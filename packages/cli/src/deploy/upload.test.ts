@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { WorkerConfig } from './config.ts';
+import { databaseIdSchema, scriptNameSchema } from './identifiers.ts';
 import {
 	buildScriptMetadata,
 	MissingResourceError,
@@ -20,7 +21,7 @@ function thrownBy(run: () => unknown): unknown {
 }
 
 const controlConfig: WorkerConfig = {
-	name: 'cupboard',
+	name: scriptNameSchema.parse('cupboard'),
 	mainModule: 'worker.js',
 	compatibilityDate: '2026-05-15',
 	compatibilityFlags: ['nodejs_compat'],
@@ -32,7 +33,7 @@ const controlConfig: WorkerConfig = {
 		{
 			binding: 'CUPBOARD_DO',
 			className: 'CupboardServer',
-			scriptName: 'cupboard-tenant'
+			scriptName: scriptNameSchema.parse('cupboard-tenant')
 		}
 	],
 	r2Buckets: [{ binding: 'BLOBS', bucketName: 'cupboard-blobs' }],
@@ -47,7 +48,7 @@ const controlConfig: WorkerConfig = {
 };
 
 const resources: ResolvedResources = {
-	d1: new Map([['cupboard', 'db-id-1']]),
+	d1: new Map([['cupboard', databaseIdSchema.parse('db-id-1')]]),
 	kv: new Map([['cupboard-tenant-cache', 'kv-id-1']])
 };
 

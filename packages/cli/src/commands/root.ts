@@ -1,5 +1,9 @@
 import type { CliUi } from '@cupboard/cli-ui';
-import { selectorForCache, type TtlSeconds } from '@cupboard/nix-store/scalars';
+import {
+	type RootName,
+	selectorForCache,
+	type TtlSeconds
+} from '@cupboard/nix-store/scalars';
 import type {
 	ParsedRootEnsureResponse,
 	ParsedRootListResponse,
@@ -22,6 +26,7 @@ import { CupboardClient, storedCacheFor } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseTtl } from '../duration.ts';
+import { parseRootName } from '../root-name.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface RootSetOptions {
@@ -81,7 +86,7 @@ export function registerRootCommands(
 				'Both outcomes exit 0; the reported status says which happened.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<name>', 'root name, e.g. github:owner/repo/main')
+		.argument('<name>', 'root name, e.g. github:owner/repo/main', parseRootName)
 		.argument('<store-path...>', 'one or more top-level store paths to retain')
 		.option(
 			'--ttl <duration>',
@@ -101,7 +106,7 @@ export function registerRootCommands(
 		.action(
 			async (
 				url: URL,
-				name: string,
+				name: RootName,
 				targets: string[],
 				options: RootEnsureOptions
 			) => {
@@ -138,7 +143,7 @@ export function registerRootCommands(
 		.command('set')
 		.description('Create or replace a retention root with the given targets.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<name>', 'root name, e.g. github:owner/repo/main')
+		.argument('<name>', 'root name, e.g. github:owner/repo/main', parseRootName)
 		.argument('<store-path...>', 'one or more top-level store paths to retain')
 		.option(
 			'--ttl <duration>',
@@ -159,7 +164,7 @@ export function registerRootCommands(
 		.action(
 			async (
 				url: URL,
-				name: string,
+				name: RootName,
 				targets: string[],
 				options: RootSetOptions
 			) => {
@@ -205,10 +210,10 @@ export function registerRootCommands(
 		.command('remove')
 		.description('Remove a retention root.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<name>', 'root name to remove')
+		.argument('<name>', 'root name to remove', parseRootName)
 		.option('--cache <name>', 'target a named cache rather than the default')
 		.option('-y, --yes', 'remove without the confirmation prompt')
-		.action(async (url: URL, name: string, options: RootOptions) => {
+		.action(async (url: URL, name: RootName, options: RootOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -226,7 +231,7 @@ export function registerRootCommands(
 
 export async function runRootEnsure(
 	cacheName: string,
-	name: string,
+	name: RootName,
 	targets: readonly string[],
 	ttlSeconds: TtlSeconds | undefined,
 	reporter: Reporter,
@@ -264,7 +269,7 @@ export async function runRootEnsure(
 
 export async function runRootSet(
 	cacheName: string,
-	name: string,
+	name: RootName,
 	targets: readonly string[],
 	ttlSeconds: TtlSeconds | undefined,
 	reporter: Reporter,
@@ -309,7 +314,7 @@ export async function runRootList(
 
 export async function runRootRemove(
 	cacheName: string,
-	name: string,
+	name: RootName,
 	ui: CliUi,
 	client: RootClient
 ): Promise<void> {

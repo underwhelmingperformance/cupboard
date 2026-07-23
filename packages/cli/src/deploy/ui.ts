@@ -1,6 +1,7 @@
 import { type CliUi, createCliUi } from '@cupboard/cli-ui';
 
 import type { AccountSummary } from './cloudflare-api.ts';
+import type { CloudflareAccountId } from './identifiers.ts';
 
 export { type MenuEntry, terminalLink, type TextEdit } from '@cupboard/cli-ui';
 
@@ -12,7 +13,7 @@ export interface DeployUi extends CliUi {
 	/** Undefined when cancelled. */
 	chooseAccount(
 		accounts: readonly AccountSummary[]
-	): Promise<string | undefined>;
+	): Promise<CloudflareAccountId | undefined>;
 }
 
 export interface DeployUiOptions {

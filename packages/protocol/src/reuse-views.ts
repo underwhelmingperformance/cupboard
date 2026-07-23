@@ -1,6 +1,7 @@
 import {
 	cacheNamePattern,
 	cacheNamePrefixPattern,
+	type CachePriority,
 	cacheSelectorSchema
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
@@ -143,3 +144,18 @@ export type ReuseViewListResponse = z.input<typeof reuseViewListResponseSchema>;
 export type ReuseViewRemoveResponse = z.input<
 	typeof reuseViewRemoveResponseSchema
 >;
+
+// The gap by which a reuse view's priority is set below its destination cache,
+// so Nix prefers the destination while still consulting the view.
+export const viewPriorityMargin = 10;
+
+/**
+ * Whether a destination cache stays preferred over a reuse view: true when the
+ * view's priority is strictly greater, since Nix prefers the lower priority.
+ */
+export function isDestinationPreferred(
+	destinationPriority: CachePriority,
+	viewPriority: ReuseViewPriority
+): boolean {
+	return viewPriority > destinationPriority;
+}

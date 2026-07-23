@@ -1,17 +1,20 @@
 import { describe, expect, it } from 'vitest';
 
+import { cloudflareAccountIdSchema } from './identifiers.ts';
 import {
 	accessKeyIdProblem,
 	checkR2Credentials,
+	r2AccessKeyIdSchema,
+	r2SecretAccessKeySchema,
 	secretAccessKeyProblem
 } from './r2-credentials.ts';
 
 const options = {
-	accountId: 'acc-hex',
+	accountId: cloudflareAccountIdSchema.parse('acc-hex'),
 	bucketName: 'cupboard-blobs',
 	credentials: {
-		accessKeyId: 'a'.repeat(32),
-		secretAccessKey: 'b'.repeat(64)
+		accessKeyId: r2AccessKeyIdSchema.parse('a'.repeat(32)),
+		secretAccessKey: r2SecretAccessKeySchema.parse('b'.repeat(64))
 	}
 };
 

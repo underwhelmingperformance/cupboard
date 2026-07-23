@@ -1,15 +1,22 @@
+import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import {
+	isDestinationPreferred,
 	reuseViewDefaultPriority,
 	reuseViewListResponseSchema,
 	reuseViewMaxSelectors,
 	reuseViewNameSchema,
+	reuseViewPrioritySchema,
 	reuseViewRemoveResponseSchema,
 	reuseViewSelectorSchema,
 	reuseViewSetBodySchema,
-	reuseViewSummarySchema
+	reuseViewSummarySchema,
+	viewPriorityMargin
 } from './reuse-views.ts';
+
+const destinationPriority = (value: number) => cachePrioritySchema.parse(value);
+const viewPriority = (value: number) => reuseViewPrioritySchema.parse(value);
 
 describe('reuseViewNameSchema', () => {
 	it.each(['reuse', 'reuse-1', 'a'.repeat(63)])('accepts %s', (value) => {
@@ -190,5 +197,38 @@ describe('reuseViewSummarySchema, list and remove responses', () => {
 		};
 
 		expect(reuseViewSummarySchema.safeParse(view).success).toBe(false);
+	});
+});
+
+describe('isDestinationPreferred', () => {
+	it.each([
+		{
+			name: 'a higher view priority keeps the destination preferred',
+			view: 50,
+			expected: true
+		},
+		{
+			name: 'an equal view priority does not keep the destination preferred',
+			view: 40,
+			expected: false
+		},
+		{
+			name: 'a lower view priority does not keep the destination preferred',
+			view: 30,
+			expected: false
+		}
+	])('$name', ({ view, expected }) => {
+		expect(
+			isDestinationPreferred(destinationPriority(40), viewPriority(view))
+		).toBe(expected);
+	});
+
+	it('keeps the destination preferred when the view sits a margin below', () => {
+		expect(
+			isDestinationPreferred(
+				destinationPriority(40),
+				viewPriority(40 + viewPriorityMargin)
+			)
+		).toBe(true);
 	});
 });

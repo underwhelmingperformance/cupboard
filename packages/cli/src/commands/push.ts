@@ -1,4 +1,8 @@
-import { selectorForCache, type TtlSeconds } from '@cupboard/nix-store/scalars';
+import {
+	type RootName,
+	selectorForCache,
+	type TtlSeconds
+} from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import type { Command } from 'commander';
 
@@ -24,12 +28,13 @@ import {
 } from '../errors.ts';
 import { runPush } from '../push/push.ts';
 import { pushClientFor } from '../push/push-client.ts';
+import { parseRootName } from '../root-name.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface PushOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
-	readonly root?: string;
+	readonly root?: RootName;
 	readonly ttl?: TtlSeconds;
 	readonly cache?: string;
 	readonly wait?: boolean;
@@ -126,7 +131,8 @@ export function registerPushCommand(
 		)
 		.option(
 			'--root <name>',
-			'retain the pushed paths under this named channel (e.g. github:owner/repo/main)'
+			'retain the pushed paths under this named channel (e.g. github:owner/repo/main)',
+			parseRootName
 		)
 		.option(
 			'--ttl <duration>',

@@ -1,6 +1,7 @@
 import type { SingleStepMigrationParam } from 'cloudflare/resources/workers/workers';
 
 import type { DurableObjectMigration } from './config.ts';
+import type { DatabaseId } from './identifiers.ts';
 
 /**
  * A D1 migration ready to apply: its filename (the applied-marker recorded in
@@ -42,8 +43,8 @@ export function parseD1Migrations(
  * so the runner is testable against a fake.
  */
 export interface D1MigrationApi {
-	query(databaseId: string, sql: string): Promise<void>;
-	queryRows(databaseId: string, sql: string): Promise<readonly string[]>;
+	query(databaseId: DatabaseId, sql: string): Promise<void>;
+	queryRows(databaseId: DatabaseId, sql: string): Promise<readonly string[]>;
 }
 
 const ensureTrackingTable =
@@ -61,7 +62,7 @@ function quote(value: string): string {
  */
 export async function applyD1Migrations(
 	api: D1MigrationApi,
-	databaseId: string,
+	databaseId: DatabaseId,
 	migrations: readonly D1Migration[]
 ): Promise<string[]> {
 	await api.query(databaseId, ensureTrackingTable);

@@ -8,7 +8,7 @@ import Cloudflare from 'cloudflare';
 
 import { CliError } from '../errors.ts';
 
-import type { CloudflareApi } from './cloudflare-api.ts';
+import type { AccountSummary, CloudflareApi } from './cloudflare-api.ts';
 import { createCloudflareApi } from './cloudflare-api.ts';
 import {
 	type CloudflareGrant,
@@ -17,6 +17,10 @@ import {
 	refreshCloudflareGrant
 } from './cloudflare-oauth.ts';
 import { readCachedGrant, writeCachedGrant } from './grant-store.ts';
+import {
+	type CloudflareAccountId,
+	cloudflareAccountIdSchema
+} from './identifiers.ts';
 
 /** The resolved credential can see no Cloudflare accounts at all. */
 export class NoCloudflareAccountsError extends CliError {
@@ -304,7 +308,7 @@ export async function freshIdToken(
 export interface ResolvedAccount {
 	readonly client: Cloudflare;
 	readonly api: CloudflareApi;
-	readonly accountId: string;
+	readonly accountId: CloudflareAccountId;
 	readonly credentialSource: CredentialSource;
 	/** The Cloudflare user behind an OAuth grant; undefined for raw tokens. */
 	readonly subject: string | undefined;
@@ -320,8 +324,8 @@ export interface ResolvedAccount {
 export async function resolveCloudflare(
 	accountOption: string | undefined,
 	chooseAccount: (
-		accounts: readonly { id: string; name: string }[]
-	) => Promise<string>,
+		accounts: readonly AccountSummary[]
+	) => Promise<CloudflareAccountId>,
 	chain: CredentialChain
 ): Promise<ResolvedAccount> {
 	const credential = await resolveCredential(chain);
@@ -330,17 +334,22 @@ export async function resolveCloudflare(
 	const fromEnv = accountOption ?? chain.env.CLOUDFLARE_ACCOUNT_ID;
 
 	if (fromEnv !== undefined && fromEnv !== '') {
+		const accountId = cloudflareAccountIdSchema.parse(fromEnv);
+
 		return {
 			client,
-			api: createCloudflareApi(client, fromEnv),
-			accountId: fromEnv,
+			api: createCloudflareApi(client, accountId),
+			accountId,
 			credentialSource: credential.source,
 			subject: credential.subject,
 			idToken: credential.idToken
 		};
 	}
 
-	const probe = createCloudflareApi(client, '');
+	const probe = createCloudflareApi(
+		client,
+		cloudflareAccountIdSchema.parse('')
+	);
 	const accounts = await probe.listAccounts();
 
 	if (accounts.length === 0) {

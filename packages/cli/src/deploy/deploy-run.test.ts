@@ -6,11 +6,20 @@ import type { DeploymentArtifact } from './artifact.ts';
 import type { CloudflareApi } from './cloudflare-api.ts';
 import type { WorkerConfig } from './config.ts';
 import { collectResources, runDeploy } from './deploy-run.ts';
+import {
+	cloudflareAccountIdSchema,
+	databaseIdSchema,
+	scriptNameSchema,
+	zoneIdSchema
+} from './identifiers.ts';
 import { buildScriptMetadata } from './upload.ts';
+
+const scriptName = (value: string) => scriptNameSchema.parse(value);
+const databaseId = (value: string) => databaseIdSchema.parse(value);
 
 function worker(overrides: Partial<WorkerConfig>): WorkerConfig {
 	return {
-		name: 'cupboard',
+		name: scriptName('cupboard'),
 		mainModule: 'worker.js',
 		compatibilityDate: '2026-05-15',
 		compatibilityFlags: ['nodejs_compat'],
@@ -33,7 +42,7 @@ function worker(overrides: Partial<WorkerConfig>): WorkerConfig {
 const artifact: DeploymentArtifact = {
 	config: {
 		control: worker({
-			name: 'cupboard',
+			name: scriptName('cupboard'),
 			kvNamespaces: [
 				{ binding: 'TENANT_CACHE', title: 'cupboard-tenant-cache' }
 			],
@@ -53,7 +62,7 @@ const artifact: DeploymentArtifact = {
 			crons: ['0 * * * *']
 		}),
 		tenant: worker({
-			name: 'cupboard-tenant',
+			name: scriptName('cupboard-tenant'),
 			migrations: [{ tag: 'v1', newSqliteClasses: ['CupboardServer'] }]
 		})
 	},
@@ -104,7 +113,10 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 	return {
 		calls,
 		api: {
-			listAccounts: () => Promise.resolve([{ id: 'acc', name: 'Acme' }]),
+			listAccounts: () =>
+				Promise.resolve([
+					{ id: cloudflareAccountIdSchema.parse('acc'), name: 'Acme' }
+				]),
 			r2BucketExists: () => {
 				recordFallbackApiCall(calls, 'r2BucketExists');
 				return Promise.resolve(false);
@@ -144,7 +156,7 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 			},
 			ensureD1Database(name) {
 				calls.push(`d1:${name}`);
-				return Promise.resolve('db-id');
+				return Promise.resolve(databaseId('db-id'));
 			},
 			ensureKvNamespace(title) {
 				calls.push(`kv:${title}`);
@@ -189,7 +201,7 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 			},
 			findZoneId(name) {
 				calls.push(`zone:${name}`);
-				return Promise.resolve('zone-1');
+				return Promise.resolve(zoneIdSchema.parse('zone-1'));
 			},
 			findCustomDomain: () => {
 				recordFallbackApiCall(calls, 'findCustomDomain');
@@ -268,7 +280,7 @@ describe('runDeploy', () => {
 			getScriptMigrationTag: () => Promise.resolve('v1'),
 			getScriptBindings: (scriptName) => {
 				const resources = {
-					d1: new Map([['cupboard', 'db-id']]),
+					d1: new Map([['cupboard', databaseId('db-id')]]),
 					kv: new Map([['cupboard-tenant-cache', 'kv-cupboard-tenant-cache']])
 				};
 				const config =

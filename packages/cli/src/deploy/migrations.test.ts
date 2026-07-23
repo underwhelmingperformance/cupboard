@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { DurableObjectMigration } from './config.ts';
+import { databaseIdSchema } from './identifiers.ts';
 import {
 	applyD1Migrations,
 	computeDurableObjectMigration,
@@ -60,7 +61,11 @@ describe('applyD1Migrations', () => {
 	it('runs only pending migrations and records them', async () => {
 		const { api, queries } = fakeApi(['0000_a.sql']);
 
-		const result = await applyD1Migrations(api, 'db-1', migrations);
+		const result = await applyD1Migrations(
+			api,
+			databaseIdSchema.parse('db-1'),
+			migrations
+		);
 
 		expect(result).toStrictEqual(['0001_b.sql']);
 		expect(queries).toStrictEqual([
@@ -74,7 +79,11 @@ describe('applyD1Migrations', () => {
 	it('is a no-op when everything is applied', async () => {
 		const { api, queries } = fakeApi(['0000_a.sql', '0001_b.sql']);
 
-		const result = await applyD1Migrations(api, 'db-1', migrations);
+		const result = await applyD1Migrations(
+			api,
+			databaseIdSchema.parse('db-1'),
+			migrations
+		);
 
 		expect(result).toStrictEqual([]);
 		expect(queries).toStrictEqual([

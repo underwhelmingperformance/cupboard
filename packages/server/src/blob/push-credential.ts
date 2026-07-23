@@ -1,3 +1,4 @@
+import { type TtlSeconds, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import type { PushCredential, PushId } from '@cupboard/protocol/upload';
 
 import { PushIdSigningKeyMissingError } from '../errors.ts';
@@ -26,12 +27,14 @@ const pushCredentialMaxTtlSeconds = 6 * 60 * 60;
 export function pushCredentialTtlSeconds(
 	tokenExpiresAt: Date,
 	now: Date
-): number {
+): TtlSeconds {
 	const remaining = Math.floor(
 		(tokenExpiresAt.getTime() - now.getTime()) / 1000
 	);
 
-	return Math.max(1, Math.min(pushCredentialMaxTtlSeconds, remaining));
+	return ttlSecondsSchema.parse(
+		Math.max(1, Math.min(pushCredentialMaxTtlSeconds, remaining))
+	);
 }
 
 export interface PushIdSigningEnv {
@@ -67,7 +70,7 @@ export class PushCredentialIssuer {
 	// already staged.
 	async issueFor(
 		pushId: PushId,
-		ttlSeconds: number,
+		ttlSeconds: TtlSeconds,
 		now: Date
 	): Promise<PushCredential> {
 		// Granted by the write-only action set: R2 rejects a
@@ -87,7 +90,7 @@ export class PushCredentialIssuer {
 		return { pushId, ...credential };
 	}
 
-	async issue(ttlSeconds: number, now: Date): Promise<PushCredential> {
+	async issue(ttlSeconds: TtlSeconds, now: Date): Promise<PushCredential> {
 		return this.issueFor(await createPushId(this.signingKey), ttlSeconds, now);
 	}
 

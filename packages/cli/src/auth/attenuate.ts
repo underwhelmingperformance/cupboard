@@ -1,3 +1,4 @@
+import { type RootName } from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
@@ -10,12 +11,12 @@ import {
 export interface PushGrantIntent {
 	readonly cacheSelector: string;
 	readonly attest: boolean;
-	readonly root?: string;
+	readonly root?: RootName;
 }
 
 export interface RootEnsureGrantIntent {
 	readonly cacheSelector: string;
-	readonly root: string;
+	readonly root: RootName;
 }
 
 export interface ConfirmGrantIntent {

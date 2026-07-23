@@ -7,9 +7,18 @@ import type { ScriptUpdateParams } from 'cloudflare/resources/workers/scripts/sc
 import { z } from 'zod';
 
 import type { WorkerBundle } from './bundle.ts';
+import {
+	type CloudflareAccountId,
+	cloudflareAccountIdSchema,
+	type DatabaseId,
+	databaseIdSchema,
+	type ScriptName,
+	type ZoneId,
+	zoneIdSchema
+} from './identifiers.ts';
 
 export interface AccountSummary {
-	readonly id: string;
+	readonly id: CloudflareAccountId;
 	readonly name: string;
 }
 
@@ -75,40 +84,43 @@ export interface CloudflareApi {
 	 * after a day. The bucket must already exist.
 	 */
 	ensureStagingLifecycleRule(bucketName: string): Promise<void>;
-	ensureD1Database(name: string): Promise<string>;
+	ensureD1Database(name: string): Promise<DatabaseId>;
 	ensureKvNamespace(title: string): Promise<string>;
 	ensureQueue(name: string): Promise<string>;
 
-	d1Query(databaseId: string, sql: string): Promise<void>;
-	d1QueryRows(databaseId: string, sql: string): Promise<string[]>;
+	d1Query(databaseId: DatabaseId, sql: string): Promise<void>;
+	d1QueryRows(databaseId: DatabaseId, sql: string): Promise<string[]>;
 
-	getScriptMigrationTag(scriptName: string): Promise<string | undefined>;
+	getScriptMigrationTag(scriptName: ScriptName): Promise<string | undefined>;
 	/** The script's live bindings, or undefined when it is not deployed. */
 	getScriptBindings(
-		scriptName: string
+		scriptName: ScriptName
 	): Promise<readonly unknown[] | undefined>;
 	uploadScript(
-		scriptName: string,
+		scriptName: ScriptName,
 		metadata: ScriptUpdateParams.Metadata,
 		bundle: WorkerBundle
 	): Promise<void>;
 
 	ensureQueueConsumer(
 		queueId: string,
-		scriptName: string,
+		scriptName: ScriptName,
 		settings: QueueConsumerSettings
 	): Promise<void>;
-	ensureSchedules(scriptName: string, crons: readonly string[]): Promise<void>;
-	putSecret(scriptName: string, secret: WorkerSecret): Promise<void>;
-	listScriptSecrets(scriptName: string): Promise<string[]>;
+	ensureSchedules(
+		scriptName: ScriptName,
+		crons: readonly string[]
+	): Promise<void>;
+	putSecret(scriptName: ScriptName, secret: WorkerSecret): Promise<void>;
+	listScriptSecrets(scriptName: ScriptName): Promise<string[]>;
 
-	findZoneId(name: string): Promise<string | undefined>;
+	findZoneId(name: string): Promise<ZoneId | undefined>;
 	/** The custom domain currently routed to the script, when one is. */
-	findCustomDomain(scriptName: string): Promise<string | undefined>;
+	findCustomDomain(scriptName: ScriptName): Promise<string | undefined>;
 	ensureCustomDomain(
-		scriptName: string,
+		scriptName: ScriptName,
 		hostname: string,
-		zoneId: string
+		zoneId: ZoneId
 	): Promise<void>;
 
 	listTokenPermissionGroups(): Promise<TokenPermissionGroup[]>;
@@ -122,7 +134,7 @@ export interface CloudflareApi {
 
 	/** The account's workers.dev subdomain, or undefined when unregistered. */
 	getWorkersDevSubdomain(): Promise<string | undefined>;
-	enableWorkersDevRoute(scriptName: string): Promise<void>;
+	enableWorkersDevRoute(scriptName: ScriptName): Promise<void>;
 
 	/**
 	 * Recent Workers Observability log events matching a full-text needle in a
@@ -265,7 +277,7 @@ function managedLifecycleFields(rule: ManagedLifecycleFields): {
  */
 export function createCloudflareApi(
 	client: Cloudflare,
-	accountId: string
+	accountId: CloudflareAccountId
 ): CloudflareApi {
 	const account = { account_id: accountId };
 
@@ -280,7 +292,10 @@ export function createCloudflareApi(
 			const accounts: AccountSummary[] = [];
 
 			for await (const item of client.accounts.list()) {
-				accounts.push({ id: item.id, name: item.name });
+				accounts.push({
+					id: cloudflareAccountIdSchema.parse(item.id),
+					name: item.name
+				});
 			}
 
 			return accounts;
@@ -336,12 +351,12 @@ export function createCloudflareApi(
 			);
 
 			if (existing?.uuid !== undefined) {
-				return existing.uuid;
+				return databaseIdSchema.parse(existing.uuid);
 			}
 
 			const created = await client.d1.database.create({ ...account, name });
 
-			return created.uuid ?? '';
+			return databaseIdSchema.parse(created.uuid ?? '');
 		},
 
 		async ensureKvNamespace(title) {
@@ -575,7 +590,7 @@ export function createCloudflareApi(
 				(item) => item.name === name
 			);
 
-			return zone?.id;
+			return zone === undefined ? undefined : zoneIdSchema.parse(zone.id);
 		},
 
 		async findCustomDomain(scriptName) {

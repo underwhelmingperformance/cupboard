@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 
 import type { CloudflareApi, TokenPolicyInput } from './cloudflare-api.ts';
+import { cloudflareAccountIdSchema, databaseIdSchema } from './identifiers.ts';
 import {
 	ApiTokenResponseError,
 	createScopedR2Key,
@@ -46,7 +47,7 @@ function baseApi(apiCalls: ApiCall[]): CloudflareApi {
 		},
 		ensureD1Database: () => {
 			recordApiCall(apiCalls, 'ensureD1Database');
-			return Promise.resolve('database-id');
+			return Promise.resolve(databaseIdSchema.parse('database-id'));
 		},
 		ensureKvNamespace: () => {
 			recordApiCall(apiCalls, 'ensureKvNamespace');
@@ -94,7 +95,7 @@ function baseApi(apiCalls: ApiCall[]): CloudflareApi {
 		},
 		findZoneId: () => {
 			recordApiCall(apiCalls, 'findZoneId');
-			return Promise.resolve(absentString);
+			return Promise.resolve(undefined);
 		},
 		findCustomDomain: () => {
 			recordApiCall(apiCalls, 'findCustomDomain');
@@ -143,7 +144,10 @@ const groups = [
 	{ id: 'pg-other', name: 'Workers Scripts Write' }
 ];
 
-const options = { accountId: 'acc-1', bucketName: 'cupboard-blobs' };
+const options = {
+	accountId: cloudflareAccountIdSchema.parse('acc-1'),
+	bucketName: 'cupboard-blobs'
+};
 
 /** A token directory: lookups miss naturally when a name is absent. */
 const findIn =

@@ -29,6 +29,7 @@ import {
 	GithubCheckFailedError,
 	GithubCheckIncompleteError
 } from '../../errors.ts';
+import { parseRootName } from '../../root-name.ts';
 import {
 	lookupRepository,
 	type RepositoryIdentity
@@ -409,18 +410,22 @@ export async function runGithubCheck(
 	// The authority each run genuinely requests, against the placeholder
 	// claims above: the PR run publishes to its pr-1 cache and roots under it,
 	// the branch run to the default cache under the caller's root prefix.
-	const pullRequestRoot = `github:${identity.fullName}/pr-1`;
-	const branchRoot = `${options.rootPrefix ?? `github:${identity.fullName}/${options.branch}`}/target`;
+	const pullRequestRoot = parseRootName(
+		`github:${identity.fullName}/pr-1/target`
+	);
+	const branchRoot = parseRootName(
+		`${options.rootPrefix ?? `github:${identity.fullName}/${options.branch}`}/target`
+	);
 	const defaultSelector = selectorForCache(DEFAULT_CACHE);
 	const pullRequestRequests = [
 		pushAuthorizationDetails({
 			cacheSelector: 'pr-1',
 			attest: true,
-			root: `${pullRequestRoot}/target`
+			root: pullRequestRoot
 		}),
 		rootEnsureAuthorizationDetails({
 			cacheSelector: 'pr-1',
-			root: `${pullRequestRoot}/target`
+			root: pullRequestRoot
 		}),
 		confirmAuthorizationDetails({ cacheSelector: 'pr-1' })
 	];

@@ -1,10 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-	CacheInfo,
-	isDestinationPreferred,
-	viewPriorityMargin
-} from './cache-info.ts';
+import { CacheInfo } from './cache-info.ts';
 import { CacheInfoParseError } from './errors.ts';
 import { cachePrioritySchema } from './scalars.ts';
 
@@ -38,34 +34,6 @@ describe('CacheInfo', () => {
 		}
 	])('parses $name', ({ text, expected }) => {
 		expect(CacheInfo.parse(text)).toStrictEqual(expected);
-	});
-});
-
-describe('isDestinationPreferred', () => {
-	it.each([
-		{
-			name: 'a higher view priority keeps the destination preferred',
-			view: 50,
-			expected: true
-		},
-		{
-			name: 'an equal view priority does not keep the destination preferred',
-			view: 40,
-			expected: false
-		},
-		{
-			name: 'a lower view priority does not keep the destination preferred',
-			view: 30,
-			expected: false
-		}
-	])('$name', ({ view, expected }) => {
-		expect(isDestinationPreferred(priority(40), priority(view))).toBe(expected);
-	});
-
-	it('keeps the destination preferred when the view sits a margin below', () => {
-		expect(
-			isDestinationPreferred(priority(40), priority(40 + viewPriorityMargin))
-		).toBe(true);
 	});
 });
 

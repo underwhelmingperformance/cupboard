@@ -13,7 +13,11 @@ import {
 	type ParsedOidcTrustSummary
 } from '@cupboard/protocol/oidc';
 import { isClaimSatisfied } from '@cupboard/protocol/oidc-trust-match';
-import { reuseViewPrioritySchema } from '@cupboard/protocol/reuse-views';
+import {
+	isDestinationPreferred,
+	reuseViewPrioritySchema,
+	viewPriorityMargin
+} from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import { basicAuthHeader } from '@cupboard/shared/http';
 import type { Command } from 'commander';
@@ -61,11 +65,6 @@ import { type ReuseViewClient } from './reuse-view.ts';
 
 const tooManyRequestsStatus: number = StatusCodes.TOO_MANY_REQUESTS;
 const serverErrorStatus: number = StatusCodes.INTERNAL_SERVER_ERROR;
-
-// The margin the view's priority sits above the destination's advertised
-// priority. Any strictly greater value keeps the destination preferred; the
-// margin only leaves room for a cache between them later.
-const viewPriorityMargin = 10;
 
 export interface GithubSetupOptions {
 	readonly repo: string;
@@ -631,7 +630,7 @@ async function planReuseView(
 
 	if (
 		isDeepEqual([...existing.selectors], selectors) &&
-		existing.priority > destinationPriority
+		isDestinationPreferred(destinationPriority, existing.priority)
 	) {
 		return { step: { step: 'reuse view', outcome: 'unchanged' } };
 	}
@@ -640,10 +639,9 @@ async function planReuseView(
 		step: {
 			step: 'reuse view',
 			outcome: 'drift',
-			detail:
-				existing.priority <= destinationPriority
-					? `stored priority ${String(existing.priority)} does not exceed the destination's ${String(destinationPriority)}`
-					: 'stored selectors differ from the pr- prefix setup would write'
+			detail: isDestinationPreferred(destinationPriority, existing.priority)
+				? 'stored selectors differ from the pr- prefix setup would write'
+				: `stored priority ${String(existing.priority)} does not exceed the destination's ${String(destinationPriority)}`
 		}
 	};
 }

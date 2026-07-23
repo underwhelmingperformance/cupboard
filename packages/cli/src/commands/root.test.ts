@@ -2,7 +2,7 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
-import { ttlSecondsSchema } from '@cupboard/nix-store/scalars';
+import { rootNameSchema, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	type ParsedRootListResponse,
@@ -25,6 +25,8 @@ import {
 	runRootRemove,
 	runRootSet
 } from './root.ts';
+
+const rootName = (value: string) => rootNameSchema.parse(value);
 
 type SetRootInput = Parameters<RootClient['set']>[0];
 type EnsureRootInput = Parameters<RootClient['ensure']>[0];
@@ -77,7 +79,7 @@ describe('runRootSet', () => {
 
 		await runRootSet(
 			'_default',
-			'github:owner/repo/main',
+			rootName('github:owner/repo/main'),
 			[target],
 			ttlSecondsSchema.parse(604_800),
 			reporter(results),
@@ -109,7 +111,7 @@ describe('runRootSet', () => {
 		try {
 			await runRootSet(
 				'_default',
-				'main',
+				rootName('main'),
 				['/tmp/nope'],
 				undefined,
 				reporter([]),
@@ -173,7 +175,7 @@ describe('runRootEnsure', () => {
 
 		await runRootEnsure(
 			'_default',
-			'main',
+			rootName('main'),
 			[target],
 			ttlSecondsSchema.parse(604_800),
 			reporter(results),
@@ -253,7 +255,12 @@ describe('runRootRemove', () => {
 			removed: true
 		});
 
-		await runRootRemove('builds', 'pr-123', ui, removeClient(response, calls));
+		await runRootRemove(
+			'builds',
+			rootName('pr-123'),
+			ui,
+			removeClient(response, calls)
+		);
 
 		expect({ calls, results: captured.results }).toStrictEqual({
 			calls: [{ cacheName: 'builds', name: 'pr-123' }],
@@ -275,7 +282,7 @@ describe('runRootRemove', () => {
 
 		await runRootRemove(
 			'builds',
-			'pr-123',
+			rootName('pr-123'),
 			ui,
 			removeClient(
 				rootRemoveResponseSchema.parse({ name: 'pr-123', removed: true }),

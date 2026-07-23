@@ -2,6 +2,10 @@ import Cloudflare from 'cloudflare';
 import { describe, expect, it } from 'vitest';
 
 import { createCloudflareApi } from './cloudflare-api.ts';
+import { cloudflareAccountIdSchema, scriptNameSchema } from './identifiers.ts';
+
+const accountId = (value: string) => cloudflareAccountIdSchema.parse(value);
+const scriptName = (value: string) => scriptNameSchema.parse(value);
 
 interface Recorded {
 	readonly method: string;
@@ -181,8 +185,8 @@ const consumersPath = '/accounts/acc-1/queues/queue-1/consumers';
 describe('uploadScript', () => {
 	it('sends the Worker as Cloudflare multipart upload parts', async () => {
 		const upload = await recordWorkerUpload((client) =>
-			createCloudflareApi(client, 'acc-1').uploadScript(
-				'cupboard',
+			createCloudflareApi(client, accountId('acc-1')).uploadScript(
+				scriptName('cupboard'),
 				{
 					main_module: 'worker.js',
 					compatibility_date: '2026-07-27'
@@ -223,9 +227,9 @@ describe('ensureQueueConsumer', () => {
 			[`GET ${consumersPath}`]: [liveWorkerConsumer]
 		});
 
-		await createCloudflareApi(client, 'acc-1').ensureQueueConsumer(
+		await createCloudflareApi(client, accountId('acc-1')).ensureQueueConsumer(
 			'queue-1',
-			'cupboard',
+			scriptName('cupboard'),
 			desiredSettings
 		);
 
@@ -238,9 +242,9 @@ describe('ensureQueueConsumer', () => {
 			[`POST ${consumersPath}`]: {}
 		});
 
-		await createCloudflareApi(client, 'acc-1').ensureQueueConsumer(
+		await createCloudflareApi(client, accountId('acc-1')).ensureQueueConsumer(
 			'queue-1',
-			'cupboard',
+			scriptName('cupboard'),
 			desiredSettings
 		);
 
@@ -261,9 +265,9 @@ describe('ensureQueueConsumer', () => {
 			[`PUT ${consumersPath}/consumer-1`]: {}
 		});
 
-		await createCloudflareApi(client, 'acc-1').ensureQueueConsumer(
+		await createCloudflareApi(client, accountId('acc-1')).ensureQueueConsumer(
 			'queue-1',
-			'cupboard',
+			scriptName('cupboard'),
 			desiredSettings
 		);
 
@@ -279,9 +283,9 @@ describe('ensureQueueConsumer', () => {
 			[`GET ${consumersPath}`]: [{ ...schemaShaped, script_name: 'cupboard' }]
 		});
 
-		await createCloudflareApi(client, 'acc-1').ensureQueueConsumer(
+		await createCloudflareApi(client, accountId('acc-1')).ensureQueueConsumer(
 			'queue-1',
-			'cupboard',
+			scriptName('cupboard'),
 			desiredSettings
 		);
 
@@ -297,9 +301,10 @@ describe('ensureSchedules', () => {
 			[`GET ${schedulesPath}`]: { schedules: [{ cron: '0 * * * *' }] }
 		});
 
-		await createCloudflareApi(client, 'acc-1').ensureSchedules('cupboard', [
-			'0 * * * *'
-		]);
+		await createCloudflareApi(client, accountId('acc-1')).ensureSchedules(
+			scriptName('cupboard'),
+			['0 * * * *']
+		);
 
 		expect(requests).toStrictEqual([{ method: 'GET', path: schedulesPath }]);
 	});
@@ -310,9 +315,10 @@ describe('ensureSchedules', () => {
 			[`PUT ${schedulesPath}`]: { schedules: [{ cron: '0 * * * *' }] }
 		});
 
-		await createCloudflareApi(client, 'acc-1').ensureSchedules('cupboard', [
-			'0 * * * *'
-		]);
+		await createCloudflareApi(client, accountId('acc-1')).ensureSchedules(
+			scriptName('cupboard'),
+			['0 * * * *']
+		);
 
 		expect(requests).toStrictEqual([
 			{ method: 'GET', path: schedulesPath },
@@ -342,9 +348,10 @@ describe('ensureStagingLifecycleRule', () => {
 			[`PUT ${lifecyclePath}`]: {}
 		});
 
-		await createCloudflareApi(client, 'acc-1').ensureStagingLifecycleRule(
-			'cupboard-blobs'
-		);
+		await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).ensureStagingLifecycleRule('cupboard-blobs');
 
 		expect({ requests, putBody: bodies[1] }).toStrictEqual({
 			requests: [
@@ -360,9 +367,10 @@ describe('ensureStagingLifecycleRule', () => {
 			[`GET ${lifecyclePath}`]: { rules: [stagingRule] }
 		});
 
-		await createCloudflareApi(client, 'acc-1').ensureStagingLifecycleRule(
-			'cupboard-blobs'
-		);
+		await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).ensureStagingLifecycleRule('cupboard-blobs');
 
 		expect(requests).toStrictEqual([{ method: 'GET', path: lifecyclePath }]);
 	});
@@ -374,9 +382,10 @@ describe('ensureStagingLifecycleRule', () => {
 			}
 		});
 
-		await createCloudflareApi(client, 'acc-1').ensureStagingLifecycleRule(
-			'cupboard-blobs'
-		);
+		await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).ensureStagingLifecycleRule('cupboard-blobs');
 
 		expect(requests).toStrictEqual([{ method: 'GET', path: lifecyclePath }]);
 	});
@@ -403,9 +412,10 @@ describe('ensureStagingLifecycleRule', () => {
 			[`PUT ${lifecyclePath}`]: {}
 		});
 
-		await createCloudflareApi(client, 'acc-1').ensureStagingLifecycleRule(
-			'cupboard-blobs'
-		);
+		await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).ensureStagingLifecycleRule('cupboard-blobs');
 
 		expect({ requests, putBody: bodies[1] }).toStrictEqual({
 			requests: [
@@ -430,8 +440,8 @@ describe('findCustomDomain', () => {
 
 		const hostname = await createCloudflareApi(
 			client,
-			'acc-1'
-		).findCustomDomain('cupboard');
+			accountId('acc-1')
+		).findCustomDomain(scriptName('cupboard'));
 
 		expect(hostname).toBe('cupboard.supply');
 	});
@@ -445,8 +455,8 @@ describe('findCustomDomain', () => {
 
 		const hostname = await createCloudflareApi(
 			client,
-			'acc-1'
-		).findCustomDomain('cupboard');
+			accountId('acc-1')
+		).findCustomDomain(scriptName('cupboard'));
 
 		expect(hostname).toBeUndefined();
 	});

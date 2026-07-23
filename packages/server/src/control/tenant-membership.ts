@@ -1,4 +1,10 @@
 import { type TenantId } from '@cupboard/nix-store/scalars';
+import {
+	type TenantReadMode,
+	tenantReadModeSchema,
+	type TenantStatus,
+	tenantStatusSchema
+} from '@cupboard/protocol/tenants';
 import { eq, ne } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -46,8 +52,8 @@ export type TenantReadVerifier = z.infer<typeof tenantReadVerifierSchema>;
 // read and dispatch paths gate on. Built from the single `tenant` row, so it never
 // reflects a torn or stale aggregate.
 export interface TenantEntry {
-	readonly status: 'active' | 'suspended' | 'offboarding' | 'offboarded';
-	readonly readMode: 'public' | 'private';
+	readonly status: TenantStatus;
+	readonly readMode: TenantReadMode;
 	readonly readVerifier?: TenantReadVerifier;
 }
 
@@ -68,8 +74,8 @@ interface DeferredContext {
 }
 
 const tenantEntrySchema = z.object({
-	status: z.enum(['active', 'suspended', 'offboarding', 'offboarded']),
-	readMode: z.enum(['public', 'private']),
+	status: tenantStatusSchema,
+	readMode: tenantReadModeSchema,
 	readVerifier: tenantReadVerifierSchema.optional()
 });
 

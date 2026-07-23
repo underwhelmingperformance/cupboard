@@ -3,13 +3,14 @@ import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
 
-import {
-	CacheInfo,
-	isDestinationPreferred
-} from '@cupboard/nix-store/cache-info';
+import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import { publicKeyUrl } from '@cupboard/nix-store/cache-url';
 import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
 import { type CachePriority } from '@cupboard/nix-store/scalars';
+import {
+	isDestinationPreferred,
+	reuseViewPrioritySchema
+} from '@cupboard/protocol/reuse-views';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import { basicAuthHeader } from '@cupboard/shared/http';
 import { retryingFetcher } from '@cupboard/shared/retry';
@@ -308,10 +309,13 @@ export async function resolveSubstituters(
 		options.readPassword === ''
 			? undefined
 			: basicAuthHeader(options.readUser, options.readPassword);
-	const [destinationPriority, viewPriority] = await Promise.all([
+	const [destinationPriority, rawViewPriority] = await Promise.all([
 		fetchCacheInfoPriority(fetcher, destinationUrl, 'destination', headers),
 		fetchCacheInfoPriority(fetcher, viewUrl, 'view', headers)
 	]);
+	// The view's priority comes from its own endpoint's cache-info, so its
+	// provenance is known here: carry it as a reuse-view priority.
+	const viewPriority = reuseViewPrioritySchema.parse(rawViewPriority);
 
 	if (!isDestinationPreferred(destinationPriority, viewPriority)) {
 		throw new ReuseViewPriorityError(destinationPriority, viewPriority);

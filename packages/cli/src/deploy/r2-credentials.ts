@@ -1,18 +1,28 @@
 import { AwsClient } from 'aws4fetch';
+import { z } from 'zod';
 
 import { resilientFetcher } from '../client/transport.ts';
 
+import type { CloudflareAccountId } from './identifiers.ts';
 import { type DeployUi, terminalLink } from './ui.ts';
 
+// The two halves of an R2 S3 credential pair, each branded so an access key id
+// and a secret access key cannot be swapped at a call site that takes both.
+export const r2AccessKeyIdSchema = z.string().brand('R2AccessKeyId');
+export type R2AccessKeyId = z.infer<typeof r2AccessKeyIdSchema>;
+
+export const r2SecretAccessKeySchema = z.string().brand('R2SecretAccessKey');
+export type R2SecretAccessKey = z.infer<typeof r2SecretAccessKeySchema>;
+
 export interface R2Credentials {
-	readonly accessKeyId: string;
-	readonly secretAccessKey: string;
+	readonly accessKeyId: R2AccessKeyId;
+	readonly secretAccessKey: R2SecretAccessKey;
 }
 
 /** Prompt for an existing pair; undefined when cancelled. */
 export async function promptR2CredentialPair(
 	ui: DeployUi,
-	accountId: string
+	accountId: CloudflareAccountId
 ): Promise<R2Credentials | undefined> {
 	const tokensPage = `https://dash.cloudflare.com/${accountId}/r2/api-tokens`;
 
@@ -38,7 +48,10 @@ export async function promptR2CredentialPair(
 		return undefined;
 	}
 
-	return { accessKeyId: accessKeyEdit.value, secretAccessKey };
+	return {
+		accessKeyId: r2AccessKeyIdSchema.parse(accessKeyEdit.value),
+		secretAccessKey: r2SecretAccessKeySchema.parse(secretAccessKey)
+	};
 }
 
 /** The verdict of probing R2 with a credential pair. */
@@ -113,7 +126,7 @@ const credentialProbeKey = '.cupboard-credential-probe';
  */
 export async function checkR2Credentials(
 	options: {
-		readonly accountId: string;
+		readonly accountId: CloudflareAccountId;
 		readonly bucketName: string;
 		readonly credentials: R2Credentials;
 	},

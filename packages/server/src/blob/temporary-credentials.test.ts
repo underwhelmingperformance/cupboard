@@ -1,3 +1,4 @@
+import { ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import type { R2PresignerConfiguration } from './presign.ts';
@@ -11,7 +12,7 @@ const configuration: R2PresignerConfiguration = {
 };
 
 const now = new Date('2026-06-29T12:00:00.000Z');
-const ttlSeconds = 900;
+const ttlSeconds = ttlSecondsSchema.parse(900);
 const issuedAt = Math.floor(now.getTime() / 1000);
 
 const textEncoder = new TextEncoder();
