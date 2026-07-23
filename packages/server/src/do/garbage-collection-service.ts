@@ -26,7 +26,13 @@ import {
 	StoredReferencesJsonMalformedError,
 	StoredReferencesNotArrayError
 } from '../errors.ts';
-import { narObjectKey, stagingPrefix } from '../http/http.ts';
+import {
+	narObjectKey,
+	type R2ObjectKey,
+	r2ObjectKeySchema,
+	type RequestOrigin,
+	stagingPrefix
+} from '../http/http.ts';
 
 import { chunk, deleteObjects, maxInClauseValues } from './bulk.ts';
 import {
@@ -970,8 +976,8 @@ export class GarbageCollectionService {
 	// next sweep and the lifecycle rule finish the job.
 	private async collectOrphanStagingKeys(
 		orphanBefore: number
-	): Promise<{ keys: string[]; wasCapped: boolean }> {
-		const keys: string[] = [];
+	): Promise<{ keys: R2ObjectKey[]; wasCapped: boolean }> {
+		const keys: R2ObjectKey[] = [];
 		let cursor: string | undefined;
 		let tracked: ReadonlySet<string> | undefined;
 
@@ -990,7 +996,7 @@ export class GarbageCollectionService {
 				tracked ??= this.trackedStagingKeys();
 
 				if (this.isReclaimableOrphan(object, tracked, orphanBefore)) {
-					keys.push(object.key);
+					keys.push(r2ObjectKeySchema.parse(object.key));
 				}
 			}
 
@@ -1082,7 +1088,7 @@ export class GarbageCollectionService {
 	async collectGarbage(
 		logger: Logger,
 		cache?: StoredCache,
-		purgeOrigin?: string,
+		purgeOrigin?: RequestOrigin,
 		sweepLimit: number = maxPathsSweptPerRun
 	): Promise<GarbageCollectionOutcome> {
 		const log = logger.with({
@@ -1096,7 +1102,7 @@ export class GarbageCollectionService {
 		// closes so an R2 stall cannot hold the gate. The rows are removed under the
 		// gate; a delete that does not land leaves an object the orphan sweep
 		// reclaims, exactly as it backstops any untracked staging object.
-		let stagingKeys: string[] = [];
+		let stagingKeys: R2ObjectKey[] = [];
 
 		const reaped = await this.context.criticalSection(async () => {
 			// A `pending` or `committing` upload is a live commit saga (awaiting

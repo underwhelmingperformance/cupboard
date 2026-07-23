@@ -17,7 +17,11 @@ import { and, count, eq, gt, min, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
 import { CacheNotEmptyError } from '../errors.ts';
-import { narObjectKey } from '../http/http.ts';
+import {
+	narObjectKey,
+	type RequestOrigin,
+	requestOriginSchema
+} from '../http/http.ts';
 
 import { deleteObjects } from './bulk.ts';
 import { type ServerContext } from './context.ts';
@@ -67,7 +71,7 @@ export class CacheAdminService {
 	// Runs inside the caller's critical section; must not open its own.
 	private async drainTeardownChunk(
 		cache: StoredCache,
-		origin: string,
+		origin: RequestOrigin,
 		limit: number
 	): Promise<number> {
 		const queued = this.context.db
@@ -186,7 +190,7 @@ export class CacheAdminService {
 	async removeCache(
 		cache: CacheName,
 		shouldForce: boolean,
-		origin: string
+		origin: RequestOrigin
 	): Promise<CacheRemoveResponse> {
 		const committedCount = this.cacheStorePathCount(cache);
 
@@ -262,17 +266,19 @@ export class CacheAdminService {
 	// The next cache awaiting (more) teardown drain and the origin to purge its edge
 	// cache with, or undefined when none remain. The alarm claims one per firing.
 	async claimTeardown(): Promise<
-		{ cache: StoredCache; origin: string } | undefined
+		{ cache: StoredCache; origin: RequestOrigin } | undefined
 	> {
 		const entries = await this.context.ctx.storage.list<string>({
 			prefix: teardownEntryPrefix,
 			limit: 1
 		});
 
+		// A stored marker holds a plain origin string, so the value is minted
+		// through the schema on read.
 		for (const [key, origin] of entries) {
 			return {
 				cache: storedCacheSchema.parse(key.slice(teardownEntryPrefix.length)),
-				origin
+				origin: requestOriginSchema.parse(origin)
 			};
 		}
 
@@ -301,7 +307,7 @@ export class CacheAdminService {
 	// optional limit caps the first chunk for tests, mirroring the resume.
 	tearDownCache(
 		cache: StoredCache,
-		origin: string,
+		origin: RequestOrigin,
 		limit: number = maxPathsTornDownPerRun
 	): Promise<void> {
 		return this.context.criticalSection(async () => {
@@ -392,7 +398,7 @@ export class CacheAdminService {
 	// caller re-arms the alarm while any marker remains.
 	async resumeTeardownPass(
 		cache: StoredCache,
-		origin: string,
+		origin: RequestOrigin,
 		limit: number = maxPathsTornDownPerRun
 	): Promise<void> {
 		await this.context.criticalSection(async () => {

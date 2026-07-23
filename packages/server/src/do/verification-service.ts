@@ -27,6 +27,8 @@ import {
 	narObjectKey,
 	narObjectKeyPrefix,
 	narObjectKeySuffix,
+	type R2ObjectKey,
+	type RequestOrigin,
 	verifyClaimLeaseMs
 } from '../http/http.ts';
 
@@ -103,7 +105,7 @@ type ReconcileOutcome = 'removed' | 'restored' | 'unchanged';
  */
 export interface PendingVerification {
 	readonly uploadId: UploadId;
-	readonly r2Key: string;
+	readonly r2Key: R2ObjectKey;
 	readonly narHash: NixSha256HashString;
 	readonly narSize: number;
 	readonly reuse: boolean;
@@ -1092,7 +1094,7 @@ export class VerificationService {
 	private async reconcileObservation(
 		logger: Logger,
 		observation: RowObservation,
-		origin: string | undefined,
+		origin: RequestOrigin | undefined,
 		committedEdges: ReadonlySet<string>
 	): Promise<ReconcileOutcome> {
 		const {
@@ -1174,7 +1176,7 @@ export class VerificationService {
 	async reconcileTargets(
 		logger: Logger,
 		targets: readonly ReconcileTarget[],
-		origin: string | undefined
+		origin: RequestOrigin | undefined
 	): Promise<void> {
 		const rows = targets
 			.map((target) => this.narInfoRow(target.cache, target.storePathHash))
@@ -1213,7 +1215,7 @@ export class VerificationService {
 	// bounded reconciling batch and report it.
 	async verify(
 		logger: Logger,
-		purgeOrigin: string | undefined,
+		purgeOrigin: RequestOrigin | undefined,
 		limit: number
 	): Promise<VerifyReport> {
 		await this.verifyPendingUploads(logger, limit);
@@ -1223,7 +1225,7 @@ export class VerificationService {
 
 	async verifyBatch(
 		logger: Logger,
-		origin: string | undefined,
+		origin: RequestOrigin | undefined,
 		limit: number
 	): Promise<VerifyReport> {
 		// Snapshot the cursor and the batch synchronously. Synchronous SQLite on

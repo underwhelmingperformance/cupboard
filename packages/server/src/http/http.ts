@@ -11,6 +11,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import type { PushId, UploadId } from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
+import { z } from 'zod';
 
 import { sha256HexBytes } from '../crypto/crypto.ts';
 
@@ -19,10 +20,32 @@ const textHeaders = {
 	'x-content-type-options': 'nosniff'
 };
 
+// The storage key of a single object in the shared R2 bucket. The key
+// constructors below are its only mint points, so a value reaching an R2
+// `get`/`put`/`delete`/`head` always came from one of them.
+export const r2ObjectKeySchema = z.string().brand('R2ObjectKey');
+export type R2ObjectKey = z.infer<typeof r2ObjectKeySchema>;
+
+// The URL a public read is cached under in the Cache API. It carries the tenant,
+// so two tenants sharing a host never collide, and a deletion purges the exact
+// key the read populated.
+export const edgeCacheKeySchema = z.string().brand('EdgeCacheKey');
+export type EdgeCacheKey = z.infer<typeof edgeCacheKeySchema>;
+
+// The public origin of an incoming request, threaded to where it derives an
+// absolute URL: the edge-cache key a narinfo is purged under, and the issuer and
+// endpoints of a tenant's authorisation-server metadata. It is minted once at
+// the request boundary and persisted to DO storage across a teardown or reconcile
+// drain, so it carries its own brand end to end.
+export const requestOriginSchema = z.string().brand('RequestOrigin');
+export type RequestOrigin = z.infer<typeof requestOriginSchema>;
+
 // The origin the scheduled (cron) handler uses to reach the Durable Object. It
 // is internal, so GC triggered through it cannot know the public URL clients
 // cached under and must not attempt to purge the edge cache.
-export const internalOrigin = 'https://cupboard.local';
+export const internalOrigin = requestOriginSchema.parse(
+	'https://cupboard.local'
+);
 
 // The most committed narinfo rows a single `GET /check` examines. The check is
 // a bounded one-shot scan; its report flags when the cache held more than this.
@@ -81,12 +104,14 @@ export const blobReaperBatchSize = 500;
 export const narObjectKeyPrefix = 'nar/';
 export const narObjectKeySuffix = '.nar.zst';
 
-export function narObjectKey(narHash: NixSha256HashString): string {
-	return `${narObjectKeyPrefix}${narHash}${narObjectKeySuffix}`;
+export function narObjectKey(narHash: NixSha256HashString): R2ObjectKey {
+	return r2ObjectKeySchema.parse(
+		`${narObjectKeyPrefix}${narHash}${narObjectKeySuffix}`
+	);
 }
 
-export function casObjectKey(digest: Sha256HexDigest): string {
-	return `cas/${digest}`;
+export function casObjectKey(digest: Sha256HexDigest): R2ObjectKey {
+	return r2ObjectKeySchema.parse(`cas/${digest}`);
 }
 
 export function attestationListCachePath(
@@ -106,13 +131,13 @@ export function attestationListObjectKey(
 	tenant: TenantId,
 	storePathHash: StorePathHash,
 	cache: StoredCache = DEFAULT_CACHE
-): string {
+): R2ObjectKey {
 	const suffix =
 		cache === DEFAULT_CACHE
 			? `attestations/${storePathHash}`
 			: `attestations/${cache}/${storePathHash}`;
 
-	return `t/${tenant}/${suffix}`;
+	return r2ObjectKeySchema.parse(`t/${tenant}/${suffix}`);
 }
 
 // Where a client uploads unverified bytes, private to one upload and grouped
@@ -120,8 +145,11 @@ export function attestationListObjectKey(
 // push. The server verifies the bytes here, then promotes them into the shared
 // `nar/<narHash>` key, so the canonical object only ever holds confirmed content
 // and no client ever writes it directly.
-export function stagingObjectKey(pushId: PushId, uploadId: UploadId): string {
-	return `staging/${pushId}/${uploadId}.nar.zst`;
+export function stagingObjectKey(
+	pushId: PushId,
+	uploadId: UploadId
+): R2ObjectKey {
+	return r2ObjectKeySchema.parse(`staging/${pushId}/${uploadId}.nar.zst`);
 }
 
 // The root every push stages under. Each push owns the `staging/<pushId>/`
@@ -136,8 +164,8 @@ export function stagingPushPrefix(pushId: PushId): string {
 export function attestationStagingObjectKey(
 	pushId: PushId,
 	uploadId: UploadId
-): string {
-	return `staging/${pushId}/attestations/${uploadId}`;
+): R2ObjectKey {
+	return r2ObjectKeySchema.parse(`staging/${pushId}/attestations/${uploadId}`);
 }
 
 // The request path a narinfo is served and edge-cached under: under the tenant
@@ -175,11 +203,25 @@ export function narInfoObjectKey(
 	tenant: TenantId,
 	storePathHash: StorePathHash,
 	cache: StoredCache = DEFAULT_CACHE
-): string {
+): R2ObjectKey {
 	const suffix =
 		cache === DEFAULT_CACHE ? storePathHash : `${cache}/${storePathHash}`;
 
-	return `${narInfoObjectPrefix(tenant)}${suffix}`;
+	return r2ObjectKeySchema.parse(`${narInfoObjectPrefix(tenant)}${suffix}`);
+}
+
+// The edge-cache key a narinfo is served and purged under: the request origin
+// joined to {@link narInfoCachePath}. The read path populates this key and a
+// deletion purges the same one, so both build it here and can never drift.
+export function narInfoCacheKey(
+	origin: RequestOrigin,
+	tenant: TenantId,
+	storePathHash: StorePathHash,
+	cache: StoredCache = DEFAULT_CACHE
+): EdgeCacheKey {
+	return edgeCacheKeySchema.parse(
+		new URL(narInfoCachePath(tenant, storePathHash, cache), origin).href
+	);
 }
 
 export function parseNarName(name: string): NixSha256HashString | undefined {

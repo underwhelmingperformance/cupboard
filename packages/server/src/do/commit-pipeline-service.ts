@@ -50,6 +50,7 @@ import {
 import {
 	narInfoObjectKey,
 	narObjectKey,
+	type R2ObjectKey,
 	verifiableMaxBytes
 } from '../http/http.ts';
 import type { MaintenanceQueueMessage } from '../routing/scheduled.ts';
@@ -1210,7 +1211,7 @@ export class CommitPipelineService {
 		cache: StoredCache,
 		uploadId: UploadId,
 		metadata: ParsedUploadPathNegotiation,
-		stagingKey: string,
+		stagingKey: R2ObjectKey,
 		graceDecision?: GraceDecision
 	): Promise<CommitOutcome> {
 		// Each retry needs a fresh recommit to have landed inside the window, so
@@ -2060,7 +2061,7 @@ export class CommitPipelineService {
 	// indefinitely; a test may shorten it below {@link narVerifyBudgetMs} to
 	// exercise the timeout without waiting the full budget.
 	async verifyPendingNar(
-		r2Key: string,
+		r2Key: R2ObjectKey,
 		metadata: ParsedUploadPathNegotiation,
 		budgetMs: number = narVerifyBudgetMs
 	): Promise<NarVerification> {

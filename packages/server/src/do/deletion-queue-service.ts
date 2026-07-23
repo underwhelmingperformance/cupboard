@@ -12,7 +12,11 @@ import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { narInfoCachePath } from '../http/http.ts';
+import {
+	type EdgeCacheKey,
+	narInfoCacheKey,
+	type RequestOrigin
+} from '../http/http.ts';
 
 import { type AttestationCasService } from './attestation-cas-service.ts';
 import { type AttestationsService } from './attestations-service.ts';
@@ -268,12 +272,12 @@ export class DeletionQueueService {
 		}
 	}
 
-	private async purgeCachedNarInfo(url: string): Promise<void> {
+	private async purgeCachedNarInfo(key: EdgeCacheKey): Promise<void> {
 		// Best-effort and colo-local: recovery correctness rests on the R2 delete
 		// and row cleanup, so a failed edge purge must not abort them. Other colos
 		// serve the stale narinfo until its TTL expires.
 		try {
-			await this.context.cache.delete(url);
+			await this.context.cache.delete(key);
 		} catch {
 			/* edge purge is best-effort */
 		}
@@ -303,7 +307,7 @@ export class DeletionQueueService {
 
 	// Runs inside the caller's critical section; must not open its own.
 	async flushQueuedNarInfoDeletions(
-		origin?: string,
+		origin?: RequestOrigin,
 		limit: number = maxNarInfoDeletionsFlushedPerRun
 	): Promise<number> {
 		// Read a capped, deterministically ordered slice grouped per cache, so one
@@ -363,7 +367,7 @@ export class DeletionQueueService {
 		cache: StoredCache,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration,
-		origin?: string
+		origin?: RequestOrigin
 	): Promise<{ objectDeleted: boolean; narScheduledForDeletion: boolean }> {
 		// Must run inside a DO critical section: the row check, object delete, NAR
 		// scheduling and queue clear span awaits and must not interleave with a
@@ -423,7 +427,7 @@ export class DeletionQueueService {
 
 		if (origin !== undefined) {
 			await this.purgeCachedNarInfo(
-				`${origin}${narInfoCachePath(tenant, storePathHash, cache)}`
+				narInfoCacheKey(origin, tenant, storePathHash, cache)
 			);
 		}
 
@@ -470,7 +474,7 @@ export class DeletionQueueService {
 	async retireTornDownNarInfos(
 		cache: StoredCache,
 		entries: readonly TornDownNarInfo[],
-		origin?: string
+		origin?: RequestOrigin
 	): Promise<number> {
 		if (entries.length === 0) {
 			return 0;
@@ -519,7 +523,7 @@ export class DeletionQueueService {
 			if (origin !== undefined) {
 				await mapWithConcurrency(removable, maxOutgoingConnections, (entry) =>
 					this.purgeCachedNarInfo(
-						`${origin}${narInfoCachePath(tenant, entry.storePathHash, cache)}`
+						narInfoCacheKey(origin, tenant, entry.storePathHash, cache)
 					)
 				);
 			}
@@ -640,7 +644,7 @@ export class DeletionQueueService {
 	deleteStorePath(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
-		origin: string
+		origin: RequestOrigin
 	): Promise<DeletePathResponse> {
 		// One critical section so the row transaction and the opportunistic object
 		// cleanup cannot interleave with a heal that would re-materialise the
@@ -723,7 +727,7 @@ export class DeletionQueueService {
 
 	async removeStaleNarInfo(
 		row: typeof schema.narInfos.$inferSelect,
-		origin: string
+		origin: RequestOrigin
 	): Promise<void> {
 		await this.context.criticalSection(() =>
 			this.reconcileMissingNar(row, origin)
@@ -740,7 +744,7 @@ export class DeletionQueueService {
 	// Runs inside the caller's critical section; must not open its own.
 	async reconcileMissingNar(
 		row: typeof schema.narInfos.$inferSelect,
-		origin?: string
+		origin?: RequestOrigin
 	): Promise<void> {
 		const clock = new Date();
 		const now = clock.toISOString();

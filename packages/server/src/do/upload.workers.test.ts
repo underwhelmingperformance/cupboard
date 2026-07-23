@@ -27,6 +27,7 @@ import {
 	narInfoCachePath,
 	narInfoObjectKey,
 	narObjectKey,
+	r2ObjectKeySchema,
 	verifiableMaxBytes
 } from '../http/http.ts';
 import {
@@ -2026,7 +2027,7 @@ describe('upload flow', () => {
 					id: uploadIdSchema.parse('rival-upload'),
 					cache: '',
 					narHash: metadata.narHash,
-					r2Key: 'staging/rival-upload',
+					r2Key: r2ObjectKeySchema.parse('staging/rival-upload'),
 					metadataJson: '{}',
 					createdAt: '2026-01-01T00:00:00.000Z',
 					expiresAt: '2099-01-01T00:00:00.000Z'

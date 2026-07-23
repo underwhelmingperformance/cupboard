@@ -5,7 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
-import { narObjectKey } from '../http/http.ts';
+import { narObjectKey, r2ObjectKeySchema } from '../http/http.ts';
 import {
 	clearBlobStorage,
 	resetTestServer,
@@ -30,7 +30,7 @@ describe('promoteVerifiedBlob', () => {
 		const staged = await verifiableNar('promote-loser');
 		const winner = await verifiableNarStored('promote-loser');
 		const canonicalKey = narObjectKey(staged.narHash);
-		const stagingKey = 'staging/promote-loser/upload';
+		const stagingKey = r2ObjectKeySchema.parse('staging/promote-loser/upload');
 
 		await env.BLOBS.put(stagingKey, staged.narBytes);
 
@@ -77,7 +77,9 @@ describe('promoteVerifiedBlob', () => {
 	it('throws when the winner vanished before it could be adopted', async () => {
 		const staged = await verifiableNar('promote-vanished');
 		const canonicalKey = narObjectKey(staged.narHash);
-		const stagingKey = 'staging/promote-vanished/upload';
+		const stagingKey = r2ObjectKeySchema.parse(
+			'staging/promote-vanished/upload'
+		);
 
 		await env.BLOBS.put(stagingKey, staged.narBytes);
 

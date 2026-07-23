@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { SubrequestTimeoutError } from '../errors.ts';
+import { type R2ObjectKey, r2ObjectKeySchema } from '../http/http.ts';
 
 import { ObjectWriteOrder } from './object-write-order.ts';
+
+const key = (name: string): R2ObjectKey => r2ObjectKeySchema.parse(name);
 
 // The settled-signal shape the timeout error carries: resolves once the
 // resolver-backed promise settles.
@@ -14,7 +17,7 @@ async function settled(pending: Promise<unknown>): Promise<void> {
 // settled-signal, as boundedSubrequest raises it.
 async function abandonedWrite(
 	order: ObjectWriteOrder,
-	keys: readonly string[],
+	keys: readonly R2ObjectKey[],
 	signal: Promise<void>
 ): Promise<void> {
 	let error: unknown;
@@ -40,7 +43,7 @@ describe('ObjectWriteOrder', () => {
 	it('runs a mutation with no outstanding signal immediately', async () => {
 		const order = new ObjectWriteOrder();
 
-		const result = await order.write(['key'], () => Promise.resolve('ok'));
+		const result = await order.write([key('key')], () => Promise.resolve('ok'));
 
 		expect(result).toBe('ok');
 	});
@@ -52,10 +55,10 @@ describe('ObjectWriteOrder', () => {
 			const order = new ObjectWriteOrder();
 			const zombie = Promise.withResolvers<string>();
 
-			await abandonedWrite(order, ['key'], settled(zombie.promise));
+			await abandonedWrite(order, [key('key')], settled(zombie.promise));
 
 			const events: string[] = [];
-			const blocked = order.write(['key'], () => {
+			const blocked = order.write([key('key')], () => {
 				events.push('issued');
 
 				return Promise.resolve();
@@ -80,9 +83,11 @@ describe('ObjectWriteOrder', () => {
 			const order = new ObjectWriteOrder();
 			const zombie = Promise.withResolvers<string>();
 
-			await abandonedWrite(order, ['key'], settled(zombie.promise));
+			await abandonedWrite(order, [key('key')], settled(zombie.promise));
 
-			const result = await order.write(['other'], () => Promise.resolve('ok'));
+			const result = await order.write([key('other')], () =>
+				Promise.resolve('ok')
+			);
 
 			expect(result).toBe('ok');
 
@@ -99,10 +104,10 @@ describe('ObjectWriteOrder', () => {
 			const order = new ObjectWriteOrder();
 			const zombie = Promise.withResolvers<string>();
 
-			await abandonedWrite(order, ['key'], settled(zombie.promise));
+			await abandonedWrite(order, [key('key')], settled(zombie.promise));
 
 			const events: string[] = [];
-			const blocked = order.write(['key'], () => {
+			const blocked = order.write([key('key')], () => {
 				events.push('issued');
 
 				return Promise.resolve();
@@ -117,7 +122,7 @@ describe('ObjectWriteOrder', () => {
 
 			// The signal stayed registered: the retry still orders behind the
 			// zombie, and proceeds once it settles.
-			const retried = order.write(['key'], () => {
+			const retried = order.write([key('key')], () => {
 				events.push('retried');
 
 				return Promise.resolve();
@@ -142,10 +147,14 @@ describe('ObjectWriteOrder', () => {
 			const order = new ObjectWriteOrder();
 			const zombie = Promise.withResolvers<string>();
 
-			await abandonedWrite(order, ['first', 'second'], settled(zombie.promise));
+			await abandonedWrite(
+				order,
+				[key('first'), key('second')],
+				settled(zombie.promise)
+			);
 
 			const events: string[] = [];
-			const blocked = order.write(['second'], () => {
+			const blocked = order.write([key('second')], () => {
 				events.push('issued');
 
 				return Promise.resolve();
@@ -181,14 +190,16 @@ describe('ObjectWriteOrder', () => {
 			let caught: unknown;
 
 			try {
-				await order.write(['key'], () => Promise.reject(error()));
+				await order.write([key('key')], () => Promise.reject(error()));
 			} catch (error_) {
 				caught = error_;
 			}
 
 			expect(caught).toBeInstanceOf(Error);
 
-			const result = await order.write(['key'], () => Promise.resolve('ok'));
+			const result = await order.write([key('key')], () =>
+				Promise.resolve('ok')
+			);
 
 			expect(result).toBe('ok');
 		} finally {

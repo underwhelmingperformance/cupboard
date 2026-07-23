@@ -8,6 +8,7 @@ import {
 	UploadedObjectNotFoundError,
 	UploadedObjectSizeMismatchError
 } from '../errors.ts';
+import { r2ObjectKeySchema } from '../http/http.ts';
 
 import {
 	type ExpectedNarBlob,
@@ -21,7 +22,7 @@ const fileHash = NixSha256Hash.fromDigest(digest).value;
 const narHash = nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`);
 // A staging key, distinct from the canonical nar/<hash> key, to prove the error
 // reports the object actually inspected.
-const r2Key = 'staging/upload-1.nar.zst';
+const r2Key = r2ObjectKeySchema.parse('staging/upload-1.nar.zst');
 
 const expected: ExpectedNarBlob = { narHash, fileHash, fileSize: 4 };
 

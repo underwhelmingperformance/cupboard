@@ -3,6 +3,7 @@ import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { SubrequestTimeoutError } from '../errors.ts';
+import { r2ObjectKeySchema } from '../http/http.ts';
 import {
 	currentServer,
 	initialise,
@@ -136,7 +137,7 @@ describe('verifyPendingNar bound against a stalled body stream', () => {
 	it('times out and cancels the stalled stream instead of hanging indefinitely', async () => {
 		await initialise();
 
-		const r2Key = 'staging/verify-timeout-test';
+		const r2Key = r2ObjectKeySchema.parse('staging/verify-timeout-test');
 		await env.BLOBS.put(r2Key, new Uint8Array([1, 2, 3]));
 		const real = await env.BLOBS.get(r2Key);
 

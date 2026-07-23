@@ -25,7 +25,11 @@ import { pushCredentialTtlSeconds } from '../blob/push-credential.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { InvalidPushIdError } from '../errors.ts';
-import { narObjectKey, stagingObjectKey } from '../http/http.ts';
+import {
+	narObjectKey,
+	type RequestOrigin,
+	stagingObjectKey
+} from '../http/http.ts';
 
 import { chunk, maxInClauseValues } from './bulk.ts';
 import { type ServerContext } from './context.ts';
@@ -341,7 +345,7 @@ export class UploadsService {
 	async negotiate(
 		cache: StoredCache,
 		body: ParsedUploadNegotiateRequest,
-		origin: string,
+		origin: RequestOrigin,
 		hints: NegotiateHints | undefined,
 		shouldReportGrace: boolean
 	): Promise<UploadNegotiateResponse> {

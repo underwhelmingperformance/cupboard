@@ -17,6 +17,7 @@ import type { RootsService } from '../do/roots-service.ts';
 import type { SigningKeysService } from '../do/signing-keys-service.ts';
 import type { StatsService } from '../do/stats-service.ts';
 import type { UploadsService } from '../do/uploads-service.ts';
+import type { RequestOrigin } from '../http/http.ts';
 
 import type { PendingCacheResolver } from './authorise.ts';
 
@@ -54,7 +55,7 @@ export interface TenantRpcServices {
 	runGarbageCollection(
 		logger: Logger,
 		cache: StoredCache | undefined,
-		purgeOrigin: string | undefined
+		purgeOrigin: RequestOrigin | undefined
 	): Promise<GarbageCollectionOutcome>;
 	readonly uploads: UploadsService;
 	readonly attestations: AttestationsService;
@@ -62,7 +63,7 @@ export interface TenantRpcServices {
 	// pass on this instance. The router clamps the limit to the batch ceiling.
 	runVerification(
 		logger: Logger,
-		purgeOrigin: string | undefined,
+		purgeOrigin: RequestOrigin | undefined,
 		limit: number
 	): Promise<VerifyReport>;
 }

@@ -10,7 +10,11 @@ import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { attestationListObjectKey, narInfoObjectKey } from '../http/http.ts';
+import {
+	attestationListObjectKey,
+	narInfoObjectKey,
+	requestOriginSchema
+} from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
@@ -33,7 +37,7 @@ import {
 import { teardownEntryPrefix } from './cache-admin-service.ts';
 
 const buildsCache = cacheNameSchema.parse('builds');
-const origin = 'https://cache.example';
+const origin = requestOriginSchema.parse('https://cache.example');
 const repeated = (character: string): string => character.repeat(32);
 
 function buildMetadata(character: string): ParsedUploadPathMetadata {
