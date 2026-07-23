@@ -9,10 +9,13 @@ import {
 	GithubRateLimitError
 } from '../oidc-trust/github.ts';
 
-import { verifyPinnedWorkflowReference } from './workflow-reference.ts';
+import { parseExactWorkflowReference } from './convention.ts';
+import { verifyWorkflowReference } from './workflow-reference.ts';
 
 const workflowPath =
 	'underwhelmingperformance/cupboard/.github/workflows/publish.yml';
+const repoPath = '/repos/underwhelmingperformance/cupboard';
+const contentPath = `${repoPath}/contents/.github%2Fworkflows%2Fpublish.yml`;
 
 function requestUrl(input: RequestInfo | URL): URL {
 	if (typeof input === 'string') {
@@ -42,7 +45,7 @@ function forbiddenFetch(remaining: string): typeof globalThis.fetch {
 		);
 }
 
-describe('verifyPinnedWorkflowReference', () => {
+describe('verifyWorkflowReference', () => {
 	it('accepts a workflow file at a full commit id', async () => {
 		const commit = 'a'.repeat(40);
 		const requested: { pathname: string; ref: string | null }[] = [];
@@ -56,15 +59,12 @@ describe('verifyPinnedWorkflowReference', () => {
 			return Promise.resolve(Response.json({ type: 'file' }));
 		};
 
-		await verifyPinnedWorkflowReference(`${workflowPath}@${commit}`, { fetch });
+		await verifyWorkflowReference(
+			parseExactWorkflowReference(`${workflowPath}@${commit}`),
+			{ fetch }
+		);
 
-		expect(requested).toStrictEqual([
-			{
-				pathname:
-					'/repos/underwhelmingperformance/cupboard/contents/.github%2Fworkflows%2Fpublish.yml',
-				ref: commit
-			}
-		]);
+		expect(requested).toStrictEqual([{ pathname: contentPath, ref: commit }]);
 	});
 
 	it('accepts a tag backed by an immutable release and a workflow file', async () => {
@@ -80,37 +80,43 @@ describe('verifyPinnedWorkflowReference', () => {
 			return Promise.resolve(Response.json({ type: 'file' }));
 		};
 
-		await verifyPinnedWorkflowReference(`${workflowPath}@refs/tags/v1.2.3`, {
-			fetch
-		});
+		await verifyWorkflowReference(
+			parseExactWorkflowReference(`${workflowPath}@refs/tags/v1.2.3`),
+			{ fetch }
+		);
 
 		expect(requested).toStrictEqual([
-			'/repos/underwhelmingperformance/cupboard/releases/tags/v1.2.3',
-			'/repos/underwhelmingperformance/cupboard/contents/.github%2Fworkflows%2Fpublish.yml?ref=refs%2Ftags%2Fv1.2.3'
+			`${repoPath}/releases/tags/v1.2.3`,
+			`${contentPath}?ref=refs%2Ftags%2Fv1.2.3`
 		]);
 	});
 
 	it('refuses an ordinary mutable tag', async () => {
 		await expect(
-			verifyPinnedWorkflowReference(`${workflowPath}@refs/tags/v1.2.3`, {
-				fetch: mutableReleaseFetch
-			})
+			verifyWorkflowReference(
+				parseExactWorkflowReference(`${workflowPath}@refs/tags/v1.2.3`),
+				{ fetch: mutableReleaseFetch }
+			)
 		).rejects.toBeInstanceOf(WorkflowReferenceMutableError);
 	});
 
 	it('refuses a reference whose workflow file does not exist', async () => {
+		const parsed = parseExactWorkflowReference(
+			`${workflowPath}@${'b'.repeat(40)}`
+		);
+
 		await expect(
-			verifyPinnedWorkflowReference(`${workflowPath}@${'b'.repeat(40)}`, {
-				fetch: missingReferenceFetch
-			})
+			verifyWorkflowReference(parsed, { fetch: missingReferenceFetch })
 		).rejects.toBeInstanceOf(WorkflowReferenceNotFoundError);
 	});
 
 	it('maps an exhausted rate limit to a typed error', async () => {
+		const parsed = parseExactWorkflowReference(
+			`${workflowPath}@${'c'.repeat(40)}`
+		);
+
 		await expect(
-			verifyPinnedWorkflowReference(`${workflowPath}@${'c'.repeat(40)}`, {
-				fetch: forbiddenFetch('0')
-			})
+			verifyWorkflowReference(parsed, { fetch: forbiddenFetch('0') })
 		).rejects.toBeInstanceOf(GithubRateLimitError);
 	});
 
@@ -118,7 +124,9 @@ describe('verifyPinnedWorkflowReference', () => {
 		const reference = `${workflowPath}@${'d'.repeat(40)}`;
 
 		await expect(
-			verifyPinnedWorkflowReference(reference, { fetch: forbiddenFetch('1') })
+			verifyWorkflowReference(parseExactWorkflowReference(reference), {
+				fetch: forbiddenFetch('1')
+			})
 		).rejects.toStrictEqual(
 			new GithubPermissionError(`workflow reference '${reference}'`)
 		);
@@ -148,8 +156,8 @@ describe('verifyPinnedWorkflowReference', () => {
 				);
 			});
 		};
-		const pending = verifyPinnedWorkflowReference(
-			`${workflowPath}@${'c'.repeat(40)}`,
+		const pending = verifyWorkflowReference(
+			parseExactWorkflowReference(`${workflowPath}@${'c'.repeat(40)}`),
 			{ fetch, signal: controller.signal }
 		);
 

@@ -94,6 +94,14 @@ immutable published release and that the workflow file exists there, so the
 workflow code, the CLI it drives, and the claims the tenant trusts all name one
 release.
 
+To trust every release rather than one, pin a tag pattern instead:
+`--workflow-ref "...cupboard-flake-publish.yml@refs/tags/v*"`. The stored rules
+then accept the workflow at any tag the pattern admits, so moving the caller to
+a new release needs no tenant change. This includes current and future matching
+tags, so the repository's tag publishers become part of the tenant's trust
+boundary. Setup validates the pattern and stores it without requiring a matching
+tag to exist.
+
 Re-running converges state that already matches. A different grace policy or
 reuse view is reported as drift and never replaced. Trust-rule differences are
 handled separately: a rule pinned to a different exact workflow reference can
@@ -201,17 +209,21 @@ cupboard github check "$tenant" --repo "$repo" \
   --workflow-ref "underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/$cupboard_version"
 ```
 
-The check verifies through GitHub that `--workflow-ref` names a real workflow at
-an immutable release tag or full commit, then evaluates the stored trust rules
-against claims assembled from the supplied repository, branch and workflow
+The check requires the exact release tag or full commit currently used by the
+caller. It verifies through GitHub that this names a real workflow at an
+immutable release or commit, then evaluates the stored trust rules against
+claims assembled from the supplied repository, branch and exact workflow
 reference. This catches a misspelt workflow path or release before the first
-run, and verifies that each matched rule's stored grants cover the caches and
-roots the run requests. It does not inspect the caller workflow, so the supplied
-reference must still match its `uses` line. The check also verifies the grace
-policy's coverage and duration, the view's priority against the destination's as
-actually served, and that the root prefix nests under the granted root. An
-invariant it cannot verify with what it was given (no `--root-prefix`, say) is
-reported by name and the exit is distinct from success.
+run, proves that a stored tag pattern admits the concrete release, and verifies
+that each matched rule's stored grants cover the caches and roots the run
+requests. A workflow that instead matches an interactive administrator rule
+fails the check, even when that rule's wildcard grant would allow the requested
+operations. It does not inspect the caller workflow, so the supplied reference
+must still match its `uses` line. The check also verifies the grace policy's
+coverage and duration, the view's priority against the destination's as actually
+served, and that the root prefix nests under the granted root. An invariant it
+cannot verify with what it was given (no `--root-prefix`, say) is reported by
+name and the exit is distinct from success.
 
 Listing the configuration by hand remains available (`cupboard policy list`,
 `cupboard reuse-view list`, `cupboard oidc-trust list`), but a listing shows
@@ -637,7 +649,25 @@ Routine changes to a working setup, and where each one's state lives.
 
 ### Move to a new cupboard release
 
-Establish the new trust before changing the caller:
+Rules pinned to a tag pattern (`@refs/tags/v*`) already cover the new release.
+Run `github check` with the exact new tag before updating the caller's `uses:`
+reference and `cupboard-version` input:
+
+```bash
+new_cupboard_version=vA.B.C
+workflow=underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml
+
+cupboard github check "$tenant" --repo "$repo" \
+  --root-prefix "github:$repo/main" \
+  --workflow-ref "$workflow@refs/tags/$new_cupboard_version"
+```
+
+Check models GitHub's default `sub` claim forms. Workflows using an environment
+or an organisation or repository custom subject template are not currently
+supported by this check.
+
+For rules pinned to an exact release, establish the new trust before changing
+the caller:
 
 ```bash
 new_cupboard_version=vA.B.C

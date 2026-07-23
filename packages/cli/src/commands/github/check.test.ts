@@ -14,6 +14,7 @@ import {
 	GithubCheckFailedError,
 	GithubCheckIncompleteError,
 	unavailableExitCode,
+	WorkflowReferenceExactRequiredError,
 	WorkflowReferenceNotFoundError,
 	WorkflowReferenceUnpinnedError
 } from '../../errors.ts';
@@ -630,6 +631,51 @@ describe('runGithubCheck', () => {
 		});
 	});
 
+	it('fails when the interactive owner rule governs a workflow run', async () => {
+		const results: ResultRow[][] = [];
+		const ownerRule = storedRule('owner', {
+			...githubPrAddBody(url, identity, {
+				repo: options.repo,
+				jobWorkflowRef: options.workflowRef
+			}),
+			claims: { sub: 'repo:acme/app:pull_request' },
+			permittedGrants: [{ type: 'cupboard_wildcard' }]
+		});
+
+		let failure: unknown;
+		try {
+			await runGithubCheck(
+				url,
+				options,
+				reporter(results),
+				checkClient({
+					graceSeconds: 86_400,
+					rules: [ownerRule, prRule, branchRule]
+				}),
+				checkDependencies({})
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expectFailed(failure);
+		expect({
+			checks: failure.checks,
+			rows: findings(results).slice(0, 2)
+		}).toStrictEqual({
+			checks: ['pull-request trust rule'],
+			rows: [
+				{
+					label: 'pull-request trust rule',
+					value:
+						'failed: interactive rule owner matches this workflow; ' +
+						'workflows must use a scoped CI rule'
+				},
+				{ label: 'main trust rule', value: 'ok' }
+			]
+		});
+	});
+
 	// A rule whose claims match but whose stored grants drifted would pass a
 	// claims-only check and still refuse the run's exchange; the grant check
 	// must catch it.
@@ -680,6 +726,62 @@ describe('runGithubCheck', () => {
 					're-run setup'
 			}
 		});
+	});
+
+	it('requires the exact workflow reference currently used by the caller', async () => {
+		const patternReference =
+			'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
+
+		await expect(
+			runGithubCheck(
+				url,
+				{ ...options, workflowRef: patternReference },
+				reporter([]),
+				checkClient({ graceSeconds: 86_400 }),
+				checkDependencies({})
+			)
+		).rejects.toStrictEqual(
+			new WorkflowReferenceExactRequiredError(patternReference)
+		);
+	});
+
+	it('checks an exact release against stored tag-pattern rules', async () => {
+		const patternReference =
+			'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
+		const patternRules = [
+			storedRule(
+				'pattern-pr',
+				githubPrAddBody(url, identity, {
+					repo: options.repo,
+					jobWorkflowRef: patternReference
+				})
+			),
+			storedRule(
+				'pattern-branch',
+				githubBranchAddBody(url, identity, {
+					repo: options.repo,
+					branch: options.branch,
+					jobWorkflowRef: patternReference
+				})
+			)
+		];
+		const results: ResultRow[][] = [];
+
+		await runGithubCheck(
+			url,
+			options,
+			reporter(results),
+			checkClient({ graceSeconds: 86_400, rules: patternRules }),
+			checkDependencies({})
+		);
+
+		expect(findings(results)).toStrictEqual([
+			{ label: 'pull-request trust rule', value: 'ok' },
+			{ label: 'main trust rule', value: 'ok' },
+			{ label: 'grace policy', value: 'ok' },
+			{ label: 'reuse view', value: 'ok' },
+			{ label: 'root prefix', value: 'ok' }
+		]);
 	});
 });
 

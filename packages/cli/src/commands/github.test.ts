@@ -444,7 +444,7 @@ describe('runGithubSetup', () => {
 
 		await runGithubSetup(url, options, reporter(results), client, {
 			...dependencies,
-			verifyWorkflowReference(reference) {
+			verifyWorkflowReference({ reference }) {
 				verifiedReferences.push(reference);
 
 				return Promise.resolve();
@@ -491,7 +491,7 @@ describe('runGithubSetup', () => {
 		await expect(
 			runGithubSetup(url, options, reporter([]), client, {
 				...dependencies,
-				verifyWorkflowReference(reference) {
+				verifyWorkflowReference({ reference }) {
 					return reference === previousWorkflowReference
 						? Promise.reject(
 								new WorkflowReferenceMutableError(reference, 'refs/tags/v1.2.2')
@@ -1049,7 +1049,7 @@ describe('runGithubSetup', () => {
 			client,
 			{
 				...dependencies,
-				verifyWorkflowReference(reference) {
+				verifyWorkflowReference({ reference }) {
 					verifiedReferences.push(reference);
 
 					return Promise.resolve();
@@ -1125,7 +1125,7 @@ describe('runGithubSetup', () => {
 
 		await runGithubSetup(url, options, reporter(results), client, {
 			...dependencies,
-			verifyWorkflowReference(reference) {
+			verifyWorkflowReference({ reference }) {
 				verifiedReferences.push(reference);
 
 				return Promise.resolve();
@@ -1356,6 +1356,243 @@ describe('runGithubSetup', () => {
 					label: 'superseded trust rule previous-pr',
 					value: `retained: pull requests and main pushes; ${previousWorkflowReference}`
 				}
+			]
+		});
+	});
+
+	it('replaces an exact rule admitted by a new tag pattern', async () => {
+		const patternReference =
+			'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
+		const patternPrBody = githubPrAddBody(url, identity, {
+			repo: options.repo,
+			jobWorkflowRef: patternReference
+		});
+		const patternBranchBody = githubBranchAddBody(url, identity, {
+			repo: options.repo,
+			branch: options.branch,
+			jobWorkflowRef: patternReference
+		});
+		const exactRule = storedRule('exact', {
+			...prBody,
+			permittedGrants: [{ type: 'cupboard_wildcard' }]
+		});
+		const patternDetail = String.raw`workflow references matching ^underwhelmingperformance/cupboard/\.github/workflows/cupboard-flake-publish\.yml@refs/tags/v[^/]*$`;
+		const results: ResultRow[][] = [];
+		const { client, recorded } = setupClient({
+			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
+			views: [
+				{
+					name: 'pull-requests',
+					priority: 50,
+					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+				}
+			],
+			rules: [exactRule]
+		});
+
+		await runGithubSetup(
+			url,
+			{ ...options, workflowRef: patternReference, yes: true },
+			reporter(results, { confirm: 'yes' }),
+			client,
+			{
+				...dependencies,
+				verifyWorkflowReference: () =>
+					Promise.reject(new Error('pattern verification should not run'))
+			}
+		);
+
+		expect({ recorded, outcomes: results[0] }).toStrictEqual({
+			recorded: {
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [patternPrBody, patternBranchBody],
+				ruleRemoves: ['exact']
+			},
+			outcomes: [
+				{ label: 'grace policy', value: 'unchanged' },
+				{ label: 'reuse view', value: 'unchanged' },
+				{
+					label: 'conflicting trust rule exact',
+					value: `removed: pull requests and main pushes; ${pinnedWorkflowReference}`
+				},
+				{
+					label: 'pull-request trust rule',
+					value: `created: ${patternDetail}`
+				},
+				{ label: 'main trust rule', value: `created: ${patternDetail}` }
+			]
+		});
+	});
+
+	it.each([
+		['a broader tag pattern', 'v2*', 'v*', ['previous-pattern']],
+		['a narrower tag pattern', 'v*', 'v2*', ['previous-pattern']],
+		['a disjoint tag pattern', 'v1*', 'v2*', []]
+	])(
+		'handles %s deterministically',
+		async (_name, previousGlob, desiredGlob, expectedRemovals) => {
+			const workflow =
+				'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml';
+			const previousReference = `${workflow}@refs/tags/${previousGlob}`;
+			const desiredReference = `${workflow}@refs/tags/${desiredGlob}`;
+			const desiredPrBody = githubPrAddBody(url, identity, {
+				repo: options.repo,
+				jobWorkflowRef: desiredReference
+			});
+			const desiredBranchBody = githubBranchAddBody(url, identity, {
+				repo: options.repo,
+				branch: options.branch,
+				jobWorkflowRef: desiredReference
+			});
+			const previousRule = storedRule('previous-pattern', {
+				...githubPrAddBody(url, identity, {
+					repo: options.repo,
+					jobWorkflowRef: previousReference
+				}),
+				permittedGrants: [{ type: 'cupboard_wildcard' }]
+			});
+			const { client, recorded } = setupClient({
+				gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
+				views: [
+					{
+						name: 'pull-requests',
+						priority: 50,
+						selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					}
+				],
+				rules: [previousRule]
+			});
+
+			await runGithubSetup(
+				url,
+				{ ...options, workflowRef: desiredReference, yes: true },
+				reporter([], { confirm: 'yes' }),
+				client,
+				{
+					...dependencies,
+					verifyWorkflowReference: () =>
+						Promise.reject(new Error('pattern verification should not run'))
+				}
+			);
+
+			expect(recorded).toStrictEqual({
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [desiredPrBody, desiredBranchBody],
+				ruleRemoves: expectedRemovals
+			});
+		}
+	);
+
+	it('stores tag-pattern rules without probing GitHub', async () => {
+		const patternReference =
+			'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
+		const patternPrBody = githubPrAddBody(url, identity, {
+			repo: options.repo,
+			jobWorkflowRef: patternReference
+		});
+		const patternBranchBody = githubBranchAddBody(url, identity, {
+			repo: options.repo,
+			branch: options.branch,
+			jobWorkflowRef: patternReference
+		});
+		const patternDetail = String.raw`workflow references matching ^underwhelmingperformance/cupboard/\.github/workflows/cupboard-flake-publish\.yml@refs/tags/v[^/]*$`;
+		const results: ResultRow[][] = [];
+		const { client, recorded } = setupClient({
+			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
+			views: [
+				{
+					name: 'pull-requests',
+					priority: 50,
+					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+				}
+			]
+		});
+
+		await runGithubSetup(
+			url,
+			{ ...options, workflowRef: patternReference },
+			reporter(results),
+			client,
+			{
+				...dependencies,
+				verifyWorkflowReference: () =>
+					Promise.reject(new Error('pattern verification should not run'))
+			}
+		);
+
+		expect({ recorded, outcomes: results[0] }).toStrictEqual({
+			recorded: {
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [patternPrBody, patternBranchBody],
+				ruleRemoves: []
+			},
+			outcomes: [
+				{ label: 'grace policy', value: 'unchanged' },
+				{ label: 'reuse view', value: 'unchanged' },
+				{
+					label: 'pull-request trust rule',
+					value: `created: ${patternDetail}`
+				},
+				{ label: 'main trust rule', value: `created: ${patternDetail}` }
+			]
+		});
+	});
+
+	it('performs no writes when stored tag-pattern rules match the desired ones', async () => {
+		const patternReference =
+			'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*';
+		const patternPrBody = githubPrAddBody(url, identity, {
+			repo: options.repo,
+			jobWorkflowRef: patternReference
+		});
+		const patternBranchBody = githubBranchAddBody(url, identity, {
+			repo: options.repo,
+			branch: options.branch,
+			jobWorkflowRef: patternReference
+		});
+		const results: ResultRow[][] = [];
+		const { client, recorded } = setupClient({
+			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
+			views: [
+				{
+					name: 'pull-requests',
+					priority: 50,
+					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+				}
+			],
+			rules: [
+				storedRule('pattern-pr', patternPrBody),
+				storedRule('pattern-branch', patternBranchBody)
+			]
+		});
+
+		await runGithubSetup(
+			url,
+			{ ...options, workflowRef: patternReference },
+			reporter(results),
+			client,
+			{
+				...dependencies,
+				verifyWorkflowReference: () =>
+					Promise.reject(new Error('pattern verification should not run'))
+			}
+		);
+
+		expect({ recorded, outcomes: results[0] }).toStrictEqual({
+			recorded: {
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [],
+				ruleRemoves: []
+			},
+			outcomes: [
+				{ label: 'grace policy', value: 'unchanged' },
+				{ label: 'reuse view', value: 'unchanged' },
+				{ label: 'pull-request trust rule', value: 'unchanged' },
+				{ label: 'main trust rule', value: 'unchanged' }
 			]
 		});
 	});

@@ -12,15 +12,25 @@ import {
 } from '@cupboard/protocol/oidc';
 
 import { InvalidClaimError } from '../../errors.ts';
+import {
+	parseWorkflowReference,
+	workflowReferenceClaim
+} from '../github/convention.ts';
 
 /**
  * The match for a `job_workflow_ref` claim value of the form
- * `owner/repo/path@ref`. When the value carries an `@ref` it is matched exactly;
- * without one it becomes a pattern matching that workflow file at any ref, which
- * is the shape a reusable workflow needs since its ref is the file's own, not
- * the branch that triggered the run.
+ * `owner/repo/path@ref`. When the value carries an `@ref` it is matched
+ * exactly; a `refs/tags/<glob>` ref with `*` wildcards becomes a pattern
+ * matching that workflow file at every tag the glob admits; without an `@ref`
+ * it becomes a pattern matching the workflow file at any ref, which is the
+ * shape a reusable workflow needs since its ref is the file's own, not the
+ * branch that triggered the run.
  */
 export function jobWorkflowReferenceClaim(value: string): ClaimMatch {
+	if (value.includes('*')) {
+		return workflowReferenceClaim(parseWorkflowReference(value));
+	}
+
 	if (value.includes('@')) {
 		return value;
 	}

@@ -26,6 +26,16 @@ describe('jobWorkflowReferenceClaim', () => {
 
 		expect(jobWorkflowReferenceClaim(value)).toBe(value);
 	});
+
+	it('matches the tag namespace when the ref is a tag pattern', () => {
+		expect(
+			jobWorkflowReferenceClaim(
+				'acme/infra/.github/workflows/publish.yml@refs/tags/v*'
+			)
+		).toStrictEqual({
+			pattern: String.raw`^acme/infra/\.github/workflows/publish\.yml@refs/tags/v[^/]*$`
+		});
+	});
 });
 
 describe('expandAllow', () => {
