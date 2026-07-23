@@ -1,7 +1,12 @@
 import {
+	type GraceSeconds,
+	graceSecondsSchema,
 	rootTtlMaxSeconds,
-	rootTtlMinSeconds
+	rootTtlMinSeconds,
+	type TtlSeconds,
+	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
+import { z } from 'zod';
 
 import {
 	InvalidDurationError,
@@ -9,6 +14,16 @@ import {
 	InvalidTtlError,
 	InvalidWaitTimeoutError
 } from './errors.ts';
+
+// How long a push waits for deferred blobs to become servable. A CLI-only
+// duration with no retention bounds, so it carries its own brand and cannot
+// cross with a root TTL or a grace window.
+export const waitTimeoutSecondsSchema = z
+	.number()
+	.int()
+	.min(1)
+	.brand('WaitTimeoutSeconds');
+export type WaitTimeoutSeconds = z.output<typeof waitTimeoutSecondsSchema>;
 
 const unitSeconds = new Map<string, number>([
 	['s', 1],
@@ -36,14 +51,14 @@ function parseDurationSeconds(input: string): number {
  * Parses a retention-root TTL, rejecting anything outside the root TTL bounds so
  * the CLI fails with the same limits the server enforces.
  */
-export function parseTtl(input: string): number {
+export function parseTtl(input: string): TtlSeconds {
 	const seconds = parseDurationSeconds(input);
 
 	if (seconds < rootTtlMinSeconds || seconds > rootTtlMaxSeconds) {
 		throw new InvalidTtlError(input, rootTtlMinSeconds, rootTtlMaxSeconds);
 	}
 
-	return seconds;
+	return ttlSecondsSchema.parse(seconds);
 }
 
 /**
@@ -51,14 +66,14 @@ export function parseTtl(input: string): number {
  * allowing zero: a grace policy may configure a zero grace, unlike a root TTL,
  * which cannot be zero.
  */
-export function parseGrace(input: string): number {
+export function parseGrace(input: string): GraceSeconds {
 	const seconds = parseDurationSeconds(input);
 
 	if (seconds > rootTtlMaxSeconds) {
 		throw new InvalidGraceError(input, rootTtlMaxSeconds);
 	}
 
-	return seconds;
+	return graceSecondsSchema.parse(seconds);
 }
 
 /**
@@ -67,12 +82,12 @@ export function parseGrace(input: string): number {
  * bounds, and rejects a zero wait, which would otherwise time the commit out on
  * the next tick; use `--no-wait` to skip waiting entirely.
  */
-export function parseWaitTimeout(input: string): number {
+export function parseWaitTimeout(input: string): WaitTimeoutSeconds {
 	const seconds = parseDurationSeconds(input);
 
 	if (seconds < 1) {
 		throw new InvalidWaitTimeoutError(input);
 	}
 
-	return seconds;
+	return waitTimeoutSecondsSchema.parse(seconds);
 }

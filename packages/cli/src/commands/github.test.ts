@@ -6,6 +6,10 @@ import {
 } from '@cupboard/cli-ui/testing';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
+	cachePrioritySchema,
+	graceSecondsSchema
+} from '@cupboard/nix-store/scalars';
+import {
 	type OidcTrustAddBody,
 	oidcTrustListResponseSchema,
 	type OidcTrustSummary,
@@ -130,7 +134,8 @@ function setupClient(stored: Stored): {
 					policies: (stored.gracePolicies ?? []).map((policy, index) => ({
 						id: `grace-${String(index)}`,
 						createdAt: '2026-01-01T00:00:00.000Z',
-						...policy
+						...policy,
+						graceSeconds: graceSecondsSchema.parse(policy.graceSeconds)
 					}))
 				}),
 			graceAdd(input) {
@@ -140,7 +145,7 @@ function setupClient(stored: Stored): {
 					id: 'grace-new',
 					createdAt: '2026-01-01T00:00:00.000Z',
 					cachePrefix: input.cachePrefix,
-					graceSeconds: input.graceSeconds
+					graceSeconds: graceSecondsSchema.parse(input.graceSeconds)
 				});
 			}
 		},
@@ -198,7 +203,10 @@ function setupClient(stored: Stored): {
 
 const dependencies = {
 	lookupRepository: () => Promise.resolve(identity),
-	fetchCacheInfo: () => Promise.resolve(new CacheInfo('/nix/store', true, 40)),
+	fetchCacheInfo: () =>
+		Promise.resolve(
+			new CacheInfo('/nix/store', true, cachePrioritySchema.parse(40))
+		),
 	verifyWorkflowReference: () => Promise.resolve()
 };
 
@@ -1666,7 +1674,11 @@ describe('registerGithubCommands', () => {
 });
 
 describe('cacheInfoFetcher', () => {
-	const info = new CacheInfo('/nix/store', true, 40).render();
+	const info = new CacheInfo(
+		'/nix/store',
+		true,
+		cachePrioritySchema.parse(40)
+	).render();
 
 	it('sends the Basic credential and parses the answer', async () => {
 		const requests: { url: string; authorization: string | undefined }[] = [];

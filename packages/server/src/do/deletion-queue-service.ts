@@ -1,4 +1,5 @@
 import {
+	type NarInfoGeneration,
 	type NixSha256HashString,
 	type StoredCache,
 	type StorePathHash,
@@ -23,7 +24,7 @@ import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 // fenced on.
 export interface TornDownNarInfo {
 	readonly storePathHash: StorePathHash;
-	readonly generation: number;
+	readonly generation: NarInfoGeneration;
 	readonly narHash: NixSha256HashString;
 }
 
@@ -103,7 +104,7 @@ export class DeletionQueueService {
 	private async retireBlobRefEdge(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
-		generation: number,
+		generation: NarInfoGeneration,
 		narHash: NixSha256HashString
 	): Promise<void> {
 		const tenant = this.context.requireTenant();
@@ -223,7 +224,7 @@ export class DeletionQueueService {
 	private clearQueuedNarInfoDeletion(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
-		generation: number
+		generation: NarInfoGeneration
 	): void {
 		this.context.db
 			.delete(schema.narInfoDeletions)
@@ -240,7 +241,7 @@ export class DeletionQueueService {
 	private async retireAttestationRefs(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
-		generation: number
+		generation: NarInfoGeneration
 	): Promise<void> {
 		const tenant = this.context.requireTenant();
 		const references = await this.context.d1
@@ -283,7 +284,7 @@ export class DeletionQueueService {
 		cache: StoredCache,
 		storePathHash: StorePathHash,
 		narHash: NixSha256HashString,
-		generation: number,
+		generation: NarInfoGeneration,
 		now: string
 	): void {
 		handle
@@ -361,7 +362,7 @@ export class DeletionQueueService {
 	async deleteQueuedNarInfo(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
-		generation: number,
+		generation: NarInfoGeneration,
 		origin?: string
 	): Promise<{ objectDeleted: boolean; narScheduledForDeletion: boolean }> {
 		// Must run inside a DO critical section: the row check, object delete, NAR

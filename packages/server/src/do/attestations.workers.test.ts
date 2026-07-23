@@ -1,4 +1,5 @@
 import {
+	narInfoGenerationSchema,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
 	type StorePathHash
@@ -407,7 +408,10 @@ describe('attestation attach and reads', () => {
 						const measured = await super.measureStagedBundle(key);
 						instance.context.db
 							.update(schema.narInfos)
-							.set({ narHash: replacement.narHash, generation: 1 })
+							.set({
+								narHash: replacement.narHash,
+								generation: narInfoGenerationSchema.parse(1)
+							})
 							.where(eqStorePath(metadata.storePathHash))
 							.run();
 

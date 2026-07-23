@@ -2,6 +2,7 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
+import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import {
 	cacheListResponseSchema,
 	type CacheRemoveResponse,
@@ -111,12 +112,17 @@ describe('runCacheCreate', () => {
 			storePaths: 0
 		});
 
-		await runCacheCreate('builds', 30, reporter(results), {
-			put(input) {
-				calls.push(input);
-				return Promise.resolve(summary);
+		await runCacheCreate(
+			'builds',
+			cachePrioritySchema.parse(30),
+			reporter(results),
+			{
+				put(input) {
+					calls.push(input);
+					return Promise.resolve(summary);
+				}
 			}
-		});
+		);
 
 		expect({ calls, results }).toStrictEqual({
 			calls: [{ cacheName: 'builds', priority: 30 }],

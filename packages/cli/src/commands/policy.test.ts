@@ -3,9 +3,13 @@ import {
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
 import {
-	type GracePolicyListResponse,
+	graceSecondsSchema,
+	ttlSecondsSchema
+} from '@cupboard/nix-store/scalars';
+import {
 	type GracePolicyRemoveResponse,
-	type GracePolicySummary,
+	type ParsedGracePolicyListResponse,
+	type ParsedGracePolicySummary,
 	type RetentionPolicyAddBody,
 	retentionPolicyListResponseSchema,
 	type RetentionPolicyRemoveResponse,
@@ -34,7 +38,13 @@ function policyClient(overrides: Partial<PolicyClient>): PolicyClient {
 			),
 		remove: ({ id }) => Promise.resolve({ id, removed: false }),
 		graceList: () => Promise.resolve({ policies: [] }),
-		graceAdd: (body) => Promise.resolve({ id: 'g1', createdAt: '', ...body }),
+		graceAdd: (body) =>
+			Promise.resolve({
+				id: 'g1',
+				createdAt: '',
+				...body,
+				graceSeconds: graceSecondsSchema.parse(body.graceSeconds)
+			}),
 		graceRemove: ({ id }) => Promise.resolve({ id, removed: false }),
 		graceCoverage: () => Promise.resolve({ covered: false }),
 		...overrides
@@ -90,12 +100,18 @@ describe('runPolicyAdd', () => {
 			ttlSeconds: 1_209_600
 		});
 
-		await runPolicyAdd('cache', 'builds', 1_209_600, reporter(results), {
-			add(body) {
-				calls.push(body);
-				return Promise.resolve(summary);
+		await runPolicyAdd(
+			'cache',
+			'builds',
+			ttlSecondsSchema.parse(1_209_600),
+			reporter(results),
+			{
+				add(body) {
+					calls.push(body);
+					return Promise.resolve(summary);
+				}
 			}
-		});
+		);
 
 		expect({ calls, results }).toStrictEqual({
 			calls: [{ scope: 'cache', pattern: 'builds', ttlSeconds: 1_209_600 }],
@@ -165,7 +181,7 @@ describe('runGracePolicyList', () => {
 			policy: {
 				id: 'g1',
 				cachePrefix: 'pr-',
-				graceSeconds: 86_400,
+				graceSeconds: graceSecondsSchema.parse(86_400),
 				createdAt: '2026-01-01T00:00:00.000Z'
 			},
 			row: { label: 'g1', value: 'pr-; 86,400s' }
@@ -175,14 +191,14 @@ describe('runGracePolicyList', () => {
 			policy: {
 				id: 'g1',
 				cachePrefix: '',
-				graceSeconds: 0,
+				graceSeconds: graceSecondsSchema.parse(0),
 				createdAt: '2026-01-01T00:00:00.000Z'
 			},
 			row: { label: 'g1', value: '(all caches); 0s' }
 		}
 	])('reports a row for $name', async ({ policy, row }) => {
 		const results: ResultRow[][] = [];
-		const response: GracePolicyListResponse = { policies: [policy] };
+		const response: ParsedGracePolicyListResponse = { policies: [policy] };
 
 		await runGracePolicyList(reporter(results), {
 			graceList: () => Promise.resolve(response)
@@ -211,14 +227,14 @@ describe('runGracePolicyAdd', () => {
 		{
 			name: 'a named prefix',
 			cachePrefix: 'pr-',
-			graceSeconds: 86_400,
+			graceSeconds: graceSecondsSchema.parse(86_400),
 			prefixRow: { label: 'Cache prefix', value: 'pr-' },
 			graceRow: { label: 'Grace (seconds)', value: '86,400' }
 		},
 		{
 			name: 'the tenant-wide default prefix',
 			cachePrefix: '',
-			graceSeconds: 0,
+			graceSeconds: graceSecondsSchema.parse(0),
 			prefixRow: { label: 'Cache prefix', value: '(all caches)' },
 			graceRow: { label: 'Grace (seconds)', value: '0' }
 		}
@@ -227,7 +243,7 @@ describe('runGracePolicyAdd', () => {
 		async ({ cachePrefix, graceSeconds, prefixRow, graceRow }) => {
 			const calls: { cachePrefix: string; graceSeconds: number }[] = [];
 			const results: ResultRow[][] = [];
-			const summary: GracePolicySummary = {
+			const summary: ParsedGracePolicySummary = {
 				id: 'g1',
 				cachePrefix,
 				graceSeconds,
@@ -300,7 +316,10 @@ describe('runGraceCoverage', () => {
 	it.each([
 		{
 			name: 'a covered cache with its resolved grace',
-			coverage: { covered: true as const, graceSeconds: 86_400 },
+			coverage: {
+				covered: true as const,
+				graceSeconds: graceSecondsSchema.parse(86_400)
+			},
 			rows: [
 				{ label: 'Cache', value: 'builds' },
 				{ label: 'Covered', value: 'yes' },

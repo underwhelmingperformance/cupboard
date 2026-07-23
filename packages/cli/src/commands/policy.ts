@@ -1,5 +1,9 @@
 import type { CliUi } from '@cupboard/cli-ui';
-import { selectorForCache } from '@cupboard/nix-store/scalars';
+import {
+	type GraceSeconds,
+	selectorForCache,
+	type TtlSeconds
+} from '@cupboard/nix-store/scalars';
 import {
 	type GracePolicyAddBody,
 	type GracePolicySummary,
@@ -30,12 +34,12 @@ import { InvalidPolicyScopeError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface PolicyAddOptions {
-	readonly ttl: number;
+	readonly ttl: TtlSeconds;
 }
 
 interface PolicyAddGraceOptions {
 	readonly cachePrefix: string;
-	readonly grace: number;
+	readonly grace: GraceSeconds;
 }
 
 interface GraceCoverageOptions {
@@ -277,7 +281,7 @@ export async function runPolicyList(
 export async function runPolicyAdd(
 	scope: RetentionPolicyScope,
 	pattern: string,
-	ttlSeconds: number,
+	ttlSeconds: TtlSeconds,
 	reporter: Reporter,
 	client: Pick<PolicyClient, 'add'>
 ): Promise<void> {
@@ -385,7 +389,7 @@ export async function runGracePolicyList(
 
 export async function runGracePolicyAdd(
 	cachePrefix: string,
-	graceSeconds: number,
+	graceSeconds: GraceSeconds,
 	reporter: Reporter,
 	client: Pick<PolicyClient, 'graceAdd'>
 ): Promise<void> {

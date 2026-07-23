@@ -1,7 +1,12 @@
 import { CacheInfoParseError } from './errors.ts';
+import { type CachePriority, cachePrioritySchema } from './scalars.ts';
 
 export class CacheInfo {
-	static readonly default = new CacheInfo('/nix/store', true, 40);
+	static readonly default = new CacheInfo(
+		'/nix/store',
+		true,
+		cachePrioritySchema.parse(40)
+	);
 
 	/**
 	/**
@@ -51,13 +56,17 @@ export class CacheInfo {
 			throw new CacheInfoParseError('Priority');
 		}
 
-		return new CacheInfo(storeDirectory, massQuery === '1', priority);
+		return new CacheInfo(
+			storeDirectory,
+			massQuery === '1',
+			cachePrioritySchema.parse(priority)
+		);
 	}
 
 	constructor(
 		public readonly storeDirectory: string,
 		public readonly hasMassQuery: boolean,
-		public readonly priority: number
+		public readonly priority: CachePriority
 	) {}
 
 	render(): string {
@@ -79,8 +88,8 @@ export const viewPriorityMargin = 10;
  * view's priority is strictly greater, since Nix prefers the lower priority.
  */
 export function isDestinationPreferred(
-	destinationPriority: number,
-	viewPriority: number
+	destinationPriority: CachePriority,
+	viewPriority: CachePriority
 ): boolean {
 	return viewPriority > destinationPriority;
 }

@@ -1,4 +1,5 @@
 import {
+	narInfoGenerationSchema,
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
@@ -68,7 +69,7 @@ async function narInfoObjectText(
 describe('narinfo object publish fence', () => {
 	beforeEach(resetTestServer);
 
-	it('rewrites a publish that lost to a newer row version', async () => {
+	it('rewrites a publish whose version the row no longer names', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('publish-fence');
 		const metadata = uploadMetadata({
@@ -86,8 +87,8 @@ describe('narinfo object publish fence', () => {
 		const current = await narInfoObjectText(metadata.storePathHash);
 
 		// A publish carrying a version the row no longer names: the shape of a
-		// put that landed after a recommit replaced the row. Its content differs
-		// from the row's render, so the fence's rewrite is observable.
+		// put that raced the row's committed version. Its content differs from
+		// the row's render, so the fence's rewrite is observable.
 		await runInDurableObject(currentServer(), async (instance) => {
 			const service = new NarInfoObjectsService(instance.context);
 			const staleNarInfo = await service.narInfoFromRow({
@@ -106,7 +107,7 @@ describe('narinfo object publish fence', () => {
 			await service.publishNarInfoObject(
 				cache,
 				row.storePathHash,
-				row.generation - 1,
+				narInfoGenerationSchema.parse(row.generation + 1),
 				row.narHash,
 				staleNarInfo
 			);

@@ -1,4 +1,5 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
+import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -60,7 +61,11 @@ describe('reuse-view nix-cache-info', () => {
 			cacheControl: response.headers.get('cache-control')
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			body: new CacheInfo('/nix/store', true, 55).render(),
+			body: new CacheInfo(
+				'/nix/store',
+				true,
+				cachePrioritySchema.parse(55)
+			).render(),
 			contentType: 'text/x-nix-cache-info; charset=utf-8',
 			cacheControl: 'no-store'
 		});

@@ -1,5 +1,6 @@
 import {
 	type AuthKeyId,
+	type NarInfoGeneration,
 	type NixSha256HashString,
 	type PredicateType,
 	type Sha256HexDigest,
@@ -55,7 +56,7 @@ export const blobReference = sqliteTable(
 		tenant: text('tenant').$type<TenantId>().notNull(),
 		cache: text('cache').$type<StoredCache>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
-		generation: integer('generation').notNull(),
+		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull()
 	},
 	(table) => [
@@ -254,7 +255,7 @@ export const attestationReference = sqliteTable(
 		tenant: text('tenant').$type<TenantId>().notNull(),
 		cache: text('cache').$type<StoredCache>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
-		generation: integer('generation').notNull(),
+		generation: integer('generation').$type<NarInfoGeneration>().notNull(),
 		predicateType: text('predicate_type').$type<PredicateType>().notNull(),
 		digest: text('digest').$type<Sha256HexDigest>().notNull()
 	},

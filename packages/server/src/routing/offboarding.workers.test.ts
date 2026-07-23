@@ -2,6 +2,7 @@ import { rootLogger } from '@cupboard/logger';
 import {
 	cacheNameSchema,
 	DEFAULT_CACHE,
+	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	type StoredCache,
@@ -279,7 +280,7 @@ describe('offboarding drain', () => {
 					tenant: id,
 					cache: defaultCache,
 					storePathHash,
-					generation: 0,
+					generation: narInfoGenerationSchema.parse(0),
 					narHash: nixSha256HashSchema.parse(
 						'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 					)
@@ -288,7 +289,7 @@ describe('offboarding drain', () => {
 					tenant: id,
 					cache: cacheNameSchema.parse('builds'),
 					storePathHash,
-					generation: 1,
+					generation: narInfoGenerationSchema.parse(1),
 					narHash: nixSha256HashSchema.parse(
 						'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
 					)
@@ -297,7 +298,7 @@ describe('offboarding drain', () => {
 					tenant: id,
 					cache: cacheNameSchema.parse('tests'),
 					storePathHash,
-					generation: 2,
+					generation: narInfoGenerationSchema.parse(2),
 					narHash: nixSha256HashSchema.parse(
 						'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccc'
 					)

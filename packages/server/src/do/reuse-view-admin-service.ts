@@ -1,4 +1,5 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
+import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	type ParsedReuseViewName,
@@ -7,6 +8,7 @@ import {
 	reuseViewDefaultPriority,
 	type ReuseViewListResponse,
 	type ReuseViewRemoveResponse,
+	reuseViewRevisionSchema,
 	type ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
 import { eq } from 'drizzle-orm';
@@ -138,13 +140,14 @@ export class ReuseViewAdminService {
 				.from(schema.reuseViewRevisionSeq)
 				.where(eq(schema.reuseViewRevisionSeq.name, name))
 				.get();
-			const revision = seq?.next ?? 1;
+			const revision = seq?.next ?? reuseViewRevisionSchema.parse(1);
+			const nextRevision = reuseViewRevisionSchema.parse(revision + 1);
 
 			tx.insert(schema.reuseViewRevisionSeq)
-				.values({ name, nextRevision: revision + 1 })
+				.values({ name, nextRevision })
 				.onConflictDoUpdate({
 					target: schema.reuseViewRevisionSeq.name,
-					set: { nextRevision: revision + 1 }
+					set: { nextRevision }
 				})
 				.run();
 
@@ -229,7 +232,7 @@ export class ReuseViewAdminService {
 		return new CacheInfo(
 			CacheInfo.default.storeDirectory,
 			CacheInfo.default.hasMassQuery,
-			row.priority
+			cachePrioritySchema.parse(row.priority)
 		).render();
 	}
 }

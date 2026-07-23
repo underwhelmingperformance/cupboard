@@ -1,5 +1,6 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
+	type NarInfoGeneration,
 	type NixSha256HashString,
 	type PredicateType,
 	predicateTypeSchema,
@@ -289,7 +290,7 @@ export class AttestationsService {
 	private async descriptorsFor(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
-		generation: number
+		generation: NarInfoGeneration
 	): Promise<AttestationDescriptor[]> {
 		const tenant = this.context.requireTenant();
 		const rows = await this.context.d1
@@ -634,7 +635,7 @@ export class AttestationsService {
 	async materialiseList(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
-		generation?: number
+		generation?: NarInfoGeneration
 	): Promise<void> {
 		const key = attestationListObjectKey(
 			this.context.requireTenant(),
@@ -763,7 +764,7 @@ function narHashDigestHex(narHash: NixSha256HashString): Sha256HexDigest {
 // against: the path, its committed generation, and the bundle digest it points at.
 function attestationReferenceKey(
 	storePathHash: StorePathHash,
-	generation: number,
+	generation: NarInfoGeneration,
 	digest: Sha256HexDigest
 ): string {
 	return `${storePathHash} ${String(generation)} ${digest}`;

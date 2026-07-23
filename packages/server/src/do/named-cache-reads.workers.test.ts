@@ -1,5 +1,6 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
+import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -78,7 +79,11 @@ describe('named cache reads', () => {
 		const namedBody = await named.text();
 		const bare = await readFetch('/nix-cache-info');
 		const bareBody = await bare.text();
-		const expectedNamedInfo = new CacheInfo('/nix/store', true, 30);
+		const expectedNamedInfo = new CacheInfo(
+			'/nix/store',
+			true,
+			cachePrioritySchema.parse(30)
+		);
 
 		expect({ namedStatus: named.status, namedBody, bareBody }).toStrictEqual({
 			namedStatus: StatusCodes.OK,

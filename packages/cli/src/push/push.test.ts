@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
+import {
+	graceSecondsSchema,
+	ttlSecondsSchema
+} from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import type { AttestationNegotiateRequest } from '@cupboard/protocol/attestations';
 import {
@@ -26,6 +30,7 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import type { CommitOptions, CommitTarget } from '../client/client.ts';
+import { waitTimeoutSecondsSchema } from '../duration.ts';
 import {
 	AttestationDivergedPathError,
 	AttestationSubjectNotPushedError,
@@ -1564,7 +1569,7 @@ describe('runPush', () => {
 		await runPush([appPath], reporter(results), {
 			client: skipClient(roots, clientCalls),
 			root: 'main',
-			ttlSeconds: 1_209_600,
+			ttlSeconds: ttlSecondsSchema.parse(1_209_600),
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		});
 
@@ -1657,7 +1662,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter(results), {
 			client: skipClient(roots, clientCalls),
-			ttlSeconds: 604_800,
+			ttlSeconds: ttlSecondsSchema.parse(604_800),
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		});
 
@@ -2072,7 +2077,7 @@ describe('runPush', () => {
 
 		await runPush([appPath, runtimePath], reporter(results), {
 			client,
-			ttlSeconds: 604_800,
+			ttlSeconds: ttlSecondsSchema.parse(604_800),
 			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, []),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
@@ -2121,7 +2126,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter([]), {
 			wait: true,
-			waitTimeoutSeconds: 30,
+			waitTimeoutSeconds: waitTimeoutSecondsSchema.parse(30),
 			client: {
 				preview: unexpectedPreviewCall,
 				...deferredUpload(events),
@@ -2511,7 +2516,7 @@ describe('runPush', () => {
 						narHash: appDigest.narHash.value,
 						status: 'pending',
 						settled: Promise.resolve(),
-						grace: { graceSeconds: 900 }
+						grace: { graceSeconds: graceSecondsSchema.parse(900) }
 					}),
 				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
 			} satisfies PushClient,

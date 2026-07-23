@@ -1,4 +1,8 @@
-import { DEFAULT_CACHE, type StoredCache } from '@cupboard/nix-store/scalars';
+import {
+	DEFAULT_CACHE,
+	narInfoGenerationSchema,
+	type StoredCache
+} from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -46,7 +50,7 @@ async function seedNarInfoDeletions(count: number): Promise<void> {
 		cache: defaultCache,
 		storePathHash: syntheticStorePathHash(index),
 		narHash: syntheticNarHash(index),
-		generation: 1,
+		generation: narInfoGenerationSchema.parse(1),
 		createdAt
 	}));
 

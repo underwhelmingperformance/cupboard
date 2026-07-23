@@ -1,6 +1,10 @@
 import { type CliUi, type MenuEntry } from '@cupboard/cli-ui';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
+	type CachePriority,
+	type GraceSeconds
+} from '@cupboard/nix-store/scalars';
+import {
 	type OidcTrustAddBody,
 	type OidcTrustListResponse,
 	type OidcTrustSummary,
@@ -567,7 +571,7 @@ interface PlannedSetupStep {
 
 async function planGracePolicy(
 	client: GithubSetupClient,
-	graceSeconds: number
+	graceSeconds: GraceSeconds
 ): Promise<PlannedSetupStep> {
 	const { policies } = await client.policies.graceList();
 	const existing = policies.find((policy) => policy.cachePrefix === '');
@@ -600,7 +604,7 @@ async function planGracePolicy(
 
 async function planReuseView(
 	client: GithubSetupClient,
-	destinationPriority: number
+	destinationPriority: CachePriority
 ): Promise<PlannedSetupStep> {
 	const selectors = [{ kind: 'prefix' as const, pattern: pullRequestPrefix }];
 	const { views } = await client.reuseViews.list();

@@ -1,10 +1,10 @@
 import {
 	compressionSchema,
+	graceSecondsSchema,
 	narInfoLineSchema,
 	nixSha256HashSchema,
 	positiveIntSchema,
 	referencesSchema,
-	rootTtlMaxSeconds,
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
@@ -130,7 +130,7 @@ export const uploadNegotiateMaxPaths = 100_000;
 export const uploadGraceFactSchema = z
 	.strictObject({
 		retainUntil: z.string().optional(),
-		graceSeconds: z.number().int().min(0).max(rootTtlMaxSeconds).optional()
+		graceSeconds: graceSecondsSchema.optional()
 	})
 	.refine(
 		(fact) => fact.retainUntil === undefined || fact.graceSeconds === undefined,

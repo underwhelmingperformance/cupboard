@@ -1,7 +1,7 @@
 import {
 	cacheNamePrefixPattern,
+	graceSecondsSchema,
 	rootNameSchema,
-	rootTtlMaxSeconds,
 	storedCacheSchema,
 	storePathHashSchema,
 	storePathSchema,
@@ -138,8 +138,6 @@ export type ParsedRetentionPolicyRemoveResponse = z.output<
 // bounded by a cache name's own maximum length, since a longer prefix could
 // never match one.
 const gracePrefixMaxLength = 63;
-
-const graceSecondsSchema = z.number().int().min(0).max(rootTtlMaxSeconds);
 
 export const gracePolicyAddBodySchema = z.strictObject({
 	// The prefix must be a prefix of some legal cache name, or the policy

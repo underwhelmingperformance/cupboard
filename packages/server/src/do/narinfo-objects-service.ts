@@ -1,6 +1,7 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
+	type NarInfoGeneration,
 	type NixSha256HashString,
 	referencesSchema,
 	type StoredCache,
@@ -37,7 +38,7 @@ import { storedSignaturesSchema } from './signing-keys.ts';
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
 
 interface NarInfoObjectVersion {
-	readonly generation: number;
+	readonly generation: NarInfoGeneration;
 	readonly narHash: NixSha256HashString;
 }
 
@@ -85,7 +86,7 @@ function isObjectVersion(
 // must still name, and the NAR hash it points at.
 interface CommittedReferenceEdge {
 	readonly storePathHash: StorePathHash;
-	readonly generation: number;
+	readonly generation: NarInfoGeneration;
 	readonly narHash: NixSha256HashString;
 }
 
@@ -100,7 +101,7 @@ type NarInfoBlobFields = Pick<
 // narinfo row against: the path, its generation, and the hash it points at.
 function referenceKey(
 	storePathHash: StorePathHash,
-	generation: number,
+	generation: NarInfoGeneration,
 	narHash: NixSha256HashString
 ): string {
 	return `${storePathHash} ${String(generation)} ${narHash}`;
@@ -119,7 +120,7 @@ export class NarInfoObjectsService {
 		previous: Promise<void> | undefined,
 		cache: StoredCache,
 		storePathHash: StorePathHash,
-		generation: number,
+		generation: NarInfoGeneration,
 		narHash: NixSha256HashString,
 		narInfo: NarInfo
 	): Promise<void> {
@@ -159,7 +160,7 @@ export class NarInfoObjectsService {
 	private async confirmPublishedObjectLocked(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
-		generation: number,
+		generation: NarInfoGeneration,
 		narHash: NixSha256HashString
 	): Promise<void> {
 		const row = this.context.db
@@ -357,7 +358,7 @@ export class NarInfoObjectsService {
 	async publishNarInfoObject(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
-		generation: number,
+		generation: NarInfoGeneration,
 		narHash: NixSha256HashString,
 		narInfo: NarInfo
 	): Promise<void> {
@@ -787,7 +788,7 @@ export class NarInfoObjectsService {
 	async putNarInfoObject(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
-		generation: number,
+		generation: NarInfoGeneration,
 		narHash: NixSha256HashString,
 		narInfo: NarInfo
 	): Promise<void> {

@@ -2,6 +2,8 @@ import { type Logger } from '@cupboard/logger';
 import { narFingerprint } from '@cupboard/nix-store/narinfo';
 import { type NarInfo } from '@cupboard/nix-store/narinfo';
 import {
+	type NarInfoGeneration,
+	narInfoGenerationSchema,
 	type NixSha256HashString,
 	type StoredCache,
 	type StorePathHash,
@@ -142,7 +144,7 @@ interface CanonicalBlobFacts {
 export interface MaterialiseRequest {
 	readonly cache: StoredCache;
 	readonly metadata: ParsedUploadPathNegotiation;
-	readonly generation: number;
+	readonly generation: NarInfoGeneration;
 	readonly probe: MaterialisationProbe;
 	readonly mustOwnBlob: boolean;
 	/**
@@ -629,7 +631,7 @@ export class CommitPipelineService {
 		tenant: TenantId,
 		cache: StoredCache,
 		metadata: ParsedUploadPathNegotiation,
-		generation: number,
+		generation: NarInfoGeneration,
 		blob: { readonly fileSize: number },
 		now: string
 	): BatchItem<'sqlite'>[] {
@@ -756,7 +758,7 @@ export class CommitPipelineService {
 		tenant: TenantId,
 		cache: StoredCache,
 		metadata: ParsedUploadPathNegotiation,
-		generation: number,
+		generation: NarInfoGeneration,
 		blob: { readonly fileSize: number }
 	): Promise<'charged' | 'over-quota' | 'tenant-inactive'> {
 		const now = new Date().toISOString();
@@ -808,7 +810,7 @@ export class CommitPipelineService {
 		charges: readonly {
 			readonly cache: StoredCache;
 			readonly metadata: ParsedUploadPathNegotiation;
-			readonly generation: number;
+			readonly generation: NarInfoGeneration;
 			readonly blob: CanonicalBlobFacts;
 		}[]
 	): Promise<'charged' | 'tenant-inactive' | 'retry-individually'> {
@@ -1704,7 +1706,7 @@ export class CommitPipelineService {
 					)
 				)
 				.get();
-			const generation = seq?.next ?? 0;
+			const generation = seq?.next ?? narInfoGenerationSchema.parse(0);
 			const inserted = tx
 				.insert(schema.narInfos)
 				.values({
@@ -1725,18 +1727,20 @@ export class CommitPipelineService {
 				.all();
 
 			if (inserted.length > 0) {
+				const nextGeneration = narInfoGenerationSchema.parse(generation + 1);
+
 				tx.insert(schema.generationSeq)
 					.values({
 						cache,
 						storePathHash: metadata.storePathHash,
-						nextGeneration: generation + 1
+						nextGeneration
 					})
 					.onConflictDoUpdate({
 						target: [
 							schema.generationSeq.cache,
 							schema.generationSeq.storePathHash
 						],
-						set: { nextGeneration: generation + 1 }
+						set: { nextGeneration }
 					})
 					.run();
 
@@ -1918,7 +1922,7 @@ export class CommitPipelineService {
 	async isGenerationCommitted(
 		cache: StoredCache,
 		metadata: ParsedUploadPathNegotiation,
-		generation: number
+		generation: NarInfoGeneration
 	): Promise<boolean> {
 		const tenant = this.context.requireTenant();
 		const edgeFilter = and(
@@ -1973,7 +1977,7 @@ export class CommitPipelineService {
 	async reclaimReservedRow(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
-		generation: number,
+		generation: NarInfoGeneration,
 		narHash: NixSha256HashString
 	): Promise<'reclaimed' | 'committed-current' | 'superseded'> {
 		const current = this.context.db

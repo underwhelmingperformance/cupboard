@@ -1,6 +1,7 @@
 import {
 	cacheNameSchema,
 	DEFAULT_CACHE,
+	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	type StoredCache,
@@ -51,7 +52,7 @@ const buildsCache = cacheNameSchema.parse('builds');
 function syntheticEntries(count: number): TornDownNarInfo[] {
 	return Array.from({ length: count }, (_unused, index) => ({
 		storePathHash: syntheticStorePathHash(index),
-		generation: 1,
+		generation: narInfoGenerationSchema.parse(1),
 		narHash: syntheticNarHash(index)
 	}));
 }

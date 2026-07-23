@@ -5,7 +5,8 @@ import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import { implicitPinName } from '@cupboard/nix-store/retention';
 import {
 	type Sha256HexDigest,
-	sha256HexDigestSchema
+	sha256HexDigestSchema,
+	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import type {
@@ -52,6 +53,10 @@ import type { CommitOptions, CommitTarget } from '../client/client.ts';
 import type { CommitOutcome, CommitSession } from '../client/commit-socket.ts';
 import { isStaleUploadError } from '../client/rpc-errors.ts';
 import {
+	type WaitTimeoutSeconds,
+	waitTimeoutSecondsSchema
+} from '../duration.ts';
+import {
 	AttestationBundleInvalidError,
 	AttestationDivergedPathError,
 	AttestationSubjectNotPushedError,
@@ -72,7 +77,7 @@ export interface PushDependencies {
 	readonly nix?: Nix;
 	readonly client: PushClient;
 	readonly root?: string;
-	readonly ttlSeconds?: number;
+	readonly ttlSeconds?: TtlSeconds;
 	// Whether this push retains what it publishes at all. Absent (or true) keeps
 	// today's behaviour: a named root with `root`, or an implicit pin per path
 	// otherwise. `false` is `--no-retain`: no root RPCs at all, so a path is kept
@@ -82,7 +87,7 @@ export interface PushDependencies {
 	// records retention, since root activation only admits servable targets.
 	// `--no-wait` returns with the deferred uploads still pending.
 	readonly wait?: boolean;
-	readonly waitTimeoutSeconds?: number;
+	readonly waitTimeoutSeconds?: WaitTimeoutSeconds;
 	readonly signal?: AbortSignal;
 	readonly attest?: boolean;
 	readonly attestations?: readonly PushAttestationSource[];
@@ -139,7 +144,7 @@ export interface PushClient {
 	setRoot(name: string, body: RootSetBody): Promise<RootSetResponse>;
 }
 
-const defaultWaitTimeoutSeconds = 600;
+const defaultWaitTimeoutSeconds = waitTimeoutSecondsSchema.parse(600);
 
 export type PushNarArchive =
 	ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>;
@@ -291,7 +296,7 @@ interface PushRuntimeDependencies {
 	readonly createNarArchive: (storePath: string) => PushNarArchive;
 	readonly compressNar: CompressNar;
 	readonly wait: boolean;
-	readonly waitTimeoutSeconds: number;
+	readonly waitTimeoutSeconds: WaitTimeoutSeconds;
 	readonly attest?: boolean;
 	readonly attestations?: readonly PushAttestationSource[];
 	readonly readAttestationBundle?: ReadAttestationBundle;
@@ -1265,7 +1270,7 @@ type RetentionPlan =
 function planRetention(
 	paths: readonly string[],
 	root: string | undefined,
-	ttlSeconds: number | undefined,
+	ttlSeconds: TtlSeconds | undefined,
 	shouldRetain: boolean
 ): RetentionPlan {
 	if (!shouldRetain) {

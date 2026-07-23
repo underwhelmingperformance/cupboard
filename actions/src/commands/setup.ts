@@ -9,6 +9,7 @@ import {
 } from '@cupboard/nix-store/cache-info';
 import { publicKeyUrl } from '@cupboard/nix-store/cache-url';
 import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
+import { type CachePriority } from '@cupboard/nix-store/scalars';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import { basicAuthHeader } from '@cupboard/shared/http';
 import { retryingFetcher } from '@cupboard/shared/retry';
@@ -251,7 +252,7 @@ async function fetchCacheInfoPriority(
 	url: string,
 	side: 'destination' | 'view',
 	headers: Readonly<Record<string, string>> | undefined
-): Promise<number> {
+): Promise<CachePriority> {
 	const target = `${url.replace(/\/+$/u, '')}/nix-cache-info`;
 	// Bounded per request, retries included: a stalled connection must fail
 	// promptly, not sit on undici's defaults.

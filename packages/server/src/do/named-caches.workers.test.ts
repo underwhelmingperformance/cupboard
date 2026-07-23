@@ -1,5 +1,6 @@
 import {
 	cacheNameSchema,
+	narInfoGenerationSchema,
 	selectorForCache,
 	storedCacheSchema,
 	storePathSchema
@@ -121,7 +122,7 @@ async function seedCollectablePaths(
 			narSize: narBytes.byteLength,
 			referencesJson: '[]',
 			sigsJson: '[]',
-			generation: 1,
+			generation: narInfoGenerationSchema.parse(1),
 			createdAt
 		};
 	});

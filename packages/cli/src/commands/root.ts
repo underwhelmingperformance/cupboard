@@ -1,5 +1,5 @@
 import type { CliUi } from '@cupboard/cli-ui';
-import { selectorForCache } from '@cupboard/nix-store/scalars';
+import { selectorForCache, type TtlSeconds } from '@cupboard/nix-store/scalars';
 import type {
 	ParsedRootEnsureResponse,
 	ParsedRootListResponse,
@@ -25,7 +25,7 @@ import { parseTtl } from '../duration.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface RootSetOptions {
-	readonly ttl?: number;
+	readonly ttl?: TtlSeconds;
 	readonly cache?: string;
 }
 
@@ -228,7 +228,7 @@ export async function runRootEnsure(
 	cacheName: string,
 	name: string,
 	targets: readonly string[],
-	ttlSeconds: number | undefined,
+	ttlSeconds: TtlSeconds | undefined,
 	reporter: Reporter,
 	client: Pick<RootClient, 'ensure'>
 ): Promise<void> {
@@ -266,7 +266,7 @@ export async function runRootSet(
 	cacheName: string,
 	name: string,
 	targets: readonly string[],
-	ttlSeconds: number | undefined,
+	ttlSeconds: TtlSeconds | undefined,
 	reporter: Reporter,
 	client: Pick<RootClient, 'set'>
 ): Promise<void> {

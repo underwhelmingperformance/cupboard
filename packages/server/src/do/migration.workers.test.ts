@@ -1,10 +1,12 @@
 import {
 	cacheNameSchema,
 	DEFAULT_CACHE,
+	graceSecondsSchema,
 	type StoredCache,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { trustRuleIdSchema } from '@cupboard/protocol/oidc';
+import { reuseViewRevisionSchema } from '@cupboard/protocol/reuse-views';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
@@ -161,7 +163,7 @@ describe('migrations', () => {
 		const policy = {
 			id: 'g1',
 			cachePrefix: 'pr-',
-			graceSeconds: 86_400,
+			graceSeconds: graceSecondsSchema.parse(86_400),
 			createdAt: '2026-01-01T00:00:00.000Z'
 		};
 
@@ -271,13 +273,16 @@ describe('migrations', () => {
 		};
 		const view = {
 			name: 'reuse',
-			revision: 1,
+			revision: reuseViewRevisionSchema.parse(1),
 			priority: 50,
 			createdAt: '2026-01-01T00:00:00.000Z',
 			updatedAt: '2026-01-01T00:00:00.000Z'
 		};
 		const selector = { view: 'reuse', kind: 'exact' as const, pattern: 'pr-1' };
-		const revisionSeq = { name: 'reuse', nextRevision: 2 };
+		const revisionSeq = {
+			name: 'reuse',
+			nextRevision: reuseViewRevisionSchema.parse(2)
+		};
 
 		const migrated = await runInDurableObject(
 			testServerFor('migration-reuse-views'),
