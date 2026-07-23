@@ -13,17 +13,16 @@ import {
 	type LookupRepositoryOptions
 } from '../oidc-trust/github.ts';
 
-import { parsePinnedWorkflowReference } from './convention.ts';
+import { type ExactWorkflowReference } from './convention.ts';
 
 /**
- * Confirms that a workflow pin resolves to a file on GitHub and that a tag is
- * protected by an immutable published release.
+ * Confirms that an exact workflow reference resolves to a workflow file on
+ * GitHub and, for a tag, an immutable published release.
  */
-export async function verifyPinnedWorkflowReference(
-	reference: string,
+export async function verifyWorkflowReference(
+	parsed: ExactWorkflowReference,
 	options: LookupRepositoryOptions = {}
 ): Promise<void> {
-	const parsed = parsePinnedWorkflowReference(reference);
 	const octokit = githubApi(options);
 
 	try {
@@ -35,7 +34,10 @@ export async function verifyPinnedWorkflowReference(
 			});
 
 			if (!release.data.immutable) {
-				throw new WorkflowReferenceMutableError(reference, parsed.pin.value);
+				throw new WorkflowReferenceMutableError(
+					parsed.reference,
+					parsed.pin.value
+				);
 			}
 		}
 
@@ -47,7 +49,7 @@ export async function verifyPinnedWorkflowReference(
 		});
 
 		if (Array.isArray(content.data) || content.data.type !== 'file') {
-			throw new WorkflowReferenceNotFoundError(reference);
+			throw new WorkflowReferenceNotFoundError(parsed.reference);
 		}
 	} catch (error) {
 		if (options.signal?.aborted === true) {
@@ -62,7 +64,7 @@ export async function verifyPinnedWorkflowReference(
 		}
 
 		if (isStatus(error, StatusCodes.NOT_FOUND)) {
-			throw new WorkflowReferenceNotFoundError(reference);
+			throw new WorkflowReferenceNotFoundError(parsed.reference);
 		}
 
 		if (isGithubRateLimitResponse(error)) {
@@ -73,7 +75,9 @@ export async function verifyPinnedWorkflowReference(
 			isStatus(error, StatusCodes.UNAUTHORIZED) ||
 			isStatus(error, StatusCodes.FORBIDDEN)
 		) {
-			throw new GithubPermissionError(`workflow reference '${reference}'`);
+			throw new GithubPermissionError(
+				`workflow reference '${parsed.reference}'`
+			);
 		}
 
 		throw error;

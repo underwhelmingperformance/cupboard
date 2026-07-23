@@ -35,13 +35,18 @@ import { tenantUrlArgument } from '../url-argument.ts';
 
 import { type GithubCheckOptions, runGithubCheck } from './github/check.ts';
 import {
+	githubBranchClaims,
+	githubPullRequestClaims
+} from './github/claims.ts';
+import {
 	minimumGraceSeconds,
-	parsePinnedWorkflowReference,
+	parseExactWorkflowReference,
+	parseWorkflowReference,
 	pullRequestPrefix,
 	pullRequestViewName,
-	requirePinnedWorkflowReference
+	workflowReferenceClaimsOverlap
 } from './github/convention.ts';
-import { verifyPinnedWorkflowReference } from './github/workflow-reference.ts';
+import { verifyWorkflowReference } from './github/workflow-reference.ts';
 import { githubBranchAddBody, githubPrAddBody } from './oidc-trust.ts';
 import { lookupRepository } from './oidc-trust/github.ts';
 import { type PolicyClient } from './policy.ts';
@@ -83,7 +88,7 @@ export interface GithubSetupClient {
 export interface GithubSetupDependencies {
 	readonly lookupRepository?: typeof lookupRepository;
 	readonly fetchCacheInfo?: (url: URL) => Promise<CacheInfo>;
-	readonly verifyWorkflowReference?: typeof verifyPinnedWorkflowReference;
+	readonly verifyWorkflowReference?: typeof verifyWorkflowReference;
 	readonly signal?: AbortSignal;
 }
 
@@ -255,6 +260,21 @@ function evaluateClaim(
 		return isClaimSatisfied(expected, actual) ? 'match' : 'mismatch';
 	}
 
+	if (claim === 'job_workflow_ref') {
+		const desiredReference = desired.body.claims.job_workflow_ref;
+
+		if (desiredReference !== undefined) {
+			const overlaps = workflowReferenceClaimsOverlap(
+				desiredReference,
+				expected
+			);
+
+			if (overlaps !== undefined) {
+				return overlaps ? 'match' : 'mismatch';
+			}
+		}
+	}
+
 	if (
 		claim === 'ref' &&
 		typeof expected === 'string' &&
@@ -377,7 +397,7 @@ function classifyTrustRule(
 		if (
 			workflowReference === undefined ||
 			rule.id === 'owner' ||
-			workflowReference === desired.body.claims.job_workflow_ref
+			isDeepEqual(workflowReference, desired.body.claims.job_workflow_ref)
 		) {
 			return;
 		}
@@ -452,13 +472,15 @@ function classifyTrustRules(
 	};
 }
 
-function isPinnedReference(reference: string): boolean {
+// A stored claim names one reviewed workflow version only when it parses as
+// an exact pin; a tag pattern names a namespace instead.
+function pinnedReference(
+	reference: string
+): ReturnType<typeof parseExactWorkflowReference> | undefined {
 	try {
-		parsePinnedWorkflowReference(reference);
-
-		return true;
+		return parseExactWorkflowReference(reference);
 	} catch {
-		return false;
+		return undefined;
 	}
 }
 
@@ -488,7 +510,7 @@ function ruleCaveat(classified: ClassifiedTrustRule): string | undefined {
 
 	if (
 		typeof workflowReference === 'string' &&
-		!isPinnedReference(workflowReference)
+		pinnedReference(workflowReference) === undefined
 	) {
 		return 'trusts future edits to the workflow';
 	}
@@ -669,21 +691,27 @@ export async function runGithubSetup(
 	const resolveRepository = dependencies.lookupRepository ?? lookupRepository;
 	const fetchCacheInfo =
 		dependencies.fetchCacheInfo ?? cacheInfoFetcher(options);
-	const verifyWorkflowReference =
-		dependencies.verifyWorkflowReference ?? verifyPinnedWorkflowReference;
+	const verifyReference =
+		dependencies.verifyWorkflowReference ?? verifyWorkflowReference;
 	const lookupOptions =
 		dependencies.signal === undefined ? {} : { signal: dependencies.signal };
 	const graceSeconds = parseGrace(options.grace);
-
-	requirePinnedWorkflowReference(options.workflowRef);
 
 	if (graceSeconds < minimumGraceSeconds) {
 		throw new GraceTooShortError(graceSeconds, minimumGraceSeconds);
 	}
 
-	await reporter.phase('Verifying workflow reference', () =>
-		verifyWorkflowReference(options.workflowRef, lookupOptions)
-	);
+	const workflowReference = parseWorkflowReference(options.workflowRef);
+
+	if (workflowReference.pin.kind !== 'tag-pattern') {
+		const exactWorkflowReference = parseExactWorkflowReference(
+			workflowReference.reference
+		);
+
+		await reporter.phase('Verifying workflow reference', () =>
+			verifyReference(exactWorkflowReference, lookupOptions)
+		);
+	}
 
 	const identity = await reporter.phase('Resolving repository', () =>
 		resolveRepository(options.repo, lookupOptions)
@@ -697,8 +725,6 @@ export async function runGithubSetup(
 		branch: options.branch,
 		jobWorkflowRef: options.workflowRef
 	});
-	const repositoryOwner =
-		identity.fullName.split('/', 1)[0] ?? identity.fullName;
 	// The claims a run of the new workflow presents, as far as they are
 	// deterministic. A job that deploys to a GitHub environment presents an
 	// environment-form `sub` instead of the defaults below.
@@ -708,32 +734,23 @@ export async function runGithubSetup(
 			kind: 'pull-request',
 			trigger: 'pull requests',
 			body: prBody,
-			tokenClaims: {
-				repository_id: String(identity.repositoryId),
-				repository_owner_id: String(identity.repositoryOwnerId),
-				repository: identity.fullName,
-				repository_owner: repositoryOwner,
-				sub: `repo:${identity.fullName}:pull_request`,
-				event_name: 'pull_request',
-				ref_type: 'branch',
-				job_workflow_ref: options.workflowRef
-			}
+			tokenClaims: githubPullRequestClaims(url, identity, {
+				...(workflowReference.pin.kind !== 'tag-pattern' && {
+					workflowReference: workflowReference.reference
+				})
+			})
 		},
 		{
 			step: `${options.branch} trust rule`,
 			kind: 'branch',
 			trigger: `${options.branch} pushes`,
 			body: branchBody,
-			tokenClaims: {
-				repository_id: String(identity.repositoryId),
-				repository_owner_id: String(identity.repositoryOwnerId),
-				repository: identity.fullName,
-				repository_owner: repositoryOwner,
-				sub: `repo:${identity.fullName}:ref:refs/heads/${options.branch}`,
-				ref: `refs/heads/${options.branch}`,
-				ref_type: 'branch',
-				job_workflow_ref: options.workflowRef
-			}
+			tokenClaims: githubBranchClaims(url, identity, {
+				branch: options.branch,
+				...(workflowReference.pin.kind !== 'tag-pattern' && {
+					workflowReference: workflowReference.reference
+				})
+			})
 		}
 	];
 	const { rules } = await reporter.phase('Reading trust rules', () =>
@@ -754,15 +771,17 @@ export async function runGithubSetup(
 			classification.superseded
 				.map(({ rule }) => rule.claims.job_workflow_ref)
 				.filter((reference) => typeof reference === 'string')
-				.filter((reference) => isPinnedReference(reference))
 		)
-	].toSorted((left, right) => left.localeCompare(right));
+	]
+		.map((reference) => pinnedReference(reference))
+		.filter((parsed) => parsed !== undefined)
+		.toSorted((left, right) => left.reference.localeCompare(right.reference));
 
 	if (previousWorkflowReferences.length > 0) {
 		await reporter.phase('Verifying previous workflow references', () =>
 			Promise.all(
 				previousWorkflowReferences.map((reference) =>
-					verifyWorkflowReference(reference, lookupOptions)
+					verifyReference(reference, lookupOptions)
 				)
 			)
 		);
@@ -993,7 +1012,7 @@ export function registerGithubCommands(
 		.option('--grace <duration>', 'Tenant-wide retention grace period.', '24h')
 		.requiredOption(
 			'--workflow-ref <owner/repo/path@ref>',
-			'The exact job_workflow_ref claim to pin, at an immutable release tag or full commit id.'
+			'The job_workflow_ref claim: an immutable release tag, a full commit id, or a tag pattern such as @refs/tags/v*.'
 		)
 		.option(
 			'-y, --yes',
@@ -1045,7 +1064,7 @@ export function registerGithubCommands(
 		.option('--branch <name>', 'Branch whose pushes publish.', 'main')
 		.requiredOption(
 			'--workflow-ref <owner/repo/path@ref>',
-			'The exact job_workflow_ref claim to check, at an immutable release tag or full commit id.'
+			'The exact immutable release tag or full commit id currently used by the caller.'
 		)
 		.option(
 			'--root-prefix <value>',

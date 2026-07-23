@@ -20,6 +20,7 @@ import { parseWorkerUrl } from '../client/transport.ts';
 import { InvalidClaimError } from '../errors.ts';
 import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
 
+import { githubActionsIssuer } from './github/claims.ts';
 import {
 	lookupRepository,
 	type RepositoryIdentity
@@ -30,9 +31,6 @@ import {
 	collectSubstitutions,
 	jobWorkflowReferenceClaim as jobWorkflowReferenceClaim
 } from './oidc-trust/rule-builder.ts';
-
-export const githubActionsIssuer =
-	'https://token.actions.githubusercontent.com';
 
 interface GithubPrOptions {
 	readonly repo: string;

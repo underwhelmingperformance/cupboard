@@ -11,6 +11,7 @@ import {
 	claimMismatches,
 	firstClaimMismatch,
 	isClaimSatisfied,
+	isRuleInteractive,
 	matchOidcTrust,
 	type OidcClaims,
 	type OidcTrustRule
@@ -19,7 +20,6 @@ import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 
 import { isAbortError } from '../../abort.ts';
-import { audienceSchema } from '../../audience.ts';
 import {
 	confirmAuthorizationDetails,
 	pushAuthorizationDetails,
@@ -29,7 +29,6 @@ import {
 	GithubCheckFailedError,
 	GithubCheckIncompleteError
 } from '../../errors.ts';
-import { githubActionsIssuer } from '../oidc-trust.ts';
 import {
 	lookupRepository,
 	type RepositoryIdentity
@@ -37,13 +36,14 @@ import {
 import { type PolicyClient } from '../policy.ts';
 import { type ReuseViewClient } from '../reuse-view.ts';
 
+import { githubBranchClaims, githubPullRequestClaims } from './claims.ts';
 import {
 	minimumGraceSeconds,
+	parseExactWorkflowReference,
 	pullRequestPrefix,
-	pullRequestViewName,
-	requirePinnedWorkflowReference
+	pullRequestViewName
 } from './convention.ts';
-import { verifyPinnedWorkflowReference } from './workflow-reference.ts';
+import { verifyWorkflowReference } from './workflow-reference.ts';
 
 export interface GithubCheckOptions {
 	readonly repo: string;
@@ -65,7 +65,7 @@ export interface GithubCheckClient {
 export interface GithubCheckDependencies {
 	readonly lookupRepository?: typeof lookupRepository;
 	readonly fetchCacheInfo: (url: URL) => Promise<CacheInfo>;
-	readonly verifyWorkflowReference?: typeof verifyPinnedWorkflowReference;
+	readonly verifyWorkflowReference?: typeof verifyWorkflowReference;
 	readonly signal?: AbortSignal;
 }
 
@@ -73,43 +73,6 @@ export interface CheckFinding {
 	readonly check: string;
 	readonly status: 'ok' | 'failed' | 'unverified';
 	readonly detail?: string;
-}
-
-// The claim set a genuine pull-request run of the pinned repository presents.
-// The pull-request number is a placeholder: rules capture it from `ref` in
-// their grant bindings, so the grant checks request the matching pr-1 cache
-// and root.
-function pullRequestClaims(
-	url: URL,
-	identity: RepositoryIdentity,
-	workflowReference: string
-): OidcClaims {
-	return {
-		iss: githubActionsIssuer,
-		aud: audienceSchema.parse(url),
-		repository_id: String(identity.repositoryId),
-		repository_owner_id: String(identity.repositoryOwnerId),
-		event_name: 'pull_request',
-		ref: 'refs/pull/1/merge',
-		job_workflow_ref: workflowReference
-	};
-}
-
-function branchClaims(
-	url: URL,
-	identity: RepositoryIdentity,
-	branch: string,
-	workflowReference: string
-): OidcClaims {
-	return {
-		iss: githubActionsIssuer,
-		aud: audienceSchema.parse(url),
-		repository_id: String(identity.repositoryId),
-		repository_owner_id: String(identity.repositoryOwnerId),
-		event_name: 'push',
-		ref: `refs/heads/${branch}`,
-		job_workflow_ref: workflowReference
-	};
 }
 
 function toMatcherRule(summary: OidcTrustSummary): OidcTrustRule {
@@ -207,6 +170,14 @@ function checkTrustRule(
 
 	if (matched === undefined) {
 		return { check, status: 'failed', detail: unmatchedDetail(rules, claims) };
+	}
+
+	if (isRuleInteractive(matched)) {
+		return {
+			check,
+			status: 'failed',
+			detail: `interactive rule ${matched.id} matches this workflow; workflows must use a scoped CI rule`
+		};
 	}
 
 	for (const request of requests) {
@@ -414,14 +385,14 @@ export async function runGithubCheck(
 	dependencies: GithubCheckDependencies
 ): Promise<void> {
 	const resolveRepository = dependencies.lookupRepository ?? lookupRepository;
-	const verifyWorkflowReference =
-		dependencies.verifyWorkflowReference ?? verifyPinnedWorkflowReference;
+	const verifyReference =
+		dependencies.verifyWorkflowReference ?? verifyWorkflowReference;
 	const lookupOptions =
 		dependencies.signal === undefined ? {} : { signal: dependencies.signal };
+	const workflowReference = parseExactWorkflowReference(options.workflowRef);
 
-	requirePinnedWorkflowReference(options.workflowRef);
 	await reporter.phase('Verifying workflow reference', () =>
-		verifyWorkflowReference(options.workflowRef, lookupOptions)
+		verifyReference(workflowReference, lookupOptions)
 	);
 
 	const identity = await reporter.phase('Resolving repository', () =>
@@ -470,13 +441,20 @@ export async function runGithubCheck(
 		checkTrustRule(
 			'pull-request trust rule',
 			rules,
-			pullRequestClaims(url, identity, options.workflowRef),
+			githubPullRequestClaims(url, identity, {
+				pullRequestNumber: 1,
+				workflowReference: workflowReference.reference
+			}),
 			pullRequestRequests
 		),
 		checkTrustRule(
 			`${options.branch} trust rule`,
 			rules,
-			branchClaims(url, identity, options.branch, options.workflowRef),
+			githubBranchClaims(url, identity, {
+				branch: options.branch,
+				eventName: 'push',
+				workflowReference: workflowReference.reference
+			}),
 			branchRequests
 		),
 		await checkGracePolicy(client),

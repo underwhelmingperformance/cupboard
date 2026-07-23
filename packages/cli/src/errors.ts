@@ -642,6 +642,38 @@ export class WorkflowReferenceMutableError extends CliUsageError {
 	}
 }
 
+/**
+ * A `*` wildcard is only meaningful in the tag part of a reference, as
+ * `refs/tags/<glob>` with literal tag characters and single `*` wildcards.
+ * Anywhere else there is no ref it could match, so it is refused rather than
+ * stored as a rule no token satisfies.
+ */
+export class WorkflowReferenceTagPatternError extends CliUsageError {
+	constructor(
+		public readonly reference: string,
+		public readonly pin: string
+	) {
+		super(
+			`--workflow-ref with '*' must pin a tag pattern 'refs/tags/<glob>'; got '${pin}' in '${reference}'`
+		);
+		this.name = 'WorkflowReferenceTagPatternError';
+	}
+}
+
+/**
+ * A configuration check evaluates the workflow release the caller will
+ * actually run. Tag patterns describe a wider setup policy and cannot identify
+ * that release.
+ */
+export class WorkflowReferenceExactRequiredError extends CliUsageError {
+	constructor(public readonly reference: string) {
+		super(
+			`github check --workflow-ref must name the exact release tag or full commit id currently used by the caller; got tag pattern '${reference}'`
+		);
+		this.name = 'WorkflowReferenceExactRequiredError';
+	}
+}
+
 export class WorkflowReferenceNotFoundError extends CliUsageError {
 	constructor(public readonly reference: string) {
 		super(

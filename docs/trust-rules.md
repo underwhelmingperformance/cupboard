@@ -55,11 +55,15 @@ to the `job_workflow_ref` claim, the workflow file that issued the token,
 written `owner/repo/path@ref`. Give it with an `@ref` to match exactly: for
 `cupboard-flake-publish.yml` that is the release tag the caller pins, and for
 `cupboard-publish.yml`, which callers reference at `main`, it is
-`refs/heads/main`. Given without an `@ref` it matches that file at any ref, a
-deliberately weaker rule: every branch and release copy of the file is accepted,
-and only the `ref` claim still pins what was built. It is named after the claim
-on purpose: `job_workflow_ref` is a different claim from `workflow` (the
-workflow's name) and `workflow_ref` (the calling workflow).
+`refs/heads/main`. A ref of `refs/tags/<glob>` with `*` wildcards is a tag
+pattern: the rule accepts the file at every tag the glob admits (`v*` for any
+release), including matching tags created in the future. The repository's tag
+publishers are therefore part of the rule's trust boundary. Given without an
+`@ref` it matches that file at any ref, a deliberately weaker rule: every branch
+and release copy of the file is accepted, and only the `ref` claim still pins
+what was built. It is named after the claim on purpose: `job_workflow_ref` is a
+different claim from `workflow` (the workflow's name) and `workflow_ref` (the
+calling workflow).
 
 ## Reusable workflows
 
