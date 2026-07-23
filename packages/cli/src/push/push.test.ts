@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import {
 	graceSecondsSchema,
+	rootNameSchema,
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
@@ -52,6 +53,8 @@ import {
 	RootTargetLimitError,
 	runPush
 } from './push.ts';
+
+const rootName = (value: string) => rootNameSchema.parse(value);
 
 const appPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
 const runtimePath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime';
@@ -117,7 +120,7 @@ describe('runPush', () => {
 
 		await expect(
 			runPush(paths, reporter([]), {
-				root: 'main',
+				root: rootName('main'),
 				nix: nixStore({}),
 				client: {
 					preview: unexpectedPreviewCall,
@@ -1538,7 +1541,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter(results), {
 			client: skipClient(roots, clientCalls),
-			root: 'main',
+			root: rootName('main'),
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		});
 
@@ -1568,7 +1571,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter(results), {
 			client: skipClient(roots, clientCalls),
-			root: 'main',
+			root: rootName('main'),
 			ttlSeconds: ttlSecondsSchema.parse(1_209_600),
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		});
@@ -1782,7 +1785,7 @@ describe('runPush', () => {
 	});
 
 	it.each([
-		{ name: 'a named root', options: { root: 'main' } },
+		{ name: 'a named root', options: { root: rootName('main') } },
 		{ name: 'implicit pins', options: {} },
 		{
 			name: '--no-retain',

@@ -2,6 +2,7 @@ import type { ScriptUpdateParams } from 'cloudflare/resources/workers/scripts/sc
 import type { SingleStepMigrationParam } from 'cloudflare/resources/workers/workers';
 
 import type { WorkerConfig } from './config.ts';
+import type { DatabaseId } from './identifiers.ts';
 
 type Metadata = ScriptUpdateParams.Metadata;
 type Binding = NonNullable<Metadata['bindings']>[number];
@@ -11,7 +12,7 @@ type Binding = NonNullable<Metadata['bindings']>[number];
  * and queues are bound by name, so only D1 and KV need an id lookup.
  */
 export interface ResolvedResources {
-	readonly d1: ReadonlyMap<string, string>;
+	readonly d1: ReadonlyMap<string, DatabaseId>;
 	readonly kv: ReadonlyMap<string, string>;
 }
 

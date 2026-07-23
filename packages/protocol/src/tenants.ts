@@ -8,12 +8,15 @@ import {
 } from './oidc.ts';
 
 export const tenantReadModeSchema = z.enum(['public', 'private']);
+export type TenantReadMode = z.infer<typeof tenantReadModeSchema>;
+
 export const tenantStatusSchema = z.enum([
 	'active',
 	'suspended',
 	'offboarding',
 	'offboarded'
 ]);
+export type TenantStatus = z.infer<typeof tenantStatusSchema>;
 
 export const readPasswordMinLength = 20;
 export const defaultReadUser = 'cupboard';

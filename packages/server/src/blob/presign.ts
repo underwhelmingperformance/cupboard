@@ -1,3 +1,4 @@
+import { ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import { AwsClient } from 'aws4fetch';
 
 import {
@@ -46,7 +47,7 @@ export class R2Presigner {
 			{
 				actions: pushUploadActions,
 				prefixPaths: [credentialProbePrefix],
-				ttlSeconds: 60
+				ttlSeconds: ttlSecondsSchema.parse(60)
 			},
 			now
 		);

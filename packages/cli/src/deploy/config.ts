@@ -1,6 +1,7 @@
 import JSON5 from 'json5';
 import { z } from 'zod';
 
+import { type ScriptName, scriptNameSchema } from './identifiers.ts';
 import { controlWorker, tenantWorker } from './source.ts';
 
 /**
@@ -11,7 +12,7 @@ import { controlWorker, tenantWorker } from './source.ts';
 export interface DurableObjectBinding {
 	readonly binding: string;
 	readonly className: string;
-	readonly scriptName: string | undefined;
+	readonly scriptName: ScriptName | undefined;
 }
 
 export interface R2Binding {
@@ -54,7 +55,7 @@ export interface DurableObjectMigration {
 }
 
 export interface WorkerConfig {
-	readonly name: string;
+	readonly name: ScriptName;
 	readonly mainModule: string;
 	readonly compatibilityDate: string;
 	readonly compatibilityFlags: readonly string[];
@@ -235,7 +236,7 @@ function kvTitle(binding: string): string {
 
 function toWorkerConfig(raw: RawWrangler, mainModule: string): WorkerConfig {
 	return {
-		name: raw.name,
+		name: scriptNameSchema.parse(raw.name),
 		mainModule,
 		compatibilityDate: raw.compatibility_date,
 		compatibilityFlags: raw.compatibility_flags,
@@ -246,7 +247,10 @@ function toWorkerConfig(raw: RawWrangler, mainModule: string): WorkerConfig {
 		durableObjects: (raw.durable_objects?.bindings ?? []).map((binding) => ({
 			binding: binding.name,
 			className: binding.class_name,
-			scriptName: binding.script_name
+			scriptName:
+				binding.script_name === undefined
+					? undefined
+					: scriptNameSchema.parse(binding.script_name)
 		})),
 		r2Buckets: raw.r2_buckets.map((bucket) => ({
 			binding: bucket.binding,

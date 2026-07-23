@@ -1,3 +1,4 @@
+import type { TtlSeconds } from '@cupboard/nix-store/scalars';
 import type { R2Credential } from '@cupboard/protocol/upload';
 
 import type { R2PresignerConfiguration } from './presign.ts';
@@ -19,7 +20,7 @@ export type R2CredentialGrant =
 export type R2TemporaryCredentialOptions = R2CredentialGrant & {
 	readonly prefixPaths?: readonly string[];
 	readonly objectPaths?: readonly string[];
-	readonly ttlSeconds: number;
+	readonly ttlSeconds: TtlSeconds;
 };
 
 // The S3 operations a push needs to stage a blob: a single PutObject for a NAR

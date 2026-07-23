@@ -25,6 +25,7 @@ import { parseWorkerUrl } from '../client/transport.ts';
 import { CupboardHttpError } from '../errors.ts';
 
 import type { CloudflareApi } from './cloudflare-api.ts';
+import type { CloudflareAccountId, ScriptName } from './identifiers.ts';
 import { deployerOwner, type OwnerBinding, type OwnerChoice } from './owner.ts';
 import {
 	checkR2Credentials,
@@ -177,7 +178,7 @@ export interface OnboardClient extends Pick<
 export type OnboardR2 =
 	| {
 			readonly kind: 'kept';
-			readonly accountId: string;
+			readonly accountId: CloudflareAccountId;
 			readonly bucketName: string;
 	  }
 	| { readonly kind: 'fresh' };
@@ -196,9 +197,9 @@ export interface OnboardOptions {
 	readonly api: CloudflareApi;
 	readonly ui: DeployUi;
 	/** The control Worker's script name, which serves the control plane. */
-	readonly controlScriptName: string;
+	readonly controlScriptName: ScriptName;
 	/** The tenant script's name, which holds the R2 credential secrets. */
-	readonly tenantScriptName: string;
+	readonly tenantScriptName: ScriptName;
 	readonly domain: string | undefined;
 	readonly admin: OnboardAdmin;
 	/** The version the uploaded Workers answer on `/_version`. */
@@ -470,7 +471,7 @@ export async function onboardDeployment(
  */
 export async function deploymentUrl(
 	api: CloudflareApi,
-	controlScriptName: string,
+	controlScriptName: ScriptName,
 	domain: string | undefined
 ): Promise<string | undefined> {
 	if (domain !== undefined) {
@@ -560,7 +561,7 @@ async function ensureWorkerR2(dependencies: {
 	readonly client: OnboardClient;
 	readonly token: string;
 	readonly r2: Extract<OnboardR2, { kind: 'kept' }>;
-	readonly tenantScriptName: string;
+	readonly tenantScriptName: ScriptName;
 	readonly check: typeof checkR2Credentials;
 	readonly attempts: number;
 	readonly sleep?: (ms: number) => Promise<void>;

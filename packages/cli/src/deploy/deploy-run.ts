@@ -7,6 +7,7 @@ import type { DeploymentArtifact } from './artifact.ts';
 import type { WorkerBundle } from './bundle.ts';
 import type { CloudflareApi, WorkerSecret } from './cloudflare-api.ts';
 import type { DeploymentConfig } from './config.ts';
+import type { DatabaseId, ScriptName } from './identifiers.ts';
 import {
 	applyD1Migrations,
 	computeDurableObjectMigration
@@ -33,7 +34,7 @@ function isCpuLimitsUnsupported(error: unknown): boolean {
 async function uploadScriptForPlan(
 	dependencies: DeployDependencies,
 	context: PhaseContext,
-	scriptName: string,
+	scriptName: ScriptName,
 	metadata: ScriptUpdateParams.Metadata,
 	bundle: WorkerBundle
 ): Promise<void> {
@@ -190,7 +191,7 @@ async function reconcileResources(
 		);
 		await Promise.all(plan.queues.map((name) => api.ensureQueue(name)));
 
-		const d1 = new Map<string, string>();
+		const d1 = new Map<string, DatabaseId>();
 
 		for (const name of plan.d1Databases) {
 			d1.set(name, await api.ensureD1Database(name));
@@ -436,7 +437,7 @@ export async function runDeploy(
 		);
 	}
 
-	const secretWork: { scriptName: string; secret: WorkerSecret }[] = [
+	const secretWork: { scriptName: ScriptName; secret: WorkerSecret }[] = [
 		...options.secrets.control.map((secret) => ({
 			scriptName: artifact.config.control.name,
 			secret

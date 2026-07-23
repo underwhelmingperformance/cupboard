@@ -18,14 +18,27 @@ import {
 } from './command.ts';
 import { parseDeploymentConfig } from './config.ts';
 import { collectResources } from './deploy-run.ts';
+import { cloudflareAccountIdSchema } from './identifiers.ts';
 import { deployerOwner, type OwnerBinding } from './owner.ts';
-import type { R2CredentialCheck } from './r2-credentials.ts';
+import {
+	r2AccessKeyIdSchema,
+	type R2CredentialCheck,
+	type R2Credentials,
+	r2SecretAccessKeySchema
+} from './r2-credentials.ts';
 import { TokenManagementNotPermittedError } from './r2-token.ts';
 import type { DeployUi, TextEdit } from './ui.ts';
 
+const accountId = (value: string) => cloudflareAccountIdSchema.parse(value);
+
+const credentialPair = (id: string, secret: string): R2Credentials => ({
+	accessKeyId: r2AccessKeyIdSchema.parse(id),
+	secretAccessKey: r2SecretAccessKeySchema.parse(secret)
+});
+
 const accounts = [
-	{ id: 'acc-1', name: 'Personal' },
-	{ id: 'acc-2', name: 'Work' }
+	{ id: accountId('acc-1'), name: 'Personal' },
+	{ id: accountId('acc-2'), name: 'Work' }
 ];
 
 const config = parseDeploymentConfig(
@@ -110,7 +123,9 @@ function pickerUi(choice?: string, uiCalls: UiCall[] = []): DeployUi {
 		chooseAccount: () => {
 			uiCalls.push({ method: 'chooseAccount' });
 
-			return Promise.resolve(choice);
+			return Promise.resolve(
+				choice === undefined ? undefined : accountId(choice)
+			);
 		},
 		openBrowser: recordUiCall(uiCalls, 'openBrowser'),
 		reporter: () => ({
@@ -350,7 +365,7 @@ const deployer = deployerOwner('cf-user-1');
 describe('planMenuEntries', () => {
 	it('lists Deploy first, every editable value, then Cancel', () => {
 		const state: PlanState = {
-			accountId: 'acc-1',
+			accountId: accountId('acc-1'),
 			domain: undefined,
 			config,
 			owner: { kind: 'owner', owner: deployer, origin: 'deployer' }
@@ -383,7 +398,7 @@ describe('planMenuEntries', () => {
 
 	it('offers replacing the R2 credentials, after the bucket, when already set', () => {
 		const base: PlanState = {
-			accountId: 'acc-1',
+			accountId: accountId('acc-1'),
 			domain: undefined,
 			config,
 			owner: { kind: 'owner', owner: deployer, origin: 'deployer' }
@@ -421,7 +436,7 @@ describe('planMenuEntries', () => {
 
 describe('reviewPlan', () => {
 	const initial: PlanState = {
-		accountId: 'acc-1',
+		accountId: accountId('acc-1'),
 		domain: undefined,
 		config,
 		owner: { kind: 'none' }
@@ -651,14 +666,8 @@ describe('reviewPlan', () => {
 });
 
 describe('R2 credential settlement', () => {
-	const pair = {
-		accessKeyId: 'a'.repeat(32),
-		secretAccessKey: 'b'.repeat(64)
-	};
-	const created = {
-		accessKeyId: 'c'.repeat(32),
-		secretAccessKey: 'd'.repeat(64)
-	};
+	const pair = credentialPair('a'.repeat(32), 'b'.repeat(64));
+	const created = credentialPair('c'.repeat(32), 'd'.repeat(64));
 
 	it('takes both parts from the environment', () => {
 		expect(
@@ -683,7 +692,7 @@ describe('R2 credential settlement', () => {
 
 		const outcome = await obtainR2Credentials({
 			ui,
-			accountId: 'acc-1',
+			accountId: accountId('acc-1'),
 			bucketName: 'cupboard-blobs',
 			creation: {
 				kind: 'available',
@@ -712,7 +721,7 @@ describe('R2 credential settlement', () => {
 		expect(
 			await obtainR2Credentials({
 				ui,
-				accountId: 'acc-1',
+				accountId: accountId('acc-1'),
 				bucketName: 'cupboard-blobs',
 				creation: {
 					kind: 'available',
@@ -736,7 +745,7 @@ describe('R2 credential settlement', () => {
 
 		const outcome = await obtainR2Credentials({
 			ui,
-			accountId: 'acc-1',
+			accountId: accountId('acc-1'),
 			bucketName: 'cupboard-blobs',
 			creation: {
 				kind: 'available',
@@ -765,7 +774,7 @@ describe('R2 credential settlement', () => {
 
 		const outcome = await obtainR2Credentials({
 			ui,
-			accountId: 'acc-1',
+			accountId: accountId('acc-1'),
 			bucketName: 'pantry',
 			creation: {
 				kind: 'available',
@@ -791,7 +800,7 @@ describe('R2 credential settlement', () => {
 		expect(
 			await obtainR2Credentials({
 				ui,
-				accountId: 'acc-1',
+				accountId: accountId('acc-1'),
 				bucketName: 'pantry',
 				creation: { kind: 'unavailable' },
 				keep: { previousBucket: 'cupboard-blobs' }
@@ -808,7 +817,7 @@ describe('R2 credential settlement', () => {
 		expect(
 			await obtainR2Credentials({
 				ui,
-				accountId: 'acc-1',
+				accountId: accountId('acc-1'),
 				bucketName: 'cupboard-blobs',
 				creation: { kind: 'unavailable' }
 			})
@@ -821,7 +830,7 @@ describe('R2 credential settlement', () => {
 
 		const outcome = await obtainR2Credentials({
 			ui,
-			accountId: 'acc-1',
+			accountId: accountId('acc-1'),
 			bucketName: 'cupboard-blobs',
 			creation: {
 				kind: 'available',
@@ -842,14 +851,11 @@ describe('R2 credential settlement', () => {
 });
 
 describe('verifyR2Credentials', () => {
-	const pair = {
-		accessKeyId: 'a'.repeat(32),
-		secretAccessKey: 'b'.repeat(64)
-	};
+	const pair = credentialPair('a'.repeat(32), 'b'.repeat(64));
 
 	const base = {
 		interactive: true,
-		accountId: 'acc-1',
+		accountId: accountId('acc-1'),
 		bucketName: 'cupboard-blobs',
 		initial: pair,
 		sleep: () => Promise.resolve()
@@ -912,10 +918,7 @@ describe('verifyR2Credentials', () => {
 	});
 
 	it('verifies a re-entered pair before accepting it', async () => {
-		const replacement = {
-			accessKeyId: 'e'.repeat(32),
-			secretAccessKey: 'f'.repeat(64)
-		};
+		const replacement = credentialPair('e'.repeat(32), 'f'.repeat(64));
 		const ui = scriptedUi({
 			menuChoices: ['reenter'],
 			textEdits: [{ kind: 'set', value: replacement.accessKeyId }],

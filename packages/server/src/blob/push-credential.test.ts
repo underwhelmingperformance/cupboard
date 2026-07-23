@@ -1,3 +1,4 @@
+import { ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import { pushIdSchema } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
@@ -9,7 +10,7 @@ import {
 import { pushIdSigningKeySchema } from './push-id.ts';
 
 const now = new Date('2026-06-29T12:00:00.000Z');
-const maxTtlSeconds = 6 * 60 * 60;
+const maxTtlSeconds = ttlSecondsSchema.parse(6 * 60 * 60);
 
 const configuration: R2PresignerConfiguration = {
 	accountId: 'acct-123',
@@ -37,7 +38,9 @@ describe('pushCredentialTtlSeconds', () => {
 	it('caps the credential at what the access token has left', () => {
 		const tokenExpiresAt = new Date(now.getTime() + 600 * 1000);
 
-		expect(pushCredentialTtlSeconds(tokenExpiresAt, now)).toBe(600);
+		expect(pushCredentialTtlSeconds(tokenExpiresAt, now)).toBe(
+			ttlSecondsSchema.parse(600)
+		);
 	});
 
 	it('falls back to the maximum when the token outlives it', () => {
@@ -49,7 +52,9 @@ describe('pushCredentialTtlSeconds', () => {
 	it('floors at one second for an all-but-expired token', () => {
 		const tokenExpiresAt = new Date(now.getTime() - 1000);
 
-		expect(pushCredentialTtlSeconds(tokenExpiresAt, now)).toBe(1);
+		expect(pushCredentialTtlSeconds(tokenExpiresAt, now)).toBe(
+			ttlSecondsSchema.parse(1)
+		);
 	});
 });
 
@@ -58,7 +63,7 @@ describe('PushCredentialIssuer', () => {
 		() => configuration,
 		pushIdSigningKeySchema.parse('signing-key')
 	);
-	const ttlSeconds = 900;
+	const ttlSeconds = ttlSecondsSchema.parse(900);
 	const issuedAt = Math.floor(now.getTime() / 1000);
 
 	it('grants the write-only actions and no scope, under the staging prefix', async () => {

@@ -42,6 +42,13 @@ export class InvalidCachePriorityError extends CliUsageError {
 	}
 }
 
+export class InvalidRootNameError extends CliUsageError {
+	constructor(public readonly value: string) {
+		super(`Invalid root name: ${value}`);
+		this.name = 'InvalidRootNameError';
+	}
+}
+
 export class InvalidPolicyScopeError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(

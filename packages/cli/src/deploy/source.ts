@@ -1,25 +1,27 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 
+import { type ScriptName, scriptNameSchema } from './identifiers.ts';
+
 /**
  * A Worker this command deploys: the script name Cloudflare knows it by, the
  * entry source (relative to the checkout root) used in tree mode, and the
  * filename its bundle is referenced by in the upload metadata.
  */
 export interface WorkerEntry {
-	readonly scriptName: string;
+	readonly scriptName: ScriptName;
 	readonly entryFile: string;
 	readonly mainModule: string;
 }
 
 export const controlWorker: WorkerEntry = {
-	scriptName: 'cupboard',
+	scriptName: scriptNameSchema.parse('cupboard'),
 	entryFile: 'packages/server/src/worker.ts',
 	mainModule: 'worker.js'
 };
 
 export const tenantWorker: WorkerEntry = {
-	scriptName: 'cupboard-tenant',
+	scriptName: scriptNameSchema.parse('cupboard-tenant'),
 	entryFile: 'packages/server/src/tenant-worker.ts',
 	mainModule: 'tenant-worker.js'
 };

@@ -1,3 +1,4 @@
+import { rootNameSchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -6,6 +7,8 @@ import {
 	pushAuthorizationDetails,
 	rootEnsureAuthorizationDetails
 } from './attenuate.ts';
+
+const rootName = (value: string) => rootNameSchema.parse(value);
 
 describe('pushAuthorizationDetails', () => {
 	it('requests only upload operations for a plain push', () => {
@@ -25,7 +28,7 @@ describe('pushAuthorizationDetails', () => {
 			pushAuthorizationDetails({
 				cacheSelector: 'pr-1',
 				attest: true,
-				root: 'main'
+				root: rootName('main')
 			})
 		).toStrictEqual([
 			{
@@ -39,7 +42,7 @@ describe('pushAuthorizationDetails', () => {
 					'root:set'
 				],
 				cache: 'pr-1',
-				root: 'main'
+				root: rootName('main')
 			}
 		]);
 	});
@@ -75,14 +78,14 @@ describe('rootEnsureAuthorizationDetails', () => {
 		expect(
 			rootEnsureAuthorizationDetails({
 				cacheSelector: 'pr-1',
-				root: 'github:owner/repo/pr-1/x86_64-linux/app'
+				root: rootName('github:owner/repo/pr-1/x86_64-linux/app')
 			})
 		).toStrictEqual([
 			{
 				type: 'cupboard_cache',
 				actions: ['root:set'],
 				cache: 'pr-1',
-				root: 'github:owner/repo/pr-1/x86_64-linux/app'
+				root: rootName('github:owner/repo/pr-1/x86_64-linux/app')
 			}
 		]);
 	});

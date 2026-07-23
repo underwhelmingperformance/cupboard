@@ -5,7 +5,12 @@ import { APIError } from 'cloudflare';
 import { CliError } from '../errors.ts';
 
 import type { CloudflareApi } from './cloudflare-api.ts';
-import type { R2Credentials } from './r2-credentials.ts';
+import type { CloudflareAccountId } from './identifiers.ts';
+import {
+	r2AccessKeyIdSchema,
+	type R2Credentials,
+	r2SecretAccessKeySchema
+} from './r2-credentials.ts';
 
 /** The deploy credential may not manage account API tokens. */
 export class TokenManagementNotPermittedError extends CliError {
@@ -57,7 +62,10 @@ export function scopedR2TokenName(bucketName: string): string {
  */
 export async function createScopedR2Key(
 	api: CloudflareApi,
-	options: { readonly accountId: string; readonly bucketName: string }
+	options: {
+		readonly accountId: CloudflareAccountId;
+		readonly bucketName: string;
+	}
 ): Promise<R2Credentials> {
 	try {
 		const name = scopedR2TokenName(options.bucketName);
@@ -113,7 +121,9 @@ function pairFrom(id: string, value: string): R2Credentials {
 	}
 
 	return {
-		accessKeyId: id,
-		secretAccessKey: createHash('sha256').update(value).digest('hex')
+		accessKeyId: r2AccessKeyIdSchema.parse(id),
+		secretAccessKey: r2SecretAccessKeySchema.parse(
+			createHash('sha256').update(value).digest('hex')
+		)
 	};
 }

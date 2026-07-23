@@ -20,7 +20,11 @@ import {
 } from './auth.ts';
 import { createEsbuildBundler } from './bundle.ts';
 import { fetchClaimFailureLogs } from './claim-logs.ts';
-import { type CloudflareApi, createCloudflareApi } from './cloudflare-api.ts';
+import {
+	type AccountSummary,
+	type CloudflareApi,
+	createCloudflareApi
+} from './cloudflare-api.ts';
 import {
 	cloudflareOauthClientId,
 	refreshCloudflareGrant
@@ -41,6 +45,7 @@ import {
 import { checkDomainOption, domainProblemText } from './domain.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
 import { readCachedGrant, writeCachedGrant } from './grant-store.ts';
+import type { CloudflareAccountId } from './identifiers.ts';
 import {
 	type ClaimSecret,
 	deploymentUrl,
@@ -61,7 +66,9 @@ import {
 import {
 	checkR2Credentials,
 	promptR2CredentialPair,
-	type R2Credentials
+	r2AccessKeyIdSchema,
+	type R2Credentials,
+	r2SecretAccessKeySchema
 } from './r2-credentials.ts';
 import {
 	createScopedR2Key,
@@ -94,9 +101,7 @@ export class ConfirmationRequiredError extends CliError {
 
 /** An account must be chosen but there is no terminal to ask on. */
 export class AccountOptionRequiredError extends CliError {
-	constructor(
-		public readonly accounts: readonly { id: string; name: string }[]
-	) {
+	constructor(public readonly accounts: readonly AccountSummary[]) {
 		super(
 			'Several Cloudflare accounts are available; pass --account <id>:\n' +
 				accounts.map((account) => `  ${account.id}  ${account.name}`).join('\n')
@@ -280,9 +285,9 @@ async function resolveArtifact(
  */
 export async function chooseDeployAccount(
 	ui: DeployUi,
-	accounts: readonly { id: string; name: string }[],
+	accounts: readonly AccountSummary[],
 	isInteractive: boolean
-): Promise<string> {
+): Promise<CloudflareAccountId> {
 	if (!isInteractive) {
 		throw new AccountOptionRequiredError(accounts);
 	}
@@ -298,7 +303,7 @@ export async function chooseDeployAccount(
 
 /** The deploy-time choices the user may tweak while reviewing the plan. */
 export interface PlanState {
-	readonly accountId: string;
+	readonly accountId: CloudflareAccountId;
 	readonly domain: string | undefined;
 	readonly config: DeploymentConfig;
 	readonly owner: OwnerChoice;
@@ -396,7 +401,7 @@ function cronsListProblem(value: string): string | undefined {
 export interface PlanReviewWorld {
 	readonly ui: DeployUi;
 	readonly render: (state: PlanState) => Promise<void>;
-	readonly accounts: () => Promise<readonly { id: string; name: string }[]>;
+	readonly accounts: () => Promise<readonly AccountSummary[]>;
 	/** The deployer's identity, when the credential carries one. */
 	readonly deployer: OwnerBinding | undefined;
 	/** True when `--yes` accepted the plan up front. */
@@ -654,7 +659,10 @@ export function envR2Credentials(
 		return undefined;
 	}
 
-	return { accessKeyId, secretAccessKey };
+	return {
+		accessKeyId: r2AccessKeyIdSchema.parse(accessKeyId),
+		secretAccessKey: r2SecretAccessKeySchema.parse(secretAccessKey)
+	};
 }
 
 /** How the R2 credential question was resolved. */
@@ -692,7 +700,7 @@ export type R2KeyCreation =
  */
 export async function obtainR2Credentials(options: {
 	readonly ui: DeployUi;
-	readonly accountId: string;
+	readonly accountId: CloudflareAccountId;
 	readonly bucketName: string;
 	readonly creation: R2KeyCreation;
 	/** Set when the Worker holds a pair that was scoped to another bucket. */
@@ -779,7 +787,7 @@ async function r2KeyCreationFor(options: {
 	readonly ui: DeployUi;
 	readonly api: CloudflareApi;
 	readonly credentialSource: CredentialSource;
-	readonly accountId: string;
+	readonly accountId: CloudflareAccountId;
 	readonly bucketName: string;
 }): Promise<R2KeyCreation> {
 	const { ui, api, accountId, bucketName } = options;
@@ -828,7 +836,7 @@ const propagationDelayMs = 5000;
 export async function verifyR2Credentials(options: {
 	readonly ui: DeployUi;
 	readonly interactive: boolean;
-	readonly accountId: string;
+	readonly accountId: CloudflareAccountId;
 	readonly bucketName: string;
 	readonly initial: R2Credentials;
 	readonly signal?: AbortSignal;
@@ -1028,7 +1036,7 @@ async function deployFlow(
 
 	let client: Cloudflare;
 	let api: CloudflareApi;
-	let accountId: string;
+	let accountId: CloudflareAccountId;
 	let credentialSource: CredentialSource;
 	let subject: string | undefined;
 	let idToken: string | undefined;
@@ -1072,8 +1080,8 @@ async function deployFlow(
 	// so a created key is scoped to the bucket and account as finally agreed.
 	let r2Credentials = envR2Credentials(process.env);
 
-	const apis = new Map<string, CloudflareApi>([[accountId, api]]);
-	const apiFor = (id: string): CloudflareApi => {
+	const apis = new Map<CloudflareAccountId, CloudflareApi>([[accountId, api]]);
+	const apiFor = (id: CloudflareAccountId): CloudflareApi => {
 		const existing = apis.get(id);
 
 		if (existing !== undefined) {
@@ -1090,14 +1098,14 @@ async function deployFlow(
 	// single visible step; a fresh wrapping secret is generated at most once
 	// and reused across re-renders so the value shown is the value deployed.
 	const secretChecks = new Map<
-		string,
+		CloudflareAccountId,
 		Promise<{ control: readonly string[]; tenant: readonly string[] }>
 	>();
 	let generatedWrapSecret: string | undefined;
 	let generatedPushIdSigningKey: string | undefined;
 
 	const existingSecretsFor = (
-		accountId: string
+		accountId: CloudflareAccountId
 	): Promise<{ control: readonly string[]; tenant: readonly string[] }> => {
 		let existing = secretChecks.get(accountId);
 

@@ -20,6 +20,11 @@ import { CupboardHttpError } from '../errors.ts';
 
 import type { CloudflareApi } from './cloudflare-api.ts';
 import {
+	cloudflareAccountIdSchema,
+	databaseIdSchema,
+	scriptNameSchema
+} from './identifiers.ts';
+import {
 	onboardAdminFor,
 	type OnboardClient,
 	onboardDeployment,
@@ -167,7 +172,11 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 					: [];
 			const [choice] = z.array(z.string().optional()).length(1).parse(taken);
 
-			return Promise.resolve(choice);
+			return Promise.resolve(
+				choice === undefined
+					? undefined
+					: cloudflareAccountIdSchema.parse(choice)
+			);
 		},
 		openBrowser: () => {
 			uiCalls.push({ method: 'openBrowser' });
@@ -307,7 +316,7 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 		},
 		ensureD1Database: () => {
 			recordApiCall(apiCalls, 'ensureD1Database');
-			return Promise.resolve('database-id');
+			return Promise.resolve(databaseIdSchema.parse('database-id'));
 		},
 		ensureKvNamespace: () => {
 			recordApiCall(apiCalls, 'ensureKvNamespace');
@@ -356,7 +365,7 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 		},
 		findZoneId: () => {
 			recordApiCall(apiCalls, 'findZoneId');
-			return Promise.resolve(absentString);
+			return Promise.resolve(undefined);
 		},
 		findCustomDomain: () => {
 			recordApiCall(apiCalls, 'findCustomDomain');
@@ -560,8 +569,8 @@ function baseOptions(ui: DeployUi, client: ScriptedClient): OnboardOptions {
 	return {
 		api: baseApi(defaultApiCalls),
 		ui,
-		controlScriptName: 'cupboard',
-		tenantScriptName: 'cupboard-tenant',
+		controlScriptName: scriptNameSchema.parse('cupboard'),
+		tenantScriptName: scriptNameSchema.parse('cupboard-tenant'),
 		domain: 'cache.example.com',
 		admin: claimable,
 		buildVersion: 'v-new',
@@ -618,7 +627,7 @@ function unreachableShape(outcome: OnboardOutcome): {
 
 const keptR2 = {
 	kind: 'kept',
-	accountId: 'acc-1',
+	accountId: cloudflareAccountIdSchema.parse('acc-1'),
 	bucketName: 'cupboard-blobs'
 } as const;
 

@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import { implicitPinName } from '@cupboard/nix-store/retention';
 import {
+	type RootName,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
 	type TtlSeconds
@@ -76,7 +77,7 @@ import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 export interface PushDependencies {
 	readonly nix?: Nix;
 	readonly client: PushClient;
-	readonly root?: string;
+	readonly root?: RootName;
 	readonly ttlSeconds?: TtlSeconds;
 	// Whether this push retains what it publishes at all. Absent (or true) keeps
 	// today's behaviour: a named root with `root`, or an implicit pin per path
@@ -1261,7 +1262,7 @@ const noRetainLabel = 'none (--no-retain)';
 type RetentionPlan =
 	| {
 			readonly kind: 'root';
-			readonly name: string;
+			readonly name: RootName;
 			readonly request: RootRequest;
 	  }
 	| { readonly kind: 'pins'; readonly requests: readonly RootRequest[] }
@@ -1269,7 +1270,7 @@ type RetentionPlan =
 
 function planRetention(
 	paths: readonly string[],
-	root: string | undefined,
+	root: RootName | undefined,
 	ttlSeconds: TtlSeconds | undefined,
 	shouldRetain: boolean
 ): RetentionPlan {
