@@ -314,7 +314,7 @@ export class VerificationService {
 
 	// The on-DO verify path, the hourly-cron backstop: reserve the row, decode and
 	// hash-check the staging bytes here, then commit. The prompt path runs the
-	// decode in the queue consumer off the DO thread and reaches `commitVerified`
+	// decode in the queue consumer off the DO thread and records its verdict
 	// through `recordVerification` instead.
 	// Phase A of a batch settle: reserve, verify and promote one claimed upload,
 	// returning it ready to materialise. A settle that finishes here (the path was
@@ -506,40 +506,6 @@ export class VerificationService {
 		await this.deleteStagingObject(pending);
 
 		return true;
-	}
-
-	// The post-verify half of the saga, shared by the on-DO cron path and the
-	// worker-driven `recordVerification`: a failed verdict reclaims the reserved
-	// row, a good one promotes the staging bytes into the shared CAS and
-	// materialises the servable object.
-	private async commitVerified(
-		logger: Logger,
-		pending: typeof schema.pendingUploads.$inferSelect,
-		metadata: ParsedUploadPathNegotiation,
-		generation: NarInfoGeneration,
-		verification: NarVerification,
-		promotion: PromotionState,
-		prefetched?: PrefetchedMaterialisationFacts
-	): Promise<void> {
-		const wasPromoted = await this.promoteForCommit(
-			pending,
-			metadata,
-			generation,
-			verification,
-			promotion
-		);
-
-		if (!wasPromoted) {
-			return;
-		}
-
-		await this.materialiseVerified(
-			logger,
-			pending,
-			metadata,
-			generation,
-			prefetched
-		);
 	}
 
 	// A failed verdict reclaims the reserved row and settles the upload; a good one
