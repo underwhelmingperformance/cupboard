@@ -9,7 +9,9 @@ import {
 	type OidcTrustListResponse,
 	type OidcTrustRemoveResponse,
 	type OidcTrustSummary,
-	type ParsedOidcTrustAddBody
+	type ParsedOidcTrustAddBody,
+	type TrustRuleId,
+	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import type { OidcTrustRule } from '@cupboard/protocol/oidc-trust-match';
 import { asc, eq, isNull } from 'drizzle-orm';
@@ -106,7 +108,7 @@ export async function listControlTrust(
 
 export async function getControlTrust(
 	database: Database,
-	id: string
+	id: TrustRuleId
 ): Promise<OidcTrustSummary> {
 	const row = await database
 		.select()
@@ -133,7 +135,7 @@ export async function addControlTrust(
 		throw new ControlTrustSubjectRequiredError();
 	}
 
-	const id = crypto.randomUUID();
+	const id = trustRuleIdSchema.parse(crypto.randomUUID());
 
 	await database
 		.insert(d1Schema.controlTrust)
@@ -162,7 +164,7 @@ export async function addControlTrust(
 
 export async function removeControlTrust(
 	database: Database,
-	id: string,
+	id: TrustRuleId,
 	now: string
 ): Promise<OidcTrustRemoveResponse> {
 	const existing = await database

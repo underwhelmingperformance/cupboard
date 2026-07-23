@@ -2,10 +2,12 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
+import { authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import type {
-	ControlKeyListResponse,
-	ControlKeyRotateResponse,
-	ControlKeySummary
+	ControlKeySummary,
+	ParsedControlKeyListResponse,
+	ParsedControlKeyRotateResponse,
+	ParsedControlKeySummary
 } from '@cupboard/protocol/control-keys';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -17,8 +19,12 @@ import {
 	runControlKeyRotate
 } from './control-key.ts';
 
-function summary(overrides: Partial<ControlKeySummary>): ControlKeySummary {
-	return { kid: 'kid-1', retired: false, ...overrides };
+function summary(
+	overrides: Partial<ControlKeySummary>
+): ParsedControlKeySummary {
+	const { kid = 'kid-1', ...rest } = overrides;
+
+	return { kid: authKeyIdSchema.parse(kid), retired: false, ...rest };
 }
 
 function controlKeyClient(
@@ -28,7 +34,7 @@ function controlKeyClient(
 		list: () => Promise.resolve({ keys: [] }),
 		rotate: () =>
 			Promise.resolve({
-				kid: 'kid-1',
+				kid: authKeyIdSchema.parse('kid-1'),
 				publicJwk: {},
 				retiring: undefined,
 				keys: []
@@ -41,7 +47,7 @@ function controlKeyClient(
 describe('runControlKeyList', () => {
 	it('reports a row per key, flagging retired ones', async () => {
 		const results: ResultRow[][] = [];
-		const response: ControlKeyListResponse = {
+		const response: ParsedControlKeyListResponse = {
 			keys: [
 				summary({
 					kid: 'kid-old',
@@ -85,10 +91,10 @@ describe('runControlKeyRotate', () => {
 		let rotateCalls = 0;
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
-		const response: ControlKeyRotateResponse = {
-			kid: 'kid-new',
+		const response: ParsedControlKeyRotateResponse = {
+			kid: authKeyIdSchema.parse('kid-new'),
 			retiring: {
-				kid: 'kid-old',
+				kid: authKeyIdSchema.parse('kid-old'),
 				scheduledRetireAt: '2026-01-01T00:20:30.000Z'
 			}
 		};
@@ -124,10 +130,10 @@ describe('runControlKeyRetire', () => {
 	])('reports retired=$retired once confirmed', async ({ retired, value }) => {
 		const calls: { kid: string }[] = [];
 		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
-		const response = { kid: 'kid-old', retired };
+		const response = { kid: authKeyIdSchema.parse('kid-old'), retired };
 
 		await runControlKeyRetire(
-			'kid-old',
+			authKeyIdSchema.parse('kid-old'),
 			ui,
 			controlKeyClient({
 				retire(input) {
@@ -155,7 +161,11 @@ describe('runControlKeyRetire', () => {
 	it('leaves the key in place when the confirmation is declined', async () => {
 		const { ui, captured } = fakeCliUi({ confirm: 'no' });
 
-		await runControlKeyRetire('kid-old', ui, controlKeyClient({}));
+		await runControlKeyRetire(
+			authKeyIdSchema.parse('kid-old'),
+			ui,
+			controlKeyClient({})
+		);
 
 		expect({
 			results: captured.results,

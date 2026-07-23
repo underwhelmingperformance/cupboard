@@ -1,4 +1,5 @@
 import type { CliUi } from '@cupboard/cli-ui';
+import { type AuthKeyId, authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import type {
 	AuthKeySummary,
 	ParsedAuthKeyListResponse,
@@ -30,7 +31,7 @@ interface RetireOptions {
 export interface AuthKeyClient {
 	list(): Promise<ParsedAuthKeyListResponse>;
 	rotate(): Promise<ParsedAuthKeyRotateResponse>;
-	retire(input: { kid: string }): Promise<ParsedAuthKeyRetireResponse>;
+	retire(input: { kid: AuthKeyId }): Promise<ParsedAuthKeyRetireResponse>;
 }
 
 export function registerAuthKeyCommands(
@@ -84,7 +85,7 @@ export function registerAuthKeyCommands(
 				signal: programOptions.signal
 			});
 
-			await runAuthKeyRetire(kid, ui, rpc.keys.auth);
+			await runAuthKeyRetire(authKeyIdSchema.parse(kid), ui, rpc.keys.auth);
 		});
 }
 
@@ -134,7 +135,7 @@ export async function runAuthKeyRotate(
 }
 
 export async function runAuthKeyRetire(
-	kid: string,
+	kid: AuthKeyId,
 	ui: CliUi,
 	client: AuthKeyClient
 ): Promise<void> {

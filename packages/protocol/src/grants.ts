@@ -1,6 +1,9 @@
 import {
+	type CacheSelector,
 	cacheSelectorSchema,
+	type RootName,
 	rootNameSchema,
+	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
@@ -141,9 +144,9 @@ export type Operation = z.infer<typeof operationSchema>;
 
 /** The concrete resource a route acts on, resolved before authorisation. */
 export interface ResourceRequest {
-	readonly cache?: string;
-	readonly root?: string;
-	readonly tenant?: string;
+	readonly cache?: CacheSelector;
+	readonly root?: RootName;
+	readonly tenant?: TenantId;
 }
 
 // ── Concrete grants (what a token carries; RFC 9396 authorization_details) ──

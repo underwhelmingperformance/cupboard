@@ -1,3 +1,4 @@
+import { type AuthKeyId } from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
@@ -34,7 +35,7 @@ export const accessJwtRetirementMarginSeconds = 5 * 60;
 // A public key in the verification set, addressed by its `kid` so a rotated key
 // set can hold several at once.
 export interface AuthPublicKey {
-	readonly kid: string;
+	readonly kid: AuthKeyId;
 	readonly publicJwk: JsonWebKey;
 }
 
@@ -55,7 +56,7 @@ export interface IssueAccessJwtOptions {
 	readonly audience: string;
 	readonly subject: string;
 	readonly grants: AuthorizationDetails;
-	readonly kid: string;
+	readonly kid: AuthKeyId;
 	readonly ttlSeconds: number;
 	readonly auditClaims?: Readonly<Record<string, unknown>>;
 }

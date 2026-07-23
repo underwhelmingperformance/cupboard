@@ -2,6 +2,8 @@ import { rootLogger } from '@cupboard/logger';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
+	type AuthKeyId,
+	authKeyIdSchema,
 	DEFAULT_CACHE,
 	nixSha256HashSchema,
 	type NixSha256HashString,
@@ -25,7 +27,8 @@ import {
 import {
 	oidcAudienceSchema,
 	oidcIssuerSchema,
-	oidcSubjectSchema
+	oidcSubjectSchema,
+	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import type {
 	RootListResponse,
@@ -651,7 +654,7 @@ export async function issueTokenForTenant(
 
 async function activeAuthKeyFor(
 	stub: DurableObjectStub<CupboardServer>
-): Promise<{ kid: string; privateJwk: JsonWebKey }> {
+): Promise<{ kid: AuthKeyId; privateJwk: JsonWebKey }> {
 	// The auth key is created on first use; a JWKS request creates it without
 	// issuing anything, so reading it straight after always finds a key.
 	const jwks = await stub.fetch(
@@ -664,7 +667,7 @@ async function activeAuthKeyFor(
 		const database = drizzle(state.storage, { schema: { authKeys } });
 		const row = z
 			.object({
-				kid: z.string(),
+				kid: authKeyIdSchema,
 				privateJwkJson: z.string()
 			})
 			.parse(
@@ -885,7 +888,7 @@ export async function seedControlTrust(fields: {
 	await drizzleD1(env.CUPBOARD_DB, { schema: { controlTrust } })
 		.insert(controlTrust)
 		.values({
-			id: crypto.randomUUID(),
+			id: trustRuleIdSchema.parse(crypto.randomUUID()),
 			issuer: fields.issuer,
 			audience: fields.audience,
 			claimsJson: JSON.stringify(fields.claims ?? {}),

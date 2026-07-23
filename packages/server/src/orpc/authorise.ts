@@ -1,7 +1,12 @@
 import {
+	type CacheSelector,
 	cacheSelectorSchema,
+	type RootName,
+	rootNameSchema,
 	selectorForCache,
-	type StoredCache
+	type StoredCache,
+	type TenantId,
+	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { type AuthzMeta, type ResourceSpec } from '@cupboard/protocol/contract';
 import {
@@ -36,6 +41,9 @@ function inputField(input: unknown, name: string): string | undefined {
 
 interface ResolvedResource {
 	readonly resource: ResourceRequest;
+	// A declared resource field was present in the input but failed to validate, so
+	// it names no concrete grant and only a wildcard can cover the request.
+	readonly unresolved: boolean;
 	// A pending-row resource whose row was not found, with whether its absence
 	// must deny.
 	readonly pendingMissing: false | { readonly missingDenies: boolean };
@@ -47,10 +55,15 @@ async function resolveResource(
 	pendingCache: PendingCacheResolver
 ): Promise<ResolvedResource> {
 	if (spec === undefined) {
-		return { resource: {}, pendingMissing: false };
+		return { resource: {}, unresolved: false, pendingMissing: false };
 	}
 
-	const resource: { cache?: string; root?: string; tenant?: string } = {};
+	const resource: {
+		cache?: CacheSelector;
+		root?: RootName;
+		tenant?: TenantId;
+	} = {};
+	let isUnresolved = false;
 	let pendingMissing: ResolvedResource['pendingMissing'] = false;
 
 	if (spec.cache !== undefined) {
@@ -64,26 +77,48 @@ async function resolveResource(
 				resource.cache = selectorForCache(cache);
 			}
 		} else {
-			// A malformed selector is left as-is: it matches no concrete grant, so a
-			// scoped token is refused, while a wildcard still covers and the route's
-			// own input validation renders the malformed name as a 400.
+			// A malformed selector names no concrete grant, so a scoped token is
+			// refused while a wildcard still covers; the route's own input validation
+			// renders the malformed name as a 400.
 			const selector = inputField(input, spec.cache.field);
-			resource.cache =
+			const parsed =
 				selector === undefined
 					? undefined
-					: (cacheSelectorSchema.safeParse(selector).data ?? selector);
+					: cacheSelectorSchema.safeParse(selector).data;
+
+			if (selector !== undefined && parsed === undefined) {
+				isUnresolved = true;
+			} else {
+				resource.cache = parsed;
+			}
 		}
 	}
 
 	if (spec.root !== undefined && 'field' in spec.root) {
-		resource.root = inputField(input, spec.root.field);
+		const raw = inputField(input, spec.root.field);
+		const parsed =
+			raw === undefined ? undefined : rootNameSchema.safeParse(raw).data;
+
+		if (raw !== undefined && parsed === undefined) {
+			isUnresolved = true;
+		} else {
+			resource.root = parsed;
+		}
 	}
 
 	if (spec.tenant !== undefined && 'field' in spec.tenant) {
-		resource.tenant = inputField(input, spec.tenant.field);
+		const raw = inputField(input, spec.tenant.field);
+		const parsed =
+			raw === undefined ? undefined : tenantIdSchema.safeParse(raw).data;
+
+		if (raw !== undefined && parsed === undefined) {
+			isUnresolved = true;
+		} else {
+			resource.tenant = parsed;
+		}
 	}
 
-	return { resource, pendingMissing };
+	return { resource, unresolved: isUnresolved, pendingMissing };
 }
 
 // Whether any grant authorises the operation on some resource at all, ignoring
@@ -101,6 +136,13 @@ function hasOperation(
 	);
 }
 
+// A wildcard grant carries no resource and covers every operation on every
+// resource, so it is the only grant that can cover a request whose resource
+// failed to validate.
+function hasWildcard(grants: AccessClaims['grants']): boolean {
+	return grants.some((grant) => grant.type === 'cupboard_wildcard');
+}
+
 /**
  * Authorise a request: the operation the procedure declares must be covered by
  * the token's grants on the resource it acts on. A procedure with no `requires`
@@ -116,7 +158,7 @@ export async function authoriseRequest(
 		throw new InsufficientScopeError();
 	}
 
-	const { resource, pendingMissing } = await resolveResource(
+	const { resource, unresolved, pendingMissing } = await resolveResource(
 		meta.resource,
 		input,
 		pendingCache
@@ -127,6 +169,14 @@ export async function authoriseRequest(
 			pendingMissing.missingDenies ||
 			!hasOperation(claims.grants, meta.requires)
 		) {
+			throw new InsufficientScopeError();
+		}
+
+		return;
+	}
+
+	if (unresolved) {
+		if (!hasWildcard(claims.grants)) {
 			throw new InsufficientScopeError();
 		}
 

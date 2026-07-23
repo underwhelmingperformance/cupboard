@@ -1,4 +1,5 @@
 import {
+	type AuthKeyId,
 	type NixSha256HashString,
 	type PredicateType,
 	type Sha256HexDigest,
@@ -6,6 +7,7 @@ import {
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import type { TrustRuleId } from '@cupboard/protocol/oidc';
 import { sql } from 'drizzle-orm';
 import {
 	check,
@@ -79,7 +81,7 @@ export const blobReference = sqliteTable(
 // issues.
 export const controlAuthKey = sqliteTable('control_auth_key', {
 	id: text('id').primaryKey(),
-	kid: text('kid').notNull(),
+	kid: text('kid').$type<AuthKeyId>().notNull(),
 	publicJwkJson: text('public_jwk_json').notNull(),
 	wrappedPrivateJwk: text('wrapped_private_jwk').notNull(),
 	createdAt: text('created_at').notNull(),
@@ -96,7 +98,7 @@ export const controlAuthKey = sqliteTable('control_auth_key', {
 // soft-disables without losing the audit row. The control plane is its own
 // issuer, entirely separate from any tenant's.
 export const controlTrust = sqliteTable('control_trust', {
-	id: text('id').primaryKey(),
+	id: text('id').$type<TrustRuleId>().primaryKey(),
 	issuer: text('issuer').notNull(),
 	audience: text('audience').notNull(),
 	claimsJson: text('claims_json').notNull().default('{}'),

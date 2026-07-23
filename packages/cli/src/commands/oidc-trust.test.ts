@@ -6,7 +6,8 @@ import {
 	type OidcTrustAddBody,
 	oidcTrustListResponseSchema,
 	type OidcTrustSummary,
-	oidcTrustSummarySchema
+	oidcTrustSummarySchema,
+	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -198,17 +199,21 @@ describe('runOidcTrustShow', () => {
 		const calls: { id: string }[] = [];
 		const results: ResultRow[][] = [];
 
-		await runOidcTrustShow('rule-1', reporter(results), {
-			get(input) {
-				calls.push(input);
-				return Promise.resolve(
-					summary({
-						id: 'rule-1',
-						claims: { repository_owner_id: '5678', repository_id: '1234' }
-					})
-				);
+		await runOidcTrustShow(
+			trustRuleIdSchema.parse('rule-1'),
+			reporter(results),
+			{
+				get(input) {
+					calls.push(input);
+					return Promise.resolve(
+						summary({
+							id: 'rule-1',
+							claims: { repository_owner_id: '5678', repository_id: '1234' }
+						})
+					);
+				}
 			}
-		});
+		);
 
 		expect({ calls, results }).toStrictEqual({
 			calls: [{ id: 'rule-1' }],
@@ -235,10 +240,10 @@ describe('runOidcTrustRemove', () => {
 		{ removed: false, value: 'not present' }
 	])('reports removed=$removed once confirmed', async ({ removed, value }) => {
 		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
-		const response = { id: 'rule-1', removed };
+		const response = { id: trustRuleIdSchema.parse('rule-1'), removed };
 
 		await runOidcTrustRemove(
-			'rule-1',
+			trustRuleIdSchema.parse('rule-1'),
 			ui,
 			trustClient({ remove: () => Promise.resolve(response) })
 		);
@@ -258,7 +263,11 @@ describe('runOidcTrustRemove', () => {
 	it('leaves the rule in place when the confirmation is declined', async () => {
 		const { ui, captured } = fakeCliUi({ confirm: 'no' });
 
-		await runOidcTrustRemove('rule-1', ui, trustClient({}));
+		await runOidcTrustRemove(
+			trustRuleIdSchema.parse('rule-1'),
+			ui,
+			trustClient({})
+		);
 
 		expect({
 			results: captured.results,
@@ -488,17 +497,21 @@ describe('claim rendering', () => {
 	it('renders an exact claim with = and a pattern claim with =~', async () => {
 		const results: ResultRow[][] = [];
 
-		await runOidcTrustShow('rule-1', reporter(results), {
-			get: () =>
-				Promise.resolve(
-					summary({
-						claims: {
-							repository_id: '1234',
-							job_workflow_ref: { pattern: '^acme/infra/.+@.+$' }
-						}
-					})
-				)
-		});
+		await runOidcTrustShow(
+			trustRuleIdSchema.parse('rule-1'),
+			reporter(results),
+			{
+				get: () =>
+					Promise.resolve(
+						summary({
+							claims: {
+								repository_id: '1234',
+								job_workflow_ref: { pattern: '^acme/infra/.+@.+$' }
+							}
+						})
+					)
+			}
+		);
 
 		expect(results[0]).toContainEqual({
 			label: 'Claims',

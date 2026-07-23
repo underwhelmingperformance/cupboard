@@ -6,7 +6,9 @@ import {
 	type OidcTrustListResponse,
 	type OidcTrustRemoveResponse,
 	type OidcTrustSummary,
-	type ParsedOidcTrustAddBody
+	type ParsedOidcTrustAddBody,
+	type TrustRuleId,
+	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 import {
@@ -140,7 +142,7 @@ export class OidcTrustService {
 		return { rules };
 	}
 
-	getRule(id: string): OidcTrustSummary {
+	getRule(id: TrustRuleId): OidcTrustSummary {
 		const row = this.context.db
 			.select()
 			.from(schema.oidcTrust)
@@ -155,7 +157,7 @@ export class OidcTrustService {
 	}
 
 	addRule(body: ParsedOidcTrustAddBody): OidcTrustSummary {
-		const id = crypto.randomUUID();
+		const id = trustRuleIdSchema.parse(crypto.randomUUID());
 		const now = new Date();
 		const createdAt = now.toISOString();
 
@@ -184,7 +186,7 @@ export class OidcTrustService {
 		};
 	}
 
-	removeRule(id: string): OidcTrustRemoveResponse {
+	removeRule(id: TrustRuleId): OidcTrustRemoveResponse {
 		const existing = this.context.db
 			.select()
 			.from(schema.oidcTrust)

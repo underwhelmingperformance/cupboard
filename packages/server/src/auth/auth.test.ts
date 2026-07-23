@@ -1,3 +1,4 @@
+import { authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
@@ -20,7 +21,7 @@ const issuer = 'cupboard';
 const audience = 'cupboard';
 const now = new Date('2026-01-01T00:00:00.000Z');
 const ttlSeconds = 600;
-const kid = 'k-test';
+const kid = authKeyIdSchema.parse('k-test');
 
 const wildcardGrants: AuthorizationDetails = [{ type: 'cupboard_wildcard' }];
 
@@ -140,7 +141,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 				audience,
 				subject: 'ci',
 				grants: wildcardGrants,
-				kid: 'k-new',
+				kid: authKeyIdSchema.parse('k-new'),
 				ttlSeconds
 			},
 			now
@@ -149,7 +150,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		const claims = await verifyAccessJwt(
 			[
 				{ kid, publicJwk: retired.publicJwk },
-				{ kid: 'k-new', publicJwk: active.publicJwk }
+				{ kid: authKeyIdSchema.parse('k-new'), publicJwk: active.publicJwk }
 			],
 			token,
 			{ issuer, audience },
@@ -197,7 +198,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 						audience,
 						subject: 'ci',
 						grants: wildcardGrants,
-						kid: 'other-kid',
+						kid: authKeyIdSchema.parse('other-kid'),
 						ttlSeconds
 					},
 					now

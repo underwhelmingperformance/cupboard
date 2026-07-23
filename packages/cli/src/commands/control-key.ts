@@ -1,4 +1,5 @@
 import type { CliUi } from '@cupboard/cli-ui';
+import { type AuthKeyId, authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import type {
 	ControlKeySummary,
 	ParsedControlKeyListResponse,
@@ -30,7 +31,7 @@ interface RetireOptions {
 export interface ControlKeyClient {
 	list(): Promise<ParsedControlKeyListResponse>;
 	rotate(): Promise<ParsedControlKeyRotateResponse>;
-	retire(input: { kid: string }): Promise<ParsedControlKeyRetireResponse>;
+	retire(input: { kid: AuthKeyId }): Promise<ParsedControlKeyRetireResponse>;
 }
 
 export function registerControlKeyCommands(
@@ -88,7 +89,7 @@ export function registerControlKeyCommands(
 				signal: programOptions.signal
 			});
 
-			await runControlKeyRetire(kid, ui, rpc.keys);
+			await runControlKeyRetire(authKeyIdSchema.parse(kid), ui, rpc.keys);
 		});
 }
 
@@ -136,7 +137,7 @@ export async function runControlKeyRotate(
 }
 
 export async function runControlKeyRetire(
-	kid: string,
+	kid: AuthKeyId,
 	ui: CliUi,
 	client: ControlKeyClient
 ): Promise<void> {

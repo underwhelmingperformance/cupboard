@@ -1,3 +1,8 @@
+import {
+	cacheSelectorSchema,
+	rootNameSchema,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -12,6 +17,28 @@ import {
 	type ResourceRequest,
 	storedPermittedGrantsSchema
 } from './grants.ts';
+
+interface ResourceFields {
+	cache?: string;
+	root?: string;
+	tenant?: string;
+}
+
+// The concrete resource a route resolves, with each field parsed through its
+// scalar schema so it carries the brand the resolver produces.
+function resource(fields: ResourceFields): ResourceRequest {
+	return {
+		...(fields.cache !== undefined && {
+			cache: cacheSelectorSchema.parse(fields.cache)
+		}),
+		...(fields.root !== undefined && {
+			root: rootNameSchema.parse(fields.root)
+		}),
+		...(fields.tenant !== undefined && {
+			tenant: tenantIdSchema.parse(fields.tenant)
+		})
+	};
+}
 
 // Fixtures are parsed through the schema so the branded cache/root/tenant
 // selectors are well-typed (and the schema itself is exercised).
@@ -189,192 +216,192 @@ describe('isOperationSatisfiedByPresentedActions', () => {
 });
 
 describe('isCoveredByToken', () => {
-	it.each<[string, AuthorizationDetail[], Operation, ResourceRequest, boolean]>(
+	it.each<[string, AuthorizationDetail[], Operation, ResourceFields, boolean]>([
 		[
+			'cache op on the named cache',
+			[cacheGrant],
+			'upload:commit',
+			{ cache: 'pr-123' },
+			true
+		],
+		[
+			'cache op on a different cache',
+			[cacheGrant],
+			'upload:commit',
+			{ cache: 'pr-999' },
+			false
+		],
+		[
+			'cache op not in the grant actions',
+			[cacheGrant],
+			'cache:delete',
+			{ cache: 'pr-123' },
+			false
+		],
+		[
+			'root:set with the exact root',
+			[cacheGrant],
+			'root:set',
+			{ cache: 'pr-123', root: 'pr-123' },
+			true
+		],
+		[
+			'root:set with a non-matching root',
+			[cacheGrant],
+			'root:set',
+			{ cache: 'pr-123', root: 'main' },
+			false
+		],
+		[
+			'root:set within a trailing-slash prefix',
+			[prefixRootGrant],
+			'root:set',
+			{ cache: 'main', root: 'github:owner/repo/pr-1' },
+			true
+		],
+		[
+			'root:set outside the prefix',
+			[prefixRootGrant],
+			'root:set',
+			{ cache: 'main', root: 'github:owner/other/pr-1' },
+			false
+		],
+		[
+			'domain op, deployment-wide',
+			[domainGrant],
+			'signing-key:rotate',
+			{},
+			true
+		],
+		['domain gc:run, deployment-wide', [domainGrant], 'gc:run', {}, true],
+		[
+			'domain grant does not cover a per-cache gc:run',
+			[domainGrant],
+			'gc:run',
+			{ cache: 'c' },
+			false
+		],
+		[
+			'domain reuse-view:set, deployment-wide',
+			[reuseViewGrant],
+			'reuse-view:set',
+			{},
+			true
+		],
+		[
+			'domain reuse-view:set does not cover a per-cache resource',
+			[reuseViewGrant],
+			'reuse-view:set',
+			{ cache: 'c' },
+			false
+		],
+		[
+			'domain reuse-view:set does not cover a different reuse-view op',
+			[reuseViewGrant],
+			'reuse-view:remove',
+			{},
+			false
+		],
+		[
+			'cache grant covers a per-cache gc:run',
+			[cacheGrant],
+			'gc:run',
+			{ cache: 'pr-123' },
+			true
+		],
+		[
+			'cache grant does not cover a deployment-wide gc:run',
+			[cacheGrant],
+			'gc:run',
+			{},
+			false
+		],
+		[
+			'tenant op on the named tenant',
+			[tenantGrant],
+			'tenant:suspend',
+			{ tenant: 'acme' },
+			true
+		],
+		[
+			'tenant op on a different tenant',
+			[tenantGrant],
+			'tenant:suspend',
+			{ tenant: 'other' },
+			false
+		],
+		[
+			'control op, resource-free',
+			[controlGrant],
+			'control-key:rotate',
+			{},
+			true
+		],
+		[
+			'a negotiate grant covers a requested preview on the same cache',
 			[
-				'cache op on the named cache',
-				[cacheGrant],
-				'upload:commit',
-				{ cache: 'pr-123' },
-				true
+				authorizationDetailSchema.parse({
+					type: 'cupboard_cache',
+					actions: ['upload:negotiate'],
+					cache: 'pr-123'
+				})
 			],
+			'upload:preview',
+			{ cache: 'pr-123' },
+			true
+		],
+		[
+			'a preview-only grant does not cover a requested negotiate',
 			[
-				'cache op on a different cache',
-				[cacheGrant],
-				'upload:commit',
-				{ cache: 'pr-999' },
-				false
+				authorizationDetailSchema.parse({
+					type: 'cupboard_cache',
+					actions: ['upload:preview'],
+					cache: 'pr-123'
+				})
 			],
+			'upload:negotiate',
+			{ cache: 'pr-123' },
+			false
+		],
+		[
+			'a commit grant does not cover a requested confirm on the same cache',
+			[cacheGrant],
+			'upload:confirm',
+			{ cache: 'pr-123' },
+			false
+		],
+		[
+			'a confirm-only grant does not cover a requested commit',
 			[
-				'cache op not in the grant actions',
-				[cacheGrant],
-				'cache:delete',
-				{ cache: 'pr-123' },
-				false
+				authorizationDetailSchema.parse({
+					type: 'cupboard_cache',
+					actions: ['upload:confirm'],
+					cache: 'pr-123'
+				})
 			],
-			[
-				'root:set with the exact root',
-				[cacheGrant],
-				'root:set',
-				{ cache: 'pr-123', root: 'pr-123' },
-				true
-			],
-			[
-				'root:set with a non-matching root',
-				[cacheGrant],
-				'root:set',
-				{ cache: 'pr-123', root: 'main' },
-				false
-			],
-			[
-				'root:set within a trailing-slash prefix',
-				[prefixRootGrant],
-				'root:set',
-				{ cache: 'main', root: 'github:owner/repo/pr-1' },
-				true
-			],
-			[
-				'root:set outside the prefix',
-				[prefixRootGrant],
-				'root:set',
-				{ cache: 'main', root: 'github:owner/other/pr-1' },
-				false
-			],
-			[
-				'domain op, deployment-wide',
-				[domainGrant],
-				'signing-key:rotate',
-				{},
-				true
-			],
-			['domain gc:run, deployment-wide', [domainGrant], 'gc:run', {}, true],
-			[
-				'domain grant does not cover a per-cache gc:run',
-				[domainGrant],
-				'gc:run',
-				{ cache: 'c' },
-				false
-			],
-			[
-				'domain reuse-view:set, deployment-wide',
-				[reuseViewGrant],
-				'reuse-view:set',
-				{},
-				true
-			],
-			[
-				'domain reuse-view:set does not cover a per-cache resource',
-				[reuseViewGrant],
-				'reuse-view:set',
-				{ cache: 'c' },
-				false
-			],
-			[
-				'domain reuse-view:set does not cover a different reuse-view op',
-				[reuseViewGrant],
-				'reuse-view:remove',
-				{},
-				false
-			],
-			[
-				'cache grant covers a per-cache gc:run',
-				[cacheGrant],
-				'gc:run',
-				{ cache: 'pr-123' },
-				true
-			],
-			[
-				'cache grant does not cover a deployment-wide gc:run',
-				[cacheGrant],
-				'gc:run',
-				{},
-				false
-			],
-			[
-				'tenant op on the named tenant',
-				[tenantGrant],
-				'tenant:suspend',
-				{ tenant: 'acme' },
-				true
-			],
-			[
-				'tenant op on a different tenant',
-				[tenantGrant],
-				'tenant:suspend',
-				{ tenant: 'other' },
-				false
-			],
-			[
-				'control op, resource-free',
-				[controlGrant],
-				'control-key:rotate',
-				{},
-				true
-			],
-			[
-				'a negotiate grant covers a requested preview on the same cache',
-				[
-					authorizationDetailSchema.parse({
-						type: 'cupboard_cache',
-						actions: ['upload:negotiate'],
-						cache: 'pr-123'
-					})
-				],
-				'upload:preview',
-				{ cache: 'pr-123' },
-				true
-			],
-			[
-				'a preview-only grant does not cover a requested negotiate',
-				[
-					authorizationDetailSchema.parse({
-						type: 'cupboard_cache',
-						actions: ['upload:preview'],
-						cache: 'pr-123'
-					})
-				],
-				'upload:negotiate',
-				{ cache: 'pr-123' },
-				false
-			],
-			[
-				'a commit grant does not cover a requested confirm on the same cache',
-				[cacheGrant],
-				'upload:confirm',
-				{ cache: 'pr-123' },
-				false
-			],
-			[
-				'a confirm-only grant does not cover a requested commit',
-				[
-					authorizationDetailSchema.parse({
-						type: 'cupboard_cache',
-						actions: ['upload:confirm'],
-						cache: 'pr-123'
-					})
-				],
-				'upload:commit',
-				{ cache: 'pr-123' },
-				false
-			],
-			[
-				'wildcard covers a cache op',
-				[wildcard],
-				'upload:commit',
-				{ cache: 'x' },
-				true
-			],
-			[
-				'wildcard covers a control op',
-				[wildcard],
-				'tenant:remove',
-				{ tenant: 'x' },
-				true
-			],
-			['no grants covers nothing', [], 'upload:commit', { cache: 'x' }, false]
-		]
-	)('%s', (_name, grants, operation, resource, expected) => {
-		expect(isCoveredByToken(grants, operation, resource)).toBe(expected);
+			'upload:commit',
+			{ cache: 'pr-123' },
+			false
+		],
+		[
+			'wildcard covers a cache op',
+			[wildcard],
+			'upload:commit',
+			{ cache: 'x' },
+			true
+		],
+		[
+			'wildcard covers a control op',
+			[wildcard],
+			'tenant:remove',
+			{ tenant: 'x' },
+			true
+		],
+		['no grants covers nothing', [], 'upload:commit', { cache: 'x' }, false]
+	])('%s', (_name, grants, operation, resourceFields, expected) => {
+		expect(isCoveredByToken(grants, operation, resource(resourceFields))).toBe(
+			expected
+		);
 	});
 });
 

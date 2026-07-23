@@ -9,7 +9,8 @@ import {
 	type OidcTrustAddBody,
 	oidcTrustListResponseSchema,
 	type OidcTrustSummary,
-	oidcTrustSummarySchema
+	oidcTrustSummarySchema,
+	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import type { GracePolicyAddBody } from '@cupboard/protocol/retention';
 import {
@@ -184,7 +185,10 @@ function setupClient(stored: Stored): {
 			remove({ id }) {
 				recorded.ruleRemoves.push(id);
 
-				return Promise.resolve({ id, removed: true });
+				return Promise.resolve({
+					id: trustRuleIdSchema.parse(id),
+					removed: true
+				});
 			}
 		}
 	};

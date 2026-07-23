@@ -9,7 +9,8 @@ import {
 	subjectTokenTypeJwt,
 	tokenExchangeGrantType,
 	type TokenResponse,
-	tokenResponseSchema
+	tokenResponseSchema,
+	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
@@ -238,7 +239,7 @@ describe('POST /token', () => {
 			drizzle(state.storage, { schema: { oidcTrust } })
 				.insert(oidcTrust)
 				.values({
-					id: 'ci-rule',
+					id: trustRuleIdSchema.parse('ci-rule'),
 					issuer: 'https://idp.test',
 					audience: 'cupboard-aud',
 					claimsJson: JSON.stringify({ sub: 'ci' }),
@@ -315,7 +316,7 @@ async function installTrustedIdp(
 		drizzle(state.storage, { schema: { oidcTrust } })
 			.insert(oidcTrust)
 			.values({
-				id: `${scope}-rule`,
+				id: trustRuleIdSchema.parse(`${scope}-rule`),
 				issuer: 'https://idp.test',
 				audience: 'cupboard-aud',
 				claimsJson: JSON.stringify({ sub: 'alice' }),
@@ -575,7 +576,7 @@ describe('refresh grant', () => {
 		await runInDurableObject(currentServer(), (_instance, state) => {
 			drizzle(state.storage, { schema: { oidcTrust } })
 				.delete(oidcTrust)
-				.where(eq(oidcTrust.id, 'admin-rule'))
+				.where(eq(oidcTrust.id, trustRuleIdSchema.parse('admin-rule')))
 				.run();
 		});
 
@@ -1141,7 +1142,7 @@ async function installGithubBranchRule(): Promise<{
 		drizzle(state.storage, { schema: { oidcTrust } })
 			.insert(oidcTrust)
 			.values({
-				id: 'github-main',
+				id: trustRuleIdSchema.parse('github-main'),
 				issuer: githubIssuer,
 				audience: githubAudience,
 				claimsJson: JSON.stringify(branchRuleClaims),
