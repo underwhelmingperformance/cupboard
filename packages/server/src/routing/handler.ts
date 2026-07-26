@@ -3,9 +3,14 @@ import {
 	cacheSelectorSchema,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import {
+	cacheAvailabilityRequestSchema,
+	type CacheAvailabilityResponse
+} from '@cupboard/protocol/cache-availability';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { type Context, Hono } from 'hono';
+import { StatusCodes } from 'http-status-codes';
 
 import { buildVersion } from '../build-info.generated.ts';
 import { controlApp } from '../control/control-app.ts';
@@ -25,11 +30,13 @@ import {
 	TextBody,
 	textResponse
 } from '../http/http.ts';
+import { parseRequestBody } from '../http/parse.ts';
 import { loggerMiddleware } from '../observability/logging.ts';
 import {
 	cacheInfoResponse,
 	cacheScope,
 	guardRead,
+	missingStorePathHashes,
 	serveNar,
 	serveNarInfo
 } from '../read/read.ts';
@@ -44,6 +51,8 @@ import { parseTenantPath } from './tenant-routing.ts';
 const healthBody = new TextBody('ok\n');
 const versionBody = new TextBody(`${buildVersion}\n`);
 const uploadPreviewPathPattern = /^\/cache\/[^/]+\/uploads\/preview$/u;
+const cacheAvailabilityPathPattern =
+	/^(?:(?:\/cache\/[^/]+)|(?:\/reuse\/[^/]+))?\/api\/v1\/missing-paths$/u;
 
 // Builds and wires the worker Hono app. The route registrations are side
 // effects, so they live inside this builder and not at module top level;
@@ -112,7 +121,8 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		const isRead =
 			context.req.method === 'GET' ||
 			context.req.method === 'HEAD' ||
-			isUploadPreviewRequest(context.req.method, route.rest);
+			isUploadPreviewRequest(context.req.method, route.rest) ||
+			isCacheAvailabilityRequest(context.req.method, route.rest);
 
 		if (isRead && entry.status !== 'active') {
 			return notFoundResponse();
@@ -211,6 +221,52 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			);
 		}
 	);
+
+	app.on(
+		'POST',
+		[
+			'/t/:tenant/api/v1/missing-paths',
+			'/t/:tenant/cache/:cacheName/api/v1/missing-paths'
+		],
+		async (context) => {
+			const denied = await guardRead(
+				context.req.raw,
+				context.get('tenantEntry')
+			);
+
+			if (denied !== undefined) {
+				return denied;
+			}
+
+			const request = await parseRequestBody(
+				cacheAvailabilityRequestSchema,
+				context.req.raw
+			);
+			const response: CacheAvailabilityResponse = {
+				missingStorePathHashes: await missingStorePathHashes(
+					context.env,
+					context.get('tenant'),
+					context.get('cache'),
+					request.storePathHashes
+				)
+			};
+
+			return context.json(response, StatusCodes.OK, {
+				'cache-control': 'no-store'
+			});
+		}
+	);
+
+	app.post('/t/:tenant/reuse/:view/api/v1/missing-paths', async (context) => {
+		const denied = await guardRead(context.req.raw, context.get('tenantEntry'));
+
+		return (
+			denied ??
+			tenantServer(context.env, context.get('tenant')).fetch(
+				innerRequest(context)
+			)
+		);
+	});
 
 	app.on(
 		'GET',
@@ -496,9 +552,10 @@ function admittedWriteStatus(
 		: undefined;
 }
 
-// Whether a tenant request mutates state. Reads, the token exchange and upload
-// preview do not. A WebSocket upgrade is a GET on the wire, but the only socket
-// route is the commit, a write, so upgrades are gated as writes.
+// Whether a tenant request mutates state. Reads, the token exchange and
+// read-only POST operations do not. A WebSocket upgrade is a GET on the wire,
+// but the only socket route is the commit, a write, so upgrades are gated as
+// writes.
 function isTenantWrite(inner: Request): boolean {
 	if (inner.headers.get('upgrade')?.toLowerCase() === 'websocket') {
 		return true;
@@ -514,11 +571,18 @@ function isTenantWrite(inner: Request): boolean {
 		return false;
 	}
 
-	return !isUploadPreviewRequest(inner.method, innerUrl.pathname);
+	return !(
+		isUploadPreviewRequest(inner.method, innerUrl.pathname) ||
+		isCacheAvailabilityRequest(inner.method, innerUrl.pathname)
+	);
 }
 
 function isUploadPreviewRequest(method: string, pathname: string): boolean {
 	return method === 'POST' && uploadPreviewPathPattern.test(pathname);
+}
+
+function isCacheAvailabilityRequest(method: string, pathname: string): boolean {
+	return method === 'POST' && cacheAvailabilityPathPattern.test(pathname);
 }
 
 // The authoritative tenant status, read from D1 and not the KV manifest, so a

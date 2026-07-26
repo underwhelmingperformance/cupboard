@@ -5,6 +5,10 @@ import {
 	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import {
+	cacheAvailabilityResponseSchema,
+	reuseViewAvailabilityMaxPaths
+} from '@cupboard/protocol/cache-availability';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq } from 'drizzle-orm';
@@ -39,6 +43,35 @@ function sharedFacts() {
 
 describe('reuse-view narinfo lookup', () => {
 	beforeEach(resetTestServer);
+
+	it('returns present and missing hashes through the bulk availability route', async () => {
+		const present = await committedPath('reuse-bulk', 'pr-1');
+		const missing = Array.from(
+			{ length: reuseViewAvailabilityMaxPaths - 1 },
+			(_, index) =>
+				storePathHashSchema.parse(String(index + 100).padStart(32, '0'))
+		);
+		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
+
+		const response = await readFetch('/reuse/reuse/api/v1/missing-paths', {
+			body: JSON.stringify({
+				storePathHashes: [present.storePathHash, ...missing]
+			}),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		});
+		const body = cacheAvailabilityResponseSchema.parse(await response.json());
+
+		expect({
+			status: response.status,
+			cacheControl: response.headers.get('cache-control'),
+			body
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			cacheControl: 'no-store',
+			body: { missingStorePathHashes: missing }
+		});
+	});
 
 	it.each([
 		{
@@ -141,8 +174,26 @@ describe('reuse-view narinfo lookup', () => {
 		}
 
 		const response = await readFetch(lookupPath(path.storePathHash));
+		const availability = await readFetch('/reuse/reuse/api/v1/missing-paths', {
+			body: JSON.stringify({
+				storePathHashes: [path.storePathHash]
+			}),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		});
+		const body = cacheAvailabilityResponseSchema.parse(
+			await availability.json()
+		);
 
-		expect(response.status).toBe(StatusCodes.NOT_FOUND);
+		expect({
+			narInfoStatus: response.status,
+			availabilityStatus: availability.status,
+			body
+		}).toStrictEqual({
+			narInfoStatus: StatusCodes.NOT_FOUND,
+			availabilityStatus: StatusCodes.OK,
+			body: { missingStorePathHashes: [path.storePathHash] }
+		});
 	});
 
 	it('serves at exactly the candidate limit', async () => {
@@ -302,10 +353,33 @@ describe('reuse-view narinfo lookup', () => {
 		const served = await readFetch(lookupPath(path.storePathHash), {
 			headers: { authorization: `Basic ${btoa('alice:secret')}` }
 		});
+		const availabilityRequest = {
+			body: JSON.stringify({ storePathHashes: [path.storePathHash] }),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		};
+		const bulkDenied = await readFetch(
+			'/reuse/reuse/api/v1/missing-paths',
+			availabilityRequest
+		);
+		const bulkServed = await readFetch('/reuse/reuse/api/v1/missing-paths', {
+			...availabilityRequest,
+			headers: {
+				...availabilityRequest.headers,
+				authorization: `Basic ${btoa('alice:secret')}`
+			}
+		});
 
-		expect({ denied: denied.status, served: served.status }).toStrictEqual({
+		expect({
+			denied: denied.status,
+			served: served.status,
+			bulkDenied: bulkDenied.status,
+			bulkServed: bulkServed.status
+		}).toStrictEqual({
 			denied: StatusCodes.UNAUTHORIZED,
-			served: StatusCodes.OK
+			served: StatusCodes.OK,
+			bulkDenied: StatusCodes.UNAUTHORIZED,
+			bulkServed: StatusCodes.OK
 		});
 	});
 });

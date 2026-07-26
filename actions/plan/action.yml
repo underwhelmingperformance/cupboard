@@ -4,7 +4,8 @@ description:
   cache, and group missing shared derivations for one-time seeding.
 inputs:
   targets:
-    description: JSON target manifest to evaluate.
+    description:
+      JSON target manifest with each optimised target's root derivation path.
     required: true
   url:
     description: cupboard Worker URL.

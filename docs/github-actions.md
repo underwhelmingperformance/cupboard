@@ -120,13 +120,16 @@ by collection, which a cache without the marker never is.
 ### 3. Declare the targets
 
 Expose a `cupboardOutputs` attribute from the flake. Each entry names an
-installable, its Nix system, its permitted GitHub runner label and the suffix
-used beneath the workflow's retention-root prefix:
+installable and carries its derivation path, Nix system, permitted GitHub runner
+label and the suffix used beneath the workflow's retention-root prefix:
 
 ```nix
-cupboardOutputs = [
+cupboardOutputs = let
+  package = packages.x86_64-linux.default;
+in [
   {
     attr = ".#packages.x86_64-linux.default";
+    rootDrvPath = package.drvPath;
     system = "x86_64-linux";
     os = "ubuntu-latest";
     remote = false;
@@ -513,34 +516,68 @@ the file at `refs/heads/main`. The release-tag pinning in
 
 `cupboard-flake-publish.yml` publishes a set of flake outputs while avoiding
 work the cache already holds. Its `targets` input names a flake output that
-evaluates to a list such as:
+evaluates to a list. Construct each entry from the derivation as well as its
+installable string, so one manifest evaluation produces the exact mapping the
+planner needs:
 
 ```nix
-[
-  {
+let
+  mkTarget = target @ {
+    derivation,
+    bestEffort ? false,
+    ...
+  }: let
+    attemptedDrvPath = builtins.tryEval derivation.drvPath;
+    resolvedDrvPath =
+      if bestEffort
+      then attemptedDrvPath
+      else {
+        success = true;
+        value = derivation.drvPath;
+      };
+  in
+    (builtins.removeAttrs target ["derivation"])
+    // {
+      inherit bestEffort;
+    }
+    // (
+      if resolvedDrvPath.success
+      then {rootDrvPath = resolvedDrvPath.value;}
+      else {}
+    );
+in [
+  (mkTarget {
     attr = ".#packages.x86_64-linux.server";
+    derivation = packages.x86_64-linux.server;
     system = "x86_64-linux";
     os = "ubuntu-latest";
     remote = true;
     rootSuffix = "x86_64-linux/server";
-  }
-  {
+  })
+  (mkTarget {
     attr = ".#darwinConfigurations.laptop.system";
+    derivation = darwinConfigurations.laptop.system;
     system = "aarch64-darwin";
     os = "macos-latest";
     remote = false;
     bestEffort = true;
     rootSuffix = "aarch64-darwin/darwin-laptop";
     outputs = ["out"];
-  }
+  })
 ]
 ```
 
+`rootDrvPath` must be a derivation path for strict targets. The helper evaluates
+those directly, preserving Nix's error when one cannot be evaluated. It catches
+a best-effort target's evaluation failure and omits the field; the planner then
+sends that target to a direct build, where its own job reports the full error.
+When `push` is false, the workflow removes every `rootDrvPath` without forcing
+it, preserving build-only mode's lack of derivation inspection.
+
 `outputs` defaults to `["out"]` and `bestEffort` to `false`. A best-effort
-target does not fail the whole matrix when its build fails, and one that fails
-to evaluate is planned as a direct build, so the failure surfaces in its own
-job. `os` selects the runner label the target's jobs run on; the manifest is the
-operator's flake, so runner choice is operator configuration
+target does not fail the whole matrix when its build fails. `os` selects the
+runner label the target's jobs run on; the manifest is the operator's flake, so
+runner choice is operator configuration
 ([docs/runner-provenance.md](./runner-provenance.md) covers self-hosted
 estates). `remote` marks a group that realises its derivations on the configured
 remote builders: those jobs build with `--max-jobs 0` and apply the `builders`

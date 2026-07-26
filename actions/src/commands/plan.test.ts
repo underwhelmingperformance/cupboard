@@ -56,8 +56,13 @@ function storePath(value: string): StorePathString {
 	return storePathSchema.parse(value);
 }
 
+const targetRootDrvPath = storePath(
+	'/nix/store/00000000000000000000000000000000-app.drv'
+);
+
 const target = {
 	attr: '.#packages.x86_64-linux.app',
+	rootDrvPath: targetRootDrvPath,
 	system: 'x86_64-linux',
 	os: 'ubuntu-latest',
 	remote: true,
@@ -632,6 +637,7 @@ describe('ensureAvailableTargets', () => {
 		const [parsed] = publishTargetsSchema.parse([
 			{
 				attr: '.#app',
+				rootDrvPath: targetRootDrvPath,
 				system: 'x86_64-linux',
 				os: 'ubuntu-latest',
 				remote: true,
@@ -1178,6 +1184,7 @@ function evaluation(
 	return {
 		target: {
 			attr: `.#${rootSuffix}`,
+			rootDrvPath: targetRootDrvPath,
 			system: 'x86_64-linux',
 			os: 'ubuntu-latest',
 			remote: true,
@@ -1255,7 +1262,7 @@ function buildRequiredResultLine(unavailable: readonly string[]): string {
 }
 
 const alwaysAvailableFetcher: typeof fetch = () =>
-	Promise.resolve(new Response('', { status: 200 }));
+	Promise.resolve(Response.json({ missingStorePathHashes: [] }));
 
 function graceCoverageResultLine(data: unknown): string {
 	return `${JSON.stringify({ kind: 'grace-coverage', data })}\n`;
@@ -1354,7 +1361,9 @@ describe('verifyGraceCoverage', () => {
 		};
 		const evaluator: NixEvaluator = () =>
 			Promise.resolve({
-				stdout: JSON.stringify({ derivations: { 'app.drv': appNode } })
+				stdout: JSON.stringify({
+					derivations: { [targetRootDrvPath]: appNode }
+				})
 			});
 
 		// Every probe answers 200, so the target counts as fully cached and a
