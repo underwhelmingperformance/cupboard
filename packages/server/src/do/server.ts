@@ -7,6 +7,10 @@ import {
 	DEFAULT_CACHE
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
+import {
+	type CacheAvailabilityResponse,
+	reuseViewAvailabilityRequestSchema
+} from '@cupboard/protocol/cache-availability';
 import type {
 	ParsedR2CredentialCheck,
 	VerifyReport
@@ -49,7 +53,7 @@ import {
 	textResponse,
 	verificationBatchSize
 } from '../http/http.ts';
-import { parseRequestValue } from '../http/parse.ts';
+import { parseRequestBody, parseRequestValue } from '../http/parse.ts';
 import {
 	loggerMiddleware,
 	requestLogger,
@@ -608,6 +612,27 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				});
 			}
 		);
+
+		this.app.post('/reuse/:view/api/v1/missing-paths', async (context) => {
+			const request = await parseRequestBody(
+				reuseViewAvailabilityRequestSchema,
+				context.req.raw
+			);
+			const view = reuseViewNameSchema.safeParse(context.req.param('view'));
+			const response: CacheAvailabilityResponse = {
+				missingStorePathHashes: view.success
+					? await this.reuseLookup.missingStorePathHashes(
+							context.get('logger'),
+							view.data,
+							request.storePathHashes
+						)
+					: request.storePathHashes
+			};
+
+			return context.json(response, StatusCodes.OK, {
+				'cache-control': 'no-store'
+			});
+		});
 
 		// The OAuth 2.0 token-exchange endpoint and the auth key set that verifies
 		// the tokens it issues. `/token` is unauthenticated: the subject token is

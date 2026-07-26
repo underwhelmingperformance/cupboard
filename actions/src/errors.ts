@@ -259,6 +259,13 @@ export class TargetEvaluationError extends CodedError {
 	}
 }
 
+export class TargetRootUnresolvedError extends CodedError {
+	constructor(public readonly attribute: string) {
+		super(`Target manifest did not resolve a derivation path for ${attribute}`);
+		this.name = 'TargetRootUnresolvedError';
+	}
+}
+
 export class TargetEvaluationResponseError extends CodedError {
 	constructor(
 		public readonly attribute: string,
@@ -451,13 +458,40 @@ export class ProbeTimeoutError extends CodedError {
 		this.name = 'ProbeTimeoutError';
 	}
 }
-export class CacheProbeError extends CodedError {
-	constructor(
-		public readonly storePath: string,
-		public readonly status: number
-	) {
-		super(`Could not check ${storePath} in the cache: HTTP ${String(status)}`);
-		this.name = 'CacheProbeError';
+
+export class CacheAvailabilityQueryError extends CodedError {
+	constructor(public readonly status: number) {
+		super(`Could not query cache availability: HTTP ${String(status)}`);
+		this.name = 'CacheAvailabilityQueryError';
+	}
+}
+
+export class CacheAvailabilityResponseMalformedError extends CodedError {
+	constructor(public override readonly cause: SyntaxError) {
+		super(
+			'the cache availability query returned malformed JSON',
+			withCause(cause)
+		);
+		this.name = 'CacheAvailabilityResponseMalformedError';
+	}
+}
+
+export class CacheAvailabilityResponseSchemaError extends CodedError {
+	constructor(public override readonly cause: z.ZodError) {
+		super(
+			'the cache availability query returned an invalid response',
+			withCause(cause)
+		);
+		this.name = 'CacheAvailabilityResponseSchemaError';
+	}
+}
+
+export class CacheAvailabilityResponseUnexpectedHashError extends CodedError {
+	constructor(public readonly storePathHash: string) {
+		super(
+			`the cache availability query returned an unrequested store-path hash: ${storePathHash}`
+		);
+		this.name = 'CacheAvailabilityResponseUnexpectedHashError';
 	}
 }
 

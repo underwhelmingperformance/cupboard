@@ -6,7 +6,6 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { afterAll, beforeAll, bench } from 'vitest';
 
-import { maximumConcurrentCacheProbes } from '../../actions/src/publish-plan.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
 import type { PushClient } from '../../packages/cli/src/push/push.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
@@ -15,10 +14,10 @@ import { type PushContext, pushStorePaths } from '../support/push.ts';
 
 // The reuse lookup shares the tenant's single Durable Object with the commit
 // path, so PLAN.md's "Named tenant reuse views" section names its load
-// behaviour a release gate: it must hold at the planner's bounded HEAD
-// concurrency against a closure larger than any one commit batch, and answer
-// overload retryably rather than wedging.
-const probeConcurrency = maximumConcurrentCacheProbes;
+// behaviour a release gate: it must hold bounded read concurrency against a
+// closure larger than any one commit batch, and answer overload retryably
+// rather than wedging.
+const probeConcurrency = 32;
 const poolSize = 64;
 const missCount = 64;
 const commitBatchSize = 8;

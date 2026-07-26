@@ -994,7 +994,13 @@ function targetMatrix(
 	plan: PublishPlan
 ): readonly object[] {
 	return plan.targets.map((target) => ({
-		...target,
+		attr: target.attr,
+		system: target.system,
+		os: target.os,
+		remote: target.remote,
+		bestEffort: target.bestEffort,
+		rootSuffix: target.rootSuffix,
+		outputs: target.outputs,
 		root: joinRoot(inputs.rootPrefix, target.rootSuffix),
 		runsOn: target.os
 	}));

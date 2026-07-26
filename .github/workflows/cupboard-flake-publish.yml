@@ -10,7 +10,8 @@ on:
         required: true
         type: string
       targets:
-        description: Flake attribute containing the cupboard target manifest.
+        description:
+          Flake attribute containing the target manifest and derivation paths.
         required: false
         default: '.#cupboardOutputs'
         type: string
@@ -279,9 +280,17 @@ jobs:
         id: targets
         env:
           TARGETS: ${{ inputs.targets }}
+          PUSH: ${{ inputs.push }}
         run: |
           set -euo pipefail
-          manifest=$(nix eval --json "${TARGETS}")
+          if [[ "${PUSH}" == true ]]; then
+            manifest=$(nix eval --json "${TARGETS}")
+          else
+            manifest=$(
+              nix eval --json "${TARGETS}" \
+                --apply 'targets: map (target: builtins.removeAttrs target ["rootDrvPath"]) targets'
+            )
+          fi
           echo "manifest=${manifest}" >> "${GITHUB_OUTPUT}"
 
       - uses: ./.cupboard/actions/plan

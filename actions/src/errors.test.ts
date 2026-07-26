@@ -8,7 +8,6 @@ import {
 	AttestationVerificationFailedError,
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
-	CacheProbeError,
 	CachePublicKeyEmptyResponseError,
 	CachePublicKeyRequestFailedError,
 	ChecksumMismatchError,
@@ -46,6 +45,7 @@ import {
 	RootEnsureResultMissingError,
 	TargetEvaluationError,
 	TargetEvaluationResponseError,
+	TargetRootUnresolvedError,
 	UnsupportedPlatformError,
 	ZeroGracePolicyError
 } from './errors.ts';
@@ -148,6 +148,11 @@ describe('action errors', () => {
 			genericExitCode
 		],
 		[
+			'TargetRootUnresolvedError',
+			new TargetRootUnresolvedError('.#app'),
+			genericExitCode
+		],
+		[
 			'DerivationGraphShapeError',
 			new DerivationGraphShapeError('.#app', { cause: new z.ZodError([]) }),
 			genericExitCode
@@ -247,11 +252,6 @@ describe('action errors', () => {
 		[
 			'ProbeTimeoutError',
 			new ProbeTimeoutError('https://cache.example.test/x.narinfo'),
-			genericExitCode
-		],
-		[
-			'CacheProbeError',
-			new CacheProbeError('/nix/store/path', 500),
 			genericExitCode
 		],
 		[
@@ -474,6 +474,12 @@ describe('TargetEvaluationError', () => {
 			attribute: '.#app',
 			cause
 		});
+	});
+});
+
+describe('TargetRootUnresolvedError', () => {
+	it('carries the target attribute', () => {
+		expect(new TargetRootUnresolvedError('.#app').attribute).toBe('.#app');
 	});
 });
 

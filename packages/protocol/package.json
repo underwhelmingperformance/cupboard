@@ -14,6 +14,7 @@
 	},
 	"exports": {
 		"./attestations": "./src/attestations.ts",
+		"./cache-availability": "./src/cache-availability.ts",
 		"./caches": "./src/caches.ts",
 		"./capture": "./src/capture.ts",
 		"./contract": "./src/contract/index.ts",

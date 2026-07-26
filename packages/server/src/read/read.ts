@@ -7,6 +7,7 @@ import {
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
@@ -14,6 +15,7 @@ import { StatusCodes } from 'http-status-codes';
 import { type TenantEntry } from '../control/tenant-membership.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
+import { maxOutgoingConnections } from '../do/bulk.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
 import {
 	isNotModified,
@@ -171,6 +173,31 @@ export function serveNarInfo(
 		`${origin}${narInfoCachePath(tenant, storePathHash, cache)}`,
 		narInfoHeaders,
 		!isPrivate
+	);
+}
+
+export async function missingStorePathHashes(
+	env: Env,
+	tenant: TenantId,
+	cache: string,
+	storePathHashes: readonly StorePathHash[]
+): Promise<StorePathHash[]> {
+	const unique = [...new Set(storePathHashes)];
+	const missing = await mapWithConcurrency(
+		unique,
+		maxOutgoingConnections,
+		async (storePathHash) => {
+			const object = await env.BLOBS.head(
+				narInfoObjectKey(tenant, storePathHash, cache)
+			);
+
+			return object === null ? storePathHash : undefined;
+		}
+	);
+
+	return missing.filter(
+		(storePathHash): storePathHash is StorePathHash =>
+			storePathHash !== undefined
 	);
 }
 

@@ -1,37 +1,45 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { availableParallelism } from 'node:os';
 import { promisify } from 'node:util';
 
 import {
+	type StorePathHash,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
+import {
+	cacheAvailabilityMaxPaths,
+	cacheAvailabilityResponseSchema,
+	reuseViewAvailabilityMaxPaths
+} from '@cupboard/protocol/cache-availability';
+import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader } from '@cupboard/shared/http';
 import { retryingFetcher } from '@cupboard/shared/retry';
-import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 import { fetchWithProbeDeadline } from './cache-probe.ts';
 import {
-	CacheProbeError,
+	CacheAvailabilityQueryError,
+	CacheAvailabilityResponseMalformedError,
+	CacheAvailabilityResponseSchemaError,
+	CacheAvailabilityResponseUnexpectedHashError,
 	DerivationGraphShapeError,
 	DerivationNodeMissingError,
 	DerivationRootCountError,
 	DuplicateGroupKeyError,
 	PublishPlanInvariantError,
 	TargetEvaluationError,
-	TargetEvaluationResponseError
+	TargetEvaluationResponseError,
+	TargetRootUnresolvedError
 } from './errors.ts';
 import { isNixPositionalArgument } from './options.ts';
 import { cacheUrlFor, reuseViewUrlFor } from './substituters.ts';
 
 const execFileAsync = promisify(execFile);
-const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
-export const maximumConcurrentCacheProbes = 32;
+export const maximumConcurrentAvailabilityQueries = 4;
 
 export type NixEvaluator = (
 	arguments_: readonly string[]
@@ -74,10 +82,16 @@ export function isValidRunnerLabel(label: string): boolean {
 	return /^[!-~]+$/u.test(label);
 }
 
+const derivationPathSchema = storePathSchema.refine(
+	(value) => value.endsWith('.drv'),
+	{ message: 'rootDrvPath must name a derivation in /nix/store' }
+);
+
 export const publishTargetSchema = z.strictObject({
 	attr: z.string().min(1).refine(isNixPositionalArgument, {
 		message: 'attr must not start with a hyphen or contain control characters'
 	}),
+	rootDrvPath: derivationPathSchema.optional(),
 	system: z.string().min(1),
 	os: z.string().min(1).refine(isValidRunnerLabel, {
 		message: 'os must be a printable ASCII runner label without spaces'
@@ -666,28 +680,29 @@ export async function evaluateTargets(
 	targets: readonly PublishTarget[],
 	evaluator: NixEvaluator = defaultNixEvaluator
 ): Promise<EvaluatedTargets> {
-	const resolutions = await mapWithConcurrency(
-		targets,
-		availableParallelism(),
-		(target) => resolveTargetRoot(target, evaluator)
-	);
-	const resolved = resolutions.filter(
-		(resolution): resolution is ResolvedTargetRoot =>
-			'rootDrvPath' in resolution
-	);
-	const unevaluated = resolutions.filter(
-		(resolution): resolution is UnevaluatedTarget => 'reason' in resolution
-	);
+	const resolved: ResolvedTargetRoot[] = [];
+	const unevaluated: UnevaluatedTarget[] = [];
+
+	for (const target of targets) {
+		if (target.rootDrvPath !== undefined) {
+			resolved.push({ target, rootDrvPath: target.rootDrvPath });
+			continue;
+		}
+
+		const error = new TargetRootUnresolvedError(target.attr);
+
+		if (!target.bestEffort) {
+			throw error;
+		}
+
+		unevaluated.push({ target, reason: error.message });
+	}
 
 	if (resolved.length === 0) {
 		return { evaluations: [], unevaluated };
 	}
 
-	const evaluated = await mapWithConcurrency(
-		resolved,
-		availableParallelism(),
-		(resolution) => evaluateResolvedTarget(resolution, evaluator)
-	);
+	const evaluated = await evaluateResolvedTargets(resolved, evaluator);
 
 	return {
 		evaluations: evaluated.filter(
@@ -702,9 +717,44 @@ export async function evaluateTargets(
 	};
 }
 
-// The recursive evaluation runs per target for the same reason the root
-// resolution does: a best-effort target's failure must not take the strict
-// targets' plan down with it.
+async function evaluateResolvedTargets(
+	resolutions: readonly ResolvedTargetRoot[],
+	evaluator: NixEvaluator
+): Promise<(TargetEvaluation | UnevaluatedTarget)[]> {
+	if (resolutions.length === 1) {
+		return [
+			await evaluateResolvedTarget(requireIndex(resolutions, 0), evaluator)
+		];
+	}
+
+	try {
+		const attributes = resolutions.map((resolution) => resolution.target.attr);
+		const rootDrvPaths = [
+			...new Set(resolutions.map((resolution) => resolution.rootDrvPath))
+		];
+		const label = attributes.join(', ');
+		const value = await evaluateDerivationsAsync(
+			rootDrvPaths,
+			true,
+			evaluator,
+			label
+		);
+		const nodes = derivationNodes(label, value);
+
+		return resolutions.map(({ target, rootDrvPath }) =>
+			evaluationForRoot(target, nodes, rootDrvPath)
+		);
+	} catch {
+		const evaluated: (TargetEvaluation | UnevaluatedTarget)[] = [];
+
+		for (const resolution of resolutions) {
+			evaluated.push(await evaluateResolvedTarget(resolution, evaluator));
+		}
+
+		return evaluated;
+	}
+}
+
 async function evaluateResolvedTarget(
 	resolution: ResolvedTargetRoot,
 	evaluator: NixEvaluator
@@ -712,7 +762,12 @@ async function evaluateResolvedTarget(
 	const { target, rootDrvPath } = resolution;
 
 	try {
-		const value = await evaluateDerivationsAsync(target.attr, true, evaluator);
+		const value = await evaluateDerivationsAsync(
+			[rootDrvPath],
+			true,
+			evaluator,
+			target.attr
+		);
 		const nodes = derivationNodes(target.attr, value);
 
 		return evaluationForRoot(target, nodes, rootDrvPath);
@@ -735,31 +790,6 @@ function evaluationFailureReason(error: unknown): string {
 	}
 
 	return error instanceof Error ? error.message : String(error);
-}
-
-// A best-effort target that fails to evaluate is left for its own build job to
-// report, where continue-on-error confines the failure. A strict target that
-// fails to evaluate fails the plan.
-async function resolveTargetRoot(
-	target: PublishTarget,
-	evaluator: NixEvaluator
-): Promise<ResolvedTargetRoot | UnevaluatedTarget> {
-	try {
-		const value = await evaluateDerivationsAsync(target.attr, false, evaluator);
-		const nodes = derivationNodes(target.attr, value);
-
-		if (nodes.size !== 1) {
-			throw new DerivationRootCountError(target.attr, nodes.size);
-		}
-
-		return { target, rootDrvPath: requireIndex(nodes.keys().toArray(), 0) };
-	} catch (error) {
-		if (!target.bestEffort) {
-			throw error;
-		}
-
-		return { target, reason: evaluationFailureReason(error) };
-	}
 }
 
 export function evaluationFromJson(
@@ -826,28 +856,29 @@ function evaluationForRoot(
 }
 
 async function evaluateDerivationsAsync(
-	installable: string,
+	installables: readonly string[],
 	isRecursive: boolean,
-	evaluator: NixEvaluator
+	evaluator: NixEvaluator,
+	label = installables.join(', ')
 ): Promise<unknown> {
 	const arguments_ = [
 		'derivation',
 		'show',
 		...(isRecursive ? ['-r'] : []),
 		'--',
-		installable
+		...installables
 	];
 
 	try {
 		const result = await evaluator(arguments_);
 
-		return parseDerivationResponse(installable, result.stdout);
+		return parseDerivationResponse(label, result.stdout);
 	} catch (error) {
 		if (error instanceof TargetEvaluationResponseError) {
 			throw error;
 		}
 
-		throw new TargetEvaluationError(installable, { cause: error });
+		throw new TargetEvaluationError(label, { cause: error });
 	}
 }
 
@@ -981,7 +1012,11 @@ export function availableCachePaths(
 		readonly cache: string;
 	}
 ): Promise<Set<StorePathString>> {
-	return availablePathsAt(cacheUrlFor(options.baseUrl, options.cache), options);
+	return availablePathsAt(
+		cacheUrlFor(options.baseUrl, options.cache),
+		options,
+		cacheAvailabilityMaxPaths
+	);
 }
 
 /**
@@ -998,55 +1033,117 @@ export function availableViewPaths(
 ): Promise<Set<StorePathString>> {
 	return availablePathsAt(
 		reuseViewUrlFor(options.baseUrl, options.view),
-		options
+		options,
+		reuseViewAvailabilityMaxPaths
 	);
 }
 
 async function availablePathsAt(
 	probeUrl: string,
-	options: ProbeOptions
+	options: ProbeOptions,
+	maximumBatchSize: number
 ): Promise<Set<StorePathString>> {
-	// The probe fan-out touches every planned path, so across hundreds of HEAD
-	// requests a single gateway blip is expected somewhere; retrying transient
-	// refusals keeps one from failing the whole plan. A deterministic refusal
-	// still fails closed on its first response.
+	const paths = new Set(options.paths).values().toArray();
+
+	if (paths.length === 0) {
+		return new Set();
+	}
+
+	const pathsByHash = new Map<StorePathHash, StorePathString[]>();
+
+	for (const storePath of paths) {
+		const hash = StorePath.hash(storePath);
+		const matching = pathsByHash.get(hash) ?? [];
+		matching.push(storePath);
+		pathsByHash.set(hash, matching);
+	}
+
+	const batches = chunk(pathsByHash.keys().toArray(), maximumBatchSize);
 	const fetcher = retryingFetcher(options.fetcher ?? fetch);
-	const available = new Set<StorePathString>();
-	const headers =
-		options.credentials === undefined
-			? undefined
-			: basicAuthHeader(options.credentials.user, options.credentials.password);
-
-	await mapWithConcurrency(
-		new Set(options.paths).values().toArray(),
-		maximumConcurrentCacheProbes,
-		async (storePath) => {
-			const hash = StorePath.hash(storePath);
-			const target = `${probeUrl}/${hash}.narinfo`;
-			// Bounded per request, retries included: a stalled connection must
-			// fail the probe promptly, not sit on undici's defaults.
-			const response = await fetchWithProbeDeadline(
-				fetcher,
-				target,
-				{
-					method: 'HEAD',
-					...(headers !== undefined && { headers })
-				},
-				({ ok, status }) => ({ ok, status })
-			);
-
-			if (response.ok) {
-				available.add(storePath);
-				return;
-			}
-
-			if (response.status !== notFoundStatus) {
-				throw new CacheProbeError(storePath, response.status);
-			}
-		}
+	const headers = {
+		'content-type': 'application/json',
+		...(options.credentials !== undefined &&
+			basicAuthHeader(options.credentials.user, options.credentials.password))
+	};
+	const firstBatch = requireIndex(batches, 0);
+	const firstMissing = await queryMissingStorePathHashes(
+		fetcher,
+		probeUrl,
+		firstBatch,
+		headers
 	);
 
+	const remainingMissing = await mapWithConcurrency(
+		batches.slice(1),
+		maximumConcurrentAvailabilityQueries,
+		(batch) => queryMissingStorePathHashes(fetcher, probeUrl, batch, headers)
+	);
+	const missing = new Set([...firstMissing, ...remainingMissing.flat()]);
+	const available = new Set<StorePathString>();
+
+	for (const [hash, matchingPaths] of pathsByHash) {
+		if (missing.has(hash)) {
+			continue;
+		}
+
+		for (const storePath of matchingPaths) {
+			available.add(storePath);
+		}
+	}
+
 	return available;
+}
+
+async function queryMissingStorePathHashes(
+	fetcher: typeof fetch,
+	probeUrl: string,
+	storePathHashes: readonly StorePathHash[],
+	headers: Readonly<Record<string, string>>
+): Promise<StorePathHash[]> {
+	const target = `${probeUrl}/api/v1/missing-paths`;
+
+	return fetchWithProbeDeadline(
+		fetcher,
+		target,
+		{
+			body: JSON.stringify({ storePathHashes }),
+			headers,
+			method: 'POST'
+		},
+		async (response) => {
+			if (!response.ok) {
+				await response.body?.cancel();
+				throw new CacheAvailabilityQueryError(response.status);
+			}
+
+			let value: unknown;
+
+			try {
+				value = await response.json();
+			} catch (error) {
+				throw new CacheAvailabilityResponseMalformedError(
+					error instanceof SyntaxError ? error : new SyntaxError(String(error))
+				);
+			}
+
+			const parsed = cacheAvailabilityResponseSchema.safeParse(value);
+
+			if (!parsed.success) {
+				throw new CacheAvailabilityResponseSchemaError(parsed.error);
+			}
+
+			const requested = new Set(storePathHashes);
+			const unexpected = parsed.data.missingStorePathHashes.find(
+				(storePathHash) => !requested.has(storePathHash)
+			);
+
+			if (unexpected !== undefined) {
+				throw new CacheAvailabilityResponseUnexpectedHashError(unexpected);
+			}
+
+			return parsed.data.missingStorePathHashes;
+		}
+	);
 }
 
 // Targets whose jobs run in the same place share seeding and fallback

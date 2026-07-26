@@ -2,14 +2,21 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import { describe, expect, it } from 'vitest';
+import { StorePath } from '@cupboard/nix-store/store-path';
+import { cacheAvailabilityRequestSchema } from '@cupboard/protocol/cache-availability';
+import { StatusCodes } from 'http-status-codes';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
-	CacheProbeError,
+	CacheAvailabilityQueryError,
+	CacheAvailabilityResponseMalformedError,
+	CacheAvailabilityResponseSchemaError,
+	CacheAvailabilityResponseUnexpectedHashError,
 	DerivationGraphShapeError,
 	DerivationRootCountError,
 	DuplicateGroupKeyError,
-	TargetEvaluationError
+	TargetEvaluationError,
+	TargetRootUnresolvedError
 } from './errors.ts';
 import {
 	assertDistinctGroupKeys,
@@ -33,6 +40,14 @@ function storePath(value: string): StorePathString {
 	return storePathSchema.parse(value);
 }
 
+async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
+	try {
+		await run();
+	} catch (error) {
+		return error;
+	}
+}
+
 const sharedPath = storePath(
 	'/nix/store/11111111111111111111111111111111-shared'
 );
@@ -54,6 +69,11 @@ const sharedOutPath = storePath(
 const sharedDevelopmentPath = storePath(
 	'/nix/store/77777777777777777777777777777777-shared-dev'
 );
+const manifestRootDrvPath = storePath(
+	'/nix/store/00000000000000000000000000000000-manifest-root.drv'
+);
+const failingNixEvaluator: NixEvaluator = () =>
+	Promise.reject(new Error('the recursive show failed'));
 
 describe('planPublish', () => {
 	it('skips retained targets and seeds an uncached shared output once', () => {
@@ -622,40 +642,57 @@ describe('derivationUses', () => {
 });
 
 describe('evaluateTargets', () => {
-	const app = { ...target('app'), bestEffort: false };
-	const home = target('home');
+	const appRootDrvPath = storePath(
+		'/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-app.drv'
+	);
+	const homeRootDrvPath = storePath(
+		'/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-home.drv'
+	);
+	const dependencyDrvPath = storePath(
+		'/nix/store/cccccccccccccccccccccccccccccccc-dependency.drv'
+	);
+	const app = {
+		...target('app'),
+		bestEffort: false,
+		rootDrvPath: appRootDrvPath
+	};
+	const home = withoutRootDrvPath(target('home'));
+	const resolvedHome = { ...home, rootDrvPath: homeRootDrvPath };
 	const appNode = {
 		env: { out: firstPath },
-		inputs: { drvs: { 'dep.drv': { dynamicOutputs: {}, outputs: ['out'] } } },
+		inputs: {
+			drvs: {
+				[dependencyDrvPath]: { dynamicOutputs: {}, outputs: ['out'] }
+			}
+		},
 		outputs: { out: { path: firstPath.replace('/nix/store/', '') } }
+	};
+	const homeNode = {
+		env: { out: secondPath },
+		inputs: { drvs: {} },
+		outputs: { out: { path: secondPath.replace('/nix/store/', '') } }
 	};
 	const dependencyNode = {
 		env: { out: sharedPath },
 		inputs: { drvs: {} },
 		outputs: { out: { path: sharedPath.replace('/nix/store/', '') } }
 	};
-	const rootGraph = { derivations: { 'app.drv': appNode } };
 	const recursiveGraph = {
-		derivations: { 'app.drv': appNode, 'dep.drv': dependencyNode }
+		derivations: {
+			[appRootDrvPath]: appNode,
+			[dependencyDrvPath]: dependencyNode
+		}
 	};
 
 	function graphEvaluator(calls: string[][]): NixEvaluator {
 		return (arguments_) => {
 			calls.push([...arguments_]);
 
-			if (arguments_.includes('.#home')) {
-				return Promise.reject(new Error('cannot fetch the private input'));
-			}
-
-			return Promise.resolve({
-				stdout: JSON.stringify(
-					arguments_.includes('-r') ? recursiveGraph : rootGraph
-				)
-			});
+			return Promise.resolve({ stdout: JSON.stringify(recursiveGraph) });
 		};
 	}
 
-	it('confines an evaluation failure to the closure target that caused it', async () => {
+	it('uses a manifest evaluation failure as a direct best-effort build', async () => {
 		const calls: string[][] = [];
 
 		const result = await evaluateTargets([app, home], graphEvaluator(calls));
@@ -668,47 +705,77 @@ describe('evaluateTargets', () => {
 				attr: entry.target.attr,
 				reason: entry.reason
 			})),
-			recursiveCall: calls.at(-1)
+			calls
 		}).toStrictEqual({
-			evaluated: ['.#app from /nix/store/app.drv'],
+			evaluated: [`.#app from ${appRootDrvPath}`],
 			unevaluated: [
 				{
 					attr: '.#home',
-					reason: 'Could not evaluate .#home: cannot fetch the private input'
+					reason: 'Target manifest did not resolve a derivation path for .#home'
 				}
 			],
-			recursiveCall: ['derivation', 'show', '-r', '--', '.#app']
+			calls: [['derivation', 'show', '-r', '--', appRootDrvPath]]
 		});
 	});
 
-	it('fails when a strict target cannot be evaluated', async () => {
-		const broken = { ...target('home'), bestEffort: false };
+	it('evaluates all manifest derivation paths in one recursive query', async () => {
+		const calls: string[][] = [];
+		const appRootNode = {
+			...appNode,
+			inputs: { drvs: {} }
+		};
+		const evaluator: NixEvaluator = (arguments_) => {
+			calls.push([...arguments_]);
+
+			return Promise.resolve({
+				stdout: JSON.stringify({
+					derivations: {
+						[appRootDrvPath]: appRootNode,
+						[homeRootDrvPath]: homeNode
+					}
+				})
+			});
+		};
+
+		const result = await evaluateTargets([app, resolvedHome], evaluator);
+
+		expect({
+			evaluated: result.evaluations.map((entry) => entry.target.attr),
+			unevaluated: result.unevaluated,
+			calls
+		}).toStrictEqual({
+			evaluated: ['.#app', '.#home'],
+			unevaluated: [],
+			calls: [
+				['derivation', 'show', '-r', '--', appRootDrvPath, homeRootDrvPath]
+			]
+		});
+	});
+
+	it('fails when a strict target has no manifest derivation path', async () => {
+		const broken = {
+			...withoutRootDrvPath(target('home')),
+			bestEffort: false
+		};
 
 		await expect(evaluateTargets([broken], graphEvaluator([]))).rejects.toThrow(
-			TargetEvaluationError
+			TargetRootUnresolvedError
 		);
 	});
 
 	const recursiveFailureEvaluator: NixEvaluator = (arguments_) => {
-		if (arguments_.includes('-r') && arguments_.includes('.#home')) {
+		if (arguments_.includes(homeRootDrvPath)) {
 			return Promise.reject(new Error('cannot fetch the private input'));
 		}
 
 		return Promise.resolve({
-			stdout: JSON.stringify(
-				arguments_.includes('-r') ? recursiveGraph : rootGraph
-			)
+			stdout: JSON.stringify(recursiveGraph)
 		});
 	};
 
-	const rootOnlyEvaluator: NixEvaluator = (arguments_) =>
-		arguments_.includes('-r')
-			? Promise.reject(new Error('the recursive show failed'))
-			: Promise.resolve({ stdout: JSON.stringify(rootGraph) });
-
 	it('confines a recursive evaluation failure to the best-effort target', async () => {
 		const result = await evaluateTargets(
-			[app, home],
+			[app, resolvedHome],
 			recursiveFailureEvaluator
 		);
 
@@ -730,7 +797,7 @@ describe('evaluateTargets', () => {
 	});
 
 	it('fails when a strict target cannot be recursively evaluated', async () => {
-		await expect(evaluateTargets([app], rootOnlyEvaluator)).rejects.toThrow(
+		await expect(evaluateTargets([app], failingNixEvaluator)).rejects.toThrow(
 			TargetEvaluationError
 		);
 	});
@@ -747,7 +814,7 @@ describe('evaluateTargets', () => {
 		}).toStrictEqual({
 			evaluations: [],
 			unevaluated: ['.#home'],
-			calls: 1
+			calls: 0
 		});
 	});
 });
@@ -904,6 +971,7 @@ describe('publishTargetSchema', () => {
 		expect(
 			publishTargetSchema.parse({
 				attr: '.#app',
+				rootDrvPath: manifestRootDrvPath,
 				system: 'x86_64-linux',
 				os: 'ubuntu-latest',
 				remote: true,
@@ -913,6 +981,7 @@ describe('publishTargetSchema', () => {
 			})
 		).toStrictEqual({
 			attr: '.#app',
+			rootDrvPath: manifestRootDrvPath,
 			system: 'x86_64-linux',
 			os: 'ubuntu-latest',
 			remote: true,
@@ -926,6 +995,7 @@ describe('publishTargetSchema', () => {
 		expect(
 			publishTargetSchema.parse({
 				attr: '.#app',
+				rootDrvPath: manifestRootDrvPath,
 				system: 'x86_64-linux',
 				os: 'ubuntu-latest',
 				remote: true,
@@ -933,6 +1003,7 @@ describe('publishTargetSchema', () => {
 			})
 		).toStrictEqual({
 			attr: '.#app',
+			rootDrvPath: manifestRootDrvPath,
 			system: 'x86_64-linux',
 			os: 'ubuntu-latest',
 			remote: true,
@@ -940,6 +1011,27 @@ describe('publishTargetSchema', () => {
 			rootSuffix: 'app',
 			outputs: ['out']
 		});
+	});
+
+	it.each([
+		{ name: 'a non-store path', rootDrvPath: '/tmp/app.drv' },
+		{
+			name: 'an output path',
+			rootDrvPath: '/nix/store/00000000000000000000000000000000-app'
+		}
+	])('rejects $name as rootDrvPath', ({ rootDrvPath }) => {
+		expect(
+			publishTargetSchema.safeParse({
+				...target('app'),
+				rootDrvPath
+			}).success
+		).toBe(false);
+	});
+
+	it('accepts an omitted best-effort root derivation result', () => {
+		const unresolved = withoutRootDrvPath(target('app'));
+
+		expect(publishTargetSchema.parse(unresolved)).toStrictEqual(unresolved);
 	});
 });
 
@@ -1051,6 +1143,61 @@ describe('joinRoot', () => {
 });
 
 describe('availableCachePaths', () => {
+	it('queries a large closure without issuing one narinfo request per path', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const paths = Array.from({ length: 18_662 }, (_, index) =>
+				numberedStorePath(index)
+			);
+			const fetcher: typeof fetch = (input, init) => {
+				const url =
+					typeof input === 'string'
+						? input
+						: input instanceof URL
+							? input.href
+							: input.url;
+
+				if (!url.endsWith('/api/v1/missing-paths')) {
+					throw new TypeError('fetch failed');
+				}
+
+				if (typeof init?.body !== 'string') {
+					throw new TypeError('availability query body is not a string');
+				}
+
+				const body = cacheAvailabilityRequestSchema.parse(
+					JSON.parse(init.body)
+				);
+
+				return Promise.resolve(
+					Response.json(
+						{
+							missingStorePathHashes: body.storePathHashes
+						},
+						{
+							headers: { 'content-type': 'application/json' },
+							status: 200
+						}
+					)
+				);
+			};
+
+			const pending = availableCachePaths({
+				baseUrl: 'https://cupboard.example/t/acme',
+				cache: 'pr-1',
+				paths,
+				fetcher
+			});
+			await vi.advanceTimersByTimeAsync(60_000);
+			const available = await pending;
+
+			expect(available).toStrictEqual(new Set());
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('returns only paths whose narinfo is available', async () => {
 		const requests: string[] = [];
 		const headers: (HeadersInit | undefined)[] = [];
@@ -1068,6 +1215,17 @@ describe('availableCachePaths', () => {
 				requests.push(url);
 				headers.push(init?.headers);
 
+				if (url.endsWith('/api/v1/missing-paths')) {
+					return Promise.resolve(
+						Response.json(
+							{
+								missingStorePathHashes: [StorePath.hash(secondPath)]
+							},
+							{ status: 200 }
+						)
+					);
+				}
+
 				return Promise.resolve(
 					new Response(undefined, {
 						status: url.includes('22222222222222222222222222222222') ? 200 : 404
@@ -1083,16 +1241,15 @@ describe('availableCachePaths', () => {
 		}).toStrictEqual({
 			available: [firstPath],
 			requests: [
-				'https://cupboard.example/t/acme/cache/pr-1/22222222222222222222222222222222.narinfo',
-				'https://cupboard.example/t/acme/cache/pr-1/33333333333333333333333333333333.narinfo'
+				'https://cupboard.example/t/acme/cache/pr-1/api/v1/missing-paths'
 			],
-			headers: [undefined, undefined]
+			headers: [{ 'content-type': 'application/json' }]
 		});
 	});
 
-	// A probe answer other than 200 or 404 is not evidence of absence:
+	// A query answer other than 200 is not evidence of absence:
 	// treating it as a miss would replan an available path as a fresh build
-	// and publish over it, so the probe fails closed and the plan never
+	// and publish over it, so the query fails closed and the plan never
 	// constructs. A transient refusal is retried before that; a deterministic
 	// one fails on its first response.
 	it.each([
@@ -1104,7 +1261,7 @@ describe('availableCachePaths', () => {
 			attempts: 5
 		}
 	])(
-		'fails closed on $name, naming the path and status',
+		'fails closed on $name, naming the status',
 		async ({ status, attempts }) => {
 			let observedAttempts = 0;
 			let thrown: unknown;
@@ -1124,14 +1281,13 @@ describe('availableCachePaths', () => {
 				thrown = error;
 			}
 
-			const probeError = thrown instanceof CacheProbeError ? thrown : undefined;
+			const queryError =
+				thrown instanceof CacheAvailabilityQueryError ? thrown : undefined;
 
 			expect({
-				storePath: probeError?.storePath,
-				status: probeError?.status,
+				status: queryError?.status,
 				observedAttempts
 			}).toStrictEqual({
-				storePath: firstPath,
 				status,
 				observedAttempts: attempts
 			});
@@ -1149,7 +1305,12 @@ describe('availableCachePaths', () => {
 				attempts += 1;
 
 				return Promise.resolve(
-					new Response(undefined, { status: attempts === 1 ? 503 : 200 })
+					new Response(
+						attempts === 1
+							? undefined
+							: JSON.stringify({ missingStorePathHashes: [] }),
+						{ status: attempts === 1 ? 503 : 200 }
+					)
 				);
 			}
 		});
@@ -1157,6 +1318,80 @@ describe('availableCachePaths', () => {
 		expect({ available: available.values().toArray(), attempts }).toStrictEqual(
 			{ available: [firstPath], attempts: 2 }
 		);
+	});
+
+	it('distinguishes malformed JSON from a schema-invalid response', async () => {
+		const malformed = await rejectedBy(() =>
+			availableCachePaths({
+				baseUrl: 'https://cupboard.example/t/acme',
+				cache: 'pr-1',
+				paths: [firstPath],
+				fetcher: () =>
+					Promise.resolve(new Response('{', { status: StatusCodes.OK }))
+			})
+		);
+		const invalid = await rejectedBy(() =>
+			availableCachePaths({
+				baseUrl: 'https://cupboard.example/t/acme',
+				cache: 'pr-1',
+				paths: [firstPath],
+				fetcher: () =>
+					Promise.resolve(
+						Response.json(
+							{ missingStorePathHashes: ['not-a-hash'] },
+							{ status: StatusCodes.OK }
+						)
+					)
+			})
+		);
+
+		expect({
+			malformed: malformed instanceof CacheAvailabilityResponseMalformedError,
+			malformedCause:
+				malformed instanceof CacheAvailabilityResponseMalformedError &&
+				malformed.cause instanceof SyntaxError,
+			invalid: invalid instanceof CacheAvailabilityResponseSchemaError,
+			invalidCause:
+				invalid instanceof CacheAvailabilityResponseSchemaError &&
+				invalid.cause.name
+		}).toStrictEqual({
+			malformed: true,
+			malformedCause: true,
+			invalid: true,
+			invalidCause: 'ZodError'
+		});
+	});
+
+	it('rejects an unrequested hash as a logically invalid response', async () => {
+		const unexpectedHash = StorePath.hash(secondPath);
+		const error = await rejectedBy(() =>
+			availableCachePaths({
+				baseUrl: 'https://cupboard.example/t/acme',
+				cache: 'pr-1',
+				paths: [firstPath],
+				fetcher: () =>
+					Promise.resolve(
+						Response.json(
+							{
+								missingStorePathHashes: [unexpectedHash]
+							},
+							{ status: StatusCodes.OK }
+						)
+					)
+			})
+		);
+
+		expect({
+			isUnexpectedHash:
+				error instanceof CacheAvailabilityResponseUnexpectedHashError,
+			storePathHash:
+				error instanceof CacheAvailabilityResponseUnexpectedHashError
+					? error.storePathHash
+					: undefined
+		}).toStrictEqual({
+			isUnexpectedHash: true,
+			storePathHash: unexpectedHash
+		});
 	});
 
 	it('sends a basic-auth Authorization header on every probe when read credentials are supplied', async () => {
@@ -1170,18 +1405,74 @@ describe('availableCachePaths', () => {
 			fetcher: (_input, init) => {
 				headers.push(init?.headers);
 
-				return Promise.resolve(new Response(undefined, { status: 404 }));
+				return Promise.resolve(
+					Response.json(
+						{
+							missingStorePathHashes: [
+								StorePath.hash(firstPath),
+								StorePath.hash(secondPath)
+							]
+						},
+						{ status: 200 }
+					)
+				);
 			}
 		});
 
 		expect(headers).toStrictEqual([
 			{
-				authorization: `Basic ${Buffer.from('reader:secret').toString('base64')}`
-			},
-			{
-				authorization: `Basic ${Buffer.from('reader:secret').toString('base64')}`
+				authorization: `Basic ${Buffer.from('reader:secret').toString('base64')}`,
+				'content-type': 'application/json'
 			}
 		]);
+	});
+
+	it('queries a large reuse-view closure through the bounded availability interface', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const paths = Array.from({ length: 18_662 }, (_, index) =>
+				numberedStorePath(index)
+			);
+			const fetcher: typeof fetch = (input, init) => {
+				const url =
+					typeof input === 'string'
+						? input
+						: input instanceof URL
+							? input.href
+							: input.url;
+
+				if (!url.endsWith('/api/v1/missing-paths')) {
+					throw new TypeError('fetch failed');
+				}
+
+				if (typeof init?.body !== 'string') {
+					throw new TypeError('availability query body is not a string');
+				}
+
+				const body = cacheAvailabilityRequestSchema.parse(
+					JSON.parse(init.body)
+				);
+
+				return Promise.resolve(
+					Response.json({
+						missingStorePathHashes: body.storePathHashes
+					})
+				);
+			};
+
+			const pending = availableViewPaths({
+				baseUrl: 'https://cupboard.example/t/acme',
+				view: 'pull-requests',
+				paths,
+				fetcher
+			});
+			await vi.advanceTimersByTimeAsync(60_000);
+
+			await expect(pending).resolves.toStrictEqual(new Set());
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it('probes a reuse view beneath the tenant base', async () => {
@@ -1200,8 +1491,8 @@ describe('availableCachePaths', () => {
 				requests.push(url);
 
 				return Promise.resolve(
-					new Response(undefined, {
-						status: url.includes('22222222222222222222222222222222') ? 200 : 404
+					Response.json({
+						missingStorePathHashes: [StorePath.hash(secondPath)]
 					})
 				);
 			}
@@ -1211,8 +1502,7 @@ describe('availableCachePaths', () => {
 			{
 				available: [firstPath],
 				requests: [
-					'https://cupboard.example/t/acme/reuse/reuse/22222222222222222222222222222222.narinfo',
-					'https://cupboard.example/t/acme/reuse/reuse/33333333333333333333333333333333.narinfo'
+					'https://cupboard.example/t/acme/reuse/reuse/api/v1/missing-paths'
 				]
 			}
 		);
@@ -1234,19 +1524,42 @@ describe('availableCachePaths', () => {
 							: input.url;
 				requests.push(url);
 
-				return Promise.resolve(new Response(undefined, { status: 404 }));
+				return Promise.resolve(
+					Response.json(
+						{
+							missingStorePathHashes: [StorePath.hash(firstPath)]
+						},
+						{ status: 200 }
+					)
+				);
 			}
 		});
 
 		expect(requests).toStrictEqual([
-			'https://cupboard.example/t/acme/cache/pr-1/22222222222222222222222222222222.narinfo'
+			'https://cupboard.example/t/acme/cache/pr-1/api/v1/missing-paths'
 		]);
 	});
 });
 
+function numberedStorePath(index: number): StorePathString {
+	const alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
+	let remaining = index;
+	let hash = '';
+
+	do {
+		hash = `${alphabet.charAt(remaining % alphabet.length)}${hash}`;
+		remaining = Math.floor(remaining / alphabet.length);
+	} while (remaining > 0);
+
+	return storePath(
+		`/nix/store/${hash.padStart(32, '0')}-planner-path-${String(index)}`
+	);
+}
+
 function target(rootSuffix: string): PublishTarget {
 	return {
 		attr: `.#${rootSuffix}`,
+		rootDrvPath: manifestRootDrvPath,
 		system: 'x86_64-linux',
 		os: 'ubuntu-latest',
 		remote: true,
@@ -1254,6 +1567,13 @@ function target(rootSuffix: string): PublishTarget {
 		rootSuffix,
 		outputs: ['out']
 	};
+}
+
+function withoutRootDrvPath(target_: PublishTarget): PublishTarget {
+	const unresolved = { ...target_ };
+	Reflect.deleteProperty(unresolved, 'rootDrvPath');
+
+	return unresolved;
 }
 
 function evaluation(
