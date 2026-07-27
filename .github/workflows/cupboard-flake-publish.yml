@@ -263,6 +263,13 @@ jobs:
         with:
           ssh-key: ${{ secrets.input_ssh_key }}
           nix-config: ${{ inputs.nix-config }}
+          # Evaluating closure roots can realise derivations for their target
+          # systems, so planning needs the caller's builders as well.
+          remote: ${{ inputs.builders != '' }}
+          builders: ${{ inputs.builders }}
+          builder-ssh-key: ${{ secrets.builder_ssh_key }}
+          builder-ssh-config: ${{ secrets.builder_ssh_config }}
+          builder-known-hosts: ${{ inputs.builder-known-hosts }}
 
       - uses: ./.cupboard/actions/setup
         id: setup
