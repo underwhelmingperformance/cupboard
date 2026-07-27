@@ -8,6 +8,88 @@ interface Recorded {
 	readonly path: string;
 }
 
+interface RecordedUploadPart {
+	readonly name: string;
+	readonly filename?: string;
+	readonly type?: string;
+	readonly value: string;
+}
+
+interface RecordedUpload {
+	readonly contentType: string | null;
+	readonly parts: readonly RecordedUploadPart[];
+}
+
+async function recordWorkerUpload(
+	run: (client: Cloudflare) => Promise<void>
+): Promise<RecordedUpload | undefined> {
+	let upload: RecordedUpload | undefined;
+
+	const fetcher: typeof fetch = async (input, init) => {
+		const rawUrl =
+			typeof input === 'string'
+				? input
+				: input instanceof URL
+					? input.href
+					: input.url;
+
+		if (new URL(rawUrl).protocol === 'data:') {
+			return new Response();
+		}
+
+		const parts: RecordedUploadPart[] = [];
+		const request =
+			init?.body instanceof FormData ? new Request(rawUrl, init) : undefined;
+		const contentType =
+			request?.headers.get('content-type') ??
+			new Headers(init?.headers).get('content-type');
+		let form: FormData | undefined;
+
+		if (init?.body instanceof FormData) {
+			form = init.body;
+		} else if (contentType?.startsWith('multipart/form-data; boundary=')) {
+			form = await new Response(init?.body, {
+				headers: { 'content-type': contentType }
+			}).formData();
+		}
+
+		if (form !== undefined) {
+			for (const [name, value] of form) {
+				parts.push(
+					typeof value === 'string'
+						? { name, value }
+						: {
+								name,
+								filename: value.name,
+								type: value.type,
+								value: await value.text()
+							}
+				);
+			}
+		}
+
+		upload = {
+			contentType: contentType?.startsWith('multipart/form-data; boundary=')
+				? 'multipart/form-data'
+				: contentType,
+			parts: parts.toSorted((left, right) =>
+				left.name.localeCompare(right.name)
+			)
+		};
+
+		return Response.json({
+			success: true,
+			errors: [],
+			messages: [],
+			result: {}
+		});
+	};
+
+	await run(new Cloudflare({ apiToken: 'token', fetch: fetcher }));
+
+	return upload;
+}
+
 /**
  * A Cloudflare client whose HTTP layer is a fake: responses are looked up by
  * `METHOD path` (paths relative to the v4 API root), and every request is
@@ -95,6 +177,45 @@ const desiredSettings = {
 };
 
 const consumersPath = '/accounts/acc-1/queues/queue-1/consumers';
+
+describe('uploadScript', () => {
+	it('sends the Worker as Cloudflare multipart upload parts', async () => {
+		const upload = await recordWorkerUpload((client) =>
+			createCloudflareApi(client, 'acc-1').uploadScript(
+				'cupboard',
+				{
+					main_module: 'worker.js',
+					compatibility_date: '2026-07-27'
+				},
+				{
+					mainModule: 'worker.js',
+					code: 'export default { fetch: () => new Response("ok") };'
+				}
+			)
+		);
+
+		expect(upload).toStrictEqual({
+			contentType: 'multipart/form-data',
+			parts: [
+				{
+					name: 'metadata',
+					filename: 'metadata',
+					type: 'application/json',
+					value: JSON.stringify({
+						main_module: 'worker.js',
+						compatibility_date: '2026-07-27'
+					})
+				},
+				{
+					name: 'worker.js',
+					filename: 'worker.js',
+					type: 'application/javascript+module',
+					value: 'export default { fetch: () => new Response("ok") };'
+				}
+			]
+		});
+	});
+});
 
 describe('ensureQueueConsumer', () => {
 	it('does not write when the live consumer already matches', async () => {

@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 
 import Cloudflare from 'cloudflare';
-import { NotFoundError, toFile } from 'cloudflare';
+import { NotFoundError } from 'cloudflare';
 import type { LifecycleUpdateParams } from 'cloudflare/resources/r2/buckets/lifecycle';
 import type { ScriptUpdateParams } from 'cloudflare/resources/workers/scripts/scripts';
 import { z } from 'zod';
@@ -431,17 +431,26 @@ export function createCloudflareApi(
 		},
 
 		async uploadScript(scriptName, metadata, bundle) {
-			const file = await toFile(
-				Buffer.from(bundle.code, 'utf8'),
+			const form = new FormData();
+			form.append(
+				'metadata',
+				new File([JSON.stringify(metadata)], 'metadata', {
+					type: 'application/json'
+				})
+			);
+			form.append(
 				bundle.mainModule,
-				{ type: 'application/javascript+module' }
+				new File([bundle.code], bundle.mainModule, {
+					type: 'application/javascript+module'
+				})
 			);
 
-			await client.workers.scripts.update(scriptName, {
-				...account,
-				metadata,
-				files: [file]
-			});
+			// The generated update method models these as nested fields, but the
+			// Worker upload API requires the metadata and module as named parts.
+			await client.put(
+				`/accounts/${encodeURIComponent(accountId)}/workers/scripts/${encodeURIComponent(scriptName)}`,
+				{ body: form }
+			);
 		},
 
 		async ensureQueueConsumer(queueId, scriptName, settings) {
