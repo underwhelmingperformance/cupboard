@@ -4,7 +4,10 @@ description:
 inputs:
   installables:
     description: Newline-delimited Nix installables to build.
-    required: true
+    required: false
+  installables-file:
+    description: File containing newline-delimited Nix installables to build.
+    required: false
   keep-going:
     description: Continue after an individual build failure.
     required: false
@@ -59,6 +62,7 @@ runs:
       shell: bash
       env:
         INSTALLABLES: ${{ inputs.installables }}
+        INSTALLABLES_FILE: ${{ inputs.installables-file }}
         KEEP_GOING: ${{ inputs.keep-going }}
         MAX_JOBS: ${{ inputs.max-jobs }}
         ALLOW_FAILURE: ${{ inputs.allow-failure }}
@@ -67,6 +71,7 @@ runs:
           --disable-warning=ExperimentalWarning \
           "$GITHUB_ACTION_PATH/../src/main.ts" build \
           --installables "$INSTALLABLES" \
+          --installables-file "$INSTALLABLES_FILE" \
           --keep-going "$KEEP_GOING" \
           --max-jobs "$MAX_JOBS" \
           --allow-failure "$ALLOW_FAILURE"

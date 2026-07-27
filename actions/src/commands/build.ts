@@ -13,6 +13,7 @@ import { CommandFailedError, InvalidInputError } from '../errors.ts';
 import {
 	appendEnvironmentFile,
 	type Environment,
+	parseLines,
 	requireEnvironment,
 	setOutput
 } from '../inputs.ts';
@@ -35,7 +36,8 @@ export interface BuildAttempt {
 }
 
 export interface BuildOptions {
-	readonly installables: readonly string[];
+	readonly installables?: readonly string[];
+	readonly installablesFile?: string;
 	readonly attempts?: string;
 	readonly keepGoing?: string;
 	readonly maxJobs?: string;
@@ -49,20 +51,26 @@ export interface RunResult {
 	readonly stdout: string;
 }
 
+export interface NixInvocation {
+	readonly arguments: readonly string[];
+	readonly stdin: string;
+}
+
 export interface BuildDependencies {
-	readonly runNix?: (arguments_: readonly string[]) => Promise<RunResult>;
+	readonly runNix?: (invocation: NixInvocation) => Promise<RunResult>;
 	readonly nix?: Pick<Nix, 'queryPathInfo'>;
 	readonly nextAttemptId?: () => string;
 	readonly sleep?: (delayMs: number) => Promise<void>;
 }
 
-function runNix(arguments_: readonly string[]): Promise<RunResult> {
+function runNix(invocation: NixInvocation): Promise<RunResult> {
 	return new Promise((resolve, reject) => {
-		const child = spawn('nix', [...arguments_], {
-			stdio: ['ignore', 'pipe', 'inherit']
+		const child = spawn('nix', [...invocation.arguments], {
+			stdio: ['pipe', 'pipe', 'inherit']
 		});
 		let stdout = '';
 
+		child.stdin.once('error', reject);
 		child.stdout.setEncoding('utf8');
 		child.stdout.on('data', (chunk: string) => {
 			stdout += chunk;
@@ -71,7 +79,18 @@ function runNix(arguments_: readonly string[]): Promise<RunResult> {
 		child.once('close', (status) => {
 			resolve({ status: status ?? undefined, stdout });
 		});
+		child.stdin.end(invocation.stdin);
 	});
+}
+
+function nixBuildInvocation(
+	arguments_: readonly string[],
+	installables: readonly string[]
+): NixInvocation {
+	return {
+		arguments: [...arguments_, '--stdin'],
+		stdin: `${installables.join('\n')}\n`
+	};
 }
 
 const activityHeaderSchema = z.object({
@@ -211,11 +230,15 @@ export function registerBuildCommand(
 ): void {
 	program
 		.command('build')
-		.requiredOption(
+		.option(
 			'--installables <value>',
 			'installable to build (repeatable or newline-delimited)',
 			collectLines,
 			[]
+		)
+		.option(
+			'--installables-file <path>',
+			'file containing newline-delimited installables'
 		)
 		.option('--attempts <count>', 'maximum build attempts', '3')
 		.option(
@@ -242,13 +265,20 @@ export async function buildAction(
 	environment: Environment = env,
 	dependencies: BuildDependencies = {}
 ): Promise<void> {
-	if (options.installables.length === 0) {
+	const installables = [...(options.installables ?? [])];
+	const installablesFile = provided(options.installablesFile);
+	if (installablesFile !== undefined) {
+		const contents = await readFile(path.resolve(installablesFile), 'utf8');
+		installables.push(...parseLines(contents));
+	}
+
+	if (installables.length === 0) {
 		throw new InvalidInputError(
 			'installables',
 			'installables must contain at least one value'
 		);
 	}
-	if (!options.installables.every(isNixPositionalArgument)) {
+	if (!installables.every(isNixPositionalArgument)) {
 		throw new InvalidInputError(
 			'installables',
 			'installables must not start with a hyphen or contain control characters'
@@ -291,14 +321,12 @@ export async function buildAction(
 		dependencies.sleep ??
 		((delayMs: number) =>
 			new Promise((resolve) => setTimeout(resolve, delayMs)));
-	const plan = await executeNix([
-		'build',
-		'--dry-run',
-		'--json',
-		'--no-link',
-		'--',
-		...options.installables
-	]);
+	const plan = await executeNix(
+		nixBuildInvocation(
+			['build', '--dry-run', '--json', '--no-link'],
+			installables
+		)
+	);
 	const preExisting = new Set<string>();
 	if (plan.status === 0) {
 		const candidates = plannedOutputPaths(plan.stdout);
@@ -335,9 +363,9 @@ export async function buildAction(
 		if (maxJobs !== undefined) {
 			arguments_.push('--max-jobs', maxJobs);
 		}
-		arguments_.push('--', ...options.installables);
+		const invocation = nixBuildInvocation(arguments_, installables);
 
-		const result = await executeNix(arguments_);
+		const result = await executeNix(invocation);
 		status = result.status;
 		finalPaths = result.stdout.split(/\r?\n/u).filter((line) => line !== '');
 		let log = '';
@@ -362,18 +390,20 @@ export async function buildAction(
 				attemptInfos
 			);
 			if (verificationDerivations.length > 0) {
-				const verificationArguments = [
-					'build',
-					'--rebuild',
-					'--no-link',
-					'--builders',
-					'',
-					'--max-jobs',
-					'1',
-					'--',
-					...verificationDerivations.map((derivation) => `${derivation}^*`)
-				];
-				const verification = await executeNix(verificationArguments);
+				const verification = await executeNix(
+					nixBuildInvocation(
+						[
+							'build',
+							'--rebuild',
+							'--no-link',
+							'--builders',
+							'',
+							'--max-jobs',
+							'1'
+						],
+						verificationDerivations.map((derivation) => `${derivation}^*`)
+					)
+				);
 				if (verification.status !== 0) {
 					throw new CommandFailedError(
 						'nix build --rebuild',
