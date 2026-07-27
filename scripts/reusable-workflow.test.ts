@@ -64,6 +64,33 @@ describe('cupboard flake publish release coordinates', () => {
 			].toSorted((left, right) => left.uses.localeCompare(right.uses))
 		);
 	});
+
+	it('configures remote builders before evaluating the target manifest', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+		const lines = contents.split('\n');
+		const prepares = actionSteps(
+			lines,
+			/^ {6}- uses: \.\/\.cupboard\/actions\/prepare$/u
+		);
+		const planPrepare = prepares[0]?.map((line) => line.trim());
+		const input = (name: string) =>
+			planPrepare?.find((line) => line.startsWith(`${name}:`));
+
+		expect({
+			remote: input('remote'),
+			builders: input('builders'),
+			builderSshKey: input('builder-ssh-key'),
+			builderSshConfig: input('builder-ssh-config'),
+			builderKnownHosts: input('builder-known-hosts')
+		}).toStrictEqual({
+			remote: "remote: ${{ inputs.builders != '' }}",
+			builders: 'builders: ${{ inputs.builders }}',
+			builderSshKey: 'builder-ssh-key: ${{ secrets.builder_ssh_key }}',
+			builderSshConfig: 'builder-ssh-config: ${{ secrets.builder_ssh_config }}',
+			builderKnownHosts:
+				'builder-known-hosts: ${{ inputs.builder-known-hosts }}'
+		});
+	});
 });
 
 describe('cupboard build provenance', () => {
