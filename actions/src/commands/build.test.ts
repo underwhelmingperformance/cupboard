@@ -1,6 +1,16 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import {
+	chmod,
+	mkdir,
+	mkdtemp,
+	readFile,
+	rm,
+	writeFile
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { env, execPath } from 'node:process';
+import { promisify } from 'node:util';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -17,6 +27,7 @@ import {
 
 const app = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
 const library = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib';
+const execFileAsync = promisify(execFile);
 
 function buildStart(derivation: string) {
 	return JSON.stringify({
@@ -106,13 +117,106 @@ describe('buildAction', () => {
 		}
 	);
 
+	it('starts Nix with a publication-sized installables file', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-build-test-')
+		);
+		temporaryDirectories.push(directory);
+		const binDirectory = path.join(directory, 'bin');
+		const nixLog = path.join(directory, 'nix.jsonl');
+		const installablesFile = path.join(directory, 'installables.txt');
+		const githubOutput = path.join(directory, 'github-output');
+		const installables = Array.from(
+			{ length: 18_662 },
+			(_, index) =>
+				`/nix/store/${String(index).padStart(32, '0')}-seed-${String(index)}.drv^out`
+		);
+
+		await writeFile(installablesFile, `${installables.join('\n')}\n`);
+		await mkdir(binDirectory, { recursive: true });
+		const nixExecutable = path.join(binDirectory, 'nix');
+		await writeFile(
+			nixExecutable,
+			String.raw`#!/usr/bin/env node
+const { appendFileSync } = require('node:fs');
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => { input += chunk; });
+process.stdin.on('end', () => {
+	appendFileSync(
+		process.env.FAKE_NIX_LOG,
+		JSON.stringify({
+			arguments: process.argv.slice(2),
+			installables: input.split(/\r?\n/u).filter(Boolean)
+		}) + '\n'
+	);
+	if (process.argv.includes('--dry-run')) {
+		process.stdout.write('[]');
+	}
+});
+`
+		);
+		await chmod(nixExecutable, 0o755);
+
+		const action = new URL('../main.ts', import.meta.url);
+		await execFileAsync(
+			execPath,
+			[
+				'--experimental-transform-types',
+				'--disable-warning=ExperimentalWarning',
+				action.pathname,
+				'build',
+				'--installables-file',
+				installablesFile,
+				'--attempts',
+				'1'
+			],
+			{
+				env: {
+					...env,
+					FAKE_NIX_LOG: nixLog,
+					GITHUB_OUTPUT: githubOutput,
+					PATH: `${binDirectory}:${env.PATH ?? ''}`,
+					RUNNER_TEMP: directory
+				}
+			}
+		);
+
+		const nixLogContents = await readFile(nixLog, 'utf8');
+		const invocations = nixLogContents
+			.trim()
+			.split('\n')
+			.map((line): unknown => JSON.parse(line));
+		expect(invocations).toStrictEqual([
+			{
+				arguments: ['build', '--dry-run', '--json', '--no-link', '--stdin'],
+				installables
+			},
+			{
+				arguments: [
+					'build',
+					'--no-link',
+					'--print-out-paths',
+					'--option',
+					'json-log-path',
+					expect.stringMatching(/cupboard-nix-.+\.jsonl/u),
+					'--stdin'
+				],
+				installables
+			}
+		]);
+	});
+
 	it('verifies a partial failed attempt before attributing it after retry', async () => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-build-test-')
 		);
 		temporaryDirectories.push(directory);
 		const appDerivation = `${app}.drv`;
-		const commands: string[][] = [];
+		const invocations: {
+			readonly arguments: readonly string[];
+			readonly stdin: string;
+		}[] = [];
 		let buildAttempt = 0;
 		let pathQueries = 0;
 
@@ -135,20 +239,23 @@ describe('buildAction', () => {
 						return Promise.resolve(pathInfo(app, appDerivation));
 					}
 				},
-				runNix: async (arguments_) => {
-					commands.push([...arguments_]);
-					if (arguments_.includes('--dry-run')) {
+				runNix: async (invocation) => {
+					invocations.push(invocation);
+					if (invocation.arguments.includes('--dry-run')) {
 						return {
 							status: 0,
 							stdout: `[{"outputs":{"out":"${app}"}}]`
 						};
 					}
-					if (arguments_.includes('--rebuild')) {
+					if (invocation.arguments.includes('--rebuild')) {
 						return { status: 0, stdout: '' };
 					}
 
 					buildAttempt += 1;
-					const logFile = arguments_[arguments_.indexOf('json-log-path') + 1];
+					const logFile =
+						invocation.arguments[
+							invocation.arguments.indexOf('json-log-path') + 1
+						];
 					if (logFile === undefined) {
 						throw new Error('missing json-log-path');
 					}
@@ -169,42 +276,51 @@ describe('buildAction', () => {
 		const receiptText = await readFile(receiptFile, 'utf8');
 		const receiptJson: unknown = JSON.parse(receiptText);
 		const receipt = buildReceiptSchema.parse(receiptJson);
-		expect({ commands, receipt }).toStrictEqual({
-			commands: [
-				['build', '--dry-run', '--json', '--no-link', '--', '.#app'],
-				[
-					'build',
-					'--no-link',
-					'--print-out-paths',
-					'--option',
-					'json-log-path',
-					path.join(directory, 'cupboard-nix-attempt-1.jsonl'),
-					'--keep-going',
-					'--',
-					'.#app'
-				],
-				[
-					'build',
-					'--no-link',
-					'--print-out-paths',
-					'--option',
-					'json-log-path',
-					path.join(directory, 'cupboard-nix-attempt-2.jsonl'),
-					'--keep-going',
-					'--',
-					'.#app'
-				],
-				[
-					'build',
-					'--rebuild',
-					'--no-link',
-					'--builders',
-					'',
-					'--max-jobs',
-					'1',
-					'--',
-					`${appDerivation}^*`
-				]
+		expect({ invocations, receipt }).toStrictEqual({
+			invocations: [
+				{
+					arguments: ['build', '--dry-run', '--json', '--no-link', '--stdin'],
+					stdin: '.#app\n'
+				},
+				{
+					arguments: [
+						'build',
+						'--no-link',
+						'--print-out-paths',
+						'--option',
+						'json-log-path',
+						path.join(directory, 'cupboard-nix-attempt-1.jsonl'),
+						'--keep-going',
+						'--stdin'
+					],
+					stdin: '.#app\n'
+				},
+				{
+					arguments: [
+						'build',
+						'--no-link',
+						'--print-out-paths',
+						'--option',
+						'json-log-path',
+						path.join(directory, 'cupboard-nix-attempt-2.jsonl'),
+						'--keep-going',
+						'--stdin'
+					],
+					stdin: '.#app\n'
+				},
+				{
+					arguments: [
+						'build',
+						'--rebuild',
+						'--no-link',
+						'--builders',
+						'',
+						'--max-jobs',
+						'1',
+						'--stdin'
+					],
+					stdin: `${appDerivation}^*\n`
+				}
 			],
 			receipt: {
 				version: 1,

@@ -413,13 +413,15 @@ steps:
       receipt-file: ${{ steps.build.outputs.receipt-file }}
 ```
 
-`installables` is newline-delimited. The build action retries three times and
-outputs the realised `paths`, a `paths-file`, and the `receipt-file` consumed by
-the attest action. A path substituted from a cache or already present from an
-earlier run is not recorded as built. Outputs returned by a remote builder are
-rebuilt and compared with `nix build --rebuild` before they qualify. When no
-path qualifies, nothing is signed and `bundle-path` is empty, which
-`actions/push` accepts as no attestations.
+`installables` is newline-delimited. Generated lists can instead be written to a
+newline-delimited file and passed as `installables-file`, which avoids runner
+limits on the size of action inputs and environment variables. The build action
+retries three times and outputs the realised `paths`, a `paths-file`, and the
+`receipt-file` consumed by the attest action. A path substituted from a cache or
+already present from an earlier run is not recorded as built. Outputs returned
+by a remote builder are rebuilt and compared with `nix build --rebuild` before
+they qualify. When no path qualifies, nothing is signed and `bundle-path` is
+empty, which `actions/push` accepts as no attestations.
 
 The action outputs `bundle-path`, the signed bundle covering every qualifying
 path, alongside `checksums-file` and `subject-count`. `id-token: write` lets the

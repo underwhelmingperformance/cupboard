@@ -159,21 +159,27 @@ describe('cupboard flake publish output records', () => {
 		});
 	});
 
-	it('chooses delimiters that cannot collide with installable records', async () => {
+	it('keeps generated installable lists in runner files', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 
 		expect({
-			fixedDelimiters: contents.match(/value<<EOF/gu) ?? [],
-			collisionChecks:
+			fileOutputs:
+				contents.match(/echo "file=\$\{installables_file\}"/gu) ?? [],
+			fileInputs:
 				contents.match(
-					/for record in "\$\{(?:candidates|attrs)\[@\]\}"; do/gu
-				) ?? []
+					/installables-file: \$\{\{ steps\.installables\.outputs\.file \}\}/gu
+				) ?? [],
+			inlineOutputs: contents.match(/echo "value<</gu) ?? []
 		}).toStrictEqual({
-			fixedDelimiters: [],
-			collisionChecks: [
-				'for record in "${candidates[@]}"; do',
-				'for record in "${attrs[@]}"; do'
-			]
+			fileOutputs: Array.from(
+				{ length: 2 },
+				() => 'echo "file=${installables_file}"'
+			),
+			fileInputs: Array.from(
+				{ length: 2 },
+				() => 'installables-file: ${{ steps.installables.outputs.file }}'
+			),
+			inlineOutputs: []
 		});
 	});
 });

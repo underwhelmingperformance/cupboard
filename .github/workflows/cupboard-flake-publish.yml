@@ -411,29 +411,12 @@ jobs:
               echo "::warning::some seed attributes did not evaluate on this runner"
           fi
 
-          candidates=()
-          while IFS= read -r candidate; do
-            candidates+=("${candidate}")
-          done < <(jq -r --arg group "${GROUP}" '.seedGroups[] | select(.key == $group) | .candidates[] | "\(.drvPath)^\(.output)"' "${plan}")
-          delimiter=CUPBOARD_INSTALLABLES
-          while true; do
-            collision=false
-            for record in "${candidates[@]}"; do
-              if [[ "${record}" == "${delimiter}" ]]; then
-                collision=true
-                break
-              fi
-            done
-            if [[ "${collision}" == false ]]; then
-              break
-            fi
-            delimiter="${delimiter}_"
-          done
-          {
-            echo "value<<${delimiter}"
-            printf '%s\n' "${candidates[@]}"
-            echo "${delimiter}"
-          } >> "${GITHUB_OUTPUT}"
+          installables_file="${RUNNER_TEMP}/cupboard-seed-installables.txt"
+          jq -r \
+            --arg group "${GROUP}" \
+            '.seedGroups[] | select(.key == $group) | .candidates[] | "\(.drvPath)^\(.output)"' \
+            "${plan}" > "${installables_file}"
+          echo "file=${installables_file}" >> "${GITHUB_OUTPUT}"
 
       # A remote copy can truncate after some paths have arrived. The build
       # action keeps one receipt across all three attempts, so those paths stay
@@ -441,7 +424,7 @@ jobs:
       - uses: ./.cupboard/actions/build-paths
         id: build
         with:
-          installables: ${{ steps.installables.outputs.value }}
+          installables-file: ${{ steps.installables.outputs.file }}
           keep-going: 'true'
           max-jobs: ${{ matrix.remote && '0' || '' }}
           allow-failure: 'true'
@@ -530,34 +513,17 @@ jobs:
           set -euo pipefail
           plan=$(find "${RUNNER_TEMP}/cupboard-plan" -type f -name '*.json' -print -quit)
 
-          attrs=()
-          while IFS= read -r attr; do
-            attrs+=("${attr}")
-          done < <(jq -r --arg group "${GROUP}" '.fallbackGroups[] | select(.key == $group) | .targets[] | "\(.attr)^\(.outputs | join(","))"' "${plan}")
-          delimiter=CUPBOARD_INSTALLABLES
-          while true; do
-            collision=false
-            for record in "${attrs[@]}"; do
-              if [[ "${record}" == "${delimiter}" ]]; then
-                collision=true
-                break
-              fi
-            done
-            if [[ "${collision}" == false ]]; then
-              break
-            fi
-            delimiter="${delimiter}_"
-          done
-          {
-            echo "value<<${delimiter}"
-            printf '%s\n' "${attrs[@]}"
-            echo "${delimiter}"
-          } >> "${GITHUB_OUTPUT}"
+          installables_file="${RUNNER_TEMP}/cupboard-fallback-installables.txt"
+          jq -r \
+            --arg group "${GROUP}" \
+            '.fallbackGroups[] | select(.key == $group) | .targets[] | "\(.attr)^\(.outputs | join(","))"' \
+            "${plan}" > "${installables_file}"
+          echo "file=${installables_file}" >> "${GITHUB_OUTPUT}"
 
       - uses: ./.cupboard/actions/build-paths
         id: build
         with:
-          installables: ${{ steps.installables.outputs.value }}
+          installables-file: ${{ steps.installables.outputs.file }}
           keep-going: 'true'
           max-jobs: ${{ matrix.remote && '0' || '' }}
           allow-failure: 'true'
