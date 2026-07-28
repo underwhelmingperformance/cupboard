@@ -12,12 +12,13 @@ import {
 } from '../attest/verify.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { storedCacheFor } from '../client/client.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { CliUsageError } from '../errors.ts';
 import { parseReadUser } from '../read-user.ts';
 
 interface VerifyOptions {
 	readonly narHash?: string;
-	readonly url?: string;
+	readonly url?: URL;
 	readonly storePathHash?: string;
 	readonly cache?: string;
 	readonly bundleDigest?: string;
@@ -89,7 +90,8 @@ export function registerAttestCommands(
 		.option('--nar-hash <hash>', 'expected NAR hash for local bundle mode')
 		.option(
 			'--url <url>',
-			'remote tenant URL to verify against (e.g. https://cupboard.example.workers.dev/t/<slug>)'
+			'remote tenant URL to verify against (e.g. https://cupboard.example.workers.dev/t/<slug>)',
+			parseWorkerUrl
 		)
 		.option('--store-path-hash <hash>', 'remote store-path hash to inspect')
 		.option('--cache <name>', 'remote named cache')

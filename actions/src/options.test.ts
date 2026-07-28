@@ -8,7 +8,8 @@ import {
 	isNixPositionalArgument,
 	provided,
 	providedCache,
-	providedReadUser
+	providedReadUser,
+	providedUrl
 } from './options.ts';
 
 describe('isNixPositionalArgument', () => {
@@ -31,6 +32,64 @@ describe('provided', () => {
 		['treats undefined as absent', undefined, undefined]
 	])('%s', (_name, value, expected) => {
 		expect(provided(value)).toBe(expected);
+	});
+});
+
+// The endpoint URLs built from a URL input derive from its origin and path
+// alone, so anything else the value carries is a copy mistake surfaced here
+// with the offending field's name.
+describe('providedUrl', () => {
+	it.each([
+		[
+			'a plain origin',
+			'https://cache.example.test',
+			'https://cache.example.test/'
+		],
+		[
+			'a tenant path',
+			'https://cache.example.test/t/acme',
+			'https://cache.example.test/t/acme'
+		],
+		[
+			'an http URL',
+			'http://localhost:8787/t/acme',
+			'http://localhost:8787/t/acme'
+		],
+		[
+			'a padded value',
+			'  https://cache.example.test/t/acme  ',
+			'https://cache.example.test/t/acme'
+		],
+		[
+			'a trailing slash',
+			'https://cache.example.test/t/acme/',
+			'https://cache.example.test/t/acme'
+		]
+	])('accepts %s', (_name, value, expected) => {
+		expect(providedUrl('cache-url', value)?.href).toBe(expected);
+	});
+
+	it.each([
+		['an absent value', undefined],
+		['a blank value', ' '.repeat(3)]
+	])('reads %s as absent', (_name, value) => {
+		expect(providedUrl('cache-url', value)).toBeUndefined();
+	});
+
+	it.each([
+		['a bare hostname', 'cache.example.test/t/acme'],
+		['a non-http scheme', 'ftp://cache.example.test'],
+		['a fragment', 'https://cache.example.test/t/acme#copied'],
+		['a query string', 'https://cache.example.test/t/acme?tab=keys'],
+		['an embedded username', 'https://ci@cache.example.test/t/acme'],
+		['embedded credentials', 'https://ci:secret@cache.example.test/t/acme']
+	])('refuses %s', (_name, value) => {
+		expect(() => providedUrl('cache-url', value)).toThrow(
+			new InvalidInputError(
+				'cache-url',
+				'cache-url must be an http(s) URL with nothing beyond origin and path'
+			)
+		);
 	});
 });
 

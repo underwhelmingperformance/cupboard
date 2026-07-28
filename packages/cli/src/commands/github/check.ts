@@ -324,9 +324,7 @@ async function checkReuseView(
 	let view: CacheInfo;
 
 	try {
-		view = await fetchCacheInfo(
-			new URL(reuseViewUrl(url.href, pullRequestViewName))
-		);
+		view = await fetchCacheInfo(reuseViewUrl(url, pullRequestViewName));
 	} catch (error) {
 		if (isAbortError(error)) {
 			throw error;

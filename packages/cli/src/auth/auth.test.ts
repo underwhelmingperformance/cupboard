@@ -1,3 +1,4 @@
+import { canonicalHref } from '@cupboard/nix-store/url';
 import type {
 	ParsedTokenResponse,
 	TokenResponse
@@ -6,7 +7,6 @@ import { describe, expect, it } from 'vitest';
 
 import { audienceSchema } from '../audience.ts';
 import { CupboardClient } from '../client/client.ts';
-import { canonicalHref } from '../client/transport.ts';
 import type { CloudflareGrant } from '../deploy/cloudflare-oauth.ts';
 import { CupboardHttpError, OwnerLoginRequiredError } from '../errors.ts';
 import { testWithConfigHome } from '../test-support.ts';

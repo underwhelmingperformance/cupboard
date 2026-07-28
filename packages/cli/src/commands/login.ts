@@ -1,4 +1,5 @@
 import { openBrowser } from '@cupboard/cli-ui';
+import { canonicalHref } from '@cupboard/nix-store/url';
 import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
 import type { Command } from 'commander';
 
@@ -15,7 +16,7 @@ import {
 } from '../auth/token-store.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
-import { canonicalHref, parseWorkerUrl } from '../client/transport.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { type CredentialChain, freshIdToken } from '../deploy/auth.ts';
 import {
 	type CloudflareGrant,

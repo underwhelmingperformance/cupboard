@@ -9,6 +9,7 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
+import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	cacheAvailabilityMaxPaths,
 	cacheAvailabilityResponseSchema,
@@ -1009,7 +1010,7 @@ interface ProbeOptions {
 
 export function availableCachePaths(
 	options: ProbeOptions & {
-		readonly baseUrl: string;
+		readonly baseUrl: URL;
 		readonly cache: StoredCache;
 	}
 ): Promise<Set<StorePathString>> {
@@ -1028,7 +1029,7 @@ export function availableCachePaths(
  */
 export function availableViewPaths(
 	options: ProbeOptions & {
-		readonly baseUrl: string;
+		readonly baseUrl: URL;
 		readonly view: string;
 	}
 ): Promise<Set<StorePathString>> {
@@ -1040,7 +1041,7 @@ export function availableViewPaths(
 }
 
 async function availablePathsAt(
-	probeUrl: string,
+	probeUrl: URL,
 	options: ProbeOptions,
 	maximumBatchSize: number
 ): Promise<Set<StorePathString>> {
@@ -1097,11 +1098,13 @@ async function availablePathsAt(
 
 async function queryMissingStorePathHashes(
 	fetcher: typeof fetch,
-	probeUrl: string,
+	probeUrl: URL,
 	storePathHashes: readonly StorePathHash[],
 	headers: Readonly<Record<string, string>>
 ): Promise<StorePathHash[]> {
-	const target = `${probeUrl}/api/v1/missing-paths`;
+	// The query hangs off the base under a fixed protocol path, so the base is
+	// rendered once and the path appended as text.
+	const target = `${canonicalHref(probeUrl)}/api/v1/missing-paths`;
 
 	return fetchWithProbeDeadline(
 		fetcher,

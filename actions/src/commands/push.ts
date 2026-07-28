@@ -4,6 +4,7 @@ import { env } from 'node:process';
 
 import { Nix } from '@cupboard/nix';
 import { type StoredCache } from '@cupboard/nix-store/scalars';
+import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	type ParsedPushSummary,
 	pushSummaryResultKind,
@@ -37,14 +38,14 @@ import {
 	collectLines,
 	isEnabled,
 	provided,
-	providedCache
+	providedCache,
+	providedUrl
 } from '../options.ts';
 import {
 	fallbackReleaseRepository,
 	installCupboard,
 	normaliseVersion
 } from '../release-install.ts';
-import { isHttpUrl } from '../substituters.ts';
 
 const legacyPushSummarySchema = pushSummarySchema.omit({ paths: true });
 
@@ -75,7 +76,7 @@ export interface PushInputs {
 	readonly releaseRepository: string;
 	readonly expectedSourceCommit: string;
 	readonly installDirectory: string;
-	readonly url: string;
+	readonly url: URL;
 	readonly paths: readonly string[];
 	readonly cache: StoredCache;
 	readonly audience: string;
@@ -107,7 +108,7 @@ const defaultRunPushCupboardDependencies: RunPushCupboardDependencies = {
 };
 
 interface PushArgumentsOptions {
-	readonly url: string;
+	readonly url: URL;
 	readonly paths: readonly string[];
 	readonly audience: string;
 	readonly root: string;
@@ -186,19 +187,12 @@ export function resolvePushInputs(
 	options: PushOptions,
 	environment: Environment
 ): PushInputs {
-	const url = provided(options.url);
+	// A malformed URL would otherwise surface much later as a confusing OIDC
+	// or fetch failure.
+	const url = providedUrl('url', options.url);
 
 	if (url === undefined) {
 		throw new MissingInputError('url');
-	}
-
-	// A malformed URL would otherwise surface much later as a confusing OIDC
-	// or fetch failure.
-	if (!isHttpUrl(url)) {
-		throw new InvalidInputError(
-			'url',
-			'url must be an http(s) URL with nothing beyond origin and path'
-		);
 	}
 
 	if (options.paths.length === 0) {
@@ -464,7 +458,7 @@ export function buildPushArguments(
 	const arguments_ = [
 		'--no-colour',
 		'push',
-		options.url,
+		canonicalHref(options.url),
 		...options.paths,
 		'--github-oidc'
 	];

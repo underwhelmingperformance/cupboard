@@ -1,3 +1,5 @@
+import { InvalidCacheUrlBaseError } from '@cupboard/nix-store/errors';
+import { parseBaseUrl } from '@cupboard/nix-store/url';
 import {
 	reachableFetcher as sharedReachableFetcher,
 	retryingFetcher
@@ -31,33 +33,18 @@ export function parseWorkerUrl(value: string | URL): URL {
 		throw new InvalidWorkerUrlError(String(value));
 	}
 
-	// Every route resolves under the base's origin and path, so a URL
-	// carrying anything else would corrupt or missend the requests built on
-	// it.
-	if (
-		(url.protocol !== 'http:' && url.protocol !== 'https:') ||
-		url.username !== '' ||
-		url.password !== '' ||
-		url.search !== '' ||
-		url.hash !== ''
-	) {
-		throw new InvalidWorkerUrlBaseError();
+	// A Worker URL is the base every route and every cache URL resolves under,
+	// so it is held to the same shape, reported here in the CLI's own usage
+	// vocabulary.
+	try {
+		return parseBaseUrl(url);
+	} catch (error: unknown) {
+		if (error instanceof InvalidCacheUrlBaseError) {
+			throw new InvalidWorkerUrlBaseError();
+		}
+
+		throw error;
 	}
-
-	url.pathname = url.pathname.replace(/\/+$/u, '') || '/';
-
-	return url;
-}
-
-/**
- * Renders a Worker URL for exact-string contexts: an OIDC audience claim, a
- * stored trust rule's audience, a session-store key. `URL#href` adds a
- * trailing slash to a bare origin, so two references to the same deployment
- * could render as different strings; stripping trailing slashes gives every
- * URL one rendering, the form the workflows and docs use.
- */
-export function canonicalHref(url: URL): string {
-	return url.href.replace(/\/+$/u, '');
 }
 
 /**

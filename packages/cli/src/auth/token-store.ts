@@ -1,10 +1,9 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 
+import { canonicalHref } from '@cupboard/nix-store/url';
 import type { ParsedTokenResponse } from '@cupboard/protocol/oidc';
 import { z } from 'zod';
-
-import { canonicalHref } from '../client/transport.ts';
 
 import { decodeJwtPayload } from './jwt.ts';
 import {

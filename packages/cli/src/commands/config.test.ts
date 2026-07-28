@@ -1,3 +1,4 @@
+import { canonicalHref } from '@cupboard/nix-store/url';
 import type { Reporter } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { describe, expect, it } from 'vitest';
@@ -108,7 +109,7 @@ describe('runConfig', () => {
 		const captured: CapturedOutput = { data: [], infos: [] };
 
 		runConfig(
-			'https://cupboard.example.workers.dev',
+			new URL('https://cupboard.example.workers.dev'),
 			'cupboard-1:abc123',
 			capturingReporter(captured)
 		);
@@ -120,7 +121,7 @@ describe('runConfig', () => {
 		const captured: CapturedOutput = { data: [], infos: [] };
 
 		runConfig(
-			'https://cupboard.example.workers.dev',
+			new URL('https://cupboard.example.workers.dev'),
 			'cupboard-1:abc123',
 			capturingReporter(captured),
 			{ user: alice, password: 'correct-horse-battery-staple' }
@@ -142,7 +143,7 @@ describe('runConfig', () => {
 		const captured: CapturedOutput = { data: [], infos: [] };
 
 		runConfig(
-			'http://localhost:1234',
+			new URL('http://localhost:1234'),
 			'cupboard-1:abc123',
 			capturingReporter(captured),
 			{ user: alice, password: 'correct-horse-battery-staple' }
@@ -187,7 +188,9 @@ describe('cacheSubstituterUrl', () => {
 			expected: 'https://cupboard.example.workers.dev/t/acme/cache/builds'
 		}
 	])('$name', ({ cache, expected, url }) => {
-		expect(cacheSubstituterUrl(new URL(url), cache)).toBe(expected);
+		const substituter = cacheSubstituterUrl(new URL(url), cache);
+
+		expect(canonicalHref(substituter)).toBe(expected);
 	});
 
 	it('rejects an invalid cache name', () => {

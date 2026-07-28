@@ -11,6 +11,7 @@ import {
 	type StoredCache,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	graceCoverageResponseSchema,
 	type ParsedGraceCoverageResponse,
@@ -59,7 +60,8 @@ import {
 	isEnabled,
 	provided,
 	providedCache,
-	providedReadUser
+	providedReadUser,
+	providedUrl
 } from '../options.ts';
 import {
 	availableCachePaths,
@@ -76,7 +78,6 @@ import {
 	type TargetEvaluation,
 	viewProbePaths
 } from '../publish-plan.ts';
-import { isHttpUrl } from '../substituters.ts';
 
 export type EnsureRunner = (
 	command: string,
@@ -143,7 +144,7 @@ export interface PlanOptions {
 
 export interface PlanInputs {
 	readonly targets: readonly PublishTarget[];
-	readonly url: string;
+	readonly url: URL;
 	readonly cache: StoredCache;
 	readonly rootPrefix: string;
 	readonly ttl: string;
@@ -216,19 +217,12 @@ export function resolvePlanInputs(
 ): PlanInputs {
 	const targets = parseTargets(options.targets);
 
-	const url = provided(options.url);
+	// A malformed URL would otherwise surface much later as a confusing OIDC
+	// or fetch failure.
+	const url = providedUrl('url', options.url);
 
 	if (url === undefined) {
 		throw new MissingInputError('url');
-	}
-
-	// A malformed URL would otherwise surface much later as a confusing OIDC
-	// or fetch failure.
-	if (!isHttpUrl(url)) {
-		throw new InvalidInputError(
-			'url',
-			'url must be an http(s) URL with nothing beyond origin and path'
-		);
 	}
 
 	const rootPrefix = provided(options.rootPrefix);
@@ -630,7 +624,7 @@ async function ensureRoot(
 		resultFile,
 		'root',
 		'ensure',
-		inputs.url,
+		canonicalHref(inputs.url),
 		root,
 		...storePaths,
 		'--github-oidc'
@@ -731,7 +725,7 @@ export async function verifyGraceCoverage(
 		resultFile,
 		'policy',
 		'grace-coverage',
-		inputs.url,
+		canonicalHref(inputs.url),
 		'--github-oidc'
 	];
 
@@ -832,7 +826,7 @@ export async function confirmDestinationIntermediates(
 		'--result-file',
 		resultFile,
 		'confirm',
-		inputs.url,
+		canonicalHref(inputs.url),
 		...storePaths,
 		'--github-oidc'
 	];
