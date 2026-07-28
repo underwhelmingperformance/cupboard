@@ -1,23 +1,20 @@
+import { NixPublicKey } from '@cupboard/nix-store/public-key';
+import { type NixKeyName, nixKeyNameSchema } from '@cupboard/nix-store/scalars';
 import {
 	type SigningKeyStage,
 	type SigningKeySummary
 } from '@cupboard/protocol/keys';
 import { z } from 'zod';
 
-import {
-	type NixKeyName,
-	nixKeyNameSchema,
-	parseJwk
-} from '../crypto/crypto.ts';
+import { parseJwk } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 
 export const storedSignaturesSchema = z.array(z.string());
 
 export interface SigningKey {
 	readonly id: string;
-	readonly name: NixKeyName;
 	readonly privateJwk: JsonWebKey;
-	readonly publicKey: string;
+	readonly publicKey: NixPublicKey;
 	readonly signing: boolean;
 	readonly published: boolean;
 	readonly createdAt: string;
@@ -25,16 +22,16 @@ export interface SigningKey {
 
 export const bootstrapKeyName = nixKeyNameSchema.parse('cupboard-1');
 
+// The stored public key is the only record of the name its signatures carry, so
+// a row that does not render as `<name>:<base64>` fails here rather than
+// yielding a name no client trusts.
 export function signingKeyFromRow(
 	row: typeof schema.signingKeys.$inferSelect
 ): SigningKey {
 	return {
 		id: row.id,
-		name: nixKeyNameSchema.parse(
-			row.publicKey.slice(0, row.publicKey.indexOf(':'))
-		),
 		privateJwk: parseJwk(row.privateJwkJson),
-		publicKey: row.publicKey,
+		publicKey: new NixPublicKey(row.publicKey),
 		signing: row.signing,
 		published: row.published,
 		createdAt: row.createdAt
@@ -44,7 +41,7 @@ export function signingKeyFromRow(
 // A stable order keeps the rendered `/pubkey` body and the narinfo `Sig:`
 // lines deterministic, so a re-materialised narinfo hashes identically.
 export function byPublicKey(left: SigningKey, right: SigningKey): number {
-	return left.publicKey > right.publicKey ? 1 : -1;
+	return left.publicKey.value > right.publicKey.value ? 1 : -1;
 }
 
 function keyStage(key: SigningKey): SigningKeyStage {
@@ -58,7 +55,7 @@ function keyStage(key: SigningKey): SigningKeyStage {
 export function keySummary(key: SigningKey): SigningKeySummary {
 	return {
 		id: key.id,
-		publicKey: key.publicKey,
+		publicKey: key.publicKey.value,
 		stage: keyStage(key),
 		createdAt: key.createdAt
 	};
@@ -71,7 +68,7 @@ const keyNamePattern = /^cupboard-(\d+)$/;
 // rotation takes the highest existing index plus one.
 export function nextKeyName(keys: readonly SigningKey[]): NixKeyName {
 	const indices = keys.flatMap((key) => {
-		const match = keyNamePattern.exec(key.name);
+		const match = keyNamePattern.exec(key.publicKey.name);
 
 		return match === null ? [] : [Math.trunc(Number(match[1] ?? '0'))];
 	});

@@ -6,6 +6,7 @@ import {
 	authKeyIdSchema,
 	DEFAULT_CACHE,
 	narInfoGenerationSchema,
+	nixKeyNameSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	predicateTypeSchema,
@@ -97,11 +98,7 @@ import {
 	invalidateTenantRow,
 	refreshTenantMembership
 } from './control/tenant-membership.ts';
-import {
-	generateSigningKey,
-	nixKeyNameSchema,
-	parseJwk
-} from './crypto/crypto.ts';
+import { generateSigningKey, parseJwk } from './crypto/crypto.ts';
 import * as d1Schema from './db/d1-schema.ts';
 import {
 	blobReference,
@@ -3112,7 +3109,7 @@ export async function seedSigningKeys(
 				.values({
 					id: seed.id,
 					privateJwkJson: JSON.stringify(generated.privateJwk),
-					publicKey: generated.publicKey,
+					publicKey: generated.publicKey.value,
 					signing: seed.signing,
 					published: seed.published,
 					createdAt: isoTimestamp(createdAt)
@@ -3122,7 +3119,7 @@ export async function seedSigningKeys(
 			seeded.push({
 				id: seed.id,
 				name: seed.name,
-				publicKey: generated.publicKey
+				publicKey: generated.publicKey.value
 			});
 		}
 

@@ -118,6 +118,17 @@ export type SigningKeyId = z.infer<typeof signingKeyIdSchema>;
 export const authKeyIdSchema = z.string().brand('AuthKeyId');
 export type AuthKeyId = z.infer<typeof authKeyIdSchema>;
 
+// A Nix signing key's name: the label a rendered public key or a narinfo
+// signature is prefixed with, and the name a client lists in
+// `trusted-public-keys`. The colon separates the name from the base64 half, so
+// a name carrying one could not be recovered from a rendered key.
+export const nixKeyNameSchema = z
+	.string()
+	.min(1)
+	.refine((value) => !value.includes(':'))
+	.brand('NixKeyName');
+export type NixKeyName = z.infer<typeof nixKeyNameSchema>;
+
 // The Nix narinfo fingerprint a signature is computed over (`narFingerprint`
 // renders it). Its own brand keeps it from being handed to a signer as an
 // interchangeable plain string.

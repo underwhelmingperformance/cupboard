@@ -1684,7 +1684,7 @@ export class CommitPipelineService {
 		);
 		const sigs = await Promise.all(
 			signingKeys.map((key) =>
-				signNixFingerprint(key.privateJwk, fingerprint, key.name)
+				signNixFingerprint(key.privateJwk, fingerprint, key.publicKey.name)
 			)
 		);
 		const referencesJson = JSON.stringify(metadata.references);

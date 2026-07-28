@@ -48,6 +48,16 @@ export class InvalidCacheUrlBaseError extends ProtocolError {
 	}
 }
 
+// A rendered Nix public key that is not `<name>:<base64>`. Both halves are
+// required: without the name there is nothing to attribute a signature to, and
+// without the material there is nothing to verify it with.
+export class InvalidNixPublicKeyError extends ProtocolError {
+	constructor(public readonly value: string) {
+		super(`Invalid Nix public key: ${value}`);
+		this.name = 'InvalidNixPublicKeyError';
+	}
+}
+
 // A netrc credential carrying a control character, which no quoting can encode
 // into a single netrc token.
 export class NetrcControlCharacterError extends ProtocolError {

@@ -1,3 +1,4 @@
+import { NixPublicKey } from '@cupboard/nix-store/public-key';
 import { type SigningKeyId } from '@cupboard/nix-store/scalars';
 import {
 	type KeyListResponse,
@@ -10,8 +11,7 @@ import { eq } from 'drizzle-orm';
 
 import {
 	generateSigningKey,
-	generateSigningKeyMaterial,
-	renderSigningPublicKey
+	generateSigningKeyMaterial
 } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import { LastSigningKeyError } from '../errors.ts';
@@ -66,7 +66,7 @@ export class SigningKeysService {
 			.values({
 				id: 'active',
 				privateJwkJson: JSON.stringify(generated.privateJwk),
-				publicKey: generated.publicKey,
+				publicKey: generated.publicKey.value,
 				signing: true,
 				published: true,
 				createdAt
@@ -76,7 +76,6 @@ export class SigningKeysService {
 		return [
 			{
 				id: 'active',
-				name: bootstrapKeyName,
 				privateJwk: generated.privateJwk,
 				publicKey: generated.publicKey,
 				signing: true,
@@ -95,7 +94,7 @@ export class SigningKeysService {
 	private async publishedKeysText(): Promise<string> {
 		const keys = await this.publishedKeys();
 
-		return keys.map((key) => key.publicKey).join('\n');
+		return keys.map((key) => key.publicKey.value).join('\n');
 	}
 
 	resetKeyCaches(): void {
@@ -112,7 +111,7 @@ export class SigningKeysService {
 
 		return this.context.criticalSection(async () => {
 			const existing = await this.loadedKeys();
-			const publicKey = renderSigningPublicKey(
+			const publicKey = NixPublicKey.of(
 				nextKeyName(existing),
 				material.publicRaw
 			);
@@ -123,7 +122,7 @@ export class SigningKeysService {
 				.values({
 					id,
 					privateJwkJson: JSON.stringify(material.privateJwk),
-					publicKey,
+					publicKey: publicKey.value,
 					signing: true,
 					published: true,
 					createdAt: isoTimestamp(new Date())
