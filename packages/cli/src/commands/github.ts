@@ -19,7 +19,7 @@ import {
 	viewPriorityMargin
 } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
-import { basicAuthHeader } from '@cupboard/shared/http';
+import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 
@@ -42,6 +42,7 @@ import {
 	GraceTooShortError,
 	ReadCredentialPairError
 } from '../errors.ts';
+import { parseReadUser } from '../read-user.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 import { type GithubCheckOptions, runGithubCheck } from './github/check.ts';
@@ -72,7 +73,7 @@ export interface GithubSetupOptions {
 	readonly grace: string;
 	readonly workflowRef: string;
 	readonly yes?: boolean;
-	readonly readUser?: string;
+	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
 }
 
@@ -110,7 +111,7 @@ export interface SetupStep {
 }
 
 export interface ReadCredentialOptions {
-	readonly readUser?: string;
+	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
 	readonly signal?: AbortSignal;
 }
@@ -1030,7 +1031,8 @@ export function registerGithubCommands(
 		)
 		.option(
 			'--read-user <user>',
-			'Basic read credential for tenants whose reads are private.'
+			'Basic read credential for tenants whose reads are private.',
+			parseReadUser
 		)
 		.option(
 			'--read-password <password>',
@@ -1082,7 +1084,8 @@ export function registerGithubCommands(
 		)
 		.option(
 			'--read-user <user>',
-			'Basic read credential for tenants whose reads are private.'
+			'Basic read credential for tenants whose reads are private.',
+			parseReadUser
 		)
 		.option(
 			'--read-password <password>',

@@ -15,7 +15,7 @@ import {
 	reuseViewPrioritySchema
 } from '@cupboard/protocol/reuse-views';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
-import { basicAuthHeader } from '@cupboard/shared/http';
+import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
 
@@ -34,7 +34,12 @@ import {
 	requireEnvironment,
 	setOutput
 } from '../inputs.ts';
-import { isEnabled, provided, providedCache } from '../options.ts';
+import {
+	isEnabled,
+	provided,
+	providedCache,
+	providedReadUser
+} from '../options.ts';
 import {
 	fallbackReleaseRepository,
 	installCupboard,
@@ -76,7 +81,7 @@ export interface SetupInputs {
 	readonly cache: StoredCache;
 	readonly reuseView: string;
 	readonly trustedPublicKey: string;
-	readonly readUser: string;
+	readonly readUser: ReadUser | '';
 	readonly readPassword: string;
 	readonly nixConfigFile: string;
 }
@@ -87,7 +92,7 @@ interface ConfigureNixInputs extends SetupInputs {
 
 interface WriteNetrcOptions {
 	readonly cacheUrl: string;
-	readonly readUser: string;
+	readonly readUser: ReadUser;
 	readonly readPassword: string;
 	readonly runnerTemporaryDirectory: string;
 }
@@ -151,7 +156,7 @@ export function resolveSetupInputs(
 ): SetupInputs {
 	// Both credential halves are taken verbatim: surrounding whitespace is
 	// part of a credential, so only its complete absence means "not set".
-	const readUser = options.readUser ?? '';
+	const readUser = providedReadUser(options.readUser);
 	const readPassword = options.readPassword ?? '';
 
 	if (readUser !== '' && readPassword === '') {
@@ -282,7 +287,7 @@ export interface ResolveSubstitutersOptions {
 	readonly cacheUrl: string;
 	readonly cache: StoredCache;
 	readonly reuseView: string;
-	readonly readUser: string;
+	readonly readUser: ReadUser | '';
 	readonly readPassword: string;
 }
 
@@ -309,7 +314,7 @@ export async function resolveSubstituters(
 	const viewUrl = reuseViewUrlFor(options.cacheUrl, options.reuseView);
 	const fetcher = retryingFetcher(dependencies.fetch ?? fetch);
 	const headers =
-		options.readPassword === ''
+		options.readUser === ''
 			? undefined
 			: basicAuthHeader({
 					user: options.readUser,
@@ -353,7 +358,7 @@ async function configureNix(
 		'RUNNER_TEMP'
 	);
 	const netrcFile =
-		inputs.readPassword === ''
+		inputs.readUser === ''
 			? undefined
 			: await writeNetrc({
 					cacheUrl: inputs.cacheUrl,

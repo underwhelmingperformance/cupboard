@@ -24,6 +24,7 @@ import {
 } from '@cupboard/protocol/reuse-views';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { ResultRow } from '@cupboard/reporter';
+import { readUserInputSchema } from '@cupboard/shared/http';
 import { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
@@ -54,6 +55,7 @@ import { githubBranchAddBody, githubPrAddBody } from './oidc-trust.ts';
 import { type RepositoryIdentity } from './oidc-trust/github.ts';
 
 const url = parseWorkerUrl('https://cupboard.example.workers.dev/t/acme');
+const alice = readUserInputSchema.parse('alice');
 const identity: RepositoryIdentity = {
 	repositoryId: 1234,
 	repositoryOwnerId: 5678,
@@ -1684,7 +1686,7 @@ describe('cacheInfoFetcher', () => {
 	it('sends the Basic credential and parses the answer', async () => {
 		const requests: { url: string; authorization: string | undefined }[] = [];
 		const fetch = cacheInfoFetcher(
-			{ readUser: 'alice', readPassword: 's3cret' },
+			{ readUser: alice, readPassword: 's3cret' },
 			{
 				fetch: (input, init) => {
 					requests.push({
@@ -1786,7 +1788,7 @@ describe('cacheInfoFetcher', () => {
 	);
 
 	it('rejects half a credential pair before any request', () => {
-		expect(() => cacheInfoFetcher({ readUser: 'alice' })).toThrow(
+		expect(() => cacheInfoFetcher({ readUser: alice })).toThrow(
 			ReadCredentialPairError
 		);
 	});

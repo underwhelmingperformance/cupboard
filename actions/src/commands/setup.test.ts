@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import { CacheInfoParseError } from '@cupboard/nix-store/errors';
 import { DEFAULT_CACHE, storedCacheSchema } from '@cupboard/nix-store/scalars';
+import { readUserInputSchema } from '@cupboard/shared/http';
 import { describe, expect, it, vi } from 'vitest';
 
 import { probeDeadlineMs } from '../cache-probe.ts';
@@ -19,16 +20,19 @@ import {
 	fetchCachePublicKeyAt,
 	resolveSetupInputs,
 	resolveSubstituters,
+	type ResolveSubstitutersOptions,
 	type SetupOptions,
 	writeNetrc
 } from './setup.ts';
+
+const alice = readUserInputSchema.parse('alice');
 
 describe('writeNetrc', () => {
 	it('writes a private netrc file scoped to the cache host', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-netrc-'));
 		const netrcFile = await writeNetrc({
 			cacheUrl: 'https://cache.example.test/t/acme',
-			readUser: 'ci',
+			readUser: readUserInputSchema.parse('ci'),
 			readPassword: 'secret',
 			runnerTemporaryDirectory: directory
 		});
@@ -201,7 +205,7 @@ function stubFetch(
 }
 
 describe('resolveSubstituters', () => {
-	const baseOptions = {
+	const baseOptions: Omit<ResolveSubstitutersOptions, 'reuseView'> = {
 		cacheUrl: 'https://cache.example.test',
 		cache: storedCacheSchema.parse(DEFAULT_CACHE),
 		readUser: '',
@@ -377,7 +381,7 @@ describe('resolveSubstituters', () => {
 	it.each([
 		[
 			'configured',
-			'alice',
+			alice,
 			'secret',
 			`Basic ${Buffer.from('alice:secret').toString('base64')}`
 		],

@@ -1,10 +1,10 @@
+import { readUserSchema } from '@cupboard/shared/http';
 import { describe, expect, it } from 'vitest';
 
 import {
 	authoriseRead,
 	hashReadPassword,
 	readPasswordSaltSchema,
-	readUserSchema,
 	type ReadVerifier
 } from './read-auth.ts';
 
@@ -54,6 +54,11 @@ describe('authoriseRead', () => {
 		{
 			name: 'malformed base64',
 			authorization: 'Basic !!!not-base64',
+			expected: false
+		},
+		{
+			name: 'a payload with no separator',
+			authorization: `Basic ${btoa('alice')}`,
 			expected: false
 		}
 	])('rejects/accepts $name', async ({ authorization, expected }) => {

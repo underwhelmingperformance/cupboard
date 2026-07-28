@@ -7,7 +7,8 @@ import {
 	isEnabled,
 	isNixPositionalArgument,
 	provided,
-	providedCache
+	providedCache,
+	providedReadUser
 } from './options.ts';
 
 describe('isNixPositionalArgument', () => {
@@ -44,6 +45,20 @@ describe('providedCache', () => {
 
 	it('refuses a value that is not a legal cache name', () => {
 		expect(() => providedCache('Not A Cache')).toThrow(InvalidInputError);
+	});
+});
+
+describe('providedReadUser', () => {
+	it.each([
+		['keeps a supplied name verbatim', ' alice ', ' alice '],
+		['reads a blank value as no read user', '', ''],
+		['reads an absent value as no read user', undefined, '']
+	])('%s', (_name, value, expected) => {
+		expect(providedReadUser(value)).toBe(expected);
+	});
+
+	it('refuses a name the credential format cannot carry', () => {
+		expect(() => providedReadUser('rea:der')).toThrow(InvalidInputError);
 	});
 });
 

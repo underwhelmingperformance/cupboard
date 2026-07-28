@@ -155,6 +155,19 @@ export class TenantAlreadyExistsError extends ServerHttpError {
 	}
 }
 
+// A Basic credential is `user:password` split on its first colon, so a read user
+// carrying one could never be read back from a reader's header. Refusing it here
+// keeps a private cache from being configured with a credential no reader can
+// present.
+export class ReadUserInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.BAD_REQUEST;
+
+	constructor(public readonly user: string) {
+		super('A read user must be non-empty and must not contain a colon');
+		this.name = 'ReadUserInvalidError';
+	}
+}
+
 export class TenantNotFoundError extends ServerHttpError {
 	readonly status = StatusCodes.NOT_FOUND;
 

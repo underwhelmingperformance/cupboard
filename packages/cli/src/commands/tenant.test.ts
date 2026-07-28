@@ -13,6 +13,7 @@ import {
 	tenantSummarySchema
 } from '@cupboard/protocol/tenants';
 import type { ResultRow } from '@cupboard/reporter';
+import { readUserInputSchema } from '@cupboard/shared/http';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -33,6 +34,7 @@ import {
 } from './tenant.ts';
 
 const acmeTenant = tenantIdSchema.parse('acme');
+const alice = readUserInputSchema.parse('alice');
 
 function thrownBy(run: () => unknown): unknown {
 	let thrown: unknown;
@@ -197,7 +199,7 @@ describe('readCredentialFromOptions', () => {
 	it('uses an explicit read password with the given user', () => {
 		expect(
 			readCredentialFromOptions({
-				readUser: 'alice',
+				readUser: alice,
 				readPassword: 'correct-horse-battery-staple'
 			})
 		).toStrictEqual({
@@ -221,7 +223,7 @@ describe('readCredentialFromOptions', () => {
 
 	it('treats auto as explicit generation', () => {
 		const selection = readCredentialFromOptions({
-			readUser: 'alice',
+			readUser: alice,
 			readPassword: 'auto'
 		});
 		const generatedPassword = z
@@ -251,7 +253,7 @@ describe('readCredentialFromOptions', () => {
 
 	it('rejects a read user with no read password', () => {
 		const error = thrownBy(() =>
-			readCredentialFromOptions({ readUser: 'alice', readPassword: false })
+			readCredentialFromOptions({ readUser: alice, readPassword: false })
 		);
 
 		expect(error).toBeInstanceOf(ReadCredentialIncompleteError);
@@ -468,7 +470,7 @@ describe('runTenantRotateCredential', () => {
 
 		await runTenantRotateCredential(
 			acmeTenant,
-			{ readUser: 'alice', readPassword: 'correct-horse-battery-staple' },
+			{ readUser: alice, readPassword: 'correct-horse-battery-staple' },
 			reporter(results),
 			{
 				rotateReadCredential(input) {
@@ -554,7 +556,7 @@ describe('runTenantRotateCredential', () => {
 
 		await runTenantRotateCredential(
 			acmeTenant,
-			{ readUser: 'alice', readPassword: 'correct-horse-battery-staple' },
+			{ readUser: alice, readPassword: 'correct-horse-battery-staple' },
 			reporter(results),
 			{
 				rotateReadCredential: () =>

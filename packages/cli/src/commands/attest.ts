@@ -1,6 +1,7 @@
 import { env } from 'node:process';
 
 import { formatCount, type ResultRow } from '@cupboard/reporter';
+import type { ReadUser } from '@cupboard/shared/http';
 import type { VerifyResult, VerifyTrust } from '@cupboard/shared/sigstore';
 import type { SlsaProvenanceSummary } from '@cupboard/shared/slsa';
 import type { Command } from 'commander';
@@ -12,6 +13,7 @@ import {
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { storedCacheFor } from '../client/client.ts';
 import { CliUsageError } from '../errors.ts';
+import { parseReadUser } from '../read-user.ts';
 
 interface VerifyOptions {
 	readonly narHash?: string;
@@ -19,7 +21,7 @@ interface VerifyOptions {
 	readonly storePathHash?: string;
 	readonly cache?: string;
 	readonly bundleDigest?: string;
-	readonly readUser?: string;
+	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
 	readonly trustedPublicKey?: string;
 	readonly trustCachePubkey?: boolean;
@@ -92,7 +94,7 @@ export function registerAttestCommands(
 		.option('--store-path-hash <hash>', 'remote store-path hash to inspect')
 		.option('--cache <name>', 'remote named cache')
 		.option('--bundle-digest <digest>', 'remote bundle digest to verify')
-		.option('--read-user <user>', 'private-read username')
+		.option('--read-user <user>', 'private-read username', parseReadUser)
 		.option('--read-password <password>', 'private-read password')
 		.option('--trusted-public-key <key>', 'trusted narinfo public key')
 		.option(
@@ -152,7 +154,8 @@ export function registerAttestCommands(
 		)
 		.action(async (bundles: string[], options: VerifyOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			const readUser = options.readUser ?? env.CUPBOARD_READ_USER;
+			const readUser =
+				options.readUser ?? parseReadUser(env.CUPBOARD_READ_USER);
 			const readPassword = options.readPassword ?? env.CUPBOARD_READ_PASSWORD;
 			const common = {
 				certificateIdentity: options.certificateIdentity,

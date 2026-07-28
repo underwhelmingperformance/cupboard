@@ -65,6 +65,17 @@ export class InvalidAudienceError extends CliUsageError {
 	}
 }
 
+// A Basic credential is `user:password` split on its first colon, so a read user
+// carrying one could never be read back from the header a reader presents.
+export class InvalidReadUserError extends CliUsageError {
+	constructor(public readonly value: string) {
+		super(
+			`Invalid read user (expected a non-empty string with no colon): ${value}`
+		);
+		this.name = 'InvalidReadUserError';
+	}
+}
+
 export class InvalidClaimError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(`Invalid --claim (expected key=value): ${value}`);

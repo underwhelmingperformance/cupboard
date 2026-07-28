@@ -5,6 +5,7 @@ import {
 	type TenantStatus,
 	tenantStatusSchema
 } from '@cupboard/protocol/tenants';
+import { type ReadUser, readUserSchema } from '@cupboard/shared/http';
 import { eq, ne } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -17,9 +18,7 @@ import {
 	type ReadPasswordHash,
 	readPasswordHashSchema,
 	type ReadPasswordSalt,
-	readPasswordSaltSchema,
-	type ReadUser,
-	readUserSchema
+	readPasswordSaltSchema
 } from '../read/read-auth.ts';
 
 import { BinaryFuse8 } from './binary-fuse-filter/index.ts';
@@ -47,7 +46,10 @@ const rowCacheTtlSeconds = 10;
 const memberKeyCacheTtlSeconds = 60;
 
 // A private cache's read verifier as the admission entry carries it: the
-// Basic-auth user and the salted hash of its password, never the plaintext.
+// Basic-auth user and the salted hash of its password, never the plaintext. The
+// user parses under the brand alone: this reads what a tenant row already holds,
+// and a stored value the credential format cannot carry leaves that cache
+// unauthenticable, not unservable.
 const tenantReadVerifierSchema = z.object({
 	user: readUserSchema,
 	passwordHash: readPasswordHashSchema,

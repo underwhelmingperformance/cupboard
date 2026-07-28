@@ -10,6 +10,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import type { TrustRuleId } from '@cupboard/protocol/oidc';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
+import type { ReadUser } from '@cupboard/shared/http';
 import { sql } from 'drizzle-orm';
 import {
 	check,
@@ -22,8 +23,7 @@ import {
 
 import {
 	type ReadPasswordHash,
-	type ReadPasswordSalt,
-	type ReadUser
+	type ReadPasswordSalt
 } from '../read/read-auth.ts';
 
 // The global, cross-tenant shared-blob facts, held in D1 and shared across all

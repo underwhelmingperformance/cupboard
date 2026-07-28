@@ -1,9 +1,12 @@
 import type { Reporter } from '@cupboard/reporter';
+import { readUserInputSchema } from '@cupboard/shared/http';
 import { describe, expect, it } from 'vitest';
 
 import { InvalidCacheNameError } from '../errors.ts';
 
 import { cacheSubstituterUrl, runConfig } from './config.ts';
+
+const alice = readUserInputSchema.parse('alice');
 
 interface CapturedOutput {
 	readonly data: string[];
@@ -120,7 +123,7 @@ describe('runConfig', () => {
 			'https://cupboard.example.workers.dev',
 			'cupboard-1:abc123',
 			capturingReporter(captured),
-			{ user: 'alice', password: 'correct-horse-battery-staple' }
+			{ user: alice, password: 'correct-horse-battery-staple' }
 		);
 
 		expect(captured).toStrictEqual({
@@ -142,7 +145,7 @@ describe('runConfig', () => {
 			'http://localhost:1234',
 			'cupboard-1:abc123',
 			capturingReporter(captured),
-			{ user: 'alice', password: 'correct-horse-battery-staple' }
+			{ user: alice, password: 'correct-horse-battery-staple' }
 		);
 
 		expect(captured).toStrictEqual({

@@ -18,6 +18,7 @@ import {
 } from '@cupboard/protocol/oidc-trust-match';
 import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
+import { type ReadUser } from '@cupboard/shared/http';
 
 import { isAbortError } from '../../abort.ts';
 import {
@@ -51,7 +52,7 @@ export interface GithubCheckOptions {
 	readonly branch: string;
 	readonly workflowRef: string;
 	readonly rootPrefix?: string;
-	readonly readUser?: string;
+	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
 }
 

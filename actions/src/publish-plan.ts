@@ -16,7 +16,7 @@ import {
 } from '@cupboard/protocol/cache-availability';
 import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { basicAuthHeader } from '@cupboard/shared/http';
+import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import { z } from 'zod';
 
@@ -1003,7 +1003,7 @@ function absoluteStorePath(storePath: string): string {
 
 interface ProbeOptions {
 	readonly paths: readonly StorePathString[];
-	readonly credentials?: { readonly user: string; readonly password: string };
+	readonly credentials?: BasicCredential;
 	readonly fetcher?: typeof fetch;
 }
 

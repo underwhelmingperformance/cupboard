@@ -3,6 +3,7 @@ import {
 	type StoredCache,
 	storedCacheSchema
 } from '@cupboard/nix-store/scalars';
+import { type ReadUser, readUserInputSchema } from '@cupboard/shared/http';
 
 import { InvalidInputError } from './errors.ts';
 import { parseLines } from './inputs.ts';
@@ -48,6 +49,30 @@ export function providedCache(value: string | undefined): StoredCache {
 
 	if (!parsed.success) {
 		throw new InvalidInputError('cache', 'cache must be a valid cache name');
+	}
+
+	return parsed.data;
+}
+
+/**
+ * The read user a `read-user` input supplies, or `''` when the input is absent.
+ * The value is taken verbatim: surrounding whitespace is part of a credential.
+ * A Basic credential is `user:password` split on its first colon, so a name
+ * carrying one refuses the input with {@link InvalidInputError} rather than
+ * configuring a runner with a credential no cache can match.
+ */
+export function providedReadUser(value = ''): ReadUser | '' {
+	if (value === '') {
+		return '';
+	}
+
+	const parsed = readUserInputSchema.safeParse(value);
+
+	if (!parsed.success) {
+		throw new InvalidInputError(
+			'read-user',
+			'read-user must not contain a colon'
+		);
 	}
 
 	return parsed.data;
