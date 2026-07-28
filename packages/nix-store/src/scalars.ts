@@ -8,13 +8,16 @@ export const storePathBasenamePattern =
 	/^[0-9a-df-np-sv-z]{32}-[0-9A-Za-z+._?=-]+$/;
 // A store directory is an absolute path of one or more segments, over the same
 // charset a store-path name uses. Which directory a given cache serves is a
-// per-cache fact the cache itself states, not a property of the shape.
-export const storeDirectoryPattern = /^(?:\/[0-9A-Za-z+._?=-]+)+$/;
+// per-cache fact the cache itself states, not a property of the shape. A `.` or
+// `..` segment is refused so that one directory has one spelling, and so a
+// comparison against the directory a cache serves cannot be evaded.
+export const storeDirectoryPattern =
+	/^(?:\/(?!\.{1,2}(?:\/|$))[0-9A-Za-z+._?=-]+)+$/;
 // A store path is a store directory, a separator, then the basename. The name
 // carries its own 211-character cap here, so the cap holds whatever the length
 // of the store directory in front of it.
 export const storePathPattern =
-	/^(?:\/[0-9A-Za-z+._?=-]+)+\/[0-9a-df-np-sv-z]{32}-[0-9A-Za-z+._?=-]{1,211}$/;
+	/^(?:\/(?!\.{1,2}(?:\/|$))[0-9A-Za-z+._?=-]+)+\/[0-9a-df-np-sv-z]{32}-[0-9A-Za-z+._?=-]{1,211}$/;
 
 export const rootNameMaxLength = 256;
 export const predicateTypeMaxLength = 512;
