@@ -20,6 +20,14 @@ export function cacheUrl(baseUrl: URL, cache: StoredCache | undefined): URL {
 	return appendPathSegments(baseUrl, 'cache', cache);
 }
 
+/**
+ * The base URL a tenant's caches are served under: the deployment's base with
+ * the tenant's `/t/<slug>` path appended.
+ */
+export function tenantUrl(baseUrl: URL, tenant: string): URL {
+	return appendPathSegments(baseUrl, 't', tenant);
+}
+
 /** The URL that serves a named reuse view under a cache base URL. */
 export function reuseViewUrl(baseUrl: URL, view: string): URL {
 	return appendPathSegments(baseUrl, 'reuse', view);

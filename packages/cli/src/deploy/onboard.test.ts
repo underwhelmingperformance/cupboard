@@ -713,7 +713,7 @@ describe('onboardDeployment', () => {
 				kind: 'ready',
 				url: 'https://cache.example.com',
 				slug: 'builds',
-				cacheUrl: 'https://cache.example.com/t/builds',
+				cacheUrl: new URL('https://cache.example.com/t/builds'),
 				publicKey: 'pk-1'
 			} satisfies OnboardOutcome,
 			urls: ['https://cache.example.com', 'https://cache.example.com/t/builds'],
@@ -760,7 +760,7 @@ describe('onboardDeployment', () => {
 				kind: 'ready',
 				url: 'https://cache.example.com',
 				slug: 'builds',
-				cacheUrl: 'https://cache.example.com/t/builds',
+				cacheUrl: new URL('https://cache.example.com/t/builds'),
 				publicKey: 'pk-1'
 			} satisfies OnboardOutcome,
 			urls: ['https://cache.example.com', 'https://cache.example.com/t/builds'],
@@ -869,7 +869,7 @@ describe('onboardDeployment', () => {
 				kind: 'ready',
 				url: 'https://cache.example.com',
 				slug: 'builds',
-				cacheUrl: 'https://cache.example.com/t/builds',
+				cacheUrl: new URL('https://cache.example.com/t/builds'),
 				publicKey: 'pk-1'
 			} satisfies OnboardOutcome,
 			signupBodies: [{ subject_token: 'id-token-1', claim_secret: 'hunter2' }],
@@ -942,7 +942,7 @@ describe('onboardDeployment', () => {
 				kind: 'ready',
 				url: 'https://cache.example.com',
 				slug: 'builds',
-				cacheUrl: 'https://cache.example.com/t/builds',
+				cacheUrl: new URL('https://cache.example.com/t/builds'),
 				publicKey: 'pk-1'
 			} satisfies OnboardOutcome,
 			urls: ['https://cache.example.com', 'https://cache.example.com/t/builds'],
@@ -1019,7 +1019,7 @@ describe('onboardDeployment', () => {
 				kind: 'ready',
 				url: 'https://cache.example.com',
 				slug: 'builds',
-				cacheUrl: 'https://cache.example.com/t/builds',
+				cacheUrl: new URL('https://cache.example.com/t/builds'),
 				publicKey: 'pk-1'
 			} satisfies OnboardOutcome,
 			probed: ['a'.repeat(32), goodKey],
@@ -1069,7 +1069,7 @@ describe('onboardDeployment', () => {
 				kind: 'ready',
 				url: 'https://cache.example.com',
 				slug: 'builds',
-				cacheUrl: 'https://cache.example.com/t/builds',
+				cacheUrl: new URL('https://cache.example.com/t/builds'),
 				publicKey: 'pk-1'
 			} satisfies OnboardOutcome,
 			infos: [
@@ -1103,7 +1103,7 @@ describe('onboardDeployment', () => {
 				kind: 'ready',
 				url: 'https://cache.example.com',
 				slug: 'builds-2',
-				cacheUrl: 'https://cache.example.com/t/builds-2',
+				cacheUrl: new URL('https://cache.example.com/t/builds-2'),
 				publicKey: 'pk-2'
 			} satisfies OnboardOutcome,
 			warnings: ['"builds" is already taken; choose another.']
@@ -1131,7 +1131,7 @@ describe('onboardDeployment', () => {
 				kind: 'ready',
 				url: 'https://cache.example.com',
 				slug: 'laney',
-				cacheUrl: 'https://cache.example.com/t/laney',
+				cacheUrl: new URL('https://cache.example.com/t/laney'),
 				publicKey: 'pk-1'
 			} satisfies OnboardOutcome,
 			infos: ['The cache "laney" already exists; nothing to create.'],

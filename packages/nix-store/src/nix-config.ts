@@ -1,20 +1,21 @@
 import { NetrcControlCharacterError } from './errors.ts';
 import { hasControlCharacter } from './scalars.ts';
+import { canonicalHref } from './url.ts';
 
 export interface NixConfigOptions {
 	readonly netrcFile?: string;
 }
 
 export class NixConfig {
-	readonly substituters: readonly string[];
+	readonly substituters: readonly URL[];
 
 	constructor(
-		substituters: string | readonly string[],
+		substituters: URL | readonly URL[],
 		public readonly publicKey: string,
 		private readonly options: NixConfigOptions = {}
 	) {
 		this.substituters =
-			typeof substituters === 'string' ? [substituters] : substituters;
+			substituters instanceof URL ? [substituters] : substituters;
 	}
 
 	render(): string {
@@ -22,9 +23,12 @@ export class NixConfig {
 		// but `trusted-public-keys` is a single space-separated line. Collapse any
 		// whitespace so every published key lands in the setting.
 		const trustedPublicKeys = this.publicKey.split(/\s+/).filter(Boolean);
+		// Nix matches a substituter by exact string, so each URL is rendered in
+		// its one canonical form.
+		const substituters = this.substituters.map((url) => canonicalHref(url));
 
 		const lines = [
-			`extra-substituters = ${this.substituters.join(' ')}`,
+			`extra-substituters = ${substituters.join(' ')}`,
 			`extra-trusted-public-keys = ${trustedPublicKeys.join(' ')}`
 		];
 
