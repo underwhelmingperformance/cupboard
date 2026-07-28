@@ -23,6 +23,19 @@ import {
 	isNixPositionalArgument,
 	provided
 } from '../options.ts';
+import {
+	derivationGraphFromJson,
+	type DerivationNode
+} from '../publish-plan.ts';
+
+const plannedOutputPathSchema = z.string().nullable();
+const plannedOutputsSchema = z.record(z.string(), plannedOutputPathSchema);
+const plannedBuildSchema = z.union([
+	z.string(),
+	z.object({
+		outputs: plannedOutputsSchema.optional()
+	})
+]);
 
 export interface BuildActivity {
 	readonly derivation: string;
@@ -35,6 +48,20 @@ export interface BuildAttempt {
 	readonly activities: readonly BuildActivity[];
 }
 
+export interface AttributedOutput {
+	readonly storePath: string;
+	readonly derivation: string;
+	readonly attempt: number;
+	readonly attemptId: string;
+	readonly machine: string;
+}
+
+interface BuildSnapshot {
+	readonly derivations: ReadonlySet<string>;
+	readonly validPaths: ReadonlySet<string>;
+	readonly complete: boolean;
+}
+
 export interface BuildOptions {
 	readonly installables?: readonly string[];
 	readonly installablesFile?: string;
@@ -42,7 +69,9 @@ export interface BuildOptions {
 	readonly keepGoing?: string;
 	readonly maxJobs?: string;
 	readonly allowFailure?: string;
+	readonly derivationGraphFile?: string;
 	readonly pathsFile?: string;
+	readonly publicationPathsFile?: string;
 	readonly receiptFile?: string;
 }
 
@@ -58,7 +87,13 @@ export interface NixInvocation {
 
 export interface BuildDependencies {
 	readonly runNix?: (invocation: NixInvocation) => Promise<RunResult>;
-	readonly nix?: Pick<Nix, 'queryPathInfo'>;
+	readonly nix?: Pick<
+		Nix,
+		| 'queryDerivationOutputPaths'
+		| 'queryPathsInfo'
+		| 'queryValidPaths'
+		| 'queryValidPathsInfo'
+	>;
 	readonly nextAttemptId?: () => string;
 	readonly sleep?: (delayMs: number) => Promise<void>;
 }
@@ -132,50 +167,14 @@ export function buildActivities(log: string): BuildActivity[] {
 		.toSorted((left, right) => left.derivation.localeCompare(right.derivation));
 }
 
-export function derivationsRequiringVerification(
-	attempts: readonly BuildAttempt[],
-	successfulAttempt: number,
-	finalInfos: readonly NixValidPathInfo[]
-): string[] {
-	const finalDerivations = new Set(
-		finalInfos.flatMap((info) =>
-			info.deriver === undefined ? [] : [info.deriver]
-		)
-	);
-
-	const derivations = new Set<string>();
-
-	for (const attempt of attempts) {
-		for (const activity of attempt.activities) {
-			if (
-				finalDerivations.has(activity.derivation) &&
-				(attempt.attempt !== successfulAttempt || activity.machine !== '')
-			) {
-				derivations.add(activity.derivation);
-			}
-		}
-	}
-
-	return derivations
-		.values()
-		.toArray()
-		.toSorted((left, right) => left.localeCompare(right));
-}
-
 export function receiptSubjects(
-	attempts: readonly BuildAttempt[],
+	outputs: readonly AttributedOutput[],
 	finalInfos: readonly NixValidPathInfo[],
 	preExisting: ReadonlySet<string>
 ): BuildReceipt['subjects'] {
-	const firstBuild = new Map<string, Omit<BuildAttempt, 'activities'>>();
-
-	for (const attempt of attempts) {
-		for (const activity of attempt.activities) {
-			if (!firstBuild.has(activity.derivation)) {
-				firstBuild.set(activity.derivation, attempt);
-			}
-		}
-	}
+	const attributedByPath = new Map(
+		outputs.map((output) => [output.storePath, output])
+	);
 
 	return finalInfos
 		.flatMap((info) => {
@@ -183,8 +182,8 @@ export function receiptSubjects(
 				return [];
 			}
 
-			const built = firstBuild.get(info.deriver);
-			if (built === undefined) {
+			const built = attributedByPath.get(info.storePath);
+			if (built?.derivation !== info.deriver) {
 				return [];
 			}
 
@@ -202,13 +201,9 @@ export function receiptSubjects(
 }
 
 export function plannedOutputPaths(value: string): string[] {
-	const outputPath = z.string().nullable();
-	const outputs = z.record(z.string(), outputPath).optional();
-	const buildable = z.union([z.string(), z.object({ outputs })]);
-	const parsedJson: unknown = JSON.parse(value);
-	const parsed = z.array(buildable).parse(parsedJson);
-
+	const parsed = plannedBuilds(value);
 	const paths = new Set<string>();
+
 	for (const buildable of parsed) {
 		if (typeof buildable === 'string' || buildable.outputs === undefined) {
 			continue;
@@ -222,6 +217,197 @@ export function plannedOutputPaths(value: string): string[] {
 	}
 
 	return [...paths].toSorted((left, right) => left.localeCompare(right));
+}
+
+function plannedBuilds(value: string) {
+	const parsedJson: unknown = JSON.parse(value);
+	return z.array(plannedBuildSchema).parse(parsedJson);
+}
+
+export function publicationPaths(options: {
+	readonly targetPaths: readonly string[];
+	readonly builtOutputPaths: readonly string[];
+}): string[] {
+	return [...new Set([...options.targetPaths, ...options.builtOutputPaths])];
+}
+
+export function retentionRootPaths(
+	infos: readonly NixValidPathInfo[]
+): string[] {
+	const selected = new Set(infos.map((info) => info.storePath));
+	const referenced = new Set(
+		infos.flatMap((info) =>
+			info.references.filter(
+				(reference) => reference !== info.storePath && selected.has(reference)
+			)
+		)
+	);
+
+	return infos
+		.map((info) => info.storePath)
+		.filter((storePath) => !referenced.has(storePath))
+		.toSorted((left, right) => left.localeCompare(right));
+}
+
+async function builtOutputInfos(
+	nix: NonNullable<BuildDependencies['nix']>,
+	outputs: readonly AttributedOutput[]
+): Promise<readonly NixValidPathInfo[]> {
+	if (outputs.length === 0) {
+		return [];
+	}
+
+	const paths = await nix.queryValidPaths(
+		outputs.map((output) => output.storePath)
+	);
+
+	return nix.queryPathsInfo(
+		paths.toSorted((left, right) => left.localeCompare(right))
+	);
+}
+
+async function evaluateDerivationGraph(
+	executeNix: NonNullable<BuildDependencies['runNix']>,
+	installables: readonly string[],
+	isAllowFailure: boolean
+): Promise<{
+	readonly graph: ReadonlyMap<string, DerivationNode>;
+	readonly isComplete: boolean;
+}> {
+	const combined = await executeNix(
+		nixBuildInvocation(['derivation', 'show', '-r'], installables)
+	);
+
+	if (combined.status === 0) {
+		const value: unknown = JSON.parse(combined.stdout);
+
+		return { graph: derivationGraphFromJson(value), isComplete: true };
+	}
+
+	if (!isAllowFailure) {
+		throw new CommandFailedError('nix derivation show', combined.status ?? -1);
+	}
+
+	const graph = new Map<string, DerivationNode>();
+	const installablesToEvaluate = installables.length > 1 ? installables : [];
+	let isComplete = installables.length > 1;
+
+	for (const installable of installablesToEvaluate) {
+		const result = await executeNix(
+			nixBuildInvocation(['derivation', 'show', '-r'], [installable])
+		);
+
+		if (result.status !== 0) {
+			isComplete = false;
+			continue;
+		}
+
+		const value: unknown = JSON.parse(result.stdout);
+
+		for (const [drvPath, node] of derivationGraphFromJson(value)) {
+			graph.set(drvPath, node);
+		}
+	}
+
+	return { graph, isComplete };
+}
+
+async function buildSnapshot(
+	nix: NonNullable<BuildDependencies['nix']>,
+	nodes: ReadonlyMap<string, DerivationNode>,
+	isComplete = true
+): Promise<BuildSnapshot> {
+	const staticPaths = nodes
+		.values()
+		.flatMap((node) =>
+			node.outputs.flatMap((output) =>
+				output.path === undefined ? [] : [output.path]
+			)
+		)
+		.toArray();
+	const pathlessDerivations = nodes
+		.values()
+		.filter((node) => node.outputs.some((output) => output.path === undefined))
+		.map((node) => node.drvPath)
+		.toArray()
+		.toSorted((left, right) => left.localeCompare(right));
+	const realisedPathlessOutputs =
+		pathlessDerivations.length === 0
+			? []
+			: await nix.queryDerivationOutputPaths(pathlessDerivations);
+	const candidates = [
+		...new Set([...staticPaths, ...realisedPathlessOutputs])
+	].toSorted((left, right) => left.localeCompare(right));
+	const validPaths =
+		candidates.length === 0 ? [] : await nix.queryValidPaths(candidates);
+
+	return {
+		derivations: new Set(nodes.keys()),
+		validPaths: new Set(validPaths),
+		complete: isComplete
+	};
+}
+
+async function attributedAttemptOutputs(
+	nix: NonNullable<BuildDependencies['nix']>,
+	snapshot: BuildSnapshot,
+	attempt: BuildAttempt,
+	previouslyAttributed: ReadonlySet<string>
+): Promise<AttributedOutput[]> {
+	const activities = new Map(
+		attempt.activities.map((activity) => [activity.derivation, activity])
+	);
+
+	for (const derivation of activities.keys()) {
+		if (snapshot.derivations.has(derivation)) {
+			continue;
+		}
+
+		if (snapshot.complete) {
+			throw new Error(
+				`build activity was outside the pre-build derivation snapshot: ${derivation}`
+			);
+		}
+
+		activities.delete(derivation);
+	}
+
+	if (activities.size === 0) {
+		return [];
+	}
+
+	const candidates = await nix.queryDerivationOutputPaths(
+		activities.keys().toArray()
+	);
+	const infos = await nix.queryValidPathsInfo(candidates);
+	const outputs: AttributedOutput[] = [];
+
+	for (const info of infos) {
+		if (
+			snapshot.validPaths.has(info.storePath) ||
+			previouslyAttributed.has(info.storePath) ||
+			info.deriver === undefined
+		) {
+			continue;
+		}
+
+		const activity = activities.get(info.deriver);
+		if (activity === undefined) {
+			continue;
+		}
+
+		outputs.push({
+			storePath: info.storePath,
+			derivation: info.deriver,
+			attempt: attempt.attempt,
+			attemptId: attempt.attemptId,
+			machine: activity.machine
+		});
+	}
+
+	return outputs.toSorted((left, right) =>
+		left.storePath.localeCompare(right.storePath)
+	);
 }
 
 export function registerBuildCommand(
@@ -252,7 +438,15 @@ export function registerBuildCommand(
 			'return successfully after exhausting attempts',
 			'false'
 		)
+		.option(
+			'--derivation-graph-file <path>',
+			'pre-evaluated recursive derivation graph'
+		)
 		.option('--paths-file <path>', 'where to write realised output paths')
+		.option(
+			'--publication-paths-file <path>',
+			'where to write the store paths selected for publication'
+		)
 		.option(
 			'--receipt-file <path>',
 			'where to write the current-run build receipt'
@@ -308,10 +502,14 @@ export async function buildAction(
 		provided(options.receiptFile) ??
 			path.join(runnerTemporary, 'cupboard-build-receipt.json')
 	);
+	const publicationPathsFile = path.resolve(
+		provided(options.publicationPathsFile) ??
+			path.join(runnerTemporary, 'cupboard-publication-paths.txt')
+	);
+	const attributed: AttributedOutput[] = [];
+	const attributedPaths = new Set<string>();
 	const observed: BuildAttempt[] = [];
-	let attributed: BuildAttempt[] = [];
 	let finalPaths: string[] = [];
-	let status: number | undefined;
 
 	await mkdir(path.dirname(receiptFile), { recursive: true });
 	const nix = dependencies.nix ?? Nix.open();
@@ -321,27 +519,28 @@ export async function buildAction(
 		dependencies.sleep ??
 		((delayMs: number) =>
 			new Promise((resolve) => setTimeout(resolve, delayMs)));
-	const plan = await executeNix(
-		nixBuildInvocation(
-			['build', '--dry-run', '--json', '--no-link'],
-			installables
-		)
-	);
-	const preExisting = new Set<string>();
-	if (plan.status === 0) {
-		const candidates = plannedOutputPaths(plan.stdout);
-		const states = await Promise.allSettled(
-			candidates.map(async (storePath) => {
-				await nix.queryPathInfo(storePath);
-				return storePath;
-			})
+	const derivationGraphFile = provided(options.derivationGraphFile);
+	let graph: ReadonlyMap<string, DerivationNode>;
+	let isGraphComplete: boolean;
+
+	if (derivationGraphFile === undefined) {
+		const evaluated = await evaluateDerivationGraph(
+			executeNix,
+			installables,
+			isAllowFailure
 		);
-		for (const state of states) {
-			if (state.status === 'fulfilled') {
-				preExisting.add(state.value);
-			}
-		}
+		graph = evaluated.graph;
+		isGraphComplete = evaluated.isComplete;
+	} else {
+		const graphText = await readFile(path.resolve(derivationGraphFile), 'utf8');
+		const graphValue: unknown = JSON.parse(graphText);
+		graph = derivationGraphFromJson(graphValue);
+		isGraphComplete = true;
 	}
+
+	const snapshot = await buildSnapshot(nix, graph, isGraphComplete);
+	let status: number | undefined;
+
 	for (let attempt = 1; attempt <= attempts; attempt += 1) {
 		const attemptId = nextAttemptId();
 		const logFile = path.join(
@@ -380,52 +579,15 @@ export async function buildAction(
 			activities: buildActivities(log)
 		};
 		observed.push(buildAttempt);
-		if (status === 0 && plan.status === 0) {
-			const attemptInfos = await Promise.all(
-				finalPaths.map((storePath) => nix.queryPathInfo(storePath))
-			);
-			const verificationDerivations = derivationsRequiringVerification(
-				observed,
-				attempt,
-				attemptInfos
-			);
-			if (verificationDerivations.length > 0) {
-				const verification = await executeNix(
-					nixBuildInvocation(
-						[
-							'build',
-							'--rebuild',
-							'--no-link',
-							'--builders',
-							'',
-							'--max-jobs',
-							'1'
-						],
-						verificationDerivations.map((derivation) => `${derivation}^*`)
-					)
-				);
-				if (verification.status !== 0) {
-					throw new CommandFailedError(
-						'nix build --rebuild',
-						verification.status ?? -1
-					);
-				}
-			}
-			const activities = new Map(
-				buildAttempt.activities.map((activity) => [
-					activity.derivation,
-					activity
-				])
-			);
-			for (const derivation of verificationDerivations) {
-				activities.set(derivation, { derivation, machine: '' });
-			}
-			attributed = [
-				{
-					...buildAttempt,
-					activities: activities.values().toArray()
-				}
-			];
+		const attemptOutputs = await attributedAttemptOutputs(
+			nix,
+			snapshot,
+			buildAttempt,
+			attributedPaths
+		);
+		for (const output of attemptOutputs) {
+			attributed.push(output);
+			attributedPaths.add(output.storePath);
 		}
 		if (status === 0) {
 			break;
@@ -439,22 +601,106 @@ export async function buildAction(
 		throw new CommandFailedError('nix build', status ?? -1);
 	}
 
-	const finalInfos = await Promise.all(
-		finalPaths.map((storePath) => nix.queryPathInfo(storePath))
+	const finalInfos = await nix.queryPathsInfo(finalPaths);
+	const finalDerivations = new Set(
+		finalInfos.flatMap((info) =>
+			info.deriver === undefined ? [] : [info.deriver]
+		)
 	);
-	const subjects = receiptSubjects(attributed, finalInfos, preExisting);
-	const receipt: BuildReceipt = { version: 1, paths: finalPaths, subjects };
+	const verificationDerivations = [
+		...new Set([
+			...attributed.flatMap((output) =>
+				output.machine === '' ? [] : [output.derivation]
+			),
+			...(snapshot.complete
+				? []
+				: observed.flatMap((attempt) =>
+						attempt.activities.flatMap((activity) =>
+							activity.machine !== '' &&
+							finalDerivations.has(activity.derivation)
+								? [activity.derivation]
+								: []
+						)
+					))
+		])
+	].toSorted((left, right) => left.localeCompare(right));
+	if (verificationDerivations.length > 0) {
+		const verification = await executeNix(
+			nixBuildInvocation(
+				[
+					'build',
+					'--rebuild',
+					'--no-link',
+					'--builders',
+					'',
+					'--max-jobs',
+					'1',
+					'--keep-going'
+				],
+				verificationDerivations.map((derivation) => `${derivation}^*`)
+			)
+		);
+		if (verification.status !== 0) {
+			throw new CommandFailedError(
+				'nix build --rebuild',
+				verification.status ?? -1
+			);
+		}
+	}
+
+	const selectedBuiltOutputInfos = await builtOutputInfos(nix, attributed);
+	const selectedBuiltOutputPaths = selectedBuiltOutputInfos.map(
+		(info) => info.storePath
+	);
+	const selectedPublicationPaths = publicationPaths({
+		targetPaths: finalPaths,
+		builtOutputPaths: selectedBuiltOutputPaths
+	});
+	const retainedPaths =
+		finalPaths.length === 0
+			? retentionRootPaths(selectedBuiltOutputInfos)
+			: finalPaths;
+	const publicationInfos = new Map(
+		[...finalInfos, ...selectedBuiltOutputInfos].map((info) => [
+			info.storePath,
+			info
+		])
+	)
+		.values()
+		.toArray();
+	const subjects = receiptSubjects(
+		attributed,
+		publicationInfos,
+		snapshot.validPaths
+	);
+	const receipt: BuildReceipt = {
+		version: 1,
+		paths: selectedPublicationPaths,
+		subjects
+	};
 	await mkdir(path.dirname(pathsFile), { recursive: true });
 	await writeFile(
 		pathsFile,
-		finalPaths.join('\n').concat(finalPaths.length === 0 ? '' : '\n')
+		retainedPaths.join('\n').concat(retainedPaths.length === 0 ? '' : '\n')
+	);
+	await writeFile(
+		publicationPathsFile,
+		selectedPublicationPaths
+			.join('\n')
+			.concat(selectedPublicationPaths.length === 0 ? '' : '\n')
 	);
 	await writeFile(receiptFile, `${JSON.stringify(receipt)}\n`);
 	await setOutput(environment, 'paths-file', pathsFile);
+	await setOutput(environment, 'publication-paths-file', publicationPathsFile);
+	await setOutput(
+		environment,
+		'publication-path-count',
+		String(selectedPublicationPaths.length)
+	);
 	await setOutput(environment, 'receipt-file', receiptFile);
 	const delimiter = `CUPBOARD_PATHS_${randomUUID().replaceAll('-', '_')}`;
 	await appendEnvironmentFile(
 		environment.GITHUB_OUTPUT,
-		`paths<<${delimiter}\n${finalPaths.join('\n')}\n${delimiter}\n`
+		`paths<<${delimiter}\n${retainedPaths.join('\n')}\n${delimiter}\n`
 	);
 }

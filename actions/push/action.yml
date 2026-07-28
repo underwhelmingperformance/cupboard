@@ -9,6 +9,16 @@ inputs:
       Newline-delimited local Nix store paths, derivations, or installables to
       push.
     required: true
+  additional-paths-file:
+    description:
+      File of store paths to publish without retaining them as target roots.
+      Older cupboard releases receive these as positional targets and may retain
+      them as a safe compatibility fallback.
+    required: false
+  closure:
+    description: Publish the complete realised closure of all paths.
+    required: false
+    default: 'false'
   cupboard-version:
     description:
       cupboard version to install. Use latest or an exact version such as 1.2.3
@@ -141,6 +151,8 @@ runs:
       env:
         URL: ${{ inputs.url }}
         PATHS: ${{ inputs.paths }}
+        ADDITIONAL_PATHS_FILE: ${{ inputs.additional-paths-file }}
+        CLOSURE: ${{ inputs.closure }}
         CUPBOARD_VERSION: ${{ inputs.cupboard-version }}
         INCLUDE_PRERELEASES: ${{ inputs.include-prereleases }}
         GH_TOKEN: ${{ inputs.github-token || github.token }}
@@ -166,6 +178,8 @@ runs:
         args=(push
           --url "$URL"
           --paths "$PATHS"
+          --additional-paths-file "$ADDITIONAL_PATHS_FILE"
+          --closure "$CLOSURE"
           --cupboard-version "$CUPBOARD_VERSION"
           --include-prereleases "$INCLUDE_PRERELEASES"
           --github-token "$GH_TOKEN"

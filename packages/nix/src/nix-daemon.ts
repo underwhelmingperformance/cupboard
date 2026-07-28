@@ -1,6 +1,7 @@
 import { createConnection, type Socket } from 'node:net';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 import {
 	defaultClosureConcurrency,
@@ -9,6 +10,10 @@ import {
 	type NixValidPathInfo,
 	resolveClosureBy
 } from './nix-store.ts';
+import {
+	type NixDaemonOverrides,
+	type NixDaemonSetOptions
+} from './store-config.ts';
 
 const defaultDaemonSocketPath = '/nix/var/nix/daemon-socket/socket';
 const workerMagic1 = 0x6e_69_78_63;
@@ -19,6 +24,11 @@ const minimumProtocolMinor = 38;
 
 const opSetOptions = 19;
 const opQueryPathInfo = 26;
+const opQueryValidPaths = 31;
+const opQuerySubstitutablePaths = 32;
+const opQueryDerivationOutputMap = 41;
+const opQueryPathInfos = 50;
+const featureQueryPathInfos = 'queryPathInfos';
 
 const stderrNext = 0x6f_6c_6d_67;
 const stderrRead = 0x64_61_74_61;
@@ -32,6 +42,8 @@ const stderrResult = 0x52_53_4c_54;
 export interface NixDaemonStoreClientOptions {
 	readonly socketPath?: string;
 	readonly connect?: NixDaemonConnector;
+	readonly setOptions?: NixDaemonSetOptions;
+	readonly overrides?: NixDaemonOverrides;
 }
 
 export type NixDaemonConnector = (
@@ -41,7 +53,7 @@ export type NixDaemonConnector = (
 export interface NixDaemonTransport {
 	write(bytes: Uint8Array): Promise<void>;
 	read(byteLength: number): Promise<Uint8Array>;
-	close(): void;
+	close(): Promise<void>;
 }
 
 interface NixDaemonProtocolVersion {
@@ -130,18 +142,86 @@ export class NixDaemonStoreClient implements NixStoreClient {
 
 	private readonly connect: NixDaemonConnector;
 
+	private readonly overrides: NixDaemonOverrides;
+
+	private readonly daemonOptions: NixDaemonSetOptions;
+
 	constructor(options: NixDaemonStoreClientOptions = {}) {
 		this.socketPath = options.socketPath ?? defaultDaemonSocketPath;
 		this.connect = options.connect ?? connectToNixDaemon;
+		this.daemonOptions = options.setOptions ?? {};
+		this.overrides = options.overrides ?? {};
 	}
 
 	private async openConnection(): Promise<NixDaemonConnection> {
 		const transport = await this.connect(this.socketPath);
-		const connection = new NixDaemonConnection(transport);
+		const connection = new NixDaemonConnection(
+			transport,
+			this.daemonOptions,
+			this.overrides
+		);
 
-		await connection.initialise();
+		try {
+			await connection.initialise();
+		} catch (error) {
+			await connection.close();
+			throw error;
+		}
 
 		return connection;
+	}
+
+	private async queryPathsInfoBy<T>(
+		storePaths: readonly string[],
+		query: (storePath: string, pool: NixDaemonConnectionPool) => Promise<T>,
+		initialConnection?: NixDaemonConnection
+	): Promise<readonly T[]> {
+		const pool = new NixDaemonConnectionPool(
+			() => this.openConnection(),
+			defaultClosureConcurrency,
+			initialConnection
+		);
+
+		try {
+			return await mapWithConcurrency(
+				storePaths,
+				defaultClosureConcurrency,
+				(storePath) => query(storePath, pool)
+			);
+		} finally {
+			await pool.closeAll();
+		}
+	}
+
+	private async queryPathsInfoBatch(storePaths: readonly string[]): Promise<
+		| { readonly kind: 'batch'; readonly infos: readonly NixValidPathInfo[] }
+		| {
+				readonly kind: 'fallback';
+				readonly connection: NixDaemonConnection;
+		  }
+	> {
+		if (storePaths.length === 0) {
+			return { kind: 'batch', infos: [] };
+		}
+
+		const connection = await this.openConnection();
+
+		if (!connection.supportsQueryPathInfos) {
+			return { kind: 'fallback', connection };
+		}
+
+		try {
+			const candidates = [...new Set(storePaths)].toSorted((left, right) =>
+				left.localeCompare(right)
+			);
+
+			return {
+				kind: 'batch',
+				infos: await connection.queryPathsInfo(candidates)
+			};
+		} finally {
+			await connection.close();
+		}
 	}
 
 	async resolveClosure(
@@ -159,7 +239,7 @@ export class NixDaemonStoreClient implements NixStoreClient {
 				defaultClosureConcurrency
 			);
 		} finally {
-			pool.closeAll();
+			await pool.closeAll();
 		}
 	}
 
@@ -169,7 +249,125 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		try {
 			return await connection.queryPathInfo(storePath);
 		} finally {
-			connection.close();
+			await connection.close();
+		}
+	}
+
+	async queryPathsInfo(
+		storePaths: readonly string[]
+	): Promise<readonly NixValidPathInfo[]> {
+		const batch = await this.queryPathsInfoBatch(storePaths);
+
+		if (batch.kind === 'batch') {
+			const infos = new Map(batch.infos.map((info) => [info.storePath, info]));
+
+			return storePaths.map((storePath) => {
+				const info = infos.get(storePath);
+
+				if (info === undefined) {
+					throw new NixStorePathNotFoundError(storePath);
+				}
+
+				return info;
+			});
+		}
+
+		return this.queryPathsInfoBy(
+			storePaths,
+			(storePath, pool) => pool.queryPathInfo(storePath),
+			batch.connection
+		);
+	}
+
+	async queryValidPathsInfo(
+		storePaths: readonly string[]
+	): Promise<readonly NixValidPathInfo[]> {
+		const batch = await this.queryPathsInfoBatch(storePaths);
+
+		if (batch.kind === 'batch') {
+			const infos = new Map(batch.infos.map((info) => [info.storePath, info]));
+
+			return storePaths.flatMap((storePath) => {
+				const info = infos.get(storePath);
+
+				return info === undefined ? [] : [info];
+			});
+		}
+
+		const infos = await this.queryPathsInfoBy(
+			storePaths,
+			async (storePath, pool) => {
+				try {
+					return await pool.queryPathInfo(storePath);
+				} catch (error) {
+					if (error instanceof NixStorePathNotFoundError) {
+						return;
+					}
+
+					throw error;
+				}
+			},
+			batch.connection
+		);
+
+		return infos.filter((info) => info !== undefined);
+	}
+
+	async queryValidPaths(
+		storePaths: readonly string[]
+	): Promise<readonly string[]> {
+		const connection = await this.openConnection();
+		const candidates = [...new Set(storePaths)].toSorted((left, right) =>
+			left.localeCompare(right)
+		);
+
+		try {
+			return await connection.queryValidPaths(candidates);
+		} finally {
+			await connection.close();
+		}
+	}
+
+	async querySubstitutablePaths(
+		storePaths: readonly string[]
+	): Promise<readonly string[]> {
+		const connection = await this.openConnection();
+		const candidates = [...new Set(storePaths)].toSorted((left, right) =>
+			left.localeCompare(right)
+		);
+
+		try {
+			return [
+				...new Set(await connection.querySubstitutablePaths(candidates))
+			].toSorted((left, right) => left.localeCompare(right));
+		} finally {
+			await connection.close();
+		}
+	}
+
+	async queryDerivationOutputPaths(
+		drvPaths: readonly string[]
+	): Promise<readonly string[]> {
+		const candidates = [...new Set(drvPaths)].toSorted((left, right) =>
+			left.localeCompare(right)
+		);
+		const pool = new NixDaemonConnectionPool(
+			() => this.openConnection(),
+			defaultClosureConcurrency
+		);
+
+		try {
+			const outputPathGroups = await mapWithConcurrency(
+				candidates,
+				defaultClosureConcurrency,
+				(drvPath) => pool.queryDerivationOutputPaths(drvPath)
+			);
+
+			return [...new Set(outputPathGroups.flat())].toSorted((left, right) =>
+				left.localeCompare(right)
+			);
+		} finally {
+			await pool.closeAll();
 		}
 	}
 }
@@ -184,7 +382,10 @@ class NixDaemonConnectionPool {
 
 	private readonly free: NixDaemonConnection[] = [];
 
-	private readonly waiters: ((connection: NixDaemonConnection) => void)[] = [];
+	private readonly waiters: {
+		readonly resolve: (connection: NixDaemonConnection) => void;
+		readonly reject: (error: NixDaemonConnectionPoolClosedError) => void;
+	}[] = [];
 
 	private opened = 0;
 
@@ -192,10 +393,23 @@ class NixDaemonConnectionPool {
 
 	constructor(
 		private readonly open: () => Promise<NixDaemonConnection>,
-		private readonly max: number
-	) {}
+		private readonly max: number,
+		initialConnection?: NixDaemonConnection
+	) {
+		if (initialConnection === undefined) {
+			return;
+		}
+
+		this.all.push(initialConnection);
+		this.free.push(initialConnection);
+		this.opened = 1;
+	}
 
 	private async acquire(): Promise<NixDaemonConnection> {
+		if (this.closed) {
+			throw new NixDaemonConnectionPoolClosedError();
+		}
+
 		const free = this.free.pop();
 
 		if (free !== undefined) {
@@ -214,30 +428,39 @@ class NixDaemonConnectionPool {
 				throw error;
 			}
 
-			// `closeAll` may have run while this connection was opening (a sibling
-			// query rejected and aborted the walk). It iterated a snapshot taken
-			// before this connection existed, so close it here to avoid retaining a
-			// leaked socket the pool will never clean up.
-			if (this.closed) {
-				connection.close();
-				throw new NixDaemonConnectionPoolClosedError();
-			}
-
-			this.all.push(connection);
-
-			return connection;
+			return this.registerOpened(connection);
 		}
 
-		return new Promise((resolve) => {
-			this.waiters.push(resolve);
+		return new Promise((resolve, reject) => {
+			this.waiters.push({ resolve, reject });
 		});
 	}
 
-	private release(connection: NixDaemonConnection): void {
+	private async registerOpened(
+		connection: NixDaemonConnection
+	): Promise<NixDaemonConnection> {
+		// An opening connection is not yet in `all`, so shutdown may complete
+		// while its asynchronous handshake is still in flight.
+		if (this.closed) {
+			await connection.close();
+			throw new NixDaemonConnectionPoolClosedError();
+		}
+
+		this.all.push(connection);
+
+		return connection;
+	}
+
+	private async release(connection: NixDaemonConnection): Promise<void> {
+		if (this.closed) {
+			await connection.close();
+			return;
+		}
+
 		const waiter = this.waiters.shift();
 
 		if (waiter !== undefined) {
-			waiter(connection);
+			waiter.resolve(connection);
 
 			return;
 		}
@@ -251,15 +474,32 @@ class NixDaemonConnectionPool {
 		try {
 			return await connection.queryPathInfo(storePath);
 		} finally {
-			this.release(connection);
+			await this.release(connection);
 		}
 	}
 
-	closeAll(): void {
+	async queryDerivationOutputPaths(
+		drvPath: string
+	): Promise<readonly string[]> {
+		const connection = await this.acquire();
+
+		try {
+			return await connection.queryDerivationOutputPaths(drvPath);
+		} finally {
+			await this.release(connection);
+		}
+	}
+
+	async closeAll(): Promise<void> {
 		this.closed = true;
 
-		for (const connection of this.all) {
-			connection.close();
+		await Promise.all(this.all.map((connection) => connection.close()));
+
+		const waiters = [...this.waiters];
+		this.waiters.length = 0;
+
+		for (const waiter of waiters) {
+			waiter.reject(new NixDaemonConnectionPoolClosedError());
 		}
 	}
 }
@@ -269,13 +509,15 @@ export async function connectToNixDaemon(
 ): Promise<NixDaemonTransport> {
 	return new Promise((resolve, reject) => {
 		const socket = createConnection(socketPath);
+		const rejectConnection = (error: Error): void => {
+			reject(new NixDaemonConnectionError(socketPath, error));
+		};
 
 		socket.once('connect', () => {
+			socket.off('error', rejectConnection);
 			resolve(new SocketNixDaemonTransport(socket));
 		});
-		socket.once('error', (error) => {
-			reject(new NixDaemonConnectionError(socketPath, error));
-		});
+		socket.once('error', rejectConnection);
 	});
 }
 
@@ -285,7 +527,13 @@ class NixDaemonConnection {
 		minor: protocolMinor
 	};
 
-	constructor(private readonly transport: NixDaemonTransport) {}
+	private readonly features = new Set<string>();
+
+	constructor(
+		private readonly transport: NixDaemonTransport,
+		private readonly options: NixDaemonSetOptions,
+		private readonly overrides: NixDaemonOverrides
+	) {}
 
 	private async handshake(): Promise<void> {
 		const request = new NixDaemonWriter();
@@ -319,10 +567,14 @@ class NixDaemonConnection {
 		}
 
 		const features = new NixDaemonWriter();
-		features.writeStringSet([]);
+		features.writeStringSet([featureQueryPathInfos]);
 
 		await this.transport.write(features.bytes());
-		await this.readStringSet();
+		const daemonFeatures = await this.readStringSet();
+
+		if (daemonFeatures.includes(featureQueryPathInfos)) {
+			this.features.add(featureQueryPathInfos);
+		}
 	}
 
 	private async postHandshake(): Promise<void> {
@@ -353,19 +605,27 @@ class NixDaemonConnection {
 
 		// Nix worker-protocol 1.38 SetOptions fields, matching RemoteStore
 		// and daemon ClientSettings order.
-		request.writeBoolean(false);
-		request.writeBoolean(false);
-		request.writeBoolean(false);
+		request.writeBoolean(this.options.keepFailed ?? false);
+		request.writeBoolean(this.options.keepGoing ?? false);
+		request.writeBoolean(this.options.tryFallback ?? false);
 		request.writeInteger(0);
-		request.writeInteger(1);
-		request.writeInteger(0);
+		request.writeInteger(this.options.maxBuildJobs ?? 1);
+		request.writeInteger(this.options.maxSilentTime ?? 0);
 		request.writeBoolean(true);
 		request.writeInteger(0);
 		request.writeInteger(0);
 		request.writeInteger(0);
-		request.writeInteger(0);
-		request.writeBoolean(true);
-		request.writeInteger(0);
+		request.writeInteger(this.options.buildCores ?? 0);
+		request.writeBoolean(this.options.useSubstitutes ?? true);
+		const overrides = Object.entries(this.overrides).toSorted(
+			([left], [right]) => left.localeCompare(right)
+		);
+		request.writeInteger(overrides.length);
+
+		for (const [name, value] of overrides) {
+			request.writeString(name);
+			request.writeString(value);
+		}
 
 		await this.transport.write(request.bytes());
 		await this.processStderr();
@@ -537,8 +797,12 @@ class NixDaemonConnection {
 		return Number(value);
 	}
 
-	close(): void {
-		this.transport.close();
+	get supportsQueryPathInfos(): boolean {
+		return this.features.has(featureQueryPathInfos);
+	}
+
+	close(): Promise<void> {
+		return this.transport.close();
 	}
 
 	async initialise(): Promise<void> {
@@ -565,6 +829,87 @@ class NixDaemonConnection {
 			signatures: pathInfo.signatures,
 			ultimate: pathInfo.ultimate
 		};
+	}
+
+	async queryPathsInfo(
+		storePaths: readonly string[]
+	): Promise<readonly NixValidPathInfo[]> {
+		const expected = new Set(storePaths);
+		const request = new NixDaemonWriter();
+		request.writeInteger(opQueryPathInfos);
+		request.writeStringSet(storePaths);
+
+		await this.transport.write(request.bytes());
+		await this.processStderr();
+
+		const count = await this.readInteger();
+		const infos: NixValidPathInfo[] = [];
+
+		for (let index = 0; index < count; index += 1) {
+			const storePath = await this.readString();
+
+			if (!expected.delete(storePath)) {
+				throw new NixDaemonRemoteError(
+					`daemon returned path info for an unexpected path: ${storePath}`
+				);
+			}
+
+			const info = await this.readUnkeyedPathInfo();
+			infos.push({ storePath, ...info });
+		}
+
+		return infos;
+	}
+
+	async querySubstitutablePaths(
+		storePaths: readonly string[]
+	): Promise<readonly string[]> {
+		const request = new NixDaemonWriter();
+		request.writeInteger(opQuerySubstitutablePaths);
+		request.writeStringSet(storePaths);
+
+		await this.transport.write(request.bytes());
+		await this.processStderr();
+
+		return this.readStringSet();
+	}
+
+	async queryValidPaths(
+		storePaths: readonly string[]
+	): Promise<readonly string[]> {
+		const request = new NixDaemonWriter();
+		request.writeInteger(opQueryValidPaths);
+		request.writeStringSet(storePaths);
+		request.writeBoolean(false);
+
+		await this.transport.write(request.bytes());
+		await this.processStderr();
+
+		return this.readStringSet();
+	}
+
+	async queryDerivationOutputPaths(
+		drvPath: string
+	): Promise<readonly string[]> {
+		const outputPaths: string[] = [];
+		const request = new NixDaemonWriter();
+		request.writeInteger(opQueryDerivationOutputMap);
+		request.writeString(drvPath);
+
+		await this.transport.write(request.bytes());
+		await this.processStderr();
+
+		const count = await this.readInteger();
+		for (let index = 0; index < count; index += 1) {
+			await this.readString();
+			const storePath = emptyStringToUndefined(await this.readString());
+
+			if (storePath !== undefined) {
+				outputPaths.push(storePath);
+			}
+		}
+
+		return outputPaths;
 	}
 }
 
@@ -609,6 +954,8 @@ class NixDaemonWriter {
 class SocketNixDaemonTransport implements NixDaemonTransport {
 	private readonly reader: SocketReader;
 
+	private closePromise?: Promise<void>;
+
 	constructor(private readonly socket: Socket) {
 		this.reader = new SocketReader(socket);
 	}
@@ -631,8 +978,21 @@ class SocketNixDaemonTransport implements NixDaemonTransport {
 		return this.reader.read(byteLength);
 	}
 
-	close(): void {
-		this.socket.end();
+	close(): Promise<void> {
+		if (this.closePromise !== undefined) {
+			return this.closePromise;
+		}
+
+		if (this.socket.destroyed) {
+			return Promise.resolve();
+		}
+
+		this.closePromise = new Promise((resolve) => {
+			this.socket.once('close', resolve);
+			this.socket.destroy();
+		});
+
+		return this.closePromise;
 	}
 }
 
@@ -654,6 +1014,10 @@ class SocketReader {
 			this.resolvePendingRead();
 		});
 		socket.once('end', () => {
+			this.ended = true;
+			this.resolvePendingRead();
+		});
+		socket.once('close', () => {
 			this.ended = true;
 			this.resolvePendingRead();
 		});

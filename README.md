@@ -29,7 +29,8 @@ A **tenant admin** owns one tenant within a deployment. They push paths, manage
 the tenant's caches and retention, and rotate the keys that sign its narinfos.
 These commands address the tenant, so their URL carries the tenant slug:
 
-- `cupboard push` uploads a store path closure and optionally pins it.
+- `cupboard push` uploads store paths and optionally pins them. `--closure`
+  includes their complete realised closures.
 - `cupboard cache`, `cupboard policy`, and `cupboard root` manage named caches
   and what is kept.
 - `cupboard key` and `cupboard auth-key` rotate the tenant's signing keys.

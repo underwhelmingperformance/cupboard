@@ -71,6 +71,10 @@ import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 export interface PushDependencies {
 	readonly nix?: Nix;
 	readonly client: PushClient;
+	/** Paths to publish without adding them to the requested retention root or pins. */
+	readonly additionalPaths?: readonly string[];
+	/** Publish the complete closure of the requested and additional paths. */
+	readonly closure?: boolean;
 	readonly root?: string;
 	readonly ttlSeconds?: number;
 	// Whether this push retains what it publishes at all. Absent (or true) keeps
@@ -271,8 +275,11 @@ export async function runPush(
 	const createNarArchive =
 		dependencies.createNarArchive ?? ((storePath) => new NarArchive(storePath));
 	const compressNar = dependencies.compressNar ?? compressNarToStream;
+	const publicationPaths = [
+		...new Set([...paths, ...(dependencies.additionalPaths ?? [])])
+	];
 
-	await runPushFlow(paths, reporter, {
+	await runPushFlow(publicationPaths, reporter, {
 		...dependencies,
 		retention,
 		nix,
@@ -288,6 +295,7 @@ interface PushRuntimeDependencies {
 	readonly nix: Nix;
 	readonly client: PushClient;
 	readonly retention: RetentionPlan;
+	readonly closure?: boolean;
 	readonly createNarArchive: (storePath: string) => PushNarArchive;
 	readonly compressNar: CompressNar;
 	readonly wait: boolean;
@@ -313,11 +321,16 @@ async function runPushFlow(
 		wait: shouldWait,
 		waitTimeoutSeconds
 	} = dependencies;
-	const closure = await reporter.phase(
-		'Resolving store closure',
+	const pathInfos = await reporter.phase(
+		dependencies.closure === true
+			? 'Resolving store closure'
+			: 'Resolving store paths',
 		async (ctx) => {
 			ctx.fact('roots', formatCount(paths.length));
-			const resolved = await nix.resolveClosure(paths);
+			const resolved =
+				dependencies.closure === true
+					? await nix.resolveClosure(paths)
+					: await nix.queryPathsInfo(paths);
 			ctx.fact('paths', formatCount(resolved.length));
 
 			return resolved;
@@ -325,7 +338,7 @@ async function runPushFlow(
 	);
 
 	if (dependencies.dryRun === true) {
-		await reportDryRun(reporter, client, closure, retention);
+		await reportDryRun(reporter, client, pathInfos, retention);
 		return;
 	}
 
@@ -338,7 +351,7 @@ async function runPushFlow(
 
 			const response = await negotiateUpload(
 				client,
-				closure.map((pathInfo) => prepareStorePathNegotiation(pathInfo))
+				pathInfos.map((pathInfo) => prepareStorePathNegotiation(pathInfo))
 			);
 			const uploadCount = response.uploads.filter((decision) =>
 				isUpload(decision)
@@ -359,7 +372,7 @@ async function runPushFlow(
 		}
 	);
 
-	const divergent = divergentSkips(closure, negotiation.uploads);
+	const divergent = divergentSkips(pathInfos, negotiation.uploads);
 
 	warnDivergentSkips(reporter, divergent);
 
@@ -370,9 +383,9 @@ async function runPushFlow(
 	// function) so the incomplete result is never mistaken for a finished one.
 	const failures: PushFailure[] = [];
 	const failedUploadIds = new Set<string>();
-	const negotiated = indexNegotiatedPaths(closure);
+	const negotiated = indexNegotiatedPaths(pathInfos);
 	const storePathByHash = new Map<string, string>(
-		closure.map((pathInfo) => [
+		pathInfos.map((pathInfo) => [
 			StorePath.hash(pathInfo.storePath),
 			pathInfo.storePath
 		])
@@ -637,15 +650,19 @@ async function runPushFlow(
 			}
 		}
 
-		const attestationRows = await attachPushedAttestations(closure, reporter, {
-			client,
-			enabled: dependencies.attest ?? true,
-			sources: dependencies.attestations ?? [],
-			readBundle:
-				dependencies.readAttestationBundle ?? defaultReadAttestationBundle,
-			pendingStorePathHashes: unservableStorePathHashes,
-			divergent
-		});
+		const attestationRows = await attachPushedAttestations(
+			pathInfos,
+			reporter,
+			{
+				client,
+				enabled: dependencies.attest ?? true,
+				sources: dependencies.attestations ?? [],
+				readBundle:
+					dependencies.readAttestationBundle ?? defaultReadAttestationBundle,
+				pendingStorePathHashes: unservableStorePathHashes,
+				divergent
+			}
+		);
 
 		const actions = effectiveActions.values().toArray();
 		const uploadedPaths = actions.filter(

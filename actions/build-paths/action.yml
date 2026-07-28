@@ -19,13 +19,30 @@ inputs:
     description: Return successfully when all three attempts fail.
     required: false
     default: 'false'
+  derivation-graph-file:
+    description:
+      Pre-evaluated recursive derivation graph. Empty evaluates it before
+      building.
+    required: false
 outputs:
   paths:
-    description: Newline-delimited realised output paths.
+    description:
+      Newline-delimited realised target paths, or graph roots for a partial
+      best-effort build.
     value: ${{ steps.build.outputs.paths }}
   paths-file:
-    description: File containing the realised output paths.
+    description:
+      File containing realised target paths, or graph roots for a partial
+      best-effort build.
     value: ${{ steps.build.outputs.paths-file }}
+  publication-paths-file:
+    description:
+      File containing target and current-run build outputs selected for
+      publication.
+    value: ${{ steps.build.outputs.publication-paths-file }}
+  publication-path-count:
+    description: Number of store paths selected for publication.
+    value: ${{ steps.build.outputs.publication-path-count }}
   receipt-file:
     description: Current-run build receipt consumed by actions/attest.
     value: ${{ steps.build.outputs.receipt-file }}
@@ -66,6 +83,7 @@ runs:
         KEEP_GOING: ${{ inputs.keep-going }}
         MAX_JOBS: ${{ inputs.max-jobs }}
         ALLOW_FAILURE: ${{ inputs.allow-failure }}
+        DERIVATION_GRAPH_FILE: ${{ inputs.derivation-graph-file }}
       run: |
         node --experimental-transform-types \
           --disable-warning=ExperimentalWarning \
@@ -74,4 +92,5 @@ runs:
           --installables-file "$INSTALLABLES_FILE" \
           --keep-going "$KEEP_GOING" \
           --max-jobs "$MAX_JOBS" \
-          --allow-failure "$ALLOW_FAILURE"
+          --allow-failure "$ALLOW_FAILURE" \
+          --derivation-graph-file "$DERIVATION_GRAPH_FILE"

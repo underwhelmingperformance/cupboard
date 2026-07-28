@@ -1,15 +1,9 @@
-import { mkdtemp, rm } from 'node:fs/promises';
-import { createServer } from 'node:net';
-import os from 'node:os';
-import path from 'node:path';
-
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { describe, expect, it } from 'vitest';
 
 import { ProtocolWriter } from '../../../tests/support/protocol-writer.ts';
 
 import {
-	connectToNixDaemon,
 	NixDaemonStoreClient,
 	type NixDaemonTransport,
 	UnsupportedNixDaemonProtocolError
@@ -20,43 +14,228 @@ import {
 } from './nix-store.ts';
 
 const appPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
+const appDrvPath = '/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv';
 const libraryPath = '/nix/store/2123456789abcdfghijklmnpqrsvwxyz-lib';
 const runtimePath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime';
 const appHash = '11'.repeat(32);
 const libraryHash = '22'.repeat(32);
 const runtimeHash = '33'.repeat(32);
 
-describe('connectToNixDaemon', () => {
-	// The fakes elsewhere bypass the socket transport entirely, so this is the
-	// one place its write/read path meets a real socket (where Node calls the
-	// write callback with null, not undefined, on success).
-	it('writes and reads through a real unix socket', async () => {
-		const directory = await mkdtemp(path.join(os.tmpdir(), 'cupboard-nix-'));
-		const socketPath = path.join(directory, 'socket');
-		const server = createServer((connection) => {
-			connection.pipe(connection);
-		});
-
-		await new Promise<void>((resolve) => {
-			server.listen(socketPath, resolve);
-		});
-
-		try {
-			const transport = await connectToNixDaemon(socketPath);
-
-			await transport.write(new Uint8Array([1, 2, 3, 4]));
-			const echoed = await transport.read(4);
-			transport.close();
-
-			expect([...echoed]).toStrictEqual([1, 2, 3, 4]);
-		} finally {
-			server.close();
-			await rm(directory, { recursive: true, force: true });
-		}
-	});
-});
-
 describe('NixDaemonStoreClient', () => {
+	it('asks every configured mass-query substituter for paths directly', async () => {
+		const client = new NixDaemonStoreClient({
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport(
+						{},
+						{
+							substitutable: {
+								expectedPaths: [appPath, libraryPath, runtimePath],
+								paths: [appPath, runtimePath]
+							}
+						}
+					)
+				)
+		});
+
+		await expect(
+			client.querySubstitutablePaths([
+				runtimePath,
+				appPath,
+				libraryPath,
+				appPath
+			])
+		).resolves.toStrictEqual([appPath, runtimePath]);
+	});
+
+	it('reads realised derivation outputs through pooled daemon connections', async () => {
+		const libraryDrvPath =
+			'/nix/store/5123456789abcdfghijklmnpqrsvwxyz-lib.drv';
+		let connections = 0;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				connections += 1;
+
+				return Promise.resolve(
+					new FakeDaemonTransport(
+						{},
+						{
+							derivationOutputs: {
+								[appDrvPath]: { out: appPath, dev: undefined },
+								[libraryDrvPath]: { out: libraryPath }
+							}
+						}
+					)
+				);
+			}
+		});
+
+		await expect(
+			client.queryDerivationOutputPaths([
+				libraryDrvPath,
+				appDrvPath,
+				libraryDrvPath
+			])
+		).resolves.toStrictEqual([appPath, libraryPath]);
+		expect(connections).toBe(2);
+	});
+
+	it('bounds concurrent derivation output queries to the daemon pool size', async () => {
+		const drvPaths = Array.from(
+			{ length: 17 },
+			(_, index) =>
+				`/nix/store/${String(index).padStart(32, '0')}-output-${String(index)}.drv`
+		);
+		const firstFrontierStarted = Promise.withResolvers<undefined>();
+		const queuedQueryStarted = Promise.withResolvers<undefined>();
+		const releases = new Map<string, () => void>();
+		const started = new Set<string>();
+		let connections = 0;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				connections += 1;
+
+				return Promise.resolve(
+					new FakeDaemonTransport(
+						{},
+						{
+							derivationOutputs: {},
+							beforeOperation(request) {
+								const drvPath = readRequestStorePath(request);
+								started.add(drvPath);
+
+								if (started.size === 16) {
+									firstFrontierStarted.resolve(undefined);
+								} else if (started.size === 17) {
+									queuedQueryStarted.resolve(undefined);
+								}
+
+								return new Promise<undefined>((resolve) => {
+									releases.set(drvPath, () => {
+										resolve(undefined);
+									});
+								});
+							}
+						}
+					)
+				);
+			}
+		});
+
+		const result = client.queryDerivationOutputPaths(drvPaths);
+		await firstFrontierStarted.promise;
+
+		expect({ connections, started: started.size }).toStrictEqual({
+			connections: 16,
+			started: 16
+		});
+
+		const firstDrvPath = drvPaths[0];
+
+		if (firstDrvPath === undefined) {
+			throw new Error('Expected at least one derivation path');
+		}
+
+		releases.get(firstDrvPath)?.();
+		await queuedQueryStarted.promise;
+
+		for (const release of releases.values()) {
+			release();
+		}
+
+		await expect(result).resolves.toStrictEqual([]);
+		expect({ connections, started: started.size }).toStrictEqual({
+			connections: 16,
+			started: 17
+		});
+	});
+
+	it('forwards canonical daemon overrides on every connection', async () => {
+		const overrides = {
+			substituters: 'https://cache.nixos.org https://cupboard.example/cache',
+			'trusted-public-keys': 'cache.nixos.org-1:key cupboard-1:key',
+			'sandbox-paths': '/build /work',
+			'netrc-file': '/tmp/cupboard-netrc'
+		};
+		const paths = {
+			[appPath]: {
+				hash: appHash,
+				narSize: 123,
+				references: [],
+				signatures: []
+			},
+			[libraryPath]: {
+				hash: libraryHash,
+				narSize: 456,
+				references: [],
+				signatures: []
+			}
+		};
+		let connections = 0;
+		const client = new NixDaemonStoreClient({
+			overrides,
+			connect: () => {
+				connections += 1;
+
+				return Promise.resolve(
+					new FakeDaemonTransport(paths, {
+						expectedOverrides: overrides
+					})
+				);
+			}
+		});
+
+		await expect(
+			client.queryPathsInfo([appPath, libraryPath])
+		).resolves.toStrictEqual([
+			pathInfo(appPath, appHash, 123, []),
+			pathInfo(libraryPath, libraryHash, 456, [])
+		]);
+		expect(connections).toBe(2);
+	});
+
+	it('writes configured dedicated SetOptions fields', async () => {
+		const client = new NixDaemonStoreClient({
+			setOptions: {
+				keepFailed: true,
+				keepGoing: true,
+				tryFallback: true,
+				maxBuildJobs: 8,
+				maxSilentTime: 30,
+				buildCores: 4,
+				useSubstitutes: false
+			},
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport(
+						{
+							[appPath]: {
+								hash: appHash,
+								narSize: 123,
+								references: [],
+								signatures: []
+							}
+						},
+						{
+							expectedSetOptions: {
+								keepFailed: true,
+								keepGoing: true,
+								tryFallback: true,
+								maxBuildJobs: 8,
+								maxSilentTime: 30,
+								buildCores: 4,
+								useSubstitutes: false
+							}
+						}
+					)
+				)
+		});
+
+		await expect(client.queryPathInfo(appPath)).resolves.toStrictEqual(
+			pathInfo(appPath, appHash, 123, [])
+		);
+	});
+
 	it('reads path info through the Nix daemon protocol', async () => {
 		const client = new NixDaemonStoreClient({
 			connect: () =>
@@ -85,6 +264,152 @@ describe('NixDaemonStoreClient', () => {
 			signatures: ['cache:first', 'cache:second'],
 			ultimate: true
 		});
+	});
+
+	it('reads several path infos through the pooled daemon protocol', async () => {
+		const paths = {
+			[appPath]: {
+				hash: appHash,
+				narSize: 123,
+				references: [libraryPath],
+				signatures: []
+			},
+			[libraryPath]: {
+				hash: libraryHash,
+				narSize: 456,
+				references: [],
+				signatures: []
+			}
+		};
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(new FakeDaemonTransport(paths))
+		});
+
+		await expect(
+			client.queryPathsInfo([libraryPath, appPath])
+		).resolves.toStrictEqual([
+			pathInfo(libraryPath, libraryHash, 456, []),
+			pathInfo(appPath, appHash, 123, [libraryPath])
+		]);
+	});
+
+	it('uses the negotiated path-info batch operation', async () => {
+		const missingPath = '/nix/store/9123456789abcdfghijklmnpqrsvwxyz-missing';
+		const paths = {
+			[appPath]: {
+				hash: appHash,
+				narSize: 123,
+				references: [libraryPath],
+				signatures: []
+			},
+			[libraryPath]: {
+				hash: libraryHash,
+				narSize: 456,
+				references: [],
+				signatures: []
+			}
+		};
+		const client = new NixDaemonStoreClient({
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport(paths, {
+						features: ['queryPathInfos'],
+						expectedPathInfoBatch: [appPath, libraryPath, missingPath]
+					})
+				)
+		});
+
+		await expect(
+			client.queryValidPathsInfo([libraryPath, missingPath, appPath])
+		).resolves.toStrictEqual([
+			pathInfo(libraryPath, libraryHash, 456, []),
+			pathInfo(appPath, appHash, 123, [libraryPath])
+		]);
+	});
+
+	it('returns only registered paths from a pooled valid-path query', async () => {
+		const client = new NixDaemonStoreClient({
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport({
+						[appPath]: {
+							hash: appHash,
+							narSize: 123,
+							references: [],
+							signatures: []
+						}
+					})
+				)
+		});
+
+		await expect(
+			client.queryValidPathsInfo([libraryPath, appPath])
+		).resolves.toStrictEqual([pathInfo(appPath, appHash, 123, [])]);
+	});
+
+	it('queries valid paths in one daemon operation', async () => {
+		const client = new NixDaemonStoreClient({
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport({
+						[appPath]: {
+							hash: appHash,
+							narSize: 123,
+							references: [],
+							signatures: []
+						}
+					})
+				)
+		});
+
+		await expect(
+			client.queryValidPaths([libraryPath, appPath, appPath])
+		).resolves.toStrictEqual([appPath]);
+	});
+
+	it('does not start a queued path query after a batch query fails', async () => {
+		const missingPath = `/nix/store/${'0'.repeat(32)}-missing`;
+		const validPaths = Array.from(
+			{ length: 16 },
+			(_, index) =>
+				`/nix/store/${String(index + 1).padStart(32, '0')}-valid-${String(index + 1)}`
+		);
+		const queuedPath = `/nix/store/${'16'.padStart(32, '0')}-valid-16`;
+		const paths = Object.fromEntries(
+			validPaths.map((storePath) => [
+				storePath,
+				{
+					hash: appHash,
+					narSize: 123,
+					references: [],
+					signatures: []
+				}
+			])
+		);
+		const startedPaths = new Set<string>();
+		const blocked = Promise.withResolvers<undefined>().promise;
+		const client = new NixDaemonStoreClient({
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport(paths, {
+						async beforeOperation(request) {
+							const storePath = readRequestStorePath(request);
+							startedPaths.add(storePath);
+
+							if (storePath !== missingPath) {
+								await blocked;
+							}
+						}
+					})
+				)
+		});
+
+		await expect(
+			client.queryPathsInfo([missingPath, ...validPaths])
+		).rejects.toStrictEqual(new NixStorePathNotFoundError(missingPath));
+		await Promise.resolve();
+
+		expect(startedPaths.has(queuedPath)).toBe(false);
 	});
 
 	it('resolves closure by walking daemon path references', async () => {
@@ -198,9 +523,13 @@ describe('NixDaemonStoreClient', () => {
 	});
 
 	it('rejects daemon protocol minors older than the SetOptions frame it sends', async () => {
+		let transport: FakeDaemonTransport | undefined;
 		const client = new NixDaemonStoreClient({
-			connect: () =>
-				Promise.resolve(new FakeDaemonTransport({}, { protocolMinor: 37 }))
+			connect: () => {
+				transport = new FakeDaemonTransport({}, { protocolMinor: 37 });
+
+				return Promise.resolve(transport);
+			}
 		});
 
 		let outcome:
@@ -235,6 +564,7 @@ describe('NixDaemonStoreClient', () => {
 				version: { major: 1, minor: 37 }
 			}
 		});
+		expect(transport?.closed).toBe(true);
 	});
 });
 
@@ -250,41 +580,83 @@ interface FakePathInfo {
 
 class FakeDaemonTransport implements NixDaemonTransport {
 	private readonly pendingBytes: Buffer[] = [];
-	private writeCount = 0;
+	private phase:
+		'handshake' | 'features' | 'post-handshake' | 'set-options' | 'ready' =
+		'handshake';
+
+	closed = false;
 
 	constructor(
 		private readonly paths: Readonly<Record<string, FakePathInfo>>,
-		private readonly options: { readonly protocolMinor?: number } = {}
+		private readonly options: {
+			readonly protocolMinor?: number;
+			readonly substitutable?: {
+				readonly expectedPaths: readonly string[];
+				readonly paths: readonly string[];
+			};
+			readonly derivationOutputs?: Readonly<
+				Record<string, Readonly<Record<string, string | undefined>>>
+			>;
+			readonly expectedOverrides?: Readonly<Record<string, string>>;
+			readonly expectedSetOptions?: {
+				readonly keepFailed: boolean;
+				readonly keepGoing: boolean;
+				readonly tryFallback: boolean;
+				readonly maxBuildJobs: number;
+				readonly maxSilentTime: number;
+				readonly buildCores: number;
+				readonly useSubstitutes: boolean;
+			};
+			readonly features?: readonly string[];
+			readonly expectedPathInfoBatch?: readonly string[];
+			readonly beforeOperation?: (request: Buffer) => Promise<void>;
+		} = {}
 	) {}
 
-	write(bytes: Uint8Array): Promise<void> {
-		this.writeCount += 1;
-
-		if (this.writeCount === 1) {
+	async write(bytes: Uint8Array): Promise<void> {
+		if (this.phase === 'handshake') {
+			this.phase = 'features';
 			this.pendingBytes.push(
 				handshakeResponse(this.options.protocolMinor ?? 38)
 			);
-			return Promise.resolve();
+			return;
 		}
 
-		if (this.writeCount === 2) {
-			this.pendingBytes.push(stringSetResponse([]));
-			return Promise.resolve();
+		if (this.phase === 'features') {
+			this.phase = 'post-handshake';
+			this.pendingBytes.push(stringSetResponse(this.options.features ?? []));
+			return;
 		}
 
-		if (this.writeCount === 3) {
+		if (this.phase === 'post-handshake') {
+			this.phase = 'set-options';
 			this.pendingBytes.push(postHandshakeResponse());
-			return Promise.resolve();
+			return;
 		}
 
-		if (this.writeCount === 4) {
+		if (this.phase === 'set-options') {
+			const request = readSetOptionsRequest(Buffer.from(bytes));
+
+			expect(request.overrides).toStrictEqual(
+				this.options.expectedOverrides ?? {}
+			);
+
+			if (this.options.expectedSetOptions !== undefined) {
+				expect(request.setOptions).toStrictEqual(
+					this.options.expectedSetOptions
+				);
+			}
+
+			this.phase = 'ready';
 			this.pendingBytes.push(stderrLastResponse());
-			return Promise.resolve();
+			return;
 		}
 
-		this.pendingBytes.push(queryPathInfoResponse(bytes, this.paths));
-
-		return Promise.resolve();
+		const request = Buffer.from(bytes);
+		await this.options.beforeOperation?.(request);
+		this.pendingBytes.push(
+			daemonOperationResponse(request, this.paths, this.options)
+		);
 	}
 
 	read(byteLength: number): Promise<Uint8Array> {
@@ -315,8 +687,11 @@ class FakeDaemonTransport implements NixDaemonTransport {
 		return Promise.resolve(bytes);
 	}
 
-	close(): void {
+	close(): Promise<void> {
+		this.closed = true;
 		this.pendingBytes.length = 0;
+
+		return Promise.resolve();
 	}
 }
 
@@ -327,11 +702,103 @@ class FakeDaemonReadUnderflowError extends Error {
 	}
 }
 
-function queryPathInfoResponse(
-	request: Uint8Array,
+function daemonOperationResponse(
+	request: Buffer,
+	paths: Readonly<Record<string, FakePathInfo>>,
+	options: {
+		readonly substitutable?: {
+			readonly expectedPaths: readonly string[];
+			readonly paths: readonly string[];
+		};
+		readonly derivationOutputs?: Readonly<
+			Record<string, Readonly<Record<string, string | undefined>>>
+		>;
+		readonly expectedPathInfoBatch?: readonly string[];
+	}
+): Buffer {
+	const operation = Number(request.readBigUInt64LE(0));
+
+	if (operation === 26) {
+		return queryPathInfoResponse(request, paths);
+	}
+
+	if (operation === 31) {
+		return queryValidPathsResponse(request, paths);
+	}
+
+	if (operation === 32) {
+		return querySubstitutablePathsResponse(request, options.substitutable);
+	}
+
+	if (operation === 41) {
+		return queryDerivationOutputMapResponse(
+			request,
+			options.derivationOutputs ?? {}
+		);
+	}
+
+	if (operation === 50) {
+		return queryPathInfosResponse(
+			request,
+			paths,
+			options.expectedPathInfoBatch
+		);
+	}
+
+	throw new Error(`Unexpected fake daemon operation: ${String(operation)}`);
+}
+
+function queryPathInfosResponse(
+	request: Buffer,
+	paths: Readonly<Record<string, FakePathInfo>>,
+	expectedPaths: readonly string[] | undefined
+): Buffer {
+	const requested = readRequestStringSet(request);
+
+	if (expectedPaths !== undefined) {
+		expect(requested).toStrictEqual(expectedPaths);
+	}
+
+	const infos = requested.flatMap((storePath) => {
+		const info = paths[storePath];
+
+		return info === undefined ? [] : [{ storePath, info }];
+	});
+	const response = new ProtocolWriter();
+	response.writeInteger(0x61_6c_74_73);
+	response.writeInteger(infos.length);
+
+	for (const { storePath, info } of infos) {
+		response.writeString(storePath);
+		writeUnkeyedPathInfo(response, info);
+	}
+
+	return response.bytes();
+}
+
+function queryValidPathsResponse(
+	request: Buffer,
 	paths: Readonly<Record<string, FakePathInfo>>
 ): Buffer {
-	const storePath = readRequestStorePath(Buffer.from(request));
+	const requested = readRequestStringSet(request);
+	const substituteFlagOffset = request.byteLength - 8;
+
+	expect(Number(request.readBigUInt64LE(substituteFlagOffset))).toBe(0);
+
+	const response = new ProtocolWriter();
+	response.writeInteger(0x61_6c_74_73);
+	response.writeStringSet(
+		requested.filter((storePath) => paths[storePath] !== undefined)
+	);
+
+	return response.bytes();
+}
+
+function queryPathInfoResponse(
+	request: Buffer,
+	paths: Readonly<Record<string, FakePathInfo>>
+): Buffer {
+	const storePath = readRequestStorePath(request);
 	const pathInfo = paths[storePath];
 	const response = new ProtocolWriter();
 	response.writeInteger(0x61_6c_74_73);
@@ -342,6 +809,15 @@ function queryPathInfoResponse(
 	}
 
 	response.writeBoolean(true);
+	writeUnkeyedPathInfo(response, pathInfo);
+
+	return response.bytes();
+}
+
+function writeUnkeyedPathInfo(
+	response: ProtocolWriter,
+	pathInfo: FakePathInfo
+): void {
 	response.writeString(pathInfo.deriver ?? '');
 	response.writeString(pathInfo.hash);
 	response.writeStringSet(pathInfo.references);
@@ -350,6 +826,50 @@ function queryPathInfoResponse(
 	response.writeBoolean(pathInfo.ultimate ?? false);
 	response.writeStringSet(pathInfo.signatures);
 	response.writeString(pathInfo.ca ?? '');
+}
+
+function querySubstitutablePathsResponse(
+	request: Buffer,
+	substitutable:
+		| {
+				readonly expectedPaths: readonly string[];
+				readonly paths: readonly string[];
+		  }
+		| undefined
+): Buffer {
+	if (substitutable === undefined) {
+		throw new Error('Unexpected QuerySubstitutablePaths request');
+	}
+
+	expect(readRequestStringSet(request)).toStrictEqual(
+		substitutable.expectedPaths
+	);
+
+	const response = new ProtocolWriter();
+	response.writeInteger(0x61_6c_74_73);
+	response.writeStringSet(substitutable.paths);
+
+	return response.bytes();
+}
+
+function queryDerivationOutputMapResponse(
+	request: Buffer,
+	outputs: Readonly<
+		Record<string, Readonly<Record<string, string | undefined>>>
+	>
+): Buffer {
+	const drvPath = readRequestStorePath(request);
+	const response = new ProtocolWriter();
+	response.writeInteger(0x61_6c_74_73);
+	const entries = Object.entries(outputs[drvPath] ?? {}).toSorted(
+		([left], [right]) => left.localeCompare(right)
+	);
+	response.writeInteger(entries.length);
+
+	for (const [output, storePath] of entries) {
+		response.writeString(output);
+		response.writeString(storePath ?? '');
+	}
 
 	return response.bytes();
 }
@@ -360,6 +880,86 @@ function readRequestStorePath(request: Buffer): string {
 	offset += 8;
 
 	return request.subarray(offset, offset + length).toString('utf8');
+}
+
+function readRequestStringSet(request: Buffer): string[] {
+	let offset = 8;
+	const count = Number(request.readBigUInt64LE(offset));
+	offset += 8;
+	const values: string[] = [];
+
+	for (let index = 0; index < count; index += 1) {
+		const length = Number(request.readBigUInt64LE(offset));
+		offset += 8;
+		values.push(request.subarray(offset, offset + length).toString('utf8'));
+		offset += length + ((8 - (length % 8)) % 8);
+	}
+
+	return values;
+}
+
+function readSetOptionsRequest(request: Buffer): {
+	readonly setOptions: {
+		readonly keepFailed: boolean;
+		readonly keepGoing: boolean;
+		readonly tryFallback: boolean;
+		readonly maxBuildJobs: number;
+		readonly maxSilentTime: number;
+		readonly buildCores: number;
+		readonly useSubstitutes: boolean;
+	};
+	readonly overrides: Readonly<Record<string, string>>;
+} {
+	let offset = 8;
+	const readInteger = (): number => {
+		const value = Number(request.readBigUInt64LE(offset));
+		offset += 8;
+
+		return value;
+	};
+	const isKeepFailed = readInteger() !== 0;
+	const shouldKeepGoing = readInteger() !== 0;
+	const shouldTryFallback = readInteger() !== 0;
+	readInteger();
+	const maxBuildJobs = readInteger();
+	const maxSilentTime = readInteger();
+	readInteger();
+	readInteger();
+	readInteger();
+	readInteger();
+	const buildCores = readInteger();
+	const shouldUseSubstitutes = readInteger() !== 0;
+	const count = Number(request.readBigUInt64LE(offset));
+	offset += 8;
+	const overrides: Record<string, string> = {};
+
+	for (let index = 0; index < count; index += 1) {
+		const key = readString();
+		const value = readString();
+		overrides[key] = value;
+	}
+
+	return {
+		setOptions: {
+			keepFailed: isKeepFailed,
+			keepGoing: shouldKeepGoing,
+			tryFallback: shouldTryFallback,
+			maxBuildJobs,
+			maxSilentTime,
+			buildCores,
+			useSubstitutes: shouldUseSubstitutes
+		},
+		overrides
+	};
+
+	function readString(): string {
+		const length = Number(request.readBigUInt64LE(offset));
+		offset += 8;
+		const value = request.subarray(offset, offset + length).toString('utf8');
+		offset += length + ((8 - (length % 8)) % 8);
+
+		return value;
+	}
 }
 
 function handshakeResponse(protocolMinor: number): Buffer {

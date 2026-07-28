@@ -94,6 +94,13 @@ on:
         required: false
         default: true
         type: boolean
+      closure:
+        description:
+          Publish complete realised closures instead of targets and outputs
+          built during the run.
+        required: false
+        default: false
+        type: boolean
       nix-config:
         description:
           Flake installable that evaluates to extra nix.conf text for builders.
@@ -403,48 +410,96 @@ jobs:
           while IFS= read -r attr; do
             attrs+=("${attr}")
           done < <(jq -r --arg group "${GROUP}" '.seedGroups[] | select(.key == $group) | .targets[]' "${plan}")
-          if [ "${#attrs[@]}" -gt 0 ]; then
-            # Best-effort: an attribute that does not evaluate on this runner
-            # degrades exactly as a failed build of it would, through the
-            # keep-going retry loop below, not by failing the whole step.
-            nix derivation show -r -- "${attrs[@]}" > /dev/null ||
-              echo "::warning::some seed attributes did not evaluate on this runner"
-          fi
-
           installables_file="${RUNNER_TEMP}/cupboard-seed-installables.txt"
           jq -r \
             --arg group "${GROUP}" \
             '.seedGroups[] | select(.key == $group) | .candidates[] | "\(.drvPath)^\(.output)"' \
             "${plan}" > "${installables_file}"
+
+          graph_file="${RUNNER_TEMP}/cupboard-seed-derivations.json"
+          if [ "${#attrs[@]}" -gt 0 ]; then
+            if ! nix derivation show -r -- "${attrs[@]}" > "${graph_file}"; then
+              echo '{"version":4,"derivations":{}}' > "${graph_file}"
+              for attr in "${attrs[@]}"; do
+                candidate_graph="${RUNNER_TEMP}/cupboard-seed-candidate.json"
+                merged_graph="${RUNNER_TEMP}/cupboard-seed-merged.json"
+                if nix derivation show -r -- "${attr}" > "${candidate_graph}"; then
+                  jq -s '{
+                    version: (map(.version // 4) | max),
+                    derivations: (map(.derivations // .) | add)
+                  }' \
+                    "${graph_file}" "${candidate_graph}" > "${merged_graph}"
+                  mv "${merged_graph}" "${graph_file}"
+                else
+                  echo "::warning::${attr} did not evaluate on this runner"
+                fi
+              done
+            fi
+          else
+            echo '{"version":4,"derivations":{}}' > "${graph_file}"
+          fi
+
+          filtered_installables="${RUNNER_TEMP}/cupboard-seed-buildable.txt"
+          : > "${filtered_installables}"
+          while IFS= read -r installable; do
+            drv_path="${installable%%^*}"
+            drv_name="${drv_path#/nix/store/}"
+            if jq -e \
+              --arg path "${drv_path}" \
+              --arg name "${drv_name}" \
+              '(.derivations // .) | has($path) or has($name)' \
+              "${graph_file}" > /dev/null; then
+              echo "${installable}" >> "${filtered_installables}"
+            else
+              echo "::warning::${installable} did not evaluate on this runner"
+            fi
+          done < "${installables_file}"
+          mv "${filtered_installables}" "${installables_file}"
+
           echo "file=${installables_file}" >> "${GITHUB_OUTPUT}"
+          echo "graph-file=${graph_file}" >> "${GITHUB_OUTPUT}"
+          if [ -s "${installables_file}" ]; then
+            echo "has-installables=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "has-installables=false" >> "${GITHUB_OUTPUT}"
+          fi
 
       # A remote copy can truncate after some paths have arrived. The build
       # action keeps one receipt across all three attempts, so those paths stay
       # attributable even when a retry finds them already valid.
       - uses: ./.cupboard/actions/build-paths
         id: build
+        if: ${{ steps.installables.outputs.has-installables == 'true' }}
         with:
           installables-file: ${{ steps.installables.outputs.file }}
+          derivation-graph-file: ${{ steps.installables.outputs.graph-file }}
           keep-going: 'true'
           max-jobs: ${{ matrix.remote && '0' || '' }}
           allow-failure: 'true'
 
       - uses: ./.cupboard/actions/attest
         id: attest
-        if: ${{ inputs.push && steps.build.outputs.paths != '' }}
+        if:
+          ${{ inputs.push && steps.installables.outputs.has-installables ==
+          'true' && steps.build.outputs.publication-path-count != '0' }}
         with:
           receipt-file: ${{ steps.build.outputs.receipt-file }}
 
       - uses: ./.cupboard/actions/push
-        if: ${{ inputs.push && steps.build.outputs.paths != '' }}
+        if:
+          ${{ inputs.push && steps.installables.outputs.has-installables ==
+          'true' && steps.build.outputs.publication-path-count != '0' }}
         with:
           url: ${{ inputs.url }}
           paths: ${{ steps.build.outputs.paths }}
+          additional-paths-file:
+            ${{ steps.build.outputs.publication-paths-file }}
+          closure: ${{ inputs.closure }}
           cache: ${{ needs.configure.outputs.cache }}
           # The plan action decides these per group; its tests prove the
           # retention and reuse combinations.
-          root: ${{ matrix.root }}
-          ttl: ${{ matrix.ttl }}
+          root: ${{ !matrix.noRetain && matrix.root || '' }}
+          ttl: ${{ !matrix.noRetain && matrix.ttl || '' }}
           no-retain: ${{ matrix.noRetain }}
           require-grace: ${{ matrix.requireGrace }}
           attestations: ${{ steps.attest.outputs.bundle-path }}
@@ -530,20 +585,27 @@ jobs:
 
       - uses: ./.cupboard/actions/attest
         id: attest
-        if: ${{ inputs.push && steps.build.outputs.paths != '' }}
+        if:
+          ${{ inputs.push && steps.build.outputs.publication-path-count != '0'
+          }}
         with:
           receipt-file: ${{ steps.build.outputs.receipt-file }}
 
       - uses: ./.cupboard/actions/push
-        if: ${{ inputs.push && steps.build.outputs.paths != '' }}
+        if:
+          ${{ inputs.push && steps.build.outputs.publication-path-count != '0'
+          }}
         with:
           url: ${{ inputs.url }}
           paths: ${{ steps.build.outputs.paths }}
+          additional-paths-file:
+            ${{ steps.build.outputs.publication-paths-file }}
+          closure: ${{ inputs.closure }}
           cache: ${{ needs.configure.outputs.cache }}
           # The plan action decides these per group; its tests prove the
           # retention and reuse combinations.
-          root: ${{ matrix.root }}
-          ttl: ${{ matrix.ttl }}
+          root: ${{ !matrix.noRetain && matrix.root || '' }}
+          ttl: ${{ !matrix.noRetain && matrix.ttl || '' }}
           no-retain: ${{ matrix.noRetain }}
           require-grace: ${{ matrix.requireGrace }}
           attestations: ${{ steps.attest.outputs.bundle-path }}
@@ -621,6 +683,9 @@ jobs:
         with:
           url: ${{ inputs.url }}
           paths: ${{ steps.build.outputs.paths }}
+          additional-paths-file:
+            ${{ steps.build.outputs.publication-paths-file }}
+          closure: ${{ inputs.closure }}
           cache: ${{ needs.configure.outputs.cache }}
           # The plan action computes each target's root with the same
           # construction its ensure calls use, so the ensured root and the

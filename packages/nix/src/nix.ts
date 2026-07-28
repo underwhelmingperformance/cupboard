@@ -72,6 +72,49 @@ export class Nix {
 		return this.store.queryPathInfo(this.toStorePath(path));
 	}
 
+	/** Path information for each argument, in argument order. */
+	async queryPathsInfo(
+		paths: readonly string[]
+	): Promise<readonly NixValidPathInfo[]> {
+		return this.store.queryPathsInfo(
+			paths.map((path) => this.toStorePath(path))
+		);
+	}
+
+	/** Path information for the arguments registered in the local store. */
+	async queryValidPathsInfo(
+		paths: readonly string[]
+	): Promise<readonly NixValidPathInfo[]> {
+		return this.store.queryValidPathsInfo(
+			paths.map((path) => this.toStorePath(path))
+		);
+	}
+
+	/** Arguments registered in the local store, in store-defined order. */
+	async queryValidPaths(paths: readonly string[]): Promise<readonly string[]> {
+		return this.store.queryValidPaths(
+			paths.map((path) => this.toStorePath(path))
+		);
+	}
+
+	/** Paths available from any configured mass-query substituter. */
+	async querySubstitutablePaths(
+		paths: readonly string[]
+	): Promise<readonly string[]> {
+		return this.store.querySubstitutablePaths(
+			paths.map((path) => this.toStorePath(path))
+		);
+	}
+
+	/** Registered output paths whose deriver is one of the given derivations. */
+	async queryDerivationOutputPaths(
+		drvPaths: readonly string[]
+	): Promise<readonly string[]> {
+		return this.store.queryDerivationOutputPaths(
+			drvPaths.map((drvPath) => this.toStorePath(drvPath))
+		);
+	}
+
 	/** The closure of the given paths, sorted by store path. */
 	async resolveClosure(
 		paths: readonly string[]

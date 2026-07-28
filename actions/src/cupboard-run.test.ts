@@ -5,7 +5,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { runCupboard } from './cupboard-run.ts';
+import { detectCupboardPushCapabilities, runCupboard } from './cupboard-run.ts';
 import {
 	CommandFailedError,
 	CupboardReportedError,
@@ -19,6 +19,8 @@ interface FakeCupboardOptions {
 	readonly writeResultFile?: boolean;
 	readonly captureArgvFile?: string;
 	readonly supportsResultFile?: boolean;
+	readonly supportsAdditionalPathsFile?: boolean;
+	readonly supportsClosure?: boolean;
 }
 
 // A stand-in for the cupboard binary: an executable script that records the
@@ -43,7 +45,20 @@ async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
 		'#!/usr/bin/env node',
 		"const fs = require('node:fs');",
 		'const argv = process.argv.slice(2);',
-		"if (argv.includes('--help')) {",
+		"if (argv[0] === 'push' && argv[1] === '--help') {",
+		`  process.stdout.write(${JSON.stringify(
+			[
+				options.supportsAdditionalPathsFile === false
+					? ''
+					: '  --additional-paths-file <path>',
+				options.supportsClosure === false ? '' : '  --closure'
+			]
+				.filter((line) => line !== '')
+				.join('\n')
+		)});`,
+		'  process.exit(0);',
+		'}',
+		"if (argv[0] === '--help') {",
 		`  process.stdout.write(${JSON.stringify(options.supportsResultFile === false ? 'Usage: cupboard' : '  --result-file <path>')});`,
 		'  process.exit(0);',
 		'}',
@@ -274,6 +289,37 @@ describe('runCupboard', () => {
 
 		await expect(runCupboard(binary, [], {})).rejects.toBeInstanceOf(
 			MissingInputError
+		);
+	});
+});
+
+describe('detectCupboardPushCapabilities', () => {
+	it('detects push flags independently from the result protocol', async () => {
+		const binary = await fakeCupboard({
+			results: [],
+			exitCode: 0,
+			supportsAdditionalPathsFile: false,
+			supportsClosure: false
+		});
+
+		await expect(detectCupboardPushCapabilities(binary)).resolves.toStrictEqual(
+			{
+				resultProtocol: 'result-file',
+				additionalPathsFile: false,
+				closure: false
+			}
+		);
+	});
+
+	it('detects a current push command', async () => {
+		const binary = await fakeCupboard({ results: [], exitCode: 0 });
+
+		await expect(detectCupboardPushCapabilities(binary)).resolves.toStrictEqual(
+			{
+				resultProtocol: 'result-file',
+				additionalPathsFile: true,
+				closure: true
+			}
 		);
 	});
 });

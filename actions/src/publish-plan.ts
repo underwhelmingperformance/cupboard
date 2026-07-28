@@ -222,6 +222,24 @@ export interface EvaluatedTargets {
 	readonly unevaluated: readonly UnevaluatedTarget[];
 }
 
+export function filterSubstitutableSeedCandidates(
+	plan: PublishPlan,
+	substitutablePaths: ReadonlySet<StorePathString>,
+	viewAvailablePaths: ReadonlySet<StorePathString>
+): PublishPlan {
+	const seedGroups = plan.seedGroups.flatMap((group) => {
+		const candidates = group.candidates.filter(
+			(candidate) =>
+				!substitutablePaths.has(candidate.path) ||
+				viewAvailablePaths.has(candidate.path)
+		);
+
+		return candidates.length === 0 ? [] : [{ ...group, candidates }];
+	});
+
+	return { ...plan, seedGroups };
+}
+
 interface ResolvedTargetRoot {
 	readonly target: PublishTarget;
 	readonly rootDrvPath: string;
@@ -962,6 +980,14 @@ function derivationNodes(
 	}
 
 	return nodes;
+}
+
+/** Parse the recursive derivation document emitted by `nix derivation show`. */
+export function derivationGraphFromJson(
+	value: unknown,
+	label = 'derivation graph'
+): ReadonlyMap<string, DerivationNode> {
+	return derivationNodes(label, value);
 }
 
 function nodeInputs(

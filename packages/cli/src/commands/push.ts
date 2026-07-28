@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+
 import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import type { Command } from 'commander';
@@ -26,6 +28,8 @@ interface PushOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly root?: string;
+	readonly additionalPathsFile?: string;
+	readonly closure?: boolean;
 	readonly ttl?: number;
 	readonly cache?: string;
 	readonly wait?: boolean;
@@ -133,6 +137,14 @@ export function registerPushCommand(
 			'--no-retain',
 			"publish without any retention root or pin; kept only by the cache's retention grace policy, if one matches"
 		)
+		.option(
+			'--additional-paths-file <path>',
+			'newline-delimited store paths to publish without retaining them as target roots'
+		)
+		.option(
+			'--closure',
+			'publish the complete realised closure of all requested paths'
+		)
 		.option('--cache <name>', 'push to a named cache rather than the default')
 		.option(
 			'--attestation <bundle>',
@@ -188,6 +200,10 @@ export function registerPushCommand(
 			validateRetentionChoice(options);
 
 			const reporter = commandUi(program, programOptions).reporter();
+			const additionalPaths =
+				options.additionalPathsFile === undefined
+					? []
+					: parsePathFile(await readFile(options.additionalPathsFile, 'utf8'));
 			const raw = CupboardClient.fromUrl(url, {
 				cache: options.cache,
 				signal: programOptions.signal
@@ -204,6 +220,8 @@ export function registerPushCommand(
 			});
 
 			await runPush(paths, reporter, {
+				additionalPaths,
+				closure: options.closure,
 				client: pushClientFor(url, token, {
 					cache: options.cache,
 					signal: programOptions.signal
@@ -224,4 +242,11 @@ export function registerPushCommand(
 				...(options.dryRun !== undefined && { dryRun: options.dryRun })
 			});
 		});
+}
+
+export function parsePathFile(contents: string): string[] {
+	return contents
+		.split(/\r?\n/u)
+		.map((line) => line.trim())
+		.filter((line) => line !== '');
 }

@@ -5,10 +5,14 @@
 # https://github.com/rhysd/actionlint/issues/647
 # https://github.com/rhysd/actionlint/pull/696
 #
-# The reusable publish workflow checks its own actions out with that pair, so
-# the unknown-property report is ignored for exactly that message and file.
-# Remove the entry once the pinned actionlint release models the properties.
+# The reusable publish workflows check their own actions out with that pair, so
+# the unknown-property report is ignored for exactly that message and those
+# files. Remove the entries once the pinned actionlint release models the
+# properties.
 paths:
   .github/workflows/cupboard-flake-publish.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'
+  .github/workflows/cupboard-publish.yml:
     ignore:
       - 'property "workflow_(repository|sha)" is not defined in object type'

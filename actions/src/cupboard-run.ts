@@ -20,6 +20,12 @@ import { type Environment, requireEnvironment } from './inputs.ts';
 
 export type CupboardResultProtocol = 'result-file' | 'legacy-stderr';
 
+export interface CupboardPushCapabilities {
+	readonly resultProtocol: CupboardResultProtocol;
+	readonly additionalPathsFile: boolean;
+	readonly closure: boolean;
+}
+
 export interface CupboardRunResult {
 	readonly protocol: CupboardResultProtocol;
 	readonly results: readonly ReporterResultEvent[];
@@ -96,8 +102,36 @@ export async function runCupboardWithProtocol(
 export async function detectCupboardResultProtocol(
 	binaryPath: string
 ): Promise<CupboardResultProtocol> {
+	const output = await readCupboardHelp(binaryPath, ['--help']);
+
+	return /(?:^|\s)--result-file(?:\s|[<=])/mu.test(output)
+		? 'result-file'
+		: 'legacy-stderr';
+}
+
+export async function detectCupboardPushCapabilities(
+	binaryPath: string
+): Promise<CupboardPushCapabilities> {
+	const [resultProtocol, output] = await Promise.all([
+		detectCupboardResultProtocol(binaryPath),
+		readCupboardHelp(binaryPath, ['push', '--help'])
+	]);
+
+	return {
+		resultProtocol,
+		additionalPathsFile: /(?:^|\s)--additional-paths-file(?:\s|[<=])/mu.test(
+			output
+		),
+		closure: /(?:^|\s)--closure(?:\s|[<=]|$)/mu.test(output)
+	};
+}
+
+async function readCupboardHelp(
+	binaryPath: string,
+	arguments_: readonly string[]
+): Promise<string> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(binaryPath, ['--help'], {
+		const child = spawn(binaryPath, arguments_, {
 			stdio: ['ignore', 'pipe', 'ignore']
 		});
 		let output = '';
@@ -121,11 +155,7 @@ export async function detectCupboardResultProtocol(
 				return;
 			}
 
-			resolve(
-				/(?:^|\s)--result-file(?:\s|[<=])/mu.test(output)
-					? 'result-file'
-					: 'legacy-stderr'
-			);
+			resolve(output);
 		});
 	});
 }

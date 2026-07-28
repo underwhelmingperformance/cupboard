@@ -3,6 +3,7 @@ import {
 	type PushSummary,
 	pushSummarySchema
 } from '@cupboard/protocol/reports';
+import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -21,7 +22,9 @@ import {
 	requireGraceResultProtocol,
 	requirePushSummary,
 	resolvePushInputs,
-	runPushCupboard
+	resolvePushPublication,
+	runPushCupboard,
+	validateRetainedPathLimit
 } from './push.ts';
 
 describe('buildPushArguments', () => {
@@ -30,6 +33,8 @@ describe('buildPushArguments', () => {
 			buildPushArguments({
 				url: 'https://cache.example.test',
 				paths: ['/nix/store/a', '/nix/store/b'],
+				additionalPathsFile: '/tmp/publication-paths',
+				closure: true,
 				audience: '',
 				root: 'github:owner/repo/main',
 				cache: 'ci',
@@ -46,6 +51,9 @@ describe('buildPushArguments', () => {
 			'/nix/store/a',
 			'/nix/store/b',
 			'--github-oidc',
+			'--additional-paths-file',
+			'/tmp/publication-paths',
+			'--closure',
 			'--root',
 			'github:owner/repo/main',
 			'--cache',
@@ -88,6 +96,8 @@ describe('resolvePushInputs', () => {
 		installDirectory: '/runner/temp/cupboard-bin',
 		url,
 		paths: [storePath],
+		additionalPathsFile: '',
+		closure: false,
 		cache: '',
 		audience: '',
 		root: 'github:owner/repo/main',
@@ -204,6 +214,8 @@ describe('buildPushArguments unretained', () => {
 			buildPushArguments({
 				url: 'https://cache.example.test',
 				paths: ['/nix/store/a'],
+				additionalPathsFile: '',
+				closure: false,
 				audience: '',
 				root: '',
 				cache: '',
@@ -250,6 +262,60 @@ describe('resolvePushInputs unretained', () => {
 		}).toStrictEqual({ retain: false, root: '', ttl: '' });
 	});
 
+	it('accepts an additional-only unretained publication', () => {
+		const inputs = resolvePushInputs(
+			{
+				...baseOptions,
+				paths: [],
+				additionalPathsFile: '/tmp/publication-paths',
+				retain: 'false'
+			},
+			environment
+		);
+
+		expect({
+			paths: inputs.paths,
+			additionalPathsFile: inputs.additionalPathsFile,
+			retain: inputs.retain
+		}).toStrictEqual({
+			paths: [],
+			additionalPathsFile: '/tmp/publication-paths',
+			retain: false
+		});
+	});
+
+	it('accepts an additional-only retained publication', () => {
+		const inputs = resolvePushInputs(
+			{
+				...baseOptions,
+				paths: [],
+				additionalPathsFile: '/tmp/publication-paths'
+			},
+			environment
+		);
+
+		expect({
+			paths: inputs.paths,
+			additionalPathsFile: inputs.additionalPathsFile,
+			retain: inputs.retain,
+			root: inputs.root
+		}).toStrictEqual({
+			paths: [],
+			additionalPathsFile: '/tmp/publication-paths',
+			retain: true,
+			root: 'github:owner/repo/main'
+		});
+	});
+
+	it('rejects an empty primary path set without an additional paths file', () => {
+		expect(() =>
+			resolvePushInputs(
+				{ ...baseOptions, paths: [], retain: 'false' },
+				environment
+			)
+		).toThrow(InvalidInputError);
+	});
+
 	it.each([
 		[
 			'root is combined with no-retain',
@@ -267,6 +333,186 @@ describe('resolvePushInputs unretained', () => {
 		expect(() => resolvePushInputs(options, environment)).toThrow(
 			InvalidInputError
 		);
+	});
+});
+
+describe('resolvePushPublication', () => {
+	const first = '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-first';
+	const second = '/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-second';
+
+	it('keeps retained and additional paths separate for a current CLI', () => {
+		expect(
+			resolvePushPublication(
+				{
+					paths: [first],
+					publicationPaths: [first, second],
+					additionalPathsFile: '/tmp/publication-paths',
+					closure: false,
+					retain: true
+				},
+				{ additionalPathsFile: true, closure: true }
+			)
+		).toStrictEqual({
+			paths: [first],
+			additionalPathsFile: '/tmp/publication-paths',
+			closure: false,
+			hasPositionalAdditionalPathsFallback: false,
+			implicitClosureFallback: false
+		});
+	});
+
+	it('promotes every retained partial output to a target root', () => {
+		expect(
+			resolvePushPublication(
+				{
+					paths: [],
+					publicationPaths: [first, second],
+					additionalPathsFile: '/tmp/publication-paths',
+					closure: false,
+					retain: true
+				},
+				{ additionalPathsFile: true, closure: true }
+			)
+		).toStrictEqual({
+			paths: [first, second],
+			additionalPathsFile: '',
+			closure: false,
+			hasPositionalAdditionalPathsFallback: false,
+			implicitClosureFallback: false
+		});
+	});
+
+	it('uses an anchor and the publication file for unretained partial output', () => {
+		expect(
+			resolvePushPublication(
+				{
+					paths: [],
+					publicationPaths: [first, second],
+					additionalPathsFile: '/tmp/publication-paths',
+					closure: true,
+					retain: false
+				},
+				{ additionalPathsFile: true, closure: true }
+			)
+		).toStrictEqual({
+			paths: [first],
+			additionalPathsFile: '/tmp/publication-paths',
+			closure: true,
+			hasPositionalAdditionalPathsFallback: false,
+			implicitClosureFallback: false
+		});
+	});
+
+	it('falls back to positional publication paths for an older retained CLI', () => {
+		expect(
+			resolvePushPublication(
+				{
+					paths: [first],
+					publicationPaths: [first, second],
+					additionalPathsFile: '/tmp/publication-paths',
+					closure: false,
+					retain: true
+				},
+				{ additionalPathsFile: false, closure: false }
+			)
+		).toStrictEqual({
+			paths: [first, second],
+			additionalPathsFile: '',
+			closure: false,
+			hasPositionalAdditionalPathsFallback: true,
+			implicitClosureFallback: true
+		});
+	});
+
+	it('falls back to positional publication paths for an older unretained CLI', () => {
+		expect(
+			resolvePushPublication(
+				{
+					paths: [first],
+					publicationPaths: [first, second],
+					additionalPathsFile: '/tmp/publication-paths',
+					closure: false,
+					retain: false
+				},
+				{ additionalPathsFile: false, closure: false }
+			)
+		).toStrictEqual({
+			paths: [first, second],
+			additionalPathsFile: '',
+			closure: false,
+			hasPositionalAdditionalPathsFallback: true,
+			implicitClosureFallback: true
+		});
+	});
+
+	it('omits the unsupported closure flag when legacy closure matches the request', () => {
+		expect(
+			resolvePushPublication(
+				{
+					paths: [first],
+					publicationPaths: [],
+					additionalPathsFile: '',
+					closure: true,
+					retain: true
+				},
+				{ additionalPathsFile: false, closure: false }
+			)
+		).toStrictEqual({
+			paths: [first],
+			additionalPathsFile: '',
+			closure: false,
+			hasPositionalAdditionalPathsFallback: false,
+			implicitClosureFallback: false
+		});
+	});
+
+	it('rejects an empty publication file when no primary path succeeded', () => {
+		expect(() =>
+			resolvePushPublication(
+				{
+					paths: [],
+					publicationPaths: [],
+					additionalPathsFile: '/tmp/publication-paths',
+					closure: false,
+					retain: true
+				},
+				{ additionalPathsFile: true, closure: true }
+			)
+		).toThrow(InvalidInputError);
+	});
+});
+
+describe('validateRetainedPathLimit', () => {
+	const paths = Array.from(
+		{ length: rootSetMaxTargets + 1 },
+		(_, index) => `/nix/store/path-${String(index)}`
+	);
+
+	it.each([
+		['accepts the root target limit', paths.slice(0, rootSetMaxTargets), true],
+		['accepts an unretained publication above the limit', paths, false]
+	])('%s', (_name, values, retain) => {
+		expect(() => {
+			validateRetainedPathLimit(values, retain);
+		}).not.toThrow();
+	});
+
+	it('rejects a retained publication above the root target limit', () => {
+		expect(() => {
+			validateRetainedPathLimit(paths, true);
+		}).toThrow(InvalidInputError);
+	});
+
+	it('counts each retained store path once', () => {
+		expect(() => {
+			validateRetainedPathLimit(
+				Array.from(
+					{ length: rootSetMaxTargets + 1 },
+					() => '/nix/store/duplicate'
+				),
+				true
+			);
+		}).not.toThrow();
 	});
 });
 
@@ -467,5 +713,27 @@ describe('runPushCupboard', () => {
 		expect(run.mock.calls).toStrictEqual([
 			['/tmp/cupboard', ['push'], { RUNNER_TEMP: '/tmp' }, 'legacy-stderr']
 		]);
+	});
+
+	it('reuses a protocol detected with the push capabilities', async () => {
+		const result = { protocol: 'result-file' as const, results: [] };
+		const detectResultProtocol = vi.fn();
+		const run = vi.fn(() => Promise.resolve(result));
+
+		await expect(
+			runPushCupboard(
+				{
+					binaryPath: '/tmp/cupboard',
+					arguments: ['push'],
+					environment: { RUNNER_TEMP: '/tmp' },
+					requireGrace: false,
+					version: 'v0.0.14',
+					protocol: 'result-file'
+				},
+				{ detectResultProtocol, run }
+			)
+		).resolves.toStrictEqual(result);
+
+		expect(detectResultProtocol).not.toHaveBeenCalled();
 	});
 });

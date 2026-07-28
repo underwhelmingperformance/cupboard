@@ -12,7 +12,8 @@ import {
 } from './nix-local-store.ts';
 import {
 	NixStorePathNotFoundError,
-	type NixValidPathInfo
+	type NixValidPathInfo,
+	UnsupportedNixStoreOperationError
 } from './nix-store.ts';
 
 const pathA = '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a';
@@ -60,6 +61,8 @@ function fakeDatabase(): NixStoreDatabase {
 	return {
 		pathRow: (storePath) => rowsByPath[storePath],
 		references: (id) => referencesById.get(id) ?? [],
+		derivationOutputs: (drvPaths) =>
+			drvPaths.includes(deriverA) ? [pathA] : [],
 		close: vi.fn()
 	};
 }
@@ -98,6 +101,41 @@ describe('NixLocalStoreClient', () => {
 		await expect(client.queryPathInfo(pathB)).resolves.toStrictEqual(infoB);
 	});
 
+	it('queries several paths through one database view', async () => {
+		await expect(client.queryPathsInfo([pathB, pathA])).resolves.toStrictEqual([
+			infoB,
+			infoA
+		]);
+	});
+
+	it('returns only registered paths from a valid-path batch query', async () => {
+		await expect(
+			client.queryValidPathsInfo(['/nix/store/missing', pathB])
+		).resolves.toStrictEqual([infoB]);
+	});
+
+	it('queries registered paths without loading their metadata', async () => {
+		await expect(
+			client.queryValidPaths(['/nix/store/missing', pathB, pathB])
+		).resolves.toStrictEqual([pathB]);
+	});
+
+	it('queries registered outputs by their deriver', async () => {
+		await expect(
+			client.queryDerivationOutputPaths([
+				'/nix/store/missing.drv',
+				deriverA,
+				deriverA
+			])
+		).resolves.toStrictEqual([pathA]);
+	});
+
+	it('cannot query substituters without a daemon', async () => {
+		await expect(client.querySubstitutablePaths([pathA])).rejects.toStrictEqual(
+			new UnsupportedNixStoreOperationError('substitutable-path queries')
+		);
+	});
+
 	it('throws for a path that is not in the store', async () => {
 		await expect(client.queryPathInfo('/nix/store/missing')).rejects.toThrow(
 			NixStorePathNotFoundError
@@ -123,6 +161,14 @@ function seededDatabase(): DatabaseSync {
 			'create table Refs (referrer integer not null, reference integer not null)'
 		)
 		.run();
+	database
+		.prepare(
+			`create table DerivationOutputs (
+				drv integer not null, id text not null, path text not null,
+				primary key (drv, id)
+			)`
+		)
+		.run();
 
 	// Each row leaves a different column NULL by omitting it, so the adapter is
 	// exercised on an absent deriver, ultimate, sigs and ca.
@@ -136,6 +182,14 @@ function seededDatabase(): DatabaseSync {
 			'insert into ValidPaths (id, path, hash, registrationTime, narSize, ca) values (?, ?, ?, ?, ?, ?)'
 		)
 		.run(2, pathB, hashB, 0, 50, caB);
+	database
+		.prepare(
+			'insert into ValidPaths (id, path, hash, registrationTime) values (?, ?, ?, ?)'
+		)
+		.run(3, deriverA, hashA, 0);
+	database
+		.prepare('insert into DerivationOutputs (drv, id, path) values (?, ?, ?)')
+		.run(3, 'out', pathA);
 
 	const insertReference = database.prepare(
 		'insert into Refs (referrer, reference) values (?, ?)'
@@ -156,6 +210,16 @@ describe('nixStoreDatabaseFromSqlite', () => {
 			expect(database.pathRow(pathB)).toStrictEqual(rowB);
 			expect(database.pathRow('/nix/store/missing')).toBeUndefined();
 			expect(database.references(1)).toStrictEqual([pathA, pathB]);
+			expect(
+				database.derivationOutputs([
+					'/nix/store/missing.drv',
+					deriverA,
+					deriverA
+				])
+			).toStrictEqual([pathA]);
+			expect(
+				database.derivationOutputs(['/nix/store/missing.drv'])
+			).toStrictEqual([]);
 		} finally {
 			database.close();
 		}

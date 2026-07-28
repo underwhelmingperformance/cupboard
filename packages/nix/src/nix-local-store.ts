@@ -9,17 +9,19 @@ import {
 	NixStoreDatabaseError,
 	NixStorePathNotFoundError,
 	type NixValidPathInfo,
-	resolveClosureBy
+	resolveClosureBy,
+	UnsupportedNixStoreOperationError
 } from './nix-store.ts';
 
 /**
- * A read view of the local Nix store's SQLite database, narrowed to the two
- * queries closure resolution needs. Injected so the client is tested without a
- * real database.
+ * A read view of the local Nix store's SQLite database, narrowed to path
+ * metadata and derivation output queries. Injected so the client is tested
+ * without a real database.
  */
 export interface NixStoreDatabase {
 	pathRow(storePath: string): NixStoreRow | undefined;
 	references(id: number): readonly string[];
+	derivationOutputs(drvPaths: readonly string[]): readonly string[];
 	close(): void;
 }
 
@@ -69,6 +71,60 @@ export class NixLocalStoreClient implements NixStoreClient {
 			requirePathInfo(database, storePath)
 		);
 	}
+
+	queryPathsInfo(
+		storePaths: readonly string[]
+	): Promise<readonly NixValidPathInfo[]> {
+		return this.withDatabase((database) =>
+			storePaths.map((storePath) => requirePathInfo(database, storePath))
+		);
+	}
+
+	queryValidPathsInfo(
+		storePaths: readonly string[]
+	): Promise<readonly NixValidPathInfo[]> {
+		return this.withDatabase((database) =>
+			storePaths.flatMap((storePath) => {
+				const row = database.pathRow(storePath);
+
+				return row === undefined
+					? []
+					: [pathInfoFromRow(database, storePath, row)];
+			})
+		);
+	}
+
+	queryValidPaths(storePaths: readonly string[]): Promise<readonly string[]> {
+		return this.withDatabase((database) => {
+			const seen = new Set<string>();
+
+			return storePaths.filter((storePath) => {
+				if (seen.has(storePath)) {
+					return false;
+				}
+
+				seen.add(storePath);
+
+				return database.pathRow(storePath) !== undefined;
+			});
+		});
+	}
+
+	querySubstitutablePaths(
+		_storePaths: readonly string[]
+	): Promise<readonly string[]> {
+		return Promise.reject(
+			new UnsupportedNixStoreOperationError('substitutable-path queries')
+		);
+	}
+
+	queryDerivationOutputPaths(
+		drvPaths: readonly string[]
+	): Promise<readonly string[]> {
+		return this.withDatabase((database) =>
+			database.derivationOutputs([...new Set(drvPaths)])
+		);
+	}
 }
 
 function requirePathInfo(
@@ -81,6 +137,14 @@ function requirePathInfo(
 		throw new NixStorePathNotFoundError(storePath);
 	}
 
+	return pathInfoFromRow(database, storePath, row);
+}
+
+function pathInfoFromRow(
+	database: NixStoreDatabase,
+	storePath: string,
+	row: NixStoreRow
+): NixValidPathInfo {
 	const deriver = present(row.deriver);
 	const ca = present(row.ca);
 
@@ -112,6 +176,7 @@ const queryPathInfoSql =
 	'select id, hash, registrationTime, deriver, narSize, ultimate, sigs, ca from ValidPaths where path = ?';
 const queryReferencesSql =
 	'select path from Refs join ValidPaths on reference = id where referrer = ?';
+const derivationOutputBatchSize = 500;
 
 /**
  * Open the local store database read-only. The shipped binary embeds a Node
@@ -129,7 +194,7 @@ export function openLocalStoreDatabase(
 	);
 }
 
-/** Adapt an open `node:sqlite` database to the two queries the local store needs. */
+/** Adapt an open `node:sqlite` database to the queries the local store needs. */
 export function nixStoreDatabaseFromSqlite(
 	database: DatabaseSync
 ): NixStoreDatabase {
@@ -156,6 +221,35 @@ export function nixStoreDatabaseFromSqlite(
 		},
 		references: (id) =>
 			referencesStatement.all(id).map((row) => text(row.path, 'path')),
+		derivationOutputs(drvPaths) {
+			const outputs = new Set<string>();
+
+			for (
+				let offset = 0;
+				offset < drvPaths.length;
+				offset += derivationOutputBatchSize
+			) {
+				const batch = drvPaths.slice(
+					offset,
+					offset + derivationOutputBatchSize
+				);
+				const placeholders = batch.map(() => '?').join(', ');
+				const statement = database.prepare(
+					`select DerivationOutputs.path
+					 from DerivationOutputs
+					 join ValidPaths on DerivationOutputs.drv = ValidPaths.id
+					 where ValidPaths.path in (${placeholders})
+					 order by DerivationOutputs.path`
+				);
+				const rows = statement.all(...batch);
+
+				for (const row of rows) {
+					outputs.add(text(row.path, 'path'));
+				}
+			}
+
+			return [...outputs].toSorted((left, right) => left.localeCompare(right));
+		},
 		close() {
 			database.close();
 		}

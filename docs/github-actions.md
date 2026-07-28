@@ -31,14 +31,15 @@ Both actions accept `cupboard-version`. The default is `latest`.
 
 The flake publish workflow does not default: it requires the caller to pass the
 release tag it is pinned with, so the workflow code and the CLI it drives always
-come from one release. `cupboard-publish.yml` tracks `main` instead, its own
-actions included, and installs `latest` by default. The actions negotiate the
-installed CLI's result protocol, so the workflow keeps working while a change on
-`main` is waiting for its matching binary release. Features that need richer
-results, such as `require-grace`, still require a release that reports those
-facts. Release API calls use `github-token`, which defaults to the workflow
-`github.token`. Public unauthenticated downloads work, but the token avoids
-unnecessary rate-limit failures.
+come from one release. `cupboard-publish.yml` callers conventionally track
+`main`; each run loads its actions from the workflow's resolved commit and
+installs `latest` by default. The actions negotiate the installed CLI's result
+protocol, so the workflow keeps working while a change on `main` is waiting for
+its matching binary release. Features that need richer results, such as
+`require-grace`, still require a release that reports those facts. Release API
+calls use `github-token`, which defaults to the workflow `github.token`. Public
+unauthenticated downloads work, but the token avoids unnecessary rate-limit
+failures.
 
 [github-latest-release]:
   https://docs.github.com/en/rest/releases/releases#get-the-latest-release
@@ -369,7 +370,9 @@ as `readlink -f`, so macOS is first-class.
 
 The default OIDC audience is the `url` input. The default retention root is
 `github:${{ github.repository }}/${{ github.ref_name }}`. `wait` defaults to
-`true` and `wait-timeout` defaults to `10m`.
+`true`, `wait-timeout` defaults to `10m`, and `closure` defaults to `false`.
+`additional-paths-file` publishes newline-delimited paths without adding them to
+the target root.
 
 Attestation bundle paths are also newline-delimited. They attach a bundle that
 already exists; `actions/attest` below produces one with the right subjects:
@@ -391,9 +394,13 @@ bundle against a store path only when the bundle's in-toto subject digest equals
 that path's NAR hash. An attestation built over a file's own digest, which is
 what `actions/attest-build-provenance` records by default, therefore does not
 match. `actions/build-paths` builds the requested installables and writes a
-current-run receipt recording which final outputs Nix actually built. The attest
-action verifies those paths and NAR hashes against the live store, then signs a
-single SLSA build-provenance attestation over them.
+current-run receipt recording which selected outputs Nix actually built. The
+attest action verifies those paths and NAR hashes against the live store, then
+signs a single SLSA build-provenance attestation over them.
+
+If a preceding step has already evaluated the recursive derivation graph,
+`derivation-graph-file` accepts its `nix derivation show -r` JSON output so the
+build action can reuse that work.
 
 ```yaml
 permissions:
@@ -416,12 +423,14 @@ steps:
 `installables` is newline-delimited. Generated lists can instead be written to a
 newline-delimited file and passed as `installables-file`, which avoids runner
 limits on the size of action inputs and environment variables. The build action
-retries three times and outputs the realised `paths`, a `paths-file`, and the
-`receipt-file` consumed by the attest action. A path substituted from a cache or
-already present from an earlier run is not recorded as built. Outputs returned
-by a remote builder are rebuilt and compared with `nix build --rebuild` before
-they qualify. When no path qualifies, nothing is signed and `bundle-path` is
-empty, which `actions/push` accepts as no attestations.
+retries three times and outputs the realised `paths`, a `paths-file`, a
+`publication-paths-file`, its `publication-path-count`, and the `receipt-file`
+consumed by the attest action. The publication file contains the requested
+outputs and outputs built during the run. Dependencies Nix substituted or found
+already present are omitted. Outputs returned by a remote builder are rebuilt
+and compared with `nix build --rebuild` before they qualify. When no path
+qualifies, nothing is signed and `bundle-path` is empty, which `actions/push`
+accepts as no attestations.
 
 The action outputs `bundle-path`, the signed bundle covering every qualifying
 path, alongside `checksums-file` and `subject-count`. `id-token: write` lets the
@@ -429,7 +438,7 @@ action obtain its Sigstore signing certificate, and `attestations: write`
 records the attestation on the repository.
 
 Because the bundle carries every attested path as a subject, a later
-`cupboard push` files it against each matching path in the pushed closure.
+`cupboard push` files it against each matching published path.
 
 ## Build, attest, and push
 
@@ -460,14 +469,16 @@ steps:
     with:
       url: https://cupboard.example.workers.dev/t/<slug>
       paths: ${{ steps.build.outputs.paths }}
+      additional-paths-file: ${{ steps.build.outputs.publication-paths-file }}
       attestations: ${{ steps.attest.outputs.bundle-path }}
 ```
 
 `setup` adds the cache as a substituter, `build-paths` records what this run
-built, `attest` signs those paths' NAR hashes, and `push` uploads the paths and
-files the bundle against them. Pushing needs a trust rule on the tenant that
-accepts this repository's GitHub Actions token, added with
-`cupboard oidc-trust`; see [docs/trust-rules.md](./trust-rules.md).
+built and selects the publication paths, `attest` signs the built paths' NAR
+hashes, and `push` uploads the selection while retaining only the requested
+outputs. Pushing needs a trust rule on the tenant that accepts this repository's
+GitHub Actions token, added with `cupboard oidc-trust`; see
+[docs/trust-rules.md](./trust-rules.md).
 
 ## The reusable workflow
 
@@ -505,14 +516,17 @@ of each other's way, so a Linux build and a macOS build of the same pull request
 each stay retained under their own root.
 
 The remaining inputs: `installable` picks what to build (the default is `.`, the
-flake at the repository root), `attest` turns provenance signing off for tenants
-that do not accept it, `runs-on` picks the runner, and `trusted-public-key` and
-`cupboard-version` pass through to `actions/setup`.
+flake at the repository root), `closure` opts into publishing the complete
+realised closure instead of the target and outputs built during the run,
+`attest` turns provenance signing off for tenants that do not accept it,
+`runs-on` picks the runner, and `trusted-public-key` and `cupboard-version` pass
+through to `actions/setup`.
 
 This workflow tracks `main`: callers reference it at `@main`, it fetches its own
-action code from `main`, and a trust rule that pins its `job_workflow_ref` names
-the file at `refs/heads/main`. The release-tag pinning in
-[docs/trust-rules.md](./trust-rules.md) belongs to `cupboard-flake-publish.yml`.
+action code from the called workflow's resolved commit, and a trust rule that
+pins its `job_workflow_ref` names the file at `refs/heads/main`. The release-tag
+pinning in [docs/trust-rules.md](./trust-rules.md) belongs to
+`cupboard-flake-publish.yml`.
 
 ### Publishing a target manifest
 
@@ -635,7 +649,11 @@ The plan first asks cupboard to retain each target whose output paths are
 already servable. Those targets get no runner job. For the remaining targets,
 Nix's derivation JSON identifies outputs referenced by more than one target. An
 uncached shared output is built and pushed once before the target matrix fans
-out. Paths already served by cupboard are not seeded.
+out. Before scheduling that seed, the planner asks Nix which bounded candidate
+paths its configured mass-query substituters can serve. Those paths are not
+seeded, even when they are already valid in the local store. A daemonless local
+store cannot query substituters, so the planner conservatively keeps every seed
+candidate. Paths already served by cupboard are also not seeded.
 
 Most output-addressed derivations expose their store path during evaluation.
 When Nix deliberately leaves a shared output path unknown, the planner groups
@@ -670,7 +688,8 @@ only symptom of too short a grace is the reuse quietly not happening.
 `reuse-view` opts the run into reading shared intermediates through a named
 tenant reuse view when the destination is missing them; see
 [docs/reuse-views.md](./reuse-views.md). Empty, the default, keeps planning and
-substitution destination-only.
+substitution destination-only among the tenant's caches. Configured external Nix
+substituters can still satisfy seed candidates.
 
 `cupboard-version` pins the CLI release the jobs install, and `maximise-space`
 (default `false`) reclaims runner disk space before building by deleting

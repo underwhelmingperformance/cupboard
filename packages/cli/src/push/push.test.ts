@@ -135,6 +135,7 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 
 		await runPush([appPath], reporter(results), {
+			closure: true,
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate(body) {
@@ -647,6 +648,7 @@ describe('runPush', () => {
 		const previews: UploadPreviewRequest[] = [];
 
 		await runPush([appPath], reporter(results), {
+			closure: true,
 			dryRun: true,
 			client: {
 				negotiate: unexpectedNegotiateCall,
@@ -1116,6 +1118,7 @@ describe('runPush', () => {
 				}
 			} satisfies PushClient,
 			attestations: [{ path: 'build.sigstore.json' }],
+			closure: true,
 			readAttestationBundle: () => Promise.resolve(bundle),
 			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
@@ -1523,6 +1526,74 @@ describe('runPush', () => {
 					{ label: 'Root expiry', value: 'permanent' }
 				]
 			]
+		});
+	});
+
+	it('publishes requested paths without their complete closure by default', async () => {
+		const roots: SetRootCall[] = [];
+		const clientCalls: unknown[] = [];
+
+		await runPush([appPath], reporter([]), {
+			client: skipClient(roots, clientCalls),
+			root: 'main',
+			nix: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			})
+		});
+
+		expect({ clientCalls, roots }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath] },
+				{ method: 'setRoot', fields: { name: 'main', targets: [appPath] } }
+			],
+			roots: [{ fields: { name: 'main', targets: [appPath] } }]
+		});
+	});
+
+	it('publishes additional paths without retaining them as target roots', async () => {
+		const roots: SetRootCall[] = [];
+		const clientCalls: unknown[] = [];
+
+		await runPush([appPath], reporter([]), {
+			additionalPaths: [runtimePath],
+			client: skipClient(roots, clientCalls),
+			root: 'main',
+			nix: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			})
+		});
+
+		expect({ clientCalls, roots }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath, runtimePath] },
+				{ method: 'setRoot', fields: { name: 'main', targets: [appPath] } }
+			],
+			roots: [{ fields: { name: 'main', targets: [appPath] } }]
+		});
+	});
+
+	it('publishes the complete closure when requested explicitly', async () => {
+		const roots: SetRootCall[] = [];
+		const clientCalls: unknown[] = [];
+
+		await runPush([appPath], reporter([]), {
+			closure: true,
+			client: skipClient(roots, clientCalls),
+			root: 'main',
+			nix: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			})
+		});
+
+		expect({ clientCalls, roots }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath, runtimePath] },
+				{ method: 'setRoot', fields: { name: 'main', targets: [appPath] } }
+			],
+			roots: [{ fields: { name: 'main', targets: [appPath] } }]
 		});
 	});
 
@@ -3112,6 +3183,8 @@ function knownPathInfo(
 
 function nixStore(paths: Record<string, NixValidPathInfo>): Nix {
 	const store = {
+		queryDerivationOutputPaths: () => Promise.resolve([]),
+		querySubstitutablePaths: () => Promise.resolve([]),
 		resolveClosure(storePaths: readonly string[]) {
 			const closure = new Set(storePaths);
 
@@ -3127,7 +3200,23 @@ function nixStore(paths: Record<string, NixValidPathInfo>): Nix {
 			);
 		},
 		queryPathInfo: (storePath: string) =>
-			Promise.resolve(knownPathInfo(paths, storePath))
+			Promise.resolve(knownPathInfo(paths, storePath)),
+		queryPathsInfo: (storePaths: readonly string[]) =>
+			Promise.resolve(
+				storePaths.map((storePath) => knownPathInfo(paths, storePath))
+			),
+		queryValidPaths: (storePaths: readonly string[]) =>
+			Promise.resolve(
+				storePaths.filter((storePath) => paths[storePath] !== undefined)
+			),
+		queryValidPathsInfo: (storePaths: readonly string[]) =>
+			Promise.resolve(
+				storePaths.flatMap((storePath) =>
+					paths[storePath] === undefined
+						? []
+						: [knownPathInfo(paths, storePath)]
+				)
+			)
 	};
 
 	return Nix.forStore(store, {

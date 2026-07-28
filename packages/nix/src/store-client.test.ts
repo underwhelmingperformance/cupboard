@@ -15,7 +15,9 @@ const baseConfig: NixStoreConfig = {
 	storeUri: 'auto',
 	storeDirectory: '/nix/store',
 	stateDirectory: '/nix/var/nix',
-	daemonSocketPath: '/nix/var/nix/daemon-socket/socket'
+	daemonSocketPath: '/nix/var/nix/daemon-socket/socket',
+	daemonSetOptions: {},
+	daemonOverrides: {}
 };
 
 interface Probes {
@@ -95,6 +97,10 @@ describe('resolveStoreBackend', () => {
 
 	it('rejects an unsupported store scheme', () => {
 		expect(() => resolve('ssh://builder')).toThrow(UnsupportedNixStoreError);
+	});
+
+	it('rejects a filesystem-rooted store', () => {
+		expect(() => resolve('/tmp/nix-root')).toThrow(UnsupportedNixStoreError);
 	});
 });
 

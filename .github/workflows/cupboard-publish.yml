@@ -38,6 +38,13 @@ on:
         required: false
         type: boolean
         default: true
+      closure:
+        description:
+          Publish the complete realised closure instead of targets and outputs
+          built during the run.
+        required: false
+        type: boolean
+        default: false
       runs-on:
         description: Runner label to build on.
         required: false
@@ -72,15 +79,14 @@ jobs:
         with:
           persist-credentials: false
 
-      # The composite actions ship alongside this workflow, which callers
-      # reference at main, so fetch the same ref's copy of them into the
-      # workspace. Running them from a local path keeps a repository's
-      # SHA-pinning policy for remote actions intact; the directory is
-      # untracked, so the flake source and its revision are unaffected.
+      # Fetch the composite actions from the called workflow's resolved commit.
+      # Running them from a local path keeps a repository's SHA-pinning policy
+      # for remote actions intact; the directory is untracked, so the flake
+      # source and its revision are unaffected.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          repository: underwhelmingperformance/cupboard
-          ref: main
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
           path: .cupboard
           persist-credentials: false
 
@@ -104,9 +110,9 @@ jobs:
         with:
           installables: ${{ inputs.installable }}
 
-      # A retention root holds one closure and a push replaces it wholesale, so
-      # builds for different systems must retain under sibling roots. Append
-      # this builder's system to the caller's prefix.
+      # A retention root holds one target set and a push replaces it
+      # wholesale, so builds for different systems must retain under sibling
+      # roots. Append this builder's system to the caller's prefix.
       - name: Resolve the retention root
         id: root
         if: ${{ inputs.root != '' }}
@@ -127,6 +133,9 @@ jobs:
         with:
           url: ${{ inputs.url }}
           paths: ${{ steps.build.outputs.paths }}
+          additional-paths-file:
+            ${{ steps.build.outputs.publication-paths-file }}
+          closure: ${{ inputs.closure }}
           cache: ${{ inputs.cache }}
           root: ${{ steps.root.outputs.root || '' }}
           ttl: ${{ inputs.ttl }}

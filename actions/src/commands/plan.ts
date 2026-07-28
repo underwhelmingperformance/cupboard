@@ -5,9 +5,11 @@ import path from 'node:path';
 import { env } from 'node:process';
 import { promisify } from 'node:util';
 
+import { Nix, UnsupportedNixStoreOperationError } from '@cupboard/nix';
 import {
 	rootNameMaxLength,
 	rootNameSchema,
+	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import {
@@ -60,6 +62,7 @@ import {
 	cacheProbePaths,
 	derivationUses,
 	evaluateTargets,
+	filterSubstitutableSeedCandidates,
 	joinRoot,
 	type NixEvaluator,
 	planPublish,
@@ -159,6 +162,7 @@ export interface PlanInputs {
 export interface PlanDependencies {
 	readonly evaluator?: NixEvaluator;
 	readonly fetcher?: typeof fetch;
+	readonly nix?: Pick<Nix, 'querySubstitutablePaths'>;
 	readonly runner?: EnsureRunner;
 	readonly createArtifactName?: () => string;
 }
@@ -416,6 +420,26 @@ async function optimisedPlan(
 					...credentials,
 					...fetcher
 				});
+	const seedEligibleUses = new Map(
+		uses.entries().filter(([, use]) => use.path !== undefined)
+	);
+	const maximumSeedPlan = planPublish({
+		evaluations,
+		retainedRoots: new Set(),
+		availablePaths,
+		...(viewAvailablePaths !== undefined && { viewAvailablePaths }),
+		uses: seedEligibleUses,
+		unevaluated: unevaluated.map((failure) => failure.target)
+	});
+	const substitutableSeedPaths = await querySubstitutableSeedPaths(
+		maximumSeedPlan,
+		dependencies.nix ?? Nix.open()
+	);
+	const filteredMaximumSeedPlan = filterSubstitutableSeedCandidates(
+		maximumSeedPlan,
+		substitutableSeedPaths,
+		viewAvailablePaths ?? new Set()
+	);
 	// Grace mode fails closed at plan time, in two halves. Coverage first: a
 	// destination with no usable grace policy keeps nothing alive, so the run
 	// refuses here, before the ensure calls below touch any retention root,
@@ -434,19 +458,8 @@ async function optimisedPlan(
 			uses,
 			unevaluated: unevaluated.map((failure) => failure.target)
 		});
-		const seedEligibleUses = new Map(
-			uses.entries().filter(([, use]) => use.path !== undefined)
-		);
-		const maximumSeedPlan = planPublish({
-			evaluations,
-			retainedRoots: new Set(),
-			availablePaths,
-			...(viewAvailablePaths !== undefined && { viewAvailablePaths }),
-			uses: seedEligibleUses,
-			unevaluated: unevaluated.map((failure) => failure.target)
-		});
 		validateIntermediateRootTargetLimits(inputs, {
-			seedGroups: maximumSeedPlan.seedGroups,
+			seedGroups: filteredMaximumSeedPlan.seedGroups,
 			fallbackGroups: maximumFallbackPlan.fallbackGroups
 		});
 	}
@@ -457,14 +470,18 @@ async function optimisedPlan(
 		availablePaths,
 		dependencies.runner
 	);
-	const plan = planPublish({
-		evaluations,
-		retainedRoots,
-		availablePaths,
-		...(viewAvailablePaths !== undefined && { viewAvailablePaths }),
-		uses,
-		unevaluated: unevaluated.map((failure) => failure.target)
-	});
+	const plan = filterSubstitutableSeedCandidates(
+		planPublish({
+			evaluations,
+			retainedRoots,
+			availablePaths,
+			...(viewAvailablePaths !== undefined && { viewAvailablePaths }),
+			uses,
+			unevaluated: unevaluated.map((failure) => failure.target)
+		}),
+		substitutableSeedPaths,
+		viewAvailablePaths ?? new Set()
+	);
 
 	// The second half: the intermediates that already reside at the
 	// destination have their deadlines refreshed, and the plan fails unless
@@ -478,6 +495,37 @@ async function optimisedPlan(
 	}
 
 	return plan;
+}
+
+export async function querySubstitutableSeedPaths(
+	plan: Pick<PublishPlan, 'seedGroups'>,
+	nix: Pick<Nix, 'querySubstitutablePaths'>
+): Promise<ReadonlySet<StorePathString>> {
+	const candidates = [
+		...new Set(
+			plan.seedGroups.flatMap((group) =>
+				group.candidates.map((candidate) => candidate.path)
+			)
+		)
+	].toSorted((left, right) => left.localeCompare(right));
+
+	if (candidates.length === 0) {
+		return new Set();
+	}
+
+	let substitutable: readonly string[];
+
+	try {
+		substitutable = await nix.querySubstitutablePaths(candidates);
+	} catch (error) {
+		if (error instanceof UnsupportedNixStoreOperationError) {
+			return new Set();
+		}
+
+		throw error;
+	}
+
+	return new Set(substitutable.map((path) => storePathSchema.parse(path)));
 }
 
 export function validateIntermediateRootTargetLimits(

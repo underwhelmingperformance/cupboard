@@ -175,7 +175,15 @@ function storeClientFor(source: NixStore): Nix {
 
 	return Nix.forStore(
 		{
+			queryDerivationOutputPaths: () => Promise.resolve([]),
+			querySubstitutablePaths: () => Promise.resolve([]),
 			queryPathInfo,
+			queryPathsInfo: (storePaths: readonly string[]) =>
+				Promise.all(storePaths.map((storePath) => queryPathInfo(storePath))),
+			queryValidPaths: (storePaths: readonly string[]) =>
+				Promise.resolve(storePaths),
+			queryValidPathsInfo: (storePaths: readonly string[]) =>
+				Promise.all(storePaths.map((storePath) => queryPathInfo(storePath))),
 			resolveClosure: (storePaths: readonly string[]) =>
 				Promise.all(storePaths.map((storePath) => queryPathInfo(storePath)))
 		},

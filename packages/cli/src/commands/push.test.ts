@@ -7,10 +7,20 @@ import {
 } from '../errors.ts';
 
 import {
+	parsePathFile,
 	pushCommandAuthorizationDetails,
 	registerPushCommand,
 	validateRetentionChoice
 } from './push.ts';
+
+describe('parsePathFile', () => {
+	it('parses newline-delimited paths and ignores blank lines', () => {
+		expect(parsePathFile(' /nix/store/a\r\n\n/nix/store/b\n')).toStrictEqual([
+			'/nix/store/a',
+			'/nix/store/b'
+		]);
+	});
+});
 
 describe('validateRetentionChoice', () => {
 	it.each([

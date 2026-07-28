@@ -2,6 +2,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { UnsupportedNixStoreOperationError } from '@cupboard/nix';
 import {
 	rootNameMaxLength,
 	storePathSchema,
@@ -46,6 +47,7 @@ import {
 	planAction,
 	type PlanInputs,
 	type PlanOptions,
+	querySubstitutableSeedPaths,
 	resolvePlanInputs,
 	seedMatrix,
 	validateIntermediateRootTargetLimits,
@@ -320,6 +322,70 @@ describe('resolvePlanInputs', () => {
 				environment
 			)
 		).toThrow(InvalidInputError);
+	});
+});
+
+describe('querySubstitutableSeedPaths', () => {
+	it('queries every selected path directly, including paths already valid locally', async () => {
+		const firstPath = storePath(`/nix/store/${'1'.repeat(32)}-first`);
+		const secondPath = storePath(`/nix/store/${'2'.repeat(32)}-second`);
+		const drvPath = `/nix/store/${'3'.repeat(32)}-shared.drv`;
+		const seedGroups = [
+			{
+				key: 'seed',
+				system: 'x86_64-linux',
+				os: 'ubuntu-latest',
+				remote: false,
+				targets: ['.#first', '.#second'],
+				candidates: [
+					{ drvPath, output: 'out', path: firstPath },
+					{ drvPath, output: 'dev', path: secondPath }
+				]
+			}
+		];
+
+		const result = await querySubstitutableSeedPaths(
+			{ seedGroups },
+			{
+				querySubstitutablePaths(paths) {
+					expect(paths).toStrictEqual([firstPath, secondPath]);
+
+					return Promise.resolve([firstPath]);
+				}
+			}
+		);
+
+		expect(result).toStrictEqual(new Set([firstPath]));
+	});
+
+	it('keeps every seed when the selected store cannot query substituters', async () => {
+		const path = storePath(`/nix/store/${'1'.repeat(32)}-first`);
+		const drvPath = `/nix/store/${'3'.repeat(32)}-shared.drv`;
+
+		await expect(
+			querySubstitutableSeedPaths(
+				{
+					seedGroups: [
+						{
+							key: 'seed',
+							system: 'x86_64-linux',
+							os: 'ubuntu-latest',
+							remote: false,
+							targets: ['.#first'],
+							candidates: [{ drvPath, output: 'out', path }]
+						}
+					]
+				},
+				{
+					querySubstitutablePaths: () =>
+						Promise.reject(
+							new UnsupportedNixStoreOperationError(
+								'substitutable-path queries'
+							)
+						)
+				}
+			)
+		).resolves.toStrictEqual(new Set());
 	});
 });
 

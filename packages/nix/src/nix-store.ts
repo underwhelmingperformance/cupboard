@@ -17,8 +17,21 @@ export interface NixValidPathInfo {
 	readonly ultimate: boolean;
 }
 
-/** A store backend: how a single path's info is fetched from this kind of store. */
+/** Operations provided by a selected Nix store backend. */
 export interface NixStoreClient {
+	queryDerivationOutputPaths(
+		drvPaths: readonly string[]
+	): Promise<readonly string[]>;
+	querySubstitutablePaths(
+		storePaths: readonly string[]
+	): Promise<readonly string[]>;
+	queryPathsInfo(
+		storePaths: readonly string[]
+	): Promise<readonly NixValidPathInfo[]>;
+	queryValidPaths(storePaths: readonly string[]): Promise<readonly string[]>;
+	queryValidPathsInfo(
+		storePaths: readonly string[]
+	): Promise<readonly NixValidPathInfo[]>;
 	resolveClosure(
 		storePaths: readonly string[]
 	): Promise<readonly NixValidPathInfo[]>;
@@ -113,6 +126,19 @@ export class NixConfigIncludeError extends NixStoreError {
 	}
 }
 
+export class NixConfigSettingError extends NixStoreError {
+	constructor(
+		public readonly setting: string,
+		public readonly value: string,
+		public readonly expected: string
+	) {
+		super(
+			`Nix configuration setting '${setting}' has invalid value '${value}': expected ${expected}`
+		);
+		this.name = 'NixConfigSettingError';
+	}
+}
+
 export class UnsupportedNixStoreError extends NixStoreError {
 	constructor(public readonly storeUri: string) {
 		super(
@@ -126,6 +152,13 @@ export class NixStoreDatabaseError extends NixStoreError {
 	constructor(message: string) {
 		super(message);
 		this.name = 'NixStoreDatabaseError';
+	}
+}
+
+export class UnsupportedNixStoreOperationError extends NixStoreError {
+	constructor(public readonly operation: string) {
+		super(`The selected Nix store does not support ${operation}`);
+		this.name = 'UnsupportedNixStoreOperationError';
 	}
 }
 

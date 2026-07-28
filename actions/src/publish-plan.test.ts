@@ -26,6 +26,7 @@ import {
 	derivationUses,
 	evaluateTargets,
 	evaluationFromJson,
+	filterSubstitutableSeedCandidates,
 	joinRoot,
 	type NixEvaluator,
 	planPublish,
@@ -503,6 +504,81 @@ describe('planPublish', () => {
 			seedGroups: [],
 			fallbackGroups: []
 		});
+	});
+});
+
+describe('filterSubstitutableSeedCandidates', () => {
+	it('omits ordinary seeds Nix can substitute and removes empty groups', () => {
+		const first = target('first');
+		const second = target('second');
+		const evaluations = [
+			multiSharedEvaluation(first, 'first', firstPath),
+			multiSharedEvaluation(second, 'second', secondPath)
+		];
+		const plan = planPublish({
+			evaluations,
+			retainedRoots: new Set(),
+			availablePaths: new Set([sharedPath]),
+			uses: derivationUses(evaluations)
+		});
+
+		const filtered = filterSubstitutableSeedCandidates(
+			plan,
+			new Set([missingPath, viewOnlyPath]),
+			new Set()
+		);
+
+		expect(serialisePlan(filtered)).toStrictEqual({
+			retained: [],
+			targets: ['first', 'second'],
+			seedGroups: [],
+			fallbackGroups: []
+		});
+	});
+
+	it('preserves view adoption seeds even when Nix can substitute them', () => {
+		const first = target('first');
+		const second = target('second');
+		const evaluations = [
+			multiSharedEvaluation(first, 'first', firstPath),
+			multiSharedEvaluation(second, 'second', secondPath)
+		];
+		const plan = planPublish({
+			evaluations,
+			retainedRoots: new Set(),
+			availablePaths: new Set([sharedPath]),
+			viewAvailablePaths: new Set([viewOnlyPath]),
+			uses: derivationUses(evaluations)
+		});
+
+		const filtered = filterSubstitutableSeedCandidates(
+			plan,
+			new Set([viewOnlyPath]),
+			new Set([viewOnlyPath])
+		);
+
+		expect(filtered.seedGroups).toStrictEqual([
+			expect.objectContaining({
+				key: 'adopt-x86_64-linux-ubuntu-latest-remote-e196fc1bd181007f',
+				candidates: [
+					{
+						drvPath: '/nix/store/shared-viewonly.drv',
+						output: 'out',
+						path: viewOnlyPath
+					}
+				]
+			}),
+			expect.objectContaining({
+				key: 'seed-x86_64-linux-ubuntu-latest-remote-e196fc1bd181007f',
+				candidates: [
+					{
+						drvPath: '/nix/store/shared-missing.drv',
+						output: 'out',
+						path: missingPath
+					}
+				]
+			})
+		]);
 	});
 });
 

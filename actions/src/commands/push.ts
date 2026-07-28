@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
 
@@ -8,6 +8,7 @@ import {
 	pushSummaryResultKind,
 	pushSummarySchema
 } from '@cupboard/protocol/reports';
+import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import {
 	createGithubReporter,
 	type Reporter,
@@ -16,8 +17,10 @@ import {
 import type { Command } from 'commander';
 
 import {
+	type CupboardPushCapabilities,
 	type CupboardResultProtocol,
 	type CupboardRunResult,
+	detectCupboardPushCapabilities,
 	detectCupboardResultProtocol,
 	runCupboardWithProtocol
 } from '../cupboard-run.ts';
@@ -31,7 +34,12 @@ import {
 	PushSummaryMissingError,
 	PushSummaryResponseError
 } from '../errors.ts';
-import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
+import {
+	type Environment,
+	parseLines,
+	requireEnvironment,
+	setOutput
+} from '../inputs.ts';
 import { collectLines, isEnabled, provided } from '../options.ts';
 import {
 	fallbackReleaseRepository,
@@ -45,6 +53,8 @@ const legacyPushSummarySchema = pushSummarySchema.omit({ paths: true });
 export interface PushOptions {
 	readonly url?: string;
 	readonly paths: readonly string[];
+	readonly additionalPathsFile?: string;
+	readonly closure?: string;
 	readonly cupboardVersion?: string;
 	readonly includePrereleases?: string;
 	readonly githubToken?: string;
@@ -71,6 +81,8 @@ export interface PushInputs {
 	readonly installDirectory: string;
 	readonly url: string;
 	readonly paths: readonly string[];
+	readonly additionalPathsFile: string;
+	readonly closure: boolean;
 	readonly cache: string;
 	readonly audience: string;
 	readonly root: string;
@@ -88,6 +100,7 @@ interface RunPushCupboardOptions {
 	readonly environment: Environment;
 	readonly requireGrace: boolean;
 	readonly version: string;
+	readonly protocol?: CupboardResultProtocol;
 }
 
 interface RunPushCupboardDependencies {
@@ -103,6 +116,8 @@ const defaultRunPushCupboardDependencies: RunPushCupboardDependencies = {
 interface PushArgumentsOptions {
 	readonly url: string;
 	readonly paths: readonly string[];
+	readonly additionalPathsFile: string;
+	readonly closure: boolean;
 	readonly audience: string;
 	readonly root: string;
 	readonly cache: string;
@@ -111,6 +126,22 @@ interface PushArgumentsOptions {
 	readonly wait: boolean;
 	readonly waitTimeout: string;
 	readonly attestations: readonly string[];
+}
+
+interface PushPublicationOptions {
+	readonly paths: readonly string[];
+	readonly publicationPaths: readonly string[];
+	readonly additionalPathsFile: string;
+	readonly closure: boolean;
+	readonly retain: boolean;
+}
+
+interface ResolvedPushPublication {
+	readonly paths: readonly string[];
+	readonly additionalPathsFile: string;
+	readonly closure: boolean;
+	readonly hasPositionalAdditionalPathsFallback: boolean;
+	readonly implicitClosureFallback: boolean;
 }
 
 export function registerPushCommand(
@@ -128,6 +159,14 @@ export function registerPushCommand(
 			'local Nix store path, derivation or installable to push (repeatable, or newline-delimited)',
 			collectLines,
 			[]
+		)
+		.option(
+			'--additional-paths-file <path>',
+			'file of paths to publish without retaining them as target roots'
+		)
+		.option(
+			'--closure <value>',
+			'publish the complete realised closure: true or false'
 		)
 		.option(
 			'--cupboard-version <version>',
@@ -195,14 +234,16 @@ export function resolvePushInputs(
 		);
 	}
 
-	if (options.paths.length === 0) {
+	const additionalPathsFile = provided(options.additionalPathsFile) ?? '';
+	const isRetained = isEnabled('retain', options.retain, true);
+
+	if (additionalPathsFile === '' && options.paths.length === 0) {
 		throw new InvalidInputError(
 			'paths',
-			'paths is required and must contain at least one path'
+			'paths must contain at least one path unless an additional-paths-file is provided'
 		);
 	}
 
-	const isRetained = isEnabled('retain', options.retain, true);
 	const explicitRoot = provided(options.root);
 
 	// Unretained publication never conflicts with the action's own implicit
@@ -255,6 +296,8 @@ export function resolvePushInputs(
 			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
 		url,
 		paths: options.paths,
+		additionalPathsFile,
+		closure: isEnabled('closure', options.closure, false),
 		cache: provided(options.cache) ?? '',
 		audience: provided(options.audience) ?? '',
 		root: isRetained
@@ -277,6 +320,10 @@ export async function pushAction(
 ): Promise<void> {
 	const inputs = resolvePushInputs(options, environment);
 	const installDirectory = path.resolve(inputs.installDirectory);
+	const publicationPaths =
+		inputs.additionalPathsFile === ''
+			? []
+			: parseLines(await readFile(inputs.additionalPathsFile, 'utf8'));
 
 	await mkdir(installDirectory, { recursive: true });
 
@@ -295,10 +342,43 @@ export async function pushAction(
 		reporter
 	);
 
-	const paths = resolveStorePaths(Nix.open(), inputs.paths);
+	const capabilities = await detectCupboardPushCapabilities(
+		installedCupboard.binaryPath
+	);
+	const publication = resolvePushPublication(
+		{
+			paths: inputs.paths,
+			publicationPaths,
+			additionalPathsFile: inputs.additionalPathsFile,
+			closure: inputs.closure,
+			retain: inputs.retain
+		},
+		capabilities
+	);
+
+	if (publication.hasPositionalAdditionalPathsFallback) {
+		reporter.warn(
+			'older cupboard release',
+			'publication paths are being passed positionally because --additional-paths-file is unavailable'
+		);
+	}
+
+	if (publication.implicitClosureFallback) {
+		reporter.warn(
+			'older cupboard release',
+			'complete closures will be published because selective closure publication is unavailable'
+		);
+	}
+
+	const paths = resolveStorePaths(Nix.open(), publication.paths);
+
+	validateRetainedPathLimit(paths, inputs.retain);
+
 	const arguments_ = buildPushArguments({
 		url: inputs.url,
 		paths,
+		additionalPathsFile: publication.additionalPathsFile,
+		closure: publication.closure,
 		audience: inputs.audience,
 		root: inputs.root,
 		cache: inputs.cache,
@@ -317,7 +397,8 @@ export async function pushAction(
 		arguments: arguments_,
 		environment,
 		requireGrace: inputs.requireGrace,
-		version: installedCupboard.version
+		version: installedCupboard.version,
+		protocol: capabilities.resultProtocol
 	});
 	const summary = requirePushSummary(run.results, run.protocol);
 
@@ -339,11 +420,76 @@ export async function pushAction(
 	}
 }
 
+export function resolvePushPublication(
+	options: PushPublicationOptions,
+	capabilities: Pick<
+		CupboardPushCapabilities,
+		'additionalPathsFile' | 'closure'
+	>
+): ResolvedPushPublication {
+	if (options.paths.length === 0 && options.publicationPaths.length === 0) {
+		throw new InvalidInputError(
+			'additional-paths-file',
+			'additional-paths-file must contain at least one path'
+		);
+	}
+
+	const hasPositionalAdditionalPathsFallback =
+		!capabilities.additionalPathsFile && options.publicationPaths.length > 0;
+	let paths = options.paths;
+	let additionalPathsFile = capabilities.additionalPathsFile
+		? options.additionalPathsFile
+		: '';
+
+	if (
+		hasPositionalAdditionalPathsFallback ||
+		(options.paths.length === 0 && options.retain)
+	) {
+		paths = [...new Set([...options.paths, ...options.publicationPaths])];
+		additionalPathsFile = '';
+	} else if (options.paths.length === 0) {
+		const [first] = options.publicationPaths;
+
+		if (first === undefined) {
+			throw new InvalidInputError(
+				'additional-paths-file',
+				'additional-paths-file must contain at least one path'
+			);
+		}
+
+		paths = [first];
+	}
+
+	return {
+		paths,
+		additionalPathsFile,
+		closure: capabilities.closure && options.closure,
+		hasPositionalAdditionalPathsFallback,
+		implicitClosureFallback: !capabilities.closure && !options.closure
+	};
+}
+
+export function validateRetainedPathLimit(
+	paths: readonly string[],
+	isRetained: boolean
+): void {
+	if (!isRetained || new Set(paths).size <= rootSetMaxTargets) {
+		return;
+	}
+
+	throw new InvalidInputError(
+		'paths',
+		`retained paths must contain at most ${String(rootSetMaxTargets)} targets; split the paths across named roots`
+	);
+}
+
 export async function runPushCupboard(
 	options: RunPushCupboardOptions,
 	dependencies: RunPushCupboardDependencies = defaultRunPushCupboardDependencies
 ): Promise<CupboardRunResult> {
-	const protocol = await dependencies.detectResultProtocol(options.binaryPath);
+	const protocol =
+		options.protocol ??
+		(await dependencies.detectResultProtocol(options.binaryPath));
 
 	if (options.requireGrace) {
 		requireGraceResultProtocol(protocol, options.version);
@@ -449,7 +595,7 @@ export function requirePushSummary(
 }
 
 function resolveStorePaths(nix: Nix, paths: readonly string[]): string[] {
-	return paths.map((storePath) => nix.toStorePath(storePath));
+	return [...new Set(paths.map((storePath) => nix.toStorePath(storePath)))];
 }
 
 export function buildPushArguments(
@@ -462,6 +608,14 @@ export function buildPushArguments(
 		...options.paths,
 		'--github-oidc'
 	];
+
+	if (options.additionalPathsFile !== '') {
+		arguments_.push('--additional-paths-file', options.additionalPathsFile);
+	}
+
+	if (options.closure) {
+		arguments_.push('--closure');
+	}
 	// No default here: the CLI derives the audience from the canonical form of
 	// the URL it parses, so one defaulting site serves the whole system.
 	if (options.audience !== '') {
