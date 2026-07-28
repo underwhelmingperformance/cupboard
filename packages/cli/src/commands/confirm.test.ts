@@ -1,4 +1,5 @@
 import { fakeCliUi } from '@cupboard/cli-ui/testing';
+import { selectorForCache } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	type ParsedUploadConfirmResponse,
@@ -9,6 +10,7 @@ import {
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
+import { storedCacheFor } from '../client/client.ts';
 import {
 	CliAbortError,
 	ConfirmIncompleteError,
@@ -37,7 +39,9 @@ describe('runConfirm', () => {
 		const calls: { cacheName: string; storePathHashes: string[] }[] = [];
 		const { ui } = fakeCliUi();
 
-		await runConfirm('pr-1', [appPath, runtimePath], ui.reporter(), {
+		const cacheName = selectorForCache(storedCacheFor('pr-1'));
+
+		await runConfirm(cacheName, [appPath, runtimePath], ui.reporter(), {
 			confirm(input) {
 				calls.push(input);
 

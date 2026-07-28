@@ -6,6 +6,7 @@ import type { CloudflareApi, TokenPolicyInput } from './cloudflare-api.ts';
 import {
 	cloudflareAccountIdSchema,
 	databaseIdSchema,
+	kvNamespaceIdSchema,
 	queueIdSchema
 } from './identifiers.ts';
 import {
@@ -55,7 +56,7 @@ function baseApi(apiCalls: ApiCall[]): CloudflareApi {
 		},
 		ensureKvNamespace: () => {
 			recordApiCall(apiCalls, 'ensureKvNamespace');
-			return Promise.resolve('namespace-id');
+			return Promise.resolve(kvNamespaceIdSchema.parse('namespace-id'));
 		},
 		ensureQueue: () => {
 			recordApiCall(apiCalls, 'ensureQueue');

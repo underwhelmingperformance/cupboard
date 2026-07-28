@@ -7,6 +7,7 @@ import {
 	type RootName,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
+	type StorePathHash,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
@@ -166,7 +167,7 @@ type UploadDecisionOf<A extends ParsedUploadDecision['action']> = Extract<
 // A path that could not be uploaded or committed. The push presses on with the
 // rest, then fails as a whole so nothing downstream treats it as finished.
 interface PushFailure {
-	readonly storePathHash: string;
+	readonly storePathHash: StorePathHash;
 	readonly storePath: string;
 	readonly stage: 'upload' | 'commit' | 'verify';
 	readonly reason: string;
@@ -377,7 +378,7 @@ async function runPushFlow(
 	const failures: PushFailure[] = [];
 	const failedUploadIds = new Set<string>();
 	const negotiated = indexNegotiatedPaths(closure);
-	const storePathByHash = new Map<string, string>(
+	const storePathByHash = new Map<StorePathHash, string>(
 		closure.map((pathInfo) => [
 			StorePath.hash(pathInfo.storePath),
 			pathInfo.storePath
@@ -464,7 +465,7 @@ async function runPushFlow(
 	// Keyed by store-path hash, refined in place as a deferred path settles or
 	// re-drives, so the push summary reads each path's latest outcome once every
 	// phase below has run.
-	const outcomes = new Map<string, CommitOutcome>();
+	const outcomes = new Map<StorePathHash, CommitOutcome>();
 	// Keyed by store-path hash: the action each path's latest negotiation
 	// chose. A re-drive renegotiates, and the fresh decision can differ from
 	// the first (a reaped reuse may need a real upload), so the summary
@@ -511,7 +512,7 @@ async function runPushFlow(
 				// still resolves to its path.
 				const pending: {
 					decision: UploadDecisionOf<'upload' | 'commit'>;
-					storePathHash: string;
+					storePathHash: StorePathHash;
 					settled: Promise<void>;
 				}[] = [];
 				let committed = 0;
@@ -634,7 +635,7 @@ async function runPushFlow(
 		// wait, once a deferred path has verified and materialised. A path that
 		// failed (at commit or verification) has no such row, and `--no-wait` leaves
 		// its deferred paths pending, so both are skipped.
-		const unservableStorePathHashes = new Set<string>(
+		const unservableStorePathHashes = new Set<StorePathHash>(
 			failures.map((failure) => failure.storePathHash)
 		);
 		if (!shouldWait) {
@@ -971,10 +972,10 @@ function previewPathRows(
 // with the grace it captured at commit time, since its deadline is not yet
 // known.
 function committedOrPendingPath(
-	storePathHash: string,
+	storePathHash: StorePathHash,
 	outcome: CommitOutcome,
 	shouldWait: boolean,
-	storePathByHash: ReadonlyMap<string, string>
+	storePathByHash: ReadonlyMap<StorePathHash, string>
 ): PushSummaryPath {
 	const isFinal = outcome.status !== 'pending' || shouldWait;
 	const grace = isFinal
@@ -1029,12 +1030,12 @@ interface AttachAttestationsDependencies {
 	readonly enabled: boolean;
 	readonly sources: readonly PushAttestationSource[];
 	readonly readBundle: ReadAttestationBundle;
-	readonly pendingStorePathHashes: ReadonlySet<string>;
-	readonly divergent: ReadonlyMap<string, DivergentSkip>;
+	readonly pendingStorePathHashes: ReadonlySet<StorePathHash>;
+	readonly divergent: ReadonlyMap<StorePathHash, DivergentSkip>;
 }
 
 interface PreparedAttestationBundle {
-	readonly storePathHash: string;
+	readonly storePathHash: StorePathHash;
 	readonly digest: string;
 	readonly bytes: Uint8Array;
 }
@@ -1502,7 +1503,7 @@ async function awaitDeferredVerdict(
 		readonly settled: Promise<void>;
 	},
 	context: CommitContext,
-	outcomes: Map<string, CommitOutcome>
+	outcomes: Map<StorePathHash, CommitOutcome>
 ): Promise<void> {
 	try {
 		await entry.settled;
@@ -1607,11 +1608,11 @@ interface DivergentSkip {
 function divergentSkips(
 	closure: readonly NixValidPathInfo[],
 	decisions: readonly (ParsedUploadDecision | ParsedUploadPreviewDecision)[]
-): ReadonlyMap<string, DivergentSkip> {
-	const localByStorePathHash = new Map<string, NixValidPathInfo>(
+): ReadonlyMap<StorePathHash, DivergentSkip> {
+	const localByStorePathHash = new Map<StorePathHash, NixValidPathInfo>(
 		closure.map((info) => [StorePath.hash(info.storePath), info])
 	);
-	const divergent = new Map<string, DivergentSkip>();
+	const divergent = new Map<StorePathHash, DivergentSkip>();
 
 	for (const decision of decisions) {
 		if (decision.action !== 'skip') {
@@ -1639,7 +1640,7 @@ function divergentSkips(
 // preview's skip decisions carry the same cached hash.
 function warnDivergentSkips(
 	reporter: Reporter,
-	divergent: ReadonlyMap<string, DivergentSkip>
+	divergent: ReadonlyMap<StorePathHash, DivergentSkip>
 ): void {
 	for (const skip of divergent.values()) {
 		reporter.warn(
