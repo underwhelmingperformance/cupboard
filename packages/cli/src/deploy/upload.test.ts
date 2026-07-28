@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import type { WorkerConfig } from './config.ts';
-import { databaseIdSchema, scriptNameSchema } from './identifiers.ts';
+import {
+	databaseIdSchema,
+	kvNamespaceIdSchema,
+	scriptNameSchema
+} from './identifiers.ts';
 import {
 	buildScriptMetadata,
 	MissingResourceError,
@@ -49,7 +53,7 @@ const controlConfig: WorkerConfig = {
 
 const resources: ResolvedResources = {
 	d1: new Map([['cupboard', databaseIdSchema.parse('db-id-1')]]),
-	kv: new Map([['cupboard-tenant-cache', 'kv-id-1']])
+	kv: new Map([['cupboard-tenant-cache', kvNamespaceIdSchema.parse('kv-id-1')]])
 };
 
 describe('buildScriptMetadata', () => {

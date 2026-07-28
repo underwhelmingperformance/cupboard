@@ -2,7 +2,7 @@ import type { ScriptUpdateParams } from 'cloudflare/resources/workers/scripts/sc
 import type { SingleStepMigrationParam } from 'cloudflare/resources/workers/workers';
 
 import type { WorkerConfig } from './config.ts';
-import type { DatabaseId } from './identifiers.ts';
+import type { DatabaseId, KvNamespaceId } from './identifiers.ts';
 
 type Metadata = ScriptUpdateParams.Metadata;
 type Binding = NonNullable<Metadata['bindings']>[number];
@@ -13,7 +13,7 @@ type Binding = NonNullable<Metadata['bindings']>[number];
  */
 export interface ResolvedResources {
 	readonly d1: ReadonlyMap<string, DatabaseId>;
-	readonly kv: ReadonlyMap<string, string>;
+	readonly kv: ReadonlyMap<string, KvNamespaceId>;
 }
 
 export class MissingResourceError extends Error {

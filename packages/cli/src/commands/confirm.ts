@@ -1,4 +1,8 @@
-import { selectorForCache } from '@cupboard/nix-store/scalars';
+import {
+	type CacheSelector,
+	selectorForCache,
+	type StorePathHash
+} from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	type ParsedUploadConfirmResponse,
@@ -37,8 +41,8 @@ interface ConfirmOptions {
  */
 export interface ConfirmClient {
 	confirm(input: {
-		cacheName: string;
-		storePathHashes: string[];
+		cacheName: CacheSelector;
+		storePathHashes: StorePathHash[];
 	}): Promise<ParsedUploadConfirmResponse>;
 }
 
@@ -100,7 +104,7 @@ export function registerConfirmCommand(
 }
 
 export async function runConfirm(
-	cacheName: string,
+	cacheName: CacheSelector,
 	storePaths: readonly string[],
 	reporter: Reporter,
 	client: ConfirmClient
@@ -108,14 +112,14 @@ export async function runConfirm(
 	const storePathHashes = storePaths.map((storePath) =>
 		StorePath.hash(storePath)
 	);
-	const storePathsByHash = new Map<string, string>(
+	const storePathsByHash = new Map<StorePathHash, string>(
 		storePaths.map((storePath) => [StorePath.hash(storePath), storePath])
 	);
 	// The server bounds one confirm request, so a closure larger than the
 	// bound is split across sequential requests. The extensions a batch
 	// applied are server-side facts whether or not a later batch's request
 	// fails, so what confirmed is reported either way.
-	const paths: UploadConfirmResponse['paths'] = [];
+	const paths: ParsedUploadConfirmResponse['paths'] = [];
 	const totalBatches = Math.ceil(
 		storePathHashes.length / uploadConfirmMaxPaths
 	);

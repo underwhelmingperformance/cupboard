@@ -9,6 +9,7 @@ import { collectResources, runDeploy } from './deploy-run.ts';
 import {
 	cloudflareAccountIdSchema,
 	databaseIdSchema,
+	kvNamespaceIdSchema,
 	queueIdSchema,
 	scriptNameSchema,
 	zoneIdSchema
@@ -18,6 +19,7 @@ import { buildScriptMetadata } from './upload.ts';
 const scriptName = (value: string) => scriptNameSchema.parse(value);
 const databaseId = (value: string) => databaseIdSchema.parse(value);
 const queueId = (value: string) => queueIdSchema.parse(value);
+const kvNamespaceId = (value: string) => kvNamespaceIdSchema.parse(value);
 
 function worker(overrides: Partial<WorkerConfig>): WorkerConfig {
 	return {
@@ -162,7 +164,7 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 			},
 			ensureKvNamespace(title) {
 				calls.push(`kv:${title}`);
-				return Promise.resolve(`kv-${title}`);
+				return Promise.resolve(kvNamespaceId(`kv-${title}`));
 			},
 			ensureQueue(name) {
 				calls.push(`queue:${name}`);
@@ -283,7 +285,9 @@ describe('runDeploy', () => {
 			getScriptBindings: (scriptName) => {
 				const resources = {
 					d1: new Map([['cupboard', databaseId('db-id')]]),
-					kv: new Map([['cupboard-tenant-cache', 'kv-cupboard-tenant-cache']])
+					kv: new Map([
+						['cupboard-tenant-cache', kvNamespaceId('kv-cupboard-tenant-cache')]
+					])
 				};
 				const config =
 					scriptName === 'cupboard-tenant'

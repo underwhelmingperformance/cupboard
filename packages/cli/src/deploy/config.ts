@@ -1,7 +1,11 @@
 import JSON5 from 'json5';
 import { z } from 'zod';
 
-import { type ScriptName, scriptNameSchema } from './identifiers.ts';
+import {
+	kvNamespaceIdSchema,
+	type ScriptName,
+	scriptNameSchema
+} from './identifiers.ts';
 import { controlWorker, tenantWorker } from './source.ts';
 
 /**
@@ -154,7 +158,10 @@ const r2BucketBinding = z.object({
 	bucket_name: bucketName
 });
 
-const kvNamespaceBinding = z.object({ binding: z.string(), id: z.string() });
+const kvNamespaceBinding = z.object({
+	binding: z.string(),
+	id: kvNamespaceIdSchema
+});
 
 const d1DatabaseBinding = z.object({
 	binding: z.string(),

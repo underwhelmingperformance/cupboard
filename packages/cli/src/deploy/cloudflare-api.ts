@@ -12,6 +12,8 @@ import {
 	cloudflareAccountIdSchema,
 	type DatabaseId,
 	databaseIdSchema,
+	type KvNamespaceId,
+	kvNamespaceIdSchema,
 	type QueueId,
 	queueIdSchema,
 	type ScriptName,
@@ -87,7 +89,7 @@ export interface CloudflareApi {
 	 */
 	ensureStagingLifecycleRule(bucketName: string): Promise<void>;
 	ensureD1Database(name: string): Promise<DatabaseId>;
-	ensureKvNamespace(title: string): Promise<string>;
+	ensureKvNamespace(title: string): Promise<KvNamespaceId>;
 	ensureQueue(name: string): Promise<QueueId>;
 
 	d1Query(databaseId: DatabaseId, sql: string): Promise<void>;
@@ -368,12 +370,12 @@ export function createCloudflareApi(
 			);
 
 			if (existing?.id !== undefined) {
-				return existing.id;
+				return kvNamespaceIdSchema.parse(existing.id);
 			}
 
 			const created = await client.kv.namespaces.create({ ...account, title });
 
-			return created.id;
+			return kvNamespaceIdSchema.parse(created.id);
 		},
 
 		async ensureQueue(name) {

@@ -7,7 +7,7 @@ import type { DeploymentArtifact } from './artifact.ts';
 import type { WorkerBundle } from './bundle.ts';
 import type { CloudflareApi, WorkerSecret } from './cloudflare-api.ts';
 import type { DeploymentConfig } from './config.ts';
-import type { DatabaseId, ScriptName } from './identifiers.ts';
+import type { DatabaseId, KvNamespaceId, ScriptName } from './identifiers.ts';
 import {
 	applyD1Migrations,
 	computeDurableObjectMigration
@@ -197,7 +197,7 @@ async function reconcileResources(
 			d1.set(name, await api.ensureD1Database(name));
 		}
 
-		const kv = new Map<string, string>();
+		const kv = new Map<string, KvNamespaceId>();
 
 		for (const title of plan.kvTitles) {
 			kv.set(title, await api.ensureKvNamespace(title));
