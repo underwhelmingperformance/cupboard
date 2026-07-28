@@ -83,13 +83,24 @@ describe('uploadNegotiateRequestSchema', () => {
 		}).toStrictEqual({ matching: true, mismatched: false });
 	});
 
+	// A narinfo names its deriver by basename, the way it names references, so
+	// the two fields carry different shapes: `ca` is a content-address
+	// specification and not a path at all.
 	it.each([
-		{ name: 'a deriver', field: 'deriver' as const },
-		{ name: 'a ca', field: 'ca' as const }
-	])('accepts $name metadata line', ({ field }) => {
+		{
+			name: 'a deriver basename',
+			field: 'deriver' as const,
+			value: `${storePathHash}-name.drv`
+		},
+		{
+			name: 'a ca specification',
+			field: 'ca' as const,
+			value: `fixed:r:sha256:${'1'.repeat(52)}`
+		}
+	])('accepts $name', ({ field, value: field_ }) => {
 		const value = {
 			pushId,
-			paths: [{ ...negotiationPath, [field]: `${storePath}.drv` }]
+			paths: [{ ...negotiationPath, [field]: field_ }]
 		};
 
 		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual(value);
@@ -129,6 +140,17 @@ describe('uploadNegotiateRequestSchema', () => {
 		{
 			name: 'a deriver carrying a control character',
 			value: { paths: [{ ...negotiationPath, deriver: 'a\nb' }] }
+		},
+		{
+			name: 'a deriver named by store path instead of basename',
+			value: {
+				paths: [
+					{
+						...negotiationPath,
+						deriver: `/nix/store/${'0'.repeat(32)}-app.drv`
+					}
+				]
+			}
 		},
 		{
 			name: 'a ca carrying a control character',

@@ -5,6 +5,7 @@ import {
 	nixSha256HashSchema,
 	positiveIntSchema,
 	referencesSchema,
+	storePathBasenameSchema,
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
@@ -33,7 +34,10 @@ const uploadPathNegotiationShape = {
 	narHash: nixSha256HashSchema,
 	narSize: positiveIntSchema,
 	references: referencesSchema,
-	deriver: narInfoLineSchema.optional(),
+	// A narinfo names the deriver the way it names references, by basename: the
+	// store directory is the one the cache's `StoreDir` states. `ca` is a
+	// content-address specification, not a path, so it stays a metadata line.
+	deriver: storePathBasenameSchema.optional(),
 	ca: narInfoLineSchema.optional()
 };
 
