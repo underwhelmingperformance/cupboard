@@ -4,10 +4,12 @@ import {
 	type RootName,
 	type StoredCache,
 	type StorePathHash,
+	type StorePathString,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { type OidcIssuer } from '@cupboard/protocol/oidc';
 import { type ClaimMismatch } from '@cupboard/protocol/oidc-trust-match';
+import { type TenantStatus } from '@cupboard/protocol/tenants';
 import { type UploadId } from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
@@ -198,9 +200,13 @@ export class TenantWritesStoppedError extends ServerHttpError {
 
 	constructor(
 		public readonly tenant: TenantId,
-		public readonly tenantStatus: string
+		// The status the write was gated on. Undefined when the registry row is
+		// gone, which the gate treats as not active and refuses just the same.
+		public readonly tenantStatus: TenantStatus | undefined
 	) {
-		super(`Writes for this tenant are stopped (${tenantStatus})`);
+		super(
+			`Writes for this tenant are stopped (${tenantStatus ?? 'unregistered'})`
+		);
 		this.name = 'TenantWritesStoppedError';
 	}
 }
@@ -327,7 +333,7 @@ export class RootTargetsUnavailableError extends ServerHttpError {
 
 	constructor(
 		public readonly rootName: RootName,
-		public readonly targets: readonly string[]
+		public readonly targets: readonly StorePathString[]
 	) {
 		super(
 			`Cannot set root: ${String(targets.length)} target(s) have no uploaded path`

@@ -11,6 +11,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import { type TenantStatus } from '@cupboard/protocol/tenants';
 import {
 	type CommitResponse,
 	type ParsedUploadGraceFact,
@@ -171,6 +172,22 @@ export interface MaterialiseRequest {
  */
 export type BatchedMaterialiseOutcome =
 	MaterialiseOutcome | { readonly kind: 'gone' };
+
+// What one charge settles to. `tenant-inactive` carries the status the charge
+// batch's own select read, which is the authoritative fence for the decision.
+type ChargeOutcome =
+	| { readonly kind: 'charged' }
+	| { readonly kind: 'over-quota' }
+	| {
+			readonly kind: 'tenant-inactive';
+			readonly tenantStatus: TenantStatus | undefined;
+	  };
+
+// What a whole flush's combined charge batch settles to. `retry-individually`
+// means the batch rolled back and each charge re-runs on its own.
+type BatchChargeOutcome =
+	| Exclude<ChargeOutcome, { kind: 'over-quota' }>
+	| { readonly kind: 'retry-individually' };
 
 interface PendingMaterialise {
 	readonly request: MaterialiseRequest;
@@ -481,7 +498,7 @@ export class CommitPipelineService {
 
 			throw new TenantWritesStoppedError(
 				this.context.requireTenant(),
-				'inactive'
+				outcome.tenantStatus
 			);
 		}
 
@@ -762,7 +779,7 @@ export class CommitPipelineService {
 		metadata: ParsedUploadPathNegotiation,
 		generation: NarInfoGeneration,
 		blob: { readonly fileSize: number }
-	): Promise<'charged' | 'over-quota' | 'tenant-inactive'> {
+	): Promise<ChargeOutcome> {
 		const now = isoTimestamp(new Date());
 
 		// The probed pre-check is the clean over-quota rejection. The
@@ -787,17 +804,20 @@ export class CommitPipelineService {
 				account !== undefined &&
 				isOverQuota(account, isOwned, blob.fileSize)
 			) {
-				return 'over-quota';
+				return { kind: 'over-quota' };
 			}
 
 			throw error;
 		}
 
 		if (statusRows.at(0)?.status !== 'active') {
-			return 'tenant-inactive';
+			return {
+				kind: 'tenant-inactive',
+				tenantStatus: statusRows.at(0)?.status
+			};
 		}
 
-		return 'charged';
+		return { kind: 'charged' };
 	}
 
 	// The whole flush's charges in one atomic D1 batch, one status select plus
@@ -815,7 +835,7 @@ export class CommitPipelineService {
 			readonly generation: NarInfoGeneration;
 			readonly blob: CanonicalBlobFacts;
 		}[]
-	): Promise<'charged' | 'tenant-inactive' | 'retry-individually'> {
+	): Promise<BatchChargeOutcome> {
 		const now = isoTimestamp(new Date());
 		const statements = charges.flatMap((charge) =>
 			this.chargeStatements(
@@ -837,14 +857,17 @@ export class CommitPipelineService {
 			]);
 			statusRows = status;
 		} catch {
-			return 'retry-individually';
+			return { kind: 'retry-individually' };
 		}
 
 		if (statusRows.at(0)?.status !== 'active') {
-			return 'tenant-inactive';
+			return {
+				kind: 'tenant-inactive',
+				tenantStatus: statusRows.at(0)?.status
+			};
 		}
 
-		return 'charged';
+		return { kind: 'charged' };
 	}
 
 	// Arms the durable verify backstop for `now + verifyBackstopDelayMs`. An
@@ -893,7 +916,14 @@ export class CommitPipelineService {
 		// the tenant is active, covers suspended, offboarding, offboarded and a
 		// missing row alike.
 		if (this.context.offboarding || account?.status !== 'active') {
-			return { outcome: { kind: 'tenant-inactive' } };
+			return {
+				outcome: {
+					kind: 'tenant-inactive',
+					tenantStatus: this.context.offboarding
+						? 'offboarding'
+						: account?.status
+				}
+			};
 		}
 
 		if (probe.blob === undefined || !probe.isCanonicalPresent) {
@@ -1000,14 +1030,7 @@ export class CommitPipelineService {
 			}))
 		);
 
-		if (charged === 'charged' || charged === 'tenant-inactive') {
-			for (const charge of chargeable) {
-				outcomes[charge.index] =
-					charged === 'charged'
-						? { kind: 'materialised', narInfo: charge.narInfo }
-						: { kind: 'tenant-inactive' };
-			}
-		} else {
+		if (charged.kind === 'retry-individually') {
 			for (const charge of chargeable) {
 				const single = await this.reserveEdgeAndCharge(
 					tenant,
@@ -1017,9 +1040,16 @@ export class CommitPipelineService {
 					charge.blob
 				);
 				outcomes[charge.index] =
-					single === 'charged'
+					single.kind === 'charged'
 						? { kind: 'materialised', narInfo: charge.narInfo }
-						: { kind: single };
+						: single;
+			}
+		} else {
+			for (const charge of chargeable) {
+				outcomes[charge.index] =
+					charged.kind === 'charged'
+						? { kind: 'materialised', narInfo: charge.narInfo }
+						: charged;
 			}
 		}
 

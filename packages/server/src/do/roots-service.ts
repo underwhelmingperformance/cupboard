@@ -45,7 +45,10 @@ interface TargetIdentity {
 }
 
 type RootWrite =
-	| { readonly kind: 'rejected'; readonly unavailable: readonly string[] }
+	| {
+			readonly kind: 'rejected';
+			readonly unavailable: readonly StorePathString[];
+	  }
 	| { readonly kind: 'written'; readonly stored: StoredRoot };
 
 export class RootsService {
@@ -243,7 +246,7 @@ export class RootsService {
 			storePath: StorePathString;
 		}[],
 		expected: ReadonlyMap<StorePathHash, TargetIdentity>
-	): readonly string[] {
+	): readonly StorePathString[] {
 		const current = new Map(
 			this.narInfoObjects
 				.narInfoRowsFor(
