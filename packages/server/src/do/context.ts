@@ -32,6 +32,7 @@ import {
 	type ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
 import { type IsoTimestamp } from '@cupboard/protocol/scalars';
+import { type TenantStatus } from '@cupboard/protocol/tenants';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import {
 	drizzle,
@@ -150,7 +151,12 @@ export type MaterialiseOutcome =
 	| { readonly kind: 'superseded' }
 	| { readonly kind: 'blob-gone' }
 	| { readonly kind: 'over-quota' }
-	| { readonly kind: 'tenant-inactive' };
+	| {
+			readonly kind: 'tenant-inactive';
+			// The status the gate observed, or undefined when the registry row is
+			// gone.
+			readonly tenantStatus: TenantStatus | undefined;
+	  };
 
 // The shared state every service is constructed with: the DO SQLite handle, the
 // global D1 handle, the runtime environment, the DO state (for critical

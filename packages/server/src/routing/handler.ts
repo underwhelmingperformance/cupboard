@@ -7,6 +7,7 @@ import {
 	cacheAvailabilityRequestSchema,
 	type CacheAvailabilityResponse
 } from '@cupboard/protocol/cache-availability';
+import { type TenantStatus } from '@cupboard/protocol/tenants';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { type Context, Hono } from 'hono';
@@ -536,7 +537,7 @@ async function dispatchTenant(
 	const status = admittedStatus ?? (await tenantStatus(env, tenant));
 
 	if (status !== 'active') {
-		throw new TenantWritesStoppedError(tenant, status ?? 'unknown');
+		throw new TenantWritesStoppedError(tenant, status);
 	}
 
 	return tenantServer(env, tenant).fetch(inner);
@@ -594,7 +595,7 @@ function isCacheAvailabilityRequest(method: string, pathname: string): boolean {
 async function tenantStatus(
 	env: Env,
 	tenant: TenantId
-): Promise<string | undefined> {
+): Promise<TenantStatus | undefined> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
 	try {

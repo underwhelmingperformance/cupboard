@@ -163,7 +163,7 @@ export class AttestationsService {
 
 		if (statusRows[0]?.status !== 'active') {
 			await this.clearPendingUploadAndStaging(pending);
-			throw new TenantWritesStoppedError(tenant, 'inactive');
+			throw new TenantWritesStoppedError(tenant, statusRows[0]?.status);
 		}
 
 		if (

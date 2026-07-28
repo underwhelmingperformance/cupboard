@@ -1,3 +1,9 @@
+import {
+	rootNameSchema,
+	storePathSchema,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
+import { type TenantStatus } from '@cupboard/protocol/tenants';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -5,12 +11,14 @@ import { z } from 'zod';
 import {
 	ControlSubjectTokenUntrustedError,
 	RefreshTokenRequiredError,
+	RootTargetsUnavailableError,
 	StaleRefreshTokenError,
 	SubjectTokenNotJwtError,
 	SubjectTokenRequiredError,
 	SubjectTokenSubjectMissingError,
 	SubjectTokenVerificationFailedError,
 	TenantSubjectTokenUntrustedError,
+	TenantWritesStoppedError,
 	TokenRequestBodyInvalidError,
 	UnsupportedGrantTypeError,
 	UnsupportedSubjectTokenTypeError
@@ -110,6 +118,57 @@ describe('OAuth errors', () => {
 			grantType: 'authorization_code',
 			problem: undefined,
 			status: StatusCodes.BAD_REQUEST
+		});
+	});
+});
+
+describe('write-stop and root errors', () => {
+	const tenant = tenantIdSchema.parse('acme');
+
+	it.each<{ readonly tenantStatus: TenantStatus | undefined }>([
+		{ tenantStatus: 'suspended' },
+		{ tenantStatus: 'offboarding' },
+		{ tenantStatus: 'offboarded' },
+		{ tenantStatus: undefined }
+	])(
+		'a stopped write carries the $tenantStatus status it was gated on',
+		({ tenantStatus }) => {
+			const error = new TenantWritesStoppedError(tenant, tenantStatus);
+
+			expect({
+				name: error.name,
+				tenant: error.tenant,
+				tenantStatus: error.tenantStatus,
+				status: error.status
+			}).toStrictEqual({
+				name: 'TenantWritesStoppedError',
+				tenant,
+				tenantStatus,
+				status: StatusCodes.FORBIDDEN
+			});
+		}
+	);
+
+	it('unavailable root targets carry the root and its store paths', () => {
+		const rootName = rootNameSchema.parse('ci');
+		const targets = [
+			storePathSchema.parse(
+				'/nix/store/00000000000000000000000000000000-alpha'
+			),
+			storePathSchema.parse('/nix/store/11111111111111111111111111111111-beta')
+		];
+		const error = new RootTargetsUnavailableError(rootName, targets);
+
+		expect({
+			name: error.name,
+			rootName: error.rootName,
+			targets: error.targets,
+			status: error.status
+		}).toStrictEqual({
+			name: 'RootTargetsUnavailableError',
+			rootName,
+			targets,
+			status: StatusCodes.CONFLICT
 		});
 	});
 });
