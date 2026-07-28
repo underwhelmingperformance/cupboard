@@ -1,3 +1,4 @@
+import { signingKeyIdSchema } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -30,9 +31,14 @@ describe('signing with a key set', () => {
 
 	it('signs every new narinfo with all signing keys and publishes them', async () => {
 		const seeded = await seedSigningKeys([
-			{ id: 'active', name: 'cupboard-1', signing: true, published: true },
 			{
-				id: '123e4567-e89b-12d3-a456-426614174000',
+				id: signingKeyIdSchema.parse('active'),
+				name: 'cupboard-1',
+				signing: true,
+				published: true
+			},
+			{
+				id: signingKeyIdSchema.parse('123e4567-e89b-12d3-a456-426614174000'),
 				name: 'cupboard-2',
 				signing: true,
 				published: true

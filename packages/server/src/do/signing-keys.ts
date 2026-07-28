@@ -1,9 +1,15 @@
 import { NixPublicKey } from '@cupboard/nix-store/public-key';
-import { type NixKeyName, nixKeyNameSchema } from '@cupboard/nix-store/scalars';
+import {
+	type NixKeyName,
+	nixKeyNameSchema,
+	type SigningKeyId,
+	signingKeyIdSchema
+} from '@cupboard/nix-store/scalars';
 import {
 	type SigningKeyStage,
 	type SigningKeySummary
 } from '@cupboard/protocol/keys';
+import { type IsoTimestamp } from '@cupboard/protocol/scalars';
 import { z } from 'zod';
 
 import { parseJwk } from '../crypto/crypto.ts';
@@ -12,24 +18,29 @@ import * as schema from '../db/schema.ts';
 export const storedSignaturesSchema = z.array(z.string());
 
 export interface SigningKey {
-	readonly id: string;
+	readonly id: SigningKeyId;
 	readonly privateJwk: JsonWebKey;
 	readonly publicKey: NixPublicKey;
 	readonly signing: boolean;
 	readonly published: boolean;
-	readonly createdAt: string;
+	readonly createdAt: IsoTimestamp;
 }
 
 export const bootstrapKeyName = nixKeyNameSchema.parse('cupboard-1');
 
+// The key an empty object creates for itself. Rotations issue a UUID, so this
+// fixed id marks the key a tenant started with.
+export const bootstrapKeyId = signingKeyIdSchema.parse('active');
+
 // The stored public key is the only record of the name its signatures carry, so
 // a row that does not render as `<name>:<base64>` fails here rather than
-// yielding a name no client trusts.
+// yielding a name no client trusts. The id is the handle the key contract
+// retires a key by, so it is held to the same form the contract accepts.
 export function signingKeyFromRow(
 	row: typeof schema.signingKeys.$inferSelect
 ): SigningKey {
 	return {
-		id: row.id,
+		id: signingKeyIdSchema.parse(row.id),
 		privateJwk: parseJwk(row.privateJwkJson),
 		publicKey: new NixPublicKey(row.publicKey),
 		signing: row.signing,
