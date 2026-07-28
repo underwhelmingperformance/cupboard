@@ -1,7 +1,8 @@
 export type { NixDependencies, RealPath } from './nix.ts';
 export { Nix } from './nix.ts';
-export type { NixValidPathInfo } from './nix-store.ts';
+export type { NixStoreDirectorySource, NixValidPathInfo } from './nix-store.ts';
 export {
+	InvalidNixStoreDirectoryError,
 	NixConfigIncludeError,
 	NixStoreDatabaseError,
 	NixStoreError,

@@ -1,5 +1,7 @@
 import {
 	storedCacheSchema,
+	type StoreDirectory,
+	storeDirectorySchema,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
@@ -51,16 +53,16 @@ async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
 }
 
 function storePathIn(
-	storeDirectory: string,
+	storeDirectory: StoreDirectory,
 	basename: string
 ): StorePathString {
 	return storePath(`${storeDirectory}/${basename}`);
 }
 
-const defaultStoreDirectory = '/nix/store';
+const defaultStoreDirectory = storeDirectorySchema.parse('/nix/store');
 // A runner whose Nix is configured with another `store-dir`: the same
 // derivation graph names its paths relative to that directory.
-const alternativeStoreDirectory = '/data/nix/store';
+const alternativeStoreDirectory = storeDirectorySchema.parse('/data/nix/store');
 
 const sharedBasename = '11111111111111111111111111111111-shared';
 const firstBasename = '22222222222222222222222222222222-first';

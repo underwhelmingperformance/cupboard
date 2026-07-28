@@ -1,14 +1,16 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { storeDirectorySchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import { Nix } from './nix.ts';
 import {
+	InvalidNixStoreDirectoryError,
 	type NixStoreClient,
 	type NixValidPathInfo,
 	NotInNixStoreError
 } from './nix-store.ts';
 
-const storeDirectory = '/nix/store';
+const storeDirectory = storeDirectorySchema.parse('/nix/store');
 const appPath = '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-app';
 const libraryPath = '/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-lib';
 
@@ -90,6 +92,23 @@ describe('Nix.toStorePath', () => {
 		const nix = nixOver(recordingStore(), () => '/etc/passwd');
 
 		expect(() => nix.toStorePath('/etc/passwd')).toThrow(NotInNixStoreError);
+	});
+});
+
+describe('Nix.open', () => {
+	it('refuses a configured store directory that could hold no store path', () => {
+		const noConfigurationFiles: Record<string, string> = {};
+
+		expect(() =>
+			Nix.open({
+				env: { NIX_STORE_DIR: 'relative/store' },
+				readFile: (filePath) => noConfigurationFiles[filePath],
+				homeDirectory: () => '/home/u',
+				canWriteStateDirectory: () => true,
+				socketExists: () => false,
+				realpath: (path) => path
+			})
+		).toThrow(InvalidNixStoreDirectoryError);
 	});
 });
 

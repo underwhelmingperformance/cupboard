@@ -4,6 +4,7 @@ import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import {
 	graceSecondsSchema,
 	rootNameSchema,
+	storeDirectorySchema,
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
@@ -3193,7 +3194,7 @@ function nixStore(paths: Record<string, NixValidPathInfo>): Nix {
 	};
 
 	return Nix.forStore(store, {
-		storeDirectory: '/nix/store',
+		storeDirectory: storeDirectorySchema.parse('/nix/store'),
 		realpath: (path) => path
 	});
 }

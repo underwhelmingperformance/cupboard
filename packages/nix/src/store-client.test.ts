@@ -1,3 +1,4 @@
+import { storeDirectorySchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import { NixDaemonStoreClient } from './nix-daemon.ts';
@@ -13,7 +14,7 @@ import type { NixStoreConfig } from './store-config.ts';
 
 const baseConfig: NixStoreConfig = {
 	storeUri: 'auto',
-	storeDirectory: '/nix/store',
+	storeDirectory: storeDirectorySchema.parse('/nix/store'),
 	stateDirectory: '/nix/var/nix',
 	daemonSocketPath: '/nix/var/nix/daemon-socket/socket'
 };

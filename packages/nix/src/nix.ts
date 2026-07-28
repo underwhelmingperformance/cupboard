@@ -1,5 +1,7 @@
 import { realpathSync } from 'node:fs';
 
+import type { StoreDirectory } from '@cupboard/nix-store/scalars';
+
 import {
 	type NixStoreClient,
 	type NixValidPathInfo,
@@ -44,7 +46,10 @@ export class Nix {
 	/** Build a client over an explicit backend, store directory and path resolver. */
 	static forStore(
 		store: NixStoreClient,
-		options: { readonly storeDirectory: string; readonly realpath?: RealPath }
+		options: {
+			readonly storeDirectory: StoreDirectory;
+			readonly realpath?: RealPath;
+		}
 	): Nix {
 		return new Nix(
 			store,
@@ -55,7 +60,7 @@ export class Nix {
 
 	private constructor(
 		private readonly store: NixStoreClient,
-		private readonly storeDirectory: string,
+		private readonly storeDirectory: StoreDirectory,
 		private readonly realpath: RealPath
 	) {}
 

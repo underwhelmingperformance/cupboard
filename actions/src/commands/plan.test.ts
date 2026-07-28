@@ -5,6 +5,7 @@ import path from 'node:path';
 import {
 	rootNameMaxLength,
 	storedCacheSchema,
+	storeDirectorySchema,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
@@ -1384,7 +1385,7 @@ describe('verifyGraceCoverage', () => {
 				undefined,
 				{
 					evaluator,
-					storeDirectory: '/nix/store',
+					storeDirectory: storeDirectorySchema.parse('/nix/store'),
 					fetcher: alwaysAvailableFetcher,
 					runner
 				}
