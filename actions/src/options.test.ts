@@ -1,3 +1,4 @@
+import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import { InvalidInputError } from './errors.ts';
@@ -5,7 +6,8 @@ import {
 	collectLines,
 	isEnabled,
 	isNixPositionalArgument,
-	provided
+	provided,
+	providedCache
 } from './options.ts';
 
 describe('isNixPositionalArgument', () => {
@@ -28,6 +30,20 @@ describe('provided', () => {
 		['treats undefined as absent', undefined, undefined]
 	])('%s', (_name, value, expected) => {
 		expect(provided(value)).toBe(expected);
+	});
+});
+
+describe('providedCache', () => {
+	it.each([
+		['trims a padded cache name', ' pr-1 ', 'pr-1'],
+		['reads a blank value as the default cache', ' ', DEFAULT_CACHE],
+		['reads an absent value as the default cache', undefined, DEFAULT_CACHE]
+	])('%s', (_name, value, expected) => {
+		expect(providedCache(value)).toBe(expected);
+	});
+
+	it('refuses a value that is not a legal cache name', () => {
+		expect(() => providedCache('Not A Cache')).toThrow(InvalidInputError);
 	});
 });
 

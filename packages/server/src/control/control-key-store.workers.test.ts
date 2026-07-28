@@ -1,5 +1,10 @@
-import { authKeyIdSchema } from '@cupboard/nix-store/scalars';
+import { authKeyIdSchema, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import {
+	oidcAudienceSchema,
+	oidcIssuerSchema,
+	oidcSubjectSchema
+} from '@cupboard/protocol/oidc';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -24,8 +29,9 @@ import {
 const secretBytes = new Uint8Array(32);
 secretBytes.fill(7);
 const secret = btoa(String.fromCodePoint(...secretBytes));
-const issuer = 'https://cupboard.test';
-const audience = 'cupboard-control';
+const issuer = oidcIssuerSchema.parse('https://cupboard.test');
+const audience = oidcAudienceSchema.parse('cupboard-control');
+const subject = oidcSubjectSchema.parse('admin');
 const t0 = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 const t1 = isoTimestampSchema.parse('2026-01-01T00:01:00.000Z');
 const t2 = isoTimestampSchema.parse('2026-01-01T00:02:00.000Z');
@@ -55,10 +61,10 @@ describe('control key store', () => {
 			{
 				issuer,
 				audience,
-				subject: 'admin',
+				subject,
 				grants: [{ type: 'cupboard_wildcard' }],
 				kid: active.kid,
-				ttlSeconds: 600
+				ttlSeconds: ttlSecondsSchema.parse(600)
 			},
 			now
 		);
@@ -75,7 +81,7 @@ describe('control key store', () => {
 		}).toStrictEqual({
 			verificationKeys: [{ kid: active.kid }],
 			claims: {
-				subject: 'admin',
+				subject,
 				grants: [{ type: 'cupboard_wildcard' }],
 				expiresAt: new Date(now.getTime() + 600 * 1000)
 			}

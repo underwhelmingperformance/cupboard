@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { promisify } from 'node:util';
 
 import {
+	type StoredCache,
 	type StorePathHash,
 	storePathSchema,
 	type StorePathString
@@ -1009,7 +1010,7 @@ interface ProbeOptions {
 export function availableCachePaths(
 	options: ProbeOptions & {
 		readonly baseUrl: string;
-		readonly cache: string;
+		readonly cache: StoredCache;
 	}
 ): Promise<Set<StorePathString>> {
 	return availablePathsAt(
@@ -1063,7 +1064,7 @@ async function availablePathsAt(
 	const headers = {
 		'content-type': 'application/json',
 		...(options.credentials !== undefined &&
-			basicAuthHeader(options.credentials.user, options.credentials.password))
+			basicAuthHeader(options.credentials))
 	};
 	const firstBatch = requireIndex(batches, 0);
 	const firstMissing = await queryMissingStorePathHashes(

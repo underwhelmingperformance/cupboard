@@ -1,3 +1,4 @@
+import { storedCacheSchema } from '@cupboard/nix-store/scalars';
 import {
 	type ParsedPushSummary,
 	type PushSummary,
@@ -32,7 +33,7 @@ describe('buildPushArguments', () => {
 				paths: ['/nix/store/a', '/nix/store/b'],
 				audience: '',
 				root: 'github:owner/repo/main',
-				cache: 'ci',
+				cache: storedCacheSchema.parse('ci'),
 				ttl: '7d',
 				retain: true,
 				wait: true,

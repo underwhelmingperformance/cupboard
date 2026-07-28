@@ -2,13 +2,12 @@ import { env } from 'node:process';
 
 import { cacheUrl } from '@cupboard/nix-store/cache-url';
 import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
-import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import { type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { storedCacheFor } from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import { InvalidCacheNameError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 export interface ConfigCredential {
@@ -30,15 +29,7 @@ export function cacheSubstituterUrl(
 	url: URL,
 	cache: string | undefined
 ): string {
-	if (
-		cache !== undefined &&
-		cache !== DEFAULT_CACHE &&
-		!cacheNameSchema.safeParse(cache).success
-	) {
-		throw new InvalidCacheNameError(cache);
-	}
-
-	return cacheUrl(url.href, cache);
+	return cacheUrl(url.href, storedCacheFor(cache));
 }
 
 export function runConfig(

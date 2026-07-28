@@ -10,6 +10,7 @@ import {
 	verifyRemoteAttestations
 } from '../attest/verify.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { storedCacheFor } from '../client/client.ts';
 import { CliUsageError } from '../errors.ts';
 
 interface VerifyOptions {
@@ -186,7 +187,7 @@ export function registerAttestCommands(
 						...common,
 						url: options.url,
 						storePathHash: options.storePathHash,
-						cache: options.cache,
+						cache: storedCacheFor(options.cache),
 						bundleDigest: options.bundleDigest,
 						readUser,
 						readPassword,

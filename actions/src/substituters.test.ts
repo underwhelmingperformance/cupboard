@@ -1,3 +1,4 @@
+import { DEFAULT_CACHE, storedCacheSchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -32,10 +33,14 @@ describe('isHttpUrl', () => {
 
 describe('cacheUrlFor', () => {
 	it.each([
-		['https://cache.example.test/', '', 'https://cache.example.test'],
+		[
+			'https://cache.example.test/',
+			DEFAULT_CACHE,
+			'https://cache.example.test'
+		],
 		['https://cache.example.test', 'ci', 'https://cache.example.test/cache/ci']
 	])('builds a substituter URL', (baseUrl, cache, expected) => {
-		expect(cacheUrlFor(baseUrl, cache)).toBe(expected);
+		expect(cacheUrlFor(baseUrl, storedCacheSchema.parse(cache))).toBe(expected);
 	});
 });
 

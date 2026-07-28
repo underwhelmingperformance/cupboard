@@ -1,8 +1,18 @@
-import { type AuthKeyId } from '@cupboard/nix-store/scalars';
+import {
+	type AuthKeyId,
+	type TtlSeconds,
+	ttlSecondsSchema
+} from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
+import {
+	type OidcAudience,
+	type OidcIssuer,
+	type OidcSubject,
+	oidcSubjectSchema
+} from '@cupboard/protocol/oidc';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { importJWK, jwtVerify, SignJWT } from 'jose';
 
@@ -12,7 +22,7 @@ import { generateEd25519KeyPair } from '../crypto/crypto.ts';
 // `authorization_details`. The owner holds a single wildcard grant; a CI token
 // holds the concrete grants its trust rule permitted.
 export interface AccessClaims {
-	readonly subject: string;
+	readonly subject: OidcSubject;
 	readonly grants: AuthorizationDetails;
 	// When the bearer token itself expires. Any credential derived from this
 	// token is capped at this instant, so it cannot outlive the token.
@@ -24,12 +34,12 @@ export interface AccessClaims {
 const accessTokenType = 'at+jwt';
 const authorizationDetailsClaim = 'authorization_details';
 
-export const adminJwtTtlSeconds = 10 * 60;
-export const writeJwtTtlSeconds = 15 * 60;
+export const adminJwtTtlSeconds = ttlSecondsSchema.parse(10 * 60);
+export const writeJwtTtlSeconds = ttlSecondsSchema.parse(15 * 60);
 // Each refresh rotates the token with a fresh window, so a session lives as
 // long as it is used at least this often; an idle one lapses to `cupboard
 // login`.
-export const refreshTokenTtlSeconds = 30 * 24 * 60 * 60;
+export const refreshTokenTtlSeconds = ttlSecondsSchema.parse(30 * 24 * 60 * 60);
 export const accessJwtClockToleranceSeconds = 30;
 export const accessJwtRetirementMarginSeconds = 5 * 60;
 
@@ -53,18 +63,18 @@ export function bearerToken(request: Request): string | undefined {
 }
 
 export interface IssueAccessJwtOptions {
-	readonly issuer: string;
-	readonly audience: string;
-	readonly subject: string;
+	readonly issuer: OidcIssuer;
+	readonly audience: OidcAudience;
+	readonly subject: OidcSubject;
 	readonly grants: AuthorizationDetails;
 	readonly kid: AuthKeyId;
-	readonly ttlSeconds: number;
+	readonly ttlSeconds: TtlSeconds;
 	readonly auditClaims?: Readonly<Record<string, unknown>>;
 }
 
 export interface VerifyAccessJwtOptions {
-	readonly issuer: string;
-	readonly audience: string;
+	readonly issuer: OidcIssuer;
+	readonly audience: OidcAudience;
 }
 
 export abstract class AccessTokenError extends Error {}
@@ -206,7 +216,7 @@ export async function verifyAccessJwt(
 	const expiresAt = new Date((verified.payload.exp ?? 0) * 1000);
 
 	return {
-		subject,
+		subject: oidcSubjectSchema.parse(subject),
 		grants: parseGrants(verified.payload[authorizationDetailsClaim]),
 		expiresAt
 	};

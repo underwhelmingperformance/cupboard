@@ -2,6 +2,7 @@ import { createPublicKey } from 'node:crypto';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
+import { storedCacheSchema } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	AttestationPredicateTypeMismatchError,
@@ -534,7 +535,7 @@ describe('remote attestation verification', () => {
 		const results = await verifyRemoteAttestations(
 			{
 				url: 'https://cupboard.test/t/acme',
-				cache: 'builds',
+				cache: storedCacheSchema.parse('builds'),
 				storePathHash,
 				readUser: 'reader',
 				readPassword: 'secret',

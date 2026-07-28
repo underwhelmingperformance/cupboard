@@ -253,15 +253,23 @@ describe('control plane POST /signup', () => {
 		});
 	});
 
-	it('reports 500 when the signup issuer is unconfigured, issuing nothing', async () => {
-		const response = await postSignup(
-			{ subject_token: 'x' },
-			{ CUPBOARD_SIGNUP_ISSUER: '' }
-		);
-		await response.text();
+	// A blank issuer and one that is not a usable issuer URL are the same deploy
+	// fault: no retry clears either, so both refuse before any token is read.
+	it.each([
+		{ name: 'unconfigured', configured: '' },
+		{ name: 'not an issuer URL', configured: 'http://issuer.example.test' }
+	])(
+		'reports 500 when the signup issuer is $name, issuing nothing',
+		async ({ configured }) => {
+			const response = await postSignup(
+				{ subject_token: 'x' },
+				{ CUPBOARD_SIGNUP_ISSUER: configured }
+			);
+			await response.text();
 
-		expect(response.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
-	});
+			expect(response.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
+		}
+	);
 
 	it('reports 503 when the configured issuer is unavailable', async () => {
 		const issuer = currentOrigin();

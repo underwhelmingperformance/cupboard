@@ -1,8 +1,11 @@
 import { type AuthKeyId, type TenantId } from '@cupboard/nix-store/scalars';
 import {
 	issuedAccessTokenType,
+	type OidcAudience,
 	oidcAudienceSchema,
+	type OidcIssuer,
 	oidcIssuerSchema,
+	oidcSubjectSchema,
 	subjectTokenTypeIdToken,
 	subjectTokenTypeJwt,
 	tokenExchangeGrantType,
@@ -190,10 +193,11 @@ export async function controlTokenExchange(
 	}
 
 	const verified = await verifyControlInbound(rule, body.subject_token);
-	const subject =
+	const subject = oidcSubjectSchema.parse(
 		typeof verified.sub === 'string' && verified.sub !== ''
 			? verified.sub
-			: rule.id;
+			: rule.id
+	);
 
 	await ensureControlKey(database, wrappingSecret, isoTimestamp(now));
 	const active = await activeControlKey(database, wrappingSecret);
@@ -590,9 +594,9 @@ function controlDatabase(env: Env): Database {
 // The control issuer is the bare-host origin: a real URL, distinct from every
 // tenant's path-based issuer, so a control token can never cross-verify as a
 // tenant token or the reverse.
-function controlIssuer(request: Request): string {
+function controlIssuer(request: Request): OidcIssuer {
 	const url = new URL(request.url);
-	return url.origin;
+	return oidcIssuerSchema.parse(url.origin);
 }
 
 // The token-issuing configuration. The generated Env types these as `string`,
@@ -604,14 +608,14 @@ interface ControlIssueConfig {
 	readonly CONTROL_KEY_WRAP_SECRET: string | undefined;
 }
 
-function controlAudience(env: ControlIssueConfig): string {
+function controlAudience(env: ControlIssueConfig): OidcAudience {
 	const configured = env.CUPBOARD_CONTROL_AUDIENCE ?? '';
 
 	if (configured === '') {
 		throw new ControlNotConfiguredError();
 	}
 
-	return configured;
+	return oidcAudienceSchema.parse(configured);
 }
 
 function controlWrappingSecret(env: ControlIssueConfig): string {

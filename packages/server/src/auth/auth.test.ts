@@ -1,8 +1,13 @@
-import { authKeyIdSchema } from '@cupboard/nix-store/scalars';
+import { authKeyIdSchema, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
+import {
+	oidcAudienceSchema,
+	oidcIssuerSchema,
+	oidcSubjectSchema
+} from '@cupboard/protocol/oidc';
 import { SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -17,10 +22,13 @@ import {
 	verifyAccessJwt
 } from './auth.ts';
 
-const issuer = 'cupboard';
-const audience = 'cupboard';
+const issuer = oidcIssuerSchema.parse('cupboard');
+const audience = oidcAudienceSchema.parse('cupboard');
+const subject = oidcSubjectSchema.parse('ci');
+const otherIssuer = oidcIssuerSchema.parse('someone-else');
+const otherAudience = oidcAudienceSchema.parse('someone-else');
 const now = new Date('2026-01-01T00:00:00.000Z');
-const ttlSeconds = 600;
+const ttlSeconds = ttlSecondsSchema.parse(600);
 const kid = authKeyIdSchema.parse('k-test');
 
 const wildcardGrants: AuthorizationDetails = [{ type: 'cupboard_wildcard' }];
@@ -83,7 +91,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		const keyPair = await generateAuthKeyPair();
 		const token = await issueAccessJwt(
 			keyPair.privateJwk,
-			{ issuer, audience, subject: 'ci', grants, kid, ttlSeconds },
+			{ issuer, audience, subject, grants, kid, ttlSeconds },
 			now
 		);
 
@@ -95,7 +103,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		);
 
 		expect(claims).toStrictEqual({
-			subject: 'ci',
+			subject,
 			grants,
 			expiresAt: new Date(now.getTime() + ttlSeconds * 1000)
 		});
@@ -108,7 +116,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 			{
 				issuer,
 				audience,
-				subject: 'ci',
+				subject,
 				grants: wildcardGrants,
 				kid,
 				ttlSeconds,
@@ -125,7 +133,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		);
 
 		expect(claims).toStrictEqual({
-			subject: 'ci',
+			subject,
 			grants: wildcardGrants,
 			expiresAt: new Date(now.getTime() + ttlSeconds * 1000)
 		});
@@ -139,7 +147,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 			{
 				issuer,
 				audience,
-				subject: 'ci',
+				subject,
 				grants: wildcardGrants,
 				kid: authKeyIdSchema.parse('k-new'),
 				ttlSeconds
@@ -158,7 +166,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		);
 
 		expect(claims).toStrictEqual({
-			subject: 'ci',
+			subject,
 			grants: wildcardGrants,
 			expiresAt: new Date(now.getTime() + ttlSeconds * 1000)
 		});
@@ -176,7 +184,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 					{
 						issuer,
 						audience,
-						subject: 'ci',
+						subject,
 						grants: wildcardGrants,
 						kid,
 						ttlSeconds
@@ -196,7 +204,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 					{
 						issuer,
 						audience,
-						subject: 'ci',
+						subject,
 						grants: wildcardGrants,
 						kid: authKeyIdSchema.parse('other-kid'),
 						ttlSeconds
@@ -213,9 +221,9 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 				issueAccessJwt(
 					privateJwk,
 					{
-						issuer: 'someone-else',
+						issuer: otherIssuer,
 						audience,
-						subject: 'ci',
+						subject,
 						grants: wildcardGrants,
 						kid,
 						ttlSeconds
@@ -233,8 +241,8 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 					privateJwk,
 					{
 						issuer,
-						audience: 'someone-else',
-						subject: 'ci',
+						audience: otherAudience,
+						subject,
 						grants: wildcardGrants,
 						kid,
 						ttlSeconds
@@ -253,7 +261,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 					{
 						issuer,
 						audience,
-						subject: 'ci',
+						subject,
 						grants: wildcardGrants,
 						kid,
 						ttlSeconds
@@ -274,7 +282,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 					{
 						issuer,
 						audience,
-						subject: 'ci',
+						subject,
 						grants: wildcardGrants,
 						kid,
 						ttlSeconds
@@ -297,7 +305,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 					.setProtectedHeader({ alg: 'EdDSA', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
-					.setSubject('ci')
+					.setSubject(subject)
 					.setIssuedAt(issuedAt)
 					.setNotBefore(issuedAt)
 					.setExpirationTime(issuedAt + ttlSeconds)
@@ -318,7 +326,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 					.setProtectedHeader({ alg: 'EdDSA', typ: 'at+jwt', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
-					.setSubject('ci')
+					.setSubject(subject)
 					.setIssuedAt(issuedAt)
 					.setNotBefore(issuedAt)
 					.setExpirationTime(issuedAt + ttlSeconds)
@@ -341,7 +349,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 					.setProtectedHeader({ alg: 'EdDSA', typ: 'at+jwt', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
-					.setSubject('ci')
+					.setSubject(subject)
 					.setIssuedAt(issuedAt)
 					.setNotBefore(issuedAt)
 					.setExpirationTime(issuedAt + ttlSeconds)
@@ -365,7 +373,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 					.setProtectedHeader({ alg: 'HS256', typ: 'at+jwt', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
-					.setSubject('ci')
+					.setSubject(subject)
 					.setIssuedAt(issuedAt)
 					.setNotBefore(issuedAt)
 					.setExpirationTime(issuedAt + ttlSeconds)

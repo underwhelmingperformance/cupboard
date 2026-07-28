@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { CacheInfoParseError } from '@cupboard/nix-store/errors';
+import { DEFAULT_CACHE, storedCacheSchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it, vi } from 'vitest';
 
 import { probeDeadlineMs } from '../cache-probe.ts';
@@ -202,7 +203,7 @@ function stubFetch(
 describe('resolveSubstituters', () => {
 	const baseOptions = {
 		cacheUrl: 'https://cache.example.test',
-		cache: '',
+		cache: storedCacheSchema.parse(DEFAULT_CACHE),
 		readUser: '',
 		readPassword: ''
 	};

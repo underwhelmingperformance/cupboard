@@ -6,6 +6,8 @@ import {
 	type AuthKeySummary
 } from '@cupboard/protocol/keys';
 import {
+	type OidcAudience,
+	type OidcIssuer,
 	refreshTokenGrantType,
 	tokenExchangeGrantType
 } from '@cupboard/protocol/oidc';
@@ -190,11 +192,11 @@ export class AuthKeysService {
 		return { keys: await this.authKeySummaries() };
 	}
 
-	authIssuer(): string {
+	authIssuer(): OidcIssuer {
 		return this.requireIdentity().issuer;
 	}
 
-	authAudience(): string {
+	authAudience(): OidcAudience {
 		return this.requireIdentity().audience;
 	}
 

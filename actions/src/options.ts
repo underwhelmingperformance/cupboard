@@ -1,3 +1,9 @@
+import {
+	DEFAULT_CACHE,
+	type StoredCache,
+	storedCacheSchema
+} from '@cupboard/nix-store/scalars';
+
 import { InvalidInputError } from './errors.ts';
 import { parseLines } from './inputs.ts';
 
@@ -29,6 +35,22 @@ export function provided(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 
 	return trimmed === undefined || trimmed === '' ? undefined : trimmed;
+}
+
+/**
+ * The cache a `cache` input addresses: the named cache after trimming, or the
+ * default cache when the input is absent or blank. A value that is not a legal
+ * cache name refuses the input with {@link InvalidInputError}, naming the field
+ * rather than letting the run fail later against a URL no cache answers.
+ */
+export function providedCache(value: string | undefined): StoredCache {
+	const parsed = storedCacheSchema.safeParse(provided(value) ?? DEFAULT_CACHE);
+
+	if (!parsed.success) {
+		throw new InvalidInputError('cache', 'cache must be a valid cache name');
+	}
+
+	return parsed.data;
 }
 
 /**

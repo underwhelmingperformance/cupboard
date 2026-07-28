@@ -7,7 +7,7 @@ import {
 	sha256HexDigestSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
-import { trustRuleIdSchema } from '@cupboard/protocol/oidc';
+import { oidcSubjectSchema, trustRuleIdSchema } from '@cupboard/protocol/oidc';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
@@ -279,7 +279,7 @@ async function seedRefreshTokens(count: number, label: string): Promise<void> {
 					id: `${label}-${String(index)}`,
 					secretHash: 'hash',
 					ruleId: trustRuleIdSchema.parse('rule'),
-					subject: 'subject',
+					subject: oidcSubjectSchema.parse('subject'),
 					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 					// Far-future expiry so the sweep deletes none and the read count is the
 					// index seek alone, not the cost of deleting rows.

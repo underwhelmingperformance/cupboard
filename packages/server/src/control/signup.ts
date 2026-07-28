@@ -1,4 +1,10 @@
-import { type OidcIssuer, oidcIssuerSchema } from '@cupboard/protocol/oidc';
+import {
+	type OidcAudience,
+	oidcAudienceSchema,
+	type OidcIssuer,
+	oidcIssuerSchema
+} from '@cupboard/protocol/oidc';
+import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	signupRequestSchema,
@@ -127,7 +133,7 @@ export function enforceGate(
 
 async function verifySignupToken(
 	issuer: OidcIssuer,
-	audience: string,
+	audience: OidcAudience,
 	token: string
 ): Promise<JWTPayload> {
 	let resolved;
@@ -197,21 +203,24 @@ interface SignupVerificationConfig {
 }
 
 function signupIssuer(env: SignupVerificationConfig): OidcIssuer {
-	const configured = env.CUPBOARD_SIGNUP_ISSUER ?? '';
+	// Discovery is cached per issuer identifier, so the configured value is
+	// normalised here, where it enters the server, and a value that is not a
+	// usable issuer URL is a deploy fault the caller cannot clear by retrying.
+	const configured = IssuerUrl.parse(env.CUPBOARD_SIGNUP_ISSUER ?? '');
 
-	if (configured === '') {
+	if (configured === undefined) {
 		throw new ControlNotConfiguredError();
 	}
 
-	return oidcIssuerSchema.parse(configured);
+	return oidcIssuerSchema.parse(configured.value);
 }
 
-function signupAudience(env: SignupVerificationConfig): string {
+function signupAudience(env: SignupVerificationConfig): OidcAudience {
 	const configured = env.CUPBOARD_SIGNUP_AUDIENCE ?? '';
 
 	if (configured === '') {
 		throw new ControlNotConfiguredError();
 	}
 
-	return configured;
+	return oidcAudienceSchema.parse(configured);
 }

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { env } from 'node:process';
 
 import { Nix } from '@cupboard/nix';
+import { type StoredCache } from '@cupboard/nix-store/scalars';
 import {
 	type ParsedPushSummary,
 	pushSummaryResultKind,
@@ -32,7 +33,12 @@ import {
 	PushSummaryResponseError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
-import { collectLines, isEnabled, provided } from '../options.ts';
+import {
+	collectLines,
+	isEnabled,
+	provided,
+	providedCache
+} from '../options.ts';
 import {
 	fallbackReleaseRepository,
 	installCupboard,
@@ -71,7 +77,7 @@ export interface PushInputs {
 	readonly installDirectory: string;
 	readonly url: string;
 	readonly paths: readonly string[];
-	readonly cache: string;
+	readonly cache: StoredCache;
 	readonly audience: string;
 	readonly root: string;
 	readonly ttl: string;
@@ -105,7 +111,7 @@ interface PushArgumentsOptions {
 	readonly paths: readonly string[];
 	readonly audience: string;
 	readonly root: string;
-	readonly cache: string;
+	readonly cache: StoredCache;
 	readonly ttl: string;
 	readonly retain: boolean;
 	readonly wait: boolean;
@@ -255,7 +261,7 @@ export function resolvePushInputs(
 			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
 		url,
 		paths: options.paths,
-		cache: provided(options.cache) ?? '',
+		cache: providedCache(options.cache),
 		audience: provided(options.audience) ?? '',
 		root: isRetained
 			? (explicitRoot ??
