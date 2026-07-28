@@ -94,7 +94,11 @@ import {
 	invalidateTenantRow,
 	refreshTenantMembership
 } from './control/tenant-membership.ts';
-import { generateSigningKey, parseJwk } from './crypto/crypto.ts';
+import {
+	generateSigningKey,
+	nixKeyNameSchema,
+	parseJwk
+} from './crypto/crypto.ts';
 import * as d1Schema from './db/d1-schema.ts';
 import {
 	blobReference,
@@ -125,7 +129,10 @@ import {
 } from './http/http.ts';
 import {
 	generateReadPasswordSalt,
-	hashReadPassword
+	hashReadPassword,
+	type ReadPasswordHash,
+	type ReadPasswordSalt,
+	readUserSchema
 } from './read/read-auth.ts';
 import { tenantServer } from './routing/durable-object.ts';
 import { runBlobReaper } from './routing/scheduled.ts';
@@ -245,9 +252,12 @@ export async function provisionFixtureTenant(
 ): Promise<void> {
 	const readMode = options.readMode ?? 'public';
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-	const readUser = options.read?.user;
-	let readPasswordHash: string | undefined;
-	let readPasswordSalt: string | undefined;
+	const readUser =
+		options.read === undefined
+			? undefined
+			: readUserSchema.parse(options.read.user);
+	let readPasswordHash: ReadPasswordHash | undefined;
+	let readPasswordSalt: ReadPasswordSalt | undefined;
 
 	if (options.read !== undefined) {
 		readPasswordSalt = generateReadPasswordSalt();
@@ -3083,7 +3093,9 @@ export async function seedSigningKeys(
 		const seeded: SeededSigningKey[] = [];
 
 		for (const seed of seeds) {
-			const generated = await generateSigningKey(seed.name);
+			const generated = await generateSigningKey(
+				nixKeyNameSchema.parse(seed.name)
+			);
 			const createdAt = new Date();
 
 			database

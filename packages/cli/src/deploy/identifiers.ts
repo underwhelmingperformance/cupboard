@@ -2,9 +2,9 @@ import { z } from 'zod';
 
 // The Cloudflare identifiers the deploy pipeline threads between the CLI flags,
 // the wrangler config and the Cloudflare API. Each carries its own brand so an
-// account id, a script name, a database id and a zone id cannot stand in for
-// one another at a call site. They are CLI-internal identifiers, so they brand
-// their string without narrowing it further.
+// account id, a script name, a database id, a zone id and a queue id cannot
+// stand in for one another at a call site. They are CLI-internal identifiers,
+// so they brand their string without narrowing it further.
 
 export const cloudflareAccountIdSchema = z
 	.string()
@@ -19,3 +19,6 @@ export type DatabaseId = z.infer<typeof databaseIdSchema>;
 
 export const zoneIdSchema = z.string().brand('ZoneId');
 export type ZoneId = z.infer<typeof zoneIdSchema>;
+
+export const queueIdSchema = z.string().brand('QueueId');
+export type QueueId = z.infer<typeof queueIdSchema>;

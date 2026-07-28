@@ -5,6 +5,8 @@ import { NixSha256Hash } from './hash.ts';
 import {
 	compressionSchema,
 	hasControlCharacter,
+	type NixFingerprint,
+	nixFingerprintSchema,
 	nixSha256HashSchema,
 	referencesSchema,
 	type StorePathBasename,
@@ -173,7 +175,7 @@ export class NarInfo {
 		);
 	}
 
-	fingerprint(): string {
+	fingerprint(): NixFingerprint {
 		return narFingerprint(
 			this.storePath,
 			this.narHash.toString(),
@@ -258,12 +260,14 @@ export function narFingerprint(
 	narHash: string,
 	narSize: number,
 	references: readonly StorePathBasename[]
-): string {
-	return [
-		'1',
-		storePath.value,
-		narHash,
-		String(narSize),
-		fingerprintReferenceStorePaths(storePath, references).join(',')
-	].join(';');
+): NixFingerprint {
+	return nixFingerprintSchema.parse(
+		[
+			'1',
+			storePath.value,
+			narHash,
+			String(narSize),
+			fingerprintReferenceStorePaths(storePath, references).join(',')
+		].join(';')
+	);
 }

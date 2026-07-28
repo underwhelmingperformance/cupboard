@@ -19,6 +19,12 @@ import {
 	text
 } from 'drizzle-orm/sqlite-core';
 
+import {
+	type ReadPasswordHash,
+	type ReadPasswordSalt,
+	type ReadUser
+} from '../read/read-auth.ts';
+
 // The global, cross-tenant shared-blob facts, held in D1 and shared across all
 // tenant Durable Objects. A row exists exactly when a verified shared
 // object lives at `nar/<nar_hash>.nar.zst`, so it is both the `available` set and
@@ -138,9 +144,9 @@ export const tenant = sqliteTable(
 		// with no credential, which then fails closed and rejects every read. Only the
 		// hash, never the plaintext, is projected into the KV manifest the read path
 		// checks, so a read secret never leaves the control plane in the clear.
-		readUser: text('read_user'),
-		readPasswordHash: text('read_password_hash'),
-		readPasswordSalt: text('read_password_salt'),
+		readUser: text('read_user').$type<ReadUser>(),
+		readPasswordHash: text('read_password_hash').$type<ReadPasswordHash>(),
+		readPasswordSalt: text('read_password_salt').$type<ReadPasswordSalt>(),
 		// When the cron last ran maintenance (GC + verify) for this tenant. The sweep
 		// processes the most-overdue active tenants first and stamps this, so the
 		// table carries its own round-robin position (no separate cursor);

@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 import {
 	authoriseRead,
 	hashReadPassword,
+	readPasswordSaltSchema,
+	readUserSchema,
 	type ReadVerifier
 } from './read-auth.ts';
 
@@ -18,10 +20,10 @@ function request(authorization?: string): Request {
 }
 
 async function verifierFor(password: string): Promise<ReadVerifier> {
-	const passwordSalt = 'test-salt';
+	const passwordSalt = readPasswordSaltSchema.parse('test-salt');
 
 	return {
-		user: 'alice',
+		user: readUserSchema.parse('alice'),
 		passwordHash: await hashReadPassword(password, passwordSalt),
 		passwordSalt
 	};

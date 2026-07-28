@@ -90,7 +90,7 @@ export type ReuseViewPriority = z.output<typeof reuseViewPrioritySchema>;
 // fixed rather than derived from that default, since a view spans caches
 // whose individual priorities may differ; a view's priority only has to sit
 // behind the caches it draws from, not track any one of them.
-export const reuseViewDefaultPriority = 50;
+export const reuseViewDefaultPriority = reuseViewPrioritySchema.parse(50);
 
 export const reuseViewSetBodySchema = z.strictObject({
 	selectors: reuseViewSelectorsSchema,

@@ -6,7 +6,10 @@ import {
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { trustRuleIdSchema } from '@cupboard/protocol/oidc';
-import { reuseViewRevisionSchema } from '@cupboard/protocol/reuse-views';
+import {
+	reuseViewPrioritySchema,
+	reuseViewRevisionSchema
+} from '@cupboard/protocol/reuse-views';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
@@ -274,7 +277,7 @@ describe('migrations', () => {
 		const view = {
 			name: 'reuse',
 			revision: reuseViewRevisionSchema.parse(1),
-			priority: 50,
+			priority: reuseViewPrioritySchema.parse(50),
 			createdAt: '2026-01-01T00:00:00.000Z',
 			updatedAt: '2026-01-01T00:00:00.000Z'
 		};

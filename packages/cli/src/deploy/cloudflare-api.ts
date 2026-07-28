@@ -12,6 +12,8 @@ import {
 	cloudflareAccountIdSchema,
 	type DatabaseId,
 	databaseIdSchema,
+	type QueueId,
+	queueIdSchema,
 	type ScriptName,
 	type ZoneId,
 	zoneIdSchema
@@ -86,7 +88,7 @@ export interface CloudflareApi {
 	ensureStagingLifecycleRule(bucketName: string): Promise<void>;
 	ensureD1Database(name: string): Promise<DatabaseId>;
 	ensureKvNamespace(title: string): Promise<string>;
-	ensureQueue(name: string): Promise<string>;
+	ensureQueue(name: string): Promise<QueueId>;
 
 	d1Query(databaseId: DatabaseId, sql: string): Promise<void>;
 	d1QueryRows(databaseId: DatabaseId, sql: string): Promise<string[]>;
@@ -103,7 +105,7 @@ export interface CloudflareApi {
 	): Promise<void>;
 
 	ensureQueueConsumer(
-		queueId: string,
+		queueId: QueueId,
 		scriptName: ScriptName,
 		settings: QueueConsumerSettings
 	): Promise<void>;
@@ -381,7 +383,7 @@ export function createCloudflareApi(
 			);
 
 			if (existing?.queue_id !== undefined) {
-				return existing.queue_id;
+				return queueIdSchema.parse(existing.queue_id);
 			}
 
 			const created = await client.queues.create({
@@ -389,7 +391,7 @@ export function createCloudflareApi(
 				queue_name: name
 			});
 
-			return created.queue_id ?? '';
+			return queueIdSchema.parse(created.queue_id ?? '');
 		},
 
 		async d1Query(databaseId, sql) {

@@ -22,6 +22,7 @@ import type { CloudflareApi } from './cloudflare-api.ts';
 import {
 	cloudflareAccountIdSchema,
 	databaseIdSchema,
+	queueIdSchema,
 	scriptNameSchema
 } from './identifiers.ts';
 import {
@@ -324,7 +325,7 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 		},
 		ensureQueue: () => {
 			recordApiCall(apiCalls, 'ensureQueue');
-			return Promise.resolve('queue-id');
+			return Promise.resolve(queueIdSchema.parse('queue-id'));
 		},
 		d1Query: () => {
 			recordApiCall(apiCalls, 'd1Query');

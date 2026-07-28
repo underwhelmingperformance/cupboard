@@ -218,7 +218,7 @@ export class ReuseViewAdminService {
 	 * Renders a reuse view's nix-cache-info body from its stored priority, or
 	 * `undefined` when no view of that name exists.
 	 */
-	cacheInfoBody(name: string): string | undefined {
+	cacheInfoBody(name: ParsedReuseViewName): string | undefined {
 		const row = this.context.db
 			.select({ priority: schema.reuseViews.priority })
 			.from(schema.reuseViews)
