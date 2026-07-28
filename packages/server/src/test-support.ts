@@ -1,6 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
+import { NixPublicKey } from '@cupboard/nix-store/public-key';
 import {
 	type AuthKeyId,
 	authKeyIdSchema,
@@ -22,6 +23,7 @@ import {
 	ttlSecondsSchema,
 	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix-store/scalars';
+import { NixSignature } from '@cupboard/nix-store/signature';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
 import {
@@ -2878,11 +2880,17 @@ export async function verifyNarInfoSignature(
 	narInfo: NarInfo,
 	publicKey: string
 ): Promise<boolean> {
-	if (narInfo.sigs.length === 0) {
+	const key = new NixPublicKey(publicKey);
+	// A signature carries the name of the key that produced it, so only the
+	// signatures naming this key are checked against it.
+	const signatures = NixSignature.parseAll(narInfo.sigs).filter(
+		(signature) => signature.name === key.name
+	);
+
+	if (signatures.length === 0) {
 		return false;
 	}
 
-	const key = parseNamedBytes(publicKey);
 	const imported = await crypto.subtle.importKey(
 		'raw',
 		key.bytes,
@@ -2894,29 +2902,12 @@ export async function verifyNarInfoSignature(
 	const fingerprint = encoder.encode(narInfo.fingerprint());
 
 	const verifications = await Promise.all(
-		narInfo.sigs.map((signature) =>
-			crypto.subtle.verify(
-				'Ed25519',
-				imported,
-				parseNamedBytes(signature).bytes,
-				fingerprint
-			)
+		signatures.map((signature) =>
+			crypto.subtle.verify('Ed25519', imported, signature.bytes, fingerprint)
 		)
 	);
 
 	return verifications.some(Boolean);
-}
-
-function parseNamedBytes(value: string): { readonly bytes: Uint8Array } {
-	const encoded = value.slice(value.indexOf(':') + 1);
-	const decoded = atob(encoded);
-
-	return {
-		bytes: Uint8Array.from(
-			decoded,
-			(character) => character.codePointAt(0) ?? 0
-		)
-	};
 }
 
 export async function readStoredNarInfo(storePathHash: StorePathHash): Promise<{

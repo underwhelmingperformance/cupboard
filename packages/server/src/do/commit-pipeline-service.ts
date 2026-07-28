@@ -1712,11 +1712,12 @@ export class CommitPipelineService {
 			metadata.narSize,
 			metadata.references
 		);
-		const sigs = await Promise.all(
+		const signatures = await Promise.all(
 			signingKeys.map((key) =>
 				signNixFingerprint(key.privateJwk, fingerprint, key.publicKey.name)
 			)
 		);
+		const sigs = signatures.map((signature) => signature.value);
 		const referencesJson = JSON.stringify(metadata.references);
 
 		// Source the generation inside the same transaction as the insert and the

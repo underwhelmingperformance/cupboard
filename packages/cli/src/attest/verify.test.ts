@@ -597,6 +597,75 @@ describe('remote attestation verification', () => {
 		]);
 	});
 
+	// A cache signs with every key it holds, so a narinfo routinely carries
+	// signatures naming keys the caller does not trust, and a served line may be
+	// anything at all. Neither stops the trusted key's own signature verifying.
+	it('verifies through the signature naming the trusted key', async () => {
+		const signed = await signedNarInfo();
+		const source = NarInfo.parse(signed.source)
+			.withSignature('other-cache:c2lnbmVk')
+			.withSignature('not-a-signature')
+			.render();
+		const fetcher: typeof fetch = (input) => {
+			const url = fetchInputUrl(input);
+
+			if (url === `https://cupboard.test/t/acme/${storePathHash}.narinfo`) {
+				return Promise.resolve(new Response(source));
+			}
+
+			if (
+				url === `https://cupboard.test/t/acme/attestations/${storePathHash}`
+			) {
+				return Promise.resolve(
+					Response.json({
+						attestations: [{ digest: bundleDigest, predicateType, size: 123 }]
+					})
+				);
+			}
+
+			if (
+				url ===
+				`https://cupboard.test/t/acme/attestation-bundles/${bundleDigest}`
+			) {
+				return Promise.resolve(new Response(new Uint8Array([1])));
+			}
+
+			return Promise.resolve(new Response('not found', { status: 404 }));
+		};
+
+		const results = await verifyRemoteAttestations(
+			{
+				url: new URL('https://cupboard.test/t/acme'),
+				storePathHash,
+				predicateType,
+				trustedPublicKey: signed.publicKey,
+				certificateIdentity: policy.identity,
+				certificateOidcIssuer: policy.issuer
+			},
+			{
+				fetch: fetcher,
+				verify: () =>
+					Promise.resolve(
+						verifiedBundle(policy, {
+							predicateType,
+							subjectDigests: [narDigest]
+						})
+					)
+			}
+		);
+
+		expect(results).toStrictEqual([
+			{
+				bundle: bundleDigest,
+				predicateType,
+				subjectDigest: narDigest,
+				signerIdentity: 'alice@example.test',
+				signerIssuer: 'https://issuer.test',
+				trust
+			}
+		]);
+	});
+
 	it('rejects a remote narinfo whose signed store path has a different hash', async () => {
 		const replayedHash = '11111111111111111111111111111111';
 		const replayedStorePath = `/nix/store/${replayedHash}-app`;

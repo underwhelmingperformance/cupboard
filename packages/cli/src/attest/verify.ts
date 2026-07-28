@@ -3,7 +3,9 @@ import { readFile as nodeReadFile } from 'node:fs/promises';
 import { cacheUrl, publicKeyUrl } from '@cupboard/nix-store/cache-url';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
+import { NixPublicKey } from '@cupboard/nix-store/public-key';
 import { type StoredCache } from '@cupboard/nix-store/scalars';
+import { NixSignature } from '@cupboard/nix-store/signature';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import { attestationListSchema } from '@cupboard/protocol/attestations';
 import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
@@ -268,7 +270,9 @@ async function verifyNarInfoSignature(
 	narInfo: NarInfo,
 	publicKeys: readonly string[]
 ): Promise<boolean> {
-	if (narInfo.sigs.length === 0) {
+	const signatures = NixSignature.parseAll(narInfo.sigs);
+
+	if (signatures.length === 0) {
 		return false;
 	}
 
@@ -276,7 +280,17 @@ async function verifyNarInfoSignature(
 	const fingerprint = encoder.encode(narInfo.fingerprint());
 
 	for (const publicKey of publicKeys) {
-		const key = parseNamedBytes(publicKey);
+		const key = new NixPublicKey(publicKey);
+		// A signature carries the name of the key that produced it, so only the
+		// signatures naming this key are checked against it.
+		const claimed = signatures.filter(
+			(signature) => signature.name === key.name
+		);
+
+		if (claimed.length === 0) {
+			continue;
+		}
+
 		const imported = await crypto.subtle.importKey(
 			'raw',
 			toArrayBuffer(key.bytes),
@@ -285,11 +299,11 @@ async function verifyNarInfoSignature(
 			['verify']
 		);
 
-		for (const signature of narInfo.sigs) {
+		for (const signature of claimed) {
 			const isVerified = await crypto.subtle.verify(
 				'Ed25519',
 				imported,
-				toArrayBuffer(parseNamedBytes(signature).bytes),
+				toArrayBuffer(signature.bytes),
 				fingerprint
 			);
 
@@ -300,18 +314,6 @@ async function verifyNarInfoSignature(
 	}
 
 	return false;
-}
-
-function parseNamedBytes(value: string): { readonly bytes: Uint8Array } {
-	const separator = value.indexOf(':');
-
-	if (separator <= 0) {
-		throw new Error('Expected a name:base64 value');
-	}
-
-	return {
-		bytes: Uint8Array.from(Buffer.from(value.slice(separator + 1), 'base64'))
-	};
 }
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {

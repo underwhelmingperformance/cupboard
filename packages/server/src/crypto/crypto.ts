@@ -1,9 +1,10 @@
-import { bytesToBase64, bytesToHex } from '@cupboard/nix-store/encoding';
+import { bytesToHex } from '@cupboard/nix-store/encoding';
 import { NixPublicKey } from '@cupboard/nix-store/public-key';
 import {
 	type NixFingerprint,
 	type NixKeyName
 } from '@cupboard/nix-store/scalars';
+import { NixSignature } from '@cupboard/nix-store/signature';
 import { z } from 'zod';
 
 const textEncoder = new TextEncoder();
@@ -118,7 +119,7 @@ export async function signNixFingerprint(
 	privateJwk: JsonWebKey,
 	fingerprint: NixFingerprint,
 	name: NixKeyName
-): Promise<string> {
+): Promise<NixSignature> {
 	const privateKey = await crypto.subtle.importKey(
 		'jwk',
 		privateJwk,
@@ -132,5 +133,5 @@ export async function signNixFingerprint(
 		textEncoder.encode(fingerprint)
 	);
 
-	return `${name}:${bytesToBase64(new Uint8Array(signature))}`;
+	return NixSignature.of(name, new Uint8Array(signature));
 }
