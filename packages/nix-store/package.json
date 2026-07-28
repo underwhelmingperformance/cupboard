@@ -21,6 +21,7 @@
 		"./public-key": "./src/public-key.ts",
 		"./retention": "./src/retention.ts",
 		"./scalars": "./src/scalars.ts",
+		"./signature": "./src/signature.ts",
 		"./store-path": "./src/store-path.ts",
 		"./url": "./src/url.ts",
 		"./zstd": "./src/zstd.ts"

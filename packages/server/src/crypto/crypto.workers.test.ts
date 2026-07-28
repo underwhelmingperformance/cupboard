@@ -27,10 +27,17 @@ describe('crypto', () => {
 			x: 'eqNTb4MVxBgHitT2FPaHwD9BFcJR9OjKEkD-16I76vI',
 			kty: 'OKP'
 		} satisfies JsonWebKey;
-
-		expect(await signNixFingerprint(privateJwk, fingerprint, keyName)).toBe(
-			'cupboard-1:7waROGMw+BXcaUyvBHxzYXL7VpQ982Qew5tP9YPUm9SIlqhnXXWQCXEc/BI9et/d06vL731Lv2krDHrHf85hBQ=='
+		const signature = await signNixFingerprint(
+			privateJwk,
+			fingerprint,
+			keyName
 		);
+
+		expect({ name: signature.name, value: signature.value }).toStrictEqual({
+			name: 'cupboard-1',
+			value:
+				'cupboard-1:7waROGMw+BXcaUyvBHxzYXL7VpQ982Qew5tP9YPUm9SIlqhnXXWQCXEc/BI9et/d06vL731Lv2krDHrHf85hBQ=='
+		});
 	});
 
 	it('generates an Ed25519 keypair and signs a Nix fingerprint', async () => {
@@ -40,11 +47,9 @@ describe('crypto', () => {
 			fingerprint,
 			keyName
 		);
-		const publicKey = parseNamedBytes(key.publicKey.value);
-		const signatureBytes = parseNamedBytes(signature);
 		const importedPublicKey = await crypto.subtle.importKey(
 			'raw',
-			publicKey.bytes,
+			key.publicKey.bytes,
 			'Ed25519',
 			false,
 			['verify']
@@ -53,18 +58,18 @@ describe('crypto', () => {
 		const isVerified = await crypto.subtle.verify(
 			'Ed25519',
 			importedPublicKey,
-			signatureBytes.bytes,
+			signature.bytes,
 			encoder.encode(fingerprint)
 		);
 
 		expect({
 			publicKey: {
-				name: publicKey.name,
-				length: publicKey.bytes.byteLength
+				name: key.publicKey.name,
+				length: key.publicKey.bytes.byteLength
 			},
 			signature: {
-				name: signatureBytes.name,
-				length: signatureBytes.bytes.byteLength
+				name: signature.name,
+				length: signature.bytes.byteLength
 			},
 			verified: isVerified
 		}).toStrictEqual({
@@ -80,34 +85,3 @@ describe('crypto', () => {
 		});
 	});
 });
-
-function parseNamedBytes(value: string): {
-	readonly name: string;
-	readonly bytes: Uint8Array;
-} {
-	const separator = value.indexOf(':');
-
-	if (separator === -1) {
-		throw new InvalidNamedBytesError(value);
-	}
-
-	const name = value.slice(0, separator);
-	const encoded = value.slice(separator + 1);
-	const decoded = atob(encoded);
-	const bytes = Uint8Array.from(
-		decoded,
-		(character) => character.codePointAt(0) ?? 0
-	);
-
-	return {
-		name,
-		bytes
-	};
-}
-
-class InvalidNamedBytesError extends Error {
-	constructor(public readonly value: string) {
-		super(`Invalid named bytes: ${value}`);
-		this.name = 'InvalidNamedBytesError';
-	}
-}

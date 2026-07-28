@@ -11,11 +11,13 @@ describe('NixPublicKey', () => {
 		expect({
 			value: key.value,
 			name: key.name,
-			material: key.material
+			material: key.material,
+			bytes: key.bytes
 		}).toStrictEqual({
 			value: 'cupboard-1:cHVibGlj',
 			name: 'cupboard-1',
-			material: 'cHVibGlj'
+			material: 'cHVibGlj',
+			bytes: Uint8Array.from([112, 117, 98, 108, 105, 99])
 		});
 	});
 
@@ -28,11 +30,13 @@ describe('NixPublicKey', () => {
 		expect({
 			value: key.value,
 			name: key.name,
-			material: key.material
+			material: key.material,
+			bytes: key.bytes
 		}).toStrictEqual({
 			value: 'cupboard-2:cHVi',
 			name: 'cupboard-2',
-			material: 'cHVi'
+			material: 'cHVi',
+			bytes: Uint8Array.from([112, 117, 98])
 		});
 	});
 
@@ -42,6 +46,8 @@ describe('NixPublicKey', () => {
 		{ name: 'no separator', value: 'cupboard-1' },
 		{ name: 'an empty name', value: ':cHVibGlj' },
 		{ name: 'empty material', value: 'cupboard-1:' },
+		{ name: 'material that is not base64', value: 'cupboard-1:not base64!' },
+		{ name: 'material of an impossible length', value: 'cupboard-1:cHVib' },
 		{ name: 'neither half', value: ':' },
 		{ name: 'nothing at all', value: '' }
 	])('refuses a key with $name', ({ value }) => {

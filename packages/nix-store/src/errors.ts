@@ -50,11 +50,21 @@ export class InvalidCacheUrlBaseError extends ProtocolError {
 
 // A rendered Nix public key that is not `<name>:<base64>`. Both halves are
 // required: without the name there is nothing to attribute a signature to, and
-// without the material there is nothing to verify it with.
+// without material that decodes there is nothing to verify it with.
 export class InvalidNixPublicKeyError extends ProtocolError {
 	constructor(public readonly value: string) {
 		super(`Invalid Nix public key: ${value}`);
 		this.name = 'InvalidNixPublicKeyError';
+	}
+}
+
+// A narinfo signature that is not `<name>:<base64>`. Both halves are required:
+// the name selects the key the signature is checked against, and the material
+// is the detached signature itself.
+export class InvalidNixSignatureError extends ProtocolError {
+	constructor(public readonly value: string) {
+		super(`Invalid Nix signature: ${value}`);
+		this.name = 'InvalidNixSignatureError';
 	}
 }
 
