@@ -21,7 +21,11 @@ export const tenantStatusSchema = z.enum([
 export type TenantStatus = z.infer<typeof tenantStatusSchema>;
 
 export const readPasswordMinLength = 20;
-export const defaultReadUser = 'cupboard';
+
+// The Basic-auth user a reader assumes when a cache names none. It is held to
+// the same rule an operator-supplied name is, so it is a `ReadUser` wherever a
+// command falls back to it.
+export const defaultReadUser = readUserInputSchema.parse('cupboard');
 
 export const readPasswordSchema = z
 	.string()

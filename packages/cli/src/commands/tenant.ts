@@ -14,7 +14,7 @@ import {
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
-import { type ReadUser, readUserInputSchema } from '@cupboard/shared/http';
+import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
@@ -111,7 +111,7 @@ export function generateReadPassword(): string {
 // The Basic-auth user a command configures: the one supplied, or the default a
 // reader assumes when a cache names none.
 function readUserOrDefault(supplied: ReadUser | undefined): ReadUser {
-	return supplied ?? readUserInputSchema.parse(defaultReadUser);
+	return supplied ?? defaultReadUser;
 }
 
 // The read credential a private cache needs. Private tenants get a generated
