@@ -1,12 +1,10 @@
-import { nixFingerprintSchema } from '@cupboard/nix-store/scalars';
+import {
+	nixFingerprintSchema,
+	nixKeyNameSchema
+} from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
-import {
-	generateSigningKey,
-	nixKeyNameSchema,
-	sha256Hex,
-	signNixFingerprint
-} from './crypto.ts';
+import { generateSigningKey, sha256Hex, signNixFingerprint } from './crypto.ts';
 
 describe('crypto', () => {
 	const fingerprint = nixFingerprintSchema.parse(
@@ -42,7 +40,7 @@ describe('crypto', () => {
 			fingerprint,
 			keyName
 		);
-		const publicKey = parseNamedBytes(key.publicKey);
+		const publicKey = parseNamedBytes(key.publicKey.value);
 		const signatureBytes = parseNamedBytes(signature);
 		const importedPublicKey = await crypto.subtle.importKey(
 			'raw',

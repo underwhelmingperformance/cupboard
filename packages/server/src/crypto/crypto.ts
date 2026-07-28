@@ -1,15 +1,12 @@
 import { bytesToBase64, bytesToHex } from '@cupboard/nix-store/encoding';
-import { type NixFingerprint } from '@cupboard/nix-store/scalars';
+import { NixPublicKey } from '@cupboard/nix-store/public-key';
+import {
+	type NixFingerprint,
+	type NixKeyName
+} from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 const textEncoder = new TextEncoder();
-
-// A Nix signing key's name, the label a rendered public key or signature is
-// prefixed with. Only the signing-key rotation path in this server produces or
-// consumes one, so the brand stays local here rather than in the shared Nix
-// domain layer.
-export const nixKeyNameSchema = z.string().brand('NixKeyName');
-export type NixKeyName = z.infer<typeof nixKeyNameSchema>;
 
 export async function sha256Hex(value: string): Promise<string> {
 	return sha256HexBytes(textEncoder.encode(value));
@@ -64,25 +61,15 @@ export async function generateSigningKeyMaterial(): Promise<{
 	return { privateJwk, publicRaw: new Uint8Array(publicRaw) };
 }
 
-// Renders a Nix signing key's public half, which labels the raw key with its
-// name. Pure, so it can run inside a critical section without holding the gate
-// across any I/O.
-export function renderSigningPublicKey(
-	name: NixKeyName,
-	publicRaw: Uint8Array
-): string {
-	return `${name}:${bytesToBase64(publicRaw)}`;
-}
-
 export async function generateSigningKey(name: NixKeyName): Promise<{
 	readonly privateJwk: JsonWebKey;
-	readonly publicKey: string;
+	readonly publicKey: NixPublicKey;
 }> {
 	const material = await generateSigningKeyMaterial();
 
 	return {
 		privateJwk: material.privateJwk,
-		publicKey: renderSigningPublicKey(name, material.publicRaw)
+		publicKey: NixPublicKey.of(name, material.publicRaw)
 	};
 }
 

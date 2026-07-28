@@ -18,6 +18,7 @@
 		"./hash": "./src/hash.ts",
 		"./narinfo": "./src/narinfo.ts",
 		"./nix-config": "./src/nix-config.ts",
+		"./public-key": "./src/public-key.ts",
 		"./retention": "./src/retention.ts",
 		"./scalars": "./src/scalars.ts",
 		"./store-path": "./src/store-path.ts",
