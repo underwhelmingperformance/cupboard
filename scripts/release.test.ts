@@ -1,3 +1,5 @@
+import { cacheNameSchema } from '@cupboard/nix-store/scalars';
+import { parseBaseUrl } from '@cupboard/nix-store/url';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -117,8 +119,16 @@ const unavailable = () =>
 		text: () => Promise.resolve('')
 	});
 
+// A `CACHE_URL` reaches the script through `parseBaseUrl`, so the bases here
+// are built the same way, spelled both with and without a trailing slash.
+const baseUrl = parseBaseUrl(new URL('https://cupboard.example/t/acme'));
+const slashedBaseUrl = parseBaseUrl(
+	new URL('https://cupboard.example/t/acme/')
+);
+const baseUrls = [baseUrl, slashedBaseUrl];
+
 describe('fetchCachePublicKey', () => {
-	it('returns the served key without surrounding whitespace', async () => {
+	it.each(baseUrls)('addresses /pubkey under %s', async (base) => {
 		const requests: string[] = [];
 		const fetchLike = (url: string) => {
 			requests.push(url);
@@ -130,28 +140,25 @@ describe('fetchCachePublicKey', () => {
 			});
 		};
 
-		const key = await fetchCachePublicKey(
-			'https://cupboard.example/t/acme',
-			fetchLike
-		);
+		const key = await fetchCachePublicKey(base, fetchLike);
 
 		expect(key).toBe('cupboard-1:abc123=');
-		expect(requests).toEqual(['https://cupboard.example/t/acme/pubkey']);
+		expect(requests).toStrictEqual(['https://cupboard.example/t/acme/pubkey']);
 	});
 
 	it('rejects a response that is not ok', async () => {
-		await expect(
-			fetchCachePublicKey('https://cupboard.example/t/acme', unavailable)
-		).rejects.toThrow(PublicKeyFetchError);
+		await expect(fetchCachePublicKey(baseUrl, unavailable)).rejects.toThrow(
+			PublicKeyFetchError
+		);
 	});
 });
 
 describe('substituterSection', () => {
-	it('renders the cache URL and key as nix.conf lines', () => {
+	it.each(baseUrls)('renders the cache URL and key under %s', (base) => {
 		expect(
 			substituterSection({
-				cacheUrl: 'https://cupboard.example/t/acme',
-				version: 'v1.2.3',
+				baseUrl: base,
+				cache: cacheNameSchema.parse('v1.2.3'),
 				publicKey: 'cupboard-1:abc123='
 			})
 		).toBe(

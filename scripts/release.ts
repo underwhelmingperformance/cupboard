@@ -4,6 +4,9 @@ import path from 'node:path';
 import { env } from 'node:process';
 import { pathToFileURL } from 'node:url';
 
+import { cacheUrl, publicKeyUrl } from '@cupboard/nix-store/cache-url';
+import { type CacheName, cacheNameSchema } from '@cupboard/nix-store/scalars';
+import { canonicalHref, parseBaseUrl } from '@cupboard/nix-store/url';
 import {
 	CodedError,
 	genericExitCode,
@@ -74,12 +77,14 @@ interface Repository {
 
 interface PublishInputs {
 	readonly version: string;
+	/** The cache the release's builds are pushed to, named after the tag. */
+	readonly cache: CacheName;
 	readonly githubToken: string;
 	readonly repository: Repository;
 	readonly commitish: string;
 	readonly name: string;
 	readonly directory: string;
-	readonly cacheUrl: string;
+	readonly baseUrl: URL;
 }
 
 const fallbackReleaseRepository = 'cupboard/cupboard';
@@ -105,6 +110,17 @@ class MalformedRepositoryError extends UsageError {
 	constructor(public readonly value: string) {
 		super(`repository must be <owner>/<name>, got '${value}'`);
 		this.name = 'MalformedRepositoryError';
+	}
+}
+
+// The diagnostic names the input only, never the value, which may hold a
+// credential the workflow meant to keep out of the log.
+class MalformedCacheUrlError extends UsageError {
+	constructor() {
+		super(
+			'CACHE_URL must be an http(s) URL with nothing beyond origin and path'
+		);
+		this.name = 'MalformedCacheUrlError';
 	}
 }
 
@@ -183,10 +199,10 @@ type FetchLike = (
 
 /** The cache signing key the deployment serves at `/pubkey`. */
 export async function fetchCachePublicKey(
-	cacheUrl: string,
+	baseUrl: URL,
 	fetchLike: FetchLike = fetch
 ): Promise<string> {
-	const url = `${cacheUrl}/pubkey`;
+	const url = canonicalHref(publicKeyUrl(baseUrl));
 	const response = await fetchLike(url);
 
 	if (!response.ok) {
@@ -205,8 +221,8 @@ export async function fetchCachePublicKey(
  * workflow, which fills the cache the section names.
  */
 export function substituterSection(options: {
-	readonly cacheUrl: string;
-	readonly version: string;
+	readonly baseUrl: URL;
+	readonly cache: CacheName;
 	readonly publicKey: string;
 }): string {
 	return [
@@ -216,7 +232,9 @@ export function substituterSection(options: {
 		'fetch it instead of building:',
 		'',
 		'```',
-		`extra-substituters = ${options.cacheUrl}/cache/${options.version}`,
+		// A substituter is matched by exact string, so the URL is rendered in its
+		// one canonical form.
+		`extra-substituters = ${canonicalHref(cacheUrl(options.baseUrl, options.cache))}`,
 		`extra-trusted-public-keys = ${options.publicKey}`,
 		'```'
 	].join('\n');
@@ -317,9 +335,9 @@ export async function publishAction(
 	}
 
 	const body = substituterSection({
-		cacheUrl: inputs.cacheUrl,
-		version: inputs.version,
-		publicKey: await fetchCachePublicKey(inputs.cacheUrl)
+		baseUrl: inputs.baseUrl,
+		cache: inputs.cache,
+		publicKey: await fetchCachePublicKey(inputs.baseUrl)
 	});
 
 	const release = await upsertDraft(octokit, inputs, body, selection.existing);
@@ -432,6 +450,7 @@ function publishInputs(environment: Environment): PublishInputs {
 
 	return {
 		version,
+		cache: releaseCache(version),
 		githubToken: input(environment, 'GITHUB_TOKEN'),
 		repository: parseRepository(
 			input(
@@ -448,8 +467,31 @@ function publishInputs(environment: Environment): PublishInputs {
 		directory: path.resolve(
 			requireInput(input(environment, 'DIRECTORY'), 'directory')
 		),
-		cacheUrl: input(environment, 'CACHE_URL', fallbackCacheUrl)
+		baseUrl: parseCacheUrl(input(environment, 'CACHE_URL', fallbackCacheUrl))
 	};
+}
+
+// The release-cache workflow names the cache after the tag, so a tag that
+// cannot name a cache would point readers at a substituter no deployment can
+// serve.
+function releaseCache(version: string): CacheName {
+	const parsed = cacheNameSchema.safeParse(version);
+
+	if (!parsed.success) {
+		throw new NonCanonicalVersionError(version);
+	}
+
+	return parsed.data;
+}
+
+// Every release URL derives from this base's origin and path alone, so it is
+// checked once here and the builders take the result on trust.
+function parseCacheUrl(value: string): URL {
+	try {
+		return parseBaseUrl(new URL(value));
+	} catch {
+		throw new MalformedCacheUrlError();
+	}
 }
 
 function parseRepository(value: string): Repository {
