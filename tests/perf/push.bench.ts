@@ -7,7 +7,11 @@ import { afterAll, beforeAll, bench } from 'vitest';
 
 import { type PushClient, runPush } from '../../packages/cli/src/push/push.ts';
 import { Nix, type NixValidPathInfo } from '../../packages/nix/src/index.ts';
-import { storeDirectorySchema } from '../../packages/nix-store/src/scalars.ts';
+import {
+	storeDirectorySchema,
+	storePathSchema,
+	type StorePathString
+} from '../../packages/nix-store/src/scalars.ts';
 import {
 	createReporter,
 	type Reporter
@@ -165,19 +169,27 @@ function takeBatch(harness: Harness): string[] {
 
 function storeClientFor(source: NixStore): Nix {
 	const queryPathInfo = async (
-		storePath: string
+		storePath: StorePathString
 	): Promise<NixValidPathInfo> => {
 		const info = await source.pathInfo(storePath);
 
 		// The pool is built in the bench's own source store, which registers
 		// local builds as ultimately trusted.
-		return { ...info, signatures: [], ultimate: true };
+		return {
+			...info,
+			storePath,
+			references: info.references.map((reference) =>
+				storePathSchema.parse(reference)
+			),
+			signatures: [],
+			ultimate: true
+		};
 	};
 
 	return Nix.forStore(
 		{
 			queryPathInfo,
-			resolveClosure: (storePaths: readonly string[]) =>
+			resolveClosure: (storePaths: readonly StorePathString[]) =>
 				Promise.all(storePaths.map((storePath) => queryPathInfo(storePath)))
 		},
 		{ storeDirectory: storeDirectorySchema.parse('/nix/store') }

@@ -1,12 +1,16 @@
 import type { NixSha256Hash } from '@cupboard/nix-store/hash';
-import type { StoreDirectory } from '@cupboard/nix-store/scalars';
+import {
+	type StoreDirectory,
+	storePathSchema,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 export interface NixValidPathInfo {
-	readonly storePath: string;
+	readonly storePath: StorePathString;
 	readonly narHash: NixSha256Hash;
 	readonly narSize: number;
-	readonly references: readonly string[];
+	readonly references: readonly StorePathString[];
 	readonly deriver?: string;
 	readonly ca?: string;
 	readonly signatures: readonly string[];
@@ -21,9 +25,25 @@ export interface NixValidPathInfo {
 /** A store backend: how a single path's info is fetched from this kind of store. */
 export interface NixStoreClient {
 	resolveClosure(
-		storePaths: readonly string[]
+		storePaths: readonly StorePathString[]
 	): Promise<readonly NixValidPathInfo[]>;
-	queryPathInfo(storePath: string): Promise<NixValidPathInfo>;
+	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo>;
+}
+
+/**
+ * The store path a backend reported, refusing a value that cannot name one. A
+ * store path a reader hands on is the key every later stage indexes, hashes and
+ * uploads by, so a value the schema cannot accept is refused here, naming the
+ * store that reported it, and never reaches those stages.
+ */
+export function requireStorePath(reported: string): StorePathString {
+	const storePath = storePathSchema.safeParse(reported);
+
+	if (!storePath.success) {
+		throw new InvalidNixStorePathError(reported);
+	}
+
+	return storePath.data;
 }
 
 /**
@@ -43,8 +63,8 @@ export const defaultClosureConcurrency = 16;
  * flight, so `queryPathInfo` must be safe to call that many times concurrently.
  */
 export async function resolveClosureBy(
-	roots: readonly string[],
-	queryPathInfo: (storePath: string) => Promise<NixValidPathInfo>,
+	roots: readonly StorePathString[],
+	queryPathInfo: (storePath: StorePathString) => Promise<NixValidPathInfo>,
 	concurrency = 1
 ): Promise<readonly NixValidPathInfo[]> {
 	const closure = new Map<string, NixValidPathInfo>();
@@ -57,7 +77,7 @@ export async function resolveClosureBy(
 			concurrency,
 			queryPathInfo
 		);
-		const references: string[] = [];
+		const references: StorePathString[] = [];
 
 		for (const info of infos) {
 			closure.set(info.storePath, info);
@@ -78,10 +98,10 @@ export async function resolveClosureBy(
 // claimed when it joins a frontier, before it is queried, so the next frontier
 // never re-schedules a path already in flight.
 function claimUnseen(
-	candidates: readonly string[],
+	candidates: readonly StorePathString[],
 	claimed: Set<string>
-): string[] {
-	const next: string[] = [];
+): StorePathString[] {
+	const next: StorePathString[] = [];
 
 	for (const candidate of candidates) {
 		if (claimed.has(candidate)) {
@@ -101,6 +121,15 @@ export class NixStorePathNotFoundError extends NixStoreError {
 	constructor(public readonly storePath: string) {
 		super(`Nix store path is not registered locally: ${storePath}`);
 		this.name = 'NixStorePathNotFoundError';
+	}
+}
+
+export class InvalidNixStorePathError extends NixStoreError {
+	constructor(public readonly path: string) {
+		super(
+			`The Nix store reported '${path}', which does not name a store path: it must be an absolute directory followed by a 32-character hash, a dash, and a name`
+		);
+		this.name = 'InvalidNixStorePathError';
 	}
 }
 

@@ -5,6 +5,8 @@ import {
 	graceSecondsSchema,
 	rootNameSchema,
 	storeDirectorySchema,
+	storePathSchema,
+	type StorePathString,
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
@@ -57,8 +59,12 @@ import {
 
 const rootName = (value: string) => rootNameSchema.parse(value);
 
-const appPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
-const runtimePath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime';
+const appPath = storePathSchema.parse(
+	'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
+);
+const runtimePath = storePathSchema.parse(
+	'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime'
+);
 const appDigest = digest(1, 123);
 const runtimeDigest = digest(2, 234);
 const compressedNarBytes = Buffer.from('compressed nar');
@@ -240,8 +246,10 @@ describe('runPush', () => {
 
 	it('uploads NARs in parallel up to the limit', async () => {
 		const limit = 2;
-		const paths = ['1', '2', '3', '4'].map(
-			(n) => `/nix/store/${n}123456789abcdfghijklmnpqrsvwxyz-p${n}`
+		const paths = ['1', '2', '3', '4'].map((n) =>
+			storePathSchema.parse(
+				`/nix/store/${n}123456789abcdfghijklmnpqrsvwxyz-p${n}`
+			)
 		);
 		const digests = new Map(
 			paths.map((path, index) => [path, digest(10 + index, 100 + index)])
@@ -1745,10 +1753,10 @@ describe('runPush', () => {
 	});
 
 	it('caps the per-path rows for a closure larger than the row limit', async () => {
-		const storePaths = Array.from(
-			{ length: 22 },
-			(_, index) =>
+		const storePaths = Array.from({ length: 22 }, (_, index) =>
+			storePathSchema.parse(
 				`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
+			)
 		);
 		const results: ResultRow[][] = [];
 		const store = nixStore(
@@ -3150,9 +3158,9 @@ function sha256Hex(bytes: Uint8Array): string {
 }
 
 function pathInfo(
-	storePath: string,
+	storePath: StorePathString,
 	narDigest: NarDigest,
-	references: readonly string[]
+	references: readonly StorePathString[]
 ): NixValidPathInfo {
 	return {
 		storePath,
@@ -3166,7 +3174,7 @@ function pathInfo(
 
 function knownPathInfo(
 	paths: Record<string, NixValidPathInfo>,
-	storePath: string
+	storePath: StorePathString
 ): NixValidPathInfo {
 	return z
 		.custom<NixValidPathInfo>((value) => value !== undefined)
@@ -3175,7 +3183,7 @@ function knownPathInfo(
 
 function nixStore(paths: Record<string, NixValidPathInfo>): Nix {
 	const store = {
-		resolveClosure(storePaths: readonly string[]) {
+		resolveClosure(storePaths: readonly StorePathString[]) {
 			const closure = new Set(storePaths);
 
 			for (const storePath of storePaths) {
@@ -3189,7 +3197,7 @@ function nixStore(paths: Record<string, NixValidPathInfo>): Nix {
 				[...closure].map((storePath) => knownPathInfo(paths, storePath))
 			);
 		},
-		queryPathInfo: (storePath: string) =>
+		queryPathInfo: (storePath: StorePathString) =>
 			Promise.resolve(knownPathInfo(paths, storePath))
 	};
 

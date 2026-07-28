@@ -1,4 +1,8 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import {
+	storePathSchema,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import { InvalidInputError } from '../errors.ts';
@@ -38,7 +42,7 @@ describe('renderChecksums', () => {
 	});
 });
 
-function attestPathInfo(storePath: string, digestByte: number) {
+function attestPathInfo(storePath: StorePathString, digestByte: number) {
 	return {
 		storePath,
 		deriver: `${storePath}.drv`,
@@ -51,8 +55,12 @@ function attestPathInfo(storePath: string, digestByte: number) {
 }
 
 describe('attestationSubjects', () => {
-	const builtPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
-	const substitutedPath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib';
+	const builtPath = storePathSchema.parse(
+		'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
+	);
+	const substitutedPath = storePathSchema.parse(
+		'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib'
+	);
 
 	it('emits only paths named by the current build receipt', () => {
 		const partitioned = attestationSubjects(

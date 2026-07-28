@@ -4,6 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import {
+	storePathSchema,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import { ProtocolWriter } from '../../../tests/support/protocol-writer.ts';
@@ -15,13 +19,20 @@ import {
 	UnsupportedNixDaemonProtocolError
 } from './nix-daemon.ts';
 import {
+	InvalidNixStorePathError,
 	NixStorePathNotFoundError,
 	type NixValidPathInfo
 } from './nix-store.ts';
 
-const appPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
-const libraryPath = '/nix/store/2123456789abcdfghijklmnpqrsvwxyz-lib';
-const runtimePath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime';
+const appPath = storePathSchema.parse(
+	'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
+);
+const libraryPath = storePathSchema.parse(
+	'/nix/store/2123456789abcdfghijklmnpqrsvwxyz-lib'
+);
+const runtimePath = storePathSchema.parse(
+	'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime'
+);
 const appHash = '11'.repeat(32);
 const libraryHash = '22'.repeat(32);
 const runtimeHash = '33'.repeat(32);
@@ -195,6 +206,28 @@ describe('NixDaemonStoreClient', () => {
 				storePath: appPath
 			}
 		});
+	});
+
+	// The daemon states the references, so one that does not name a store path is
+	// refused at the reply rather than carried into the closure.
+	it('rejects a daemon reference that does not name a store path', async () => {
+		const client = new NixDaemonStoreClient({
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport({
+						[appPath]: {
+							hash: appHash,
+							narSize: 123,
+							references: ['/nix/store/notes.txt'],
+							signatures: []
+						}
+					})
+				)
+		});
+
+		await expect(client.queryPathInfo(appPath)).rejects.toThrow(
+			InvalidNixStorePathError
+		);
 	});
 
 	it('rejects daemon protocol minors older than the SetOptions frame it sends', async () => {
@@ -387,10 +420,10 @@ function postHandshakeResponse(): Buffer {
 }
 
 function pathInfo(
-	storePath: string,
+	storePath: StorePathString,
 	hash: string,
 	narSize: number,
-	references: readonly string[]
+	references: readonly StorePathString[]
 ): NixValidPathInfo {
 	return {
 		storePath,

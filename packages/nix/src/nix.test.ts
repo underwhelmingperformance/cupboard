@@ -1,5 +1,10 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
-import { storeDirectorySchema } from '@cupboard/nix-store/scalars';
+import {
+	type StoreDirectory,
+	storeDirectorySchema,
+	storePathSchema,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import { Nix } from './nix.ts';
@@ -11,12 +16,19 @@ import {
 } from './nix-store.ts';
 
 const storeDirectory = storeDirectorySchema.parse('/nix/store');
-const appPath = '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-app';
-const libraryPath = '/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-lib';
+const divertedStoreDirectory = storeDirectorySchema.parse(
+	'/home/u/.local/share/nix/root/store'
+);
+const appPath = storePathSchema.parse(
+	'/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-app'
+);
+const libraryPath = storePathSchema.parse(
+	'/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-lib'
+);
 
 function info(
-	storePath: string,
-	references: readonly string[] = []
+	storePath: StorePathString,
+	references: readonly StorePathString[] = []
 ): NixValidPathInfo {
 	return {
 		storePath,
@@ -55,9 +67,10 @@ function recordingStore(): RecordingStore {
 
 function nixOver(
 	store: NixStoreClient,
-	realpath: (path: string) => string = (path) => path
+	realpath: (path: string) => string = (path) => path,
+	directory: StoreDirectory = storeDirectory
 ): Nix {
-	return Nix.forStore(store, { storeDirectory, realpath });
+	return Nix.forStore(store, { storeDirectory: directory, realpath });
 }
 
 describe('Nix.toStorePath', () => {
@@ -70,6 +83,19 @@ describe('Nix.toStorePath', () => {
 		}
 	])('returns the store path for $name', ({ input, expected }) => {
 		expect(nixOver(recordingStore()).toStorePath(input)).toBe(expected);
+	});
+
+	// The store directory comes from the running configuration, so a store the
+	// system diverted elsewhere resolves the same way the default one does.
+	it('returns the store path under a diverted store directory', () => {
+		const divertedPath = `${divertedStoreDirectory}/cccccccccccccccccccccccccccccccc-app`;
+		const nix = nixOver(
+			recordingStore(),
+			(path) => path,
+			divertedStoreDirectory
+		);
+
+		expect(nix.toStorePath(`${divertedPath}/bin/app`)).toBe(divertedPath);
 	});
 
 	it('resolves a symlink before taking the store path', () => {
@@ -88,10 +114,20 @@ describe('Nix.toStorePath', () => {
 		expect(nix.toStorePath(`${appPath}/bin`)).toBe(appPath);
 	});
 
-	it('throws when the path is outside the store', () => {
-		const nix = nixOver(recordingStore(), () => '/etc/passwd');
+	it.each([
+		{ name: 'outside the store directory', resolved: '/etc/passwd' },
+		{
+			name: 'a loose file beside the store paths',
+			resolved: '/nix/store/notes.txt'
+		},
+		{
+			name: 'the store directory itself',
+			resolved: '/nix/store/'
+		}
+	])('throws when the path resolves to $name', ({ resolved }) => {
+		const nix = nixOver(recordingStore(), () => resolved);
 
-		expect(() => nix.toStorePath('/etc/passwd')).toThrow(NotInNixStoreError);
+		expect(() => nix.toStorePath(resolved)).toThrow(NotInNixStoreError);
 	});
 });
 
