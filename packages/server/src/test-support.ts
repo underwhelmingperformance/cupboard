@@ -126,6 +126,7 @@ import {
 	internalOrigin,
 	narInfoObjectKey,
 	narObjectKey,
+	type R2ObjectKey,
 	stagingObjectKey
 } from './http/http.ts';
 import {
@@ -1245,7 +1246,7 @@ export async function pendingAttestationRows(): Promise<
 export async function stageAttestationBundle(
 	uploadId: string,
 	bytes: Uint8Array
-): Promise<string> {
+): Promise<R2ObjectKey> {
 	const key = attestationStagingObjectKey(
 		testPushId,
 		uploadIdSchema.parse(uploadId)
@@ -1263,7 +1264,11 @@ export async function fileAttestationReference(options: {
 	readonly generation: number;
 	readonly predicateType?: string;
 	readonly tenant?: string;
-}): Promise<{ digest: Sha256HexDigest; size: number; stagingKey: string }> {
+}): Promise<{
+	digest: Sha256HexDigest;
+	size: number;
+	stagingKey: R2ObjectKey;
+}> {
 	const stagingKey = await stageAttestationBundle(
 		options.uploadId,
 		options.bytes

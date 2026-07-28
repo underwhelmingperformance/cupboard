@@ -1,5 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
 import { type Capture, startCapture } from '@cupboard/logger/testing';
+import { storedCacheSchema } from '@cupboard/nix-store/scalars';
+import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { ORPCError } from '@orpc/server';
 import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -22,7 +24,7 @@ describe('bridgedError', () => {
 	it('maps a CacheNotEmptyError to its defined contract error with data', () => {
 		const bridged = bridgedError(
 			rootLogger(),
-			new CacheNotEmptyError('builds')
+			new CacheNotEmptyError(storedCacheSchema.parse('builds'))
 		);
 
 		expect(bridged).toBeInstanceOf(ORPCError);
@@ -38,7 +40,7 @@ describe('bridgedError', () => {
 	it('keeps the status and message of any other ServerHttpError', () => {
 		const bridged = bridgedError(
 			rootLogger(),
-			new UploadNotFoundError('upload-1')
+			new UploadNotFoundError(uploadIdSchema.parse('upload-1'))
 		);
 
 		expect(bridged).toBeInstanceOf(ORPCError);

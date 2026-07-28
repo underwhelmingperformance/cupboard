@@ -16,7 +16,11 @@ import {
 	AttestationBundleTooLargeError,
 	UploadedObjectNotFoundError
 } from '../errors.ts';
-import { casObjectKey, maxAttestationBundleBytes } from '../http/http.ts';
+import {
+	casObjectKey,
+	maxAttestationBundleBytes,
+	type R2ObjectKey
+} from '../http/http.ts';
 
 import { type ServerContext } from './context.ts';
 
@@ -125,7 +129,7 @@ export class AttestationCasService {
 	}
 
 	async measureStagedBundle(
-		stagingKey: string
+		stagingKey: R2ObjectKey
 	): Promise<MeasuredAttestationBundle> {
 		const metadata = await this.context.env.BLOBS.head(stagingKey);
 
@@ -163,7 +167,7 @@ export class AttestationCasService {
 	}
 
 	async promoteMeasuredBundle(
-		_stagingKey: string,
+		_stagingKey: R2ObjectKey,
 		bundle: MeasuredAttestationBundle
 	): Promise<void> {
 		await this.ensureCasObject(bundle);

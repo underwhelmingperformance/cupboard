@@ -1,3 +1,4 @@
+import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -30,7 +31,10 @@ function formRequest(body: string): Request {
 }
 
 function storedFault(cause: Error): StoredUploadMetadataInvalidError {
-	return new StoredUploadMetadataInvalidError('upload-1', cause);
+	return new StoredUploadMetadataInvalidError(
+		uploadIdSchema.parse('upload-1'),
+		cause
+	);
 }
 
 describe('parseRequestValue', () => {
