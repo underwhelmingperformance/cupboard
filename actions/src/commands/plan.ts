@@ -29,6 +29,7 @@ import {
 	type ReporterResultEvent
 } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import { type ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
@@ -54,7 +55,12 @@ import {
 	ZeroGracePolicyError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
-import { isEnabled, provided, providedCache } from '../options.ts';
+import {
+	isEnabled,
+	provided,
+	providedCache,
+	providedReadUser
+} from '../options.ts';
 import {
 	availableCachePaths,
 	availableViewPaths,
@@ -141,7 +147,7 @@ export interface PlanInputs {
 	readonly cache: StoredCache;
 	readonly rootPrefix: string;
 	readonly ttl: string;
-	readonly readUser: string;
+	readonly readUser: ReadUser | '';
 	readonly readPassword: string;
 	readonly audience: string;
 	readonly cupboardPath: string;
@@ -242,7 +248,7 @@ export function resolvePlanInputs(
 
 	// Both credential halves are taken verbatim: surrounding whitespace is
 	// part of a credential, so only its complete absence means "not set".
-	const readUser = options.readUser ?? '';
+	const readUser = providedReadUser(options.readUser);
 	const readPassword = options.readPassword ?? '';
 
 	if (readUser !== '' && readPassword === '') {

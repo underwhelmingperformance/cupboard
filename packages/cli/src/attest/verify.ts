@@ -5,7 +5,7 @@ import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { type StoredCache } from '@cupboard/nix-store/scalars';
 import { attestationListSchema } from '@cupboard/protocol/attestations';
-import { basicAuthHeader } from '@cupboard/shared/http';
+import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
 import {
 	type AttestationPolicyOptions,
 	type BundleVerifyOptions,
@@ -30,7 +30,7 @@ export interface RemoteAttestationVerifyOptions extends AttestationPolicyOptions
 	readonly storePathHash: string;
 	readonly cache?: StoredCache;
 	readonly bundleDigest?: string;
-	readonly readUser?: string;
+	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
 	readonly trustedPublicKey?: string;
 	readonly trustCachePubkey?: boolean;

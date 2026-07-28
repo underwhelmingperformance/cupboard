@@ -73,6 +73,7 @@ import {
 	type UploadStatusResponse,
 	uploadStatusResponseSchema
 } from '@cupboard/protocol/upload';
+import { readUserInputSchema } from '@cupboard/shared/http';
 import {
 	createExecutionContext,
 	runInDurableObject,
@@ -132,8 +133,7 @@ import {
 	generateReadPasswordSalt,
 	hashReadPassword,
 	type ReadPasswordHash,
-	type ReadPasswordSalt,
-	readUserSchema
+	type ReadPasswordSalt
 } from './read/read-auth.ts';
 import { tenantServer } from './routing/durable-object.ts';
 import { runBlobReaper } from './routing/scheduled.ts';
@@ -256,7 +256,7 @@ export async function provisionFixtureTenant(
 	const readUser =
 		options.read === undefined
 			? undefined
-			: readUserSchema.parse(options.read.user);
+			: readUserInputSchema.parse(options.read.user);
 	let readPasswordHash: ReadPasswordHash | undefined;
 	let readPasswordSalt: ReadPasswordSalt | undefined;
 

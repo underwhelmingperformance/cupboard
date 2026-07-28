@@ -5,6 +5,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { cacheAvailabilityRequestSchema } from '@cupboard/protocol/cache-availability';
+import { readUserInputSchema } from '@cupboard/shared/http';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -1402,7 +1403,10 @@ describe('availableCachePaths', () => {
 			baseUrl: 'https://cupboard.example/t/acme',
 			cache: storedCacheSchema.parse('pr-1'),
 			paths: [firstPath, secondPath],
-			credentials: { user: 'reader', password: 'secret' },
+			credentials: {
+				user: readUserInputSchema.parse('reader'),
+				password: 'secret'
+			},
 			fetcher: (_input, init) => {
 				headers.push(init?.headers);
 

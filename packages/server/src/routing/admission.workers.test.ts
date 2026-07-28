@@ -4,6 +4,7 @@ import {
 	type ParsedTenantCreateBody,
 	tenantCreateBodySchema
 } from '@cupboard/protocol/tenants';
+import { readUserSchema } from '@cupboard/shared/http';
 import {
 	createExecutionContext,
 	waitOnExecutionContext
@@ -28,8 +29,7 @@ import { TenantAdmissionUnavailableError } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import {
 	readPasswordHashSchema,
-	readPasswordSaltSchema,
-	readUserSchema
+	readPasswordSaltSchema
 } from '../read/read-auth.ts';
 import {
 	adminGrants,

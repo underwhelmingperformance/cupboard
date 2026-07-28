@@ -14,12 +14,14 @@ import {
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
+import { type ReadUser, readUserInputSchema } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { controlRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
+import { parseReadUser } from '../read-user.ts';
 import { deploymentUrlArgument } from '../url-argument.ts';
 
 /**
@@ -38,7 +40,7 @@ export interface TenantClient {
 	}): Promise<ParsedTenantReadModeResponse>;
 	rotateReadCredential(input: {
 		id: TenantId;
-		read: { user: string; password: string };
+		read: { user: ReadUser; password: string };
 	}): Promise<ParsedTenantReadModeResponse>;
 	clearReadCredential(input: {
 		id: TenantId;
@@ -47,7 +49,7 @@ export interface TenantClient {
 }
 
 interface RotateCredentialOptions {
-	readonly readUser?: string;
+	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
 }
 
@@ -60,7 +62,7 @@ interface CreateOptions {
 	readonly ownerSubject: string;
 	readonly ownerAudience: string;
 	readonly public?: boolean;
-	readonly readUser?: string;
+	readonly readUser?: ReadUser;
 	readonly readPassword?: string | false;
 	readonly quotaBytes?: number;
 }
@@ -98,7 +100,7 @@ export function parseQuotaBytes(value: string): number {
 
 interface ReadCredentialSelection {
 	readonly read:
-		undefined | { readonly user: string; readonly password: string };
+		undefined | { readonly user: ReadUser; readonly password: string };
 	readonly generatedPassword: string | undefined;
 }
 
@@ -106,11 +108,17 @@ export function generateReadPassword(): string {
 	return randomBytes(32).toString('base64url');
 }
 
+// The Basic-auth user a command configures: the one supplied, or the default a
+// reader assumes when a cache names none.
+function readUserOrDefault(supplied: ReadUser | undefined): ReadUser {
+	return supplied ?? readUserInputSchema.parse(defaultReadUser);
+}
+
 // The read credential a private cache needs. Private tenants get a generated
 // password by default; `--no-read-password` keeps the existing fails-closed mode.
 export function readCredentialFromOptions(options: {
 	readonly public?: boolean;
-	readonly readUser?: string;
+	readonly readUser?: ReadUser;
 	readonly readPassword?: string | false;
 }): ReadCredentialSelection {
 	if (options.readPassword === false) {
@@ -128,7 +136,7 @@ export function readCredentialFromOptions(options: {
 		return { read: undefined, generatedPassword: undefined };
 	}
 
-	const user = options.readUser ?? defaultReadUser;
+	const user = readUserOrDefault(options.readUser);
 	const generated =
 		options.readPassword === undefined || options.readPassword === 'auto'
 			? generateReadPassword()
@@ -178,7 +186,8 @@ export function registerTenantCommands(
 		.option('--public', 'make the cache publicly readable (private by default)')
 		.option(
 			'--read-user <user>',
-			'the Basic-auth user a private cache requires from readers'
+			'the Basic-auth user a private cache requires from readers',
+			parseReadUser
 		)
 		.option(
 			'--read-password <password>',
@@ -309,7 +318,8 @@ export function registerTenantCommands(
 		.argument('<id>', 'tenant slug')
 		.option(
 			'--read-user <user>',
-			'the Basic-auth user a private cache requires from readers'
+			'the Basic-auth user a private cache requires from readers',
+			parseReadUser
 		)
 		.option(
 			'--read-password <password>',
@@ -493,7 +503,7 @@ export async function runTenantRotateCredential(
 	reporter: Reporter,
 	client: Pick<TenantClient, 'rotateReadCredential'>
 ): Promise<void> {
-	const user = options.readUser ?? defaultReadUser;
+	const user = readUserOrDefault(options.readUser);
 	const password = options.readPassword ?? generateReadPassword();
 	const generated = options.readPassword === undefined ? password : undefined;
 

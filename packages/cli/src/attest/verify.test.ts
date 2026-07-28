@@ -4,6 +4,7 @@ import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { storedCacheSchema } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
+import { readUserInputSchema } from '@cupboard/shared/http';
 import {
 	AttestationPredicateTypeMismatchError,
 	AttestationSubjectMismatchError,
@@ -537,7 +538,7 @@ describe('remote attestation verification', () => {
 				url: 'https://cupboard.test/t/acme',
 				cache: storedCacheSchema.parse('builds'),
 				storePathHash,
-				readUser: 'reader',
+				readUser: readUserInputSchema.parse('reader'),
 				readPassword: 'secret',
 				trustCachePubkey: true,
 				predicateType,

@@ -4,6 +4,7 @@ import {
 	type ParsedTenantCreateBody,
 	tenantCreateBodySchema
 } from '@cupboard/protocol/tenants';
+import { type ReadUser, readUserSchema } from '@cupboard/shared/http';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -13,6 +14,7 @@ import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import {
+	ReadUserInvalidError,
 	TenantAlreadyExistsError,
 	TenantNotFoundError,
 	TenantNotSuspendedError,
@@ -23,9 +25,7 @@ import {
 	type ReadPasswordHash,
 	readPasswordHashSchema,
 	type ReadPasswordSalt,
-	readPasswordSaltSchema,
-	type ReadUser,
-	readUserSchema
+	readPasswordSaltSchema
 } from '../read/read-auth.ts';
 
 import {
@@ -593,6 +593,26 @@ describe('tenant lifecycle operations', () => {
 			),
 			hashIsPlaintext: false
 		});
+	});
+
+	it.each([
+		{
+			name: 'a colon',
+			user: 'rea:der'
+		},
+		{
+			name: 'nothing',
+			user: ''
+		}
+	])('refuses a rotated read user carrying $name', async ({ user }) => {
+		await ensureTenant(database(), createBody(acme), now);
+
+		await expect(
+			setTenantReadCredential(database(), acme, {
+				user,
+				password: 'correct-horse-battery-staple'
+			})
+		).rejects.toBeInstanceOf(ReadUserInvalidError);
 	});
 
 	it('clears a read credential to empty columns', async () => {
