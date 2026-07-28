@@ -1,9 +1,22 @@
 import { CacheInfoParseError } from './errors.ts';
-import { type CachePriority, cachePrioritySchema } from './scalars.ts';
+import {
+	type CachePriority,
+	cachePrioritySchema,
+	type StoreDirectory,
+	storeDirectorySchema
+} from './scalars.ts';
+
+/**
+ * The store directory a cupboard cache serves. A binary cache serves exactly
+ * one, which is why `nix-cache-info` carries `StoreDir`: a client substituting
+ * from the cache must be running the same store. This is the single statement
+ * of that fact, so what the cache advertises and what it accepts agree.
+ */
+export const servedStoreDirectory = storeDirectorySchema.parse('/nix/store');
 
 export class CacheInfo {
 	static readonly default = new CacheInfo(
-		'/nix/store',
+		servedStoreDirectory,
 		true,
 		cachePrioritySchema.parse(40)
 	);
@@ -32,9 +45,11 @@ export class CacheInfo {
 			);
 		}
 
-		const storeDirectory = fields.get('StoreDir');
+		const storeDirectory = storeDirectorySchema.safeParse(
+			fields.get('StoreDir')
+		);
 
-		if (storeDirectory === undefined || storeDirectory === '') {
+		if (!storeDirectory.success) {
 			throw new CacheInfoParseError('StoreDir');
 		}
 
@@ -57,14 +72,14 @@ export class CacheInfo {
 		}
 
 		return new CacheInfo(
-			storeDirectory,
+			storeDirectory.data,
 			massQuery === '1',
 			cachePrioritySchema.parse(priority)
 		);
 	}
 
 	constructor(
-		public readonly storeDirectory: string,
+		public readonly storeDirectory: StoreDirectory,
 		public readonly hasMassQuery: boolean,
 		public readonly priority: CachePriority
 	) {}

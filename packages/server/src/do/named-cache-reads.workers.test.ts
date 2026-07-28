@@ -1,4 +1,7 @@
-import { CacheInfo } from '@cupboard/nix-store/cache-info';
+import {
+	CacheInfo,
+	servedStoreDirectory
+} from '@cupboard/nix-store/cache-info';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import { StatusCodes } from 'http-status-codes';
@@ -80,7 +83,7 @@ describe('named cache reads', () => {
 		const bare = await readFetch('/nix-cache-info');
 		const bareBody = await bare.text();
 		const expectedNamedInfo = new CacheInfo(
-			'/nix/store',
+			servedStoreDirectory,
 			true,
 			cachePrioritySchema.parse(30)
 		);

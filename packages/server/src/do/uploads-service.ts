@@ -31,6 +31,7 @@ import {
 	type RequestOrigin,
 	stagingObjectKey
 } from '../http/http.ts';
+import { requireServedStorePaths } from '../policy/served-store.ts';
 
 import { chunk, maxInClauseValues } from './bulk.ts';
 import { type ServerContext } from './context.ts';
@@ -358,6 +359,8 @@ export class UploadsService {
 			return { uploads: [] };
 		}
 
+		requireServedStorePaths(body.paths.map((path) => path.storePath));
+
 		const {
 			facts,
 			existingByStorePathHash,
@@ -495,6 +498,8 @@ export class UploadsService {
 		if (body.paths.length === 0) {
 			return { uploads: [] };
 		}
+
+		requireServedStorePaths(body.paths.map((path) => path.storePath));
 
 		const { existingByStorePathHash, skippable, reusableByNarHash } =
 			await this.classifyClosure(cache, body, hints, false);

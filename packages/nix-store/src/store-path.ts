@@ -1,5 +1,7 @@
 import { InvalidStorePathError } from './errors.ts';
 import {
+	type StoreDirectory,
+	storeDirectorySchema,
 	type StorePathBasename,
 	storePathBasenameSchema,
 	type StorePathHash,
@@ -31,6 +33,14 @@ export function storePathBasename(path: string): string | undefined {
 	const basename = path.split('/').at(-1);
 
 	return basename === undefined || basename === '' ? undefined : basename;
+}
+
+// The store directory a path belongs to: everything before its final separator.
+// A path with no directory, or one rooted directly at `/`, has none.
+export function storeDirectoryOf(path: string): string | undefined {
+	const separator = path.lastIndexOf('/');
+
+	return separator <= 0 ? undefined : path.slice(0, separator);
 }
 
 export function validStorePath(path: string): string | undefined {
@@ -109,28 +119,33 @@ export class StorePath {
 	}
 
 	readonly value: string;
+	readonly storeDirectory: StoreDirectory;
 	readonly basename: StorePathBasename;
 	readonly hash: StorePathHash;
 
-	// A `StorePath` is valid by construction: it parses its basename and hash up
-	// front and rejects anything that is not `/nix/store/<hash>-<name>`, so every
-	// instance carries those derived values up front.
+	// A `StorePath` is valid by construction: it parses the store directory it
+	// belongs to, its basename and its hash up front, and rejects anything that
+	// is not `<store directory>/<hash>-<name>`. The directory is part of the
+	// value because it is an input to the path hash, so two paths naming the
+	// same basename under different stores are different paths.
 	constructor(value: string) {
-		if (!value.startsWith('/nix/store/')) {
-			throw new InvalidStorePathError(value);
-		}
-
+		const directory = storeDirectoryOf(value);
+		const storeDirectory =
+			directory === undefined
+				? undefined
+				: storeDirectorySchema.safeParse(directory);
 		const candidate = storePathBasename(value);
 		const basename =
 			candidate === undefined
 				? undefined
 				: storePathBasenameSchema.safeParse(candidate);
 
-		if (!basename?.success) {
+		if (!storeDirectory?.success || !basename?.success) {
 			throw new InvalidStorePathError(value);
 		}
 
 		this.value = value;
+		this.storeDirectory = storeDirectory.data;
 		this.basename = basename.data;
 		// A validated basename is `<32-char hash>-<name>`, so its leading hash
 		// always satisfies the hash schema.

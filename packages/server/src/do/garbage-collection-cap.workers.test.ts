@@ -3,6 +3,7 @@ import {
 	narInfoGenerationSchema,
 	type StoredCache
 } from '@cupboard/nix-store/scalars';
+import { StorePath } from '@cupboard/nix-store/store-path';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
@@ -181,7 +182,7 @@ describe('garbage collection sweep cap', () => {
 			fileSize: narBytes.byteLength,
 			storePathHash: repeated('a'),
 			name: 'parent',
-			references: [child.storePath.slice('/nix/store/'.length)]
+			references: [StorePath.basename(child.storePath)]
 		});
 		const collectable = uploadMetadata({
 			fileSize: narBytes.byteLength,

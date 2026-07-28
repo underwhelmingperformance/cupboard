@@ -1,7 +1,10 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { CacheInfo } from '@cupboard/nix-store/cache-info';
+import {
+	CacheInfo,
+	servedStoreDirectory
+} from '@cupboard/nix-store/cache-info';
 import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { describe, expect, it } from 'vitest';
@@ -75,7 +78,7 @@ describe('Nix substitution from a named cache', () => {
 					});
 					const afterRemoval = await rpc.caches.list();
 					const expectedCacheInfo = new CacheInfo(
-						'/nix/store',
+						servedStoreDirectory,
 						true,
 						cachePrioritySchema.parse(30)
 					);

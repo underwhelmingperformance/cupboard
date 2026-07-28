@@ -3,6 +3,7 @@ import {
 	type NixSha256HashString,
 	type RootName,
 	type StoredCache,
+	type StoreDirectory,
 	type StorePathHash,
 	type StorePathString,
 	type TenantId
@@ -339,6 +340,25 @@ export class RootTargetsUnavailableError extends ServerHttpError {
 			`Cannot set root: ${String(targets.length)} target(s) have no uploaded path`
 		);
 		this.name = 'RootTargetsUnavailableError';
+	}
+}
+
+// A binary cache serves one store directory, the one its `nix-cache-info`
+// advertises. A path from another store has a different identity (the store
+// directory is an input to the path hash) and no client of this cache could
+// substitute it, so submitting one is refused at the boundary that took it.
+export class StorePathNotServedError extends ServerHttpError {
+	readonly status = StatusCodes.BAD_REQUEST;
+
+	constructor(
+		public readonly storePath: StorePathString,
+		public readonly storeDirectory: string,
+		public readonly servedStoreDirectory: StoreDirectory
+	) {
+		super(
+			`Store path is in '${storeDirectory}', but this cache serves '${servedStoreDirectory}'`
+		);
+		this.name = 'StorePathNotServedError';
 	}
 }
 

@@ -339,6 +339,16 @@ async function checkReuseView(
 		};
 	}
 
+	// A substituter can only serve paths from the store it advertises, so a view
+	// on a different store directory answers nothing the destination could use.
+	if (view.storeDirectory !== destination.storeDirectory) {
+		return {
+			check,
+			status: 'failed',
+			detail: `view serves store ${view.storeDirectory}, not the destination's ${destination.storeDirectory}`
+		};
+	}
+
 	if (view.priority <= destination.priority) {
 		return {
 			check,
