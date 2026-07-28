@@ -3,6 +3,7 @@ import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { importJWK, jwtVerify, SignJWT } from 'jose';
 
 import { generateEd25519KeyPair } from '../crypto/crypto.ts';
@@ -104,14 +105,14 @@ export const authJwtAlgorithm = 'EdDSA';
 const jwtAlgorithm = authJwtAlgorithm;
 const clockToleranceSeconds = accessJwtClockToleranceSeconds;
 
-export function scheduledAccessKeyRetireAt(rotatedAt: Date): string {
+export function scheduledAccessKeyRetireAt(rotatedAt: Date): IsoTimestamp {
 	const retireAt = new Date(
 		rotatedAt.getTime() +
 			Math.max(adminJwtTtlSeconds, writeJwtTtlSeconds) * 1000 +
 			accessJwtClockToleranceSeconds * 1000 +
 			accessJwtRetirementMarginSeconds * 1000
 	);
-	return retireAt.toISOString();
+	return isoTimestamp(retireAt);
 }
 
 export async function generateAuthKeyPair(): Promise<{

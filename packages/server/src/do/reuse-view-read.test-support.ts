@@ -4,6 +4,7 @@ import {
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { StatusCodes } from 'http-status-codes';
 import { expect } from 'vitest';
@@ -87,7 +88,7 @@ export async function insertUnbackedRow(
 				narSize: 10,
 				referencesJson: '[]',
 				sigsJson: '[]',
-				createdAt: '2026-01-01T00:00:00.000Z'
+				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 			})
 			.run();
 	});

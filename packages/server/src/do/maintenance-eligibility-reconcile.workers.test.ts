@@ -2,6 +2,7 @@ import {
 	nixSha256HashSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -33,7 +34,7 @@ import {
 
 // Stored for a tenant with work due now: a fixed past instant, so the many mutations
 // of a push leave the row unchanged. Mirrors the sentinel in the service.
-const wakeImmediately = new Date(0).toISOString();
+const wakeImmediately = isoTimestamp(new Date(0));
 
 // The maintenance reconcile runs synchronously on each mutation, publishing the
 // tenant's wake time to D1 before the request returns: an existence check plus
@@ -151,18 +152,20 @@ describe('maintenance reconcile', () => {
 
 		// A stale projection left from before the commit: a sentinel wake no real state
 		// produces, stamped far in the past. The commit's reconcile must overwrite it.
-		const staleReconciledAt = '2000-01-01T00:00:00.000Z';
+		const staleReconciledAt = isoTimestampSchema.parse(
+			'2000-01-01T00:00:00.000Z'
+		);
 		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 			.insert(d1Schema.tenantMaintenanceEligibility)
 			.values({
 				tenant: tenantIdSchema.parse(fixtureTenant),
-				nextWakeAt: '2099-12-31T23:59:59.999Z',
+				nextWakeAt: isoTimestampSchema.parse('2099-12-31T23:59:59.999Z'),
 				reconciledAt: staleReconciledAt
 			})
 			.onConflictDoUpdate({
 				target: d1Schema.tenantMaintenanceEligibility.tenant,
 				set: {
-					nextWakeAt: '2099-12-31T23:59:59.999Z',
+					nextWakeAt: isoTimestampSchema.parse('2099-12-31T23:59:59.999Z'),
 					reconciledAt: staleReconciledAt
 				}
 			})
@@ -260,18 +263,20 @@ describe('coalesced maintenance reconcile', () => {
 
 		// A stale projection with a sentinel wake no real state produces. The
 		// commit's coalesced publish must overwrite it after the reply.
-		const staleReconciledAt = '2000-01-01T00:00:00.000Z';
+		const staleReconciledAt = isoTimestampSchema.parse(
+			'2000-01-01T00:00:00.000Z'
+		);
 		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 			.insert(d1Schema.tenantMaintenanceEligibility)
 			.values({
 				tenant: tenantIdSchema.parse(fixtureTenant),
-				nextWakeAt: '2099-12-31T23:59:59.999Z',
+				nextWakeAt: isoTimestampSchema.parse('2099-12-31T23:59:59.999Z'),
 				reconciledAt: staleReconciledAt
 			})
 			.onConflictDoUpdate({
 				target: d1Schema.tenantMaintenanceEligibility.tenant,
 				set: {
-					nextWakeAt: '2099-12-31T23:59:59.999Z',
+					nextWakeAt: isoTimestampSchema.parse('2099-12-31T23:59:59.999Z'),
 					reconciledAt: staleReconciledAt
 				}
 			})
@@ -344,8 +349,8 @@ async function insertPendingUpload(
 				narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 				r2Key: r2ObjectKeySchema.parse('staging/seed-upload'),
 				metadataJson: '{}',
-				createdAt: '2026-01-01T00:00:00.000Z',
-				expiresAt: '2026-06-01T00:00:00.000Z',
+				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+				expiresAt: isoTimestampSchema.parse('2026-06-01T00:00:00.000Z'),
 				verdict
 			})
 			.run();

@@ -31,6 +31,7 @@ import {
 	type ParsedReuseViewSelector,
 	type ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
+import { type IsoTimestamp } from '@cupboard/protocol/scalars';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import {
 	drizzle,
@@ -110,8 +111,8 @@ export interface AuthKey {
 	readonly kid: AuthKeyId;
 	readonly privateJwk: JsonWebKey;
 	readonly publicJwk: JsonWebKey;
-	readonly createdAt: string;
-	readonly scheduledRetireAt?: string;
+	readonly createdAt: IsoTimestamp;
+	readonly scheduledRetireAt?: IsoTimestamp;
 	readonly retired: boolean;
 }
 
@@ -144,7 +145,7 @@ export type MaterialiseOutcome =
 			readonly narInfo: NarInfo;
 			// The grace deadline this materialisation extended the path to, when
 			// its captured decision granted one.
-			readonly graceRetainUntil?: string;
+			readonly graceRetainUntil?: IsoTimestamp;
 	  }
 	| { readonly kind: 'superseded' }
 	| { readonly kind: 'blob-gone' }

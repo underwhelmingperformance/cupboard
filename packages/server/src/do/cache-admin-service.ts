@@ -13,6 +13,7 @@ import {
 	type CacheRemoveResponse,
 	type CacheSummary
 } from '@cupboard/protocol/caches';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, count, eq, gt, min, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
@@ -92,8 +93,10 @@ export class CacheAdminService {
 
 	// Deadlines are ISO-8601 UTC strings, so lexicographic min is chronological
 	// min and the string comparison against "now" selects only live rows.
-	private earliestLiveGraceDeadline(cache: StoredCache): string | undefined {
-		const now = new Date().toISOString();
+	private earliestLiveGraceDeadline(
+		cache: StoredCache
+	): IsoTimestamp | undefined {
+		const now = isoTimestamp(new Date());
 		const row = this.context.db
 			.select({ earliest: min(schema.retentionGrace.retainUntil) })
 			.from(schema.retentionGrace)
@@ -134,7 +137,7 @@ export class CacheAdminService {
 				.all()
 				.map((row) => [row.cache, row.count])
 		);
-		const now = new Date().toISOString();
+		const now = isoTimestamp(new Date());
 		const earliestDeadlines = new Map(
 			this.context.db
 				.select({
@@ -169,14 +172,12 @@ export class CacheAdminService {
 	}
 
 	putCache(cache: CacheName, priority: CachePriority): CacheSummary {
-		const now = new Date();
-
 		this.context.db
 			.insert(schema.caches)
 			.values({
 				name: cache,
 				priority,
-				createdAt: now.toISOString()
+				createdAt: isoTimestamp(new Date())
 			})
 			.onConflictDoUpdate({
 				target: schema.caches.name,
@@ -250,14 +251,12 @@ export class CacheAdminService {
 			return;
 		}
 
-		const now = new Date();
-
 		this.context.db
 			.insert(schema.caches)
 			.values({
 				name: cache,
 				priority: cachePrioritySchema.parse(CacheInfo.default.priority),
-				createdAt: now.toISOString()
+				createdAt: isoTimestamp(new Date())
 			})
 			.onConflictDoNothing()
 			.run();
@@ -311,7 +310,7 @@ export class CacheAdminService {
 		limit: number = maxPathsTornDownPerRun
 	): Promise<void> {
 		return this.context.criticalSection(async () => {
-			const now = new Date().toISOString();
+			const now = isoTimestamp(new Date());
 			const pending = this.context.db
 				.select({
 					r2Key: schema.pendingUploads.r2Key,

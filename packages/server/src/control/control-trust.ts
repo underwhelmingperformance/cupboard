@@ -14,6 +14,7 @@ import {
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import type { OidcTrustRule } from '@cupboard/protocol/oidc-trust-match';
+import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import { asc, eq, isNull } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
@@ -126,7 +127,7 @@ export async function getControlTrust(
 export async function addControlTrust(
 	database: Database,
 	body: ParsedOidcTrustAddBody,
-	now: string
+	now: IsoTimestamp
 ): Promise<OidcTrustSummary> {
 	// A control rule must pin a subject: without it the rule would match every
 	// subject of the trusted issuer and audience, handing out control authority on
@@ -165,7 +166,7 @@ export async function addControlTrust(
 export async function removeControlTrust(
 	database: Database,
 	id: TrustRuleId,
-	now: string
+	now: IsoTimestamp
 ): Promise<OidcTrustRemoveResponse> {
 	const existing = await database
 		.select()

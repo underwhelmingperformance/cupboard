@@ -21,6 +21,7 @@ import {
 	type OidcTrustRule
 } from '@cupboard/protocol/oidc-trust-match';
 import type { ControlCheckReport } from '@cupboard/protocol/reports';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type MembershipRebuildResponse,
 	type ParsedTenantCreateBody,
@@ -136,7 +137,7 @@ export async function controlTokenExchange(
 	);
 
 	if (presented !== undefined) {
-		await ensureControlKey(database, wrappingSecret, now.toISOString());
+		await ensureControlKey(database, wrappingSecret, isoTimestamp(now));
 		const active = await activeControlKey(database, wrappingSecret);
 		const granted = attenuatedGrants(
 			presented.grants,
@@ -194,7 +195,7 @@ export async function controlTokenExchange(
 			? verified.sub
 			: rule.id;
 
-	await ensureControlKey(database, wrappingSecret, now.toISOString());
+	await ensureControlKey(database, wrappingSecret, isoTimestamp(now));
 	const active = await activeControlKey(database, wrappingSecret);
 	const grants = resolveRequestedGrants(
 		rule,
@@ -292,7 +293,7 @@ export async function controlJwks(env: Env): Promise<{
 	await ensureControlKey(
 		database,
 		controlWrappingSecret(env),
-		now.toISOString()
+		isoTimestamp(now)
 	);
 
 	const verificationKeys = await controlVerificationKeys(database);
@@ -409,7 +410,7 @@ export function controlKeyRotate(env: Env): Promise<ControlKeyRotation> {
 	return rotateControlKey(
 		controlDatabase(env),
 		controlWrappingSecret(env),
-		now.toISOString()
+		isoTimestamp(now)
 	);
 }
 
@@ -421,7 +422,7 @@ export async function controlKeyRetire(
 	const isRetired = await retireControlKey(
 		controlDatabase(env),
 		kid,
-		now.toISOString()
+		isoTimestamp(now)
 	);
 
 	return { kid, retired: isRetired };
@@ -458,7 +459,7 @@ export function controlOidcTrustAdd(
 	body: ParsedOidcTrustAddBody
 ): Promise<OidcTrustSummary> {
 	const now = new Date();
-	return addControlTrust(controlDatabase(env), body, now.toISOString());
+	return addControlTrust(controlDatabase(env), body, isoTimestamp(now));
 }
 
 export function controlOidcTrustRemove(
@@ -466,7 +467,7 @@ export function controlOidcTrustRemove(
 	id: TrustRuleId
 ): Promise<OidcTrustRemoveResponse> {
 	const now = new Date();
-	return removeControlTrust(controlDatabase(env), id, now.toISOString());
+	return removeControlTrust(controlDatabase(env), id, isoTimestamp(now));
 }
 
 export async function controlTenantCreate(
@@ -482,7 +483,7 @@ export async function controlTenantCreate(
 	// step is idempotent, so a retry after a mid-provision failure replays cleanly
 	// avoiding an admitted-but-unconfigured tenant.
 	const now = new Date();
-	const summary = await ensureTenant(database, body, now.toISOString());
+	const summary = await ensureTenant(database, body, isoTimestamp(now));
 	const issuer = oidcIssuerSchema.parse(`${origin}/t/${summary.id}`);
 
 	await tenantServer(env, summary.id).configure({

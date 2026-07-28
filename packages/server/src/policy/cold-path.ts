@@ -1,5 +1,6 @@
 import { isImplicitPinName } from '@cupboard/nix-store/retention';
 import { ttlSecondsSchema } from '@cupboard/nix-store/scalars';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 
 import { ColdPathTtlConfigurationInvalidError } from '../errors.ts';
 
@@ -41,7 +42,9 @@ interface RootExpiryInput {
  * Precedence: an explicit TTL wins, then a matching retention policy, then the
  * cold-path default for an implicit pin, and otherwise the root is permanent.
  */
-export function resolveRootExpiry(input: RootExpiryInput): string | undefined {
+export function resolveRootExpiry(
+	input: RootExpiryInput
+): IsoTimestamp | undefined {
 	const ttl =
 		input.explicitTtlSeconds ??
 		input.policyTtlSeconds ??
@@ -51,6 +54,5 @@ export function resolveRootExpiry(input: RootExpiryInput): string | undefined {
 		return undefined;
 	}
 
-	const expiresAt = new Date(input.now.getTime() + ttl * 1000);
-	return expiresAt.toISOString();
+	return isoTimestamp(new Date(input.now.getTime() + ttl * 1000));
 }

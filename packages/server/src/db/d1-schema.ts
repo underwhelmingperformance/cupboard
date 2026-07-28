@@ -9,6 +9,7 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import type { TrustRuleId } from '@cupboard/protocol/oidc';
+import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import { sql } from 'drizzle-orm';
 import {
 	check,
@@ -39,13 +40,13 @@ export const blobState = sqliteTable(
 		fileSize: integer('file_size').notNull(),
 		compression: text('compression', { enum: ['zstd'] }).notNull(),
 		narSize: integer('nar_size').notNull(),
-		verifiedAt: text('verified_at').notNull(),
+		verifiedAt: text('verified_at').$type<IsoTimestamp>().notNull(),
 		// The reaper's grace timer. The arm pass sets it to `now + grace` once no
 		// `blob_ref` references this hash; a commit that re-references the hash
 		// (promote or reuse) clears it back to NULL; the collect pass deletes the row
 		// and the shared object once it has elapsed and the hash is still
 		// unreferenced. NULL means live, or not yet armed.
-		deleteAfter: text('delete_after')
+		deleteAfter: text('delete_after').$type<IsoTimestamp>()
 	},
 	(table) => [index('blob_state_delete_after_idx').on(table.deleteAfter)]
 );
@@ -91,9 +92,9 @@ export const controlAuthKey = sqliteTable('control_auth_key', {
 	kid: text('kid').$type<AuthKeyId>().notNull(),
 	publicJwkJson: text('public_jwk_json').notNull(),
 	wrappedPrivateJwk: text('wrapped_private_jwk').notNull(),
-	createdAt: text('created_at').notNull(),
-	scheduledRetireAt: text('scheduled_retire_at'),
-	retiredAt: text('retired_at')
+	createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+	scheduledRetireAt: text('scheduled_retire_at').$type<IsoTimestamp>(),
+	retiredAt: text('retired_at').$type<IsoTimestamp>()
 });
 
 // The control-plane trust policy: which external OIDC identity may exchange a
@@ -113,8 +114,8 @@ export const controlTrust = sqliteTable('control_trust', {
 		.notNull()
 		.default('[{"type":"cupboard_wildcard"}]'),
 	displayJson: text('display_json'),
-	createdAt: text('created_at').notNull(),
-	disabledAt: text('disabled_at')
+	createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+	disabledAt: text('disabled_at').$type<IsoTimestamp>()
 });
 
 // The tenant registry: one row per provisioned cache, written only by the Worker.
@@ -138,7 +139,7 @@ export const tenant = sqliteTable(
 		ownerSubject: text('owner_subject').notNull(),
 		ownerAudience: text('owner_audience').notNull(),
 		configVersion: integer('config_version').notNull(),
-		createdAt: text('created_at').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		// The per-tenant read verifier for a private cache: the Basic-auth user and a
 		// hash of its password. Both are NULL for a public cache, or for a private one
 		// with no credential, which then fails closed and rejects every read. Only the
@@ -152,7 +153,7 @@ export const tenant = sqliteTable(
 		// table carries its own round-robin position (no separate cursor);
 		// NULL (a never-maintained tenant) sorts first, so a new tenant is picked up
 		// promptly.
-		lastMaintainedAt: text('last_maintained_at')
+		lastMaintainedAt: text('last_maintained_at').$type<IsoTimestamp>()
 	},
 	(table) => [
 		index('tenant_maintenance_idx').on(table.status, table.lastMaintainedAt)
@@ -170,8 +171,8 @@ export const tenantMaintenanceFailure = sqliteTable(
 		pass: text('pass', { enum: ['maintenance', 'offboard'] }).notNull(),
 		consecutiveFailures: integer('consecutive_failures').notNull().default(0),
 		lastError: text('last_error'),
-		lastFailedAt: text('last_failed_at'),
-		lastSuccessAt: text('last_success_at')
+		lastFailedAt: text('last_failed_at').$type<IsoTimestamp>(),
+		lastSuccessAt: text('last_success_at').$type<IsoTimestamp>()
 	},
 	(table) => [primaryKey({ columns: [table.tenant, table.pass] })]
 );
@@ -186,13 +187,13 @@ export const tenantMaintenanceEligibility = sqliteTable(
 		tenant: text('tenant').$type<TenantId>().primaryKey(),
 		// The tenant's next wake time: a fixed past sentinel when work is due now, the
 		// soonest deferred deadline otherwise, or null when the tenant is idle.
-		nextWakeAt: text('next_wake_at'),
+		nextWakeAt: text('next_wake_at').$type<IsoTimestamp>(),
 		// When the wake time was last recomputed. Not strictly monotonic: the conflict
 		// rule can write an older reconcile's stamp when its wake is sooner, so a reader
 		// must not treat this as a "last reconciled" high-water mark. Its only consumer
 		// is the cron staleness floor, where a backward value can only trigger an extra
 		// sweep, never miss one.
-		reconciledAt: text('reconciled_at').notNull()
+		reconciledAt: text('reconciled_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
 		index('tenant_maintenance_eligibility_due_idx').on(
@@ -221,7 +222,7 @@ export const globalAdmin = sqliteTable('global_admin', {
 	id: text('id').primaryKey(),
 	issuer: text('issuer').notNull(),
 	subject: text('subject').notNull(),
-	claimedAt: text('claimed_at').notNull()
+	claimedAt: text('claimed_at').$type<IsoTimestamp>().notNull()
 });
 
 // Per-tenant unique-blob presence: a tenant references this NAR hash via at least
@@ -246,8 +247,8 @@ export const casObject = sqliteTable(
 	{
 		digest: text('digest').$type<Sha256HexDigest>().primaryKey(),
 		size: integer('size').notNull(),
-		storedAt: text('stored_at').notNull(),
-		deleteAfter: text('delete_after')
+		storedAt: text('stored_at').$type<IsoTimestamp>().notNull(),
+		deleteAfter: text('delete_after').$type<IsoTimestamp>()
 	},
 	(table) => [index('cas_object_delete_after_idx').on(table.deleteAfter)]
 );
@@ -311,7 +312,7 @@ export const tenantUsage = sqliteTable(
 		casBytes: integer('cas_bytes').notNull().default(0),
 		casBlobs: integer('cas_blobs').notNull().default(0),
 		quotaBytes: integer('quota_bytes'),
-		updatedAt: text('updated_at').notNull()
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
 		check('tenant_usage_bytes_nonnegative', sql`${table.bytes} >= 0`),

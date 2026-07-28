@@ -8,6 +8,7 @@ import {
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { trustRuleIdSchema } from '@cupboard/protocol/oidc';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { StatusCodes } from 'http-status-codes';
@@ -164,7 +165,7 @@ async function seedNarInfoDeletions(
 					storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 					narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 					generation: narInfoGenerationSchema.parse(generationOffset + index),
-					createdAt: '2026-01-01T00:00:00.000Z'
+					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 				})
 				.run();
 		}
@@ -204,7 +205,7 @@ describe('maintenance sweep cost', () => {
 				currentServer().demoteAttestationReferences([
 					{
 						digest: sha256HexDigestSchema.parse('b'.repeat(64)),
-						fenceStoredAt: '2000-01-01T00:00:00.000Z'
+						fenceStoredAt: isoTimestampSchema.parse('2000-01-01T00:00:00.000Z')
 					}
 				])
 		}
@@ -279,10 +280,10 @@ async function seedRefreshTokens(count: number, label: string): Promise<void> {
 					secretHash: 'hash',
 					ruleId: trustRuleIdSchema.parse('rule'),
 					subject: 'subject',
-					createdAt: '2026-01-01T00:00:00.000Z',
+					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 					// Far-future expiry so the sweep deletes none and the read count is the
 					// index seek alone, not the cost of deleting rows.
-					expiresAt: '2099-01-01T00:00:00.000Z'
+					expiresAt: isoTimestampSchema.parse('2099-01-01T00:00:00.000Z')
 				})
 				.run();
 		}
@@ -309,14 +310,14 @@ async function reconcileCost(): Promise<number> {
 async function seedLiveRoots(count: number, label: string): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
 		for (let index = 0; index < count; index += 1) {
-			const now = '2026-01-01T00:00:00.000Z';
+			const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 
 			instance.context.db
 				.insert(schema.retentionRoots)
 				.values({
 					cache: '',
 					name: rootNameSchema.parse(`${label}-${String(index)}`),
-					expiresAt: '2999-01-01T00:00:00.000Z',
+					expiresAt: isoTimestampSchema.parse('2999-01-01T00:00:00.000Z'),
 					createdAt: now,
 					updatedAt: now
 				})
@@ -327,7 +328,7 @@ async function seedLiveRoots(count: number, label: string): Promise<void> {
 
 async function seedExpiredRoot(name: string): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
-		const now = '2026-01-01T00:00:00.000Z';
+		const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 
 		instance.context.db
 			.insert(schema.retentionRoots)
@@ -378,8 +379,8 @@ async function seedPendingUploads(
 					narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 					r2Key: r2ObjectKeySchema.parse(`staging/backlog-${String(index)}`),
 					metadataJson: '{}',
-					createdAt: '2026-01-01T00:00:00.000Z',
-					expiresAt: '2026-01-02T00:00:00.000Z',
+					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+					expiresAt: isoTimestampSchema.parse('2026-01-02T00:00:00.000Z'),
 					verdict
 				})
 				.run();
@@ -435,8 +436,8 @@ async function seedReconcileBacklog(
 					storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 					digest: sha256HexDigestSchema.parse('b'.repeat(64)),
 					r2Key: r2ObjectKeySchema.parse(`staging/attestation/${id}`),
-					createdAt: '2026-01-01T00:00:00.000Z',
-					expiresAt: '2026-01-02T00:00:00.000Z'
+					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+					expiresAt: isoTimestampSchema.parse('2026-01-02T00:00:00.000Z')
 				})
 				.run();
 			instance.context.db
@@ -444,9 +445,9 @@ async function seedReconcileBacklog(
 				.values({
 					cache: '',
 					name: rootNameSchema.parse(id),
-					expiresAt: '2026-01-02T00:00:00.000Z',
-					createdAt: '2026-01-01T00:00:00.000Z',
-					updatedAt: '2026-01-01T00:00:00.000Z'
+					expiresAt: isoTimestampSchema.parse('2026-01-02T00:00:00.000Z'),
+					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+					updatedAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 				})
 				.run();
 			instance.context.db
@@ -454,7 +455,7 @@ async function seedReconcileBacklog(
 				.values({
 					cache: '',
 					storePathHash: syntheticStorePathHash(),
-					retainUntil: '2026-01-02T00:00:00.000Z'
+					retainUntil: isoTimestampSchema.parse('2026-01-02T00:00:00.000Z')
 				})
 				.run();
 			instance.context.db
@@ -464,8 +465,10 @@ async function seedReconcileBacklog(
 					kid: authKeyIdSchema.parse(id),
 					privateJwkJson: '{}',
 					publicJwkJson: '{}',
-					createdAt: '2026-01-01T00:00:00.000Z',
-					scheduledRetireAt: '2026-01-02T00:00:00.000Z'
+					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+					scheduledRetireAt: isoTimestampSchema.parse(
+						'2026-01-02T00:00:00.000Z'
+					)
 				})
 				.run();
 		}

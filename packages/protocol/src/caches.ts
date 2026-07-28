@@ -2,6 +2,7 @@ import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';
+import { isoTimestampSchema } from './scalars.ts';
 
 // A cache summary names a cache (the empty string is the default), its Nix
 // priority, how many store paths it holds, and its grace state: whether the
@@ -15,7 +16,7 @@ export const cacheSummarySchema = z.strictObject({
 	priority: cachePrioritySchema,
 	storePaths: countSchema,
 	graceManaged: z.boolean().optional(),
-	earliestGraceDeadline: z.string().optional()
+	earliestGraceDeadline: isoTimestampSchema.optional()
 });
 export type ParsedCacheSummary = z.output<typeof cacheSummarySchema>;
 

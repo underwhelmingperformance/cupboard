@@ -1,5 +1,6 @@
 import { authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
@@ -25,11 +26,11 @@ secretBytes.fill(7);
 const secret = btoa(String.fromCodePoint(...secretBytes));
 const issuer = 'https://cupboard.test';
 const audience = 'cupboard-control';
-const t0 = '2026-01-01T00:00:00.000Z';
-const t1 = '2026-01-01T00:01:00.000Z';
-const t2 = '2026-01-01T00:02:00.000Z';
-const t1RetireAt = '2026-01-01T00:21:30.000Z';
-const t2RetireAt = '2026-01-01T00:22:30.000Z';
+const t0 = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+const t1 = isoTimestampSchema.parse('2026-01-01T00:01:00.000Z');
+const t2 = isoTimestampSchema.parse('2026-01-01T00:02:00.000Z');
+const t1RetireAt = isoTimestampSchema.parse('2026-01-01T00:21:30.000Z');
+const t2RetireAt = isoTimestampSchema.parse('2026-01-01T00:22:30.000Z');
 const now = new Date(t0);
 
 function controlDatabase(): ReturnType<typeof drizzleD1<typeof d1Schema>> {
@@ -140,7 +141,7 @@ describe('control key store', () => {
 
 		const early = await retireScheduledControlKeys(
 			database,
-			'2026-01-01T00:21:29.999Z'
+			isoTimestampSchema.parse('2026-01-01T00:21:29.999Z')
 		);
 		const earlyVerificationKeys = await controlVerificationKeys(database);
 		const earlyKeys = earlyVerificationKeys.map((key) => key.kid);

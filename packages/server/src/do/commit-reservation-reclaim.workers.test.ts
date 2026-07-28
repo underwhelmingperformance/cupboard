@@ -4,6 +4,7 @@ import {
 	type NixSha256HashString,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -429,7 +430,7 @@ describe('reclaimReservedRow answers from the live row identity', () => {
 					.values({
 						cache: '',
 						storePathHash: metadata.storePathHash,
-						retainUntil: '2026-06-01T00:00:00.000Z'
+						retainUntil: isoTimestampSchema.parse('2026-06-01T00:00:00.000Z')
 					})
 					.run();
 			});

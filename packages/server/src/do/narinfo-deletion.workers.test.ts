@@ -9,6 +9,7 @@ import {
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
@@ -77,7 +78,7 @@ function buildDeletionQueue(context: ServerContext): DeletionQueueService {
 async function seedQueuedDeletions(
 	entries: readonly TornDownNarInfo[]
 ): Promise<void> {
-	const createdAt = testBase.toISOString();
+	const createdAt = isoTimestamp(testBase);
 
 	await runInDurableObject(currentServer(), (_instance, state) => {
 		const database = drizzle(state.storage, { schema: { narInfoDeletions } });
@@ -127,7 +128,7 @@ describe('narinfo deletion queue', () => {
 		const token = await initialise();
 		const hash = storePathHashSchema.parse('0'.repeat(32));
 		const narHash = nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`);
-		const createdAt = '2026-01-01T00:00:00.000Z';
+		const createdAt = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 
 		await runInDurableObject(
 			testServerFor('narinfo-deletion-caches'),

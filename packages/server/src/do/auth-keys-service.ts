@@ -9,6 +9,7 @@ import {
 	refreshTokenGrantType,
 	tokenExchangeGrantType
 } from '@cupboard/protocol/oidc';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 
 import {
@@ -101,8 +102,7 @@ export class AuthKeysService {
 
 		const generated = await generateAuthKeyPair();
 		const kid = authKeyIdSchema.parse(crypto.randomUUID());
-		const createdAt = new Date();
-		const createdAtIso = createdAt.toISOString();
+		const createdAtIso = isoTimestamp(new Date());
 
 		this.context.db
 			.insert(schema.authKeys)
@@ -252,7 +252,7 @@ export class AuthKeysService {
 					kid,
 					privateJwkJson: JSON.stringify(generated.privateJwk),
 					publicJwkJson: JSON.stringify(generated.publicJwk),
-					createdAt: rotatedAt.toISOString()
+					createdAt: isoTimestamp(rotatedAt)
 				})
 				.run();
 			this.resetAuthKeyCache();
@@ -284,11 +284,9 @@ export class AuthKeysService {
 					return { refused: true };
 				}
 
-				const retiredAt = new Date();
-
 				this.context.db
 					.update(schema.authKeys)
-					.set({ retiredAt: retiredAt.toISOString() })
+					.set({ retiredAt: isoTimestamp(new Date()) })
 					.where(eq(schema.authKeys.kid, kid))
 					.run();
 				this.resetAuthKeyCache();
@@ -306,7 +304,7 @@ export class AuthKeysService {
 
 	async retireScheduledAuthKeys(now: Date = new Date()): Promise<number> {
 		return this.context.criticalSection(() => {
-			const nowIso = now.toISOString();
+			const nowIso = isoTimestamp(now);
 			const due = this.context.db
 				.select({ kid: schema.authKeys.kid })
 				.from(schema.authKeys)

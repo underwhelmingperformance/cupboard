@@ -1,3 +1,4 @@
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	signupRequestSchema,
 	type SignupResponse
@@ -62,7 +63,7 @@ export async function handleSignup(
 	const { claimed: isClaimed } = await claimGlobalAdmin(
 		controlDatabase(env),
 		{ issuer, subject, audience },
-		now.toISOString()
+		isoTimestamp(now)
 	);
 
 	return Response.json(

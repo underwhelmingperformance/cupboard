@@ -1,6 +1,7 @@
 import { rootLogger } from '@cupboard/logger';
 import { startCapture } from '@cupboard/logger/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -97,11 +98,11 @@ describe('scheduled tenant pass failure records', () => {
 		await provisionNamedTenant('retiring');
 		await deleteEligibility('acme');
 		await writeEligibility('beta', {
-			nextWakeAt: '2026-01-01T00:00:00.000Z',
-			reconciledAt: '2026-01-01T00:00:00.000Z'
+			nextWakeAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		});
 		await writeEligibility('current', {
-			reconciledAt: '2026-01-01T00:00:00.000Z'
+			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		});
 		await offboardTenant('retiring');
 
@@ -254,7 +255,7 @@ describe('scheduled tenant pass failure records', () => {
 		await provisionNamedTenant('retiring');
 		await deleteEligibility('acme');
 		await writeEligibility('current', {
-			reconciledAt: '2026-01-01T00:00:00.000Z'
+			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		});
 		await offboardTenant('retiring');
 
@@ -288,7 +289,7 @@ describe('scheduled tenant pass failure records', () => {
 	it('executes stale tenant maintenance messages as no-ops', async () => {
 		await provisionNamedTenant('acme');
 		await writeEligibility('acme', {
-			reconciledAt: '2026-01-01T00:00:00.000Z'
+			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		});
 
 		const seen: string[] = [];
@@ -325,7 +326,7 @@ describe('scheduled tenant pass failure records', () => {
 		// Freshly maintained, so an ordinary maintenance message would be a
 		// stale no-op; the verify pass was asked for by a commit and runs anyway.
 		await writeEligibility('acme', {
-			reconciledAt: '2026-01-01T00:00:00.000Z'
+			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		});
 
 		const seen: string[] = [];
@@ -572,10 +573,10 @@ describe('scheduled tenant pass failure records', () => {
 		await provisionNamedTenant('beta');
 		await suspendTenant('v1');
 		await writeEligibility('acme', {
-			reconciledAt: '2026-01-01T00:00:00.000Z'
+			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		});
 		await writeEligibility('beta', {
-			reconciledAt: '2026-01-01T00:00:00.000Z'
+			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		});
 
 		const seen: string[] = [];
@@ -607,10 +608,10 @@ describe('scheduled tenant pass failure records', () => {
 		await suspendTenant('v1');
 		await deleteEligibility('acme');
 		await writeEligibility('beta', {
-			reconciledAt: '2025-12-31T17:59:59.000Z'
+			reconciledAt: isoTimestampSchema.parse('2025-12-31T17:59:59.000Z')
 		});
 		await writeEligibility('current', {
-			reconciledAt: '2026-01-01T00:00:00.000Z'
+			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		});
 
 		const seen: string[] = [];
@@ -629,7 +630,7 @@ describe('scheduled tenant pass failure records', () => {
 		// `delete` and `verify` carry immediate work, which the reconcile publishes as
 		// the fixed past `wakeImmediately` sentinel. Seed that exact value so the
 		// producer's "due now" marker threads through the cron's `lte` selection.
-		const wakeImmediately = new Date(0).toISOString();
+		const wakeImmediately = isoTimestamp(new Date(0));
 
 		await provisionNamedTenant('delete');
 		await provisionNamedTenant('idle');
@@ -639,22 +640,22 @@ describe('scheduled tenant pass failure records', () => {
 		await suspendTenant('v1');
 		await writeEligibility('delete', {
 			nextWakeAt: wakeImmediately,
-			reconciledAt: '2026-01-01T00:00:00.000Z'
+			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		});
 		await writeEligibility('idle', {
-			reconciledAt: '2026-01-01T00:00:00.000Z'
+			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		});
 		await writeEligibility('root', {
-			nextWakeAt: '2026-01-01T00:00:00.000Z',
-			reconciledAt: '2026-01-01T00:00:00.000Z'
+			nextWakeAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		});
 		await writeEligibility('upload', {
-			nextWakeAt: '2026-01-01T00:00:00.000Z',
-			reconciledAt: '2026-01-01T00:00:00.000Z'
+			nextWakeAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		});
 		await writeEligibility('verify', {
 			nextWakeAt: wakeImmediately,
-			reconciledAt: '2026-01-01T00:00:00.000Z'
+			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		});
 
 		const seen: string[] = [];
@@ -867,14 +868,16 @@ async function writeEligibility(
 		.insert(d1Schema.tenantMaintenanceEligibility)
 		.values({
 			tenant: tenantIdSchema.parse(tenant),
-			reconciledAt: '2026-01-01T00:00:00.000Z',
+			reconciledAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 			...fields
 		})
 		.onConflictDoUpdate({
 			target: d1Schema.tenantMaintenanceEligibility.tenant,
 			set: {
 				nextWakeAt: fields.nextWakeAt ?? sql`null`,
-				reconciledAt: fields.reconciledAt ?? '2026-01-01T00:00:00.000Z'
+				reconciledAt:
+					fields.reconciledAt ??
+					isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 			}
 		})
 		.run();

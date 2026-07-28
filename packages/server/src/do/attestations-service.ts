@@ -19,6 +19,7 @@ import {
 	type AttestationNegotiateResponse,
 	type ParsedAttestationNegotiateRequest
 } from '@cupboard/protocol/attestations';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
@@ -232,8 +233,7 @@ export class AttestationsService {
 			);
 		}
 
-		const nowDate = new Date();
-		const now = nowDate.toISOString();
+		const now = isoTimestamp(new Date());
 
 		if (pending.expiresAt < now) {
 			await this.clearPendingUploadAndStaging(pending);
@@ -519,8 +519,8 @@ export class AttestationsService {
 					storePathHash: bundle.storePathHash,
 					digest: bundle.digest,
 					r2Key,
-					createdAt: now.toISOString(),
-					expiresAt: expiresAt.toISOString()
+					createdAt: isoTimestamp(now),
+					expiresAt: isoTimestamp(expiresAt)
 				})
 				.run();
 
@@ -530,7 +530,7 @@ export class AttestationsService {
 				digest: bundle.digest,
 				uploadId,
 				r2Key,
-				expiresAt: expiresAt.toISOString()
+				expiresAt: isoTimestamp(expiresAt)
 			});
 		}
 
@@ -683,7 +683,7 @@ export class AttestationsService {
 
 	async removeReferencesForDigest(
 		digest: Sha256HexDigest,
-		fenceStoredAt: string
+		fenceStoredAt: IsoTimestamp
 	): Promise<void> {
 		// The reaper routes here on a single head()===null observation. Re-check inside
 		// this Durable Object, the single writer of the tenant's rows: a concurrent

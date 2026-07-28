@@ -5,6 +5,7 @@ import {
 	type KeyRotateResponse,
 	type SigningKeyStage
 } from '@cupboard/protocol/keys';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { eq } from 'drizzle-orm';
 
 import {
@@ -58,8 +59,7 @@ export class SigningKeysService {
 		}
 
 		const generated = await generateSigningKey(bootstrapKeyName);
-		const now = new Date();
-		const createdAt = now.toISOString();
+		const createdAt = isoTimestamp(new Date());
 
 		this.context.db
 			.insert(schema.signingKeys)
@@ -117,7 +117,6 @@ export class SigningKeysService {
 				material.publicRaw
 			);
 			const id = crypto.randomUUID();
-			const rotationCreatedAt = new Date();
 
 			this.context.db
 				.insert(schema.signingKeys)
@@ -127,7 +126,7 @@ export class SigningKeysService {
 					publicKey,
 					signing: true,
 					published: true,
-					createdAt: rotationCreatedAt.toISOString()
+					createdAt: isoTimestamp(new Date())
 				})
 				.run();
 

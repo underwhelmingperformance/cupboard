@@ -6,6 +6,7 @@ import {
 	oidcIssuerSchema,
 	oidcSubjectSchema
 } from './oidc.ts';
+import { isoTimestampSchema } from './scalars.ts';
 
 export const tenantReadModeSchema = z.enum(['public', 'private']);
 export type TenantReadMode = z.infer<typeof tenantReadModeSchema>;
@@ -65,7 +66,7 @@ export const tenantSummarySchema = z.strictObject({
 	ownerSubject: oidcSubjectSchema,
 	ownerAudience: oidcAudienceSchema,
 	configVersion: z.number().int(),
-	createdAt: z.string()
+	createdAt: isoTimestampSchema
 });
 export type ParsedTenantSummary = z.output<typeof tenantSummarySchema>;
 export type TenantSummary = z.input<typeof tenantSummarySchema>;

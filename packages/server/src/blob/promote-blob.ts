@@ -1,5 +1,6 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { sql } from 'drizzle-orm';
 import { type BatchItem } from 'drizzle-orm/batch';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
@@ -147,8 +148,7 @@ function blobStateUpsert(
 	target: PromotionTarget,
 	canonical: CanonicalBlob
 ): BlobStateUpsert {
-	const now = new Date();
-	const verifiedAt = now.toISOString();
+	const verifiedAt = isoTimestamp(new Date());
 
 	return d1
 		.insert(d1Schema.blobState)

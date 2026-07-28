@@ -8,6 +8,7 @@ import {
 	authKeyRetireResponseSchema,
 	authKeyRotateResponseSchema
 } from '@cupboard/protocol/keys';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
@@ -248,7 +249,7 @@ describe('auth-key rotation', () => {
 						kid: authKeyIdSchema.parse(''),
 						privateJwkJson: JSON.stringify(pair.privateJwk),
 						publicJwkJson: JSON.stringify(pair.publicJwk),
-						createdAt: '2026-01-01T00:00:00.000Z'
+						createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 					})
 					.run();
 

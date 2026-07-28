@@ -1,4 +1,5 @@
 import { type AuthKeyId, authKeyIdSchema } from '@cupboard/nix-store/scalars';
+import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import { and, desc, eq, exists, isNotNull, isNull, lte, ne } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 
@@ -28,14 +29,14 @@ export interface ControlSigningKey {
 export interface ControlKeySummary {
 	readonly kid: AuthKeyId;
 	readonly retired: boolean;
-	readonly scheduledRetireAt?: string;
+	readonly scheduledRetireAt?: IsoTimestamp;
 }
 
 export interface ControlKeyRotation {
 	readonly kid: AuthKeyId;
 	readonly retiring?: {
 		readonly kid: AuthKeyId;
-		readonly scheduledRetireAt: string;
+		readonly scheduledRetireAt: IsoTimestamp;
 	};
 }
 
@@ -48,7 +49,7 @@ const bootstrapId = 'bootstrap';
 export async function ensureControlKey(
 	database: Database,
 	wrappingSecret: string,
-	now: string
+	now: IsoTimestamp
 ): Promise<void> {
 	const existing = await database
 		.select({ id: d1Schema.controlAuthKey.id })
@@ -160,7 +161,7 @@ export async function controlKeySummaries(
 export async function rotateControlKey(
 	database: Database,
 	wrappingSecret: string,
-	now: string
+	now: IsoTimestamp
 ): Promise<ControlKeyRotation> {
 	const outgoing = await activeControlKey(database, wrappingSecret);
 	const { privateJwk, publicJwk } = await generateAuthKeyPair();
@@ -201,7 +202,7 @@ export async function rotateControlKey(
 export async function retireControlKey(
 	database: Database,
 	kid: AuthKeyId,
-	now: string
+	now: IsoTimestamp
 ): Promise<boolean> {
 	const anotherLiveKey = database
 		.select({ kid: d1Schema.controlAuthKey.kid })
@@ -250,7 +251,7 @@ export async function retireControlKey(
 
 export async function retireScheduledControlKeys(
 	database: Database,
-	now: string
+	now: IsoTimestamp
 ): Promise<number> {
 	const due = await database
 		.select({ kid: d1Schema.controlAuthKey.kid })

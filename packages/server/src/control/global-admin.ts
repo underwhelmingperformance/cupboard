@@ -1,3 +1,4 @@
+import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 
@@ -41,7 +42,7 @@ export interface ClaimOutcome {
 export async function claimGlobalAdmin(
 	database: Database,
 	principal: ClaimPrincipal,
-	now: string
+	now: IsoTimestamp
 ): Promise<ClaimOutcome> {
 	const claimsJson = JSON.stringify({ sub: principal.subject });
 
@@ -54,8 +55,8 @@ export async function claimGlobalAdmin(
 			'permitted_grants_json'
 		),
 		displayJson: sql<string | null>`null`.as('display_json'),
-		createdAt: sql<string>`${now}`.as('created_at'),
-		disabledAt: sql<string | null>`null`.as('disabled_at')
+		createdAt: sql<IsoTimestamp>`${now}`.as('created_at'),
+		disabledAt: sql<IsoTimestamp | null>`null`.as('disabled_at')
 	};
 
 	const bootstrapTrustWhere = and(

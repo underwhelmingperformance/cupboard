@@ -14,6 +14,7 @@ import {
 	type RootSetResponse,
 	type RootSummary
 } from '@cupboard/protocol/retention';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { chunk } from '@cupboard/shared/collections';
 import { and, eq } from 'drizzle-orm';
 
@@ -27,9 +28,9 @@ import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
 
 interface StoredRoot {
-	readonly expiresAt: string | undefined;
-	readonly createdAt: string;
-	readonly updatedAt: string;
+	readonly expiresAt: IsoTimestamp | undefined;
+	readonly createdAt: IsoTimestamp;
+	readonly updatedAt: IsoTimestamp;
 }
 
 // Each target contributes four values to its INSERT. Cloudflare SQLite admits
@@ -57,7 +58,7 @@ export class RootsService {
 
 	private writeRoot(cache: StoredCache, request: RootSetCommand): StoredRoot {
 		const now = new Date();
-		const nowIso = now.toISOString();
+		const nowIso = isoTimestamp(now);
 		// Precedence: an explicit TTL, then a matching retention policy, then the
 		// cold-path default for an implicit pin, otherwise permanent.
 		const expiresAt = resolveRootExpiry({
@@ -269,7 +270,7 @@ export class RootsService {
 	private rootSummaryFrom(
 		name: RootName,
 		stored: StoredRoot,
-		now: string,
+		now: IsoTimestamp,
 		targets: readonly {
 			storePathHash: StorePathHash;
 			storePath: StorePathString;
@@ -410,8 +411,7 @@ export class RootsService {
 	}
 
 	async listRoots(cache: StoredCache): Promise<RootListResponse> {
-		const nowDate = new Date();
-		const now = nowDate.toISOString();
+		const now = isoTimestamp(new Date());
 		const roots = this.context.db
 			.select()
 			.from(schema.retentionRoots)
@@ -448,7 +448,7 @@ export class RootsService {
 		const released = this.rootTargetRows(cache, name).map(
 			(target) => target.storePathHash
 		);
-		const nowIso = new Date().toISOString();
+		const nowIso = isoTimestamp(new Date());
 
 		return this.context.db.transaction((tx) => {
 			const existing = tx

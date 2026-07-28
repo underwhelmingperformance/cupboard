@@ -12,6 +12,7 @@ import { storePathHashOf } from '@cupboard/nix-store/store-path';
 import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';
+import { isoTimestampSchema } from './scalars.ts';
 
 // Each wire shape here is declared once and exposed two ways. The plain alias is
 // what a builder assembles: the CLI putting together a request, the server
@@ -100,7 +101,7 @@ export const r2CredentialSchema = z.strictObject({
 	sessionToken: z.string(),
 	endpoint: z.string(),
 	bucket: z.string(),
-	expiresAt: z.string()
+	expiresAt: isoTimestampSchema
 });
 export type ParsedR2Credential = z.output<typeof r2CredentialSchema>;
 export type R2Credential = z.input<typeof r2CredentialSchema>;
@@ -175,7 +176,7 @@ export const uploadActionDecisionSchema = z.strictObject({
 	narHash: nixSha256HashSchema,
 	uploadId: uploadIdSchema,
 	r2Key: z.string(),
-	expiresAt: z.string(),
+	expiresAt: isoTimestampSchema,
 	grace: uploadGraceFactSchema.optional()
 });
 export type ParsedUploadActionDecision = z.output<

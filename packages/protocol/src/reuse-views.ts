@@ -6,6 +6,8 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
+import { isoTimestampSchema } from './scalars.ts';
+
 // A reuse view's name shares a cache name's shape (lowercase, bounded), since
 // it is served beneath its own path segment the same way a cache name is, but
 // it is not a cache name itself: the brand keeps the two from being confused
@@ -113,8 +115,8 @@ export const reuseViewSummarySchema = z.strictObject({
 	revision: reuseViewRevisionSchema,
 	priority: reuseViewPrioritySchema,
 	selectors: z.array(reuseViewSelectorSchema),
-	createdAt: z.string(),
-	updatedAt: z.string()
+	createdAt: isoTimestampSchema,
+	updatedAt: isoTimestampSchema
 });
 export type ParsedReuseViewSummary = z.output<typeof reuseViewSummarySchema>;
 

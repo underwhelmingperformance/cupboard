@@ -43,6 +43,7 @@ import {
 	rootRemoveResponseSchema,
 	rootSetResponseSchema
 } from '@cupboard/protocol/retention';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	acceptCapabilitiesHeader,
 	type CommitResponse,
@@ -266,7 +267,7 @@ export async function provisionFixtureTenant(
 			readPasswordSalt
 		);
 	}
-	const now = testBase.toISOString();
+	const now = isoTimestamp(testBase);
 
 	await database
 		.insert(d1Schema.tenant)
@@ -347,7 +348,7 @@ export async function provisionNamedTenant(
 			ownerSubject: '',
 			ownerAudience: '',
 			configVersion,
-			createdAt: testBase.toISOString()
+			createdAt: isoTimestamp(testBase)
 		})
 		.onConflictDoUpdate({
 			target: d1Schema.tenant.id,
@@ -362,7 +363,7 @@ export async function provisionNamedTenant(
 			bytes: 0,
 			narinfos: 0,
 			blobs: 0,
-			updatedAt: testBase.toISOString()
+			updatedAt: isoTimestamp(testBase)
 		})
 		.onConflictDoNothing()
 		.run();
@@ -870,7 +871,7 @@ export async function issueControlAdminToken(
 	const wrappingSecret = testControlEnv.CONTROL_KEY_WRAP_SECRET;
 
 	const ensureAt = new Date();
-	await ensureControlKey(database, wrappingSecret, ensureAt.toISOString());
+	await ensureControlKey(database, wrappingSecret, isoTimestamp(ensureAt));
 	const active = await activeControlKey(database, wrappingSecret);
 
 	const originUrl = new URL(harness.origin);
@@ -903,7 +904,7 @@ export async function seedControlTrust(fields: {
 			issuer: fields.issuer,
 			audience: fields.audience,
 			claimsJson: JSON.stringify(fields.claims ?? {}),
-			createdAt: createdAt.toISOString()
+			createdAt: isoTimestamp(createdAt)
 		})
 		.run();
 }
@@ -1009,7 +1010,7 @@ export function syntheticCasDigest(index: number): Sha256HexDigest {
 export async function seedBlobStates(
 	narHashes: readonly NixSha256HashString[]
 ): Promise<void> {
-	const verifiedAt = new Date().toISOString();
+	const verifiedAt = isoTimestamp(new Date());
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: { blobState } });
 
 	// Each row binds six parameters, so the insert is chunked under D1's
@@ -1035,7 +1036,7 @@ export async function seedBlobStates(
 export async function seedCasObjects(
 	digests: readonly Sha256HexDigest[]
 ): Promise<void> {
-	const storedAt = new Date().toISOString();
+	const storedAt = isoTimestamp(new Date());
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
 	for (const batch of chunk(digests, 20)) {
@@ -1049,7 +1050,7 @@ export async function seedCasObjects(
 /** Arms a shared blob's reaper grace timer directly. */
 export async function armBlobReaperTimer(
 	narHash: NixSha256HashString,
-	graceUntil: string = new Date(Date.now() + 60_000).toISOString()
+	graceUntil: IsoTimestamp = isoTimestamp(new Date(Date.now() + 60_000))
 ): Promise<void> {
 	await drizzleD1(env.CUPBOARD_DB, { schema: { blobState } })
 		.update(blobState)
@@ -1400,7 +1401,7 @@ export async function queueUnflushedNarInfoDeletion(fields: {
 					storePathHash: deletion.storePathHash,
 					narHash: deletion.narHash,
 					generation: narInfoGenerationSchema.parse(deletion.generation),
-					createdAt: createdAt.toISOString()
+					createdAt: isoTimestamp(createdAt)
 				})
 				.onConflictDoNothing()
 				.run();
@@ -1422,7 +1423,7 @@ export async function seedNarInfoDeletion(fields: {
 				storePathHash: fields.storePathHash,
 				narHash: fields.narHash,
 				generation: narInfoGenerationSchema.parse(fields.generation),
-				createdAt: createdAt.toISOString()
+				createdAt: isoTimestamp(createdAt)
 			})
 			.onConflictDoNothing()
 			.run();
@@ -2442,7 +2443,7 @@ export async function seedCanonicalBlob(nar: VerifiableNar): Promise<void> {
 			fileSize: nar.narBytes.byteLength,
 			compression: 'zstd',
 			narSize: nar.narSize,
-			verifiedAt: testBase.toISOString()
+			verifiedAt: isoTimestamp(testBase)
 		})
 		.onConflictDoNothing()
 		.run();
@@ -2824,7 +2825,7 @@ export async function seedReservedNarInfo(
 				ca: metadata.ca,
 				sigsJson: '[]',
 				generation: reserved,
-				createdAt: '2026-01-01T00:00:00.000Z'
+				createdAt: isoTimestamp(testBase)
 			})
 			.run();
 		database
@@ -3023,9 +3024,8 @@ export function singleDecision(
 	return uploadDecisionSchema.parse(decision);
 }
 
-export function uploadExpiryFromNow(): string {
-	const expiry = new Date(Date.now() + 15 * 60 * 1000);
-	return expiry.toISOString();
+export function uploadExpiryFromNow(): IsoTimestamp {
+	return isoTimestamp(new Date(Date.now() + 15 * 60 * 1000));
 }
 
 /** The highest migration index registered in `drizzle/migrations.js`. */
@@ -3106,7 +3106,7 @@ export async function seedSigningKeys(
 					publicKey: generated.publicKey,
 					signing: seed.signing,
 					published: seed.published,
-					createdAt: createdAt.toISOString()
+					createdAt: isoTimestamp(createdAt)
 				})
 				.run();
 

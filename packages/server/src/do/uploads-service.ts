@@ -3,6 +3,7 @@ import {
 	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type ParsedUploadGraceFact,
 	type ParsedUploadNegotiateRequest,
@@ -189,8 +190,8 @@ export class UploadsService {
 				narHash: metadata.narHash,
 				r2Key,
 				metadataJson: JSON.stringify(pendingMetadata),
-				createdAt: now.toISOString(),
-				expiresAt: expiresAt.toISOString(),
+				createdAt: isoTimestamp(now),
+				expiresAt: isoTimestamp(expiresAt),
 				graceDecisionJson: serialiseGraceDecision(graceDecision)
 			})
 			.run();
@@ -210,7 +211,7 @@ export class UploadsService {
 			narHash: metadata.narHash,
 			uploadId,
 			r2Key,
-			expiresAt: expiresAt.toISOString()
+			expiresAt: isoTimestamp(expiresAt)
 		};
 	}
 

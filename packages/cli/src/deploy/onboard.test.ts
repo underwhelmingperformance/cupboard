@@ -5,6 +5,7 @@ import {
 	oidcSubjectSchema
 } from '@cupboard/protocol/oidc';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { ParsedSignupResponse } from '@cupboard/protocol/signup';
 import type {
 	ParsedMembershipRebuildResponse,
@@ -426,7 +427,7 @@ function tenantSummary(id: string): ParsedTenantSummary {
 		ownerSubject: oidcSubjectSchema.parse(owner.subject),
 		ownerAudience: oidcAudienceSchema.parse(owner.audience),
 		configVersion: 1,
-		createdAt: '2026-06-12T00:00:00Z'
+		createdAt: isoTimestampSchema.parse('2026-06-12T00:00:00Z')
 	};
 }
 

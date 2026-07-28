@@ -4,11 +4,11 @@ import {
 } from '@cupboard/cli-ui/testing';
 import { authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import type {
-	AuthKeySummary,
 	ParsedAuthKeyListResponse,
 	ParsedAuthKeyRotateResponse,
 	ParsedAuthKeySummary
 } from '@cupboard/protocol/keys';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
@@ -19,12 +19,14 @@ import {
 	runAuthKeyRotate
 } from './auth-key.ts';
 
-function summary(overrides: Partial<AuthKeySummary>): ParsedAuthKeySummary {
+function summary(
+	overrides: Omit<Partial<ParsedAuthKeySummary>, 'kid'> & { kid?: string }
+): ParsedAuthKeySummary {
 	const { kid = 'kid-1', ...rest } = overrides;
 
 	return {
 		kid: authKeyIdSchema.parse(kid),
-		createdAt: '2026-01-01T00:00:00.000Z',
+		createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 		active: true,
 		...rest
 	};
@@ -51,7 +53,9 @@ describe('runAuthKeyList', () => {
 				summary({
 					kid: 'kid-old',
 					active: false,
-					scheduledRetireAt: '2026-01-01T00:20:30.000Z'
+					scheduledRetireAt: isoTimestampSchema.parse(
+						'2026-01-01T00:20:30.000Z'
+					)
 				}),
 				summary({ kid: 'kid-new', active: true })
 			]
@@ -97,13 +101,15 @@ describe('runAuthKeyRotate', () => {
 			rotated: authKeyIdSchema.parse('kid-new'),
 			retiring: {
 				kid: authKeyIdSchema.parse('kid-old'),
-				scheduledRetireAt: '2026-01-01T00:20:30.000Z'
+				scheduledRetireAt: isoTimestampSchema.parse('2026-01-01T00:20:30.000Z')
 			},
 			keys: [
 				summary({
 					kid: 'kid-old',
 					active: false,
-					scheduledRetireAt: '2026-01-01T00:20:30.000Z'
+					scheduledRetireAt: isoTimestampSchema.parse(
+						'2026-01-01T00:20:30.000Z'
+					)
 				}),
 				summary({ kid: 'kid-new' })
 			]

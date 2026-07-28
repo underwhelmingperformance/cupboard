@@ -7,6 +7,7 @@ import {
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, exists, ne, notExists, sql } from 'drizzle-orm';
 
 import { sha256HexBytes } from '../crypto/crypto.ts';
@@ -167,8 +168,7 @@ export class AttestationCasService {
 	): Promise<void> {
 		await this.ensureCasObject(bundle);
 
-		const clock = new Date();
-		const now = clock.toISOString();
+		const now = isoTimestamp(new Date());
 		await this.context.d1
 			.insert(d1Schema.casObject)
 			.values({
@@ -197,8 +197,7 @@ export class AttestationCasService {
 			return 'over-quota';
 		}
 
-		const clock = new Date();
-		const now = clock.toISOString();
+		const now = isoTimestamp(new Date());
 		const presenceMissing = notExists(
 			this.context.d1
 				.select({ one: sql`1` })
@@ -273,11 +272,10 @@ export class AttestationCasService {
 
 	async removeCapturedReference(
 		reference: AttestationReference,
-		fenceStoredAt?: string
+		fenceStoredAt?: IsoTimestamp
 	): Promise<void> {
 		const tenant = this.context.requireTenant();
-		const clock = new Date();
-		const now = clock.toISOString();
+		const now = isoTimestamp(new Date());
 
 		// On the reaper demote path, fence every destructive step on the shared object
 		// generation the reaper observed gone. A re-promote bumps cas_object.storedAt,

@@ -12,6 +12,7 @@ import {
 	tokenResponseSchema,
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
@@ -244,7 +245,7 @@ describe('POST /token', () => {
 					audience: 'cupboard-aud',
 					claimsJson: JSON.stringify({ sub: 'ci' }),
 					permittedGrantsJson: JSON.stringify(trustClassGrants.write),
-					createdAt: '2026-01-01T00:00:00.000Z'
+					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 				})
 				.run();
 		});
@@ -321,7 +322,7 @@ async function installTrustedIdp(
 				audience: 'cupboard-aud',
 				claimsJson: JSON.stringify({ sub: 'alice' }),
 				permittedGrantsJson: JSON.stringify(trustClassGrants[scope]),
-				createdAt: '2026-01-01T00:00:00.000Z'
+				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 			})
 			.run();
 	});
@@ -544,7 +545,9 @@ describe('refresh grant', () => {
 		await runInDurableObject(currentServer(), (_instance, state) => {
 			drizzle(state.storage, { schema: { refreshTokens } })
 				.update(refreshTokens)
-				.set({ expiresAt: '2020-01-01T00:00:00.000Z' })
+				.set({
+					expiresAt: isoTimestampSchema.parse('2020-01-01T00:00:00.000Z')
+				})
 				.run();
 		});
 
@@ -660,7 +663,9 @@ describe('refresh grant', () => {
 
 			database
 				.update(refreshTokens)
-				.set({ expiresAt: '2020-01-01T00:00:00.000Z' })
+				.set({
+					expiresAt: isoTimestampSchema.parse('2020-01-01T00:00:00.000Z')
+				})
 				.where(eq(refreshTokens.id, stale.id))
 				.run();
 		});
@@ -1147,7 +1152,7 @@ async function installGithubBranchRule(): Promise<{
 				audience: githubAudience,
 				claimsJson: JSON.stringify(branchRuleClaims),
 				permittedGrantsJson: JSON.stringify(trustClassGrants.write),
-				createdAt: '2026-01-01T00:00:00.000Z'
+				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 			})
 			.run();
 	});
