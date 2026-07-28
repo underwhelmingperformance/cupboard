@@ -1,4 +1,5 @@
 import type { NixValidPathInfo } from '@cupboard/nix';
+import type { StorePathBasename } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import type { UploadPathNegotiationFields } from '@cupboard/protocol/upload';
 
@@ -11,14 +12,14 @@ export function prepareStorePathNegotiation(
 		narHash: pathInfo.narHash.toString(),
 		narSize: pathInfo.narSize,
 		references: StorePath.referenceBasenames(pathInfo.references),
-		deriver: normaliseOptionalStorePathBasename(pathInfo.deriver),
+		deriver: optionalStorePathBasename(pathInfo.deriver),
 		ca: pathInfo.ca
 	};
 }
 
-function normaliseOptionalStorePathBasename(
+function optionalStorePathBasename(
 	value: string | undefined
-): string | undefined {
+): StorePathBasename | undefined {
 	if (value === undefined || value === '') {
 		return undefined;
 	}
