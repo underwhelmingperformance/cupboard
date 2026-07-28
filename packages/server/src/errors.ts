@@ -1,6 +1,18 @@
+import {
+	type AuthKeyId,
+	type NixSha256HashString,
+	type RootName,
+	type StoredCache,
+	type StorePathHash,
+	type TenantId
+} from '@cupboard/nix-store/scalars';
+import { type OidcIssuer } from '@cupboard/protocol/oidc';
 import { type ClaimMismatch } from '@cupboard/protocol/oidc-trust-match';
+import { type UploadId } from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
+
+import { type R2ObjectKey } from './http/http.ts';
 
 export abstract class ServerHttpError extends Error {
 	abstract readonly status: number;
@@ -40,7 +52,7 @@ export class ColdPathTtlConfigurationInvalidError extends ServerHttpError {
 export class OwnerConfigurationInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
-	constructor(public readonly issuer: string) {
+	constructor(public readonly issuer: OidcIssuer) {
 		super('The configured owner issuer is not a valid https issuer URL');
 		this.name = 'OwnerConfigurationInvalidError';
 	}
@@ -58,7 +70,7 @@ export class CommitUpgradeRequiredError extends ServerHttpError {
 export class CacheNotEmptyError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
-	constructor(public readonly cache: string) {
+	constructor(public readonly cache: StoredCache) {
 		super('Cache is not empty; pass force to tear it down');
 		this.name = 'CacheNotEmptyError';
 	}
@@ -110,7 +122,7 @@ export class ControlNotConfiguredError extends ServerHttpError {
 export class LastControlKeyError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
-	constructor(public readonly kid: string) {
+	constructor(public readonly kid: AuthKeyId) {
 		super('Cannot retire the last control signing key');
 		this.name = 'LastControlKeyError';
 	}
@@ -172,7 +184,7 @@ export class TenantWritesStoppedError extends ServerHttpError {
 	readonly status = StatusCodes.FORBIDDEN;
 
 	constructor(
-		public readonly tenant: string,
+		public readonly tenant: TenantId,
 		public readonly tenantStatus: string
 	) {
 		super(`Writes for this tenant are stopped (${tenantStatus})`);
@@ -186,7 +198,7 @@ export class TenantWritesStoppedError extends ServerHttpError {
 export class TenantRetiredError extends ServerHttpError {
 	readonly status = StatusCodes.GONE;
 
-	constructor(public readonly tenant: string) {
+	constructor(public readonly tenant: TenantId) {
 		super(`Tenant '${tenant}' is offboarded and its slug is retired`);
 		this.name = 'TenantRetiredError';
 	}
@@ -198,7 +210,7 @@ export class TenantRetiredError extends ServerHttpError {
 export class TenantNotSuspendedError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
-	constructor(public readonly tenant: string) {
+	constructor(public readonly tenant: TenantId) {
 		super(`Tenant '${tenant}' is not suspended`);
 		this.name = 'TenantNotSuspendedError';
 	}
@@ -210,7 +222,7 @@ export class TenantNotSuspendedError extends ServerHttpError {
 export class QuotaExceededError extends ServerHttpError {
 	readonly status = StatusCodes.INSUFFICIENT_STORAGE;
 
-	constructor(public readonly tenant: string) {
+	constructor(public readonly tenant: TenantId) {
 		super('This tenant is over its storage quota');
 		this.name = 'QuotaExceededError';
 	}
@@ -246,7 +258,7 @@ export class ControlWrappedKeyMalformedError extends ServerHttpError {
 export class LastAuthKeyError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
-	constructor(public readonly kid: string) {
+	constructor(public readonly kid: AuthKeyId) {
 		super('Cannot retire the last auth key');
 		this.name = 'LastAuthKeyError';
 	}
@@ -291,7 +303,7 @@ export class InsufficientScopeError extends ServerHttpError {
 export class RootNotPermittedError extends ServerHttpError {
 	readonly status = StatusCodes.FORBIDDEN;
 
-	constructor(public readonly rootName: string) {
+	constructor(public readonly rootName: RootName) {
 		super('Token is not permitted to set this root');
 		this.name = 'RootNotPermittedError';
 	}
@@ -301,7 +313,7 @@ export class RootTargetsUnavailableError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
 	constructor(
-		public readonly rootName: string,
+		public readonly rootName: RootName,
 		public readonly targets: readonly string[]
 	) {
 		super(
@@ -520,7 +532,7 @@ export class IssuerUnavailableError extends ServerHttpError {
 	override readonly retryAfterSeconds = 5;
 
 	constructor(
-		public readonly issuer: string,
+		public readonly issuer: OidcIssuer,
 		options: { readonly cause: unknown }
 	) {
 		super(
@@ -535,7 +547,7 @@ export class StoredUploadMetadataInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
 	constructor(
-		public readonly uploadId: string,
+		public readonly uploadId: UploadId,
 		public override readonly cause: Error
 	) {
 		super('Stored upload metadata is invalid');
@@ -559,7 +571,7 @@ export class StoredReferencesInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
 	constructor(
-		public readonly storePathHash: string,
+		public readonly storePathHash: StorePathHash,
 		public override readonly cause: Error
 	) {
 		super('Stored narinfo references are invalid');
@@ -570,7 +582,7 @@ export class StoredReferencesInvalidError extends ServerHttpError {
 export class StoredReferencesJsonMalformedError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
-	constructor(public readonly storePathHash: string) {
+	constructor(public readonly storePathHash: StorePathHash) {
 		super('Stored narinfo references are malformed JSON');
 		this.name = 'StoredReferencesJsonMalformedError';
 	}
@@ -579,7 +591,7 @@ export class StoredReferencesJsonMalformedError extends ServerHttpError {
 export class StoredReferencesNotArrayError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
-	constructor(public readonly storePathHash: string) {
+	constructor(public readonly storePathHash: StorePathHash) {
 		super('Stored narinfo references are not an array');
 		this.name = 'StoredReferencesNotArrayError';
 	}
@@ -589,7 +601,7 @@ export class StoredSignaturesInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
 	constructor(
-		public readonly storePathHash: string,
+		public readonly storePathHash: StorePathHash,
 		public override readonly cause: Error
 	) {
 		super('Stored narinfo signatures are invalid');
@@ -662,7 +674,7 @@ export class InvalidPushIdError extends ServerHttpError {
 export class UploadNotFoundError extends ServerHttpError {
 	readonly status = StatusCodes.NOT_FOUND;
 
-	constructor(public readonly uploadId: string) {
+	constructor(public readonly uploadId: UploadId) {
 		super('Upload not found');
 		this.name = 'UploadNotFoundError';
 	}
@@ -671,7 +683,7 @@ export class UploadNotFoundError extends ServerHttpError {
 export class UploadExpiredError extends ServerHttpError {
 	readonly status = StatusCodes.NOT_FOUND;
 
-	constructor(public readonly uploadId: string) {
+	constructor(public readonly uploadId: UploadId) {
 		super('Upload expired');
 		this.name = 'UploadExpiredError';
 	}
@@ -681,9 +693,9 @@ export class UploadCacheMismatchError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 
 	constructor(
-		public readonly uploadId: string,
-		public readonly negotiatedCache: string,
-		public readonly requestedCache: string
+		public readonly uploadId: UploadId,
+		public readonly negotiatedCache: StoredCache,
+		public readonly requestedCache: StoredCache
 	) {
 		super('Upload committed under a different cache than it negotiated');
 		this.name = 'UploadCacheMismatchError';
@@ -697,7 +709,7 @@ export class UploadedObjectNotFoundError extends ServerHttpError {
 	// push already performs for a 404 commit.
 	readonly status = StatusCodes.NOT_FOUND;
 
-	constructor(public readonly r2Key: string) {
+	constructor(public readonly r2Key: R2ObjectKey) {
 		super('Uploaded object not found');
 		this.name = 'UploadedObjectNotFoundError';
 	}
@@ -776,7 +788,7 @@ export class SubrequestTimeoutError extends ServerHttpError {
 export class AttestationUploadNotFoundError extends ServerHttpError {
 	readonly status = StatusCodes.NOT_FOUND;
 
-	constructor(public readonly uploadId: string) {
+	constructor(public readonly uploadId: UploadId) {
 		super('Attestation upload not found');
 		this.name = 'AttestationUploadNotFoundError';
 	}
@@ -785,7 +797,7 @@ export class AttestationUploadNotFoundError extends ServerHttpError {
 export class AttestationUploadExpiredError extends ServerHttpError {
 	readonly status = StatusCodes.NOT_FOUND;
 
-	constructor(public readonly uploadId: string) {
+	constructor(public readonly uploadId: UploadId) {
 		super('Attestation upload expired');
 		this.name = 'AttestationUploadExpiredError';
 	}
@@ -795,9 +807,9 @@ export class AttestationUploadCacheMismatchError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 
 	constructor(
-		public readonly uploadId: string,
-		public readonly negotiatedCache: string,
-		public readonly requestedCache: string
+		public readonly uploadId: UploadId,
+		public readonly negotiatedCache: StoredCache,
+		public readonly requestedCache: StoredCache
 	) {
 		super(
 			'Attestation upload attached under a different cache than it negotiated'
@@ -809,7 +821,7 @@ export class AttestationUploadCacheMismatchError extends ServerHttpError {
 export class AttestationPathNotFoundError extends ServerHttpError {
 	readonly status = StatusCodes.NOT_FOUND;
 
-	constructor(public readonly storePathHash: string) {
+	constructor(public readonly storePathHash: StorePathHash) {
 		super('Committed store path not found');
 		this.name = 'AttestationPathNotFoundError';
 	}
@@ -864,7 +876,7 @@ export class UploadedObjectSizeMismatchError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 
 	constructor(
-		public readonly r2Key: string,
+		public readonly r2Key: R2ObjectKey,
 		public readonly expectedSize: number,
 		public readonly actualSize: number
 	) {
@@ -876,7 +888,7 @@ export class UploadedObjectSizeMismatchError extends ServerHttpError {
 export class UploadedObjectChecksumMissingError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 
-	constructor(public readonly r2Key: string) {
+	constructor(public readonly r2Key: R2ObjectKey) {
 		super('Uploaded object SHA-256 checksum is missing');
 		this.name = 'UploadedObjectChecksumMissingError';
 	}
@@ -886,9 +898,9 @@ export class UploadedObjectChecksumMismatchError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 
 	constructor(
-		public readonly r2Key: string,
-		public readonly expectedFileHash: string,
-		public readonly actualFileHash: string
+		public readonly r2Key: R2ObjectKey,
+		public readonly expectedFileHash: NixSha256HashString,
+		public readonly actualFileHash: NixSha256HashString
 	) {
 		super('Uploaded object SHA-256 checksum does not match metadata');
 		this.name = 'UploadedObjectChecksumMismatchError';
@@ -902,7 +914,7 @@ export class NarVerificationFailedError extends ServerHttpError {
 	readonly status = StatusCodes.UNPROCESSABLE_ENTITY;
 
 	constructor(
-		public readonly r2Key: string,
+		public readonly r2Key: R2ObjectKey,
 		public readonly reason:
 			'nar-hash-mismatch' | 'nar-size-mismatch' | 'undecodable'
 	) {

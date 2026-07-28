@@ -4,6 +4,7 @@ import {
 	type ParsedUploadBlobMetadata,
 	type ParsedUploadPathMetadata,
 	type ParsedUploadPathNegotiation,
+	type UploadId,
 	uploadPathMetadataSchema,
 	uploadPathNegotiationSchema
 } from '@cupboard/protocol/upload';
@@ -12,6 +13,7 @@ import {
 	StoredUploadMetadataInvalidError,
 	UploadedObjectChecksumMissingError
 } from '../errors.ts';
+import { type R2ObjectKey } from '../http/http.ts';
 import { parseStoredJson } from '../http/parse.ts';
 
 // The compressed metadata of the one canonical object served for a NAR hash.
@@ -34,7 +36,10 @@ export function commitMetadataFromPathAndBlob(
 	};
 }
 
-export function canonicalBlobOf(key: string, object: R2Object): CanonicalBlob {
+export function canonicalBlobOf(
+	key: R2ObjectKey,
+	object: R2Object
+): CanonicalBlob {
 	const sha256 = object.checksums.sha256;
 
 	if (sha256 === undefined) {
@@ -48,7 +53,7 @@ export function canonicalBlobOf(key: string, object: R2Object): CanonicalBlob {
 }
 
 export function parseStoredUploadPathMetadata(
-	uploadId: string,
+	uploadId: UploadId,
 	source: string
 ): ParsedUploadPathNegotiation {
 	const onInvalid = (cause: Error): StoredUploadMetadataInvalidError =>

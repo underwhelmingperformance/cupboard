@@ -57,6 +57,7 @@ import { hasAcceptedCapability } from '../http/capabilities.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import {
 	parseNarInfoName,
+	type R2ObjectKey,
 	type RequestOrigin,
 	requestOriginSchema,
 	textResponse,
@@ -1844,14 +1845,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	async measureAttestationBundle(
-		stagingKey: string
+		stagingKey: R2ObjectKey
 	): Promise<MeasuredAttestationBundle> {
 		await this.initialise();
 		return this.attestationCas.measureStagedBundle(stagingKey);
 	}
 
 	async promoteAttestationBundle(
-		stagingKey: string,
+		stagingKey: R2ObjectKey,
 		bundle: MeasuredAttestationBundle
 	): Promise<void> {
 		await this.initialise();

@@ -27,7 +27,11 @@ import { z } from 'zod';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import { AttestationPathNotFoundError } from '../errors.ts';
-import { attestationListObjectKey, casObjectKey } from '../http/http.ts';
+import {
+	attestationListObjectKey,
+	casObjectKey,
+	type R2ObjectKey
+} from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	attestationReferenceRows,
@@ -403,7 +407,7 @@ describe('attestation attach and reads', () => {
 			async (instance) => {
 				class RacingAttestationCasService extends AttestationCasService {
 					override async measureStagedBundle(
-						key: string
+						key: R2ObjectKey
 					): ReturnType<typeof instance.measureAttestationBundle> {
 						const measured = await super.measureStagedBundle(key);
 						instance.context.db

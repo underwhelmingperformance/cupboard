@@ -101,7 +101,7 @@ export class NixSha256Hash {
 		return sha256HexDigestSchema.parse(bytesToHex(this.bytes));
 	}
 
-	toString(): string {
+	toString(): NixSha256HashString {
 		return this.value;
 	}
 

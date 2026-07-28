@@ -1,3 +1,4 @@
+import { type OidcIssuer, oidcIssuerSchema } from '@cupboard/protocol/oidc';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	signupRequestSchema,
@@ -125,7 +126,7 @@ export function enforceGate(
 }
 
 async function verifySignupToken(
-	issuer: string,
+	issuer: OidcIssuer,
 	audience: string,
 	token: string
 ): Promise<JWTPayload> {
@@ -195,14 +196,14 @@ interface SignupVerificationConfig {
 	readonly CUPBOARD_SIGNUP_AUDIENCE: string | undefined;
 }
 
-function signupIssuer(env: SignupVerificationConfig): string {
+function signupIssuer(env: SignupVerificationConfig): OidcIssuer {
 	const configured = env.CUPBOARD_SIGNUP_ISSUER ?? '';
 
 	if (configured === '') {
 		throw new ControlNotConfiguredError();
 	}
 
-	return configured;
+	return oidcIssuerSchema.parse(configured);
 }
 
 function signupAudience(env: SignupVerificationConfig): string {
