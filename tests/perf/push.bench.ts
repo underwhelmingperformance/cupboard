@@ -7,6 +7,7 @@ import { afterAll, beforeAll, bench } from 'vitest';
 
 import { type PushClient, runPush } from '../../packages/cli/src/push/push.ts';
 import { Nix, type NixValidPathInfo } from '../../packages/nix/src/index.ts';
+import { storeDirectorySchema } from '../../packages/nix-store/src/scalars.ts';
 import {
 	createReporter,
 	type Reporter
@@ -179,7 +180,7 @@ function storeClientFor(source: NixStore): Nix {
 			resolveClosure: (storePaths: readonly string[]) =>
 				Promise.all(storePaths.map((storePath) => queryPathInfo(storePath)))
 		},
-		{ storeDirectory: '/nix/store' }
+		{ storeDirectory: storeDirectorySchema.parse('/nix/store') }
 	);
 }
 

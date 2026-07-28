@@ -4,6 +4,7 @@ import { promisify } from 'node:util';
 
 import {
 	type StoredCache,
+	type StoreDirectory,
 	type StorePathHash,
 	storePathSchema,
 	type StorePathString
@@ -680,7 +681,7 @@ function addSeedCandidate(
 
 export async function evaluateTargets(
 	targets: readonly PublishTarget[],
-	storeDirectory: string,
+	storeDirectory: StoreDirectory,
 	evaluator: NixEvaluator = defaultNixEvaluator
 ): Promise<EvaluatedTargets> {
 	const resolved: ResolvedTargetRoot[] = [];
@@ -726,7 +727,7 @@ export async function evaluateTargets(
 
 async function evaluateResolvedTargets(
 	resolutions: readonly ResolvedTargetRoot[],
-	storeDirectory: string,
+	storeDirectory: StoreDirectory,
 	evaluator: NixEvaluator
 ): Promise<(TargetEvaluation | UnevaluatedTarget)[]> {
 	if (resolutions.length === 1) {
@@ -771,7 +772,7 @@ async function evaluateResolvedTargets(
 
 async function evaluateResolvedTarget(
 	resolution: ResolvedTargetRoot,
-	storeDirectory: string,
+	storeDirectory: StoreDirectory,
 	evaluator: NixEvaluator
 ): Promise<TargetEvaluation | UnevaluatedTarget> {
 	const { target, rootDrvPath } = resolution;
@@ -810,7 +811,7 @@ function evaluationFailureReason(error: unknown): string {
 export function evaluationFromJson(
 	target: PublishTarget,
 	value: unknown,
-	storeDirectory: string
+	storeDirectory: StoreDirectory
 ): TargetEvaluation {
 	const nodes = derivationNodes(target.attr, value, storeDirectory);
 	const referenced = new Set<string>();
@@ -939,7 +940,7 @@ const derivationNodeBaseSchema = z.looseObject({
 
 type ParsedDerivationNode = z.output<typeof derivationNodeBaseSchema>;
 
-function derivationNodeSchema(storeDirectory: string) {
+function derivationNodeSchema(storeDirectory: StoreDirectory) {
 	return derivationNodeBaseSchema.transform((node) => ({
 		inputs: nodeInputs(node, storeDirectory),
 		outputs: nodeOutputs(node, storeDirectory)
@@ -953,7 +954,7 @@ const derivationWrapperSchema = z.looseObject({
 	derivations: z.record(z.string(), z.unknown())
 });
 
-function derivationDocumentSchema(storeDirectory: string) {
+function derivationDocumentSchema(storeDirectory: StoreDirectory) {
 	return z.preprocess(
 		(value) => {
 			const wrapper = derivationWrapperSchema.safeParse(value);
@@ -967,7 +968,7 @@ function derivationDocumentSchema(storeDirectory: string) {
 function derivationNodes(
 	attribute: string,
 	value: unknown,
-	storeDirectory: string
+	storeDirectory: StoreDirectory
 ): Map<string, DerivationNode> {
 	const parsed = derivationDocumentSchema(storeDirectory).safeParse(value);
 
@@ -987,7 +988,7 @@ function derivationNodes(
 
 function nodeInputs(
 	node: ParsedDerivationNode,
-	storeDirectory: string
+	storeDirectory: StoreDirectory
 ): Map<string, readonly string[]> {
 	const drvs = node.inputs?.drvs ?? node.inputDrvs ?? {};
 	const inputs = new Map<string, readonly string[]>();
@@ -1004,7 +1005,7 @@ function nodeInputs(
 
 function nodeOutputs(
 	node: ParsedDerivationNode,
-	storeDirectory: string
+	storeDirectory: StoreDirectory
 ): DerivationOutput[] {
 	return Object.entries(node.outputs).map(([name, output]) => {
 		const candidate = output.path ?? node.env[name];
@@ -1024,7 +1025,10 @@ function nodeOutputs(
 // A derivation reference is printed either absolute or as a bare basename, and
 // a basename belongs to the store the evaluating Nix reads, whose directory the
 // runner's configuration decides.
-function absoluteStorePath(storePath: string, storeDirectory: string): string {
+function absoluteStorePath(
+	storePath: string,
+	storeDirectory: StoreDirectory
+): string {
 	const prefix = `${storeDirectory}/`;
 
 	return storePath.startsWith(prefix) ? storePath : `${prefix}${storePath}`;

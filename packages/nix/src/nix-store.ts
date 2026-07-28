@@ -1,4 +1,5 @@
 import type { NixSha256Hash } from '@cupboard/nix-store/hash';
+import type { StoreDirectory } from '@cupboard/nix-store/scalars';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 export interface NixValidPathInfo {
@@ -113,6 +114,21 @@ export class NixConfigIncludeError extends NixStoreError {
 	}
 }
 
+/** The setting a discovered store directory came from. */
+export type NixStoreDirectorySource = 'NIX_STORE_DIR' | 'store-dir';
+
+export class InvalidNixStoreDirectoryError extends NixStoreError {
+	constructor(
+		public readonly storeDirectory: string,
+		public readonly source: NixStoreDirectorySource
+	) {
+		super(
+			`The ${source} setting '${storeDirectory}' does not name a Nix store directory: it must be an absolute path of one or more segments, none of them '.' or '..'`
+		);
+		this.name = 'InvalidNixStoreDirectoryError';
+	}
+}
+
 export class UnsupportedNixStoreError extends NixStoreError {
 	constructor(public readonly storeUri: string) {
 		super(
@@ -132,7 +148,7 @@ export class NixStoreDatabaseError extends NixStoreError {
 export class NotInNixStoreError extends NixStoreError {
 	constructor(
 		public readonly path: string,
-		public readonly storeDirectory: string
+		public readonly storeDirectory: StoreDirectory
 	) {
 		super(`${path} is not inside the Nix store ${storeDirectory}`);
 		this.name = 'NotInNixStoreError';

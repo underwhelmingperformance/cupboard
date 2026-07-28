@@ -1,6 +1,10 @@
+import { storeDirectoryMaxLength } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
-import { NixConfigIncludeError } from './nix-store.ts';
+import {
+	InvalidNixStoreDirectoryError,
+	NixConfigIncludeError
+} from './nix-store.ts';
 import {
 	discoverNixStoreConfig,
 	type NixConfigEnvironment,
@@ -24,6 +28,18 @@ function environmentFrom(fixture: Fixture): NixConfigEnvironment {
 function discover(fixture: Fixture): NixStoreConfig {
 	return discoverNixStoreConfig(environmentFrom(fixture));
 }
+
+function thrownBy(fixture: Fixture): unknown {
+	try {
+		discover(fixture);
+	} catch (error) {
+		return error;
+	}
+
+	return undefined;
+}
+
+const overlongStoreDirectory = `/${'d'.repeat(storeDirectoryMaxLength)}`;
 
 describe('discoverNixStoreConfig', () => {
 	it('falls back to the compiled defaults with no configuration', () => {
@@ -130,5 +146,83 @@ describe('discoverNixStoreConfig', () => {
 		expect(() =>
 			discover({ files: { '/etc/nix/nix.conf': 'include missing.conf\n' } })
 		).toThrow(NixConfigIncludeError);
+	});
+
+	it.each([
+		{
+			name: 'a relative path in NIX_STORE_DIR',
+			fixture: { env: { NIX_STORE_DIR: 'nix/store' } },
+			storeDirectory: 'nix/store',
+			source: 'NIX_STORE_DIR'
+		},
+		{
+			name: 'a parent segment in NIX_STORE_DIR',
+			fixture: { env: { NIX_STORE_DIR: '/nix/../store' } },
+			storeDirectory: '/nix/../store',
+			source: 'NIX_STORE_DIR'
+		},
+		{
+			name: 'a current segment in NIX_STORE_DIR',
+			fixture: { env: { NIX_STORE_DIR: '/nix/./store' } },
+			storeDirectory: '/nix/./store',
+			source: 'NIX_STORE_DIR'
+		},
+		{
+			name: 'the filesystem root in NIX_STORE_DIR',
+			fixture: { env: { NIX_STORE_DIR: '/' } },
+			storeDirectory: '/',
+			source: 'NIX_STORE_DIR'
+		},
+		{
+			name: 'a segment outside the store charset in NIX_STORE_DIR',
+			fixture: { env: { NIX_STORE_DIR: '/nix/st ore' } },
+			storeDirectory: '/nix/st ore',
+			source: 'NIX_STORE_DIR'
+		},
+		{
+			name: 'a directory over the length cap in NIX_STORE_DIR',
+			fixture: { env: { NIX_STORE_DIR: overlongStoreDirectory } },
+			storeDirectory: overlongStoreDirectory,
+			source: 'NIX_STORE_DIR'
+		},
+		{
+			name: 'a relative store-dir setting',
+			fixture: { files: { '/etc/nix/nix.conf': 'store-dir = ../store\n' } },
+			storeDirectory: '../store',
+			source: 'store-dir'
+		},
+		{
+			name: 'an empty store-dir setting',
+			fixture: { files: { '/etc/nix/nix.conf': 'store-dir =\n' } },
+			storeDirectory: '',
+			source: 'store-dir'
+		},
+		{
+			name: 'NIX_STORE_DIR shadowing a usable store-dir setting',
+			fixture: {
+				env: { NIX_STORE_DIR: 'relative/store' },
+				files: { '/etc/nix/nix.conf': 'store-dir = /file/store\n' }
+			},
+			storeDirectory: 'relative/store',
+			source: 'NIX_STORE_DIR'
+		}
+	])('refuses $name', ({ fixture, storeDirectory, source }) => {
+		const error = thrownBy(fixture);
+
+		expect(error).toBeInstanceOf(InvalidNixStoreDirectoryError);
+
+		if (!(error instanceof InvalidNixStoreDirectoryError)) {
+			throw error;
+		}
+
+		expect({
+			name: error.name,
+			storeDirectory: error.storeDirectory,
+			source: error.source
+		}).toStrictEqual({
+			name: 'InvalidNixStoreDirectoryError',
+			storeDirectory,
+			source
+		});
 	});
 });

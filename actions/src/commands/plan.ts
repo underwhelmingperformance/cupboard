@@ -10,6 +10,7 @@ import {
 	rootNameMaxLength,
 	rootNameSchema,
 	type StoredCache,
+	type StoreDirectory,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
@@ -172,7 +173,7 @@ export interface PlanDependencies {
 	 * an evaluation are relative to. Discovered from the runner's configuration
 	 * when it is not given.
 	 */
-	readonly storeDirectory?: string;
+	readonly storeDirectory?: StoreDirectory;
 	readonly fetcher?: typeof fetch;
 	readonly runner?: EnsureRunner;
 	readonly createArtifactName?: () => string;

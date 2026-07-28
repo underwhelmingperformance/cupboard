@@ -3,9 +3,17 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { env } from 'node:process';
 
+import {
+	type StoreDirectory,
+	storeDirectorySchema
+} from '@cupboard/nix-store/scalars';
 import { RE2JS } from 're2js';
 
-import { NixConfigIncludeError } from './nix-store.ts';
+import {
+	InvalidNixStoreDirectoryError,
+	NixConfigIncludeError,
+	type NixStoreDirectorySource
+} from './nix-store.ts';
 
 // RE2 (linear time, no backtracking) so a crafted `nix.conf` line cannot make
 // the include parse run slow; `\s+` and `.+` overlap, which is polynomial under
@@ -20,7 +28,8 @@ const includeLine = RE2JS.compile(String.raw`(!?)include\s+(.+)`);
 export interface NixStoreConfig {
 	/** The `store` setting: a URI, `auto`, `daemon`, `local`, or a store path. */
 	readonly storeUri: string;
-	readonly storeDirectory: string;
+	/** The `store-dir` setting: the directory every store path sits under. */
+	readonly storeDirectory: StoreDirectory;
 	readonly stateDirectory: string;
 	readonly daemonSocketPath: string;
 }
@@ -33,7 +42,7 @@ export interface NixConfigEnvironment {
 	readonly homeDirectory: () => string | undefined;
 }
 
-const defaultStoreDirectory = '/nix/store';
+const defaultStoreDirectory = storeDirectorySchema.parse('/nix/store');
 const defaultStateDirectory = '/nix/var/nix';
 const defaultSystemConfigDirectory = '/etc/nix';
 const maxIncludeDepth = 16;
@@ -60,10 +69,7 @@ export function discoverNixStoreConfig(
 	dependencies: NixConfigEnvironment = defaultNixConfigEnvironment
 ): NixStoreConfig {
 	const settings = mergedSettings(dependencies);
-	const storeDirectory =
-		nonEmpty(dependencies.env.NIX_STORE_DIR) ??
-		settings.get('store-dir') ??
-		defaultStoreDirectory;
+	const storeDirectory = resolveStoreDirectory(dependencies, settings);
 	const stateDirectory =
 		nonEmpty(dependencies.env.NIX_STATE_DIR) ?? defaultStateDirectory;
 	const storeUri =
@@ -73,6 +79,41 @@ export function discoverNixStoreConfig(
 		path.join(stateDirectory, 'daemon-socket', 'socket');
 
 	return { storeUri, storeDirectory, stateDirectory, daemonSocketPath };
+}
+
+// The store directory prefixes every store path read through this
+// configuration, so a spelling that no store path could be built on is a
+// configuration error, reported where the setting is read.
+function resolveStoreDirectory(
+	dependencies: NixConfigEnvironment,
+	settings: ReadonlyMap<string, string>
+): StoreDirectory {
+	const fromEnvironment = nonEmpty(dependencies.env.NIX_STORE_DIR);
+
+	if (fromEnvironment !== undefined) {
+		return parseStoreDirectory(fromEnvironment, 'NIX_STORE_DIR');
+	}
+
+	const fromSettings = settings.get('store-dir');
+
+	if (fromSettings !== undefined) {
+		return parseStoreDirectory(fromSettings, 'store-dir');
+	}
+
+	return defaultStoreDirectory;
+}
+
+function parseStoreDirectory(
+	value: string,
+	source: NixStoreDirectorySource
+): StoreDirectory {
+	const parsed = storeDirectorySchema.safeParse(value);
+
+	if (!parsed.success) {
+		throw new InvalidNixStoreDirectoryError(value, source);
+	}
+
+	return parsed.data;
 }
 
 function mergedSettings(
