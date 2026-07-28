@@ -6,7 +6,10 @@ import { env } from 'node:process';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import { publicKeyUrl } from '@cupboard/nix-store/cache-url';
 import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
-import { type CachePriority } from '@cupboard/nix-store/scalars';
+import {
+	type CachePriority,
+	type StoredCache
+} from '@cupboard/nix-store/scalars';
 import {
 	isDestinationPreferred,
 	reuseViewPrioritySchema
@@ -31,7 +34,7 @@ import {
 	requireEnvironment,
 	setOutput
 } from '../inputs.ts';
-import { isEnabled, provided } from '../options.ts';
+import { isEnabled, provided, providedCache } from '../options.ts';
 import {
 	fallbackReleaseRepository,
 	installCupboard,
@@ -70,7 +73,7 @@ export interface SetupInputs {
 	readonly installDirectory: string;
 	readonly addToPath: boolean;
 	readonly cacheUrl: string;
-	readonly cache: string;
+	readonly cache: StoredCache;
 	readonly reuseView: string;
 	readonly trustedPublicKey: string;
 	readonly readUser: string;
@@ -193,7 +196,7 @@ export function resolveSetupInputs(
 			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
 		addToPath: isEnabled('add-to-path', options.addToPath, true),
 		cacheUrl,
-		cache: provided(options.cache) ?? '',
+		cache: providedCache(options.cache),
 		reuseView: provided(options.reuseView) ?? '',
 		trustedPublicKey: provided(options.trustedPublicKey) ?? '',
 		readUser,
@@ -277,7 +280,7 @@ async function fetchCacheInfoPriority(
 
 export interface ResolveSubstitutersOptions {
 	readonly cacheUrl: string;
-	readonly cache: string;
+	readonly cache: StoredCache;
 	readonly reuseView: string;
 	readonly readUser: string;
 	readonly readPassword: string;
@@ -308,7 +311,10 @@ export async function resolveSubstituters(
 	const headers =
 		options.readPassword === ''
 			? undefined
-			: basicAuthHeader(options.readUser, options.readPassword);
+			: basicAuthHeader({
+					user: options.readUser,
+					password: options.readPassword
+				});
 	const [destinationPriority, rawViewPriority] = await Promise.all([
 		fetchCacheInfoPriority(fetcher, destinationUrl, 'destination', headers),
 		fetchCacheInfoPriority(fetcher, viewUrl, 'view', headers)

@@ -8,6 +8,7 @@ import { promisify } from 'node:util';
 import {
 	rootNameMaxLength,
 	rootNameSchema,
+	type StoredCache,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import {
@@ -53,7 +54,7 @@ import {
 	ZeroGracePolicyError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
-import { isEnabled, provided } from '../options.ts';
+import { isEnabled, provided, providedCache } from '../options.ts';
 import {
 	availableCachePaths,
 	availableViewPaths,
@@ -137,7 +138,7 @@ export interface PlanOptions {
 export interface PlanInputs {
 	readonly targets: readonly PublishTarget[];
 	readonly url: string;
-	readonly cache: string;
+	readonly cache: StoredCache;
 	readonly rootPrefix: string;
 	readonly ttl: string;
 	readonly readUser: string;
@@ -274,7 +275,7 @@ export function resolvePlanInputs(
 	return {
 		targets,
 		url,
-		cache: provided(options.cache) ?? '',
+		cache: providedCache(options.cache),
 		rootPrefix,
 		ttl: provided(options.ttl) ?? '',
 		readUser,

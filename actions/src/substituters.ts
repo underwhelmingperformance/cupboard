@@ -1,12 +1,13 @@
 import { cacheUrl, reuseViewUrl } from '@cupboard/nix-store/cache-url';
+import { type StoredCache } from '@cupboard/nix-store/scalars';
 
 const cacheHeaders: Readonly<Record<string, string>> = {
 	accept: 'text/plain',
 	'user-agent': 'cupboard-action'
 };
 
-export function cacheUrlFor(baseUrl: string, cache: string): string {
-	return cacheUrl(baseUrl, cache.trim());
+export function cacheUrlFor(baseUrl: string, cache: StoredCache): string {
+	return cacheUrl(baseUrl, cache);
 }
 
 /**

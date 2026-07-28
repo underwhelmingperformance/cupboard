@@ -1,4 +1,10 @@
 import {
+	oidcAudienceSchema,
+	type OidcIssuer,
+	oidcIssuerSchema,
+	oidcTrustAddBodySchema
+} from '@cupboard/protocol/oidc';
+import {
 	createLocalJWKSet,
 	errors as joseErrors,
 	exportJWK,
@@ -13,6 +19,7 @@ import {
 	decodeInboundClaims,
 	fetchOidcDiscovery,
 	inboundAlgorithmAllowlist,
+	type InboundVerifyOptions,
 	intersectAlgorithms,
 	OidcDiscoveryError,
 	OidcDiscoveryStore,
@@ -22,12 +29,23 @@ import {
 	verifyInboundOidcToken
 } from './oidc.ts';
 
-const issuer = 'https://accounts.example.com';
+const issuer = oidcIssuerSchema.parse('https://accounts.example.com');
 const metadataUrl =
 	'https://accounts.example.com/.well-known/openid-configuration';
-const audience = 'client-id.apps.example.com';
+const audience = oidcAudienceSchema.parse('client-id.apps.example.com');
 const now = new Date('2026-01-01T00:00:00.000Z');
 const kid = 'idp-key-1';
+
+// The issuer a trust rule holds after the admin API accepted it, the only way an
+// `OidcIssuer` reaches discovery from a configured rule.
+function configuredRuleIssuer(configured: string): OidcIssuer {
+	return oidcTrustAddBodySchema.parse({
+		issuer: configured,
+		audience,
+		claims: { sub: 'repo:owner/repo:ref:refs/heads/main' },
+		permittedGrants: [{ type: 'cupboard_wildcard' }]
+	}).issuer;
+}
 
 function requestUrl(input: string | URL | Request): string {
 	if (typeof input === 'string') {
@@ -144,8 +162,8 @@ async function inboundIssuer(algorithm = 'RS256'): Promise<InboundIssuer> {
 }
 
 function verifyOptions(
-	overrides: Partial<{ issuer: string; audience: string }> = {}
-) {
+	overrides: Partial<Omit<InboundVerifyOptions, 'algorithms'>> = {}
+): InboundVerifyOptions {
 	return {
 		issuer,
 		audience,
@@ -223,12 +241,16 @@ describe('verifyInboundOidcToken', () => {
 	it.each([
 		{
 			name: 'a mismatched audience',
-			options: verifyOptions({ audience: 'someone-else' }),
+			options: verifyOptions({
+				audience: oidcAudienceSchema.parse('someone-else')
+			}),
 			at: now
 		},
 		{
 			name: 'a mismatched issuer',
-			options: verifyOptions({ issuer: 'https://evil.example.com' }),
+			options: verifyOptions({
+				issuer: oidcIssuerSchema.parse('https://evil.example.com')
+			}),
 			at: now
 		},
 		{
@@ -428,7 +450,10 @@ describe('fetchOidcDiscovery', () => {
 			);
 		};
 
-		const discovery = await fetchOidcDiscovery(`${issuer}/`, fetcher);
+		const discovery = await fetchOidcDiscovery(
+			oidcIssuerSchema.parse(`${issuer}/`),
+			fetcher
+		);
 
 		expect({ requested, discovery }).toStrictEqual({
 			requested: [metadataUrl],
@@ -523,7 +548,10 @@ describe('fetchOidcDiscovery', () => {
 		};
 
 		const error = await rejectedBy(() =>
-			fetchOidcDiscovery('http://accounts.example.com', fetcher)
+			fetchOidcDiscovery(
+				oidcIssuerSchema.parse('http://accounts.example.com'),
+				fetcher
+			)
 		);
 
 		expect(error).toBeInstanceOf(OidcDiscoveryError);
@@ -573,7 +601,7 @@ describe('OidcDiscoveryStore', () => {
 		]);
 	});
 
-	it('keys the cache on the normalised issuer, so two spellings share one fetch', async () => {
+	it('shares one fetch across the spellings a trust rule can be configured with', async () => {
 		const requested: string[] = [];
 		const fetcher: typeof fetch = (input) => {
 			requested.push(requestUrl(input));
@@ -588,8 +616,9 @@ describe('OidcDiscoveryStore', () => {
 		};
 		const store = new OidcDiscoveryStore({ now: () => 0, fetcher });
 
-		await store.resolve(issuer);
-		await store.resolve(`${issuer}/`);
+		for (const configured of [issuer, `${issuer}/`]) {
+			await store.resolve(configuredRuleIssuer(configured));
+		}
 
 		expect({ requested }).toStrictEqual({ requested: [metadataUrl] });
 	});

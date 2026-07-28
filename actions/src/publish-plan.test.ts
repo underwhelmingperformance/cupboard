@@ -1,4 +1,5 @@
 import {
+	storedCacheSchema,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
@@ -1185,7 +1186,7 @@ describe('availableCachePaths', () => {
 
 			const pending = availableCachePaths({
 				baseUrl: 'https://cupboard.example/t/acme',
-				cache: 'pr-1',
+				cache: storedCacheSchema.parse('pr-1'),
 				paths,
 				fetcher
 			});
@@ -1203,7 +1204,7 @@ describe('availableCachePaths', () => {
 		const headers: (HeadersInit | undefined)[] = [];
 		const available = await availableCachePaths({
 			baseUrl: 'https://cupboard.example/t/acme',
-			cache: 'pr-1',
+			cache: storedCacheSchema.parse('pr-1'),
 			paths: [firstPath, secondPath],
 			fetcher: (input, init) => {
 				const url =
@@ -1269,7 +1270,7 @@ describe('availableCachePaths', () => {
 			try {
 				await availableCachePaths({
 					baseUrl: 'https://cupboard.example/t/acme',
-					cache: 'pr-1',
+					cache: storedCacheSchema.parse('pr-1'),
 					paths: [firstPath],
 					fetcher: () => {
 						observedAttempts += 1;
@@ -1299,7 +1300,7 @@ describe('availableCachePaths', () => {
 
 		const available = await availableCachePaths({
 			baseUrl: 'https://cupboard.example/t/acme',
-			cache: 'pr-1',
+			cache: storedCacheSchema.parse('pr-1'),
 			paths: [firstPath],
 			fetcher: () => {
 				attempts += 1;
@@ -1324,7 +1325,7 @@ describe('availableCachePaths', () => {
 		const malformed = await rejectedBy(() =>
 			availableCachePaths({
 				baseUrl: 'https://cupboard.example/t/acme',
-				cache: 'pr-1',
+				cache: storedCacheSchema.parse('pr-1'),
 				paths: [firstPath],
 				fetcher: () =>
 					Promise.resolve(new Response('{', { status: StatusCodes.OK }))
@@ -1333,7 +1334,7 @@ describe('availableCachePaths', () => {
 		const invalid = await rejectedBy(() =>
 			availableCachePaths({
 				baseUrl: 'https://cupboard.example/t/acme',
-				cache: 'pr-1',
+				cache: storedCacheSchema.parse('pr-1'),
 				paths: [firstPath],
 				fetcher: () =>
 					Promise.resolve(
@@ -1367,7 +1368,7 @@ describe('availableCachePaths', () => {
 		const error = await rejectedBy(() =>
 			availableCachePaths({
 				baseUrl: 'https://cupboard.example/t/acme',
-				cache: 'pr-1',
+				cache: storedCacheSchema.parse('pr-1'),
 				paths: [firstPath],
 				fetcher: () =>
 					Promise.resolve(
@@ -1399,7 +1400,7 @@ describe('availableCachePaths', () => {
 
 		await availableCachePaths({
 			baseUrl: 'https://cupboard.example/t/acme',
-			cache: 'pr-1',
+			cache: storedCacheSchema.parse('pr-1'),
 			paths: [firstPath, secondPath],
 			credentials: { user: 'reader', password: 'secret' },
 			fetcher: (_input, init) => {
@@ -1506,38 +1507,6 @@ describe('availableCachePaths', () => {
 				]
 			}
 		);
-	});
-
-	it('trims a padded cache name, matching the URL the substituter would use', async () => {
-		const requests: string[] = [];
-
-		await availableCachePaths({
-			baseUrl: 'https://cupboard.example/t/acme',
-			cache: ' pr-1 ',
-			paths: [firstPath],
-			fetcher: (input) => {
-				const url =
-					typeof input === 'string'
-						? input
-						: input instanceof URL
-							? input.href
-							: input.url;
-				requests.push(url);
-
-				return Promise.resolve(
-					Response.json(
-						{
-							missingStorePathHashes: [StorePath.hash(firstPath)]
-						},
-						{ status: 200 }
-					)
-				);
-			}
-		});
-
-		expect(requests).toStrictEqual([
-			'https://cupboard.example/t/acme/cache/pr-1/api/v1/missing-paths'
-		]);
 	});
 });
 

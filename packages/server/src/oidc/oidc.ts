@@ -1,3 +1,4 @@
+import type { OidcAudience, OidcIssuer } from '@cupboard/protocol/oidc';
 import { isAllowedIssuerUrl, IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 import type { OidcClaims } from '@cupboard/protocol/oidc-trust-match';
 import {
@@ -54,7 +55,7 @@ export class OidcKeysUnreachableError extends Error {
 
 export class OidcDiscoveryError extends Error {
 	constructor(
-		public readonly issuer: string,
+		public readonly issuer: OidcIssuer,
 		options: { readonly cause: unknown }
 	) {
 		super(`Could not resolve OIDC metadata for issuer ${issuer}`, {
@@ -78,8 +79,8 @@ export function decodeInboundClaims(token: string): OidcClaims {
 }
 
 export interface InboundVerifyOptions {
-	readonly issuer: string;
-	readonly audience: string;
+	readonly issuer: OidcIssuer;
+	readonly audience: OidcAudience;
 	readonly algorithms: readonly string[];
 }
 
@@ -164,7 +165,7 @@ const discoveryTimeoutMs = 15_000;
  * hostile document cannot redirect verification to another identity provider.
  */
 export async function fetchOidcDiscovery(
-	issuer: string,
+	issuer: OidcIssuer,
 	fetcher: typeof fetch = fetch
 ): Promise<OidcDiscovery> {
 	const issuerUrl = IssuerUrl.parse(issuer);
@@ -267,7 +268,7 @@ export interface OidcDiscoveryStoreOptions {
  * discovery fetch; a failed fetch is evicted so the next request retries.
  */
 export class OidcDiscoveryStore {
-	private readonly issuers = new Map<string, CachedIssuer>();
+	private readonly issuers = new Map<OidcIssuer, CachedIssuer>();
 
 	private readonly now: () => number;
 
@@ -279,7 +280,7 @@ export class OidcDiscoveryStore {
 	}
 
 	private async forgetIfFailed(
-		issuer: string,
+		issuer: OidcIssuer,
 		entry: CachedIssuer
 	): Promise<void> {
 		try {
@@ -293,7 +294,7 @@ export class OidcDiscoveryStore {
 		}
 	}
 
-	private async discover(issuer: string): Promise<ResolvedIssuer> {
+	private async discover(issuer: OidcIssuer): Promise<ResolvedIssuer> {
 		const discovery = await fetchOidcDiscovery(issuer, this.fetcher);
 
 		return {
@@ -310,12 +311,12 @@ export class OidcDiscoveryStore {
 		};
 	}
 
-	resolve(issuer: string): Promise<ResolvedIssuer> {
-		// Key on the normalised issuer so two spellings of one issuer (a trailing
-		// slash, say) share a single cache entry and a single discovery fetch.
-		const key = IssuerUrl.parse(issuer)?.value ?? issuer;
+	// An `OidcIssuer` is normalised where it is minted, so two spellings of one
+	// issuer (a trailing slash, say) arrive here as the same value and share a
+	// single cache entry and a single discovery fetch.
+	resolve(issuer: OidcIssuer): Promise<ResolvedIssuer> {
 		const nowMs = this.now();
-		const cached = this.issuers.get(key);
+		const cached = this.issuers.get(issuer);
 
 		if (
 			cached !== undefined &&
@@ -325,11 +326,11 @@ export class OidcDiscoveryStore {
 		}
 
 		const entry: CachedIssuer = {
-			resolved: this.discover(key),
+			resolved: this.discover(issuer),
 			fetchedAtMs: nowMs
 		};
-		this.issuers.set(key, entry);
-		void this.forgetIfFailed(key, entry);
+		this.issuers.set(issuer, entry);
+		void this.forgetIfFailed(issuer, entry);
 
 		return entry.resolved;
 	}

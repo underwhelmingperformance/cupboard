@@ -1,6 +1,9 @@
+import { type TtlSeconds } from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
+	type OidcSubject,
+	oidcSubjectSchema,
 	type ParsedTokenRequest,
 	refreshTokenGrantType,
 	subjectTokenTypeIdToken,
@@ -98,10 +101,11 @@ export class TokenExchangeService {
 			rule,
 			body.subject_token
 		);
-		const subject =
+		const subject = oidcSubjectSchema.parse(
 			typeof verified.sub === 'string' && verified.sub !== ''
 				? verified.sub
-				: rule.id;
+				: rule.id
+		);
 
 		// Bindings are evaluated against the verified payload, never the unverified
 		// claims used only to route the token to a rule.
@@ -316,7 +320,7 @@ export class TokenExchangeService {
 	// session never outlives an edit to its rule.
 	private async issuedResponse(
 		rule: OidcTrustRule,
-		subject: string,
+		subject: OidcSubject,
 		claims: OidcClaims,
 		requested: AuthorizationDetails | undefined,
 		extra: Pick<TokenResponse, 'issued_token_type'>
@@ -353,7 +357,7 @@ export class TokenExchangeService {
 
 	private async issueRefreshToken(
 		ruleId: TrustRuleId,
-		subject: string
+		subject: OidcSubject
 	): Promise<string> {
 		const id = crypto.randomUUID();
 		const secret = randomSecretHex();
@@ -377,9 +381,9 @@ export class TokenExchangeService {
 
 	private async issueRuleToken(
 		rule: OidcTrustRule,
-		subject: string,
+		subject: OidcSubject,
 		grants: AuthorizationDetails,
-		ttlSeconds: number
+		ttlSeconds: TtlSeconds
 	): Promise<string> {
 		const key = await this.authKeys.activeAuthKey();
 

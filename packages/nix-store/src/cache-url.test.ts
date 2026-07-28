@@ -5,6 +5,7 @@ import {
 	InvalidCacheUrlBaseError,
 	InvalidCacheUrlSegmentError
 } from './errors.ts';
+import { DEFAULT_CACHE, storedCacheSchema } from './scalars.ts';
 
 // Every builder derives its result from the base's origin and path alone, so
 // a base smuggling anything else in, credentials that would be sent on every
@@ -31,7 +32,7 @@ describe('cacheUrl', () => {
 		{
 			name: 'the empty cache name is the default cache',
 			base: 'https://cupboard.example.workers.dev',
-			cache: '',
+			cache: storedCacheSchema.parse(DEFAULT_CACHE),
 			expected: 'https://cupboard.example.workers.dev'
 		},
 		{
@@ -43,36 +44,27 @@ describe('cacheUrl', () => {
 		{
 			name: 'a named cache appends the cache path to a bare host',
 			base: 'https://cupboard.example.workers.dev',
-			cache: 'builds',
+			cache: storedCacheSchema.parse('builds'),
 			expected: 'https://cupboard.example.workers.dev/cache/builds'
 		},
 		{
 			name: 'a named cache preserves a tenant path prefix',
 			base: 'https://cupboard.example.workers.dev/t/acme',
-			cache: 'builds',
+			cache: storedCacheSchema.parse('builds'),
 			expected: 'https://cupboard.example.workers.dev/t/acme/cache/builds'
 		},
 		{
 			name: 'a trailing slash on the base is trimmed for a named cache',
 			base: 'https://cupboard.example.workers.dev/t/acme/',
-			cache: 'builds',
+			cache: storedCacheSchema.parse('builds'),
 			expected: 'https://cupboard.example.workers.dev/t/acme/cache/builds'
 		}
 	])('$name', ({ base, cache, expected }) => {
 		expect(cacheUrl(base, cache)).toBe(expected);
 	});
 
-	it.each([['.'], ['..']])(
-		'refuses the path-traversal cache name %j',
-		(cache) => {
-			expect(() =>
-				cacheUrl('https://cupboard.example.workers.dev', cache)
-			).toThrow(InvalidCacheUrlSegmentError);
-		}
-	);
-
 	it.each(unusableBases)('refuses a base carrying %s', (_name, base) => {
-		expect(() => cacheUrl(base, 'builds')).toThrow(
+		expect(() => cacheUrl(base, storedCacheSchema.parse('builds'))).toThrow(
 			new InvalidCacheUrlBaseError()
 		);
 	});

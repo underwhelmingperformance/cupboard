@@ -2,7 +2,7 @@ import {
 	InvalidCacheUrlBaseError,
 	InvalidCacheUrlSegmentError
 } from './errors.ts';
-import { DEFAULT_CACHE } from './scalars.ts';
+import { DEFAULT_CACHE, type StoredCache } from './scalars.ts';
 
 // The URLs that address a cache and its views, derived from a base URL that may
 // already carry a tenant path (`/t/<slug>`). Every builder appends to that path
@@ -16,7 +16,10 @@ import { DEFAULT_CACHE } from './scalars.ts';
  * The substituter URL for a cache: the base URL for the default cache, or the
  * base with a `/cache/<name>` segment for a named one.
  */
-export function cacheUrl(baseUrl: string, cache: string | undefined): string {
+export function cacheUrl(
+	baseUrl: string,
+	cache: StoredCache | undefined
+): string {
 	if (cache === undefined || cache === DEFAULT_CACHE) {
 		return trimRight(parseBaseUrl(baseUrl).href);
 	}

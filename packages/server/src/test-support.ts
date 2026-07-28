@@ -17,6 +17,7 @@ import {
 	storePathHashSchema,
 	type TenantId,
 	tenantIdSchema,
+	ttlSecondsSchema,
 	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
@@ -27,6 +28,7 @@ import {
 } from '@cupboard/protocol/grants';
 import {
 	oidcAudienceSchema,
+	type OidcIssuer,
 	oidcIssuerSchema,
 	oidcSubjectSchema,
 	trustRuleIdSchema
@@ -326,10 +328,10 @@ export async function provisionNamedTenant(
 		readonly readMode?: 'public' | 'private';
 		configure?: boolean;
 	} = {}
-): Promise<string> {
+): Promise<OidcIssuer> {
 	const id = tenantIdSchema.parse(name);
 	const readMode = options.readMode ?? 'public';
-	const issuer = `${harness.origin}/t/${id}`;
+	const issuer = oidcIssuerSchema.parse(`${harness.origin}/t/${id}`);
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
 	// The workers pool keeps a Durable Object warm across tests, so a fixed-name
@@ -372,7 +374,7 @@ export async function provisionNamedTenant(
 	if (options.configure !== false) {
 		await stub.configure({
 			tenant: id,
-			issuer: oidcIssuerSchema.parse(issuer),
+			issuer,
 			audience: oidcAudienceSchema.parse(issuer),
 			...emptyOwner,
 			configVersion
@@ -627,12 +629,12 @@ async function issueServerSignedTokenFor(
 	return issueAccessJwt(
 		key.privateJwk,
 		{
-			issuer: tenantTestIssuer,
-			audience: tenantTestIssuer,
-			subject,
+			issuer: oidcIssuerSchema.parse(tenantTestIssuer),
+			audience: oidcAudienceSchema.parse(tenantTestIssuer),
+			subject: oidcSubjectSchema.parse(subject),
 			grants,
 			kid: key.kid,
-			ttlSeconds: 600
+			ttlSeconds: ttlSecondsSchema.parse(600)
 		},
 		new Date()
 	);
@@ -645,7 +647,7 @@ async function issueServerSignedTokenFor(
  */
 export async function issueTokenForTenant(
 	stub: DurableObjectStub<CupboardServer>,
-	issuer: string,
+	issuer: OidcIssuer,
 	grants: AuthorizationDetails,
 	subject = 'route-test'
 ): Promise<string> {
@@ -655,11 +657,11 @@ export async function issueTokenForTenant(
 		key.privateJwk,
 		{
 			issuer,
-			audience: issuer,
-			subject,
+			audience: oidcAudienceSchema.parse(issuer),
+			subject: oidcSubjectSchema.parse(subject),
 			grants,
 			kid: key.kid,
-			ttlSeconds: 600
+			ttlSeconds: ttlSecondsSchema.parse(600)
 		},
 		new Date()
 	);
@@ -879,12 +881,14 @@ export async function issueControlAdminToken(
 	return issueAccessJwt(
 		active.privateJwk,
 		{
-			issuer: originUrl.origin,
-			audience: testControlEnv.CUPBOARD_CONTROL_AUDIENCE,
-			subject,
+			issuer: oidcIssuerSchema.parse(originUrl.origin),
+			audience: oidcAudienceSchema.parse(
+				testControlEnv.CUPBOARD_CONTROL_AUDIENCE
+			),
+			subject: oidcSubjectSchema.parse(subject),
 			grants,
 			kid: active.kid,
-			ttlSeconds: 600
+			ttlSeconds: ttlSecondsSchema.parse(600)
 		},
 		new Date()
 	);

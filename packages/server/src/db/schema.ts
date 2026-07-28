@@ -13,7 +13,7 @@ import {
 	type StorePathString,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
-import type { TrustRuleId } from '@cupboard/protocol/oidc';
+import type { OidcSubject, TrustRuleId } from '@cupboard/protocol/oidc';
 import type {
 	ReuseViewPriority,
 	ReuseViewRevision
@@ -211,7 +211,7 @@ export const refreshTokens = sqliteTable(
 		id: text('id').primaryKey(),
 		secretHash: text('secret_hash').notNull(),
 		ruleId: text('rule_id').$type<TrustRuleId>().notNull(),
-		subject: text('subject').notNull(),
+		subject: text('subject').$type<OidcSubject>().notNull(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
 	},

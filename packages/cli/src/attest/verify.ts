@@ -3,6 +3,7 @@ import { readFile as nodeReadFile } from 'node:fs/promises';
 import { cacheUrl } from '@cupboard/nix-store/cache-url';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
+import { type StoredCache } from '@cupboard/nix-store/scalars';
 import { attestationListSchema } from '@cupboard/protocol/attestations';
 import { basicAuthHeader } from '@cupboard/shared/http';
 import {
@@ -27,7 +28,7 @@ export interface LocalAttestationVerifyOptions extends AttestationPolicyOptions 
 export interface RemoteAttestationVerifyOptions extends AttestationPolicyOptions {
 	readonly url: string;
 	readonly storePathHash: string;
-	readonly cache?: string;
+	readonly cache?: StoredCache;
 	readonly bundleDigest?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
@@ -250,7 +251,10 @@ function readAuthHeaders(options: RemoteAttestationVerifyOptions): Headers {
 
 	headers.set(
 		'authorization',
-		basicAuthHeader(options.readUser, options.readPassword).authorization
+		basicAuthHeader({
+			user: options.readUser,
+			password: options.readPassword
+		}).authorization
 	);
 
 	return headers;

@@ -142,7 +142,10 @@ export function cacheInfoFetcher(
 	const headers =
 		options.readUser === undefined || options.readPassword === undefined
 			? undefined
-			: basicAuthHeader(options.readUser, options.readPassword);
+			: basicAuthHeader({
+					user: options.readUser,
+					password: options.readPassword
+				});
 	const fetcher = resilientFetcher(dependencies.fetch);
 	const timeoutMs = dependencies.timeoutMs ?? cacheInfoTimeoutMs;
 

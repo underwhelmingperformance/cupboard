@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import {
 	rootNameMaxLength,
+	storedCacheSchema,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
@@ -772,7 +773,7 @@ describe('confirmDestinationIntermediates', () => {
 
 		await confirmDestinationIntermediates(
 			planInputs({
-				cache: 'builds',
+				cache: storedCacheSchema.parse('builds'),
 				intermediateRetention: 'grace',
 				temporaryDirectory: directory
 			}),
@@ -1305,7 +1306,7 @@ describe('verifyGraceCoverage', () => {
 
 		await verifyGraceCoverage(
 			planInputs({
-				cache: 'builds',
+				cache: storedCacheSchema.parse('builds'),
 				intermediateRetention: 'grace',
 				temporaryDirectory: directory
 			}),
