@@ -680,6 +680,7 @@ function addSeedCandidate(
 
 export async function evaluateTargets(
 	targets: readonly PublishTarget[],
+	storeDirectory: string,
 	evaluator: NixEvaluator = defaultNixEvaluator
 ): Promise<EvaluatedTargets> {
 	const resolved: ResolvedTargetRoot[] = [];
@@ -704,7 +705,11 @@ export async function evaluateTargets(
 		return { evaluations: [], unevaluated };
 	}
 
-	const evaluated = await evaluateResolvedTargets(resolved, evaluator);
+	const evaluated = await evaluateResolvedTargets(
+		resolved,
+		storeDirectory,
+		evaluator
+	);
 
 	return {
 		evaluations: evaluated.filter(
@@ -721,11 +726,16 @@ export async function evaluateTargets(
 
 async function evaluateResolvedTargets(
 	resolutions: readonly ResolvedTargetRoot[],
+	storeDirectory: string,
 	evaluator: NixEvaluator
 ): Promise<(TargetEvaluation | UnevaluatedTarget)[]> {
 	if (resolutions.length === 1) {
 		return [
-			await evaluateResolvedTarget(requireIndex(resolutions, 0), evaluator)
+			await evaluateResolvedTarget(
+				requireIndex(resolutions, 0),
+				storeDirectory,
+				evaluator
+			)
 		];
 	}
 
@@ -741,7 +751,7 @@ async function evaluateResolvedTargets(
 			evaluator,
 			label
 		);
-		const nodes = derivationNodes(label, value);
+		const nodes = derivationNodes(label, value, storeDirectory);
 
 		return resolutions.map(({ target, rootDrvPath }) =>
 			evaluationForRoot(target, nodes, rootDrvPath)
@@ -750,7 +760,9 @@ async function evaluateResolvedTargets(
 		const evaluated: (TargetEvaluation | UnevaluatedTarget)[] = [];
 
 		for (const resolution of resolutions) {
-			evaluated.push(await evaluateResolvedTarget(resolution, evaluator));
+			evaluated.push(
+				await evaluateResolvedTarget(resolution, storeDirectory, evaluator)
+			);
 		}
 
 		return evaluated;
@@ -759,6 +771,7 @@ async function evaluateResolvedTargets(
 
 async function evaluateResolvedTarget(
 	resolution: ResolvedTargetRoot,
+	storeDirectory: string,
 	evaluator: NixEvaluator
 ): Promise<TargetEvaluation | UnevaluatedTarget> {
 	const { target, rootDrvPath } = resolution;
@@ -770,7 +783,7 @@ async function evaluateResolvedTarget(
 			evaluator,
 			target.attr
 		);
-		const nodes = derivationNodes(target.attr, value);
+		const nodes = derivationNodes(target.attr, value, storeDirectory);
 
 		return evaluationForRoot(target, nodes, rootDrvPath);
 	} catch (error) {
@@ -796,9 +809,10 @@ function evaluationFailureReason(error: unknown): string {
 
 export function evaluationFromJson(
 	target: PublishTarget,
-	value: unknown
+	value: unknown,
+	storeDirectory: string
 ): TargetEvaluation {
-	const nodes = derivationNodes(target.attr, value);
+	const nodes = derivationNodes(target.attr, value, storeDirectory);
 	const referenced = new Set<string>();
 
 	for (const node of nodes.values()) {
@@ -925,10 +939,12 @@ const derivationNodeBaseSchema = z.looseObject({
 
 type ParsedDerivationNode = z.output<typeof derivationNodeBaseSchema>;
 
-const derivationNodeSchema = derivationNodeBaseSchema.transform((node) => ({
-	inputs: nodeInputs(node),
-	outputs: nodeOutputs(node)
-}));
+function derivationNodeSchema(storeDirectory: string) {
+	return derivationNodeBaseSchema.transform((node) => ({
+		inputs: nodeInputs(node, storeDirectory),
+		outputs: nodeOutputs(node, storeDirectory)
+	}));
+}
 
 // `nix derivation show` prints a bare map of drvPath to node; the Determinate
 // evaluator wraps the same map under `derivations`. Unwrapping to the inner map
@@ -937,20 +953,23 @@ const derivationWrapperSchema = z.looseObject({
 	derivations: z.record(z.string(), z.unknown())
 });
 
-const derivationDocumentSchema = z.preprocess(
-	(value) => {
-		const wrapper = derivationWrapperSchema.safeParse(value);
+function derivationDocumentSchema(storeDirectory: string) {
+	return z.preprocess(
+		(value) => {
+			const wrapper = derivationWrapperSchema.safeParse(value);
 
-		return wrapper.success ? wrapper.data.derivations : value;
-	},
-	z.record(z.string(), derivationNodeSchema)
-);
+			return wrapper.success ? wrapper.data.derivations : value;
+		},
+		z.record(z.string(), derivationNodeSchema(storeDirectory))
+	);
+}
 
 function derivationNodes(
 	attribute: string,
-	value: unknown
+	value: unknown,
+	storeDirectory: string
 ): Map<string, DerivationNode> {
-	const parsed = derivationDocumentSchema.safeParse(value);
+	const parsed = derivationDocumentSchema(storeDirectory).safeParse(value);
 
 	if (!parsed.success) {
 		throw new DerivationGraphShapeError(attribute, { cause: parsed.error });
@@ -959,7 +978,7 @@ function derivationNodes(
 	const nodes = new Map<string, DerivationNode>();
 
 	for (const [rawDrvPath, body] of Object.entries(parsed.data)) {
-		const drvPath = absoluteStorePath(rawDrvPath);
+		const drvPath = absoluteStorePath(rawDrvPath, storeDirectory);
 		nodes.set(drvPath, { drvPath, ...body });
 	}
 
@@ -967,14 +986,15 @@ function derivationNodes(
 }
 
 function nodeInputs(
-	node: ParsedDerivationNode
+	node: ParsedDerivationNode,
+	storeDirectory: string
 ): Map<string, readonly string[]> {
 	const drvs = node.inputs?.drvs ?? node.inputDrvs ?? {};
 	const inputs = new Map<string, readonly string[]>();
 
 	for (const [inputPath, input] of Object.entries(drvs)) {
 		inputs.set(
-			absoluteStorePath(inputPath),
+			absoluteStorePath(inputPath, storeDirectory),
 			Array.isArray(input) ? input : input.outputs
 		);
 	}
@@ -982,7 +1002,10 @@ function nodeInputs(
 	return inputs;
 }
 
-function nodeOutputs(node: ParsedDerivationNode): DerivationOutput[] {
+function nodeOutputs(
+	node: ParsedDerivationNode,
+	storeDirectory: string
+): DerivationOutput[] {
 	return Object.entries(node.outputs).map(([name, output]) => {
 		const candidate = output.path ?? node.env[name];
 
@@ -990,16 +1013,21 @@ function nodeOutputs(node: ParsedDerivationNode): DerivationOutput[] {
 			return { name };
 		}
 
-		const path = storePathSchema.safeParse(absoluteStorePath(candidate));
+		const path = storePathSchema.safeParse(
+			absoluteStorePath(candidate, storeDirectory)
+		);
 
 		return path.success ? { name, path: path.data } : { name };
 	});
 }
 
-function absoluteStorePath(storePath: string): string {
-	return storePath.startsWith('/nix/store/')
-		? storePath
-		: `/nix/store/${storePath}`;
+// A derivation reference is printed either absolute or as a bare basename, and
+// a basename belongs to the store the evaluating Nix reads, whose directory the
+// runner's configuration decides.
+function absoluteStorePath(storePath: string, storeDirectory: string): string {
+	const prefix = `${storeDirectory}/`;
+
+	return storePath.startsWith(prefix) ? storePath : `${prefix}${storePath}`;
 }
 
 interface ProbeOptions {

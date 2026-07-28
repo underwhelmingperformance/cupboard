@@ -9,3 +9,5 @@ export {
 	NotInNixStoreError,
 	UnsupportedNixStoreError
 } from './nix-store.ts';
+export type { NixStoreConfig } from './store-config.ts';
+export { discoverNixStoreConfig } from './store-config.ts';

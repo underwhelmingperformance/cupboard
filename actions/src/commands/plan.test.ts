@@ -1382,7 +1382,12 @@ describe('verifyGraceCoverage', () => {
 					GITHUB_OUTPUT: path.join(planDirectory, 'output')
 				},
 				undefined,
-				{ evaluator, fetcher: alwaysAvailableFetcher, runner }
+				{
+					evaluator,
+					storeDirectory: '/nix/store',
+					fetcher: alwaysAvailableFetcher,
+					runner
+				}
 			)
 		).rejects.toBeInstanceOf(GracePolicyMissingError);
 
