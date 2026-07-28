@@ -10,14 +10,13 @@ import type {
 	ParsedTenantReadCredential,
 	ParsedTenantSummary
 } from '@cupboard/protocol/tenants';
-import { type ReadUser, readUserInputSchema } from '@cupboard/shared/http';
+import type { ReadUser } from '@cupboard/shared/http';
 import { and, eq, ne, notInArray, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import {
-	ReadUserInvalidError,
 	TenantAlreadyExistsError,
 	TenantNotFoundError,
 	TenantNotSuspendedError,
@@ -33,18 +32,6 @@ import {
 type Database = DrizzleD1Database<typeof d1Schema>;
 
 type TenantRow = typeof d1Schema.tenant.$inferSelect;
-
-// The read user a caller supplies, refused where it cannot round-trip through a
-// Basic credential.
-function suppliedReadUser(user: string): ReadUser {
-	const parsed = readUserInputSchema.safeParse(user);
-
-	if (!parsed.success) {
-		throw new ReadUserInvalidError(user);
-	}
-
-	return parsed.data;
-}
 
 interface ReadVerifierColumns {
 	readonly readUser: ReadUser | undefined;
@@ -66,7 +53,7 @@ async function readVerifierColumnsForInsert(
 	const readPasswordSalt = generateReadPasswordSalt();
 
 	return {
-		readUser: suppliedReadUser(read.user),
+		readUser: read.user,
 		readPasswordHash: await hashReadPassword(read.password, readPasswordSalt),
 		readPasswordSalt
 	};
@@ -347,7 +334,7 @@ export async function setTenantReadCredential(
 	const readPasswordSalt = generateReadPasswordSalt();
 
 	return updateLiveTenant(database, id, {
-		readUser: suppliedReadUser(read.user),
+		readUser: read.user,
 		readPasswordHash: await hashReadPassword(read.password, readPasswordSalt),
 		readPasswordSalt
 	});

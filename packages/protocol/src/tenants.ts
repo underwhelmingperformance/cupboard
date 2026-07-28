@@ -1,4 +1,5 @@
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import { readUserInputSchema } from '@cupboard/shared/http';
 import { z } from 'zod';
 
 import {
@@ -27,11 +28,13 @@ export const readPasswordSchema = z
 	.min(readPasswordMinLength)
 	.regex(/^[!-~]+$/);
 
-// The Basic-auth credential a private cache requires from a reader. The password
-// is an opaque secret: the CLI generates one by default, and explicit values must
-// be netrc-safe visible ASCII. The control plane hashes it before persistence.
+// The Basic-auth credential a private cache requires from a reader. The user is
+// one an operator supplies, so it is held to what a Basic header can carry back.
+// The password is an opaque secret: the CLI generates one by default, and explicit
+// values must be netrc-safe visible ASCII. The control plane hashes it before
+// persistence.
 export const tenantReadCredentialSchema = z.strictObject({
-	user: z.string().min(1),
+	user: readUserInputSchema,
 	password: readPasswordSchema
 });
 export type ParsedTenantReadCredential = z.output<
