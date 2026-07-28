@@ -68,6 +68,11 @@ const acceptedCases: readonly {
 		value: `/var/lib/cupboard/nix/store/${storePathHash}-name`
 	},
 	{
+		name: 'a store path whose store directory has dots inside a segment',
+		schema: storePathSchema,
+		value: `/nix/store.d/..foo/${storePathHash}-name`
+	},
+	{
 		name: 'the default store directory',
 		schema: storeDirectorySchema,
 		value: '/nix/store'
@@ -239,9 +244,34 @@ const rejectedCases: readonly {
 		value: `/${'d'.repeat(storeDirectoryMaxLength)}/${storePathHash}-name`
 	},
 	{
+		name: 'a store path whose store directory walks up a level',
+		schema: storePathSchema,
+		value: `/nix/../etc/${storePathHash}-name`
+	},
+	{
+		name: 'a store path whose store directory names the current level',
+		schema: storePathSchema,
+		value: `/nix/./store/${storePathHash}-name`
+	},
+	{
+		name: 'a store path walking up out of the store directory',
+		schema: storePathSchema,
+		value: `/nix/store/../${storePathHash}-name`
+	},
+	{
 		name: 'a relative store directory',
 		schema: storeDirectorySchema,
 		value: 'nix/store'
+	},
+	{
+		name: 'a store directory that walks up a level',
+		schema: storeDirectorySchema,
+		value: '/nix/../etc'
+	},
+	{
+		name: 'a store directory ending in a current-level segment',
+		schema: storeDirectorySchema,
+		value: '/nix/.'
 	},
 	{
 		name: 'the filesystem root as a store directory',
