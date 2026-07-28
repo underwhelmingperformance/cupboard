@@ -11,6 +11,7 @@ import {
 	reuseViewRevisionSchema,
 	type ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { eq } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
@@ -121,7 +122,7 @@ export class ReuseViewAdminService {
 		name: ParsedReuseViewName,
 		body: ParsedReuseViewSetBody
 	): ReuseViewSummary {
-		const now = new Date().toISOString();
+		const now = isoTimestamp(new Date());
 
 		return this.context.db.transaction((tx) => {
 			// An identical re-apply changes nothing and returns the stored

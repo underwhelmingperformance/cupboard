@@ -15,6 +15,11 @@ import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
+import {
+	type IsoTimestamp,
+	isoTimestamp,
+	isoTimestampSchema
+} from '@cupboard/protocol/scalars';
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import {
 	acceptCapabilitiesHeader,
@@ -161,13 +166,13 @@ const buildsCache = cacheNameSchema.parse('builds');
 const pr5Cache = cacheNameSchema.parse('pr-5');
 
 // The shared test clock is pinned to 2026-01-01, so these bracket "now".
-const liveDeadline = '2026-06-01T00:00:00.000Z';
-const expiredDeadline = '2025-12-01T00:00:00.000Z';
+const liveDeadline = isoTimestampSchema.parse('2026-06-01T00:00:00.000Z');
+const expiredDeadline = isoTimestampSchema.parse('2025-12-01T00:00:00.000Z');
 
 async function seedGraceDeadline(
 	cache: string,
 	storePathHash: string,
-	retainUntil: string
+	retainUntil: IsoTimestamp
 ): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
 		instance.context.db
@@ -653,7 +658,7 @@ describe('retention grace transitions', () => {
 				const name = rootNameSchema.parse(
 					`expired-${String(index).padStart(2, '0')}`
 				);
-				const expiresAt = new Date(firstExpiry + index * 1000).toISOString();
+				const expiresAt = isoTimestamp(new Date(firstExpiry + index * 1000));
 
 				instance.context.db
 					.insert(schema.retentionRoots)
@@ -750,7 +755,7 @@ describe('retention grace transitions', () => {
 		});
 		await pushPath(token, path);
 		const rootName = rootNameSchema.parse('oversized');
-		const expiresAt = new Date(Date.now() - 1000).toISOString();
+		const expiresAt = isoTimestamp(new Date(Date.now() - 1000));
 		const targetCount = maxExpiredRootTargetsPerRun + 1;
 
 		const observed = await runInDurableObject(
@@ -867,8 +872,16 @@ describe('retention grace transitions', () => {
 
 		await runInDurableObject(currentServer(), (instance) => {
 			const service = new RetentionService(instance.context);
-			service.extendGraceDeadlines('', [hash], '2026-03-01T00:00:00.000Z');
-			service.extendGraceDeadlines('', [hash], '2026-02-01T00:00:00.000Z');
+			service.extendGraceDeadlines(
+				'',
+				[hash],
+				isoTimestampSchema.parse('2026-03-01T00:00:00.000Z')
+			);
+			service.extendGraceDeadlines(
+				'',
+				[hash],
+				isoTimestampSchema.parse('2026-02-01T00:00:00.000Z')
+			);
 		});
 
 		expect(await graceDeadlineRows(DEFAULT_CACHE)).toStrictEqual([
@@ -2918,7 +2931,7 @@ describe('grace transition atomicity', () => {
 		const name = rootNameSchema.parse('channel');
 		const hash = storePathHashSchema.parse(repeated('m'));
 		const storePath = storePathSchema.parse(`/nix/store/${repeated('m')}-x`);
-		const nowIso = '2026-01-01T00:00:00.000Z';
+		const nowIso = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 
 		await runInDurableObject(currentServer(), (instance) => {
 			const retention = new RetentionService(instance.context);
@@ -3410,7 +3423,7 @@ describe('confirming an unretained publication', () => {
 							narSize: narBytes.byteLength,
 							referencesJson: '[]',
 							generation: narInfoGenerationSchema.parse(1),
-							createdAt: '2026-01-01T00:00:00.000Z'
+							createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 						}))
 					)
 					.run();

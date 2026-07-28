@@ -18,6 +18,7 @@ import type {
 	VerifyReport
 } from '@cupboard/protocol/reports';
 import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	commitCapabilitiesHeader,
 	commitCapabilitiesValue,
@@ -1265,8 +1266,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		applyMigrations(this.context.db, migrations);
 		await this.assertZstdAvailable();
 
-		const now = new Date();
-
 		// The default cache always exists in the registry so its priority is
 		// resolved the same way as a named cache's. Idempotent across restarts.
 		this.context.db
@@ -1274,7 +1273,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.values({
 				name: DEFAULT_CACHE,
 				priority: cachePrioritySchema.parse(CacheInfo.default.priority),
-				createdAt: now.toISOString()
+				createdAt: isoTimestamp(new Date())
 			})
 			.onConflictDoNothing()
 			.run();

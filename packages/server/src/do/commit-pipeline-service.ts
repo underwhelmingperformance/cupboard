@@ -10,6 +10,7 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type CommitResponse,
 	type ParsedUploadGraceFact,
@@ -578,7 +579,7 @@ export class CommitPipelineService {
 		cache: StoredCache,
 		narHash: NixSha256HashString,
 		uploadId: UploadId,
-		nowIso: string
+		nowIso: IsoTimestamp
 	): boolean {
 		// A null verdict is an inline commit mid-flight; `committing` and
 		// `pending` are sagas the verification pass re-drives.
@@ -634,7 +635,7 @@ export class CommitPipelineService {
 		metadata: ParsedUploadPathNegotiation,
 		generation: NarInfoGeneration,
 		blob: { readonly fileSize: number },
-		now: string
+		now: IsoTimestamp
 	): BatchItem<'sqlite'>[] {
 		const activeTenantFilter = and(
 			eq(d1Schema.tenant.id, tenant),
@@ -762,7 +763,7 @@ export class CommitPipelineService {
 		generation: NarInfoGeneration,
 		blob: { readonly fileSize: number }
 	): Promise<'charged' | 'over-quota' | 'tenant-inactive'> {
-		const now = new Date().toISOString();
+		const now = isoTimestamp(new Date());
 
 		// The probed pre-check is the clean over-quota rejection. The
 		// `tenant_usage` CHECK constraint backs it as a database-level invariant.
@@ -815,7 +816,7 @@ export class CommitPipelineService {
 			readonly blob: CanonicalBlobFacts;
 		}[]
 	): Promise<'charged' | 'tenant-inactive' | 'retry-individually'> {
-		const now = new Date().toISOString();
+		const now = isoTimestamp(new Date());
 		const statements = charges.flatMap((charge) =>
 			this.chargeStatements(
 				tenant,
@@ -1043,7 +1044,7 @@ export class CommitPipelineService {
 			string,
 			{
 				readonly cache: StoredCache;
-				readonly retainUntil: string;
+				readonly retainUntil: IsoTimestamp;
 				readonly entries: {
 					readonly index: number;
 					readonly hash: StorePathHash;
@@ -1070,9 +1071,9 @@ export class CommitPipelineService {
 				continue;
 			}
 
-			const retainUntil = new Date(
-				settledAt + graceSeconds * 1000
-			).toISOString();
+			const retainUntil = isoTimestamp(
+				new Date(settledAt + graceSeconds * 1000)
+			);
 			const key = `${request.cache} ${retainUntil}`;
 			const group = extensions.get(key) ?? {
 				cache: request.cache,
@@ -1380,8 +1381,7 @@ export class CommitPipelineService {
 		}
 
 		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
-		const clock = new Date();
-		const nowIso = clock.toISOString();
+		const nowIso = isoTimestamp(new Date());
 
 		if (pending.expiresAt < nowIso) {
 			await this.uploadState.clearPendingUploadAndStaging(
@@ -1397,9 +1397,7 @@ export class CommitPipelineService {
 
 		this.context.db
 			.update(schema.pendingUploads)
-			.set({
-				expiresAt: renewedExpiry.toISOString()
-			})
+			.set({ expiresAt: isoTimestamp(renewedExpiry) })
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
 
@@ -1671,8 +1669,7 @@ export class CommitPipelineService {
 		cache: StoredCache,
 		metadata: ParsedUploadPathNegotiation
 	): Promise<ReserveOutcome> {
-		const clock = new Date();
-		const now = clock.toISOString();
+		const now = isoTimestamp(new Date());
 		this.cacheAdmin.loadOrCreateCache(cache);
 		const signingKeys = await this.signingKeysService.signingKeys();
 		// The fingerprint, and so the signature, commits to the uncompressed NAR and

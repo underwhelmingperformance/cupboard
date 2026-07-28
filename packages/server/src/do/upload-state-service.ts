@@ -2,6 +2,7 @@ import {
 	type NixSha256HashString,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type ParsedUploadPathNegotiation,
 	type SessionId,
@@ -200,10 +201,7 @@ export class UploadStateService {
 
 		this.context.db
 			.update(schema.pendingUploads)
-			.set({
-				verdict,
-				expiresAt: expiresAt.toISOString()
-			})
+			.set({ verdict, expiresAt: isoTimestamp(expiresAt) })
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
 	}

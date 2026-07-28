@@ -28,6 +28,7 @@
 		"./reports": "./src/reports.ts",
 		"./retention": "./src/retention.ts",
 		"./reuse-views": "./src/reuse-views.ts",
+		"./scalars": "./src/scalars.ts",
 		"./signup": "./src/signup.ts",
 		"./tenants": "./src/tenants.ts",
 		"./upload": "./src/upload.ts"

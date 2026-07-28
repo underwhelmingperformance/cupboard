@@ -1,4 +1,5 @@
 import type { TtlSeconds } from '@cupboard/nix-store/scalars';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import type { R2Credential } from '@cupboard/protocol/upload';
 
 import type { R2PresignerConfiguration } from './presign.ts';
@@ -130,6 +131,6 @@ export async function createR2TemporaryCredentials(
 		sessionToken: btoa(`jwt/${jwt}`),
 		endpoint,
 		bucket: configuration.bucketName,
-		expiresAt: new Date(expiresAt * 1000).toISOString()
+		expiresAt: isoTimestamp(new Date(expiresAt * 1000))
 	};
 }

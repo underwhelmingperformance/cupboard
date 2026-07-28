@@ -10,6 +10,7 @@ import {
 	reuseViewPrioritySchema,
 	reuseViewRevisionSchema
 } from '@cupboard/protocol/reuse-views';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
@@ -117,7 +118,7 @@ describe('migrations', () => {
 			scope: 'root-name-prefix' as const,
 			pattern: 'pr-',
 			defaultTtlSeconds: 1_209_600,
-			createdAt: '2026-01-01T00:00:00.000Z'
+			createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		};
 
 		const rows = await runInDurableObject(
@@ -142,7 +143,7 @@ describe('migrations', () => {
 			id: 'active',
 			cache: cacheNameSchema.parse('builds'),
 			lastStorePathHash: 'a'.repeat(32),
-			updatedAt: '2026-01-01T00:00:00.000Z'
+			updatedAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		};
 
 		const rows = await runInDurableObject(
@@ -167,7 +168,7 @@ describe('migrations', () => {
 			id: 'g1',
 			cachePrefix: 'pr-',
 			graceSeconds: graceSecondsSchema.parse(86_400),
-			createdAt: '2026-01-01T00:00:00.000Z'
+			createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		};
 
 		const rows = await runInDurableObject(
@@ -197,7 +198,7 @@ describe('migrations', () => {
 		const deadline = {
 			cache: defaultCache,
 			storePathHash: storePathHashSchema.parse('a'.repeat(32)),
-			retainUntil: '2026-06-01T00:00:00.000Z'
+			retainUntil: isoTimestampSchema.parse('2026-06-01T00:00:00.000Z')
 		};
 
 		const migrated = await runInDurableObject(
@@ -278,8 +279,8 @@ describe('migrations', () => {
 			name: 'reuse',
 			revision: reuseViewRevisionSchema.parse(1),
 			priority: reuseViewPrioritySchema.parse(50),
-			createdAt: '2026-01-01T00:00:00.000Z',
-			updatedAt: '2026-01-01T00:00:00.000Z'
+			createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+			updatedAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 		};
 		const selector = { view: 'reuse', kind: 'exact' as const, pattern: 'pr-1' };
 		const revisionSeq = {
@@ -420,8 +421,8 @@ describe('migrations', () => {
 				}
 			]),
 			displayJson: JSON.stringify({ repository: 'owner/repo' }),
-			createdAt: '2026-01-01T00:00:00.000Z',
-			disabledAt: '2026-01-02T00:00:00.000Z'
+			createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+			disabledAt: isoTimestampSchema.parse('2026-01-02T00:00:00.000Z')
 		};
 
 		const rows = await runInDurableObject(

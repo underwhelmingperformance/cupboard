@@ -2,6 +2,7 @@ import {
 	DEFAULT_CACHE,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -38,7 +39,7 @@ const hashCount = 100;
 const hashes = Array.from({ length: hashCount }, (_, index) =>
 	storePathHashSchema.parse(generatedHash(index))
 );
-const retainUntil = '2026-06-01T00:00:00.000Z';
+const retainUntil = isoTimestampSchema.parse('2026-06-01T00:00:00.000Z');
 
 describe('retention grace bounds', () => {
 	beforeEach(resetTestServer);

@@ -15,6 +15,7 @@ import {
 	type OidcClaims,
 	type OidcTrustRule
 } from '@cupboard/protocol/oidc-trust-match';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { asc, eq, isNull, sql } from 'drizzle-orm';
 import type { JWTPayload } from 'jose';
 
@@ -158,8 +159,7 @@ export class OidcTrustService {
 
 	addRule(body: ParsedOidcTrustAddBody): OidcTrustSummary {
 		const id = trustRuleIdSchema.parse(crypto.randomUUID());
-		const now = new Date();
-		const createdAt = now.toISOString();
+		const createdAt = isoTimestamp(new Date());
 
 		this.context.db
 			.insert(schema.oidcTrust)
@@ -202,12 +202,9 @@ export class OidcTrustService {
 		const wasRemoved = existing !== undefined && !existing.disabledAt;
 
 		if (wasRemoved) {
-			const now = new Date();
-			const disabledAt = now.toISOString();
-
 			this.context.db
 				.update(schema.oidcTrust)
-				.set({ disabledAt })
+				.set({ disabledAt: isoTimestamp(new Date()) })
 				.where(eq(schema.oidcTrust.id, id))
 				.run();
 		}
@@ -275,8 +272,7 @@ export class OidcTrustService {
 			// covers every operation in its domain.
 			permittedGrantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }])
 		};
-		const now = new Date();
-		const createdAt = now.toISOString();
+		const createdAt = isoTimestamp(new Date());
 
 		this.context.db
 			.insert(schema.oidcTrust)

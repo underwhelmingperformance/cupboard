@@ -7,6 +7,7 @@ import {
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { type VerifyReport } from '@cupboard/protocol/reports';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type ParsedUploadGraceFact,
 	type ParsedUploadPathNegotiation,
@@ -163,9 +164,9 @@ function isAwaitingVerdict(
 // pass already working them. A lease older than `verifyClaimLeaseMs` belongs
 // to a pass presumed dead, so its rows are claimable again.
 function claimableFilter(now: Date) {
-	const leasedBefore = new Date(
-		now.getTime() - verifyClaimLeaseMs
-	).toISOString();
+	const leasedBefore = isoTimestamp(
+		new Date(now.getTime() - verifyClaimLeaseMs)
+	);
 
 	return and(
 		or(
@@ -1117,7 +1118,7 @@ export class VerificationService {
 
 		this.context.db
 			.update(schema.pendingUploads)
-			.set({ claimedAt: now.toISOString() })
+			.set({ claimedAt: isoTimestamp(now) })
 			.where(inArray(schema.pendingUploads.id, uploadIds))
 			.run();
 	}
@@ -1292,7 +1293,7 @@ export class VerificationService {
 			const nextCache = hasWrapped || last === undefined ? '' : last.cache;
 			const nextHash =
 				hasWrapped || last === undefined ? '' : last.storePathHash;
-			const now = new Date().toISOString();
+			const now = isoTimestamp(new Date());
 
 			this.context.db
 				.insert(schema.verificationCursor)

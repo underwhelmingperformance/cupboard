@@ -6,6 +6,7 @@ import {
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import { gcResponseSchema } from '@cupboard/protocol/retention';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	type StatsResponse,
 	statsResponseSchema,
@@ -108,7 +109,7 @@ async function seedCollectablePaths(
 	count: number
 ): Promise<void> {
 	const storedCache = storedCacheSchema.parse(cache);
-	const createdAt = new Date().toISOString();
+	const createdAt = isoTimestamp(new Date());
 	const rows = Array.from({ length: count }, (_unused, index) => {
 		const storePathHash = syntheticStorePathHash(index);
 

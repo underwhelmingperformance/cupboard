@@ -1,5 +1,6 @@
 import { startCapture } from '@cupboard/logger/testing';
 import { nixSha256HashSchema } from '@cupboard/nix-store/scalars';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { StatusCodes } from 'http-status-codes';
@@ -229,7 +230,7 @@ function pendingUpload(
 		narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 		r2Key: r2ObjectKeySchema.parse(`staging/upload-${String(index)}`),
 		metadataJson: '{}',
-		createdAt: '2026-01-01T00:00:00.000Z',
-		expiresAt: '2026-01-02T00:00:00.000Z'
+		createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+		expiresAt: isoTimestampSchema.parse('2026-01-02T00:00:00.000Z')
 	};
 }

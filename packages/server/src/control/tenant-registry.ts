@@ -4,6 +4,7 @@ import {
 	oidcIssuerSchema,
 	oidcSubjectSchema
 } from '@cupboard/protocol/oidc';
+import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import type {
 	ParsedTenantCreateBody,
 	ParsedTenantReadCredential,
@@ -123,7 +124,7 @@ async function sameReadVerifier(
 export async function ensureTenant(
 	database: Database,
 	body: ParsedTenantCreateBody,
-	now: string
+	now: IsoTimestamp
 ): Promise<ParsedTenantSummary> {
 	const verifier = await readVerifierColumnsForInsert(body.read);
 	const inserted = await database
@@ -186,7 +187,7 @@ export async function ensureTenant(
 async function ensureUsageRow(
 	database: Database,
 	body: ParsedTenantCreateBody,
-	now: string
+	now: IsoTimestamp
 ): Promise<void> {
 	await database
 		.insert(d1Schema.tenantUsage)

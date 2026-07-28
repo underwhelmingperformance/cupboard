@@ -11,6 +11,7 @@ import {
 	reuseViewNameSchema,
 	reuseViewSetBodySchema
 } from '@cupboard/protocol/reuse-views';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq, sql } from 'drizzle-orm';
@@ -440,7 +441,7 @@ describe('reuse-view lookup hardening', () => {
 				narSize: 10,
 				referencesJson: '[]',
 				sigsJson: '[]',
-				createdAt: '2026-01-01T00:00:00.000Z'
+				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 			}));
 
 			// The Durable Object's SQLite binds at most ~100 variables per
@@ -461,7 +462,7 @@ describe('reuse-view lookup hardening', () => {
 					narSize: 10,
 					referencesJson: '[]',
 					sigsJson: '[]',
-					createdAt: '2026-01-01T00:00:00.000Z'
+					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 				})
 				.run();
 		});

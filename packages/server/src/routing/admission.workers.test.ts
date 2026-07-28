@@ -1,4 +1,5 @@
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import {
 	type ParsedTenantCreateBody,
 	tenantCreateBodySchema
@@ -40,7 +41,7 @@ import {
 
 import worker from './handler.ts';
 
-const now = '2026-01-01T00:00:00.000Z';
+const now = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 
 async function admitWithFaults(
 	slug: string,

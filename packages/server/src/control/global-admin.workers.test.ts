@@ -1,3 +1,4 @@
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
@@ -10,8 +11,8 @@ import { claimGlobalAdmin } from './global-admin.ts';
 
 const issuer = 'https://idp.example.test';
 const audience = 'cupboard-control-client';
-const t0 = '2026-01-01T00:00:00.000Z';
-const t1 = '2026-01-01T00:01:00.000Z';
+const t0 = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+const t1 = isoTimestampSchema.parse('2026-01-01T00:01:00.000Z');
 
 function controlDatabase(): ReturnType<typeof drizzleD1<typeof d1Schema>> {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });

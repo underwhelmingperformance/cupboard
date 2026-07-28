@@ -13,6 +13,7 @@ import {
 	type ReuseViewSelector,
 	type ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
@@ -84,7 +85,7 @@ function pullRequestView(
 		revision: 1,
 		priority: 50,
 		selectors: [...selectors],
-		createdAt: '2026-01-01T00:00:00.000Z',
+		createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 		updatedAt: '2026-01-01T00:00:00.000Z'
 	};
 }
@@ -109,12 +110,14 @@ function checkClient(overrides: {
 										graceSeconds: graceSecondsSchema.parse(
 											overrides.graceSeconds
 										),
-										createdAt: '2026-01-01T00:00:00.000Z'
+										createdAt: isoTimestampSchema.parse(
+											'2026-01-01T00:00:00.000Z'
+										)
 									}
 								]),
 						...(overrides.extraPolicies ?? []).map((policy, index) => ({
 							id: `grace-extra-${String(index)}`,
-							createdAt: '2026-01-01T00:00:00.000Z',
+							createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 							...policy,
 							graceSeconds: graceSecondsSchema.parse(policy.graceSeconds)
 						}))

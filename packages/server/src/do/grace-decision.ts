@@ -6,6 +6,7 @@ import {
 	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { type ParsedUploadGraceFact } from '@cupboard/protocol/upload';
 import { and, eq, inArray } from 'drizzle-orm';
 import { z } from 'zod';
@@ -160,7 +161,7 @@ export function confirmGraceBatch(
 	const retainUntil =
 		graceSeconds === undefined || graceSeconds === 0
 			? undefined
-			: new Date(Date.now() + graceSeconds * 1000).toISOString();
+			: isoTimestamp(new Date(Date.now() + graceSeconds * 1000));
 	const matched: StorePathHash[] = [];
 
 	// The identity re-check and the writes it authorises share one transaction
@@ -246,8 +247,8 @@ export function storedGraceDeadlines(
 	database: ServerContext['db'],
 	cache: StoredCache,
 	storePathHashes: readonly StorePathHash[]
-): Map<StorePathHash, string> {
-	const deadlines = new Map<StorePathHash, string>();
+): Map<StorePathHash, IsoTimestamp> {
+	const deadlines = new Map<StorePathHash, IsoTimestamp>();
 
 	for (const batch of chunk(storePathHashes, maxInClauseValues)) {
 		const rows = database

@@ -6,6 +6,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
+import { isoTimestampSchema } from './scalars.ts';
 import { pushIdSchema, uploadIdSchema } from './upload.ts';
 
 export const attestationDescriptorSchema = z.strictObject({
@@ -56,7 +57,7 @@ export const attestationUploadDecisionSchema = z.strictObject({
 	digest: sha256HexDigestSchema,
 	uploadId: uploadIdSchema,
 	r2Key: z.string(),
-	expiresAt: z.string()
+	expiresAt: isoTimestampSchema
 });
 export type ParsedAttestationUploadDecision = z.output<
 	typeof attestationUploadDecisionSchema

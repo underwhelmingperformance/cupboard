@@ -4,6 +4,7 @@ import {
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
@@ -1228,9 +1229,10 @@ async function tenantMaintenanceIsDue(
 
 function tenantMaintenanceDueCondition() {
 	const now = new Date();
-	const nowIso = now.toISOString();
-	const staleDate = new Date(now.getTime() - maintenanceEligibilityStaleMs);
-	const staleBefore = staleDate.toISOString();
+	const nowIso = isoTimestamp(now);
+	const staleBefore = isoTimestamp(
+		new Date(now.getTime() - maintenanceEligibilityStaleMs)
+	);
 
 	return and(
 		eq(d1Schema.tenant.status, 'active'),
@@ -1249,7 +1251,7 @@ function tenantMaintenanceDueCondition() {
 export function buildStampMaintainedStatement(
 	database: CronDatabase,
 	tenantIds: readonly TenantId[],
-	maintainedAt: string
+	maintainedAt: IsoTimestamp
 ) {
 	return database
 		.update(d1Schema.tenant)
@@ -1269,8 +1271,7 @@ async function stampMaintained(
 		return;
 	}
 
-	const maintainedDate = new Date();
-	const maintainedAt = maintainedDate.toISOString();
+	const maintainedAt = isoTimestamp(new Date());
 
 	const tenantIds = batch.map((entry) => entry.id);
 	const chunks = chunk(tenantIds, maxInClauseValues);
@@ -1327,12 +1328,9 @@ async function settleAuthKeyRetirement(
 }
 
 function runControlKeyRetirement(logger: Logger, env: Env): Promise<number> {
-	const retireDate = new Date();
-	const now = retireDate.toISOString();
-
 	return retireScheduledControlKeys(
 		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
-		now
+		isoTimestamp(new Date())
 	);
 }
 
@@ -1342,8 +1340,7 @@ async function recordTenantPassOutcomes(
 	tenants: readonly { readonly id: TenantId }[],
 	results: readonly PromiseSettledResult<unknown>[]
 ): Promise<void> {
-	const timestamp = new Date();
-	const now = timestamp.toISOString();
+	const now = isoTimestamp(new Date());
 
 	await Promise.all(
 		tenants.map(({ id }, index) => {
@@ -1362,7 +1359,7 @@ function recordTenantPassSuccess(
 	database: CronDatabase,
 	tenant: TenantId,
 	pass: TenantCronPass,
-	now: string
+	now: IsoTimestamp
 ): Promise<unknown> {
 	return database
 		.insert(d1Schema.tenantMaintenanceFailure)
@@ -1390,7 +1387,7 @@ function recordTenantPassFailure(
 	tenant: TenantId,
 	pass: TenantCronPass,
 	error: unknown,
-	now: string
+	now: IsoTimestamp
 ): Promise<unknown> {
 	const lastError = errorSummary(error);
 

@@ -15,6 +15,7 @@ import {
 	type RetentionPolicyRemoveResponse,
 	retentionPolicySummarySchema
 } from '@cupboard/protocol/retention';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
@@ -41,7 +42,7 @@ function policyClient(overrides: Partial<PolicyClient>): PolicyClient {
 		graceAdd: (body) =>
 			Promise.resolve({
 				id: 'g1',
-				createdAt: '',
+				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 				...body,
 				graceSeconds: graceSecondsSchema.parse(body.graceSeconds)
 			}),
@@ -182,7 +183,7 @@ describe('runGracePolicyList', () => {
 				id: 'g1',
 				cachePrefix: 'pr-',
 				graceSeconds: graceSecondsSchema.parse(86_400),
-				createdAt: '2026-01-01T00:00:00.000Z'
+				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 			},
 			row: { label: 'g1', value: 'pr-; 86,400s' }
 		},
@@ -192,7 +193,7 @@ describe('runGracePolicyList', () => {
 				id: 'g1',
 				cachePrefix: '',
 				graceSeconds: graceSecondsSchema.parse(0),
-				createdAt: '2026-01-01T00:00:00.000Z'
+				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 			},
 			row: { label: 'g1', value: '(all caches); 0s' }
 		}
@@ -247,7 +248,7 @@ describe('runGracePolicyAdd', () => {
 				id: 'g1',
 				cachePrefix,
 				graceSeconds,
-				createdAt: '2026-01-01T00:00:00.000Z'
+				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 			};
 
 			await runGracePolicyAdd(cachePrefix, graceSeconds, reporter(results), {

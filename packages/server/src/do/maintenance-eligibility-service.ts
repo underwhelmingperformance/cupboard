@@ -1,4 +1,5 @@
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	and,
 	asc,
@@ -18,7 +19,7 @@ import { type ServerContext } from './context.ts';
 // A tenant with work due now should be woken on the scheduler's next pass. We store a
 // fixed past instant, so the many mutations of a single push leave the wake time
 // unchanged and skip the redundant D1 write.
-const wakeImmediately = new Date(0).toISOString();
+const wakeImmediately = isoTimestamp(new Date(0));
 
 export class MaintenanceEligibilityService {
 	constructor(private readonly context: ServerContext) {}
@@ -53,7 +54,7 @@ export class MaintenanceEligibilityService {
 		return queuedDeletion !== undefined;
 	}
 
-	private earliestUploadExpiry(): string | undefined {
+	private earliestUploadExpiry(): IsoTimestamp | undefined {
 		const pendingUploadExpiry = this.context.db
 			.select({ expiresAt: schema.pendingUploads.expiresAt })
 			.from(schema.pendingUploads)
@@ -72,7 +73,7 @@ export class MaintenanceEligibilityService {
 			.toSorted(byCodeUnit)[0];
 	}
 
-	private earliestRootExpiry(): string | undefined {
+	private earliestRootExpiry(): IsoTimestamp | undefined {
 		return (
 			this.context.db
 				.select({ expiresAt: schema.retentionRoots.expiresAt })
@@ -84,7 +85,7 @@ export class MaintenanceEligibilityService {
 		);
 	}
 
-	private earliestGraceExpiry(): string | undefined {
+	private earliestGraceExpiry(): IsoTimestamp | undefined {
 		return (
 			this.context.db
 				.select({ retainUntil: schema.retentionGrace.retainUntil })
@@ -95,7 +96,7 @@ export class MaintenanceEligibilityService {
 		);
 	}
 
-	private earliestAuthKeyRetirement(): string | undefined {
+	private earliestAuthKeyRetirement(): IsoTimestamp | undefined {
 		return (
 			this.context.db
 				.select({ scheduledRetireAt: schema.authKeys.scheduledRetireAt })
@@ -115,7 +116,7 @@ export class MaintenanceEligibilityService {
 	// The soonest deferred deadline once there is nothing due now: an upload or
 	// attestation expiry, a retention-root TTL, a retention-grace deadline, or an
 	// auth-key retirement.
-	private earliestFutureWake(): string | undefined {
+	private earliestFutureWake(): IsoTimestamp | undefined {
 		return [
 			this.earliestUploadExpiry(),
 			this.earliestRootExpiry(),
@@ -126,7 +127,7 @@ export class MaintenanceEligibilityService {
 			.toSorted(byCodeUnit)[0];
 	}
 
-	private nextWakeAt(): string | undefined {
+	private nextWakeAt(): IsoTimestamp | undefined {
 		return this.hasImmediateWork()
 			? wakeImmediately
 			: this.earliestFutureWake();
@@ -152,7 +153,7 @@ export class MaintenanceEligibilityService {
 	// path, and concurrent same-tenant reconciles need no external lock.
 	async reconcile(now: Date = new Date()): Promise<void> {
 		const tenant = this.context.requireTenant();
-		const reconciledAt = now.toISOString();
+		const reconciledAt = isoTimestamp(now);
 		const nextWakeAt = this.nextWakeAt();
 
 		await this.context.d1
@@ -181,8 +182,8 @@ export class MaintenanceEligibilityService {
 // would strand due work, so ties resolve towards waking. The comparisons run against
 // the values this upsert binds, so no `excluded` reference is needed.
 function maintenanceWakeWins(
-	nextWakeAt: string | undefined,
-	reconciledAt: string
+	nextWakeAt: IsoTimestamp | undefined,
+	reconciledAt: IsoTimestamp
 ): SQL {
 	const { nextWakeAt: storedWake, reconciledAt: storedReconciledAt } =
 		d1Schema.tenantMaintenanceEligibility;

@@ -8,6 +8,7 @@ import {
 	narInfoGenerationSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import {
 	commitCapabilitiesHeader,
@@ -2029,8 +2030,8 @@ describe('upload flow', () => {
 					narHash: metadata.narHash,
 					r2Key: r2ObjectKeySchema.parse('staging/rival-upload'),
 					metadataJson: '{}',
-					createdAt: '2026-01-01T00:00:00.000Z',
-					expiresAt: '2099-01-01T00:00:00.000Z'
+					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+					expiresAt: isoTimestampSchema.parse('2099-01-01T00:00:00.000Z')
 				})
 				.run();
 		});

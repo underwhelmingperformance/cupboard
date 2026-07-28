@@ -1,4 +1,5 @@
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -6,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 import * as d1Schema from './d1-schema.ts';
 
-const updatedAt = '2026-01-01T00:00:00.000Z';
+const updatedAt = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
 
 describe('tenant_usage non-negative constraints', () => {
 	it.each([

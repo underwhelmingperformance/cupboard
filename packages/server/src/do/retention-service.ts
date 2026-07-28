@@ -15,6 +15,7 @@ import {
 	type RetentionPolicyRemoveResponse,
 	type RetentionPolicySummary
 } from '@cupboard/protocol/retention';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
@@ -35,7 +36,7 @@ const maxGraceDeadlineRowsPerInsert = Math.floor(maxInClauseValues / 3);
 
 interface GraceTransition {
 	readonly storePathHash: StorePathHash;
-	readonly anchorIso: string;
+	readonly anchorIso: IsoTimestamp;
 }
 
 export class RetentionService {
@@ -72,7 +73,7 @@ export class RetentionService {
 		cache: StoredCache,
 		entries: readonly {
 			readonly storePathHash: StorePathHash;
-			readonly retainUntil: string;
+			readonly retainUntil: IsoTimestamp;
 		}[],
 		writer: SchemaWriter
 	): void {
@@ -112,7 +113,6 @@ export class RetentionService {
 
 	addPolicy(body: ParsedRetentionPolicyAddBody): RetentionPolicySummary {
 		const id = crypto.randomUUID();
-		const now = new Date();
 
 		this.context.db
 			.insert(schema.retentionPolicies)
@@ -121,7 +121,7 @@ export class RetentionService {
 				scope: body.scope,
 				pattern: body.pattern,
 				defaultTtlSeconds: body.ttlSeconds,
-				createdAt: now.toISOString()
+				createdAt: isoTimestamp(new Date())
 			})
 			.run();
 
@@ -180,7 +180,6 @@ export class RetentionService {
 
 	addGracePolicy(body: ParsedGracePolicyAddBody): GracePolicySummary {
 		const id = crypto.randomUUID();
-		const now = new Date();
 
 		const row = this.context.db
 			.insert(schema.retentionGracePolicies)
@@ -188,7 +187,7 @@ export class RetentionService {
 				id,
 				cachePrefix: body.cachePrefix,
 				graceSeconds: body.graceSeconds,
-				createdAt: now.toISOString()
+				createdAt: isoTimestamp(new Date())
 			})
 			.onConflictDoUpdate({
 				target: schema.retentionGracePolicies.cachePrefix,
@@ -253,7 +252,7 @@ export class RetentionService {
 	extendGraceDeadlines(
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[],
-		retainUntil: string,
+		retainUntil: IsoTimestamp,
 		writer: SchemaWriter = this.context.db
 	): void {
 		this.extendGraceDeadlineEntries(
@@ -290,7 +289,7 @@ export class RetentionService {
 	applyGraceTransition(
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[],
-		anchorIso: string,
+		anchorIso: IsoTimestamp,
 		writer: SchemaWriter = this.context.db
 	): void {
 		this.applyGraceTransitions(
@@ -329,7 +328,7 @@ export class RetentionService {
 		// would wake maintenance for nothing and hand a recommitted path an
 		// inherited stale deadline. Only backed hashes receive one, read through
 		// the caller's writer so the check shares its transaction.
-		const latestAnchorByHash = new Map<StorePathHash, string>();
+		const latestAnchorByHash = new Map<StorePathHash, IsoTimestamp>();
 
 		for (const transition of transitions) {
 			const current = latestAnchorByHash.get(transition.storePathHash);
@@ -359,9 +358,9 @@ export class RetentionService {
 					: [
 							{
 								storePathHash,
-								retainUntil: new Date(
-									new Date(anchorIso).getTime() + graceSeconds * 1000
-								).toISOString()
+								retainUntil: isoTimestamp(
+									new Date(new Date(anchorIso).getTime() + graceSeconds * 1000)
+								)
 							}
 						];
 			}),

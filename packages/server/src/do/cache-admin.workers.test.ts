@@ -12,6 +12,7 @@ import {
 	cacheRemoveResponseSchema,
 	cacheSummarySchema
 } from '@cupboard/protocol/caches';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
@@ -43,9 +44,11 @@ const repeated = (character: string): string => character.repeat(32);
 const buildsCache = cacheNameSchema.parse('builds');
 
 // The shared test clock is pinned to 2026-01-01, so these bracket "now".
-const earlierLiveDeadline = '2026-03-01T00:00:00.000Z';
-const laterLiveDeadline = '2026-06-01T00:00:00.000Z';
-const expiredDeadline = '2025-12-01T00:00:00.000Z';
+const earlierLiveDeadline = isoTimestampSchema.parse(
+	'2026-03-01T00:00:00.000Z'
+);
+const laterLiveDeadline = isoTimestampSchema.parse('2026-06-01T00:00:00.000Z');
+const expiredDeadline = isoTimestampSchema.parse('2025-12-01T00:00:00.000Z');
 
 function expectCommitSocketError(
 	error: unknown
@@ -185,7 +188,7 @@ describe('cache registry admin', () => {
 									`cache-${String(index).padStart(2, '0')}`
 								),
 								priority: cachePrioritySchema.parse(40),
-								createdAt: '2026-01-01T00:00:00.000Z'
+								createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 							})
 							.run();
 					}

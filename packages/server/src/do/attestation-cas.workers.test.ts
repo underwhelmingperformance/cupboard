@@ -5,6 +5,7 @@ import {
 	sha256HexDigestSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
@@ -496,7 +497,10 @@ describe('attestation CAS lifecycle', () => {
 		// live object's accounting, so the demote re-checks and is a no-op. The stale
 		// fence value is never consulted because the presence check short-circuits.
 		await currentServer().demoteAttestationReferences([
-			{ digest: bundle.digest, fenceStoredAt: '2000-01-01T00:00:00.000Z' }
+			{
+				digest: bundle.digest,
+				fenceStoredAt: isoTimestampSchema.parse('2000-01-01T00:00:00.000Z')
+			}
 		]);
 
 		expect({
@@ -532,12 +536,15 @@ describe('attestation CAS lifecycle', () => {
 		await env.BLOBS.delete(casObjectKey(bundle.digest));
 		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 			.update(d1Schema.casObject)
-			.set({ storedAt: '2099-01-01T00:00:00.000Z' })
+			.set({ storedAt: isoTimestampSchema.parse('2099-01-01T00:00:00.000Z') })
 			.where(eq(d1Schema.casObject.digest, bundle.digest))
 			.run();
 
 		await currentServer().demoteAttestationReferences([
-			{ digest: bundle.digest, fenceStoredAt: '2000-01-01T00:00:00.000Z' }
+			{
+				digest: bundle.digest,
+				fenceStoredAt: isoTimestampSchema.parse('2000-01-01T00:00:00.000Z')
+			}
 		]);
 
 		expect({

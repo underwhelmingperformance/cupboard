@@ -1,12 +1,14 @@
 import { authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
+import { isoTimestampSchema } from './scalars.ts';
+
 // The control-plane signing keys, as the admin surface sees them. `retired` keys
 // no longer verify; the rest are the live set, with the newest one issuing.
 export const controlKeySummarySchema = z.strictObject({
 	kid: authKeyIdSchema,
 	retired: z.boolean(),
-	scheduledRetireAt: z.string().optional()
+	scheduledRetireAt: isoTimestampSchema.optional()
 });
 export type ParsedControlKeySummary = z.output<typeof controlKeySummarySchema>;
 
@@ -22,7 +24,7 @@ export const controlKeyRotateResponseSchema = z.strictObject({
 	retiring: z
 		.strictObject({
 			kid: authKeyIdSchema,
-			scheduledRetireAt: z.string()
+			scheduledRetireAt: isoTimestampSchema
 		})
 		.optional()
 });

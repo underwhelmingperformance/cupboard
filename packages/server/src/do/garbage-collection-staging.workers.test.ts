@@ -1,4 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -107,8 +108,8 @@ describe('garbage collection best-effort staging deletes', () => {
 						narHash: syntheticNarHash(1),
 						r2Key: reapedKey,
 						metadataJson: '{}',
-						createdAt: '1970-01-01T00:00:00.000Z',
-						expiresAt: '1970-01-01T00:00:00.000Z'
+						createdAt: isoTimestampSchema.parse('1970-01-01T00:00:00.000Z'),
+						expiresAt: isoTimestampSchema.parse('1970-01-01T00:00:00.000Z')
 					})
 					.run();
 

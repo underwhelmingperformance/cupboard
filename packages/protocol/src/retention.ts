@@ -10,6 +10,7 @@ import {
 import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';
+import { isoTimestampSchema } from './scalars.ts';
 
 // One root names a bounded target list. Ensuring a root probes each
 // distinct target's narinfo object and canonical NAR in R2 and rewrites the
@@ -32,10 +33,10 @@ export type ParsedRootTarget = z.output<typeof rootTargetSchema>;
 
 export const rootSummarySchema = z.strictObject({
 	name: rootNameSchema,
-	expiresAt: z.string().optional(),
+	expiresAt: isoTimestampSchema.optional(),
 	expired: z.boolean(),
-	createdAt: z.string(),
-	updatedAt: z.string(),
+	createdAt: isoTimestampSchema,
+	updatedAt: isoTimestampSchema,
 	targets: z.array(rootTargetSchema)
 });
 export type ParsedRootSummary = z.output<typeof rootSummarySchema>;
@@ -160,7 +161,7 @@ export const gracePolicySummarySchema = z.strictObject({
 	id: z.string(),
 	cachePrefix: z.string(),
 	graceSeconds: graceSecondsSchema,
-	createdAt: z.string()
+	createdAt: isoTimestampSchema
 });
 export type ParsedGracePolicySummary = z.output<
 	typeof gracePolicySummarySchema

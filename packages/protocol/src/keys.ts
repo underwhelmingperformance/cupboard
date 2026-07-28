@@ -4,6 +4,8 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
+import { isoTimestampSchema } from './scalars.ts';
+
 // A key signs new narinfos (`signing`), is advertised from `/pubkey` while
 // clients may still trust it (`publication`), or has been dropped (`absent`).
 export const signingKeyStageSchema = z.enum([
@@ -17,7 +19,7 @@ export const signingKeySummarySchema = z.strictObject({
 	id: signingKeyIdSchema,
 	publicKey: z.string(),
 	stage: signingKeyStageSchema,
-	createdAt: z.string()
+	createdAt: isoTimestampSchema
 });
 export type ParsedSigningKeySummary = z.output<typeof signingKeySummarySchema>;
 
@@ -42,9 +44,9 @@ export type ParsedKeyRetireResponse = z.output<typeof keyRetireResponseSchema>;
 // every listed key still verifies and is published in the JWKS.
 export const authKeySummarySchema = z.strictObject({
 	kid: authKeyIdSchema,
-	createdAt: z.string(),
+	createdAt: isoTimestampSchema,
 	active: z.boolean(),
-	scheduledRetireAt: z.string().optional()
+	scheduledRetireAt: isoTimestampSchema.optional()
 });
 export type ParsedAuthKeySummary = z.output<typeof authKeySummarySchema>;
 
@@ -60,7 +62,7 @@ export const authKeyRotateResponseSchema = z.strictObject({
 	retiring: z
 		.strictObject({
 			kid: authKeyIdSchema,
-			scheduledRetireAt: z.string()
+			scheduledRetireAt: isoTimestampSchema
 		})
 		.optional(),
 	keys: z.array(authKeySummarySchema)

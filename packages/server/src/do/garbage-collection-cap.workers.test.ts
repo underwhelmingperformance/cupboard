@@ -3,6 +3,7 @@ import {
 	narInfoGenerationSchema,
 	type StoredCache
 } from '@cupboard/nix-store/scalars';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -45,7 +46,7 @@ async function continuation(): Promise<unknown> {
 }
 
 async function seedNarInfoDeletions(count: number): Promise<void> {
-	const createdAt = new Date().toISOString();
+	const createdAt = isoTimestamp(new Date());
 	const rows = Array.from({ length: count }, (_unused, index) => ({
 		cache: defaultCache,
 		storePathHash: syntheticStorePathHash(index),

@@ -22,6 +22,7 @@ import {
 	type ReuseViewSelector,
 	reuseViewSummarySchema
 } from '@cupboard/protocol/reuse-views';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { ResultRow } from '@cupboard/reporter';
 import { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
@@ -133,7 +134,7 @@ function setupClient(stored: Stored): {
 				Promise.resolve({
 					policies: (stored.gracePolicies ?? []).map((policy, index) => ({
 						id: `grace-${String(index)}`,
-						createdAt: '2026-01-01T00:00:00.000Z',
+						createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 						...policy,
 						graceSeconds: graceSecondsSchema.parse(policy.graceSeconds)
 					}))
@@ -143,7 +144,7 @@ function setupClient(stored: Stored): {
 
 				return Promise.resolve({
 					id: 'grace-new',
-					createdAt: '2026-01-01T00:00:00.000Z',
+					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 					cachePrefix: input.cachePrefix,
 					graceSeconds: graceSecondsSchema.parse(input.graceSeconds)
 				});
@@ -155,7 +156,7 @@ function setupClient(stored: Stored): {
 					reuseViewListResponseSchema.parse({
 						views: (stored.views ?? []).map((view, index) => ({
 							revision: index + 1,
-							createdAt: '2026-01-01T00:00:00.000Z',
+							createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 							updatedAt: '2026-01-01T00:00:00.000Z',
 							...view,
 							selectors: [...view.selectors]
@@ -171,7 +172,7 @@ function setupClient(stored: Stored): {
 						revision: 1,
 						priority: input.priority ?? 50,
 						selectors: [...input.selectors],
-						createdAt: '2026-01-01T00:00:00.000Z',
+						createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 						updatedAt: '2026-01-01T00:00:00.000Z'
 					})
 				);

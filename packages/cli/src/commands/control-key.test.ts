@@ -4,11 +4,11 @@ import {
 } from '@cupboard/cli-ui/testing';
 import { authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import type {
-	ControlKeySummary,
 	ParsedControlKeyListResponse,
 	ParsedControlKeyRotateResponse,
 	ParsedControlKeySummary
 } from '@cupboard/protocol/control-keys';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
@@ -20,7 +20,7 @@ import {
 } from './control-key.ts';
 
 function summary(
-	overrides: Partial<ControlKeySummary>
+	overrides: Omit<Partial<ParsedControlKeySummary>, 'kid'> & { kid?: string }
 ): ParsedControlKeySummary {
 	const { kid = 'kid-1', ...rest } = overrides;
 
@@ -52,7 +52,9 @@ describe('runControlKeyList', () => {
 				summary({
 					kid: 'kid-old',
 					retired: false,
-					scheduledRetireAt: '2026-01-01T00:20:30.000Z'
+					scheduledRetireAt: isoTimestampSchema.parse(
+						'2026-01-01T00:20:30.000Z'
+					)
 				}),
 				summary({ kid: 'kid-new' })
 			]
@@ -95,7 +97,7 @@ describe('runControlKeyRotate', () => {
 			kid: authKeyIdSchema.parse('kid-new'),
 			retiring: {
 				kid: authKeyIdSchema.parse('kid-old'),
-				scheduledRetireAt: '2026-01-01T00:20:30.000Z'
+				scheduledRetireAt: isoTimestampSchema.parse('2026-01-01T00:20:30.000Z')
 			}
 		};
 

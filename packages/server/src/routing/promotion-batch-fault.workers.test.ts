@@ -1,4 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import type { UploadId } from '@cupboard/protocol/upload';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -193,9 +194,10 @@ describe('reaper pin: claimed hashes have their grace timers cleared up front', 
 		);
 
 		// Arm the reaper timer on the shared blob's existing row.
+		const armedUntil = new Date(testBase.getTime() + 5000);
 		await armBlobReaperTimer(
 			reuse.narHash as Parameters<typeof armBlobReaperTimer>[0],
-			new Date(testBase.getTime() + 5000).toISOString()
+			isoTimestamp(armedUntil)
 		);
 
 		const beforePass = await blobStateArmTimes();

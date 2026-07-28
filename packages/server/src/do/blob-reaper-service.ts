@@ -5,6 +5,7 @@ import {
 	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
 	and,
@@ -67,7 +68,7 @@ export interface NarInfoDemoter {
 // is fenced on so a re-stored object is left intact.
 export interface CasReferenceDemotion {
 	readonly digest: Sha256HexDigest;
-	readonly fenceStoredAt: string;
+	readonly fenceStoredAt: IsoTimestamp;
 }
 
 export interface CasReferenceDemoter {
@@ -112,8 +113,9 @@ export class BlobReaperService {
 	// not any one tenant's narinfos. Bounded: only a batch is armed per pass, and a
 	// commit that re-references a hash clears the timer it set.
 	private async armUnreferencedBlobs(now: Date, limit: number): Promise<void> {
-		const graceDeadline = new Date(now.getTime() + blobReaperGraceMs);
-		const deletionTime = graceDeadline.toISOString();
+		const deletionTime = isoTimestamp(
+			new Date(now.getTime() + blobReaperGraceMs)
+		);
 		const referencedHashes = this.d1
 			.select({ narHash: d1Schema.blobReference.narHash })
 			.from(d1Schema.blobReference);
@@ -161,7 +163,7 @@ export class BlobReaperService {
 	// the D1 fact is deleted before the R2 object (D1-first/R2-last), so a crash
 	// between them leaves only a harmless orphan object the next promote adopts.
 	private async collectExpiredBlobs(now: Date, limit: number): Promise<number> {
-		const nowIso = now.toISOString();
+		const nowIso = isoTimestamp(now);
 		const expired = await this.d1
 			.select({ narHash: d1Schema.blobState.narHash })
 			.from(d1Schema.blobState)
@@ -216,8 +218,9 @@ export class BlobReaperService {
 		now: Date,
 		limit: number
 	): Promise<void> {
-		const graceDeadline = new Date(now.getTime() + blobReaperGraceMs);
-		const deletionTime = graceDeadline.toISOString();
+		const deletionTime = isoTimestamp(
+			new Date(now.getTime() + blobReaperGraceMs)
+		);
 		const referencedDigests = this.d1
 			.select({ digest: d1Schema.attestationReference.digest })
 			.from(d1Schema.attestationReference);
@@ -263,7 +266,7 @@ export class BlobReaperService {
 		now: Date,
 		limit: number
 	): Promise<number> {
-		const nowIso = now.toISOString();
+		const nowIso = isoTimestamp(now);
 		const expired = await this.d1
 			.select({ digest: d1Schema.casObject.digest })
 			.from(d1Schema.casObject)
@@ -414,7 +417,7 @@ export class BlobReaperService {
 	// chunked to stay within D1's bound-parameter limit. Returns how many were
 	// deleted.
 	private async deleteFencedBlobStates(
-		rows: readonly { narHash: NixSha256HashString; verifiedAt: string }[]
+		rows: readonly { narHash: NixSha256HashString; verifiedAt: IsoTimestamp }[]
 	): Promise<number> {
 		// The chunks go in one D1 batch, so all chunks cost a single round-trip.
 		const chunks = chunk(rows, maxFencedDeleteRows);
@@ -444,7 +447,7 @@ export class BlobReaperService {
 	private demoteBatch(
 		after: string,
 		limit: number
-	): Promise<{ narHash: NixSha256HashString; verifiedAt: string }[]> {
+	): Promise<{ narHash: NixSha256HashString; verifiedAt: IsoTimestamp }[]> {
 		return this.d1
 			.select({
 				narHash: d1Schema.blobState.narHash,
@@ -461,7 +464,7 @@ export class BlobReaperService {
 	// `stored_at` captured at scan, the CAS counterpart of
 	// {@link deleteFencedBlobStates}. Returns how many were deleted.
 	private async deleteFencedCasObjects(
-		rows: readonly { digest: Sha256HexDigest; storedAt: string }[]
+		rows: readonly { digest: Sha256HexDigest; storedAt: IsoTimestamp }[]
 	): Promise<number> {
 		// The chunks go in one D1 batch, so all chunks cost a single round-trip.
 		const chunks = chunk(rows, maxFencedDeleteRows);
@@ -489,7 +492,7 @@ export class BlobReaperService {
 	private demoteCasBatch(
 		after: string,
 		limit: number
-	): Promise<{ digest: Sha256HexDigest; storedAt: string }[]> {
+	): Promise<{ digest: Sha256HexDigest; storedAt: IsoTimestamp }[]> {
 		return this.d1
 			.select({
 				digest: d1Schema.casObject.digest,
@@ -506,7 +509,7 @@ export class BlobReaperService {
 	// bulk read per chunk. Each tenant's entry is the demotions to route to it in a
 	// single call, carrying the per-digest `stored_at` fence.
 	private async casReferencingDemotions(
-		objects: readonly { digest: Sha256HexDigest; storedAt: string }[]
+		objects: readonly { digest: Sha256HexDigest; storedAt: IsoTimestamp }[]
 	): Promise<Map<string, CasReferenceDemotion[]>> {
 		const storedAtByDigest = new Map(
 			objects.map((object) => [object.digest, object.storedAt])

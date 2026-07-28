@@ -5,6 +5,7 @@ import {
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { type DeletePathResponse } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, eq, exists, inArray, notExists, or, sql } from 'drizzle-orm';
@@ -61,7 +62,7 @@ export function teardownPresenceBatch(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
 	narHashes: readonly NixSha256HashString[],
-	now: string
+	now: IsoTimestamp
 ) {
 	const stillReferenced = d1
 		.select({ narHash: d1Schema.blobReference.narHash })
@@ -112,8 +113,7 @@ export class DeletionQueueService {
 		narHash: NixSha256HashString
 	): Promise<void> {
 		const tenant = this.context.requireTenant();
-		const clock = new Date();
-		const now = clock.toISOString();
+		const now = isoTimestamp(new Date());
 
 		// Retire the captured edge and credit a narinfo back in one atomic batch. The
 		// credit is gated on the edge still existing, so a replayed retirement (the edge
@@ -289,7 +289,7 @@ export class DeletionQueueService {
 		storePathHash: StorePathHash,
 		narHash: NixSha256HashString,
 		generation: NarInfoGeneration,
-		now: string
+		now: IsoTimestamp
 	): void {
 		handle
 			.insert(schema.narInfoDeletions)
@@ -481,8 +481,7 @@ export class DeletionQueueService {
 		}
 
 		const tenant = this.context.requireTenant();
-		const clock = new Date();
-		const now = clock.toISOString();
+		const now = isoTimestamp(new Date());
 
 		let deletedObjects = 0;
 
@@ -673,8 +672,7 @@ export class DeletionQueueService {
 			// The narinfo object cleanup, and with it the NAR scheduling, runs
 			// afterwards and is best-effort; the grace clock for the NAR only starts
 			// once the object is actually removed.
-			const clock = new Date();
-			const now = clock.toISOString();
+			const now = isoTimestamp(new Date());
 
 			this.context.db.transaction((tx) => {
 				tx.delete(schema.narInfos)
@@ -746,8 +744,7 @@ export class DeletionQueueService {
 		row: typeof schema.narInfos.$inferSelect,
 		origin?: RequestOrigin
 	): Promise<void> {
-		const clock = new Date();
-		const now = clock.toISOString();
+		const now = isoTimestamp(new Date());
 
 		this.context.db.transaction((tx) => {
 			tx.delete(schema.narInfos)

@@ -18,6 +18,7 @@ import type {
 	ReuseViewPriority,
 	ReuseViewRevision
 } from '@cupboard/protocol/reuse-views';
+import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import type { SessionId, UploadId } from '@cupboard/protocol/upload';
 import {
 	index,
@@ -49,7 +50,7 @@ export const narInfos = sqliteTable(
 			.$type<NarInfoGeneration>()
 			.notNull()
 			.default(narInfoGenerationSchema.parse(0)),
-		createdAt: text('created_at').notNull()
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
 		primaryKey({ columns: [table.cache, table.storePathHash] }),
@@ -90,8 +91,8 @@ export const pendingUploads = sqliteTable(
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
 		metadataJson: text('metadata_json').notNull(),
-		createdAt: text('created_at').notNull(),
-		expiresAt: text('expires_at').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
 		// The commit-saga status of an accepted upload, the durable marker a crashed
 		// commit is re-driven from and a `push --wait` client polls. `committing` once an
 		// inline commit starts, before it reserves the narinfo row; `pending` once a blob
@@ -117,7 +118,7 @@ export const pendingUploads = sqliteTable(
 		// consumer run) claims nothing already being worked. Null while unclaimed;
 		// a crashed pass's lease simply expires. A client re-drive resets it so
 		// the pass it requests need not wait the lease out.
-		claimedAt: text('claimed_at'),
+		claimedAt: text('claimed_at').$type<IsoTimestamp>(),
 		// The retention grace decision captured at negotiation, applied when this
 		// upload materialises. A policy changed afterwards does not alter it. Null
 		// on a row negotiated before the decision existed, which materialises as
@@ -141,8 +142,8 @@ export const pendingAttestations = sqliteTable(
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		digest: text('digest').$type<Sha256HexDigest>().notNull(),
 		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
-		createdAt: text('created_at').notNull(),
-		expiresAt: text('expires_at').notNull()
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
 	},
 	// The maintenance sweep finds the soonest-expiring attestation and GC reaps the
 	// expired ones; the index spares both a scan of every staged bundle.
@@ -162,7 +163,7 @@ export const narInfoDeletions = sqliteTable(
 			.$type<NarInfoGeneration>()
 			.notNull()
 			.default(narInfoGenerationSchema.parse(0)),
-		createdAt: text('created_at').notNull()
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
 		primaryKey({
@@ -183,9 +184,9 @@ export const authKeys = sqliteTable(
 			.default(authKeyIdSchema.parse('')),
 		privateJwkJson: text('private_jwk_json').notNull(),
 		publicJwkJson: text('public_jwk_json').notNull(),
-		createdAt: text('created_at').notNull(),
-		scheduledRetireAt: text('scheduled_retire_at'),
-		retiredAt: text('retired_at')
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		scheduledRetireAt: text('scheduled_retire_at').$type<IsoTimestamp>(),
+		retiredAt: text('retired_at').$type<IsoTimestamp>()
 	},
 	// The maintenance sweep finds the soonest scheduled retirement among the keys
 	// still in service; filtering on `retired_at` then ordering by
@@ -211,8 +212,8 @@ export const refreshTokens = sqliteTable(
 		secretHash: text('secret_hash').notNull(),
 		ruleId: text('rule_id').$type<TrustRuleId>().notNull(),
 		subject: text('subject').notNull(),
-		createdAt: text('created_at').notNull(),
-		expiresAt: text('expires_at').notNull()
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
 	},
 	// The GC sweep deletes expired refresh tokens by `expires_at`; the index spares
 	// it a scan of every live grant.
@@ -243,7 +244,7 @@ export const signingKeys = sqliteTable('signing_key', {
 	publicKey: text('public_key').notNull(),
 	signing: integer('signing', { mode: 'boolean' }).notNull().default(true),
 	published: integer('published', { mode: 'boolean' }).notNull().default(true),
-	createdAt: text('created_at').notNull()
+	createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 });
 
 export const retentionRoots = sqliteTable(
@@ -251,9 +252,9 @@ export const retentionRoots = sqliteTable(
 	{
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
 		name: text('name').$type<RootName>().notNull(),
-		expiresAt: text('expires_at'),
-		createdAt: text('created_at').notNull(),
-		updatedAt: text('updated_at').notNull()
+		expiresAt: text('expires_at').$type<IsoTimestamp>(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 	},
 	// The maintenance sweep finds the soonest-expiring TTL root; the index spares
 	// it a scan of every root.
@@ -294,7 +295,7 @@ export const retentionGrace = sqliteTable(
 	{
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
-		retainUntil: text('retain_until').notNull()
+		retainUntil: text('retain_until').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
 		primaryKey({ columns: [table.cache, table.storePathHash] }),
@@ -367,7 +368,7 @@ export const caches = sqliteTable('cache', {
 	graceManaged: integer('grace_managed', { mode: 'boolean' })
 		.notNull()
 		.default(false),
-	createdAt: text('created_at').notNull()
+	createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 });
 
 export const retentionPolicies = sqliteTable('retention_policy', {
@@ -375,7 +376,7 @@ export const retentionPolicies = sqliteTable('retention_policy', {
 	scope: text('scope', { enum: ['cache', 'root-name-prefix'] }).notNull(),
 	pattern: text('pattern').notNull(),
 	defaultTtlSeconds: integer('default_ttl_seconds').notNull(),
-	createdAt: text('created_at').notNull()
+	createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 });
 
 // A retention grace policy applies a grace period to every path successfully
@@ -388,7 +389,7 @@ export const retentionGracePolicies = sqliteTable(
 		id: text('id').primaryKey(),
 		cachePrefix: text('cache_prefix').notNull(),
 		graceSeconds: integer('grace_seconds').$type<GraceSeconds>().notNull(),
-		createdAt: text('created_at').notNull()
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
 		unique('retention_grace_policy_cache_prefix_unique').on(table.cachePrefix)
@@ -403,7 +404,7 @@ export const verificationCursor = sqliteTable('verification_cursor', {
 	id: text('id').primaryKey(),
 	cache: text('cache').$type<StoredCache>().notNull().default(''),
 	lastStorePathHash: text('last_store_path_hash'),
-	updatedAt: text('updated_at').notNull()
+	updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 });
 
 // An OIDC trust rule federates an external identity into a set of cupboard
@@ -421,8 +422,8 @@ export const oidcTrust = sqliteTable('oidc_trust', {
 	claimsJson: text('claims_json').notNull().default('{}'),
 	permittedGrantsJson: text('permitted_grants_json').notNull().default('[]'),
 	displayJson: text('display_json'),
-	createdAt: text('created_at').notNull(),
-	disabledAt: text('disabled_at')
+	createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+	disabledAt: text('disabled_at').$type<IsoTimestamp>()
 });
 
 // A named reuse view: tenant configuration naming a set of caches another
@@ -434,8 +435,8 @@ export const reuseViews = sqliteTable('reuse_view', {
 	name: text('name').primaryKey(),
 	revision: integer('revision').$type<ReuseViewRevision>().notNull(),
 	priority: integer('priority').$type<ReuseViewPriority>().notNull(),
-	createdAt: text('created_at').notNull(),
-	updatedAt: text('updated_at').notNull()
+	createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+	updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 });
 
 export const reuseViewSelectors = sqliteTable(

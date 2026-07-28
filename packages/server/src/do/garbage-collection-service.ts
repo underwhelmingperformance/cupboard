@@ -6,6 +6,7 @@ import {
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	and,
 	asc,
@@ -196,7 +197,7 @@ export class GarbageCollectionService {
 
 	private expireRoots(
 		cache: StoredCache,
-		now: string
+		now: IsoTimestamp
 	): {
 		rootsExpired: number;
 		rootsInspected: number;
@@ -712,7 +713,7 @@ export class GarbageCollectionService {
 
 	private advanceSweep(
 		cache: StoredCache,
-		now: string,
+		now: IsoTimestamp,
 		cursor: string,
 		budget: number
 	): {
@@ -787,7 +788,7 @@ export class GarbageCollectionService {
 
 	private collectUnreachable(
 		cache: StoredCache,
-		now: string,
+		now: IsoTimestamp,
 		budget: number
 	): {
 		rootsExpired: number;
@@ -1096,7 +1097,7 @@ export class GarbageCollectionService {
 			...(cache !== undefined && { cache })
 		});
 		const startedAt = new Date();
-		const now = startedAt.toISOString();
+		const now = isoTimestamp(startedAt);
 
 		// The staging objects the sweep reaps, deleted after the critical section
 		// closes so an R2 stall cannot hold the gate. The rows are removed under the

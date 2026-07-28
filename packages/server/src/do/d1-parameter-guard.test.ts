@@ -19,6 +19,7 @@ import {
 	storePathSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { and, eq, inArray, or, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/d1';
 import { describe, expect, it } from 'vitest';
@@ -62,7 +63,7 @@ const stubD1 = {
 const database = drizzle(stubD1, { schema: d1Schema });
 const tenant = tenantIdSchema.parse('fixture-tenant');
 const cache = cacheNameSchema.parse('builds');
-const now = '2024-01-01T00:00:00.000Z';
+const now = isoTimestampSchema.parse('2024-01-01T00:00:00.000Z');
 
 // A syntactically valid NAR hash; value does not matter for param-count checks.
 const testNarHash = nixSha256HashSchema.parse(

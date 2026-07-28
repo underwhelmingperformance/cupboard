@@ -17,6 +17,7 @@ import {
 	type OidcClaims,
 	type OidcTrustRule
 } from '@cupboard/protocol/oidc-trust-match';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { and, eq } from 'drizzle-orm';
 
 import {
@@ -282,8 +283,7 @@ export class TokenExchangeService {
 		const claimed = consumed.at(0);
 
 		// Lost the consume race, or the row was expired (reclaimed on touch): refused.
-		const now = new Date();
-		const nowIso = now.toISOString();
+		const nowIso = isoTimestamp(new Date());
 
 		if (claimed === undefined || claimed.expiresAt <= nowIso) {
 			throw new StaleRefreshTokenError();
@@ -367,8 +367,8 @@ export class TokenExchangeService {
 				secretHash: await sha256Hex(secret),
 				ruleId,
 				subject,
-				createdAt: now.toISOString(),
-				expiresAt: expiresAt.toISOString()
+				createdAt: isoTimestamp(now),
+				expiresAt: isoTimestamp(expiresAt)
 			})
 			.run();
 

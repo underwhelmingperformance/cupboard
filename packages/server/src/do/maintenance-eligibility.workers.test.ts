@@ -7,6 +7,11 @@ import {
 	storePathHashSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import {
+	type IsoTimestamp,
+	isoTimestamp,
+	isoTimestampSchema
+} from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -28,7 +33,7 @@ import {
 const now = new Date('2026-01-01T00:00:00.000Z');
 
 // A tenant with work due now stores a fixed past instant. Mirrors the service.
-const wakeImmediately = new Date(0).toISOString();
+const wakeImmediately = isoTimestamp(new Date(0));
 
 class MaintenanceProjectionTestError extends Error {
 	constructor(public readonly operation: 'delete' | 'insert') {
@@ -109,7 +114,7 @@ describe('maintenance eligibility projection', () => {
 						.values(
 							pendingUpload(
 								'verify-after-failed-refresh',
-								now.toISOString(),
+								isoTimestamp(now),
 								'pending'
 							)
 						)
@@ -166,7 +171,7 @@ describe('maintenance eligibility projection', () => {
 								.values(
 									pendingUpload(
 										'verify-after-failed-invalidation',
-										now.toISOString(),
+										isoTimestamp(now),
 										'pending'
 									)
 								)
@@ -204,9 +209,20 @@ describe('maintenance eligibility projection', () => {
 			instance.context.db
 				.insert(schema.pendingUploads)
 				.values([
-					pendingUpload('waiting-bytes', '2026-01-02T00:00:00.000Z'),
-					pendingUpload('verify-a', '2026-01-03T00:00:00.000Z', 'pending'),
-					pendingUpload('verify-b', '2026-01-04T00:00:00.000Z', 'committing')
+					pendingUpload(
+						'waiting-bytes',
+						isoTimestampSchema.parse('2026-01-02T00:00:00.000Z')
+					),
+					pendingUpload(
+						'verify-a',
+						isoTimestampSchema.parse('2026-01-03T00:00:00.000Z'),
+						'pending'
+					),
+					pendingUpload(
+						'verify-b',
+						isoTimestampSchema.parse('2026-01-04T00:00:00.000Z'),
+						'committing'
+					)
 				])
 				.run();
 			instance.context.db
@@ -216,7 +232,7 @@ describe('maintenance eligibility projection', () => {
 					storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 					narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 					generation: narInfoGenerationSchema.parse(0),
-					createdAt: '2026-01-01T00:00:00.000Z'
+					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 				})
 				.run();
 			instance.context.db
@@ -224,9 +240,9 @@ describe('maintenance eligibility projection', () => {
 				.values({
 					cache: '',
 					name: rootNameSchema.parse('release'),
-					expiresAt: '2026-01-05T00:00:00.000Z',
-					createdAt: '2026-01-01T00:00:00.000Z',
-					updatedAt: '2026-01-01T00:00:00.000Z'
+					expiresAt: isoTimestampSchema.parse('2026-01-05T00:00:00.000Z'),
+					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+					updatedAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 				})
 				.run();
 
@@ -246,16 +262,21 @@ describe('maintenance eligibility projection', () => {
 		await runInDurableObject(currentServer(), (instance) => {
 			instance.context.db
 				.insert(schema.pendingUploads)
-				.values(pendingUpload('terminal', '2026-01-04T00:00:00.000Z'))
+				.values(
+					pendingUpload(
+						'terminal',
+						isoTimestampSchema.parse('2026-01-04T00:00:00.000Z')
+					)
+				)
 				.run();
 			instance.context.db
 				.insert(schema.retentionRoots)
 				.values({
 					cache: '',
 					name: rootNameSchema.parse('release'),
-					expiresAt: '2026-01-03T00:00:00.000Z',
-					createdAt: '2026-01-01T00:00:00.000Z',
-					updatedAt: '2026-01-01T00:00:00.000Z'
+					expiresAt: isoTimestampSchema.parse('2026-01-03T00:00:00.000Z'),
+					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+					updatedAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 				})
 				.run();
 
@@ -276,7 +297,10 @@ describe('maintenance eligibility projection', () => {
 			instance.context.db
 				.insert(schema.pendingAttestations)
 				.values(
-					pendingAttestation('attestation-upload', '2026-01-02T00:00:00.000Z')
+					pendingAttestation(
+						'attestation-upload',
+						isoTimestampSchema.parse('2026-01-02T00:00:00.000Z')
+					)
 				)
 				.run();
 
@@ -299,7 +323,7 @@ describe('maintenance eligibility projection', () => {
 				.values({
 					cache: '',
 					storePathHash: storePathHashSchema.parse('a'.repeat(32)),
-					retainUntil: '2026-01-02T00:00:00.000Z'
+					retainUntil: isoTimestampSchema.parse('2026-01-02T00:00:00.000Z')
 				})
 				.run();
 
@@ -322,7 +346,7 @@ describe('maintenance eligibility projection', () => {
 				.values({
 					cache: '',
 					storePathHash: storePathHashSchema.parse('a'.repeat(32)),
-					retainUntil: '2026-01-05T00:00:00.000Z'
+					retainUntil: isoTimestampSchema.parse('2026-01-05T00:00:00.000Z')
 				})
 				.run();
 			instance.context.db
@@ -330,9 +354,9 @@ describe('maintenance eligibility projection', () => {
 				.values({
 					cache: '',
 					name: rootNameSchema.parse('release'),
-					expiresAt: '2026-01-03T00:00:00.000Z',
-					createdAt: '2026-01-01T00:00:00.000Z',
-					updatedAt: '2026-01-01T00:00:00.000Z'
+					expiresAt: isoTimestampSchema.parse('2026-01-03T00:00:00.000Z'),
+					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+					updatedAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 				})
 				.run();
 
@@ -356,13 +380,17 @@ describe('maintenance eligibility projection', () => {
 					authKey({
 						id: 'old-retired',
 						kid: authKeyIdSchema.parse('old-retired'),
-						scheduledRetireAt: '2026-01-02T00:00:00.000Z',
-						retiredAt: '2026-01-02T00:01:00.000Z'
+						scheduledRetireAt: isoTimestampSchema.parse(
+							'2026-01-02T00:00:00.000Z'
+						),
+						retiredAt: isoTimestampSchema.parse('2026-01-02T00:01:00.000Z')
 					}),
 					authKey({
 						id: 'old-live',
 						kid: authKeyIdSchema.parse('old-live'),
-						scheduledRetireAt: '2026-01-03T00:00:00.000Z'
+						scheduledRetireAt: isoTimestampSchema.parse(
+							'2026-01-03T00:00:00.000Z'
+						)
 					}),
 					authKey({ id: 'active', kid: authKeyIdSchema.parse('active') })
 				])
@@ -384,10 +412,10 @@ describe('maintenance eligibility projection', () => {
 describe('maintenance wake conflict resolution', () => {
 	beforeEach(resetTestServer);
 
-	const earlier = '2026-01-01T00:00:00.000Z';
-	const later = '2026-02-01T00:00:00.000Z';
-	const soonFuture = '2026-03-01T00:00:00.000Z';
-	const farFuture = '2026-09-01T00:00:00.000Z';
+	const earlier = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+	const later = isoTimestampSchema.parse('2026-02-01T00:00:00.000Z');
+	const soonFuture = isoTimestampSchema.parse('2026-03-01T00:00:00.000Z');
+	const farFuture = isoTimestampSchema.parse('2026-09-01T00:00:00.000Z');
 
 	// Each case seeds a stored projection row, then reconciles against Durable Object
 	// state that drives the incoming wake (`immediate` from a pending upload, a future
@@ -482,8 +510,8 @@ describe('maintenance wake conflict resolution', () => {
 });
 
 async function seedEligibility(
-	nextWakeAt: string | undefined,
-	reconciledAt: string
+	nextWakeAt: IsoTimestamp | undefined,
+	reconciledAt: IsoTimestamp
 ): Promise<void> {
 	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 		.insert(d1Schema.tenantMaintenanceEligibility)
@@ -501,7 +529,7 @@ async function seedEligibility(
 
 function pendingUpload(
 	id: string,
-	expiresAt: string,
+	expiresAt: IsoTimestamp,
 	verdict?: typeof schema.pendingUploads.$inferSelect.verdict
 ): typeof schema.pendingUploads.$inferInsert {
 	return {
@@ -510,7 +538,7 @@ function pendingUpload(
 		narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 		r2Key: r2ObjectKeySchema.parse(`staging/${id}`),
 		metadataJson: '{}',
-		createdAt: '2026-01-01T00:00:00.000Z',
+		createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 		expiresAt,
 		verdict
 	};
@@ -518,7 +546,7 @@ function pendingUpload(
 
 function pendingAttestation(
 	id: string,
-	expiresAt: string
+	expiresAt: IsoTimestamp
 ): typeof schema.pendingAttestations.$inferInsert {
 	return {
 		id: uploadIdSchema.parse(id),
@@ -526,7 +554,7 @@ function pendingAttestation(
 		storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 		digest: sha256HexDigestSchema.parse('b'.repeat(64)),
 		r2Key: r2ObjectKeySchema.parse(`staging/attestations/${id}`),
-		createdAt: '2026-01-01T00:00:00.000Z',
+		createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 		expiresAt
 	};
 }
@@ -539,7 +567,7 @@ function authKey(
 		kid: authKeyIdSchema.parse('key'),
 		privateJwkJson: '{}',
 		publicJwkJson: '{}',
-		createdAt: '2026-01-01T00:00:00.000Z',
+		createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
 		...overrides
 	};
 }
