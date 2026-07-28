@@ -4,7 +4,10 @@ import {
 	type CliUiScript,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
-import { CacheInfo } from '@cupboard/nix-store/cache-info';
+import {
+	CacheInfo,
+	servedStoreDirectory
+} from '@cupboard/nix-store/cache-info';
 import {
 	cachePrioritySchema,
 	graceSecondsSchema
@@ -208,7 +211,7 @@ const dependencies = {
 	lookupRepository: () => Promise.resolve(identity),
 	fetchCacheInfo: () =>
 		Promise.resolve(
-			new CacheInfo('/nix/store', true, cachePrioritySchema.parse(40))
+			new CacheInfo(servedStoreDirectory, true, cachePrioritySchema.parse(40))
 		),
 	verifyWorkflowReference: () => Promise.resolve()
 };
@@ -1678,7 +1681,7 @@ describe('registerGithubCommands', () => {
 
 describe('cacheInfoFetcher', () => {
 	const info = new CacheInfo(
-		'/nix/store',
+		servedStoreDirectory,
 		true,
 		cachePrioritySchema.parse(40)
 	).render();

@@ -53,6 +53,36 @@ describe('uploadNegotiateRequestSchema', () => {
 		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual(value);
 	});
 
+	// The cross-check reads the hash out of the path, and a store directory
+	// varies in length, so a hash read at a fixed offset would compare the wrong
+	// slice for every store but the default one. These paths carry a directory
+	// of a different length in front of the same basename.
+	it.each([
+		{ name: 'a home directory store', directory: '/home/laney/nixstore' },
+		{
+			name: 'a deeply nested store',
+			directory: '/var/lib/cupboard/nix/store'
+		},
+		{ name: 'a single-segment store', directory: '/nixstore' }
+	])('cross-checks the hash of a path in $name', ({ directory }) => {
+		const matching = {
+			...negotiationPath,
+			storePath: `${directory}/${storePathHash}-name`
+		};
+		const mismatched = { ...matching, storePathHash: '1'.repeat(32) };
+
+		expect({
+			matching: uploadNegotiateRequestSchema.safeParse({
+				pushId,
+				paths: [matching]
+			}).success,
+			mismatched: uploadNegotiateRequestSchema.safeParse({
+				pushId,
+				paths: [mismatched]
+			}).success
+		}).toStrictEqual({ matching: true, mismatched: false });
+	});
+
 	it.each([
 		{ name: 'a deriver', field: 'deriver' as const },
 		{ name: 'a ca', field: 'ca' as const }

@@ -14,6 +14,8 @@ import {
 	rootNameSchema,
 	sha256HexDigestSchema,
 	signingKeyIdSchema,
+	storeDirectoryMaxLength,
+	storeDirectorySchema,
 	storePathBasenameSchema,
 	storePathHashSchema,
 	storePathSchema,
@@ -54,6 +56,31 @@ const acceptedCases: readonly {
 		name: 'a store path with an upper-case and punctuation name',
 		schema: storePathSchema,
 		value: `/nix/store/${storePathHash}-Name+._?=`
+	},
+	{
+		name: 'a store path in a store directory under a home directory',
+		schema: storePathSchema,
+		value: `/home/laney/nixstore/${storePathHash}-name`
+	},
+	{
+		name: 'a store path in a deeply nested store directory',
+		schema: storePathSchema,
+		value: `/var/lib/cupboard/nix/store/${storePathHash}-name`
+	},
+	{
+		name: 'the default store directory',
+		schema: storeDirectorySchema,
+		value: '/nix/store'
+	},
+	{
+		name: 'a single-segment store directory',
+		schema: storeDirectorySchema,
+		value: '/nixstore'
+	},
+	{
+		name: 'a deeply nested store directory',
+		schema: storeDirectorySchema,
+		value: '/var/lib/cupboard/nix/store'
 	},
 	{
 		name: 'a valid store path basename',
@@ -192,9 +219,49 @@ const rejectedCases: readonly {
 		value: `${storePath}\nInjected: value`
 	},
 	{
-		name: 'a path outside the store',
+		name: 'a path whose basename is not a store-path basename',
 		schema: storePathSchema,
 		value: '/etc/passwd'
+	},
+	{
+		name: 'a store path with no store directory in front of it',
+		schema: storePathSchema,
+		value: `/${storePathHash}-name`
+	},
+	{
+		name: 'a relative store path',
+		schema: storePathSchema,
+		value: `nix/store/${storePathHash}-name`
+	},
+	{
+		name: 'a store path whose store directory is longer than the cap',
+		schema: storePathSchema,
+		value: `/${'d'.repeat(storeDirectoryMaxLength)}/${storePathHash}-name`
+	},
+	{
+		name: 'a relative store directory',
+		schema: storeDirectorySchema,
+		value: 'nix/store'
+	},
+	{
+		name: 'the filesystem root as a store directory',
+		schema: storeDirectorySchema,
+		value: '/'
+	},
+	{
+		name: 'a store directory with a trailing separator',
+		schema: storeDirectorySchema,
+		value: '/nix/store/'
+	},
+	{
+		name: 'a store directory with a newline',
+		schema: storeDirectorySchema,
+		value: '/nix/store\nStoreDir: /elsewhere'
+	},
+	{
+		name: 'a store directory longer than the cap',
+		schema: storeDirectorySchema,
+		value: `/${'d'.repeat(storeDirectoryMaxLength)}`
 	},
 	{
 		name: 'a nested path under a store path',

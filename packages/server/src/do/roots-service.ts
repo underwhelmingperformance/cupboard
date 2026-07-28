@@ -21,6 +21,7 @@ import { and, eq } from 'drizzle-orm';
 import * as schema from '../db/schema.ts';
 import { RootTargetsUnavailableError } from '../errors.ts';
 import { coldPathTtlSeconds, resolveRootExpiry } from '../policy/cold-path.ts';
+import { requireServedStorePaths } from '../policy/served-store.ts';
 
 import { type CacheAdminService } from './cache-admin-service.ts';
 import { type RootSetCommand, type ServerContext } from './context.ts';
@@ -296,10 +297,15 @@ export class RootsService {
 		};
 	}
 
+	// Every root write starts here, so this is where a submitted target is held
+	// to the store directory the cache serves: a root over a path from another
+	// store could never be satisfied by anything this cache can serve.
 	private buildRootSetCommand(
 		rootName: RootName,
 		body: ParsedRootSetBody
 	): RootSetCommand {
+		requireServedStorePaths(body.targets);
+
 		return {
 			name: rootName,
 			targets: resolveRootTargets(body.targets),

@@ -6,19 +6,32 @@ export const storePathHashPattern = /^[0-9a-df-np-sv-z]{32}$/;
 export const storePathNamePattern = /^[0-9A-Za-z+._?=-]+$/;
 export const storePathBasenamePattern =
 	/^[0-9a-df-np-sv-z]{32}-[0-9A-Za-z+._?=-]+$/;
+// A store directory is an absolute path of one or more segments, over the same
+// charset a store-path name uses. Which directory a given cache serves is a
+// per-cache fact the cache itself states, not a property of the shape.
+export const storeDirectoryPattern = /^(?:\/[0-9A-Za-z+._?=-]+)+$/;
+// A store path is a store directory, a separator, then the basename. The name
+// carries its own 211-character cap here, so the cap holds whatever the length
+// of the store directory in front of it.
 export const storePathPattern =
-	/^\/nix\/store\/[0-9a-df-np-sv-z]{32}-[0-9A-Za-z+._?=-]+$/;
+	/^(?:\/[0-9A-Za-z+._?=-]+)+\/[0-9a-df-np-sv-z]{32}-[0-9A-Za-z+._?=-]{1,211}$/;
 
 export const rootNameMaxLength = 256;
 export const predicateTypeMaxLength = 512;
 export const narInfoLineMaxLength = 1024;
 // Nix caps a store-path name at 211 characters, so a basename (32-char hash, a
-// dash, the name) is at most 244 and a full `/nix/store/<basename>` at most 255.
-// The patterns already constrain the charset; these bound the length so a single
-// upload body cannot carry a multi-megabyte name.
+// dash, the name) is at most 244 and at least 34. The patterns already constrain
+// the charset; these bound the length so a single upload body cannot carry a
+// multi-megabyte name. `storePathMaxLength` bounds the whole path and
+// `storeDirectoryMaxLength` is what that leaves in front of the shortest
+// basename, so a path this schema accepts always has a directory the store
+// directory schema accepts too.
 export const storePathNameMaxLength = 211;
 export const storePathBasenameMaxLength = 33 + storePathNameMaxLength;
-export const storePathMaxLength = 11 + storePathBasenameMaxLength;
+export const storePathBasenameMinLength = 34;
+export const storePathMaxLength = 512;
+export const storeDirectoryMaxLength =
+	storePathMaxLength - 1 - storePathBasenameMinLength;
 // One path's references are its direct closure neighbours; a few thousand is
 // already extreme, so the cap rejects only an abusive body.
 export const referencesMaxLength = 10_000;
@@ -54,6 +67,13 @@ export const storePathHashSchema = z
 	.regex(storePathHashPattern)
 	.brand('StorePathHash');
 export type StorePathHash = z.infer<typeof storePathHashSchema>;
+
+export const storeDirectorySchema = z
+	.string()
+	.max(storeDirectoryMaxLength)
+	.regex(storeDirectoryPattern)
+	.brand('StoreDirectory');
+export type StoreDirectory = z.infer<typeof storeDirectorySchema>;
 
 export const storePathSchema = z
 	.string()

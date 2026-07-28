@@ -1,7 +1,10 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { CacheInfo } from '@cupboard/nix-store/cache-info';
+import {
+	CacheInfo,
+	servedStoreDirectory
+} from '@cupboard/nix-store/cache-info';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
@@ -88,7 +91,7 @@ describe('Nix substitution through a reuse view', () => {
 					});
 
 					const expectedCacheInfo = new CacheInfo(
-						'/nix/store',
+						servedStoreDirectory,
 						true,
 						cachePrioritySchema.parse(50)
 					);

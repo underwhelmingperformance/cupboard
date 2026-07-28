@@ -1,5 +1,8 @@
 import { capturingReporter as reporter } from '@cupboard/cli-ui/testing';
-import { CacheInfo } from '@cupboard/nix-store/cache-info';
+import {
+	CacheInfo,
+	servedStoreDirectory
+} from '@cupboard/nix-store/cache-info';
 import {
 	cachePrioritySchema,
 	graceSecondsSchema
@@ -151,11 +154,15 @@ function checkDependencies(overrides: {
 			Promise.resolve(
 				target.pathname.includes('/reuse/')
 					? new CacheInfo(
-							'/nix/store',
+							servedStoreDirectory,
 							true,
 							cachePrioritySchema.parse(overrides.viewPriority ?? 50)
 						)
-					: new CacheInfo('/nix/store', true, cachePrioritySchema.parse(40))
+					: new CacheInfo(
+							servedStoreDirectory,
+							true,
+							cachePrioritySchema.parse(40)
+						)
 			)
 	};
 }
@@ -316,7 +323,7 @@ describe('runGithubCheck', () => {
 							? Promise.reject(reason)
 							: Promise.resolve(
 									new CacheInfo(
-										'/nix/store',
+										servedStoreDirectory,
 										true,
 										cachePrioritySchema.parse(40)
 									)
