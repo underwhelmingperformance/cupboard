@@ -62,7 +62,7 @@
 		"fix:format": "prettier --write .",
 		"fix:lint": "eslint . --fix",
 		"fixtures:generate": "node tests/fixtures/generate.ts",
-		"test:actions": "vitest run actions/src --exclude '**/.claude/**'",
+		"test:actions": "vitest run --config actions/vitest.config.ts",
 		"test:e2e": "pnpm --filter @cupboard/server build-info && vitest run --config tests/e2e/vitest.config.ts",
 		"test:scripts": "vitest run scripts --exclude '**/.claude/**'",
 		"update:flake-deps": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/flake-dependencies.ts update"
