@@ -1,35 +1,50 @@
 import { base64ToBytes, bytesToBase64Url } from '@cupboard/nix-store/encoding';
 import { StatusCodes } from 'http-status-codes';
+import { z } from 'zod';
 
 import { isConstantTimeEqual, sha256HexBytes } from '../crypto/crypto.ts';
 
 const textEncoder = new TextEncoder();
 const readPasswordHashDomain = 'cupboard-read-password-v1';
 
+// The three read-verifier fields are otherwise interchangeable strings, so each
+// carries its own brand: a stored user cannot be handed to a comparison expecting
+// a hash, and a hash cannot be handed to one expecting a salt.
+export const readUserSchema = z.string().brand('ReadUser');
+export type ReadUser = z.infer<typeof readUserSchema>;
+
+export const readPasswordHashSchema = z.string().brand('ReadPasswordHash');
+export type ReadPasswordHash = z.infer<typeof readPasswordHashSchema>;
+
+export const readPasswordSaltSchema = z.string().brand('ReadPasswordSalt');
+export type ReadPasswordSalt = z.infer<typeof readPasswordSaltSchema>;
+
 // A private cache's read verifier: the Basic-auth user and the hash of its
 // password. The hash is what the KV admission manifest carries, so the read path
 // authorises without a plaintext secret ever leaving the control plane.
 export interface ReadVerifier {
-	readonly user: string;
-	readonly passwordHash: string;
-	readonly passwordSalt: string;
+	readonly user: ReadUser;
+	readonly passwordHash: ReadPasswordHash;
+	readonly passwordSalt: ReadPasswordSalt;
 }
 
 /** Hashes a read password the same way the verifier stores it, for comparison. */
-export function hashReadPassword(
+export async function hashReadPassword(
 	password: string,
-	salt: string
-): Promise<string> {
-	return sha256HexBytes(
-		textEncoder.encode(`${readPasswordHashDomain}\0${salt}\0${password}`)
+	salt: ReadPasswordSalt
+): Promise<ReadPasswordHash> {
+	return readPasswordHashSchema.parse(
+		await sha256HexBytes(
+			textEncoder.encode(`${readPasswordHashDomain}\0${salt}\0${password}`)
+		)
 	);
 }
 
-export function generateReadPasswordSalt(): string {
+export function generateReadPasswordSalt(): ReadPasswordSalt {
 	const bytes = new Uint8Array(16);
 	crypto.getRandomValues(bytes);
 
-	return bytesToBase64Url(bytes);
+	return readPasswordSaltSchema.parse(bytesToBase64Url(bytes));
 }
 
 /**
@@ -55,7 +70,9 @@ export async function authoriseRead(
 	}
 
 	const separator = decoded.indexOf(':');
-	const user = separator === -1 ? decoded : decoded.slice(0, separator);
+	const user = readUserSchema.parse(
+		separator === -1 ? decoded : decoded.slice(0, separator)
+	);
 	const password = separator === -1 ? '' : decoded.slice(separator + 1);
 
 	const passwordHash = await hashReadPassword(password, verifier.passwordSalt);

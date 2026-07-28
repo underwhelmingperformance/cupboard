@@ -2,10 +2,15 @@ import Cloudflare from 'cloudflare';
 import { describe, expect, it } from 'vitest';
 
 import { createCloudflareApi } from './cloudflare-api.ts';
-import { cloudflareAccountIdSchema, scriptNameSchema } from './identifiers.ts';
+import {
+	cloudflareAccountIdSchema,
+	queueIdSchema,
+	scriptNameSchema
+} from './identifiers.ts';
 
 const accountId = (value: string) => cloudflareAccountIdSchema.parse(value);
 const scriptName = (value: string) => scriptNameSchema.parse(value);
+const queueId = (value: string) => queueIdSchema.parse(value);
 
 interface Recorded {
 	readonly method: string;
@@ -228,7 +233,7 @@ describe('ensureQueueConsumer', () => {
 		});
 
 		await createCloudflareApi(client, accountId('acc-1')).ensureQueueConsumer(
-			'queue-1',
+			queueId('queue-1'),
 			scriptName('cupboard'),
 			desiredSettings
 		);
@@ -243,7 +248,7 @@ describe('ensureQueueConsumer', () => {
 		});
 
 		await createCloudflareApi(client, accountId('acc-1')).ensureQueueConsumer(
-			'queue-1',
+			queueId('queue-1'),
 			scriptName('cupboard'),
 			desiredSettings
 		);
@@ -266,7 +271,7 @@ describe('ensureQueueConsumer', () => {
 		});
 
 		await createCloudflareApi(client, accountId('acc-1')).ensureQueueConsumer(
-			'queue-1',
+			queueId('queue-1'),
 			scriptName('cupboard'),
 			desiredSettings
 		);
@@ -284,7 +289,7 @@ describe('ensureQueueConsumer', () => {
 		});
 
 		await createCloudflareApi(client, accountId('acc-1')).ensureQueueConsumer(
-			'queue-1',
+			queueId('queue-1'),
 			scriptName('cupboard'),
 			desiredSettings
 		);

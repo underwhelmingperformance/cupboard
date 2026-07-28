@@ -14,7 +14,10 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import type { TrustRuleId } from '@cupboard/protocol/oidc';
-import type { ReuseViewRevision } from '@cupboard/protocol/reuse-views';
+import type {
+	ReuseViewPriority,
+	ReuseViewRevision
+} from '@cupboard/protocol/reuse-views';
 import type { SessionId, UploadId } from '@cupboard/protocol/upload';
 import {
 	index,
@@ -430,7 +433,7 @@ export const oidcTrust = sqliteTable('oidc_trust', {
 export const reuseViews = sqliteTable('reuse_view', {
 	name: text('name').primaryKey(),
 	revision: integer('revision').$type<ReuseViewRevision>().notNull(),
-	priority: integer('priority').notNull(),
+	priority: integer('priority').$type<ReuseViewPriority>().notNull(),
 	createdAt: text('created_at').notNull(),
 	updatedAt: text('updated_at').notNull()
 });

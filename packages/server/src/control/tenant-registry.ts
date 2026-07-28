@@ -22,7 +22,11 @@ import {
 } from '../errors.ts';
 import {
 	generateReadPasswordSalt,
-	hashReadPassword
+	hashReadPassword,
+	type ReadPasswordHash,
+	type ReadPasswordSalt,
+	type ReadUser,
+	readUserSchema
 } from '../read/read-auth.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
@@ -30,9 +34,9 @@ type Database = DrizzleD1Database<typeof d1Schema>;
 type TenantRow = typeof d1Schema.tenant.$inferSelect;
 
 interface ReadVerifierColumns {
-	readonly readUser: string | undefined;
-	readonly readPasswordHash: string | undefined;
-	readonly readPasswordSalt: string | undefined;
+	readonly readUser: ReadUser | undefined;
+	readonly readPasswordHash: ReadPasswordHash | undefined;
+	readonly readPasswordSalt: ReadPasswordSalt | undefined;
 }
 
 async function readVerifierColumnsForInsert(
@@ -49,7 +53,7 @@ async function readVerifierColumnsForInsert(
 	const readPasswordSalt = generateReadPasswordSalt();
 
 	return {
-		readUser: read.user,
+		readUser: readUserSchema.parse(read.user),
 		readPasswordHash: await hashReadPassword(read.password, readPasswordSalt),
 		readPasswordSalt
 	};
@@ -330,7 +334,7 @@ export async function setTenantReadCredential(
 	const readPasswordSalt = generateReadPasswordSalt();
 
 	return updateLiveTenant(database, id, {
-		readUser: read.user,
+		readUser: readUserSchema.parse(read.user),
 		readPasswordHash: await hashReadPassword(read.password, readPasswordSalt),
 		readPasswordSalt
 	});

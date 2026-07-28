@@ -4,14 +4,18 @@ import {
 } from '@cupboard/protocol/keys';
 import { z } from 'zod';
 
-import { parseJwk } from '../crypto/crypto.ts';
+import {
+	type NixKeyName,
+	nixKeyNameSchema,
+	parseJwk
+} from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 
 export const storedSignaturesSchema = z.array(z.string());
 
 export interface SigningKey {
 	readonly id: string;
-	readonly name: string;
+	readonly name: NixKeyName;
 	readonly privateJwk: JsonWebKey;
 	readonly publicKey: string;
 	readonly signing: boolean;
@@ -19,14 +23,16 @@ export interface SigningKey {
 	readonly createdAt: string;
 }
 
-export const bootstrapKeyName = 'cupboard-1';
+export const bootstrapKeyName = nixKeyNameSchema.parse('cupboard-1');
 
 export function signingKeyFromRow(
 	row: typeof schema.signingKeys.$inferSelect
 ): SigningKey {
 	return {
 		id: row.id,
-		name: row.publicKey.slice(0, row.publicKey.indexOf(':')),
+		name: nixKeyNameSchema.parse(
+			row.publicKey.slice(0, row.publicKey.indexOf(':'))
+		),
 		privateJwk: parseJwk(row.privateJwkJson),
 		publicKey: row.publicKey,
 		signing: row.signing,
@@ -63,7 +69,7 @@ const keyNamePattern = /^cupboard-(\d+)$/;
 // Each key needs a distinct Nix key name so old and new keys can coexist in a
 // client's trusted set during a rotation. Names follow `cupboard-<n>`; the next
 // rotation takes the highest existing index plus one.
-export function nextKeyName(keys: readonly SigningKey[]): string {
+export function nextKeyName(keys: readonly SigningKey[]): NixKeyName {
 	const indices = keys.flatMap((key) => {
 		const match = keyNamePattern.exec(key.name);
 
@@ -71,5 +77,5 @@ export function nextKeyName(keys: readonly SigningKey[]): string {
 	});
 	const next = indices.length === 0 ? 1 : Math.max(...indices) + 1;
 
-	return `cupboard-${String(next)}`;
+	return nixKeyNameSchema.parse(`cupboard-${String(next)}`);
 }

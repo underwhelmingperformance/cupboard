@@ -9,6 +9,7 @@ import { collectResources, runDeploy } from './deploy-run.ts';
 import {
 	cloudflareAccountIdSchema,
 	databaseIdSchema,
+	queueIdSchema,
 	scriptNameSchema,
 	zoneIdSchema
 } from './identifiers.ts';
@@ -16,6 +17,7 @@ import { buildScriptMetadata } from './upload.ts';
 
 const scriptName = (value: string) => scriptNameSchema.parse(value);
 const databaseId = (value: string) => databaseIdSchema.parse(value);
+const queueId = (value: string) => queueIdSchema.parse(value);
 
 function worker(overrides: Partial<WorkerConfig>): WorkerConfig {
 	return {
@@ -164,7 +166,7 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 			},
 			ensureQueue(name) {
 				calls.push(`queue:${name}`);
-				return Promise.resolve(`qid-${name}`);
+				return Promise.resolve(queueId(`qid-${name}`));
 			},
 			d1Query(_databaseId, sql) {
 				calls.push(`d1q:${sql.slice(0, 12)}`);

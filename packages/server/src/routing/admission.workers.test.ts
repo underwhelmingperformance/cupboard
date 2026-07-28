@@ -26,6 +26,11 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import {
+	readPasswordHashSchema,
+	readPasswordSaltSchema,
+	readUserSchema
+} from '../read/read-auth.ts';
+import {
 	adminGrants,
 	flakyD1,
 	issueTokenForTenant,
@@ -484,9 +489,9 @@ describe('layered admission gate', () => {
 		await database()
 			.update(d1Schema.tenant)
 			.set({
-				readUser: 'reader',
-				readPasswordHash: 'hash',
-				readPasswordSalt: 'salt'
+				readUser: readUserSchema.parse('reader'),
+				readPasswordHash: readPasswordHashSchema.parse('hash'),
+				readPasswordSalt: readPasswordSaltSchema.parse('salt')
 			})
 			.where(eq(d1Schema.tenant.id, tenantIdSchema.parse('acme')))
 			.run();

@@ -118,6 +118,12 @@ export type SigningKeyId = z.infer<typeof signingKeyIdSchema>;
 export const authKeyIdSchema = z.string().brand('AuthKeyId');
 export type AuthKeyId = z.infer<typeof authKeyIdSchema>;
 
+// The Nix narinfo fingerprint a signature is computed over (`narFingerprint`
+// renders it). Its own brand keeps it from being handed to a signer as an
+// interchangeable plain string.
+export const nixFingerprintSchema = z.string().brand('NixFingerprint');
+export type NixFingerprint = z.infer<typeof nixFingerprintSchema>;
+
 export const positiveIntSchema = z
 	.number()
 	.int()

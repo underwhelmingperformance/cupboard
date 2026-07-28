@@ -3,7 +3,11 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 
 import type { CloudflareApi, TokenPolicyInput } from './cloudflare-api.ts';
-import { cloudflareAccountIdSchema, databaseIdSchema } from './identifiers.ts';
+import {
+	cloudflareAccountIdSchema,
+	databaseIdSchema,
+	queueIdSchema
+} from './identifiers.ts';
 import {
 	ApiTokenResponseError,
 	createScopedR2Key,
@@ -55,7 +59,7 @@ function baseApi(apiCalls: ApiCall[]): CloudflareApi {
 		},
 		ensureQueue: () => {
 			recordApiCall(apiCalls, 'ensureQueue');
-			return Promise.resolve('queue-id');
+			return Promise.resolve(queueIdSchema.parse('queue-id'));
 		},
 		d1Query: () => {
 			recordApiCall(apiCalls, 'd1Query');

@@ -17,7 +17,15 @@ import {
 	TenantNotSuspendedError,
 	TenantRetiredError
 } from '../errors.ts';
-import { hashReadPassword } from '../read/read-auth.ts';
+import {
+	hashReadPassword,
+	type ReadPasswordHash,
+	readPasswordHashSchema,
+	type ReadPasswordSalt,
+	readPasswordSaltSchema,
+	type ReadUser,
+	readUserSchema
+} from '../read/read-auth.ts';
 
 import {
 	clearTenantReadCredential,
@@ -119,15 +127,15 @@ function errorFields(error: unknown): {
 }
 
 async function storedReadVerifier(id: TenantId): Promise<{
-	readonly readUser: string;
-	readonly readPasswordHash: string;
-	readonly readPasswordSalt: string;
+	readonly readUser: ReadUser;
+	readonly readPasswordHash: ReadPasswordHash;
+	readonly readPasswordSalt: ReadPasswordSalt;
 }> {
 	return z
 		.object({
-			readUser: z.string(),
-			readPasswordHash: z.string(),
-			readPasswordSalt: z.string()
+			readUser: readUserSchema,
+			readPasswordHash: readPasswordHashSchema,
+			readPasswordSalt: readPasswordSaltSchema
 		})
 		.parse(
 			await database()
@@ -389,7 +397,10 @@ describe('tenant registry', () => {
 		);
 		await database()
 			.update(d1Schema.tenant)
-			.set({ readUser: 'reader', readPasswordHash: 'hash' })
+			.set({
+				readUser: readUserSchema.parse('reader'),
+				readPasswordHash: readPasswordHashSchema.parse('hash')
+			})
 			.where(eq(d1Schema.tenant.id, acme))
 			.run();
 		await setTenantStatus(database(), acme, 'offboarding');

@@ -13,6 +13,14 @@ import { z } from 'zod';
 import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
+import {
+	type ReadPasswordHash,
+	readPasswordHashSchema,
+	type ReadPasswordSalt,
+	readPasswordSaltSchema,
+	type ReadUser,
+	readUserSchema
+} from '../read/read-auth.ts';
 
 import { BinaryFuse8 } from './binary-fuse-filter/index.ts';
 
@@ -41,9 +49,9 @@ const memberKeyCacheTtlSeconds = 60;
 // A private cache's read verifier as the admission entry carries it: the
 // Basic-auth user and the salted hash of its password, never the plaintext.
 const tenantReadVerifierSchema = z.object({
-	user: z.string(),
-	passwordHash: z.string(),
-	passwordSalt: z.string()
+	user: readUserSchema,
+	passwordHash: readPasswordHashSchema,
+	passwordSalt: readPasswordSaltSchema
 });
 
 export type TenantReadVerifier = z.infer<typeof tenantReadVerifierSchema>;
@@ -213,9 +221,9 @@ async function readTenantRow(
 interface TenantAdmissionRow {
 	status: TenantEntry['status'];
 	readMode: TenantEntry['readMode'];
-	readUser: string | null;
-	readPasswordHash: string | null;
-	readPasswordSalt: string | null;
+	readUser: ReadUser | null;
+	readPasswordHash: ReadPasswordHash | null;
+	readPasswordSalt: ReadPasswordSalt | null;
 }
 
 function entryFromRow(row: TenantAdmissionRow): TenantEntry {
