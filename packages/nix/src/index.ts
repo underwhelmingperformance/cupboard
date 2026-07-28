@@ -3,6 +3,7 @@ export { Nix } from './nix.ts';
 export type { NixStoreDirectorySource, NixValidPathInfo } from './nix-store.ts';
 export {
 	InvalidNixStoreDirectoryError,
+	InvalidNixStorePathError,
 	NixConfigIncludeError,
 	NixStoreDatabaseError,
 	NixStoreError,

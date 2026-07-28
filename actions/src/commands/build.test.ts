@@ -13,6 +13,10 @@ import { env, execPath } from 'node:process';
 import { promisify } from 'node:util';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import {
+	storePathSchema,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { buildReceiptSchema } from '../build-receipt.ts';
@@ -25,9 +29,13 @@ import {
 	receiptSubjects
 } from './build.ts';
 
-const app = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
-const library = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib';
 const execFileAsync = promisify(execFile);
+const app = storePathSchema.parse(
+	'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
+);
+const library = storePathSchema.parse(
+	'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib'
+);
 
 function buildStart(derivation: string) {
 	return JSON.stringify({
@@ -339,7 +347,7 @@ process.stdin.on('end', () => {
 	});
 });
 
-function pathInfo(storePath: string, deriver?: string) {
+function pathInfo(storePath: StorePathString, deriver?: string) {
 	return {
 		storePath,
 		narHash: NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa)),

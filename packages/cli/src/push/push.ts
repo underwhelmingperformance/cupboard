@@ -8,6 +8,7 @@ import {
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
 	type StorePathHash,
+	type StorePathString,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
@@ -1600,7 +1601,7 @@ function verifyNarMetadata(
 // reproducible. The cache keeps its copy, and an attestation over the local
 // bytes can never attach to it.
 interface DivergentSkip {
-	readonly storePath: string;
+	readonly storePath: StorePathString;
 	readonly localNarHash: string;
 	readonly cacheNarHash: string;
 }

@@ -2,6 +2,7 @@ import process from 'node:process';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { storePathSchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -11,12 +12,20 @@ import {
 	type NixStoreRow
 } from './nix-local-store.ts';
 import {
+	InvalidNixStorePathError,
 	NixStorePathNotFoundError,
 	type NixValidPathInfo
 } from './nix-store.ts';
 
-const pathA = '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a';
-const pathB = '/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-b';
+const pathA = storePathSchema.parse(
+	'/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a'
+);
+const pathB = storePathSchema.parse(
+	'/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-b'
+);
+const missingPath = storePathSchema.parse(
+	'/nix/store/cccccccccccccccccccccccccccccccc-missing'
+);
 const hashA = `sha256:${'aa'.repeat(32)}`;
 const hashB = `sha256:${'bb'.repeat(32)}`;
 const deriverA = '/nix/store/dddddddddddddddddddddddddddddddd-a.drv';
@@ -43,8 +52,8 @@ const rowB: NixStoreRow = {
 	ca: caB
 };
 
-const referencesA: readonly string[] = [pathA, pathB];
-const referencesB: readonly string[] = [pathB];
+const referencesA = [pathA, pathB];
+const referencesB = [pathB];
 
 const referencesById: ReadonlyMap<number, readonly string[]> = new Map([
 	[1, referencesA],
@@ -99,9 +108,42 @@ describe('NixLocalStoreClient', () => {
 	});
 
 	it('throws for a path that is not in the store', async () => {
-		await expect(client.queryPathInfo('/nix/store/missing')).rejects.toThrow(
+		await expect(client.queryPathInfo(missingPath)).rejects.toThrow(
 			NixStorePathNotFoundError
 		);
+	});
+
+	// The store database holds the references, so a row that does not name a
+	// store path is refused at the read rather than carried into the closure.
+	it('refuses a reference that does not name a store path', async () => {
+		const brokenReferences = new NixLocalStoreClient(() => ({
+			pathRow: (storePath) => rowsByPath[storePath],
+			references: () => ['/nix/store/notes.txt'],
+			close: vi.fn()
+		}));
+
+		await expect(brokenReferences.queryPathInfo(pathA)).rejects.toThrow(
+			InvalidNixStorePathError
+		);
+	});
+
+	// A store the system diverted elsewhere reads the same way the default one
+	// does: the store directory is discovered, never assumed to be `/nix/store`.
+	it('reads a path and its references from a diverted store directory', async () => {
+		const divertedPath = storePathSchema.parse(
+			'/home/u/.local/share/nix/root/store/dddddddddddddddddddddddddddddddd-a'
+		);
+		const diverted = new NixLocalStoreClient(() => ({
+			pathRow: (storePath) => (storePath === divertedPath ? rowA : undefined),
+			references: () => [divertedPath],
+			close: vi.fn()
+		}));
+
+		await expect(
+			diverted.resolveClosure([divertedPath])
+		).resolves.toStrictEqual([
+			{ ...infoA, storePath: divertedPath, references: [divertedPath] }
+		]);
 	});
 });
 

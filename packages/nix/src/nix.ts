@@ -1,6 +1,10 @@
 import { realpathSync } from 'node:fs';
 
-import type { StoreDirectory } from '@cupboard/nix-store/scalars';
+import {
+	type StoreDirectory,
+	storePathSchema,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
 
 import {
 	type NixStoreClient,
@@ -90,8 +94,12 @@ export class Nix {
 	 * The store path an argument names, the way `nix path-info` does: resolve
 	 * symlinks, then take the store path containing the result. A `result`
 	 * symlink and a file inside a store path both resolve to the store path.
+	 *
+	 * The entry directly under the store directory has to name a store path for
+	 * the result to be one, so a loose file sitting beside the store's paths is
+	 * refused here as not being in the store.
 	 */
-	toStorePath(path: string): string {
+	toStorePath(path: string): StorePathString {
 		const resolved = this.resolveRealPath(path);
 		const prefix = `${this.storeDirectory}/`;
 
@@ -99,12 +107,13 @@ export class Nix {
 			throw new NotInNixStoreError(resolved, this.storeDirectory);
 		}
 
-		const [name] = resolved.slice(prefix.length).split('/', 1);
+		const [entry] = resolved.slice(prefix.length).split('/', 1);
+		const storePath = storePathSchema.safeParse(`${prefix}${entry ?? ''}`);
 
-		if (name === undefined || name === '') {
+		if (!storePath.success) {
 			throw new NotInNixStoreError(resolved, this.storeDirectory);
 		}
 
-		return `${this.storeDirectory}/${name}`;
+		return storePath.data;
 	}
 }

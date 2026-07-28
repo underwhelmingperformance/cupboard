@@ -1,12 +1,14 @@
 import { createConnection, type Socket } from 'node:net';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import type { StorePathString } from '@cupboard/nix-store/scalars';
 
 import {
 	defaultClosureConcurrency,
 	type NixStoreClient,
 	NixStorePathNotFoundError,
 	type NixValidPathInfo,
+	requireStorePath,
 	resolveClosureBy
 } from './nix-store.ts';
 
@@ -145,7 +147,7 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	}
 
 	async resolveClosure(
-		storePaths: readonly string[]
+		storePaths: readonly StorePathString[]
 	): Promise<readonly NixValidPathInfo[]> {
 		const pool = new NixDaemonConnectionPool(
 			() => this.openConnection(),
@@ -163,7 +165,7 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		}
 	}
 
-	async queryPathInfo(storePath: string): Promise<NixValidPathInfo> {
+	async queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo> {
 		const connection = await this.openConnection();
 
 		try {
@@ -245,7 +247,7 @@ class NixDaemonConnectionPool {
 		this.free.push(connection);
 	}
 
-	async queryPathInfo(storePath: string): Promise<NixValidPathInfo> {
+	async queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo> {
 		const connection = await this.acquire();
 
 		try {
@@ -548,7 +550,7 @@ class NixDaemonConnection {
 		await this.setOptions();
 	}
 
-	async queryPathInfo(storePath: string): Promise<NixValidPathInfo> {
+	async queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo> {
 		const pathInfo = await this.queryUnkeyedPathInfo(storePath);
 
 		if (pathInfo === undefined) {
@@ -559,7 +561,9 @@ class NixDaemonConnection {
 			storePath,
 			narHash: pathInfo.narHash,
 			narSize: pathInfo.narSize,
-			references: pathInfo.references,
+			references: pathInfo.references.map((reference) =>
+				requireStorePath(reference)
+			),
 			deriver: pathInfo.deriver,
 			ca: pathInfo.ca,
 			signatures: pathInfo.signatures,

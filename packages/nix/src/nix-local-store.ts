@@ -3,12 +3,14 @@ import process from 'node:process';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import type { StorePathString } from '@cupboard/nix-store/scalars';
 
 import {
 	type NixStoreClient,
 	NixStoreDatabaseError,
 	NixStorePathNotFoundError,
 	type NixValidPathInfo,
+	requireStorePath,
 	resolveClosureBy
 } from './nix-store.ts';
 
@@ -55,7 +57,7 @@ export class NixLocalStoreClient implements NixStoreClient {
 	}
 
 	resolveClosure(
-		storePaths: readonly string[]
+		storePaths: readonly StorePathString[]
 	): Promise<readonly NixValidPathInfo[]> {
 		return this.withDatabase((database) =>
 			resolveClosureBy(storePaths, (storePath) =>
@@ -64,7 +66,7 @@ export class NixLocalStoreClient implements NixStoreClient {
 		);
 	}
 
-	queryPathInfo(storePath: string): Promise<NixValidPathInfo> {
+	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo> {
 		return this.withDatabase((database) =>
 			requirePathInfo(database, storePath)
 		);
@@ -73,7 +75,7 @@ export class NixLocalStoreClient implements NixStoreClient {
 
 function requirePathInfo(
 	database: NixStoreDatabase,
-	storePath: string
+	storePath: StorePathString
 ): NixValidPathInfo {
 	const row = database.pathRow(storePath);
 
@@ -88,7 +90,9 @@ function requirePathInfo(
 		storePath,
 		narHash: NixSha256Hash.parsePrefixed(row.hash),
 		narSize: row.narSize,
-		references: database.references(row.id),
+		references: database
+			.references(row.id)
+			.map((reference) => requireStorePath(reference)),
 		signatures: splitSignatures(row.sigs),
 		ultimate: row.ultimate,
 		...(deriver !== undefined && { deriver }),
