@@ -50,12 +50,23 @@ async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
 	}
 }
 
-const sharedPath = storePath(
-	'/nix/store/11111111111111111111111111111111-shared'
-);
-const firstPath = storePath(
-	'/nix/store/22222222222222222222222222222222-first'
-);
+function storePathIn(
+	storeDirectory: string,
+	basename: string
+): StorePathString {
+	return storePath(`${storeDirectory}/${basename}`);
+}
+
+const defaultStoreDirectory = '/nix/store';
+// A runner whose Nix is configured with another `store-dir`: the same
+// derivation graph names its paths relative to that directory.
+const alternativeStoreDirectory = '/data/nix/store';
+
+const sharedBasename = '11111111111111111111111111111111-shared';
+const firstBasename = '22222222222222222222222222222222-first';
+
+const sharedPath = storePathIn(defaultStoreDirectory, sharedBasename);
+const firstPath = storePathIn(defaultStoreDirectory, firstBasename);
 const secondPath = storePath(
 	'/nix/store/33333333333333333333333333333333-second'
 );
@@ -667,7 +678,7 @@ describe('evaluateTargets', () => {
 				[dependencyDrvPath]: { dynamicOutputs: {}, outputs: ['out'] }
 			}
 		},
-		outputs: { out: { path: firstPath.replace('/nix/store/', '') } }
+		outputs: { out: { path: firstBasename } }
 	};
 	const homeNode = {
 		env: { out: secondPath },
@@ -677,7 +688,7 @@ describe('evaluateTargets', () => {
 	const dependencyNode = {
 		env: { out: sharedPath },
 		inputs: { drvs: {} },
-		outputs: { out: { path: sharedPath.replace('/nix/store/', '') } }
+		outputs: { out: { path: sharedBasename } }
 	};
 	const recursiveGraph = {
 		derivations: {
@@ -697,7 +708,11 @@ describe('evaluateTargets', () => {
 	it('uses a manifest evaluation failure as a direct best-effort build', async () => {
 		const calls: string[][] = [];
 
-		const result = await evaluateTargets([app, home], graphEvaluator(calls));
+		const result = await evaluateTargets(
+			[app, home],
+			defaultStoreDirectory,
+			graphEvaluator(calls)
+		);
 
 		expect({
 			evaluated: result.evaluations.map(
@@ -739,7 +754,11 @@ describe('evaluateTargets', () => {
 			});
 		};
 
-		const result = await evaluateTargets([app, resolvedHome], evaluator);
+		const result = await evaluateTargets(
+			[app, resolvedHome],
+			defaultStoreDirectory,
+			evaluator
+		);
 
 		expect({
 			evaluated: result.evaluations.map((entry) => entry.target.attr),
@@ -760,9 +779,9 @@ describe('evaluateTargets', () => {
 			bestEffort: false
 		};
 
-		await expect(evaluateTargets([broken], graphEvaluator([]))).rejects.toThrow(
-			TargetRootUnresolvedError
-		);
+		await expect(
+			evaluateTargets([broken], defaultStoreDirectory, graphEvaluator([]))
+		).rejects.toThrow(TargetRootUnresolvedError);
 	});
 
 	const recursiveFailureEvaluator: NixEvaluator = (arguments_) => {
@@ -778,6 +797,7 @@ describe('evaluateTargets', () => {
 	it('confines a recursive evaluation failure to the best-effort target', async () => {
 		const result = await evaluateTargets(
 			[app, resolvedHome],
+			defaultStoreDirectory,
 			recursiveFailureEvaluator
 		);
 
@@ -799,15 +819,19 @@ describe('evaluateTargets', () => {
 	});
 
 	it('fails when a strict target cannot be recursively evaluated', async () => {
-		await expect(evaluateTargets([app], failingNixEvaluator)).rejects.toThrow(
-			TargetEvaluationError
-		);
+		await expect(
+			evaluateTargets([app], defaultStoreDirectory, failingNixEvaluator)
+		).rejects.toThrow(TargetEvaluationError);
 	});
 
 	it('skips the recursive pass when every target fails to evaluate', async () => {
 		const calls: string[][] = [];
 
-		const result = await evaluateTargets([home], graphEvaluator(calls));
+		const result = await evaluateTargets(
+			[home],
+			defaultStoreDirectory,
+			graphEvaluator(calls)
+		);
 
 		expect({
 			evaluations: result.evaluations,
@@ -822,67 +846,81 @@ describe('evaluateTargets', () => {
 });
 
 describe('evaluationFromJson', () => {
-	it('parses Determinate derivation JSON and identifies the graph root', () => {
-		const parsed = evaluationFromJson(target('app'), {
-			derivations: {
-				'dep.drv': {
-					env: { out: sharedPath },
-					inputs: { drvs: {} },
-					outputs: {
-						out: { path: sharedPath.replace('/nix/store/', '') }
+	it.each([
+		{ storeDirectory: defaultStoreDirectory },
+		{ storeDirectory: alternativeStoreDirectory }
+	])(
+		'parses Determinate derivation JSON under $storeDirectory and identifies the graph root',
+		({ storeDirectory }) => {
+			const appPath = storePathIn(storeDirectory, firstBasename);
+			const dependencyPath = storePathIn(storeDirectory, sharedBasename);
+			const parsed = evaluationFromJson(
+				target('app'),
+				{
+					derivations: {
+						'dep.drv': {
+							env: { out: dependencyPath },
+							inputs: { drvs: {} },
+							outputs: { out: { path: sharedBasename } }
+						},
+						'app.drv': {
+							env: { out: appPath },
+							inputs: {
+								drvs: { 'dep.drv': { dynamicOutputs: {}, outputs: ['out'] } }
+							},
+							outputs: { out: {} }
+						}
 					}
 				},
-				'app.drv': {
-					env: { out: firstPath },
-					inputs: {
-						drvs: { 'dep.drv': { dynamicOutputs: {}, outputs: ['out'] } }
-					},
-					outputs: { out: {} }
-				}
-			}
-		});
+				storeDirectory
+			);
 
-		expect({
-			rootDrvPath: parsed.rootDrvPath,
-			targetPaths: parsed.targetPaths,
-			nodes: parsed.nodes
-				.values()
-				.map((node) => ({
-					drvPath: node.drvPath,
-					inputs: node.inputs.entries().toArray(),
-					outputs: node.outputs
-				}))
-				.toArray()
-		}).toStrictEqual({
-			rootDrvPath: '/nix/store/app.drv',
-			targetPaths: [firstPath],
-			nodes: [
-				{
-					drvPath: '/nix/store/app.drv',
-					inputs: [['/nix/store/dep.drv', ['out']]],
-					outputs: [{ name: 'out', path: firstPath }]
-				},
-				{
-					drvPath: '/nix/store/dep.drv',
-					inputs: [],
-					outputs: [{ name: 'out', path: sharedPath }]
-				}
-			]
-		});
-	});
+			expect({
+				rootDrvPath: parsed.rootDrvPath,
+				targetPaths: parsed.targetPaths,
+				nodes: parsed.nodes
+					.values()
+					.map((node) => ({
+						drvPath: node.drvPath,
+						inputs: node.inputs.entries().toArray(),
+						outputs: node.outputs
+					}))
+					.toArray()
+			}).toStrictEqual({
+				rootDrvPath: `${storeDirectory}/app.drv`,
+				targetPaths: [appPath],
+				nodes: [
+					{
+						drvPath: `${storeDirectory}/app.drv`,
+						inputs: [[`${storeDirectory}/dep.drv`, ['out']]],
+						outputs: [{ name: 'out', path: appPath }]
+					},
+					{
+						drvPath: `${storeDirectory}/dep.drv`,
+						inputs: [],
+						outputs: [{ name: 'out', path: dependencyPath }]
+					}
+				]
+			});
+		}
+	);
 
 	it('leaves a content-addressed placeholder output without a path', () => {
-		const parsed = evaluationFromJson(target('app'), {
-			derivations: {
-				'app.drv': {
-					env: {
-						out: '/1rz4g4znpzjwh1xymhjpm42vipw92pr73vdgl6xs1hycac8kf2n9'
-					},
-					inputs: { drvs: {} },
-					outputs: { out: {} }
+		const parsed = evaluationFromJson(
+			target('app'),
+			{
+				derivations: {
+					'app.drv': {
+						env: {
+							out: '/1rz4g4znpzjwh1xymhjpm42vipw92pr73vdgl6xs1hycac8kf2n9'
+						},
+						inputs: { drvs: {} },
+						outputs: { out: {} }
+					}
 				}
-			}
-		});
+			},
+			defaultStoreDirectory
+		);
 
 		expect({
 			targetPaths: parsed.targetPaths,
@@ -907,13 +945,17 @@ describe('evaluationFromJson', () => {
 	});
 
 	it('accepts the bare drvPath map layout', () => {
-		const parsed = evaluationFromJson(target('app'), {
-			'app.drv': {
-				env: { out: firstPath },
-				inputs: { drvs: {} },
-				outputs: { out: {} }
-			}
-		});
+		const parsed = evaluationFromJson(
+			target('app'),
+			{
+				'app.drv': {
+					env: { out: firstPath },
+					inputs: { drvs: {} },
+					outputs: { out: {} }
+				}
+			},
+			defaultStoreDirectory
+		);
 
 		expect({
 			rootDrvPath: parsed.rootDrvPath,
@@ -931,9 +973,9 @@ describe('evaluationFromJson', () => {
 			value: { derivations: { 'app.drv': 'not a node' } }
 		}
 	])('rejects $name', ({ value }) => {
-		expect(() => evaluationFromJson(target('app'), value)).toThrow(
-			DerivationGraphShapeError
-		);
+		expect(() =>
+			evaluationFromJson(target('app'), value, defaultStoreDirectory)
+		).toThrow(DerivationGraphShapeError);
 	});
 
 	it.each([
@@ -948,9 +990,9 @@ describe('evaluationFromJson', () => {
 			}
 		}
 	])('rejects a graph with $name', ({ value }) => {
-		expect(() => evaluationFromJson(target('app'), value)).toThrow(
-			DerivationRootCountError
-		);
+		expect(() =>
+			evaluationFromJson(target('app'), value, defaultStoreDirectory)
+		).toThrow(DerivationRootCountError);
 	});
 });
 

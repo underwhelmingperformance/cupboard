@@ -5,6 +5,7 @@ import path from 'node:path';
 import { env } from 'node:process';
 import { promisify } from 'node:util';
 
+import { discoverNixStoreConfig } from '@cupboard/nix';
 import {
 	rootNameMaxLength,
 	rootNameSchema,
@@ -166,6 +167,12 @@ export interface PlanInputs {
  */
 export interface PlanDependencies {
 	readonly evaluator?: NixEvaluator;
+	/**
+	 * The store directory the runner's Nix reads, which the derivation paths in
+	 * an evaluation are relative to. Discovered from the runner's configuration
+	 * when it is not given.
+	 */
+	readonly storeDirectory?: string;
 	readonly fetcher?: typeof fetch;
 	readonly runner?: EnsureRunner;
 	readonly createArtifactName?: () => string;
@@ -379,6 +386,7 @@ async function optimisedPlan(
 ): Promise<PublishPlan> {
 	const { evaluations, unevaluated } = await evaluateTargets(
 		inputs.targets,
+		dependencies.storeDirectory ?? discoverNixStoreConfig().storeDirectory,
 		dependencies.evaluator
 	);
 
