@@ -2,7 +2,9 @@ import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import {
 	type ParsedTenantCreateBody,
-	tenantCreateBodySchema
+	type ParsedTenantReadCredential,
+	tenantCreateBodySchema,
+	tenantReadCredentialSchema
 } from '@cupboard/protocol/tenants';
 import { type ReadUser, readUserSchema } from '@cupboard/shared/http';
 import { env } from 'cloudflare:workers';
@@ -14,7 +16,6 @@ import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import {
-	ReadUserInvalidError,
 	TenantAlreadyExistsError,
 	TenantNotFoundError,
 	TenantNotSuspendedError,
@@ -81,6 +82,13 @@ function privateBodyWithRead(id: string): ParsedTenantCreateBody {
 		ownerIssuer: 'https://idp.test',
 		ownerSubject: 'owner',
 		ownerAudience: 'aud'
+	});
+}
+
+function readCredential(user: string): ParsedTenantReadCredential {
+	return tenantReadCredentialSchema.parse({
+		user,
+		password: 'correct-horse-battery-staple'
 	});
 }
 
@@ -575,10 +583,7 @@ describe('tenant lifecycle operations', () => {
 	it('stores a rotated read credential hashed, not in plaintext', async () => {
 		await ensureTenant(database(), createBody(acme), now);
 
-		await setTenantReadCredential(database(), acme, {
-			user: 'reader',
-			password: 'correct-horse-battery-staple'
-		});
+		await setTenantReadCredential(database(), acme, readCredential('reader'));
 		const row = await storedReadVerifier(acme);
 
 		expect({
@@ -593,26 +598,6 @@ describe('tenant lifecycle operations', () => {
 			),
 			hashIsPlaintext: false
 		});
-	});
-
-	it.each([
-		{
-			name: 'a colon',
-			user: 'rea:der'
-		},
-		{
-			name: 'nothing',
-			user: ''
-		}
-	])('refuses a rotated read user carrying $name', async ({ user }) => {
-		await ensureTenant(database(), createBody(acme), now);
-
-		await expect(
-			setTenantReadCredential(database(), acme, {
-				user,
-				password: 'correct-horse-battery-staple'
-			})
-		).rejects.toBeInstanceOf(ReadUserInvalidError);
 	});
 
 	it('clears a read credential to empty columns', async () => {
@@ -644,10 +629,7 @@ describe('tenant lifecycle operations', () => {
 		{
 			name: 'read credential',
 			run: (id: TenantId) =>
-				setTenantReadCredential(database(), id, {
-					user: 'reader',
-					password: 'correct-horse-battery-staple'
-				})
+				setTenantReadCredential(database(), id, readCredential('reader'))
 		},
 		{
 			name: 'cleared credential',

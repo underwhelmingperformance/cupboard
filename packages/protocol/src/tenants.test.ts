@@ -27,4 +27,17 @@ describe('tenantReadCredentialSchema', () => {
 			tenantReadCredentialSchema.safeParse({ user: 'alice', password }).success
 		).toBe(false);
 	});
+
+	it.each([
+		{ name: 'a colon', user: 'ali:ce' },
+		{ name: 'a leading colon', user: ':alice' },
+		{ name: 'nothing', user: '' }
+	])('rejects a user carrying $name', ({ user }) => {
+		expect(
+			tenantReadCredentialSchema.safeParse({
+				user,
+				password: 'correct-horse-battery-staple'
+			}).success
+		).toBe(false);
+	});
 });

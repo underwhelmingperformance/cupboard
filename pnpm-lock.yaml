@@ -329,6 +329,9 @@ importers:
       '@cupboard/nix-store':
         specifier: workspace:*
         version: link:../nix-store
+      '@cupboard/shared':
+        specifier: workspace:*
+        version: link:../shared
       '@orpc/contract':
         specifier: ^1.14.7
         version: 1.14.8
