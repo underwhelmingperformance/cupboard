@@ -13,6 +13,7 @@ import {
 	selectorForCache,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
+	type SigningKeyId,
 	storedCacheSchema,
 	type StorePathHash,
 	storePathHashSchema,
@@ -3071,14 +3072,14 @@ export function migrateThrough(
 }
 
 export interface SigningKeySeed {
-	readonly id: string;
+	readonly id: SigningKeyId;
 	readonly name: string;
 	readonly signing: boolean;
 	readonly published: boolean;
 }
 
 export interface SeededSigningKey {
-	readonly id: string;
+	readonly id: SigningKeyId;
 	readonly name: string;
 	readonly publicKey: string;
 }

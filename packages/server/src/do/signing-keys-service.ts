@@ -1,5 +1,8 @@
 import { NixPublicKey } from '@cupboard/nix-store/public-key';
-import { type SigningKeyId } from '@cupboard/nix-store/scalars';
+import {
+	type SigningKeyId,
+	signingKeyIdSchema
+} from '@cupboard/nix-store/scalars';
 import {
 	type KeyListResponse,
 	type KeyRetireResponse,
@@ -19,6 +22,7 @@ import { TextBody } from '../http/http.ts';
 
 import { type ServerContext } from './context.ts';
 import {
+	bootstrapKeyId,
 	bootstrapKeyName,
 	byPublicKey,
 	keySummary,
@@ -64,7 +68,7 @@ export class SigningKeysService {
 		this.context.db
 			.insert(schema.signingKeys)
 			.values({
-				id: 'active',
+				id: bootstrapKeyId,
 				privateJwkJson: JSON.stringify(generated.privateJwk),
 				publicKey: generated.publicKey.value,
 				signing: true,
@@ -75,7 +79,7 @@ export class SigningKeysService {
 
 		return [
 			{
-				id: 'active',
+				id: bootstrapKeyId,
 				privateJwk: generated.privateJwk,
 				publicKey: generated.publicKey,
 				signing: true,
@@ -115,7 +119,7 @@ export class SigningKeysService {
 				nextKeyName(existing),
 				material.publicRaw
 			);
-			const id = crypto.randomUUID();
+			const id = signingKeyIdSchema.parse(crypto.randomUUID());
 
 			this.context.db
 				.insert(schema.signingKeys)
