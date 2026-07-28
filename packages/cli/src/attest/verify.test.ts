@@ -535,7 +535,7 @@ describe('remote attestation verification', () => {
 
 		const results = await verifyRemoteAttestations(
 			{
-				url: 'https://cupboard.test/t/acme',
+				url: new URL('https://cupboard.test/t/acme'),
 				cache: storedCacheSchema.parse('builds'),
 				storePathHash,
 				readUser: readUserInputSchema.parse('reader'),
@@ -617,7 +617,7 @@ describe('remote attestation verification', () => {
 			try {
 				const results = await verifyRemoteAttestations(
 					{
-						url: 'https://cupboard.test/t/acme',
+						url: new URL('https://cupboard.test/t/acme'),
 						storePathHash,
 						predicateType,
 						trustedPublicKey: replayedNarInfo.publicKey,

@@ -1,9 +1,10 @@
 import { readFile as nodeReadFile } from 'node:fs/promises';
 
-import { cacheUrl } from '@cupboard/nix-store/cache-url';
+import { cacheUrl, publicKeyUrl } from '@cupboard/nix-store/cache-url';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { type StoredCache } from '@cupboard/nix-store/scalars';
+import { canonicalHref } from '@cupboard/nix-store/url';
 import { attestationListSchema } from '@cupboard/protocol/attestations';
 import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
 import {
@@ -26,7 +27,7 @@ export interface LocalAttestationVerifyOptions extends AttestationPolicyOptions 
 }
 
 export interface RemoteAttestationVerifyOptions extends AttestationPolicyOptions {
-	readonly url: string;
+	readonly url: URL;
 	readonly storePathHash: string;
 	readonly cache?: StoredCache;
 	readonly bundleDigest?: string;
@@ -88,7 +89,10 @@ export async function verifyRemoteAttestations(
 ): Promise<readonly VerifyResult[]> {
 	const policy = identityPolicy(options);
 	const fetcher = dependencies.fetch ?? resilientFetcher();
-	const base = cacheUrl(options.url, options.cache);
+	// The narinfo, list and bundle endpoints hang off the cache base under
+	// fixed protocol paths, so the base is rendered once and those paths are
+	// appended to it.
+	const base = canonicalHref(cacheUrl(options.url, options.cache));
 	const readHeaders = readAuthHeaders(options);
 	const narInfo = await fetchNarInfo(
 		fetcher,
@@ -217,7 +221,7 @@ async function remoteTrustKeys(
 		);
 	}
 
-	const response = await fetcher(`${trimRight(options.url)}/pubkey`, {
+	const response = await fetcher(publicKeyUrl(options.url), {
 		signal: options.signal
 	});
 
@@ -315,8 +319,4 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 		bytes.byteOffset,
 		bytes.byteOffset + bytes.byteLength
 	) as ArrayBuffer;
-}
-
-function trimRight(value: string): string {
-	return value.replace(/\/+$/, '');
 }

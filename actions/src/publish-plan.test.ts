@@ -1186,7 +1186,7 @@ describe('availableCachePaths', () => {
 			};
 
 			const pending = availableCachePaths({
-				baseUrl: 'https://cupboard.example/t/acme',
+				baseUrl: new URL('https://cupboard.example/t/acme'),
 				cache: storedCacheSchema.parse('pr-1'),
 				paths,
 				fetcher
@@ -1204,7 +1204,7 @@ describe('availableCachePaths', () => {
 		const requests: string[] = [];
 		const headers: (HeadersInit | undefined)[] = [];
 		const available = await availableCachePaths({
-			baseUrl: 'https://cupboard.example/t/acme',
+			baseUrl: new URL('https://cupboard.example/t/acme'),
 			cache: storedCacheSchema.parse('pr-1'),
 			paths: [firstPath, secondPath],
 			fetcher: (input, init) => {
@@ -1270,7 +1270,7 @@ describe('availableCachePaths', () => {
 
 			try {
 				await availableCachePaths({
-					baseUrl: 'https://cupboard.example/t/acme',
+					baseUrl: new URL('https://cupboard.example/t/acme'),
 					cache: storedCacheSchema.parse('pr-1'),
 					paths: [firstPath],
 					fetcher: () => {
@@ -1300,7 +1300,7 @@ describe('availableCachePaths', () => {
 		let attempts = 0;
 
 		const available = await availableCachePaths({
-			baseUrl: 'https://cupboard.example/t/acme',
+			baseUrl: new URL('https://cupboard.example/t/acme'),
 			cache: storedCacheSchema.parse('pr-1'),
 			paths: [firstPath],
 			fetcher: () => {
@@ -1325,7 +1325,7 @@ describe('availableCachePaths', () => {
 	it('distinguishes malformed JSON from a schema-invalid response', async () => {
 		const malformed = await rejectedBy(() =>
 			availableCachePaths({
-				baseUrl: 'https://cupboard.example/t/acme',
+				baseUrl: new URL('https://cupboard.example/t/acme'),
 				cache: storedCacheSchema.parse('pr-1'),
 				paths: [firstPath],
 				fetcher: () =>
@@ -1334,7 +1334,7 @@ describe('availableCachePaths', () => {
 		);
 		const invalid = await rejectedBy(() =>
 			availableCachePaths({
-				baseUrl: 'https://cupboard.example/t/acme',
+				baseUrl: new URL('https://cupboard.example/t/acme'),
 				cache: storedCacheSchema.parse('pr-1'),
 				paths: [firstPath],
 				fetcher: () =>
@@ -1368,7 +1368,7 @@ describe('availableCachePaths', () => {
 		const unexpectedHash = StorePath.hash(secondPath);
 		const error = await rejectedBy(() =>
 			availableCachePaths({
-				baseUrl: 'https://cupboard.example/t/acme',
+				baseUrl: new URL('https://cupboard.example/t/acme'),
 				cache: storedCacheSchema.parse('pr-1'),
 				paths: [firstPath],
 				fetcher: () =>
@@ -1400,7 +1400,7 @@ describe('availableCachePaths', () => {
 		const headers: (HeadersInit | undefined)[] = [];
 
 		await availableCachePaths({
-			baseUrl: 'https://cupboard.example/t/acme',
+			baseUrl: new URL('https://cupboard.example/t/acme'),
 			cache: storedCacheSchema.parse('pr-1'),
 			paths: [firstPath, secondPath],
 			credentials: {
@@ -1467,7 +1467,7 @@ describe('availableCachePaths', () => {
 			};
 
 			const pending = availableViewPaths({
-				baseUrl: 'https://cupboard.example/t/acme',
+				baseUrl: new URL('https://cupboard.example/t/acme'),
 				view: 'pull-requests',
 				paths,
 				fetcher
@@ -1483,7 +1483,7 @@ describe('availableCachePaths', () => {
 	it('probes a reuse view beneath the tenant base', async () => {
 		const requests: string[] = [];
 		const available = await availableViewPaths({
-			baseUrl: 'https://cupboard.example/t/acme',
+			baseUrl: new URL('https://cupboard.example/t/acme'),
 			view: 'reuse',
 			paths: [firstPath, secondPath],
 			fetcher: (input) => {

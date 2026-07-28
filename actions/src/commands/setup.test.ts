@@ -4,6 +4,7 @@ import path from 'node:path';
 
 import { CacheInfoParseError } from '@cupboard/nix-store/errors';
 import { DEFAULT_CACHE, storedCacheSchema } from '@cupboard/nix-store/scalars';
+import { canonicalHref } from '@cupboard/nix-store/url';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -31,7 +32,7 @@ describe('writeNetrc', () => {
 	it('writes a private netrc file scoped to the cache host', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-netrc-'));
 		const netrcFile = await writeNetrc({
-			cacheUrl: 'https://cache.example.test/t/acme',
+			cacheUrl: new URL('https://cache.example.test/t/acme'),
 			readUser: readUserInputSchema.parse('ci'),
 			readPassword: 'secret',
 			runnerTemporaryDirectory: directory
@@ -64,7 +65,7 @@ describe('resolveSetupInputs', () => {
 		expectedSourceCommit: '',
 		installDirectory: '/runner/temp/cupboard-bin',
 		addToPath: true,
-		cacheUrl: '',
+		cacheUrl: undefined,
 		cache: '',
 		reuseView: '',
 		trustedPublicKey: '',
@@ -206,7 +207,7 @@ function stubFetch(
 
 describe('resolveSubstituters', () => {
 	const baseOptions: Omit<ResolveSubstitutersOptions, 'reuseView'> = {
-		cacheUrl: 'https://cache.example.test',
+		cacheUrl: new URL('https://cache.example.test'),
 		cache: storedCacheSchema.parse(DEFAULT_CACHE),
 		readUser: '',
 		readPassword: ''
@@ -225,7 +226,10 @@ describe('resolveSubstituters', () => {
 			{ fetch: fetcher }
 		);
 
-		expect({ requests, substituters }).toStrictEqual({
+		expect({
+			requests,
+			substituters: substituters.map((url) => canonicalHref(url))
+		}).toStrictEqual({
 			requests: [],
 			substituters: ['https://cache.example.test']
 		});
@@ -269,7 +273,9 @@ describe('resolveSubstituters', () => {
 				return;
 			}
 
-			await expect(outcome).resolves.toStrictEqual([
+			const substituters = await outcome;
+
+			expect(substituters.map((url) => canonicalHref(url))).toStrictEqual([
 				'https://cache.example.test',
 				'https://cache.example.test/reuse/reuse'
 			]);
@@ -416,7 +422,7 @@ describe('fetchCachePublicKeyAt', () => {
 					readonly headers: Readonly<Record<string, string>>;
 			  }
 			| undefined;
-		const url = 'https://cache.example.test/pubkey';
+		const url = new URL('https://cache.example.test/pubkey');
 		const publicKey = await fetchCachePublicKeyAt(url, (input, init) => {
 			request = {
 				url: requestUrl(input),
@@ -429,7 +435,7 @@ describe('fetchCachePublicKeyAt', () => {
 		expect({ publicKey, request }).toStrictEqual({
 			publicKey: 'cache.example.test:key',
 			request: {
-				url,
+				url: url.href,
 				headers: {
 					accept: 'text/plain',
 					'user-agent': 'cupboard-action'
@@ -461,7 +467,7 @@ describe('fetchCachePublicKeyAt', () => {
 
 				return Promise.resolve(new Response(body));
 			};
-			const url = 'https://cache.example.test/pubkey';
+			const url = new URL('https://cache.example.test/pubkey');
 			const pending = fetchCachePublicKeyAt(url, fetcher);
 			const rejection =
 				expect(pending).rejects.toBeInstanceOf(ProbeTimeoutError);
@@ -473,7 +479,7 @@ describe('fetchCachePublicKeyAt', () => {
 				requestedUrl,
 				aborted: receivedSignal?.aborted
 			}).toStrictEqual({
-				requestedUrl: url,
+				requestedUrl: url.href,
 				aborted: true
 			});
 		} finally {

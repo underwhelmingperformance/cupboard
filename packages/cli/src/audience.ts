@@ -1,6 +1,6 @@
+import { canonicalHref } from '@cupboard/nix-store/url';
 import { z } from 'zod';
 
-import { canonicalHref } from './client/transport.ts';
 import { InvalidAudienceError } from './errors.ts';
 
 /**

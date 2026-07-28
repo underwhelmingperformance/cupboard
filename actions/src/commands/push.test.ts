@@ -29,7 +29,7 @@ describe('buildPushArguments', () => {
 	it('builds a GitHub OIDC push invocation', () => {
 		expect(
 			buildPushArguments({
-				url: 'https://cache.example.test',
+				url: new URL('https://cache.example.test'),
 				paths: ['/nix/store/a', '/nix/store/b'],
 				audience: '',
 				root: 'github:owner/repo/main',
@@ -87,7 +87,7 @@ describe('resolvePushInputs', () => {
 		releaseRepository: 'owner/cupboard',
 		expectedSourceCommit: '',
 		installDirectory: '/runner/temp/cupboard-bin',
-		url,
+		url: new URL(url),
 		paths: [storePath],
 		cache: '',
 		audience: '',
@@ -203,7 +203,7 @@ describe('buildPushArguments unretained', () => {
 	it('appends --no-retain and omits root and ttl when unretained', () => {
 		expect(
 			buildPushArguments({
-				url: 'https://cache.example.test',
+				url: new URL('https://cache.example.test'),
 				paths: ['/nix/store/a'],
 				audience: '',
 				root: '',

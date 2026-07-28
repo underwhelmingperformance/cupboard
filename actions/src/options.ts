@@ -3,6 +3,7 @@ import {
 	type StoredCache,
 	storedCacheSchema
 } from '@cupboard/nix-store/scalars';
+import { parseBaseUrl } from '@cupboard/nix-store/url';
 import { type ReadUser, readUserInputSchema } from '@cupboard/shared/http';
 
 import { InvalidInputError } from './errors.ts';
@@ -52,6 +53,35 @@ export function providedCache(value: string | undefined): StoredCache {
 	}
 
 	return parsed.data;
+}
+
+/**
+ * The base URL a URL-valued input names, or `undefined` when the input is
+ * absent or blank. Every endpoint the run builds derives from this URL's origin
+ * and path alone, so a value carrying anything else is a copy mistake: refusing
+ * it here names the offending field before any request is made, and the checked
+ * URL is what the rest of the run carries. The diagnostic names the field only,
+ * never the value, which may hold a credential the workflow meant to keep out
+ * of the log.
+ */
+export function providedUrl(
+	name: string,
+	value: string | undefined
+): URL | undefined {
+	const trimmed = provided(value);
+
+	if (trimmed === undefined) {
+		return undefined;
+	}
+
+	try {
+		return parseBaseUrl(new URL(trimmed));
+	} catch {
+		throw new InvalidInputError(
+			name,
+			`${name} must be an http(s) URL with nothing beyond origin and path`
+		);
+	}
 }
 
 /**

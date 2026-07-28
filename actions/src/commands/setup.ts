@@ -10,6 +10,7 @@ import {
 	type CachePriority,
 	type StoredCache
 } from '@cupboard/nix-store/scalars';
+import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	isDestinationPreferred,
 	reuseViewPrioritySchema
@@ -38,7 +39,8 @@ import {
 	isEnabled,
 	provided,
 	providedCache,
-	providedReadUser
+	providedReadUser,
+	providedUrl
 } from '../options.ts';
 import {
 	fallbackReleaseRepository,
@@ -48,7 +50,6 @@ import {
 import {
 	cachePublicKeyRequestHeaders,
 	cacheUrlFor,
-	isHttpUrl,
 	reuseViewUrlFor
 } from '../substituters.ts';
 
@@ -77,7 +78,7 @@ export interface SetupInputs {
 	readonly expectedSourceCommit: string;
 	readonly installDirectory: string;
 	readonly addToPath: boolean;
-	readonly cacheUrl: string;
+	readonly cacheUrl: URL | undefined;
 	readonly cache: StoredCache;
 	readonly reuseView: string;
 	readonly trustedPublicKey: string;
@@ -87,11 +88,12 @@ export interface SetupInputs {
 }
 
 interface ConfigureNixInputs extends SetupInputs {
+	readonly cacheUrl: URL;
 	readonly environment: Environment;
 }
 
 interface WriteNetrcOptions {
-	readonly cacheUrl: string;
+	readonly cacheUrl: URL;
 	readonly readUser: ReadUser;
 	readonly readPassword: string;
 	readonly runnerTemporaryDirectory: string;
@@ -173,14 +175,7 @@ export function resolveSetupInputs(
 		);
 	}
 
-	const cacheUrl = provided(options.cacheUrl) ?? '';
-
-	if (cacheUrl !== '' && !isHttpUrl(cacheUrl)) {
-		throw new InvalidInputError(
-			'cache-url',
-			'cache-url must be an http(s) URL with nothing beyond origin and path'
-		);
-	}
+	const cacheUrl = providedUrl('cache-url', options.cacheUrl);
 
 	return {
 		version: normaliseVersion(provided(options.cupboardVersion) ?? 'latest'),
@@ -245,11 +240,14 @@ export async function setupAction(
 	await setOutput(environment, 'cupboard-path', installedCupboard.binaryPath);
 	await setOutput(environment, 'cupboard-version', installedCupboard.version);
 
-	if (inputs.cacheUrl === '') {
+	if (inputs.cacheUrl === undefined) {
 		return;
 	}
 
-	await configureNix({ ...inputs, environment }, reporter);
+	await configureNix(
+		{ ...inputs, cacheUrl: inputs.cacheUrl, environment },
+		reporter
+	);
 }
 
 interface CacheInfoFetchDependencies {
@@ -258,11 +256,12 @@ interface CacheInfoFetchDependencies {
 
 async function fetchCacheInfoPriority(
 	fetcher: typeof fetch,
-	url: string,
+	substituter: URL,
 	side: 'destination' | 'view',
 	headers: Readonly<Record<string, string>> | undefined
 ): Promise<CachePriority> {
-	const target = `${url.replace(/\/+$/u, '')}/nix-cache-info`;
+	const url = canonicalHref(substituter);
+	const target = `${url}/nix-cache-info`;
 	// Bounded per request, retries included: a stalled connection must fail
 	// promptly, not sit on undici's defaults.
 	return fetchWithProbeDeadline(
@@ -284,7 +283,7 @@ async function fetchCacheInfoPriority(
 }
 
 export interface ResolveSubstitutersOptions {
-	readonly cacheUrl: string;
+	readonly cacheUrl: URL;
 	readonly cache: StoredCache;
 	readonly reuseView: string;
 	readonly readUser: ReadUser | '';
@@ -304,7 +303,7 @@ export interface ResolveSubstitutersOptions {
 export async function resolveSubstituters(
 	options: ResolveSubstitutersOptions,
 	dependencies: CacheInfoFetchDependencies = {}
-): Promise<readonly string[]> {
+): Promise<readonly URL[]> {
 	const destinationUrl = cacheUrlFor(options.cacheUrl, options.cache);
 
 	if (options.reuseView === '') {
@@ -366,8 +365,10 @@ async function configureNix(
 					readPassword: inputs.readPassword,
 					runnerTemporaryDirectory
 				});
+	// A substituter is matched by exact string, so each URL is rendered in its
+	// one canonical form for the config file.
 	const nixConfig = new NixConfig(
-		substituters,
+		substituters.map((substituter) => canonicalHref(substituter)),
 		trustedPublicKey,
 		netrcFile === undefined ? {} : { netrcFile }
 	).render();
@@ -402,8 +403,9 @@ async function fetchTrustedPublicKey(
 	inputs: ConfigureNixInputs,
 	reporter: Reporter
 ): Promise<string> {
-	const url = publicKeyUrl(inputs.cacheUrl);
-	const trimmedPublicKey = await fetchCachePublicKeyAt(url);
+	const trimmedPublicKey = await fetchCachePublicKeyAt(
+		publicKeyUrl(inputs.cacheUrl)
+	);
 
 	reporter.warn(
 		'No trusted-public-key was supplied; trusting the cache signing key from /pubkey for this run.'
@@ -414,9 +416,11 @@ async function fetchTrustedPublicKey(
 
 /** Fetch and validate the signing key returned by a cache's public-key endpoint. */
 export async function fetchCachePublicKeyAt(
-	url: string,
+	endpoint: URL,
 	fetcher: typeof fetch = fetch
 ): Promise<string> {
+	const url = canonicalHref(endpoint);
+
 	return fetchWithProbeDeadline(
 		retryingFetcher(fetcher),
 		url,
@@ -446,11 +450,7 @@ export async function writeNetrc(options: WriteNetrcOptions): Promise<string> {
 
 	await writeFile(
 		netrcFile,
-		renderNetrc(
-			new URL(options.cacheUrl),
-			options.readUser,
-			options.readPassword
-		),
+		renderNetrc(options.cacheUrl, options.readUser, options.readPassword),
 		{ mode: 0o600 }
 	);
 	await chmod(netrcFile, 0o600);

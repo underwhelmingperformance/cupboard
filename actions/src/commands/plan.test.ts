@@ -970,7 +970,7 @@ describe('confirmDestinationIntermediates', () => {
 function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 	return {
 		targets: [],
-		url: 'https://cupboard.example/t/acme',
+		url: new URL('https://cupboard.example/t/acme'),
 		cache: '',
 		rootPrefix: 'github:owner/repo/main',
 		ttl: '',
