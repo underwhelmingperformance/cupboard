@@ -5,7 +5,10 @@ import { NixConfig, renderNetrc } from './nix-config.ts';
 
 describe('NixConfig', () => {
 	it('renders a nix.conf snippet', () => {
-		const config = new NixConfig('https://cache.example', 'cupboard-1:key');
+		const config = new NixConfig(
+			new URL('https://cache.example'),
+			'cupboard-1:key'
+		);
 		expect(config.render()).toBe(
 			[
 				'extra-substituters = https://cache.example',
@@ -17,7 +20,7 @@ describe('NixConfig', () => {
 
 	it('renders newline-separated rotation keys as one space-separated line', () => {
 		const config = new NixConfig(
-			'https://cache.example',
+			new URL('https://cache.example'),
 			'cupboard-1:one\ncupboard-2:two'
 		);
 		expect(config.render()).toBe(
@@ -31,7 +34,10 @@ describe('NixConfig', () => {
 
 	it('renders several substituters on one line', () => {
 		const config = new NixConfig(
-			['https://cache.example', 'https://cache.example/reuse/nightly'],
+			[
+				new URL('https://cache.example'),
+				new URL('https://cache.example/reuse/nightly')
+			],
 			'cupboard-1:key'
 		);
 		expect(config.render()).toBe(
@@ -44,9 +50,11 @@ describe('NixConfig', () => {
 	});
 
 	it('renders a netrc-file line when a path is given', () => {
-		const config = new NixConfig('https://cache.example', 'cupboard-1:key', {
-			netrcFile: '/tmp/cupboard-netrc'
-		});
+		const config = new NixConfig(
+			new URL('https://cache.example'),
+			'cupboard-1:key',
+			{ netrcFile: '/tmp/cupboard-netrc' }
+		);
 		expect(config.render()).toBe(
 			[
 				'extra-substituters = https://cache.example',

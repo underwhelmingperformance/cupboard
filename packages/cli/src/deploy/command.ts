@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { isSea } from 'node:sea';
 
 import { NixConfig } from '@cupboard/nix-store/nix-config';
+import { canonicalHref } from '@cupboard/nix-store/url';
 import type Cloudflare from 'cloudflare';
 import { APIError } from 'cloudflare';
 import { StatusCodes } from 'http-status-codes';
@@ -1615,6 +1616,7 @@ async function deployFlow(
 		}
 
 		case 'ready': {
+			const cacheUrl = canonicalHref(outcome.cacheUrl);
 			const nixConfig = new NixConfig(outcome.cacheUrl, outcome.publicKey);
 			const nixConfigLines = nixConfig
 				.render()
@@ -1623,13 +1625,13 @@ async function deployFlow(
 				.map((line) => ({ label: '', value: line }));
 
 			ui.note('Add to your nix.conf (e.g. /etc/nix/nix.conf)', [
-				{ label: 'Cache URL', value: outcome.cacheUrl },
+				{ label: 'Cache URL', value: cacheUrl },
 				{ label: '', value: '' },
 				...nixConfigLines
 			]);
 
 			ui.outro(
-				`Deployed and initialised. Next: cupboard push ${outcome.cacheUrl} ./result`
+				`Deployed and initialised. Next: cupboard push ${cacheUrl} ./result`
 			);
 			return;
 		}

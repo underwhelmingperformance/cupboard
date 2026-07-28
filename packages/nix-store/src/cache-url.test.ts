@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { cacheUrl, publicKeyUrl, reuseViewUrl } from './cache-url.ts';
+import {
+	cacheUrl,
+	publicKeyUrl,
+	reuseViewUrl,
+	tenantUrl
+} from './cache-url.ts';
 import { InvalidCacheUrlSegmentError } from './errors.ts';
 import { DEFAULT_CACHE, storedCacheSchema } from './scalars.ts';
 import { parseBaseUrl } from './url.ts';
@@ -62,6 +67,31 @@ describe('cacheUrl', () => {
 		cacheUrl(baseUrl, storedCacheSchema.parse('builds')).pathname = '/edited';
 
 		expect(baseUrl.href).toBe('https://cupboard.example.workers.dev/t/acme');
+	});
+});
+
+describe('tenantUrl', () => {
+	it.each([
+		{
+			name: 'appends the tenant path to a bare host',
+			value: 'https://cupboard.example.workers.dev',
+			tenant: 'acme',
+			expected: 'https://cupboard.example.workers.dev/t/acme'
+		},
+		{
+			name: 'drops a trailing slash on the base',
+			value: 'https://cupboard.example.workers.dev/',
+			tenant: 'acme',
+			expected: 'https://cupboard.example.workers.dev/t/acme'
+		}
+	])('$name', ({ value, tenant, expected }) => {
+		expect(tenantUrl(base(value), tenant).href).toBe(expected);
+	});
+
+	it.each([[''], ['.'], ['..']])('refuses the tenant slug %j', (tenant) => {
+		expect(() =>
+			tenantUrl(base('https://cupboard.example.workers.dev'), tenant)
+		).toThrow(InvalidCacheUrlSegmentError);
 	});
 });
 

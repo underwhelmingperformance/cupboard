@@ -365,10 +365,8 @@ async function configureNix(
 					readPassword: inputs.readPassword,
 					runnerTemporaryDirectory
 				});
-	// A substituter is matched by exact string, so each URL is rendered in its
-	// one canonical form for the config file.
 	const nixConfig = new NixConfig(
-		substituters.map((substituter) => canonicalHref(substituter)),
+		substituters,
 		trustedPublicKey,
 		netrcFile === undefined ? {} : { netrcFile }
 	).render();

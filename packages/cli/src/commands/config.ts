@@ -2,7 +2,6 @@ import { env } from 'node:process';
 
 import { cacheUrl } from '@cupboard/nix-store/cache-url';
 import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
-import { canonicalHref } from '@cupboard/nix-store/url';
 import { type Reporter } from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
@@ -41,9 +40,7 @@ export function runConfig(
 	// The nix.conf snippet is the command's payload, so it goes to stdout and
 	// `cupboard config <url> <pubkey> >> nix.conf` works. The netrc lines belong in
 	// a different file, so they stay on stderr as guidance.
-	// A substituter is matched by exact string, so the URL is rendered in its
-	// one canonical form.
-	const nixConfig = new NixConfig(canonicalHref(url), publicKey);
+	const nixConfig = new NixConfig(url, publicKey);
 	reporter.data(nixConfig.render().trimEnd());
 
 	if (credential === undefined) {

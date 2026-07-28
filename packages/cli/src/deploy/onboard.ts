@@ -1,4 +1,6 @@
+import { tenantUrl } from '@cupboard/nix-store/cache-url';
 import { cacheNamePattern } from '@cupboard/nix-store/scalars';
+import { canonicalHref } from '@cupboard/nix-store/url';
 import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
 import type {
 	ParsedControlCheckReport,
@@ -105,7 +107,7 @@ export type OnboardOutcome =
 			readonly url: string;
 			readonly slug: string;
 			/** The cache URL Nix talks to: `<url>/t/<slug>`. */
-			readonly cacheUrl: string;
+			readonly cacheUrl: URL;
 			readonly publicKey: string;
 	  }
 	| { readonly kind: 'no-admin'; readonly url: string }
@@ -432,8 +434,9 @@ export async function onboardDeployment(
 		});
 	}
 
-	const cacheUrl = `${url}/t/${slug}`;
-	const cacheClient = clientFactory(cacheUrl);
+	const cacheUrl = tenantUrl(parseWorkerUrl(url), slug);
+	const cacheHref = canonicalHref(cacheUrl);
+	const cacheClient = clientFactory(cacheHref);
 
 	const key = await pollProbe(
 		ui,
@@ -447,7 +450,7 @@ export async function onboardDeployment(
 	if (key.kind === 'gave-up') {
 		return {
 			kind: 'unreachable',
-			url: cacheUrl,
+			url: cacheHref,
 			lastProbe: key.lastProbe,
 			worker: options.tenantScriptName,
 			...(key.lastStatus !== undefined && { lastStatus: key.lastStatus }),
