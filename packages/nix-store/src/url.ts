@@ -1,5 +1,17 @@
 import { InvalidCacheUrlBaseError } from './errors.ts';
 
+// A URL's path can carry any number of trailing slashes, and an anchored `/+$`
+// pattern rescans from each one, so the trim walks back from the end instead.
+function withoutTrailingSlashes(value: string): string {
+	let end = value.length;
+
+	while (end > 0 && value.codePointAt(end - 1) === 0x2f) {
+		end -= 1;
+	}
+
+	return value.slice(0, end);
+}
+
 /**
  * The base a cache's URLs are built from, checked once so every builder and
  * every request derived from it can take the result on trust. Only the origin
@@ -21,7 +33,7 @@ export function parseBaseUrl(url: URL): URL {
 
 	const base = new URL(url);
 
-	base.pathname = base.pathname.replace(/\/+$/u, '') || '/';
+	base.pathname = withoutTrailingSlashes(base.pathname) || '/';
 
 	return base;
 }
@@ -34,5 +46,5 @@ export function parseBaseUrl(url: URL): URL {
  * slashes gives every URL one rendering, the form the workflows and docs use.
  */
 export function canonicalHref(url: URL): string {
-	return url.href.replace(/\/+$/u, '');
+	return withoutTrailingSlashes(url.href);
 }
