@@ -262,6 +262,36 @@ describe('migrations', () => {
 		expect(decision).toStrictEqual([{ id: 'u1', hasDecision: false }]);
 	});
 
+	it('carries a pre-0033 pending upload through the attach-root column add', async () => {
+		const insertPreAttachPendingUpload =
+			"INSERT INTO pending_upload (id, cache, nar_hash, r2_key, metadata_json, created_at, expires_at) VALUES ('u1', '', 'sha256:nar', 'staging/p/u1', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:15:00.000Z')";
+		const selectAttachRootNames =
+			'SELECT id, attach_root_name FROM pending_upload';
+
+		const migrated = await runInDurableObject(
+			testServerFor('migration-attach-root'),
+			async (_instance, state) => {
+				// A pending upload from before 0033 has no attach-root column; the
+				// migration must add it as NULL, the shape of a push that named no
+				// root. The anchor is fixed so later migrations cannot silently
+				// retarget the test.
+				await migrateThrough(state, 32);
+				state.storage.sql.exec(insertPreAttachPendingUpload);
+
+				await migrateThrough(state, latestMigrationIndex);
+
+				const rows = state.storage.sql.exec(selectAttachRootNames).toArray();
+
+				return rows.map((row) => ({
+					id: row.id,
+					hasAttachRoot: row.attach_root_name !== null
+				}));
+			}
+		);
+
+		expect(migrated).toStrictEqual([{ id: 'u1', hasAttachRoot: false }]);
+	});
+
 	it('gains the reuse-view tables and narinfo index at the latest migration, leaving an existing narinfo row untouched', async () => {
 		const storePathHash = 'a'.repeat(32);
 		const narInfoRow = {

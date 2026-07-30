@@ -123,7 +123,11 @@ export const pendingUploads = sqliteTable(
 		// upload materialises. A policy changed afterwards does not alter it. Null
 		// on a row negotiated before the decision existed, which materialises as
 		// though no policy matched.
-		graceDecisionJson: text('grace_decision_json')
+		graceDecisionJson: text('grace_decision_json'),
+		// The run root the push bound at negotiate, inherited by this upload's
+		// commit: the finalising step attaches the committed path under this name.
+		// Null on a row whose push named no root, which commits without attaching.
+		attachRootName: text('attach_root_name').$type<RootName>()
 	},
 	// The maintenance reconcile finds the soonest-expiring upload and probes for any
 	// still awaiting verification (an existence check, not a count); without these

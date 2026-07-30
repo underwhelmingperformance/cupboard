@@ -16,7 +16,7 @@ import {
 	verificationBatchSize
 } from '../http/http.ts';
 
-import { authoriseRequest } from './authorise.ts';
+import { authoriseAttachRoot, authoriseRequest } from './authorise.ts';
 import { type TenantOrpcContext, type TenantRpcServices } from './context.ts';
 import { bridgedError } from './error-bridge.ts';
 
@@ -225,6 +225,14 @@ export const tenantRouter = os.router({
 			)
 		),
 		negotiate: os.uploads.negotiate.handler(({ input, context }) => {
+			if (input.attachRoot !== undefined) {
+				authoriseAttachRoot(
+					context.claims,
+					input.cacheName,
+					input.attachRoot.name
+				);
+			}
+
 			const origin = requestOriginSchema.parse(
 				new URL(context.request.url).origin
 			);
@@ -232,7 +240,10 @@ export const tenantRouter = os.router({
 				cacheFromSelector(input.cacheName),
 				{
 					pushId: input.pushId,
-					paths: input.paths
+					paths: input.paths,
+					...(input.attachRoot !== undefined && {
+						attachRoot: input.attachRoot
+					})
 				},
 				origin,
 				context.services.takeNegotiateHints(context.request),

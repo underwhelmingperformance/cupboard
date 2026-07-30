@@ -1,5 +1,6 @@
 import {
 	type NixSha256HashString,
+	type RootName,
 	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
@@ -50,6 +51,7 @@ import {
 } from './negotiate-hints.ts';
 import { type ReconcileQueueService } from './reconcile-queue-service.ts';
 import { type RetentionService } from './retention-service.ts';
+import { type RootsService } from './roots-service.ts';
 import { commitMetadataFromPathAndBlob } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
@@ -124,7 +126,8 @@ export class UploadsService {
 		private readonly narInfoObjects: NarInfoObjectsService,
 		private readonly deletionQueue: DeletionQueueService,
 		private readonly reconcileQueue: ReconcileQueueService,
-		private readonly retention: RetentionService
+		private readonly retention: RetentionService,
+		private readonly roots: RootsService
 	) {}
 
 	// The committed narinfo rows for a closure, read in cache-scoped chunks that
@@ -160,7 +163,8 @@ export class UploadsService {
 		pushId: PushId,
 		metadata: ParsedUploadPathNegotiation,
 		existingBlob: ReusableBlob | undefined,
-		graceDecision: GraceDecision
+		graceDecision: GraceDecision,
+		attachRootName: RootName | undefined
 	): UploadDecision {
 		const uploadId = uploadIdSchema.parse(crypto.randomUUID());
 		const now = new Date();
@@ -193,7 +197,8 @@ export class UploadsService {
 				metadataJson: JSON.stringify(pendingMetadata),
 				createdAt: isoTimestamp(now),
 				expiresAt: isoTimestamp(expiresAt),
-				graceDecisionJson: serialiseGraceDecision(graceDecision)
+				graceDecisionJson: serialiseGraceDecision(graceDecision),
+				attachRootName
 			})
 			.run();
 
@@ -355,6 +360,18 @@ export class UploadsService {
 			throw new InvalidPushIdError();
 		}
 
+		// The run root is bound where the push is established: created on the
+		// push's first negotiate, extended forward-only after that, before any
+		// upload is planned, so every row this negotiation plans carries the
+		// root its commit attaches to.
+		if (body.attachRoot !== undefined) {
+			this.roots.bindRunRoot(
+				cache,
+				body.attachRoot.name,
+				body.attachRoot.ttlSeconds
+			);
+		}
+
 		if (body.paths.length === 0) {
 			return { uploads: [] };
 		}
@@ -456,7 +473,8 @@ export class UploadsService {
 				body.pushId,
 				metadata,
 				reusableByNarHash.get(metadata.narHash),
-				graceDecision
+				graceDecision,
+				body.attachRoot?.name
 			);
 
 			uploads.push(

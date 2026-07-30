@@ -187,3 +187,20 @@ export async function authoriseRequest(
 		throw new InsufficientScopeError();
 	}
 }
+
+/**
+ * Authorise the run root a negotiate binds: `root:attach` must be covered on
+ * the named cache and root, by action membership and the grant's root
+ * selector, exactly as a root write's route authorisation covers `root:set`.
+ * The decision is taken at negotiate, before any upload is planned; the commit
+ * socket inherits the binding, so no later frame carries a root to re-check.
+ */
+export function authoriseAttachRoot(
+	claims: AccessClaims,
+	cache: CacheSelector,
+	root: RootName
+): void {
+	if (!isCoveredByToken(claims.grants, 'root:attach', { cache, root })) {
+		throw new InsufficientScopeError();
+	}
+}
