@@ -143,6 +143,19 @@ export class NixConfigIncludeError extends NixStoreError {
 	}
 }
 
+export class NixConfigSettingError extends NixStoreError {
+	constructor(
+		public readonly setting: string,
+		public readonly value: string,
+		public readonly expected: string
+	) {
+		super(
+			`Nix configuration setting '${setting}' has invalid value '${value}': expected ${expected}`
+		);
+		this.name = 'NixConfigSettingError';
+	}
+}
+
 /** The setting a discovered store directory came from. */
 export type NixStoreDirectorySource = 'NIX_STORE_DIR' | 'store-dir';
 
