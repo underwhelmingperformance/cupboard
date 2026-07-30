@@ -388,13 +388,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.authKeys,
 			this.oidcTrust
 		);
+		this.roots = new RootsService(
+			this.context,
+			this.cacheAdmin,
+			this.retention,
+			this.narInfoObjects
+		);
 		this.uploads = new UploadsService(
 			this.context,
 			this.uploadState,
 			this.narInfoObjects,
 			this.deletionQueue,
 			this.reconcileQueue,
-			this.retention
+			this.retention,
+			this.roots
 		);
 		this.commitPipeline = new CommitPipelineService(
 			this.context,
@@ -411,17 +418,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.narInfoObjects,
 			this.uploadState,
 			this.retention,
-			// `this.roots` is assigned just below; the closure reads it at verdict
-			// time, long after construction.
 			(cache, storePathHash) => {
 				this.roots.pruneRetentionTargets(cache, storePathHash);
 			}
-		);
-		this.roots = new RootsService(
-			this.context,
-			this.cacheAdmin,
-			this.retention,
-			this.narInfoObjects
 		);
 		this.offboarding = new OffboardingService(this.context);
 		this.maintenanceEligibility = new MaintenanceEligibilityService(

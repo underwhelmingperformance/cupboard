@@ -3,7 +3,8 @@ import {
 	type RootName,
 	type StoredCache,
 	type StorePathHash,
-	type StorePathString
+	type StorePathString,
+	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, resolveRootTargets } from '@cupboard/nix-store/store-path';
 import {
@@ -16,7 +17,7 @@ import {
 } from '@cupboard/protocol/retention';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { chunk } from '@cupboard/shared/collections';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
 import { RootTargetsUnavailableError } from '../errors.ts';
@@ -356,6 +357,54 @@ export class RootsService {
 				stored: this.writeRoot(cache, requested)
 			});
 		});
+	}
+
+	// Binds a push's run root at negotiate: created on the push's first
+	// negotiate, extended forward-only after that. The run root accretes and is
+	// never replaced, so nothing is released, no grace transition runs, and no
+	// target list is touched; committed paths join it as their commits finalise.
+	// The expiry resolves through the same precedence a root write uses: the
+	// explicit TTL, then a matching retention policy, then the cold-path default
+	// for an implicit pin, otherwise permanent. A single upsert on the single
+	// writer, so it needs no gate.
+	bindRunRoot(
+		cache: StoredCache,
+		name: RootName,
+		explicitTtlSeconds: TtlSeconds | undefined
+	): void {
+		const now = new Date();
+		const nowIso = isoTimestamp(now);
+		const expiresAt = resolveRootExpiry({
+			explicitTtlSeconds,
+			policyTtlSeconds: this.retention.resolvePolicyTtl(cache, name),
+			name,
+			coldPathTtlSeconds: coldPathTtlSeconds(this.context.env),
+			now
+		});
+
+		this.cacheAdmin.loadOrCreateCache(cache);
+
+		this.context.db
+			.insert(schema.retentionRoots)
+			.values({
+				cache,
+				name,
+				expiresAt,
+				createdAt: nowIso,
+				updatedAt: nowIso
+			})
+			.onConflictDoUpdate({
+				target: [schema.retentionRoots.cache, schema.retentionRoots.name],
+				set: {
+					// SQL `max` answers NULL when either side is NULL, which reads a
+					// permanent expiry as the latest possible one in both directions;
+					// over ISO-8601 UTC strings it is chronological, so a shorter TTL
+					// never truncates what an earlier negotiate established.
+					expiresAt: sql`max(${schema.retentionRoots.expiresAt}, excluded.expires_at)`,
+					updatedAt: nowIso
+				}
+			})
+			.run();
 	}
 
 	async setRoot(

@@ -32,6 +32,7 @@ import m0029 from './0029_pending_upload_grace_decision.sql';
 import m0030 from './0030_reuse_views.sql';
 import m0031 from './0031_retention_root_expiry_index.sql';
 import m0032 from './0032_careful_chameleon.sql';
+import m0033 from './0033_pending_upload_attach_root.sql';
 
 export default {
 	journal,
@@ -68,6 +69,7 @@ export default {
 		m0029,
 		m0030,
 		m0031,
-		m0032
+		m0032,
+		m0033
 	}
 };

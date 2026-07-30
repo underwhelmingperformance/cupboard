@@ -96,6 +96,7 @@ import {
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionService } from './retention-service.ts';
+import { RootsService } from './roots-service.ts';
 import { gcContinuationKey } from './server.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
@@ -151,13 +152,21 @@ function uploadsServiceFor(context: ServerContext): UploadsService {
 		narInfoObjects
 	);
 
+	const retention = new RetentionService(context);
+
 	return new UploadsService(
 		context,
 		new UploadStateService(context),
 		narInfoObjects,
 		deletionQueue,
 		new ReconcileQueueService(context),
-		new RetentionService(context)
+		retention,
+		new RootsService(
+			context,
+			new CacheAdminService(context, deletionQueue),
+			retention,
+			narInfoObjects
+		)
 	);
 }
 
