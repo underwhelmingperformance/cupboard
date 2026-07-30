@@ -70,6 +70,20 @@ export class CommitUpgradeRequiredError extends ServerHttpError {
 	}
 }
 
+// One tenant's Durable Object holds a bounded set of live commit sockets. A
+// socket is an optimisation over durable status polling, so an upgrade past
+// the bound is refused retryably: the turned-away client polls the upload
+// status, or retries once a session closes.
+export class CommitSessionLimitError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 5;
+
+	constructor(public readonly limit: number) {
+		super('Too many concurrent commit sessions');
+		this.name = 'CommitSessionLimitError';
+	}
+}
+
 export class CacheNotEmptyError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 

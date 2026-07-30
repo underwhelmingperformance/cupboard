@@ -45,6 +45,7 @@ import { type NarVerification } from '../blob/nar-verify.ts';
 import * as schema from '../db/schema.ts';
 import { isD1Overload } from '../db/transient.ts';
 import {
+	CommitSessionLimitError,
 	CommitUpgradeRequiredError,
 	DatabaseOverloadedError,
 	R2PresignConfigurationMissingError,
@@ -168,6 +169,13 @@ const commitSessionAttachmentSchema = z.object({
 	cache: storedCacheSchema,
 	sessionId: sessionIdSchema
 });
+
+// Bounds the commit sockets one tenant holds at once, parked hibernating ones
+// included. A socket is an optimisation over durable status polling, so an
+// upgrade past the bound is refused retryably and the turned-away client polls
+// instead. The cap sits on sessions per tenant: root selectors admit
+// unboundedly many root names, so a per-root cap would bound nothing.
+export const maxCommitSessionsPerTenant = 8;
 
 // A storage key marking that a bounded garbage-collection sweep stopped at its
 // per-run cap with work left over. The alarm reads it to resume, so a large
@@ -707,6 +715,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private commitSession(request: Request, cache: StoredCache): Response {
 		if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
 			throw new CommitUpgradeRequiredError();
+		}
+
+		// Counted before the accept, while the refusal is still plain HTTP, so
+		// it reaches the client with the retryable status, Retry-After and
+		// no-store through the ordinary error handler. Parked hibernating
+		// sockets are live and count; a closed socket leaves the set once its
+		// close event is handled.
+		if (this.ctx.getWebSockets().length >= maxCommitSessionsPerTenant) {
+			throw new CommitSessionLimitError(maxCommitSessionsPerTenant);
 		}
 
 		const pair = new WebSocketPair();
