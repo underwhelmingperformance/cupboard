@@ -1,0 +1,253 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+	buildEventSchema,
+	buildReceiptSchema,
+	targetOutcomeSchema
+} from './build.ts';
+
+const storePath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
+const outputPath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib';
+const derivation = '/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv';
+
+describe('buildEventSchema', () => {
+	it('accepts a hook event', () => {
+		const event = {
+			version: 1,
+			invocationId: 'invocation-1',
+			derivation,
+			outputPaths: [storePath, outputPath]
+		};
+
+		expect(buildEventSchema.parse(event)).toStrictEqual(event);
+	});
+
+	it.each([
+		{
+			name: 'an unknown format version',
+			value: {
+				version: 2,
+				invocationId: 'invocation-1',
+				derivation,
+				outputPaths: [storePath]
+			}
+		},
+		{
+			name: 'an empty invocation id',
+			value: {
+				version: 1,
+				invocationId: '',
+				derivation,
+				outputPaths: [storePath]
+			}
+		},
+		{
+			name: 'a derivation that is not a .drv path',
+			value: {
+				version: 1,
+				invocationId: 'invocation-1',
+				derivation: storePath,
+				outputPaths: [storePath]
+			}
+		},
+		{
+			name: 'no completed output paths',
+			value: {
+				version: 1,
+				invocationId: 'invocation-1',
+				derivation,
+				outputPaths: []
+			}
+		},
+		{
+			name: 'an output path outside the store-path shape',
+			value: {
+				version: 1,
+				invocationId: 'invocation-1',
+				derivation,
+				outputPaths: ['relative/path']
+			}
+		},
+		{
+			name: 'an unknown field',
+			value: {
+				version: 1,
+				invocationId: 'invocation-1',
+				derivation,
+				outputPaths: [storePath],
+				extra: true
+			}
+		}
+	])('rejects $name', ({ value }) => {
+		expect(buildEventSchema.safeParse(value).success).toBe(false);
+	});
+});
+
+describe('targetOutcomeSchema', () => {
+	it.each([
+		{ outcome: 'built', value: { outcome: 'built', storePath } },
+		{
+			outcome: 'destination-served',
+			value: { outcome: 'destination-served', storePath }
+		},
+		{
+			outcome: 'published-by-reference',
+			value: { outcome: 'published-by-reference', storePath }
+		},
+		{
+			outcome: 'left-upstream',
+			value: { outcome: 'left-upstream', storePath }
+		},
+		{
+			outcome: 'failed',
+			value: { outcome: 'failed', storePath, reason: 'upload' }
+		},
+		{ outcome: 'collected', value: { outcome: 'collected', storePath } }
+	])('round-trips a $outcome outcome', ({ value }) => {
+		expect(targetOutcomeSchema.parse(value)).toStrictEqual(value);
+	});
+
+	it.each([
+		{
+			name: 'an unknown outcome',
+			value: { outcome: 'skipped', storePath }
+		},
+		{
+			name: 'a failure without a reason kind',
+			value: { outcome: 'failed', storePath }
+		},
+		{
+			name: 'a failure with an unknown reason kind',
+			value: { outcome: 'failed', storePath, reason: 'weather' }
+		},
+		{
+			name: 'a reason on a non-failure outcome',
+			value: { outcome: 'built', storePath, reason: 'upload' }
+		}
+	])('rejects $name', ({ value }) => {
+		expect(targetOutcomeSchema.safeParse(value).success).toBe(false);
+	});
+});
+
+describe('buildReceiptSchema', () => {
+	const subject = {
+		storePath,
+		narHash: 'aa'.repeat(32),
+		derivation,
+		attempt: 1,
+		attemptId: 'one'
+	};
+
+	it('accepts a receipt carrying only what a bare build knows', () => {
+		const receipt = {
+			version: 2,
+			paths: [storePath, outputPath],
+			subjects: [subject]
+		};
+
+		expect(buildReceiptSchema.parse(receipt)).toStrictEqual(receipt);
+	});
+
+	it('accepts a receipt carrying every planned-run section', () => {
+		const receipt = {
+			version: 2,
+			paths: [storePath, outputPath],
+			subjects: [subject],
+			outcomes: [
+				{ outcome: 'built', storePath },
+				{ outcome: 'left-upstream', storePath: outputPath }
+			],
+			planner: {
+				willBuild: 1,
+				willSubstitute: 2,
+				unknown: 0,
+				attached: 3,
+				adopted: 1,
+				leftUpstream: 1
+			},
+			substitutable: { downloadSize: 1024, narSize: 4096 },
+			evaluationTimeMs: 250,
+			childExitStatus: 0,
+			uploaded: [storePath],
+			failed: [],
+			collected: [outputPath]
+		};
+
+		expect(buildReceiptSchema.parse(receipt)).toStrictEqual(receipt);
+	});
+
+	it('refuses a version-1 receipt', () => {
+		const result = buildReceiptSchema.safeParse({
+			version: 1,
+			paths: [storePath],
+			subjects: [subject]
+		});
+
+		expect(result.success).toBe(false);
+
+		if (result.success) {
+			return;
+		}
+
+		expect(
+			result.error.issues.map((issue) => ({
+				code: issue.code,
+				path: issue.path
+			}))
+		).toStrictEqual([{ code: 'invalid_value', path: ['version'] }]);
+	});
+
+	it.each([
+		{
+			name: 'a path outside the store-path shape',
+			value: { version: 2, paths: ['app'], subjects: [] }
+		},
+		{
+			name: 'a subject attributed to attempt zero',
+			value: {
+				version: 2,
+				paths: [storePath],
+				subjects: [{ ...subject, attempt: 0 }]
+			}
+		},
+		{
+			name: 'a subject whose NAR hash is not sha256 hex',
+			value: {
+				version: 2,
+				paths: [storePath],
+				subjects: [{ ...subject, narHash: 'zz'.repeat(32) }]
+			}
+		},
+		{
+			name: 'a fractional child exit status',
+			value: {
+				version: 2,
+				paths: [storePath],
+				subjects: [],
+				childExitStatus: 1.5
+			}
+		},
+		{
+			name: 'a negative planner count',
+			value: {
+				version: 2,
+				paths: [storePath],
+				subjects: [],
+				planner: {
+					willBuild: -1,
+					willSubstitute: 0,
+					unknown: 0,
+					attached: 0,
+					adopted: 0,
+					leftUpstream: 0
+				}
+			}
+		},
+		{
+			name: 'an unknown field',
+			value: { version: 2, paths: [storePath], subjects: [], extra: true }
+		}
+	])('rejects $name', ({ value }) => {
+		expect(buildReceiptSchema.safeParse(value).success).toBe(false);
+	});
+});
