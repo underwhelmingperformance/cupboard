@@ -164,7 +164,27 @@ export const tenantRouter = os.router({
 	},
 	roots: {
 		list: os.roots.list.handler(({ input, context }) =>
-			context.services.roots.listRoots(cacheFromSelector(input.cacheName))
+			context.services.roots.listRoots(
+				cacheFromSelector(input.params.cacheName),
+				{
+					...(input.query.cursor !== undefined && {
+						cursor: input.query.cursor
+					}),
+					...(input.query.limit !== undefined && { limit: input.query.limit })
+				}
+			)
+		),
+		targets: os.roots.targets.handler(({ input, context }) =>
+			context.services.roots.rootTargets(
+				cacheFromSelector(input.params.cacheName),
+				input.params.name,
+				{
+					...(input.query.cursor !== undefined && {
+						cursor: input.query.cursor
+					}),
+					...(input.query.limit !== undefined && { limit: input.query.limit })
+				}
+			)
 		),
 		set: os.roots.set.handler(({ input, context }) =>
 			context.services.roots.setRoot(

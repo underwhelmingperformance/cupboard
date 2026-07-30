@@ -9,8 +9,10 @@ import {
 	retentionPolicyListResponseSchema,
 	retentionPolicyRemoveResponseSchema,
 	rootEnsureResponseSchema,
+	rootListResponseSchema,
 	rootSetBodySchema,
-	rootSetMaxTargets
+	rootSetMaxTargets,
+	rootTargetsPageSchema
 } from './retention.ts';
 
 const storePathHash = '0'.repeat(32);
@@ -97,6 +99,77 @@ describe('rootEnsureResponseSchema', () => {
 		}
 	])('accepts $name', ({ value }) => {
 		expect(rootEnsureResponseSchema.parse(value)).toStrictEqual(value);
+	});
+});
+
+describe('rootListResponseSchema', () => {
+	const listedRoot = {
+		name: 'github:owner/repo/main',
+		expired: false,
+		createdAt: '2026-01-01T00:00:00.000Z',
+		updatedAt: '2026-01-01T00:00:00.000Z',
+		targetCount: 3
+	};
+
+	it.each([
+		{ name: 'a final page', value: { roots: [listedRoot] } },
+		{
+			name: 'a page with a continuation',
+			value: { roots: [listedRoot], cursor: listedRoot.name }
+		},
+		{ name: 'an empty listing', value: { roots: [] } }
+	])('accepts $name', ({ value }) => {
+		expect(rootListResponseSchema.parse(value)).toStrictEqual(value);
+	});
+
+	it.each([
+		{
+			name: 'an entry carrying inline targets',
+			value: { roots: [{ ...listedRoot, targets: [] }] }
+		},
+		{
+			name: 'a negative target count',
+			value: { roots: [{ ...listedRoot, targetCount: -1 }] }
+		},
+		{ name: 'an empty cursor', value: { roots: [], cursor: '' } }
+	])('rejects $name', ({ value }) => {
+		expect(rootListResponseSchema.safeParse(value).success).toBe(false);
+	});
+});
+
+describe('rootTargetsPageSchema', () => {
+	const pageTarget = {
+		storePathHash: '0'.repeat(32),
+		storePath: `/nix/store/${'0'.repeat(32)}-name`,
+		present: true
+	};
+
+	it.each([
+		{ name: 'a final page', value: { targets: [pageTarget] } },
+		{
+			name: 'a page with a continuation',
+			value: { targets: [pageTarget], cursor: pageTarget.storePathHash }
+		},
+		{ name: 'an empty page', value: { targets: [] } }
+	])('accepts $name', ({ value }) => {
+		expect(rootTargetsPageSchema.parse(value)).toStrictEqual(value);
+	});
+
+	it.each([
+		{
+			name: 'a target with no present flag',
+			value: {
+				targets: [
+					{
+						storePathHash: pageTarget.storePathHash,
+						storePath: pageTarget.storePath
+					}
+				]
+			}
+		},
+		{ name: 'an empty cursor', value: { targets: [], cursor: '' } }
+	])('rejects $name', ({ value }) => {
+		expect(rootTargetsPageSchema.safeParse(value).success).toBe(false);
 	});
 });
 

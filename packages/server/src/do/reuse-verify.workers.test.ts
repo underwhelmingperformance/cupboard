@@ -14,7 +14,7 @@ import {
 	expectSingleCommitDecision,
 	fetchNarInfo,
 	initialise,
-	listRoots,
+	listRootTargets,
 	markUploadPendingVerification,
 	narInfoGeneration,
 	negotiateUploads,
@@ -184,9 +184,9 @@ describe('deferred reuse verification', () => {
 		await replantStuckPending(staged);
 		await currentServer().recordMissingObject(reuse.uploadId);
 
-		const { roots } = await listRoots(token);
-		expect(
-			(roots.at(0)?.targets ?? []).map((target) => target.storePathHash)
-		).toStrictEqual([second.storePathHash]);
+		const { targets } = await listRootTargets(token, 'main');
+		expect(targets.map((target) => target.storePathHash)).toStrictEqual([
+			second.storePathHash
+		]);
 	});
 });

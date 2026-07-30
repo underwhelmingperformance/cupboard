@@ -59,10 +59,40 @@ export type ParsedRootEnsureResponse = z.output<
 	typeof rootEnsureResponseSchema
 >;
 
+// Bounds one listing page. A targets page probes each target's serve state (a
+// narinfo-object check per distinct path), so the bound keeps one request's
+// probe fan-out within what a single Durable Object request can serve; the
+// roots listing shares the bound as plain request sizing.
+export const rootListPageSize = 200;
+
+// A continuation for a listing with more pages: opaque to the client, passed
+// back unchanged to resume where the previous page stopped.
+const listCursorSchema = z.string().min(1);
+
+// One root in the listing. A run root accretes attached paths without bound,
+// so the listing carries a target count and no inline targets; a root's
+// targets are read through the paged targets route.
+export const rootListEntrySchema = z.strictObject({
+	name: rootNameSchema,
+	expiresAt: isoTimestampSchema.optional(),
+	expired: z.boolean(),
+	createdAt: isoTimestampSchema,
+	updatedAt: isoTimestampSchema,
+	targetCount: countSchema
+});
+export type ParsedRootListEntry = z.output<typeof rootListEntrySchema>;
+
 export const rootListResponseSchema = z.strictObject({
-	roots: z.array(rootSummarySchema)
+	roots: z.array(rootListEntrySchema),
+	cursor: listCursorSchema.optional()
 });
 export type ParsedRootListResponse = z.output<typeof rootListResponseSchema>;
+
+export const rootTargetsPageSchema = z.strictObject({
+	targets: z.array(rootTargetSchema),
+	cursor: listCursorSchema.optional()
+});
+export type ParsedRootTargetsPage = z.output<typeof rootTargetsPageSchema>;
 
 export const rootRemoveResponseSchema = z.strictObject({
 	name: rootNameSchema,
@@ -202,7 +232,9 @@ export type RootTarget = z.input<typeof rootTargetSchema>;
 export type RootSummary = z.input<typeof rootSummarySchema>;
 export type RootSetResponse = z.input<typeof rootSetResponseSchema>;
 export type RootEnsureResponse = z.input<typeof rootEnsureResponseSchema>;
+export type RootListEntry = z.input<typeof rootListEntrySchema>;
 export type RootListResponse = z.input<typeof rootListResponseSchema>;
+export type RootTargetsPage = z.input<typeof rootTargetsPageSchema>;
 export type RootRemoveResponse = z.input<typeof rootRemoveResponseSchema>;
 export type RetentionPolicyAddBody = z.input<
 	typeof retentionPolicyAddBodySchema
