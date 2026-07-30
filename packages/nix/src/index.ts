@@ -5,11 +5,16 @@ export {
 	InvalidNixStoreDirectoryError,
 	InvalidNixStorePathError,
 	NixConfigIncludeError,
+	NixConfigSettingError,
 	NixStoreDatabaseError,
 	NixStoreError,
 	NixStorePathNotFoundError,
 	NotInNixStoreError,
 	UnsupportedNixStoreError
 } from './nix-store.ts';
-export type { NixStoreConfig } from './store-config.ts';
+export type {
+	NixDaemonOverrides,
+	NixDaemonSetOptions,
+	NixStoreConfig
+} from './store-config.ts';
 export { discoverNixStoreConfig } from './store-config.ts';

@@ -16,7 +16,9 @@ const baseConfig: NixStoreConfig = {
 	storeUri: 'auto',
 	storeDirectory: storeDirectorySchema.parse('/nix/store'),
 	stateDirectory: '/nix/var/nix',
-	daemonSocketPath: '/nix/var/nix/daemon-socket/socket'
+	daemonSocketPath: '/nix/var/nix/daemon-socket/socket',
+	daemonSetOptions: {},
+	daemonOverrides: {}
 };
 
 interface Probes {
