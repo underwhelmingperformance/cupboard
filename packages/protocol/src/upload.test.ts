@@ -1,3 +1,7 @@
+import {
+	rootNameMaxLength,
+	rootTtlMaxSeconds
+} from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -51,6 +55,64 @@ describe('uploadNegotiateRequestSchema', () => {
 		const value = { pushId, paths: [negotiationPath] };
 
 		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual(value);
+	});
+
+	it.each([
+		{
+			name: 'a run root with no ttl',
+			attachRoot: { name: 'github:owner/repo/pr-1' }
+		},
+		{
+			name: 'a run root with a ttl',
+			attachRoot: { name: 'ci', ttlSeconds: 86_400 }
+		}
+	])('accepts a request attaching $name', ({ attachRoot }) => {
+		const value = { pushId, paths: [negotiationPath], attachRoot };
+
+		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual(value);
+	});
+
+	it.each([
+		{
+			name: 'an over-length root name',
+			attachRoot: { name: 'r'.repeat(rootNameMaxLength + 1) },
+			issues: [{ code: 'too_big', path: ['attachRoot', 'name'] }]
+		},
+		{
+			name: 'a root name carrying a control character',
+			attachRoot: { name: 'ci\nnightly' },
+			issues: [{ code: 'custom', path: ['attachRoot', 'name'] }]
+		},
+		{
+			name: 'a ttl above the root bound',
+			attachRoot: { name: 'ci', ttlSeconds: rootTtlMaxSeconds + 1 },
+			issues: [{ code: 'too_big', path: ['attachRoot', 'ttlSeconds'] }]
+		},
+		{
+			name: 'a ttl below the root bound',
+			attachRoot: { name: 'ci', ttlSeconds: 0 },
+			issues: [{ code: 'too_small', path: ['attachRoot', 'ttlSeconds'] }]
+		},
+		{
+			name: 'an unknown key',
+			attachRoot: { name: 'ci', surprise: true },
+			issues: [{ code: 'unrecognized_keys', path: ['attachRoot'] }]
+		}
+	])('rejects an attachRoot with $name', ({ attachRoot, issues }) => {
+		const result = uploadNegotiateRequestSchema.safeParse({
+			pushId,
+			paths: [negotiationPath],
+			attachRoot
+		});
+
+		expect(
+			result.success
+				? []
+				: result.error.issues.map((issue) => ({
+						code: issue.code,
+						path: issue.path
+					}))
+		).toStrictEqual(issues);
 	});
 
 	// The cross-check reads the hash out of the path, and a store directory

@@ -13,6 +13,7 @@ import {
 	isOperationPermittedAtIssuance,
 	isOperationSatisfiedByPresentedActions,
 	type Operation,
+	operationSchema,
 	permittedGrantSchema,
 	type ResourceRequest,
 	storedPermittedGrantsSchema
@@ -52,6 +53,20 @@ const cacheGrant = authorizationDetailSchema.parse({
 const prefixRootGrant = authorizationDetailSchema.parse({
 	type: 'cupboard_cache',
 	actions: ['root:set'],
+	cache: 'main',
+	root: 'github:owner/repo/'
+});
+
+const attachRootGrant = authorizationDetailSchema.parse({
+	type: 'cupboard_cache',
+	actions: ['root:attach'],
+	cache: 'main',
+	root: 'ci'
+});
+
+const prefixAttachRootGrant = authorizationDetailSchema.parse({
+	type: 'cupboard_cache',
+	actions: ['root:attach'],
 	cache: 'main',
 	root: 'github:owner/repo/'
 });
@@ -215,6 +230,25 @@ describe('isOperationSatisfiedByPresentedActions', () => {
 	});
 });
 
+// `root:attach` retains paths under a name, which no other operation does, so
+// neither implication table may map it to a broader operation. The sweep pins
+// that structurally: across every operation, the only single-action set that
+// reaches a requested `root:attach` is `root:attach` itself.
+describe('root:attach implication', () => {
+	it.each<
+		[string, (actions: readonly Operation[], operation: Operation) => boolean]
+	>([
+		['at issuance', isOperationPermittedAtIssuance],
+		['by presented authority', isOperationSatisfiedByPresentedActions]
+	])('is reached only by its own action %s', (_name, isImplied) => {
+		const reaching = operationSchema.options.filter((operation) =>
+			isImplied([operation], 'root:attach')
+		);
+
+		expect(reaching).toStrictEqual(['root:attach']);
+	});
+});
+
 describe('isCoveredByToken', () => {
 	it.each<[string, AuthorizationDetail[], Operation, ResourceFields, boolean]>([
 		[
@@ -250,6 +284,41 @@ describe('isCoveredByToken', () => {
 			[cacheGrant],
 			'root:set',
 			{ cache: 'pr-123', root: 'main' },
+			false
+		],
+		[
+			'root:attach with the exact root',
+			[attachRootGrant],
+			'root:attach',
+			{ cache: 'main', root: 'ci' },
+			true
+		],
+		[
+			'root:attach with a non-matching root',
+			[attachRootGrant],
+			'root:attach',
+			{ cache: 'main', root: 'other' },
+			false
+		],
+		[
+			'root:attach within a trailing-slash prefix',
+			[prefixAttachRootGrant],
+			'root:attach',
+			{ cache: 'main', root: 'github:owner/repo/pr-1' },
+			true
+		],
+		[
+			'root:attach outside the prefix',
+			[prefixAttachRootGrant],
+			'root:attach',
+			{ cache: 'main', root: 'github:owner/other/pr-1' },
+			false
+		],
+		[
+			'a commit grant does not cover root:attach on its own root',
+			[cacheGrant],
+			'root:attach',
+			{ cache: 'pr-123', root: 'pr-123' },
 			false
 		],
 		[

@@ -5,9 +5,11 @@ import {
 	nixSha256HashSchema,
 	positiveIntSchema,
 	referencesSchema,
+	rootNameSchema,
 	storePathBasenameSchema,
 	storePathHashSchema,
-	storePathSchema
+	storePathSchema,
+	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
 import { storePathHashOf } from '@cupboard/nix-store/store-path';
 import { z } from 'zod';
@@ -145,8 +147,18 @@ export const uploadGraceFactSchema = z
 	);
 export type ParsedUploadGraceFact = z.output<typeof uploadGraceFactSchema>;
 
+// The run root the push's commits attach to, bound at negotiate alongside the
+// push id; the commit socket inherits it. A commit frame carries no root, so
+// the name here covers every path the push commits.
+export const uploadAttachRootSchema = z.strictObject({
+	name: rootNameSchema,
+	ttlSeconds: ttlSecondsSchema.optional()
+});
+export type ParsedUploadAttachRoot = z.output<typeof uploadAttachRootSchema>;
+
 export const uploadNegotiateRequestSchema = z.strictObject({
 	pushId: pushIdSchema,
+	attachRoot: uploadAttachRootSchema.optional(),
 	paths: z.array(uploadPathNegotiationSchema).max(uploadNegotiateMaxPaths)
 });
 export type ParsedUploadNegotiateRequest = z.output<
@@ -504,6 +516,7 @@ export type UploadPathNegotiationFields = z.input<
 >;
 export type UploadBlobMetadataFields = z.input<typeof uploadBlobMetadataSchema>;
 export type UploadPathMetadataFields = z.input<typeof uploadPathMetadataSchema>;
+export type UploadAttachRoot = z.input<typeof uploadAttachRootSchema>;
 export type UploadNegotiateRequest = z.input<
 	typeof uploadNegotiateRequestSchema
 >;
