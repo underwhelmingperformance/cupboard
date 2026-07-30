@@ -43,7 +43,7 @@ export type NixDaemonConnector = (
 export interface NixDaemonTransport {
 	write(bytes: Uint8Array): Promise<void>;
 	read(byteLength: number): Promise<Uint8Array>;
-	close(): void;
+	close(): Promise<void>;
 }
 
 interface NixDaemonProtocolVersion {
@@ -117,9 +117,10 @@ export class InvalidNixDaemonHashError extends NixDaemonError {
 	}
 }
 
-// Raised when a connection finishes opening after the pool was closed (the
-// closure walk aborted). The connection is closed and this is thrown so the
-// abandoned query settles on a closed-pool error without using a dead socket.
+// Raised when the pool shuts down while a query still needs a connection: an
+// acquire after shutdown, a parked waiter, or a connection that finishes
+// opening after the closure walk aborted. The abandoned query settles on a
+// closed-pool error without using a dead socket.
 export class NixDaemonConnectionPoolClosedError extends NixDaemonError {
 	constructor() {
 		super('Nix daemon connection pool closed during closure walk');
@@ -141,7 +142,12 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		const transport = await this.connect(this.socketPath);
 		const connection = new NixDaemonConnection(transport);
 
-		await connection.initialise();
+		try {
+			await connection.initialise();
+		} catch (error) {
+			await connection.close();
+			throw error;
+		}
 
 		return connection;
 	}
@@ -161,7 +167,7 @@ export class NixDaemonStoreClient implements NixStoreClient {
 				defaultClosureConcurrency
 			);
 		} finally {
-			pool.closeAll();
+			await pool.closeAll();
 		}
 	}
 
@@ -171,7 +177,7 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		try {
 			return await connection.queryPathInfo(storePath);
 		} finally {
-			connection.close();
+			await connection.close();
 		}
 	}
 }
@@ -186,7 +192,10 @@ class NixDaemonConnectionPool {
 
 	private readonly free: NixDaemonConnection[] = [];
 
-	private readonly waiters: ((connection: NixDaemonConnection) => void)[] = [];
+	private readonly waiters: {
+		readonly resolve: (connection: NixDaemonConnection) => void;
+		readonly reject: (error: NixDaemonConnectionPoolClosedError) => void;
+	}[] = [];
 
 	private opened = 0;
 
@@ -198,6 +207,10 @@ class NixDaemonConnectionPool {
 	) {}
 
 	private async acquire(): Promise<NixDaemonConnection> {
+		if (this.closed) {
+			throw new NixDaemonConnectionPoolClosedError();
+		}
+
 		const free = this.free.pop();
 
 		if (free !== undefined) {
@@ -216,30 +229,39 @@ class NixDaemonConnectionPool {
 				throw error;
 			}
 
-			// `closeAll` may have run while this connection was opening (a sibling
-			// query rejected and aborted the walk). It iterated a snapshot taken
-			// before this connection existed, so close it here to avoid retaining a
-			// leaked socket the pool will never clean up.
-			if (this.closed) {
-				connection.close();
-				throw new NixDaemonConnectionPoolClosedError();
-			}
-
-			this.all.push(connection);
-
-			return connection;
+			return this.registerOpened(connection);
 		}
 
-		return new Promise((resolve) => {
-			this.waiters.push(resolve);
+		return new Promise((resolve, reject) => {
+			this.waiters.push({ resolve, reject });
 		});
 	}
 
-	private release(connection: NixDaemonConnection): void {
+	private async registerOpened(
+		connection: NixDaemonConnection
+	): Promise<NixDaemonConnection> {
+		// An opening connection is not yet in `all`, so shutdown may complete
+		// while its asynchronous handshake is still in flight.
+		if (this.closed) {
+			await connection.close();
+			throw new NixDaemonConnectionPoolClosedError();
+		}
+
+		this.all.push(connection);
+
+		return connection;
+	}
+
+	private async release(connection: NixDaemonConnection): Promise<void> {
+		if (this.closed) {
+			await connection.close();
+			return;
+		}
+
 		const waiter = this.waiters.shift();
 
 		if (waiter !== undefined) {
-			waiter(connection);
+			waiter.resolve(connection);
 
 			return;
 		}
@@ -253,15 +275,20 @@ class NixDaemonConnectionPool {
 		try {
 			return await connection.queryPathInfo(storePath);
 		} finally {
-			this.release(connection);
+			await this.release(connection);
 		}
 	}
 
-	closeAll(): void {
+	async closeAll(): Promise<void> {
 		this.closed = true;
 
-		for (const connection of this.all) {
-			connection.close();
+		await Promise.all(this.all.map((connection) => connection.close()));
+
+		const waiters = [...this.waiters];
+		this.waiters.length = 0;
+
+		for (const waiter of waiters) {
+			waiter.reject(new NixDaemonConnectionPoolClosedError());
 		}
 	}
 }
@@ -271,13 +298,15 @@ export async function connectToNixDaemon(
 ): Promise<NixDaemonTransport> {
 	return new Promise((resolve, reject) => {
 		const socket = createConnection(socketPath);
+		const rejectConnection = (error: Error): void => {
+			reject(new NixDaemonConnectionError(socketPath, error));
+		};
 
 		socket.once('connect', () => {
+			socket.off('error', rejectConnection);
 			resolve(new SocketNixDaemonTransport(socket));
 		});
-		socket.once('error', (error) => {
-			reject(new NixDaemonConnectionError(socketPath, error));
-		});
+		socket.once('error', rejectConnection);
 	});
 }
 
@@ -539,8 +568,8 @@ class NixDaemonConnection {
 		return Number(value);
 	}
 
-	close(): void {
-		this.transport.close();
+	close(): Promise<void> {
+		return this.transport.close();
 	}
 
 	async initialise(): Promise<void> {
@@ -613,6 +642,8 @@ class NixDaemonWriter {
 class SocketNixDaemonTransport implements NixDaemonTransport {
 	private readonly reader: SocketReader;
 
+	private closePromise?: Promise<void>;
+
 	constructor(private readonly socket: Socket) {
 		this.reader = new SocketReader(socket);
 	}
@@ -635,8 +666,21 @@ class SocketNixDaemonTransport implements NixDaemonTransport {
 		return this.reader.read(byteLength);
 	}
 
-	close(): void {
-		this.socket.end();
+	close(): Promise<void> {
+		if (this.closePromise !== undefined) {
+			return this.closePromise;
+		}
+
+		if (this.socket.destroyed) {
+			return Promise.resolve();
+		}
+
+		this.closePromise = new Promise((resolve) => {
+			this.socket.once('close', resolve);
+			this.socket.destroy();
+		});
+
+		return this.closePromise;
 	}
 }
 
@@ -658,6 +702,10 @@ class SocketReader {
 			this.resolvePendingRead();
 		});
 		socket.once('end', () => {
+			this.ended = true;
+			this.resolvePendingRead();
+		});
+		socket.once('close', () => {
 			this.ended = true;
 			this.resolvePendingRead();
 		});
