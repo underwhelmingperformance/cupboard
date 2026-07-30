@@ -1847,7 +1847,7 @@ export class CommitSocketProtocolError extends Error {
  * reader. The listener attaches before `accept()` so no frame the server sent
  * during the commit transition is missed.
  */
-interface CommitConversation {
+export interface CommitConversation {
 	readonly socket: WebSocket;
 	readonly send: (request: CommitSessionRequest) => void;
 	readonly nextFrame: () => Promise<ParsedCommitSessionFrame>;
@@ -1929,6 +1929,22 @@ export async function openCommitSession(
 	return commitSessionFromResponse(response);
 }
 
+// Closes a session socket and waits for the close handshake to complete, so
+// the server has handled the close before the caller opens another session; a
+// close still in flight counts against the per-tenant commit session bound.
+function closeSettled(socket: WebSocket): Promise<void> {
+	if (socket.readyState === WebSocket.READY_STATE_CLOSED) {
+		return Promise.resolve();
+	}
+
+	return new Promise((resolve) => {
+		socket.addEventListener('close', () => {
+			resolve();
+		});
+		socket.close();
+	});
+}
+
 // The frame dance the commit helpers share: send the commit op, settle on the
 // reply, or drive the verification pass (the queue would run it in production)
 // and settle on the verdict; `wait: false` returns the deferral as `pending`.
@@ -1944,23 +1960,23 @@ async function settleCommitSession(
 	const first = await nextFrame();
 
 	if (first.ev === 'settled') {
-		socket.close();
+		await closeSettled(socket);
 
 		return first.response;
 	}
 
 	if (first.ev === 'error') {
-		socket.close();
+		await closeSettled(socket);
 		throw new CommitSocketError(first.status, first.message);
 	}
 
 	if (first.ev !== 'deferred') {
-		socket.close();
+		await closeSettled(socket);
 		throw new CommitSocketProtocolError(`unexpected first frame: ${first.ev}`);
 	}
 
 	if (options.wait === false) {
-		socket.close();
+		await closeSettled(socket);
 
 		return {
 			storePathHash: first.storePathHash,
@@ -1971,7 +1987,7 @@ async function settleCommitSession(
 
 	await runVerification();
 	const verdict = await nextFrame();
-	socket.close();
+	await closeSettled(socket);
 
 	if (verdict.ev !== 'verdict') {
 		throw new CommitSocketProtocolError(`unexpected frame: ${verdict.ev}`);
