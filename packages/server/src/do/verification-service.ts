@@ -502,6 +502,16 @@ export class VerificationService {
 			return false;
 		}
 
+		// The committed row's identity was just proven by the confirmation, so
+		// the push's run root retains the path, exactly as the flush attaches
+		// it when the settle runs uninterrupted.
+		this.commitPipeline.attachRootTarget(
+			pending.cache,
+			pending.attachRootName,
+			metadata.storePathHash,
+			metadata.storePath
+		);
+
 		this.notifyWaiters(pending, 'servable');
 		this.uploadState.clearPendingUpload(pending.id);
 		await this.deleteStagingObject(pending);
@@ -591,6 +601,7 @@ export class VerificationService {
 			generation,
 			probe,
 			graceDecision,
+			attachRootName: pending.attachRootName ?? undefined,
 			// A deferred settle proved its bytes (a fresh decode, or a reuse row
 			// negotiate admitted when the presence edge existed), so ownership is
 			// not re-required here; the first commit of a hash is not yet owned.
@@ -630,6 +641,7 @@ export class VerificationService {
 				probe: freshProbe,
 				mustOwnBlob: false,
 				graceDecision,
+				attachRootName: pending.attachRootName ?? undefined,
 				isStillSettleable: () => {
 					const current = this.context.db
 						.select()
@@ -686,8 +698,15 @@ export class VerificationService {
 
 				// This upload lost the race, so its own captured decision never
 				// ran; apply it against the winning generation before notifying,
-				// or a positive policy would grant nothing.
+				// or a positive policy would grant nothing. The push's run root
+				// retains the path for the same reason, under the same proof.
 				if (result === 'committed-current') {
+					this.commitPipeline.attachRootTarget(
+						pending.cache,
+						pending.attachRootName,
+						metadata.storePathHash,
+						metadata.storePath
+					);
 					confirmGrace(
 						this.context,
 						this.retention,
@@ -1694,8 +1713,16 @@ export class VerificationService {
 
 					// This upload lost the race, so its own captured decision
 					// never ran; apply it against the winning generation before
-					// notifying, or a positive policy would grant nothing.
+					// notifying, or a positive policy would grant nothing. The
+					// push's run root retains the path for the same reason,
+					// under the same proof.
 					if (result === 'committed-current') {
+						this.commitPipeline.attachRootTarget(
+							pending.cache,
+							pending.attachRootName,
+							metadata.storePathHash,
+							metadata.storePath
+						);
 						confirmGrace(
 							this.context,
 							this.retention,
