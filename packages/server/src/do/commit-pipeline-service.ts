@@ -5,8 +5,10 @@ import {
 	type NarInfoGeneration,
 	narInfoGenerationSchema,
 	type NixSha256HashString,
+	type RootName,
 	type StoredCache,
 	type StorePathHash,
+	type StorePathString,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
@@ -76,6 +78,7 @@ import {
 } from './grace-decision.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
+import { maxRootTargetInsertRows } from './roots-service.ts';
 import { type SigningKeysService } from './signing-keys-service.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
@@ -156,6 +159,12 @@ export interface MaterialiseRequest {
 	 * before the decision existed and grants nothing.
 	 */
 	readonly graceDecision: GraceDecision | undefined;
+	/**
+	 * The run root the push bound at negotiate, stamped on the pending row. A
+	 * materialised outcome attaches the committed path to it inside the same
+	 * gate; `undefined` is a push that named no root and attaches nothing.
+	 */
+	readonly attachRootName: RootName | undefined;
 	/**
 	 * Runs inside the flush gate before the fence; a false verdict settles the
 	 * request as `gone` (its row's fate was decided elsewhere) without charging.
@@ -386,6 +395,7 @@ export class CommitPipelineService {
 		uploadId: UploadId,
 		metadata: ParsedUploadPathNegotiation,
 		graceDecision: GraceDecision | undefined,
+		attachRootName: RootName | undefined,
 		// The caller's probe of the shared facts, taken alongside its advisory
 		// checks. It may be stale by the gate below; the charge batch is the
 		// authoritative guard.
@@ -408,7 +418,8 @@ export class CommitPipelineService {
 				uploadId,
 				metadata,
 				canonicalKey,
-				graceDecision
+				graceDecision,
+				attachRootName
 			);
 		}
 
@@ -423,7 +434,8 @@ export class CommitPipelineService {
 			generation,
 			probe,
 			mustOwnBlob: true,
-			graceDecision
+			graceDecision,
+			attachRootName
 		});
 
 		// Over quota on a prefetched probe: the prefetched `isOwned` can be stale when
@@ -439,7 +451,8 @@ export class CommitPipelineService {
 				generation,
 				probe: freshProbe,
 				mustOwnBlob: true,
-				graceDecision
+				graceDecision,
+				attachRootName
 			});
 		}
 
@@ -481,7 +494,8 @@ export class CommitPipelineService {
 				uploadId,
 				metadata,
 				canonicalKey,
-				graceDecision
+				graceDecision,
+				attachRootName
 			);
 		}
 
@@ -527,6 +541,15 @@ export class CommitPipelineService {
 			// decision never ran; apply it against the winner's generation
 			// before any waiter hears the verdict and before the row holding
 			// the decision is cleared, or a positive policy would grant nothing.
+			// The push's run root retains the path for the same reason, applied
+			// with the same identity proof.
+			this.attachRootTarget(
+				cache,
+				attachRootName,
+				metadata.storePathHash,
+				metadata.storePath
+			);
+
 			return confirmGrace(
 				this.context,
 				this.retention,
@@ -1054,6 +1077,7 @@ export class CommitPipelineService {
 		}
 
 		this.applyCapturedGrace(requests, outcomes);
+		this.applyRootAttach(requests, outcomes);
 
 		return outcomes;
 	}
@@ -1145,6 +1169,42 @@ export class CommitPipelineService {
 		}
 	}
 
+	// Attaches each materialised request's committed path to the run root its
+	// push bound at negotiate, inside the same gate that finalised the
+	// generation, so the collector can never observe the committed path without
+	// its retention row. Additive and monotonic, keyed by cache, root and
+	// store-path hash: a replayed flush re-inserts nothing, and nothing is ever
+	// released, so no grace transition runs and the root row's expiry is
+	// untouched. The narinfo row exists by construction here, and the run
+	// root's target list may grow past the per-request root-write cap, which
+	// bounds request sizing only.
+	private applyRootAttach(
+		requests: readonly MaterialiseRequest[],
+		outcomes: readonly (BatchedMaterialiseOutcome | undefined)[]
+	): void {
+		const targets = requests.flatMap((request, index) =>
+			outcomes[index]?.kind === 'materialised' &&
+			request.attachRootName !== undefined
+				? [
+						{
+							cache: request.cache,
+							rootName: request.attachRootName,
+							storePathHash: request.metadata.storePathHash,
+							storePath: request.metadata.storePath
+						}
+					]
+				: []
+		);
+
+		for (const batch of chunk(targets, maxRootTargetInsertRows)) {
+			this.context.db
+				.insert(schema.retentionRootTargets)
+				.values(batch)
+				.onConflictDoNothing()
+				.run();
+		}
+	}
+
 	// One flush: a single gate settles a whole batch, taken from the queue
 	// inside the gate callback itself. The wait for the gate is the collection
 	// window: every settle whose own turn in the gate queue (its reserve, a
@@ -1233,6 +1293,32 @@ export class CommitPipelineService {
 		return this.tenantAccount(this.context.requireTenant());
 	}
 
+	/**
+	 * Attaches one committed path to the run root a push bound at negotiate,
+	 * for a settle that finalises outside the shared flush: an already-present
+	 * answer, a concede to a concurrent winner, or a re-driven saga whose
+	 * generation a competing pass committed. Additive and idempotent by cache,
+	 * root and store-path hash; a push that bound no root attaches nothing.
+	 * Callers apply it where the committed row's identity has just been
+	 * proven, exactly where the captured grace decision is reapplied.
+	 */
+	attachRootTarget(
+		cache: StoredCache,
+		rootName: RootName | null | undefined,
+		storePathHash: StorePathHash,
+		storePath: StorePathString
+	): void {
+		if (rootName === null || rootName === undefined) {
+			return;
+		}
+
+		this.context.db
+			.insert(schema.retentionRootTargets)
+			.values({ cache, rootName, storePathHash, storePath })
+			.onConflictDoNothing()
+			.run();
+	}
+
 	// reports already-present with the winner's narHash. Any blob this upload
 	// promoted but no edge now references is left for the reaper to collect.
 	// When no committed winner exists yet (the winning upload is still verifying),
@@ -1243,7 +1329,8 @@ export class CommitPipelineService {
 		uploadId: UploadId,
 		metadata: ParsedUploadPathNegotiation,
 		stagingKey: R2ObjectKey,
-		graceDecision?: GraceDecision
+		graceDecision?: GraceDecision,
+		attachRootName?: RootName
 	): Promise<CommitOutcome> {
 		// Each retry needs a fresh recommit to have landed inside the window, so
 		// the loop settles as soon as the path holds still — but sustained churn
@@ -1298,6 +1385,16 @@ export class CommitPipelineService {
 			if (!confirmed.matched) {
 				continue;
 			}
+
+			// The winner's row identity was just proven by the confirmation, so
+			// this push's run root retains the path it published, served by the
+			// winner's row.
+			this.attachRootTarget(
+				cache,
+				attachRootName,
+				winner.storePathHash,
+				winner.storePath
+			);
 
 			await this.uploadState.clearPendingUploadAndStaging(
 				uploadId,
@@ -1512,6 +1609,16 @@ export class CommitPipelineService {
 					};
 				}
 
+				// The winner's row identity was just proven by the confirmation,
+				// so this push's run root retains the path it published, served
+				// by the winner's row.
+				this.attachRootTarget(
+					cache,
+					pending.attachRootName,
+					existingNarInfo.storePathHash,
+					existingNarInfo.storePath
+				);
+
 				await this.uploadState.clearPendingUploadAndStaging(
 					uploadId,
 					pending.r2Key,
@@ -1645,6 +1752,7 @@ export class CommitPipelineService {
 				uploadId,
 				metadata,
 				graceDecision,
+				pending.attachRootName ?? undefined,
 				probe,
 				committingSessionId,
 				advisory?.prefetched !== undefined

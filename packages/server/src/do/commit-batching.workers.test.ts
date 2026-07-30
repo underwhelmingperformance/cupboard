@@ -1,10 +1,17 @@
 import { rootLogger } from '@cupboard/logger';
+import { WIRE_DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
+import {
+	uploadCommitDecisionSchema,
+	uploadNegotiateResponseSchema
+} from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as schema from '../db/schema.ts';
 import {
+	authorisedFetch,
 	commitPath,
 	commitUpload,
 	currentServer,
@@ -14,7 +21,9 @@ import {
 	openCommitSession,
 	provisionFixtureTenant,
 	resetTestServer,
+	testPushId,
 	uploadMetadata,
+	uploadPathNegotiation,
 	verifiableNar
 } from '../test-support.ts';
 
@@ -143,7 +152,8 @@ describe('batched commit settles', () => {
 								generation,
 								probe,
 								mustOwnBlob: true,
-								graceDecision: undefined
+								graceDecision: undefined,
+								attachRootName: undefined
 							});
 						})
 					);
@@ -365,5 +375,93 @@ describe('batched commit settles', () => {
 		expect(
 			frames.map((f) => f.ev).toSorted((a, b) => a.localeCompare(b))
 		).toStrictEqual(['settled', 'settled']);
+	});
+
+	it('attaches every path of a batched session to the bound run root, across flushes', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('batch-attach');
+		const attachRoot = { name: 'ci/run-1', ttlSeconds: 3600 };
+		const paths = ['a', 'b', 'c', 'd'].map((letter, index) =>
+			uploadMetadata({
+				name: `batch-attach-${String(index)}`,
+				storePathHash: letter.repeat(32),
+				narHash: nar.narHash,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength,
+				narSize: nar.narSize
+			})
+		);
+		const [seed, ...attached] = paths;
+
+		if (seed === undefined) {
+			throw new Error('the batch needs a seed path');
+		}
+
+		// The seed commits the blob outside the run root, so every rooted path
+		// negotiates a reuse commit and its attach settles through the flush.
+		await commitPath(token, seed, nar);
+
+		const negotiated = await authorisedFetch(
+			`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
+			token,
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					pushId: testPushId,
+					paths: attached.map((path) => uploadPathNegotiation(path)),
+					attachRoot
+				})
+			}
+		);
+		expect(negotiated.status).toBe(StatusCodes.OK);
+		const decisions = uploadNegotiateResponseSchema
+			.parse(await negotiated.json())
+			.uploads.map((decision) => uploadCommitDecisionSchema.parse(decision));
+
+		// Two batch messages over one session, so the attaches span two flushes.
+		const session = await openCommitSession(token);
+		const frames: string[] = [];
+
+		for (const chunkOfDecisions of [
+			decisions.slice(0, 2),
+			decisions.slice(2)
+		]) {
+			session.send({
+				op: 'commit-batch',
+				commits: chunkOfDecisions.map((decision) => ({
+					uploadId: decision.uploadId,
+					storePathHash: decision.storePathHash,
+					narHash: decision.narHash
+				}))
+			});
+
+			const received = await Promise.all(
+				chunkOfDecisions.map(() => session.nextFrame())
+			);
+			frames.push(...received.map((frame) => frame.ev));
+		}
+
+		session.socket.close();
+
+		const targets = await runInDurableObject(currentServer(), (instance) =>
+			instance.context.db
+				.select()
+				.from(schema.retentionRootTargets)
+				.all()
+				.toSorted((left, right) =>
+					left.storePathHash.localeCompare(right.storePathHash)
+				)
+		);
+
+		expect({ frames, targets }).toStrictEqual({
+			frames: ['settled', 'settled', 'settled'],
+			targets: attached.map((path) => ({
+				cache: '',
+				rootName: attachRoot.name,
+				storePathHash: path.storePathHash,
+				storePath: path.storePath
+			}))
+		});
 	});
 });
