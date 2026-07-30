@@ -3538,7 +3538,15 @@ describe('upload flow', () => {
 
 			expect({ status: response.status, roots }).toStrictEqual({
 				status: StatusCodes.CONFLICT,
-				roots: [original]
+				roots: [
+					{
+						name: original.name,
+						expired: original.expired,
+						createdAt: original.createdAt,
+						updatedAt: original.updatedAt,
+						targetCount: original.targets.length
+					}
+				]
 			});
 		});
 
@@ -3651,7 +3659,15 @@ describe('upload flow', () => {
 			expect({ status: response.status, body, roots }).toStrictEqual({
 				status: StatusCodes.OK,
 				body: { status: 'build-required', unavailable: [absentPath] },
-				roots: [original]
+				roots: [
+					{
+						name: original.name,
+						expired: original.expired,
+						createdAt: original.createdAt,
+						updatedAt: original.updatedAt,
+						targetCount: original.targets.length
+					}
+				]
 			});
 		});
 

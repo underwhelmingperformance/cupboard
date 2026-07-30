@@ -12,7 +12,7 @@ import {
 	currentServer,
 	deferFreshUpload,
 	initialise,
-	listRoots,
+	listRootTargets,
 	narInfoGeneration,
 	pendingUploadVerdict,
 	resetTestServer,
@@ -92,13 +92,13 @@ describe('verify short-circuits an already-committed re-claim', () => {
 			const object = await env.BLOBS.head(
 				narInfoObjectKey(fixtureTenant, upload.metadata.storePathHash)
 			);
-			const { roots } = await listRoots(token);
+			const { targets } = await listRootTargets(token, 'main');
 
 			expect({
 				verdict: await pendingUploadVerdict(upload.uploadId),
 				generation: await narInfoGeneration(upload.metadata.storePathHash),
 				served: object !== null,
-				target: roots.at(0)?.targets.at(0)?.present
+				target: targets.at(0)?.present
 			}).toStrictEqual({
 				verdict: undefined,
 				generation: 0,

@@ -9,13 +9,16 @@ import {
 	type ParsedRootRemoveResponse,
 	type ParsedRootSetResponse,
 	rootEnsureResponseSchema,
+	rootListEntrySchema,
 	rootListResponseSchema,
 	rootRemoveResponseSchema,
 	type RootSummary,
-	rootSummarySchema
+	rootSummarySchema,
+	rootTargetsPageSchema
 } from '@cupboard/protocol/retention';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import {
 	describeExpiry,
@@ -23,7 +26,8 @@ import {
 	runRootEnsure,
 	runRootList,
 	runRootRemove,
-	runRootSet
+	runRootSet,
+	runRootTargets
 } from './root.ts';
 
 const rootName = (value: string) => rootNameSchema.parse(value);
@@ -203,30 +207,54 @@ describe('runRootEnsure', () => {
 });
 
 describe('runRootList', () => {
-	it('reports a row per root', async () => {
+	it('follows the cursor to exhaustion and reports a row per root', async () => {
+		const calls: Parameters<RootClient['list']>[0][] = [];
 		const results: ResultRow[][] = [];
-		const response = rootListResponseSchema.parse({
-			roots: [
-				summary({ name: 'main', targets: [presentTarget()] }),
-				summary({
-					name: 'pr-123',
-					expiresAt: '2026-01-08T00:00:00.000Z',
-					targets: [presentTarget()]
-				})
-			]
+		const pages = [
+			rootListResponseSchema.parse({
+				roots: [entry({ name: 'main', targetCount: 1 })],
+				cursor: 'main'
+			}),
+			rootListResponseSchema.parse({
+				roots: [
+					entry({
+						name: 'pr-123',
+						expiresAt: '2026-01-08T00:00:00.000Z',
+						targetCount: 3
+					})
+				]
+			})
+		];
+
+		await runRootList('_default', reporter(results), {
+			list(input) {
+				calls.push(input);
+
+				const page = pages.shift();
+
+				if (page === undefined) {
+					throw new Error('listed past the final page');
+				}
+
+				return Promise.resolve(page);
+			}
 		});
 
-		await runRootList('_default', reporter(results), listClient(response));
-
-		expect(results).toStrictEqual([
-			[
-				{ label: 'main', value: '1 target(s); permanent' },
-				{
-					label: 'pr-123',
-					value: '1 target(s); expires 2026-01-08 00:00 UTC'
-				}
+		expect({ calls, results }).toStrictEqual({
+			calls: [
+				{ params: { cacheName: '_default' } },
+				{ params: { cacheName: '_default' }, query: { cursor: 'main' } }
+			],
+			results: [
+				[
+					{ label: 'main', value: '1 target(s); permanent' },
+					{
+						label: 'pr-123',
+						value: '3 target(s); expires 2026-01-08 00:00 UTC'
+					}
+				]
 			]
-		]);
+		});
 	});
 
 	it('reports nothing but an info line when there are no roots', async () => {
@@ -242,6 +270,59 @@ describe('runRootList', () => {
 		expect({ results, infos }).toStrictEqual({
 			results: [[]],
 			infos: ['No retention roots.']
+		});
+	});
+});
+
+describe('runRootTargets', () => {
+	it('follows the cursor to exhaustion and reports each target', async () => {
+		const calls: Parameters<RootClient['targets']>[0][] = [];
+		const results: ResultRow[][] = [];
+		const missingTarget = `/nix/store/${'b'.repeat(32)}-tool`;
+		const pages = [
+			rootTargetsPageSchema.parse({
+				targets: [presentTarget()],
+				cursor: presentTarget().storePathHash
+			}),
+			rootTargetsPageSchema.parse({
+				targets: [
+					{
+						storePathHash: 'b'.repeat(32),
+						storePath: missingTarget,
+						present: false
+					}
+				]
+			})
+		];
+
+		await runRootTargets('_default', rootName('main'), reporter(results), {
+			targets(input) {
+				calls.push(input);
+
+				const page = pages.shift();
+
+				if (page === undefined) {
+					throw new Error('listed past the final page');
+				}
+
+				return Promise.resolve(page);
+			}
+		});
+
+		expect({ calls, results }).toStrictEqual({
+			calls: [
+				{ params: { cacheName: '_default', name: 'main' } },
+				{
+					params: { cacheName: '_default', name: 'main' },
+					query: { cursor: presentTarget().storePathHash }
+				}
+			],
+			results: [
+				[
+					{ label: target, value: 'present' },
+					{ label: missingTarget, value: 'missing' }
+				]
+			]
 		});
 	});
 });
@@ -319,6 +400,19 @@ function summary(overrides: Partial<RootSummary>) {
 	});
 }
 
+function entry(
+	overrides: Partial<z.input<typeof rootListEntrySchema>>
+): z.output<typeof rootListEntrySchema> {
+	return rootListEntrySchema.parse({
+		name: 'root',
+		expired: false,
+		createdAt: '2026-01-01T00:00:00.000Z',
+		updatedAt: '2026-01-01T00:00:00.000Z',
+		targetCount: 0,
+		...overrides
+	});
+}
+
 function setRootClient(
 	response: ParsedRootSetResponse,
 	calls: SetRootInput[]
@@ -369,6 +463,7 @@ function removeClient(
 				})
 			),
 		list: () => Promise.resolve({ roots: [] }),
+		targets: () => Promise.resolve({ targets: [] }),
 		remove(input) {
 			calls.push(input);
 

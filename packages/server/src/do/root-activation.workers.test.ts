@@ -20,6 +20,7 @@ import {
 	expectSingleUploadDecision,
 	initialise,
 	listRoots,
+	listRootTargets,
 	markUploadPendingVerification,
 	narBytes,
 	narInfoGeneration,
@@ -125,7 +126,7 @@ describe('root activation gating', () => {
 		});
 
 		await currentServer().runVerification();
-		const { roots: activated } = await listRoots(token);
+		const activated = await listRootTargets(token, 'main');
 
 		const target = {
 			storePathHash: metadata.storePathHash,
@@ -133,7 +134,7 @@ describe('root activation gating', () => {
 		};
 		expect({
 			reserved: reserved.targets,
-			activated: activated.at(0)?.targets
+			activated: activated.targets
 		}).toStrictEqual({
 			reserved: [{ ...target, present: false }],
 			activated: [{ ...target, present: true }]
@@ -160,11 +161,11 @@ describe('root activation gating', () => {
 		const served = await env.BLOBS.head(
 			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
-		const { roots } = await listRoots(token);
+		const { targets } = await listRootTargets(token, 'main');
 
 		expect({
 			served: served !== null,
-			present: roots.at(0)?.targets.at(0)?.present
+			present: targets.at(0)?.present
 		}).toStrictEqual({ served: true, present: true });
 	});
 
@@ -193,8 +194,8 @@ describe('root activation gating', () => {
 		// dropped from the root.
 		await currentServer().runVerification();
 
-		const { roots } = await listRoots(token);
-		expect(roots.at(0)?.targets ?? []).toStrictEqual([]);
+		const { targets } = await listRootTargets(token, 'main');
+		expect(targets).toStrictEqual([]);
 	});
 
 	it('keeps a rooted target when a straggling mismatch loses to its own commit', async () => {
@@ -223,12 +224,10 @@ describe('root activation gating', () => {
 			actualNarHash: upload.nar.narHash
 		});
 
-		const { roots } = await listRoots(token);
+		const page = await listRootTargets(token, 'main');
 		expect({
 			generation: await narInfoGeneration(upload.metadata.storePathHash),
-			targets: (roots.at(0)?.targets ?? []).map(
-				(target) => target.storePathHash
-			)
+			targets: page.targets.map((target) => target.storePathHash)
 		}).toStrictEqual({
 			generation: 0,
 			targets: [upload.metadata.storePathHash]
@@ -314,10 +313,12 @@ describe('root activation gating', () => {
 			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
 		const { roots } = await listRoots(token);
+		const afterDemote = await listRootTargets(token, 'main');
 
 		expect({
 			whenRooted: original.targets,
-			afterDemote: roots
+			listed: roots,
+			afterDemote: afterDemote.targets
 		}).toStrictEqual({
 			whenRooted: [
 				{
@@ -326,19 +327,20 @@ describe('root activation gating', () => {
 					present: true
 				}
 			],
-			afterDemote: [
+			listed: [
 				{
 					name: 'main',
 					expired: false,
 					createdAt: '2026-01-01T00:00:00.000Z',
 					updatedAt: '2026-01-01T00:00:00.000Z',
-					targets: [
-						{
-							storePathHash: metadata.storePathHash,
-							storePath: metadata.storePath,
-							present: false
-						}
-					]
+					targetCount: 1
+				}
+			],
+			afterDemote: [
+				{
+					storePathHash: metadata.storePathHash,
+					storePath: metadata.storePath,
+					present: false
 				}
 			]
 		});

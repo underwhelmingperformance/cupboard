@@ -250,7 +250,13 @@ describe('tenant contract round trip', () => {
 			name: 'github:owner/repo/main',
 			targets: [metadata.storePath]
 		});
-		const listed = await client.roots.list({ cacheName: '_default' });
+		const listed = await client.roots.list({
+			params: { cacheName: '_default' }
+		});
+		const targetsPage = await client.roots.targets({
+			params: { cacheName: '_default', name: 'github:owner/repo/main' },
+			query: { limit: 1 }
+		});
 		const removedRoot = await client.roots.remove({
 			cacheName: '_default',
 			name: 'github:owner/repo/main'
@@ -263,7 +269,11 @@ describe('tenant contract round trip', () => {
 
 		expect({
 			setTargets: set.targets.map((entry) => entry.present),
-			listedNames: listed.roots.map((entry) => entry.name),
+			listed: listed.roots.map((entry) => ({
+				name: entry.name,
+				targetCount: entry.targetCount
+			})),
+			targetsPage,
 			removedRoot,
 			removedPath: {
 				deleted: removedPath.deleted,
@@ -272,7 +282,16 @@ describe('tenant contract round trip', () => {
 			sweptOk: swept.ok
 		}).toStrictEqual({
 			setTargets: [true],
-			listedNames: ['github:owner/repo/main'],
+			listed: [{ name: 'github:owner/repo/main', targetCount: 1 }],
+			targetsPage: {
+				targets: [
+					{
+						storePathHash: metadata.storePathHash,
+						storePath: metadata.storePath,
+						present: true
+					}
+				]
+			},
 			removedRoot: { name: 'github:owner/repo/main', removed: true },
 			removedPath: { deleted: true, storePathHash: metadata.storePathHash },
 			sweptOk: true

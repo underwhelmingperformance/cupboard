@@ -6,10 +6,12 @@ import {
 } from '@cupboard/nix-store/scalars';
 import type {
 	ParsedRootEnsureResponse,
+	ParsedRootListEntry,
 	ParsedRootListResponse,
 	ParsedRootRemoveResponse,
 	ParsedRootSetResponse,
-	RootSummary
+	ParsedRootTarget,
+	ParsedRootTargetsPage
 } from '@cupboard/protocol/retention';
 import {
 	formatTimestamp,
@@ -62,7 +64,14 @@ export interface RootClient {
 		targets: string[];
 		ttlSeconds?: number;
 	}): Promise<ParsedRootEnsureResponse>;
-	list(input: { cacheName: string }): Promise<ParsedRootListResponse>;
+	list(input: {
+		params: { cacheName: string };
+		query?: { cursor?: string; limit?: number };
+	}): Promise<ParsedRootListResponse>;
+	targets(input: {
+		params: { cacheName: string; name: string };
+		query?: { cursor?: string; limit?: number };
+	}): Promise<ParsedRootTargetsPage>;
 	remove(input: {
 		cacheName: string;
 		name: string;
@@ -207,6 +216,27 @@ export function registerRootCommands(
 		});
 
 	root
+		.command('targets')
+		.description("List a retention root's targets and whether each is served.")
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.argument('<name>', 'root name, e.g. github:owner/repo/main', parseRootName)
+		.option('--cache <name>', 'target a named cache rather than the default')
+		.action(async (url: URL, name: RootName, options: RootOptions) => {
+			const reporter = commandUi(program, programOptions).reporter();
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+				signal: programOptions.signal
+			});
+
+			await runRootTargets(
+				selectorForCache(storedCacheFor(options.cache)),
+				name,
+				reporter,
+				rpc.roots
+			);
+		});
+
+	root
 		.command('remove')
 		.description('Remove a retention root.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
@@ -300,15 +330,66 @@ export async function runRootList(
 	reporter: Reporter,
 	client: Pick<RootClient, 'list'>
 ): Promise<void> {
-	const { roots } = await reporter.phase('Listing retention roots', () =>
-		client.list({ cacheName })
-	);
+	// The server pages the listing, so a tenant with many roots is read in
+	// bounded requests; the human listing still shows the whole set.
+	const roots = await reporter.phase('Listing retention roots', async () => {
+		const entries: ParsedRootListEntry[] = [];
+		let cursor: string | undefined;
+
+		do {
+			const page = await client.list({
+				params: { cacheName },
+				...(cursor !== undefined && { query: { cursor } })
+			});
+
+			entries.push(...page.roots);
+			cursor = page.cursor;
+		} while (cursor !== undefined);
+
+		return entries;
+	});
 
 	reporter.result({
 		kind: 'roots',
 		data: roots,
 		rows: roots.map((root) => rootListRow(root)),
 		empty: 'No retention roots.'
+	});
+}
+
+export async function runRootTargets(
+	cacheName: string,
+	name: RootName,
+	reporter: Reporter,
+	client: Pick<RootClient, 'targets'>
+): Promise<void> {
+	// The targets are paged for the same reason as the listing: a run root
+	// accretes attached paths without bound.
+	const targets = await reporter.phase('Listing root targets', async () => {
+		const collected: ParsedRootTarget[] = [];
+		let cursor: string | undefined;
+
+		do {
+			const page = await client.targets({
+				params: { cacheName, name },
+				...(cursor !== undefined && { query: { cursor } })
+			});
+
+			collected.push(...page.targets);
+			cursor = page.cursor;
+		} while (cursor !== undefined);
+
+		return collected;
+	});
+
+	reporter.result({
+		kind: 'root-targets',
+		data: targets,
+		rows: targets.map((target) => ({
+			label: target.storePath,
+			value: target.present ? 'present' : 'missing'
+		})),
+		empty: 'No targets.'
 	});
 }
 
@@ -343,14 +424,17 @@ export async function runRootRemove(
 	});
 }
 
-function rootListRow(root: RootSummary): ResultRow {
+function rootListRow(root: ParsedRootListEntry): ResultRow {
 	return {
 		label: root.name,
-		value: `${String(root.targets.length)} target(s); ${describeExpiry(root)}`
+		value: `${String(root.targetCount)} target(s); ${describeExpiry(root)}`
 	};
 }
 
-export function describeExpiry(summary: RootSummary): string {
+export function describeExpiry(summary: {
+	readonly expiresAt?: string;
+	readonly expired: boolean;
+}): string {
 	if (summary.expiresAt === undefined) {
 		return 'permanent';
 	}

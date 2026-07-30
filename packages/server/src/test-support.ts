@@ -47,7 +47,8 @@ import {
 	gcResponseSchema,
 	rootListResponseSchema,
 	rootRemoveResponseSchema,
-	rootSetResponseSchema
+	rootSetResponseSchema,
+	rootTargetsPageSchema
 } from '@cupboard/protocol/retention';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
@@ -2152,15 +2153,46 @@ export async function setRoot(
 	return rootSetResponseSchema.parse(await response.json());
 }
 
-export async function listRoots(token: string): Promise<RootListResponse> {
+export async function listRoots(
+	token: string,
+	options: { readonly cursor?: string; readonly limit?: number } = {}
+): Promise<RootListResponse> {
 	const response = await authorisedFetch(
-		`/cache/${WIRE_DEFAULT_CACHE}/roots`,
+		`/cache/${WIRE_DEFAULT_CACHE}/roots${listPageQuery(options)}`,
 		token
 	);
 
 	expect(response.status).toBe(StatusCodes.OK);
 
 	return rootListResponseSchema.parse(await response.json());
+}
+
+/** One page of a root's targets, with the per-target serve probe applied. */
+export async function listRootTargets(
+	token: string,
+	name: string,
+	options: { readonly cursor?: string; readonly limit?: number } = {}
+): Promise<z.output<typeof rootTargetsPageSchema>> {
+	const response = await authorisedFetch(
+		`/cache/${WIRE_DEFAULT_CACHE}/roots/${encodeURIComponent(name)}/targets${listPageQuery(options)}`,
+		token
+	);
+
+	expect(response.status).toBe(StatusCodes.OK);
+
+	return rootTargetsPageSchema.parse(await response.json());
+}
+
+function listPageQuery(options: {
+	readonly cursor?: string;
+	readonly limit?: number;
+}): string {
+	const query = new URLSearchParams({
+		...(options.cursor !== undefined && { cursor: options.cursor }),
+		...(options.limit !== undefined && { limit: String(options.limit) })
+	}).toString();
+
+	return query === '' ? '' : `?${query}`;
 }
 
 export async function removeRoot(

@@ -10,10 +10,12 @@ import { byCodeUnit, resolveRootTargets } from '@cupboard/nix-store/store-path';
 import {
 	type ParsedRootSetBody,
 	type RootEnsureResponse,
+	rootListPageSize,
 	type RootListResponse,
 	type RootRemoveResponse,
 	type RootSetResponse,
-	type RootSummary
+	type RootSummary,
+	type RootTargetsPage
 } from '@cupboard/protocol/retention';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { chunk } from '@cupboard/shared/collections';
@@ -468,37 +470,92 @@ export class RootsService {
 		};
 	}
 
-	async listRoots(cache: StoredCache): Promise<RootListResponse> {
+	// The listing summarises: counted in SQLite and keyset-paginated by name, it
+	// reads no target rows and probes nothing in R2, so a tenant whose run
+	// roots have accreted thousands of paths lists them in bounded pages. A
+	// root's targets are read through {@link rootTargets}.
+	listRoots(
+		cache: StoredCache,
+		options: { readonly cursor?: string; readonly limit?: number } = {}
+	): RootListResponse {
+		const limit = Math.min(options.limit ?? rootListPageSize, rootListPageSize);
 		const now = isoTimestamp(new Date());
-		const roots = this.context.db
-			.select()
+		const rows = this.context.db
+			.select({
+				name: schema.retentionRoots.name,
+				expiresAt: schema.retentionRoots.expiresAt,
+				createdAt: schema.retentionRoots.createdAt,
+				updatedAt: schema.retentionRoots.updatedAt,
+				targetCount: sql<number>`(select count(*) from ${schema.retentionRootTargets} where ${schema.retentionRootTargets.cache} = ${schema.retentionRoots.cache} and ${schema.retentionRootTargets.rootName} = ${schema.retentionRoots.name})`
+			})
 			.from(schema.retentionRoots)
-			.where(eq(schema.retentionRoots.cache, cache))
-			.all();
-
-		const summaries: RootSummary[] = [];
-
-		for (const root of roots) {
-			const targets = this.rootTargetRows(cache, root.name);
-			const servable = await this.servableTargets(cache, targets);
-
-			summaries.push(
-				this.rootSummaryFrom(
-					root.name,
-					{
-						expiresAt: root.expiresAt ?? undefined,
-						createdAt: root.createdAt,
-						updatedAt: root.updatedAt
-					},
-					now,
-					targets,
-					servable
+			.where(
+				and(
+					eq(schema.retentionRoots.cache, cache),
+					options.cursor === undefined
+						? undefined
+						: sql`${schema.retentionRoots.name} > ${options.cursor}`
 				)
-			);
-		}
+			)
+			.orderBy(schema.retentionRoots.name)
+			.limit(limit + 1)
+			.all();
+		const page = rows.slice(0, limit);
+		const last = page.at(-1);
 
 		return {
-			roots: summaries.toSorted((a, b) => byCodeUnit(a.name, b.name))
+			roots: page.map((row) => ({
+				name: row.name,
+				...(row.expiresAt !== null && { expiresAt: row.expiresAt }),
+				expired: row.expiresAt !== null && row.expiresAt <= now,
+				createdAt: row.createdAt,
+				updatedAt: row.updatedAt,
+				targetCount: row.targetCount
+			})),
+			...(rows.length > limit && last !== undefined && { cursor: last.name })
+		};
+	}
+
+	// One page of a root's targets, keyset-paginated by store-path hash. The
+	// serve probe runs per page, so the page bound also bounds the per-target
+	// probe fan-out an unbounded run root would otherwise fan out in one
+	// request. An unknown root reads as a root with no targets.
+	async rootTargets(
+		cache: StoredCache,
+		name: RootName,
+		options: { readonly cursor?: string; readonly limit?: number } = {}
+	): Promise<RootTargetsPage> {
+		const limit = Math.min(options.limit ?? rootListPageSize, rootListPageSize);
+		const rows = this.context.db
+			.select({
+				storePathHash: schema.retentionRootTargets.storePathHash,
+				storePath: schema.retentionRootTargets.storePath
+			})
+			.from(schema.retentionRootTargets)
+			.where(
+				and(
+					eq(schema.retentionRootTargets.cache, cache),
+					eq(schema.retentionRootTargets.rootName, name),
+					options.cursor === undefined
+						? undefined
+						: sql`${schema.retentionRootTargets.storePathHash} > ${options.cursor}`
+				)
+			)
+			.orderBy(schema.retentionRootTargets.storePathHash)
+			.limit(limit + 1)
+			.all();
+		const page = rows.slice(0, limit);
+		const last = page.at(-1);
+		const servable = await this.servableTargets(cache, page);
+
+		return {
+			targets: page.map((target) => ({
+				storePathHash: target.storePathHash,
+				storePath: target.storePath,
+				present: servable.has(target.storePathHash)
+			})),
+			...(rows.length > limit &&
+				last !== undefined && { cursor: last.storePathHash })
 		};
 	}
 
