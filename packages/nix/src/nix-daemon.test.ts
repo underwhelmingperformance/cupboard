@@ -57,7 +57,7 @@ describe('connectToNixDaemon', () => {
 
 			await transport.write(new Uint8Array([1, 2, 3, 4]));
 			const echoed = await transport.read(4);
-			transport.close();
+			await transport.close();
 
 			expect([...echoed]).toStrictEqual([1, 2, 3, 4]);
 		} finally {
@@ -69,21 +69,23 @@ describe('connectToNixDaemon', () => {
 
 describe('NixDaemonStoreClient', () => {
 	it('reads path info through the Nix daemon protocol', async () => {
+		let transport: FakeDaemonTransport | undefined;
 		const client = new NixDaemonStoreClient({
-			connect: () =>
-				Promise.resolve(
-					new FakeDaemonTransport({
-						[appPath]: {
-							hash: appHash,
-							narSize: 123,
-							references: [libraryPath, runtimePath],
-							deriver: '/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv',
-							ca: 'fixed:r:sha256:hash',
-							signatures: ['cache:first', 'cache:second'],
-							ultimate: true
-						}
-					})
-				)
+			connect: () => {
+				transport = new FakeDaemonTransport({
+					[appPath]: {
+						hash: appHash,
+						narSize: 123,
+						references: [libraryPath, runtimePath],
+						deriver: '/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv',
+						ca: 'fixed:r:sha256:hash',
+						signatures: ['cache:first', 'cache:second'],
+						ultimate: true
+					}
+				});
+
+				return Promise.resolve(transport);
+			}
 		});
 
 		await expect(client.queryPathInfo(appPath)).resolves.toStrictEqual({
@@ -96,6 +98,7 @@ describe('NixDaemonStoreClient', () => {
 			signatures: ['cache:first', 'cache:second'],
 			ultimate: true
 		});
+		expect(transport?.closed).toBe(true);
 	});
 
 	it('resolves closure by walking daemon path references', async () => {
@@ -133,33 +136,32 @@ describe('NixDaemonStoreClient', () => {
 	});
 
 	it('resolves a multi-path frontier across several connections', async () => {
-		let connections = 0;
+		const transports: FakeDaemonTransport[] = [];
 		const client = new NixDaemonStoreClient({
 			connect: () => {
-				connections += 1;
+				const transport = new FakeDaemonTransport({
+					[appPath]: {
+						hash: appHash,
+						narSize: 123,
+						references: [libraryPath, runtimePath],
+						signatures: []
+					},
+					[libraryPath]: {
+						hash: libraryHash,
+						narSize: 456,
+						references: [],
+						signatures: []
+					},
+					[runtimePath]: {
+						hash: runtimeHash,
+						narSize: 789,
+						references: [],
+						signatures: []
+					}
+				});
+				transports.push(transport);
 
-				return Promise.resolve(
-					new FakeDaemonTransport({
-						[appPath]: {
-							hash: appHash,
-							narSize: 123,
-							references: [libraryPath, runtimePath],
-							signatures: []
-						},
-						[libraryPath]: {
-							hash: libraryHash,
-							narSize: 456,
-							references: [],
-							signatures: []
-						},
-						[runtimePath]: {
-							hash: runtimeHash,
-							narSize: 789,
-							references: [],
-							signatures: []
-						}
-					})
-				);
+				return Promise.resolve(transport);
 			}
 		});
 
@@ -171,7 +173,10 @@ describe('NixDaemonStoreClient', () => {
 
 		// The root is one frontier on its own; its two references form the next,
 		// so the pool opens a second connection to query them at the same time.
-		expect(connections).toBe(2);
+		expect(transports.map((transport) => transport.closed)).toStrictEqual([
+			true,
+			true
+		]);
 	});
 
 	it('rejects daemon misses with a typed path error', async () => {
@@ -231,9 +236,13 @@ describe('NixDaemonStoreClient', () => {
 	});
 
 	it('rejects daemon protocol minors older than the SetOptions frame it sends', async () => {
+		let transport: FakeDaemonTransport | undefined;
 		const client = new NixDaemonStoreClient({
-			connect: () =>
-				Promise.resolve(new FakeDaemonTransport({}, { protocolMinor: 37 }))
+			connect: () => {
+				transport = new FakeDaemonTransport({}, { protocolMinor: 37 });
+
+				return Promise.resolve(transport);
+			}
 		});
 
 		let outcome:
@@ -268,6 +277,7 @@ describe('NixDaemonStoreClient', () => {
 				version: { major: 1, minor: 37 }
 			}
 		});
+		expect(transport?.closed).toBe(true);
 	});
 });
 
@@ -284,6 +294,8 @@ interface FakePathInfo {
 class FakeDaemonTransport implements NixDaemonTransport {
 	private readonly pendingBytes: Buffer[] = [];
 	private writeCount = 0;
+
+	closed = false;
 
 	constructor(
 		private readonly paths: Readonly<Record<string, FakePathInfo>>,
@@ -348,8 +360,11 @@ class FakeDaemonTransport implements NixDaemonTransport {
 		return Promise.resolve(bytes);
 	}
 
-	close(): void {
+	close(): Promise<void> {
+		this.closed = true;
 		this.pendingBytes.length = 0;
+
+		return Promise.resolve();
 	}
 }
 
