@@ -11,6 +11,7 @@ export {
 	InvalidNixStorePathError,
 	NixConfigIncludeError,
 	NixConfigSettingError,
+	NixDaemonUnavailableError,
 	NixStoreDatabaseError,
 	NixStoreError,
 	NixStorePathNotFoundError,
@@ -18,6 +19,7 @@ export {
 	UnsupportedNixStoreError,
 	UnsupportedNixStoreOperationError
 } from './nix-store.ts';
+export type { NixDaemonClientOptions } from './store-client.ts';
 export type {
 	NixDaemonOverrides,
 	NixDaemonSetOptions,

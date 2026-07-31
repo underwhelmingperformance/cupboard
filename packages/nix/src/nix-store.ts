@@ -261,6 +261,15 @@ export class UnsupportedNixStoreOperationError extends NixStoreError {
 	}
 }
 
+export class NixDaemonUnavailableError extends NixStoreError {
+	constructor(public readonly socketPath: string) {
+		super(
+			`No Nix daemon is available: its socket ${socketPath} does not exist`
+		);
+		this.name = 'NixDaemonUnavailableError';
+	}
+}
+
 export class NotInNixStoreError extends NixStoreError {
 	constructor(
 		public readonly path: string,

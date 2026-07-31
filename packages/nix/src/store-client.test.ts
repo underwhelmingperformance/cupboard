@@ -1,10 +1,19 @@
-import { storeDirectorySchema } from '@cupboard/nix-store/scalars';
+import {
+	storeDirectorySchema,
+	storePathSchema
+} from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
+
+import { FakeDaemonTransport } from '../../../tests/support/fake-daemon-transport.ts';
 
 import { NixDaemonStoreClient } from './nix-daemon.ts';
 import { NixLocalStoreClient } from './nix-local-store.ts';
-import { UnsupportedNixStoreError } from './nix-store.ts';
 import {
+	NixDaemonUnavailableError,
+	UnsupportedNixStoreError
+} from './nix-store.ts';
+import {
+	createNixDaemonStoreClient,
 	createNixStoreClient,
 	resolveStoreBackend,
 	type StoreBackend,
@@ -112,5 +121,134 @@ describe('createNixStoreClient', () => {
 		expect(
 			createNixStoreClient(environment({ NIX_REMOTE: 'local' }))
 		).toBeInstanceOf(NixLocalStoreClient);
+	});
+});
+
+function daemonEnvironment(probes: Probes): StoreClientEnvironment {
+	return {
+		env: {},
+		readFile: (filePath) => noFiles.get(filePath),
+		homeDirectory: () => noFiles.get('home'),
+		canWriteStateDirectory: () => probes.canWrite ?? false,
+		socketExists: () => probes.socket ?? false
+	};
+}
+
+describe('createNixDaemonStoreClient', () => {
+	it.each([
+		{ name: 'a writable state directory', canWrite: true },
+		{ name: 'a read-only state directory', canWrite: false }
+	])('selects the daemon over $name when its socket exists', ({ canWrite }) => {
+		expect(
+			createNixDaemonStoreClient(daemonEnvironment({ canWrite, socket: true }))
+		).toBeInstanceOf(NixDaemonStoreClient);
+	});
+
+	it.each([
+		{ name: 'a writable state directory', canWrite: true },
+		{ name: 'a read-only state directory', canWrite: false }
+	])('refuses a daemonless install with $name', ({ canWrite }) => {
+		let outcome:
+			| { value: NixDaemonStoreClient }
+			| { error: { name: string; socketPath: string } };
+		try {
+			const value = createNixDaemonStoreClient(
+				daemonEnvironment({ canWrite, socket: false })
+			);
+			outcome = { value };
+		} catch (error_: unknown) {
+			expect(error_).toBeInstanceOf(NixDaemonUnavailableError);
+
+			if (!(error_ instanceof NixDaemonUnavailableError)) {
+				throw error_;
+			}
+
+			outcome = {
+				error: { name: error_.name, socketPath: error_.socketPath }
+			};
+		}
+
+		expect(outcome).toStrictEqual({
+			error: {
+				name: 'NixDaemonUnavailableError',
+				socketPath: '/nix/var/nix/daemon-socket/socket'
+			}
+		});
+	});
+
+	it('probes the socket a unix store URI names', () => {
+		let outcome:
+			{ value: NixDaemonStoreClient } | { error: { socketPath: string } };
+		try {
+			const value = createNixDaemonStoreClient(
+				daemonEnvironment({ canWrite: true, socket: false }),
+				{ ...baseConfig, storeUri: 'unix:///run/nix.sock' }
+			);
+			outcome = { value };
+		} catch (error_: unknown) {
+			if (!(error_ instanceof NixDaemonUnavailableError)) {
+				throw error_;
+			}
+
+			outcome = { error: { socketPath: error_.socketPath } };
+		}
+
+		expect(outcome).toStrictEqual({
+			error: { socketPath: '/run/nix.sock' }
+		});
+	});
+
+	it('merges per-call options over the discovered daemon settings', async () => {
+		const storePath = storePathSchema.parse(
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
+		);
+		const config: NixStoreConfig = {
+			...baseConfig,
+			daemonSetOptions: { maxBuildJobs: 1, keepGoing: true },
+			daemonOverrides: {
+				'netrc-file': '/discovered/netrc',
+				'download-attempts': '2'
+			}
+		};
+		const client = createNixDaemonStoreClient(
+			daemonEnvironment({ socket: true }),
+			config,
+			{
+				setOptions: { maxBuildJobs: 4 },
+				overrides: { 'netrc-file': '/caller/netrc' },
+				connect: () =>
+					Promise.resolve(
+						new FakeDaemonTransport(
+							{
+								[storePath]: {
+									hash: '11'.repeat(32),
+									narSize: 123,
+									references: [],
+									signatures: []
+								}
+							},
+							{
+								expectedSetOptions: {
+									keepFailed: false,
+									keepGoing: true,
+									tryFallback: false,
+									maxBuildJobs: 4,
+									maxSilentTime: 0,
+									buildCores: 0,
+									useSubstitutes: true
+								},
+								expectedOverrides: {
+									'netrc-file': '/caller/netrc',
+									'download-attempts': '2'
+								}
+							}
+						)
+					)
+			}
+		);
+
+		await expect(client.queryValidPaths([storePath])).resolves.toStrictEqual([
+			storePath
+		]);
 	});
 });
