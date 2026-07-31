@@ -37,6 +37,12 @@ export interface NixStoreConfig {
 	readonly daemonSetOptions: NixDaemonSetOptions;
 	/** The discovered settings a daemon connection forwards as overrides. */
 	readonly daemonOverrides: NixDaemonOverrides;
+	/**
+	 * The effective `post-build-hook` setting from the merged configuration.
+	 * Nix supports exactly one post-build hook, so a caller about to apply its
+	 * own reads this first to refuse over an operator's existing hook.
+	 */
+	readonly postBuildHook?: string;
 }
 
 /** The settings the daemon protocol's SetOptions frame carries as fields. */
@@ -97,6 +103,7 @@ export function discoverNixStoreConfig(
 	const daemonSocketPath =
 		nonEmpty(dependencies.env.NIX_DAEMON_SOCKET_PATH) ??
 		path.join(stateDirectory, 'daemon-socket', 'socket');
+	const postBuildHook = nonEmpty(settings.get('post-build-hook'));
 
 	return {
 		storeUri,
@@ -104,7 +111,8 @@ export function discoverNixStoreConfig(
 		stateDirectory,
 		daemonSocketPath,
 		daemonSetOptions,
-		daemonOverrides
+		daemonOverrides,
+		...(postBuildHook !== undefined && { postBuildHook })
 	};
 }
 

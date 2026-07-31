@@ -801,6 +801,85 @@ export class BuildEventMalformedError extends BuildEventRejectedError {
 }
 
 /**
+ * Streaming publication needs the daemon: temporary roots exist only behind
+ * it, and the daemonless local backend has no connection to hold one on. The
+ * socket path names where a daemon was looked for.
+ */
+export class DaemonRequiredError extends CliError {
+	constructor(public readonly socketPath: string) {
+		super(
+			`Streaming publication requires a Nix daemon, and no daemon socket ` +
+				`exists at ${socketPath}. Start nix-daemon, or run without streaming.`
+		);
+		this.name = 'DaemonRequiredError';
+	}
+
+	override get exitCode(): number {
+		return unavailableExitCode;
+	}
+}
+
+/**
+ * The daemon does not trust this client, so it would silently ignore the
+ * invocation's `post-build-hook` override and the build would stream nothing.
+ * Refused before the expensive build starts; `requiredSetting` names the
+ * daemon setting that admits the user.
+ */
+export class UntrustedDaemonError extends CliError {
+	public readonly requiredSetting = 'trusted-users';
+
+	constructor(public readonly trust: 'not-trusted' | 'unknown') {
+		super(
+			`The Nix daemon does not trust this user, so it would ignore the ` +
+				`post-build-hook this run sets. Add the user to the daemon's ` +
+				`trusted-users setting.`
+		);
+		this.name = 'UntrustedDaemonError';
+	}
+
+	override get exitCode(): number {
+		return authExitCode;
+	}
+}
+
+/**
+ * The effective configuration already sets `post-build-hook`. Nix supports
+ * exactly one, so streaming mode refuses; it never silently overrides an
+ * operator's hook.
+ */
+export class PostBuildHookConflictError extends CliError {
+	constructor(public readonly existingHook: string) {
+		super(
+			`The Nix configuration already sets post-build-hook (${existingHook}), ` +
+				`and Nix supports exactly one. Remove it, or run without streaming.`
+		);
+		this.name = 'PostBuildHookConflictError';
+	}
+}
+
+/**
+ * The token's granted authorization_details do not cover an operation this
+ * run needs on a root, so a later phase would fail after the expensive build;
+ * refused up front, naming the missing authority.
+ */
+export class MissingGrantError extends CliError {
+	constructor(
+		public readonly operation: string,
+		public readonly root: string
+	) {
+		super(
+			`The access token does not grant ${operation} on root ${root}; ` +
+				`request it in the token exchange's authorization_details.`
+		);
+		this.name = 'MissingGrantError';
+	}
+
+	override get exitCode(): number {
+		return authExitCode;
+	}
+}
+
+/**
  * This installation carries no compiled hook helper at any expected location,
  * so streaming publication cannot start. The candidates name every location
  * that was checked.
