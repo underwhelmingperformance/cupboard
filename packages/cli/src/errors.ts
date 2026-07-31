@@ -626,6 +626,30 @@ export class GraceTooShortError extends CliUsageError {
 	}
 }
 
+/** The reference source did not serve the requested narinfo. */
+export class NarInfoUnavailableError extends CliError {
+	constructor(
+		public readonly target: URL,
+		public readonly status: number
+	) {
+		super(`${target} answered HTTP ${String(status)} for the narinfo`);
+		this.name = 'NarInfoUnavailableError';
+	}
+}
+
+/** The reference source served a body that does not parse as a narinfo. */
+export class NarInfoUnparsableError extends CliError {
+	constructor(
+		public readonly target: URL,
+		options: { readonly cause: unknown }
+	) {
+		super(`${target} did not answer with a parsable narinfo body`, {
+			cause: options.cause
+		});
+		this.name = 'NarInfoUnparsableError';
+	}
+}
+
 /**
  * A `job_workflow_ref` claim without an `@<ref>` becomes a pattern matching
  * the workflow file at every ref, so edited workflow code would inherit the
