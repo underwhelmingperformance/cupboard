@@ -801,6 +801,22 @@ export class BuildEventMalformedError extends BuildEventRejectedError {
 }
 
 /**
+ * This installation carries no compiled hook helper at any expected location,
+ * so streaming publication cannot start. The candidates name every location
+ * that was checked.
+ */
+export class HookHelperMissingError extends CliError {
+	constructor(public readonly candidates: readonly string[]) {
+		super(
+			`This installation is missing its cupboard-hook-relay hook helper; ` +
+				`checked: ${candidates.join(', ')}. Set CUPBOARD_HOOK_HELPER to ` +
+				`name one explicitly.`
+		);
+		this.name = 'HookHelperMissingError';
+	}
+}
+
+/**
  * A well-formed build event naming an output path outside the selected store
  * directory. Only paths beneath that directory are publication candidates, so
  * the event is refused before anything enters the accepted set.
