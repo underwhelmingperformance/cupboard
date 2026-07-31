@@ -49,6 +49,7 @@ import type { NarUploadStream } from '../nix/blob.ts';
 import { type NarDigest, NixSha256Hash } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 
+import { PublicationCollection } from './publication.ts';
 import {
 	type PushClient,
 	type PushDependencies,
@@ -58,6 +59,16 @@ import {
 } from './push.ts';
 
 const rootName = (value: string) => rootNameSchema.parse(value);
+
+function publication(
+	targets: readonly string[],
+	intermediatePaths?: readonly string[]
+): PublicationCollection {
+	return PublicationCollection.of({
+		targets,
+		...(intermediatePaths !== undefined && { intermediatePaths })
+	});
+}
 
 const appPath = storePathSchema.parse(
 	'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
@@ -126,7 +137,7 @@ describe('runPush', () => {
 		);
 
 		await expect(
-			runPush(paths, reporter([]), {
+			runPush(publication(paths), reporter([]), {
 				root: rootName('main'),
 				nix: nixStore({}),
 				client: {
@@ -151,7 +162,8 @@ describe('runPush', () => {
 		const commits: string[] = [];
 		const results: ResultRow[][] = [];
 
-		await runPush([appPath], reporter(results), {
+		await runPush(publication([appPath]), reporter(results), {
+			closure: true,
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate(body) {
@@ -247,7 +259,7 @@ describe('runPush', () => {
 	it('carries the run root into the negotiate request', async () => {
 		const negotiations: Omit<UploadNegotiateRequest, 'pushId'>[] = [];
 
-		await runPush([appPath], reporter([]), {
+		await runPush(publication([appPath]), reporter([]), {
 			runRoot: {
 				name: rootName('ci/run-1'),
 				ttlSeconds: ttlSecondsSchema.parse(3600)
@@ -317,7 +329,7 @@ describe('runPush', () => {
 			Promise.withResolvers();
 		const uploadedKeys: string[] = [];
 
-		await runPush(paths, reporter([]), {
+		await runPush(publication(paths), reporter([]), {
 			uploadConcurrency: limit,
 			client: {
 				preview: unexpectedPreviewCall,
@@ -372,7 +384,7 @@ describe('runPush', () => {
 		const payloads: ResultPayload[] = [];
 		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
 
-		await runPush([appPath], reporter([], [], payloads), {
+		await runPush(publication([appPath]), reporter([], [], payloads), {
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate() {
@@ -450,7 +462,7 @@ describe('runPush', () => {
 		const commitAttempts: string[] = [];
 		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
 
-		await runPush([appPath], reporter([]), {
+		await runPush(publication([appPath]), reporter([]), {
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate() {
@@ -534,7 +546,7 @@ describe('runPush', () => {
 		const payloads: ResultPayload[] = [];
 		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
 
-		await runPush([appPath], reporter([], [], payloads), {
+		await runPush(publication([appPath]), reporter([], [], payloads), {
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate() {
@@ -641,7 +653,7 @@ describe('runPush', () => {
 			UploadVerificationFailedError
 		);
 
-		await runPush([appPath], reporter([], [], payloads), {
+		await runPush(publication([appPath]), reporter([], [], payloads), {
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate() {
@@ -733,7 +745,8 @@ describe('runPush', () => {
 		const clientCalls: unknown[] = [];
 		const previews: UploadPreviewRequest[] = [];
 
-		await runPush([appPath], reporter(results), {
+		await runPush(publication([appPath]), reporter(results), {
+			closure: true,
 			dryRun: true,
 			client: {
 				negotiate: unexpectedNegotiateCall,
@@ -822,7 +835,7 @@ describe('runPush', () => {
 		const warnings: { label: string; value?: string }[] = [];
 		const clientCalls: unknown[] = [];
 
-		await runPush([appPath], reporter(results, warnings), {
+		await runPush(publication([appPath]), reporter(results, warnings), {
 			wait: false,
 			client: {
 				preview: unexpectedPreviewCall,
@@ -897,7 +910,7 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 		const clientCalls: unknown[] = [];
 
-		await runPush([appPath], reporter(results), {
+		await runPush(publication([appPath]), reporter(results), {
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate(body) {
@@ -990,7 +1003,7 @@ describe('runPush', () => {
 		const bundle = sigstoreBundleBytes(narDigestHex(appDigest.narHash));
 		const bundleDigest = sha256Hex(bundle);
 
-		await runPush([appPath], reporter(results), {
+		await runPush(publication([appPath]), reporter(results), {
 			client: {
 				...skipClient(roots, clientCalls),
 				negotiateAttestations(body) {
@@ -1099,7 +1112,7 @@ describe('runPush', () => {
 		const bundle = sigstoreBundleBytes(narDigestHex(appDigest.narHash));
 		const bundleDigest = sha256Hex(bundle);
 
-		await runPush([appPath], reporter([]), {
+		await runPush(publication([appPath]), reporter([]), {
 			client: {
 				preview: unexpectedPreviewCall,
 				...deferredUpload([]),
@@ -1167,7 +1180,8 @@ describe('runPush', () => {
 		]);
 		const bundleDigest = sha256Hex(bundle);
 
-		await runPush([appPath], reporter(results), {
+		await runPush(publication([appPath]), reporter(results), {
+			closure: true,
 			client: {
 				...skipClient(roots, clientCalls),
 				negotiateAttestations(body) {
@@ -1260,7 +1274,7 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 		const clientCalls: unknown[] = [];
 
-		await runPush([appPath], reporter(results), {
+		await runPush(publication([appPath]), reporter(results), {
 			client: skipClient(roots, clientCalls),
 			attest: false,
 			attestations: [{ path: 'app.sigstore.json' }],
@@ -1299,7 +1313,7 @@ describe('runPush', () => {
 
 		const outcome = await (async () => {
 			try {
-				await runPush([appPath], reporter([]), {
+				await runPush(publication([appPath]), reporter([]), {
 					client: skipClient([], clientCalls),
 					attestations: [{ path: 'other.sigstore.json' }],
 					readAttestationBundle(path) {
@@ -1355,7 +1369,7 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 		const clientCalls: unknown[] = [];
 
-		await runPush([appPath], reporter(results, warnings), {
+		await runPush(publication([appPath]), reporter(results, warnings), {
 			client: divergentSkipClient(
 				cacheDigest.narHash.toString(),
 				[],
@@ -1395,7 +1409,7 @@ describe('runPush', () => {
 
 		const outcome = await (async () => {
 			try {
-				await runPush([appPath], reporter([]), {
+				await runPush(publication([appPath]), reporter([]), {
 					client: {
 						...divergentSkipClient(
 							cacheDigest.narHash.toString(),
@@ -1445,7 +1459,7 @@ describe('runPush', () => {
 	it('compresses and hashes uploaded NARs in a single pass', async () => {
 		const archives: FakeNarArchive[] = [];
 
-		await runPush([appPath], reporter([]), {
+		await runPush(publication([appPath]), reporter([]), {
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate: () =>
@@ -1550,7 +1564,7 @@ describe('runPush', () => {
 		} satisfies PushDependencies;
 		const outcome = await (async () => {
 			try {
-				await runPush([appPath], reporter([], warnings), options);
+				await runPush(publication([appPath]), reporter([], warnings), options);
 				return { pushed: true };
 			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(PushIncompleteError);
@@ -1598,7 +1612,7 @@ describe('runPush', () => {
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
 
-		await runPush([appPath], reporter(results), {
+		await runPush(publication([appPath]), reporter(results), {
 			client: skipClient(roots, clientCalls),
 			root: rootName('main'),
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -1623,12 +1637,131 @@ describe('runPush', () => {
 		});
 	});
 
+	it('resolves metadata for exactly the publication entries by default', async () => {
+		const roots: SetRootCall[] = [];
+		const clientCalls: unknown[] = [];
+		const nixCalls: NixCall[] = [];
+
+		await runPush(publication([appPath]), reporter([]), {
+			client: skipClient(roots, clientCalls),
+			root: rootName('main'),
+			nix: nixStore(
+				{
+					[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
+					[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+				},
+				nixCalls
+			)
+		});
+
+		expect({ nixCalls, clientCalls, roots }).toStrictEqual({
+			nixCalls: [{ method: 'queryPathsInfo', paths: [appPath] }],
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath] },
+				{ method: 'setRoot', fields: { name: 'main', targets: [appPath] } }
+			],
+			roots: [{ fields: { name: 'main', targets: [appPath] } }]
+		});
+	});
+
+	it('publishes the complete realised closure with --closure', async () => {
+		const roots: SetRootCall[] = [];
+		const clientCalls: unknown[] = [];
+		const nixCalls: NixCall[] = [];
+
+		await runPush(publication([appPath]), reporter([]), {
+			closure: true,
+			client: skipClient(roots, clientCalls),
+			root: rootName('main'),
+			nix: nixStore(
+				{
+					[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
+					[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+				},
+				nixCalls
+			)
+		});
+
+		expect({ nixCalls, clientCalls, roots }).toStrictEqual({
+			nixCalls: [{ method: 'resolveClosure', paths: [appPath] }],
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath, runtimePath] },
+				{ method: 'setRoot', fields: { name: 'main', targets: [appPath] } }
+			],
+			roots: [{ fields: { name: 'main', targets: [appPath] } }]
+		});
+	});
+
+	it('publishes declared intermediates without naming them in the root', async () => {
+		const roots: SetRootCall[] = [];
+		const clientCalls: unknown[] = [];
+		const results: ResultRow[][] = [];
+
+		await runPush(publication([appPath], [runtimePath]), reporter(results), {
+			client: skipClient(roots, clientCalls),
+			root: rootName('main'),
+			nix: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, []),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			})
+		});
+
+		expect({ clientCalls, roots, results }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath, runtimePath] },
+				{ method: 'setRoot', fields: { name: 'main', targets: [appPath] } }
+			],
+			roots: [{ fields: { name: 'main', targets: [appPath] } }],
+			results: [
+				[
+					{ label: 'Uploaded paths', value: '0' },
+					{ label: 'Already cached', value: '0' },
+					{ label: 'Skipped', value: '2' },
+					{ label: 'Bytes uploaded', value: '0 B' },
+					{ label: 'Root', value: 'main' },
+					{ label: 'Root expiry', value: 'permanent' }
+				]
+			]
+		});
+	});
+
+	it('pins only the declared targets when no root is given', async () => {
+		const roots: SetRootCall[] = [];
+		const clientCalls: unknown[] = [];
+
+		await runPush(publication([appPath], [runtimePath]), reporter([]), {
+			client: skipClient(roots, clientCalls),
+			nix: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, []),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			})
+		});
+
+		expect({ clientCalls, roots }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath, runtimePath] },
+				{
+					method: 'setRoot',
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					}
+				}
+			],
+			roots: [
+				{
+					fields: { name: `pin:${StorePath.hash(appPath)}`, targets: [appPath] }
+				}
+			]
+		});
+	});
+
 	it('sets an expiring channel with --root and --ttl', async () => {
 		const roots: SetRootCall[] = [];
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
 
-		await runPush([appPath], reporter(results), {
+		await runPush(publication([appPath]), reporter(results), {
 			client: skipClient(roots, clientCalls),
 			root: rootName('main'),
 			ttlSeconds: ttlSecondsSchema.parse(1_209_600),
@@ -1667,7 +1800,7 @@ describe('runPush', () => {
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
 
-		await runPush([appPath, runtimePath], reporter(results), {
+		await runPush(publication([appPath, runtimePath]), reporter(results), {
 			client: skipClient(roots, clientCalls),
 			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, []),
@@ -1722,7 +1855,7 @@ describe('runPush', () => {
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
 
-		await runPush([appPath], reporter(results), {
+		await runPush(publication([appPath]), reporter(results), {
 			client: skipClient(roots, clientCalls),
 			ttlSeconds: ttlSecondsSchema.parse(604_800),
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -1768,7 +1901,7 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 		const warns: { label: string; value?: string }[] = [];
 
-		await runPush([appPath], reporter(results, warns), {
+		await runPush(publication([appPath]), reporter(results, warns), {
 			client: skipClient(roots, clientCalls),
 			retain: false,
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -1818,7 +1951,7 @@ describe('runPush', () => {
 			)
 		);
 
-		await runPush(storePaths, reporter(results, []), {
+		await runPush(publication(storePaths), reporter(results, []), {
 			client: skipClient([], []),
 			retain: false,
 			nix: store
@@ -1855,7 +1988,7 @@ describe('runPush', () => {
 		async ({ options }) => {
 			const bodies: Omit<UploadNegotiateRequest, 'pushId'>[] = [];
 
-			await runPush([appPath], reporter([]), {
+			await runPush(publication([appPath]), reporter([]), {
 				...options,
 				client: {
 					...skipClient([], []),
@@ -1888,7 +2021,7 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 		const previews: UploadPreviewRequest[] = [];
 
-		await runPush([appPath], reporter(results), {
+		await runPush(publication([appPath]), reporter(results), {
 			dryRun: true,
 			retain: false,
 			client: {
@@ -1956,7 +2089,7 @@ describe('runPush', () => {
 
 			const results: ResultRow[][] = [];
 
-			await runPush([appPath], reporter(results), {
+			await runPush(publication([appPath]), reporter(results), {
 				...(wait !== undefined && { wait }),
 				retain: false,
 				client: {
@@ -1998,8 +2131,8 @@ describe('runPush', () => {
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		};
 
-		await runPush([appPath], reporter([]), dependencies);
-		await runPush([appPath], reporter([]), dependencies);
+		await runPush(publication([appPath]), reporter([]), dependencies);
+		await runPush(publication([appPath]), reporter([]), dependencies);
 
 		expect({ clientCalls, roots }).toStrictEqual({
 			clientCalls: [
@@ -2040,7 +2173,7 @@ describe('runPush', () => {
 	it('records retention only after committing the uploads', async () => {
 		const events: string[] = [];
 
-		await runPush([appPath], reporter([]), {
+		await runPush(publication([appPath]), reporter([]), {
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate() {
@@ -2137,7 +2270,7 @@ describe('runPush', () => {
 			}
 		};
 
-		await runPush([appPath, runtimePath], reporter(results), {
+		await runPush(publication([appPath, runtimePath]), reporter(results), {
 			client,
 			ttlSeconds: ttlSecondsSchema.parse(604_800),
 			nix: nixStore({
@@ -2186,7 +2319,7 @@ describe('runPush', () => {
 		const events: string[] = [];
 		const commitOptions: CommitOptions[] = [];
 
-		await runPush([appPath], reporter([]), {
+		await runPush(publication([appPath]), reporter([]), {
 			wait: true,
 			waitTimeoutSeconds: waitTimeoutSecondsSchema.parse(30),
 			client: {
@@ -2245,7 +2378,7 @@ describe('runPush', () => {
 		} satisfies PushDependencies;
 		const outcome = await (async () => {
 			try {
-				await runPush([appPath], reporter([], warnings), options);
+				await runPush(publication([appPath]), reporter([], warnings), options);
 				return { pushed: true };
 			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(PushIncompleteError);
@@ -2325,7 +2458,7 @@ describe('runPush', () => {
 
 		const outcome = await (async () => {
 			try {
-				await runPush([appPath], reporter([], warnings), options);
+				await runPush(publication([appPath]), reporter([], warnings), options);
 				return { pushed: true };
 			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(PushIncompleteError);
@@ -2427,7 +2560,11 @@ describe('runPush', () => {
 		} satisfies PushDependencies;
 		const outcome = await (async () => {
 			try {
-				await runPush([appPath, runtimePath], reporter([]), options);
+				await runPush(
+					publication([appPath, runtimePath]),
+					reporter([]),
+					options
+				);
 				return { pushed: true };
 			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(PushIncompleteError);
@@ -2462,50 +2599,55 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 		const payloads: ResultPayload[] = [];
 
-		await runPush([appPath, runtimePath], reporter(results, [], payloads), {
-			client: {
-				preview: unexpectedPreviewCall,
-				negotiate: (body) =>
-					Promise.resolve(
-						uploadNegotiateResponseSchema.parse({
-							uploads: body.paths.map((path) =>
-								path.storePathHash === StorePath.hash(appPath)
-									? {
-											action: 'skip',
-											storePathHash: path.storePathHash,
-											narHash: path.narHash,
-											grace: { retainUntil: '2026-02-01T00:00:00.000Z' }
-										}
-									: {
-											action: 'upload',
-											storePathHash: path.storePathHash,
-											narHash: path.narHash,
-											uploadId: `upload-${path.storePathHash}`,
-											r2Key: `nar/${path.narHash}.nar.zst`,
-											expiresAt: '2026-05-18T12:00:00.000Z'
-										}
-							)
-						})
-					),
-				async uploadNar(_r2Key, body) {
-					await collectReadableStream(body);
-				},
-				commit: () =>
-					Promise.resolve({
-						storePathHash: StorePath.hash(runtimePath),
-						narHash: runtimeDigest.narHash.value,
-						status: 'committed',
-						settled: Promise.resolve()
-					}),
-				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
-			} satisfies PushClient,
-			nix: nixStore({
-				[appPath]: pathInfo(appPath, appDigest, []),
-				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
-			}),
-			createNarArchive: () => new FakeNarArchive(runtimeDigest),
-			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
-		});
+		await runPush(
+			publication([appPath, runtimePath]),
+			reporter(results, [], payloads),
+			{
+				client: {
+					preview: unexpectedPreviewCall,
+					negotiate: (body) =>
+						Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: body.paths.map((path) =>
+									path.storePathHash === StorePath.hash(appPath)
+										? {
+												action: 'skip',
+												storePathHash: path.storePathHash,
+												narHash: path.narHash,
+												grace: { retainUntil: '2026-02-01T00:00:00.000Z' }
+											}
+										: {
+												action: 'upload',
+												storePathHash: path.storePathHash,
+												narHash: path.narHash,
+												uploadId: `upload-${path.storePathHash}`,
+												r2Key: `nar/${path.narHash}.nar.zst`,
+												expiresAt: '2026-05-18T12:00:00.000Z'
+											}
+								)
+							})
+						),
+					async uploadNar(_r2Key, body) {
+						await collectReadableStream(body);
+					},
+					commit: () =>
+						Promise.resolve({
+							storePathHash: StorePath.hash(runtimePath),
+							narHash: runtimeDigest.narHash.value,
+							status: 'committed',
+							settled: Promise.resolve()
+						}),
+					setRoot: (name, body) =>
+						Promise.resolve(rootSummary({ name, ...body }))
+				} satisfies PushClient,
+				nix: nixStore({
+					[appPath]: pathInfo(appPath, appDigest, []),
+					[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+				}),
+				createNarArchive: () => new FakeNarArchive(runtimeDigest),
+				compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
+			}
+		);
 
 		const appHash = StorePath.hash(appPath);
 		const runtimeHash = StorePath.hash(runtimePath);
@@ -2550,7 +2692,7 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 		const payloads: ResultPayload[] = [];
 
-		await runPush([appPath], reporter(results, [], payloads), {
+		await runPush(publication([appPath]), reporter(results, [], payloads), {
 			wait: false,
 			client: {
 				preview: unexpectedPreviewCall,
@@ -2624,7 +2766,7 @@ describe('runPush', () => {
 		const bodies: UploadNegotiateRequest[] = [];
 		const commitTargets: CommitTarget[] = [];
 
-		await runPush([appPath], reporter([]), {
+		await runPush(publication([appPath]), reporter([]), {
 			client: {
 				...skipClient([], []),
 				probeUploadGraceFacts(kind) {
@@ -2679,7 +2821,7 @@ describe('runPush', () => {
 	it('refuses an unretained push before negotiating real paths when grace facts are unsupported', async () => {
 		const probes: string[] = [];
 
-		const pushed = runPush([appPath], reporter([]), {
+		const pushed = runPush(publication([appPath]), reporter([]), {
 			retain: false,
 			client: {
 				...skipClient([], []),
@@ -2703,7 +2845,7 @@ describe('runPush', () => {
 	it('refuses an unretained dry run before previewing real paths when grace facts are unsupported', async () => {
 		const probes: string[] = [];
 
-		const previewed = runPush([appPath], reporter([]), {
+		const previewed = runPush(publication([appPath]), reporter([]), {
 			dryRun: true,
 			retain: false,
 			client: {
@@ -2730,7 +2872,7 @@ describe('runPush', () => {
 	it('surfaces a contract-defined preview NOT_FOUND unchanged', async () => {
 		const outcome = await (async () => {
 			try {
-				await runPush([appPath], reporter([]), {
+				await runPush(publication([appPath]), reporter([]), {
 					dryRun: true,
 					client: {
 						negotiate: unexpectedNegotiateCall,
@@ -2760,7 +2902,7 @@ describe('runPush', () => {
 
 		const outcome = await (async () => {
 			try {
-				await runPush([appPath], reporter([]), {
+				await runPush(publication([appPath]), reporter([]), {
 					dryRun: true,
 					client: {
 						negotiate: unexpectedNegotiateCall,
@@ -2810,7 +2952,7 @@ describe('runPush', () => {
 
 		const outcome = await (async () => {
 			try {
-				await runPush([appPath], reporter([]), {
+				await runPush(publication([appPath]), reporter([]), {
 					dryRun: true,
 					client: {
 						negotiate: unexpectedNegotiateCall,
@@ -2859,7 +3001,7 @@ describe('runPush', () => {
 		async (_case, tenantServes) => {
 			const outcome = await (async () => {
 				try {
-					await runPush([appPath], reporter([]), {
+					await runPush(publication([appPath]), reporter([]), {
 						dryRun: true,
 						client: {
 							negotiate: unexpectedNegotiateCall,
@@ -2888,7 +3030,7 @@ describe('runPush', () => {
 	it('diagnoses server-too-old when the tenant answers but preview is missing', async () => {
 		const outcome = await (async () => {
 			try {
-				await runPush([appPath], reporter([]), {
+				await runPush(publication([appPath]), reporter([]), {
 					dryRun: true,
 					client: {
 						negotiate: unexpectedNegotiateCall,
@@ -2916,7 +3058,7 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 		const warns: { label: string; value?: string }[] = [];
 
-		await runPush([appPath], reporter(results, warns), {
+		await runPush(publication([appPath]), reporter(results, warns), {
 			dryRun: true,
 			retain: false,
 			client: {
@@ -2956,7 +3098,7 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 		const warns: { label: string; value?: string }[] = [];
 
-		await runPush([appPath], reporter(results, warns), {
+		await runPush(publication([appPath]), reporter(results, warns), {
 			dryRun: true,
 			retain: false,
 			client: {
@@ -3002,7 +3144,7 @@ describe('runPush', () => {
 		const cacheDigest = digest(9, 999);
 		const warns: { label: string; value?: string }[] = [];
 
-		await runPush([appPath], reporter([], warns), {
+		await runPush(publication([appPath]), reporter([], warns), {
 			dryRun: true,
 			client: {
 				negotiate: unexpectedNegotiateCall,
@@ -3231,9 +3373,19 @@ function knownPathInfo(
 		.parse(paths[storePath]);
 }
 
-function nixStore(paths: Record<string, NixValidPathInfo>): Nix {
+interface NixCall {
+	readonly method: 'resolveClosure' | 'queryPathsInfo';
+	readonly paths: readonly string[];
+}
+
+function nixStore(
+	paths: Record<string, NixValidPathInfo>,
+	calls: NixCall[] = []
+): Nix {
 	const store = {
 		resolveClosure(storePaths: readonly StorePathString[]) {
+			calls.push({ method: 'resolveClosure', paths: storePaths });
+
 			const closure = new Set(storePaths);
 
 			for (const storePath of storePaths) {
@@ -3249,10 +3401,13 @@ function nixStore(paths: Record<string, NixValidPathInfo>): Nix {
 		},
 		queryPathInfo: (storePath: StorePathString) =>
 			Promise.resolve(knownPathInfo(paths, storePath)),
-		queryPathsInfo: (storePaths: readonly StorePathString[]) =>
-			Promise.resolve(
+		queryPathsInfo: (storePaths: readonly StorePathString[]) => {
+			calls.push({ method: 'queryPathsInfo', paths: storePaths });
+
+			return Promise.resolve(
 				storePaths.map((storePath) => knownPathInfo(paths, storePath))
-			),
+			);
+		},
 		queryValidPathsInfo: (storePaths: readonly StorePathString[]) =>
 			Promise.resolve(
 				storePaths

@@ -77,9 +77,16 @@ import { compressNarToStream, type NarUploadStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 
+import { type PublicationCollection } from './publication.ts';
+
 export interface PushDependencies {
 	readonly nix?: Nix;
 	readonly client: PushClient;
+	/**
+	 * Publish the complete realised closure of the publication entries. The
+	 * default resolves metadata for exactly the entries, with no closure walk.
+	 */
+	readonly closure?: boolean;
 	readonly root?: RootName;
 	readonly ttlSeconds?: TtlSeconds;
 	// The run root this push binds at negotiate: the server attaches every
@@ -273,14 +280,15 @@ async function tenantAnswers(client: PushClient): Promise<boolean> {
 }
 
 export async function runPush(
-	paths: readonly string[],
+	publication: PublicationCollection,
 	reporter: Reporter,
 	dependencies: PushDependencies
 ): Promise<void> {
 	// Validate the retention before any upload work: an invalid root name or
-	// target must fail fast, not after NARs are built and committed.
+	// target must fail fast, not after NARs are built and committed. Only the
+	// declared targets are retained; intermediates join no root or pin.
 	const retention = planRetention(
-		paths,
+		publication.targetPaths,
 		dependencies.root,
 		dependencies.ttlSeconds,
 		dependencies.retain ?? true
@@ -290,7 +298,7 @@ export async function runPush(
 		dependencies.createNarArchive ?? ((storePath) => new NarArchive(storePath));
 	const compressNar = dependencies.compressNar ?? compressNarToStream;
 
-	await runPushFlow(paths, reporter, {
+	await runPushFlow(publication, reporter, {
 		...dependencies,
 		retention,
 		nix,
@@ -306,6 +314,7 @@ interface PushRuntimeDependencies {
 	readonly nix: Nix;
 	readonly client: PushClient;
 	readonly retention: RetentionPlan;
+	readonly closure?: boolean;
 	readonly createNarArchive: (storePath: string) => PushNarArchive;
 	readonly compressNar: CompressNar;
 	readonly wait: boolean;
@@ -319,7 +328,7 @@ interface PushRuntimeDependencies {
 }
 
 async function runPushFlow(
-	paths: readonly string[],
+	publication: PublicationCollection,
 	reporter: Reporter,
 	dependencies: PushRuntimeDependencies
 ): Promise<void> {
@@ -332,11 +341,19 @@ async function runPushFlow(
 		wait: shouldWait,
 		waitTimeoutSeconds
 	} = dependencies;
-	const closure = await reporter.phase(
-		'Resolving store closure',
+	// The default publishes exactly the publication entries, resolving their
+	// metadata with no closure walk; `--closure` expands the entries through
+	// the store and publishes the complete realised closure.
+	const pathInfos = await reporter.phase(
+		dependencies.closure === true
+			? 'Resolving store closure'
+			: 'Resolving store paths',
 		async (ctx) => {
-			ctx.fact('roots', formatCount(paths.length));
-			const resolved = await nix.resolveClosure(paths);
+			ctx.fact('roots', formatCount(publication.entries.length));
+			const resolved =
+				dependencies.closure === true
+					? await nix.resolveClosure(publication.storePaths)
+					: await nix.queryPathsInfo(publication.storePaths);
 			ctx.fact('paths', formatCount(resolved.length));
 
 			return resolved;
@@ -344,7 +361,7 @@ async function runPushFlow(
 	);
 
 	if (dependencies.dryRun === true) {
-		await reportDryRun(reporter, client, closure, retention);
+		await reportDryRun(reporter, client, pathInfos, retention);
 		return;
 	}
 
@@ -357,7 +374,7 @@ async function runPushFlow(
 
 			const response = await negotiateUpload(
 				client,
-				closure.map((pathInfo) => prepareStorePathNegotiation(pathInfo)),
+				pathInfos.map((pathInfo) => prepareStorePathNegotiation(pathInfo)),
 				dependencies.runRoot
 			);
 			const uploadCount = response.uploads.filter((decision) =>
@@ -379,7 +396,7 @@ async function runPushFlow(
 		}
 	);
 
-	const divergent = divergentSkips(closure, negotiation.uploads);
+	const divergent = divergentSkips(pathInfos, negotiation.uploads);
 
 	warnDivergentSkips(reporter, divergent);
 
@@ -390,9 +407,9 @@ async function runPushFlow(
 	// function) so the incomplete result is never mistaken for a finished one.
 	const failures: PushFailure[] = [];
 	const failedUploadIds = new Set<string>();
-	const negotiated = indexNegotiatedPaths(closure);
+	const negotiated = indexNegotiatedPaths(pathInfos);
 	const storePathByHash = new Map<StorePathHash, string>(
-		closure.map((pathInfo) => [
+		pathInfos.map((pathInfo) => [
 			StorePath.hash(pathInfo.storePath),
 			pathInfo.storePath
 		])
@@ -660,15 +677,19 @@ async function runPushFlow(
 			}
 		}
 
-		const attestationRows = await attachPushedAttestations(closure, reporter, {
-			client,
-			enabled: dependencies.attest ?? true,
-			sources: dependencies.attestations ?? [],
-			readBundle:
-				dependencies.readAttestationBundle ?? defaultReadAttestationBundle,
-			pendingStorePathHashes: unservableStorePathHashes,
-			divergent
-		});
+		const attestationRows = await attachPushedAttestations(
+			pathInfos,
+			reporter,
+			{
+				client,
+				enabled: dependencies.attest ?? true,
+				sources: dependencies.attestations ?? [],
+				readBundle:
+					dependencies.readAttestationBundle ?? defaultReadAttestationBundle,
+				pendingStorePathHashes: unservableStorePathHashes,
+				divergent
+			}
+		);
 
 		const actions = effectiveActions.values().toArray();
 		const uploadedPaths = actions.filter(
@@ -748,7 +769,7 @@ async function runPushFlow(
 async function reportDryRun(
 	reporter: Reporter,
 	client: PushClient,
-	closure: readonly NixValidPathInfo[],
+	pathInfos: readonly NixValidPathInfo[],
 	retention: RetentionPlan
 ): Promise<void> {
 	const preview = await reporter.phase(
@@ -760,7 +781,7 @@ async function reportDryRun(
 
 			const response = await previewUpload(
 				client,
-				closure.map((pathInfo) => prepareStorePathNegotiation(pathInfo))
+				pathInfos.map((pathInfo) => prepareStorePathNegotiation(pathInfo))
 			);
 
 			ctx.fact(
@@ -782,7 +803,7 @@ async function reportDryRun(
 		}
 	);
 
-	warnDivergentSkips(reporter, divergentSkips(closure, preview.uploads));
+	warnDivergentSkips(reporter, divergentSkips(pathInfos, preview.uploads));
 
 	const wouldUpload = preview.uploads.filter(
 		(decision) => decision.action === 'upload'
@@ -1064,7 +1085,7 @@ interface AttestationSummary {
 }
 
 async function attachPushedAttestations(
-	closure: readonly NixValidPathInfo[],
+	pathInfos: readonly NixValidPathInfo[],
 	reporter: Reporter,
 	dependencies: AttachAttestationsDependencies
 ): Promise<readonly ResultRow[]> {
@@ -1074,7 +1095,7 @@ async function attachPushedAttestations(
 
 	return reporter.steps('Attestations', async (log) => {
 		const readStep = log.group('read');
-		const prepared = await prepareAttestationBundles(closure, dependencies);
+		const prepared = await prepareAttestationBundles(pathInfos, dependencies);
 		readStep.success(`${formatCount(prepared.length)} bundle(s)`);
 
 		const ready = prepared.filter(
@@ -1173,11 +1194,11 @@ async function attachPushedAttestations(
 }
 
 async function prepareAttestationBundles(
-	closure: readonly NixValidPathInfo[],
+	pathInfos: readonly NixValidPathInfo[],
 	dependencies: AttachAttestationsDependencies
 ): Promise<readonly PreparedAttestationBundle[]> {
 	const byNarHash = new Map(
-		closure.map((pathInfo) => [pathInfo.narHash.digestHex(), pathInfo])
+		pathInfos.map((pathInfo) => [pathInfo.narHash.digestHex(), pathInfo])
 	);
 	const prepared: PreparedAttestationBundle[] = [];
 	const seen = new Set<string>();
@@ -1578,8 +1599,8 @@ async function redriveExpiredCommit(
 	}
 
 	// The reaped row took the staged bytes with it, so re-stream the NAR to the
-	// fresh staging key before committing. The store path is still in the closure,
-	// so nothing local is needed beyond re-reading it.
+	// fresh staging key before committing. The store path is still in the
+	// resolved set, so nothing local is needed beyond re-reading it.
 	const upload = context.compressNar(
 		context.createNarArchive(pathInfo.storePath)
 	);
@@ -1627,11 +1648,11 @@ interface DivergentSkip {
 }
 
 function divergentSkips(
-	closure: readonly NixValidPathInfo[],
+	pathInfos: readonly NixValidPathInfo[],
 	decisions: readonly (ParsedUploadDecision | ParsedUploadPreviewDecision)[]
 ): ReadonlyMap<StorePathHash, DivergentSkip> {
 	const localByStorePathHash = new Map<StorePathHash, NixValidPathInfo>(
-		closure.map((info) => [StorePath.hash(info.storePath), info])
+		pathInfos.map((info) => [StorePath.hash(info.storePath), info])
 	);
 	const divergent = new Map<StorePathHash, DivergentSkip>();
 
@@ -1673,9 +1694,10 @@ function warnDivergentSkips(
 	}
 }
 
-// The closure indexed by the pair a negotiation decision names, so resolving a
-// decision back to its path is one lookup. Built once: scanning the closure and
-// rehashing every store path on every lookup is quadratic across a large push.
+// The resolved paths indexed by the pair a negotiation decision names, so
+// resolving a decision back to its path is one lookup. Built once: scanning
+// the resolved set and rehashing every store path on every lookup is quadratic
+// across a large push.
 type NegotiatedPaths = ReadonlyMap<string, NixValidPathInfo>;
 
 function negotiatedPathKey(storePathHash: string, narHash: string): string {
@@ -1683,10 +1705,10 @@ function negotiatedPathKey(storePathHash: string, narHash: string): string {
 }
 
 function indexNegotiatedPaths(
-	closure: readonly NixValidPathInfo[]
+	pathInfos: readonly NixValidPathInfo[]
 ): NegotiatedPaths {
 	return new Map(
-		closure.map((item) => [
+		pathInfos.map((item) => [
 			negotiatedPathKey(
 				StorePath.hash(item.storePath),
 				item.narHash.toString()

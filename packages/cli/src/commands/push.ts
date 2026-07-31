@@ -27,6 +27,7 @@ import {
 	OidcRetentionChoiceRequiredError,
 	RunRootTtlWithoutRunRootError
 } from '../errors.ts';
+import { PublicationCollection } from '../push/publication.ts';
 import { runPush } from '../push/push.ts';
 import { pushClientFor } from '../push/push-client.ts';
 import { parseRootName } from '../root-name.ts';
@@ -225,6 +226,9 @@ export function registerPushCommand(
 
 			validateRetentionChoice(options);
 
+			// Entries are store paths at the domain boundary: an argument that is
+			// not one fails here, before any token is requested.
+			const publication = PublicationCollection.of({ targets: paths });
 			const reporter = commandUi(program, programOptions).reporter();
 			const raw = CupboardClient.fromUrl(url, {
 				cache: options.cache,
@@ -241,7 +245,7 @@ export function registerPushCommand(
 				)
 			});
 
-			await runPush(paths, reporter, {
+			await runPush(publication, reporter, {
 				client: pushClientFor(url, token, {
 					cache: options.cache,
 					signal: programOptions.signal
