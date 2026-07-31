@@ -16,6 +16,7 @@ import {
 	type ReporterResultEvent
 } from '@cupboard/reporter';
 import type { Command } from 'commander';
+import { z } from 'zod';
 
 import {
 	type CupboardResultProtocol,
@@ -49,6 +50,18 @@ import {
 
 const legacyPushSummarySchema = pushSummarySchema.omit({ paths: true });
 
+/** One root group's own target paths, from a cohort declaring several roots. */
+export interface RootGroup {
+	readonly root: string;
+	readonly paths: readonly string[];
+}
+
+const rootGroupSchema = z.object({
+	root: z.string().min(1),
+	paths: z.array(z.string().min(1)).min(1)
+});
+const rootGroupsSchema = z.array(rootGroupSchema);
+
 export interface PushOptions {
 	readonly url?: string;
 	readonly paths: readonly string[];
@@ -67,6 +80,12 @@ export interface PushOptions {
 	readonly requireGrace?: string;
 	readonly waitTimeout?: string;
 	readonly attestations: readonly string[];
+	readonly intermediatePathsFile?: string;
+	readonly referencePathsFile?: string;
+	readonly referenceSource?: string;
+	readonly runRoot?: string;
+	readonly runRootTtl?: string;
+	readonly rootGroups?: string;
 }
 
 export interface PushInputs {
@@ -87,6 +106,12 @@ export interface PushInputs {
 	readonly waitTimeout: string;
 	readonly attestations: readonly string[];
 	readonly requireGrace: boolean;
+	readonly intermediatePathsFile: string;
+	readonly referencePathsFile: string;
+	readonly referenceSource: string;
+	readonly runRoot: string;
+	readonly runRootTtl: string;
+	readonly rootGroups: readonly RootGroup[];
 }
 
 interface RunPushCupboardOptions {
@@ -118,6 +143,11 @@ interface PushArgumentsOptions {
 	readonly wait: boolean;
 	readonly waitTimeout: string;
 	readonly attestations: readonly string[];
+	readonly intermediatePathsFile: string;
+	readonly referencePathsFile: string;
+	readonly referenceSource: string;
+	readonly runRoot: string;
+	readonly runRootTtl: string;
 }
 
 export function registerPushCommand(
@@ -180,6 +210,27 @@ export function registerPushCommand(
 			collectLines,
 			[]
 		)
+		.option(
+			'--intermediate-paths-file <path>',
+			'newline-delimited store paths to publish alongside the targets without retaining them as targets'
+		)
+		.option(
+			'--reference-paths-file <path>',
+			'newline-delimited store paths the tenant already holds, published from the reference source with no local store read or NAR upload'
+		)
+		.option(
+			'--reference-source <url>',
+			'served cache endpoint the reference paths are read from (required with --reference-paths-file)'
+		)
+		.option(
+			'--run-root <name>',
+			'bind a run root: every pushed path also joins this root as it commits'
+		)
+		.option('--run-root-ttl <ttl>', 'expire the run root after this duration')
+		.option(
+			'--root-groups <json>',
+			'JSON array of {root, paths} groups: one push per group, replacing the flat paths and root inputs'
+		)
 		.action((options: PushOptions) => pushAction(options, environment));
 }
 
@@ -195,15 +246,38 @@ export function resolvePushInputs(
 		throw new MissingInputError('url');
 	}
 
-	if (options.paths.length === 0) {
+	const rootGroups = parseRootGroups(options.rootGroups);
+
+	if (rootGroups.length === 0 && options.paths.length === 0) {
 		throw new InvalidInputError(
 			'paths',
 			'paths is required and must contain at least one path'
 		);
 	}
 
+	if (rootGroups.length > 0 && options.paths.length > 0) {
+		throw new InvalidInputError(
+			'root-groups',
+			'root-groups cannot be combined with paths'
+		);
+	}
+
 	const isRetained = isEnabled('retain', options.retain, true);
 	const explicitRoot = provided(options.root);
+
+	if (explicitRoot !== undefined && rootGroups.length > 0) {
+		throw new InvalidInputError(
+			'root-groups',
+			'root-groups cannot be combined with root: each group names its own root'
+		);
+	}
+
+	if (!isRetained && rootGroups.length > 0) {
+		throw new InvalidInputError(
+			'root-groups',
+			'root-groups cannot be combined with no-retain: a group publishes under its own root'
+		);
+	}
 
 	// Unretained publication never conflicts with the action's own implicit
 	// default root: it simply suppresses it, the same way the CLI's
@@ -233,6 +307,26 @@ export function resolvePushInputs(
 		throw new InvalidInputError(
 			'require-grace',
 			'require-grace cannot be combined with wait: false'
+		);
+	}
+
+	const referencePathsFile = provided(options.referencePathsFile);
+	const referenceSource = provided(options.referenceSource);
+
+	if ((referencePathsFile === undefined) !== (referenceSource === undefined)) {
+		throw new InvalidInputError(
+			'reference-source',
+			'reference-paths-file and reference-source must be supplied together'
+		);
+	}
+
+	const runRoot = provided(options.runRoot);
+	const runRootTtl = provided(options.runRootTtl);
+
+	if (runRootTtl !== undefined && runRoot === undefined) {
+		throw new InvalidInputError(
+			'run-root-ttl',
+			'run-root-ttl requires run-root'
 		);
 	}
 
@@ -266,8 +360,54 @@ export function resolvePushInputs(
 		wait: shouldWait,
 		waitTimeout: provided(options.waitTimeout) ?? '10m',
 		attestations: options.attestations,
-		requireGrace: requiresGrace
+		requireGrace: requiresGrace,
+		intermediatePathsFile: provided(options.intermediatePathsFile) ?? '',
+		referencePathsFile: referencePathsFile ?? '',
+		referenceSource: referenceSource ?? '',
+		runRoot: runRoot ?? '',
+		runRootTtl: runRootTtl ?? '',
+		rootGroups
 	};
+}
+
+/**
+ * A cohort's `{root, paths}[]` grouping, replacing the flat `paths`/`root`
+ * inputs when a cohort declares more than one target root: the all-or-nothing
+ * replacement rule applies per root, so each group is its own push.
+ */
+function parseRootGroups(value: string | undefined): readonly RootGroup[] {
+	const trimmed = provided(value);
+
+	if (trimmed === undefined) {
+		return [];
+	}
+
+	let parsedJson: unknown;
+
+	try {
+		parsedJson = JSON.parse(trimmed);
+	} catch (error) {
+		throw new InvalidInputError(
+			'root-groups',
+			`root-groups is not valid JSON: ${error instanceof Error ? error.message : String(error)}`
+		);
+	}
+
+	const parsed = rootGroupsSchema.safeParse(parsedJson);
+
+	if (!parsed.success) {
+		throw new InvalidInputError(
+			'root-groups',
+			`root-groups does not match {root, paths}[]:\n${z.prettifyError(parsed.error)}`
+		);
+	}
+
+	return parsed.data;
+}
+
+export interface PushInvocation {
+	readonly root: string;
+	readonly paths: readonly string[];
 }
 
 export async function pushAction(
@@ -295,31 +435,34 @@ export async function pushAction(
 		reporter
 	);
 
-	const paths = resolveStorePaths(Nix.open(), inputs.paths);
-	const arguments_ = buildPushArguments({
-		url: inputs.url,
-		paths,
-		audience: inputs.audience,
-		root: inputs.root,
-		cache: inputs.cache,
-		ttl: inputs.ttl,
-		retain: inputs.retain,
-		wait: inputs.wait,
-		waitTimeout: inputs.waitTimeout,
-		attestations: inputs.attestations
-	});
+	const nix = Nix.open();
+	const pushes: readonly PushInvocation[] =
+		inputs.rootGroups.length > 0
+			? inputs.rootGroups.map((group) => ({
+					root: group.root,
+					paths: resolveStorePaths(nix, group.paths)
+				}))
+			: [{ root: inputs.root, paths: resolveStorePaths(nix, inputs.paths) }];
 
 	await setOutput(environment, 'cupboard-path', installedCupboard.binaryPath);
 	await setOutput(environment, 'cupboard-version', installedCupboard.version);
 
-	const run = await runPushCupboard({
-		binaryPath: installedCupboard.binaryPath,
-		arguments: arguments_,
-		environment,
-		requireGrace: inputs.requireGrace,
-		version: installedCupboard.version
-	});
-	const summary = requirePushSummary(run.results, run.protocol);
+	const argumentsPerPush = pushArgumentsForInvocations(inputs, pushes);
+	const summaries: ParsedPushSummary[] = [];
+
+	for (const arguments_ of argumentsPerPush) {
+		const run = await runPushCupboard({
+			binaryPath: installedCupboard.binaryPath,
+			arguments: arguments_,
+			environment,
+			requireGrace: inputs.requireGrace,
+			version: installedCupboard.version
+		});
+
+		summaries.push(requirePushSummary(run.results, run.protocol));
+	}
+
+	const summary = aggregatePushSummaries(summaries);
 
 	await publishPushOutputs(environment, summary);
 
@@ -337,6 +480,41 @@ export async function pushAction(
 			throw new GraceDeadlineMissingError(missing);
 		}
 	}
+}
+
+/**
+ * Combines one summary per root-group push into the totals and combined path
+ * list this action reports as its own outputs and require-grace checks
+ * against: a grouped push is still one logical publication, whatever number
+ * of `cupboard push` invocations it took to reach every root.
+ */
+export function aggregatePushSummaries(
+	summaries: readonly ParsedPushSummary[]
+): ParsedPushSummary {
+	let uploadedPaths = 0;
+	let reusedBlobs = 0;
+	let skipped = 0;
+	let uploadedBytes = 0;
+	const failures: ParsedPushSummary['failures'][number][] = [];
+	const paths: ParsedPushSummary['paths'][number][] = [];
+
+	for (const summary of summaries) {
+		uploadedPaths += summary.uploadedPaths;
+		reusedBlobs += summary.reusedBlobs;
+		skipped += summary.skipped;
+		uploadedBytes += summary.uploadedBytes;
+		failures.push(...summary.failures);
+		paths.push(...summary.paths);
+	}
+
+	return {
+		uploadedPaths,
+		reusedBlobs,
+		skipped,
+		uploadedBytes,
+		failures,
+		paths
+	};
 }
 
 export async function runPushCupboard(
@@ -496,5 +674,72 @@ export function buildPushArguments(
 		arguments_.push('--attestation', attestation);
 	}
 
+	if (options.intermediatePathsFile !== '') {
+		arguments_.push('--intermediate-paths-file', options.intermediatePathsFile);
+	}
+
+	if (options.referencePathsFile !== '') {
+		arguments_.push('--reference-paths-file', options.referencePathsFile);
+	}
+
+	if (options.referenceSource !== '') {
+		arguments_.push('--reference-source', options.referenceSource);
+	}
+
+	if (options.runRoot !== '') {
+		arguments_.push('--run-root', options.runRoot);
+	}
+
+	if (options.runRootTtl !== '') {
+		arguments_.push('--run-root-ttl', options.runRootTtl);
+	}
+
 	return arguments_;
+}
+
+/**
+ * The `cupboard push` argv for each of a run's invocations, one per root
+ * group (or the single flat push when the run declares none). The
+ * cohort-wide intermediate and reference paths are not scoped to any one
+ * target root, so only the first invocation carries them; a later one would
+ * otherwise republish the same paths.
+ */
+export function pushArgumentsForInvocations(
+	inputs: Pick<
+		PushInputs,
+		| 'url'
+		| 'audience'
+		| 'cache'
+		| 'ttl'
+		| 'retain'
+		| 'wait'
+		| 'waitTimeout'
+		| 'attestations'
+		| 'intermediatePathsFile'
+		| 'referencePathsFile'
+		| 'referenceSource'
+		| 'runRoot'
+		| 'runRootTtl'
+	>,
+	pushes: readonly PushInvocation[]
+): readonly (readonly string[])[] {
+	return pushes.map((push, index) =>
+		buildPushArguments({
+			url: inputs.url,
+			paths: push.paths,
+			audience: inputs.audience,
+			root: push.root,
+			cache: inputs.cache,
+			ttl: inputs.ttl,
+			retain: inputs.retain,
+			wait: inputs.wait,
+			waitTimeout: inputs.waitTimeout,
+			attestations: inputs.attestations,
+			intermediatePathsFile: index === 0 ? inputs.intermediatePathsFile : '',
+			referencePathsFile: index === 0 ? inputs.referencePathsFile : '',
+			referenceSource: index === 0 ? inputs.referenceSource : '',
+			runRoot: inputs.runRoot,
+			runRootTtl: inputs.runRootTtl
+		})
+	);
 }

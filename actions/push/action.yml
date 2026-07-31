@@ -7,8 +7,8 @@ inputs:
   paths:
     description:
       Newline-delimited local Nix store paths, derivations, or installables to
-      push.
-    required: true
+      push. Required unless root-groups is given.
+    required: false
   cupboard-version:
     description:
       cupboard version to install. Use latest or an exact version such as 1.2.3
@@ -70,6 +70,37 @@ inputs:
       Requires wait to stay enabled.
     required: false
     default: 'false'
+  intermediate-paths-file:
+    description:
+      Newline-delimited store paths to publish alongside the targets without
+      retaining them as targets. Carried by only the first push when root-groups
+      declares more than one root.
+    required: false
+  reference-paths-file:
+    description:
+      Newline-delimited store paths the tenant already holds, published from
+      reference-source with no local store read or NAR upload. Required together
+      with reference-source.
+    required: false
+  reference-source:
+    description:
+      Served cache endpoint the reference paths are read from. Required together
+      with reference-paths-file.
+    required: false
+  run-root:
+    description:
+      Bind a run root, so every pushed path also joins this root as it commits;
+      independent of root or root-groups.
+    required: false
+  run-root-ttl:
+    description: Expire the run root after this duration. Requires run-root.
+    required: false
+  root-groups:
+    description: >-
+      JSON array of {root, paths} objects: one push per group, replacing the
+      flat paths and root inputs. Use when a cohort declares more than one
+      target root; the all-or-nothing replacement rule holds per root.
+    required: false
 outputs:
   cupboard-path:
     description: Path to the installed cupboard binary.
@@ -162,6 +193,12 @@ runs:
         WAIT_TIMEOUT: ${{ inputs.wait-timeout }}
         ATTESTATIONS: ${{ inputs.attestations }}
         REQUIRE_GRACE: ${{ inputs.require-grace }}
+        INTERMEDIATE_PATHS_FILE: ${{ inputs.intermediate-paths-file }}
+        REFERENCE_PATHS_FILE: ${{ inputs.reference-paths-file }}
+        REFERENCE_SOURCE: ${{ inputs.reference-source }}
+        RUN_ROOT: ${{ inputs.run-root }}
+        RUN_ROOT_TTL: ${{ inputs.run-root-ttl }}
+        ROOT_GROUPS: ${{ inputs.root-groups }}
       run: |
         args=(push
           --url "$URL"
@@ -180,7 +217,13 @@ runs:
           --require-grace "$REQUIRE_GRACE"
           --wait "$WAIT"
           --wait-timeout "$WAIT_TIMEOUT"
-          --attestations "$ATTESTATIONS")
+          --attestations "$ATTESTATIONS"
+          --intermediate-paths-file "$INTERMEDIATE_PATHS_FILE"
+          --reference-paths-file "$REFERENCE_PATHS_FILE"
+          --reference-source "$REFERENCE_SOURCE"
+          --run-root "$RUN_ROOT"
+          --run-root-ttl "$RUN_ROOT_TTL"
+          --root-groups "$ROOT_GROUPS")
         node --experimental-transform-types \
           --disable-warning=ExperimentalWarning \
           "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"

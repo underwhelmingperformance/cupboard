@@ -15,15 +15,27 @@ import {
 } from '../errors.ts';
 
 import {
+	aggregatePushSummaries,
 	buildPushArguments,
 	hasUngracedPath,
 	pathsMissingGraceDeadline,
+	pushArgumentsForInvocations,
+	type PushInputs,
+	type PushInvocation,
 	type PushOptions,
 	requireGraceResultProtocol,
 	requirePushSummary,
 	resolvePushInputs,
 	runPushCupboard
 } from './push.ts';
+
+const noExtras = {
+	intermediatePathsFile: '',
+	referencePathsFile: '',
+	referenceSource: '',
+	runRoot: '',
+	runRootTtl: ''
+};
 
 describe('buildPushArguments', () => {
 	it('builds a GitHub OIDC push invocation', () => {
@@ -38,7 +50,8 @@ describe('buildPushArguments', () => {
 				retain: true,
 				wait: true,
 				waitTimeout: '10m',
-				attestations: ['/tmp/a.json', '/tmp/b.json']
+				attestations: ['/tmp/a.json', '/tmp/b.json'],
+				...noExtras
 			})
 		).toStrictEqual([
 			'--no-colour',
@@ -59,6 +72,46 @@ describe('buildPushArguments', () => {
 			'/tmp/a.json',
 			'--attestation',
 			'/tmp/b.json'
+		]);
+	});
+
+	it('carries the intermediate, reference and run-root flags', () => {
+		expect(
+			buildPushArguments({
+				url: new URL('https://cache.example.test'),
+				paths: ['/nix/store/a'],
+				audience: '',
+				root: 'github:owner/repo/main',
+				cache: '',
+				ttl: '',
+				retain: true,
+				wait: true,
+				waitTimeout: '',
+				attestations: [],
+				intermediatePathsFile: '/tmp/intermediates.txt',
+				referencePathsFile: '/tmp/references.txt',
+				referenceSource: 'https://cache.example.test/t/acme/reuse/reuse',
+				runRoot: 'github:owner/repo/_cupboard-seed/12345/app',
+				runRootTtl: '24h'
+			})
+		).toStrictEqual([
+			'--no-colour',
+			'push',
+			'https://cache.example.test',
+			'/nix/store/a',
+			'--github-oidc',
+			'--root',
+			'github:owner/repo/main',
+			'--intermediate-paths-file',
+			'/tmp/intermediates.txt',
+			'--reference-paths-file',
+			'/tmp/references.txt',
+			'--reference-source',
+			'https://cache.example.test/t/acme/reuse/reuse',
+			'--run-root',
+			'github:owner/repo/_cupboard-seed/12345/app',
+			'--run-root-ttl',
+			'24h'
 		]);
 	});
 });
@@ -97,7 +150,13 @@ describe('resolvePushInputs', () => {
 		wait: true,
 		waitTimeout: '10m',
 		attestations: [],
-		requireGrace: false
+		requireGrace: false,
+		intermediatePathsFile: '',
+		referencePathsFile: '',
+		referenceSource: '',
+		runRoot: '',
+		runRootTtl: '',
+		rootGroups: []
 	};
 
 	it('applies defaults when optional flags are absent', () => {
@@ -212,7 +271,8 @@ describe('buildPushArguments unretained', () => {
 				retain: false,
 				wait: true,
 				waitTimeout: '',
-				attestations: []
+				attestations: [],
+				...noExtras
 			})
 		).toStrictEqual([
 			'--no-colour',
@@ -268,6 +328,285 @@ describe('resolvePushInputs unretained', () => {
 		expect(() => resolvePushInputs(options, environment)).toThrow(
 			InvalidInputError
 		);
+	});
+});
+
+describe('resolvePushInputs reference and run-root pairing', () => {
+	const environment = {
+		GITHUB_REPOSITORY: 'owner/repo',
+		GITHUB_REF_NAME: 'main',
+		GITHUB_ACTION_REPOSITORY: 'owner/cupboard',
+		RUNNER_TEMP: '/runner/temp'
+	};
+	const baseOptions: PushOptions = {
+		url: 'https://cupboard.example/t/acme',
+		paths: ['/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo'],
+		attestations: []
+	};
+
+	it.each([
+		[
+			'reference-paths-file is given without reference-source',
+			{ ...baseOptions, referencePathsFile: '/tmp/references.txt' }
+		],
+		[
+			'reference-source is given without reference-paths-file',
+			{
+				...baseOptions,
+				referenceSource: 'https://cache.example.test/t/acme/reuse/reuse'
+			}
+		],
+		[
+			'run-root-ttl is given without run-root',
+			{ ...baseOptions, runRootTtl: '24h' }
+		]
+	])('rejects when %s', (_name, options) => {
+		expect(() => resolvePushInputs(options, environment)).toThrow(
+			InvalidInputError
+		);
+	});
+
+	it('resolves reference and run-root inputs given together', () => {
+		const inputs = resolvePushInputs(
+			{
+				...baseOptions,
+				referencePathsFile: '/tmp/references.txt',
+				referenceSource: 'https://cache.example.test/t/acme/reuse/reuse',
+				runRoot: 'github:owner/repo/_cupboard-seed/12345/app',
+				runRootTtl: '24h'
+			},
+			environment
+		);
+
+		expect({
+			referencePathsFile: inputs.referencePathsFile,
+			referenceSource: inputs.referenceSource,
+			runRoot: inputs.runRoot,
+			runRootTtl: inputs.runRootTtl
+		}).toStrictEqual({
+			referencePathsFile: '/tmp/references.txt',
+			referenceSource: 'https://cache.example.test/t/acme/reuse/reuse',
+			runRoot: 'github:owner/repo/_cupboard-seed/12345/app',
+			runRootTtl: '24h'
+		});
+	});
+});
+
+describe('resolvePushInputs root-groups', () => {
+	const environment = {
+		GITHUB_REPOSITORY: 'owner/repo',
+		GITHUB_REF_NAME: 'main',
+		GITHUB_ACTION_REPOSITORY: 'owner/cupboard',
+		RUNNER_TEMP: '/runner/temp'
+	};
+	const groups = [
+		{ root: 'github:owner/repo/main/app', paths: ['/nix/store/a'] },
+		{ root: 'github:owner/repo/main/lib', paths: ['/nix/store/b'] }
+	];
+	const baseOptions: PushOptions = {
+		url: 'https://cupboard.example/t/acme',
+		paths: [],
+		attestations: [],
+		rootGroups: JSON.stringify(groups)
+	};
+
+	it('parses root-groups into resolved groups and leaves paths empty', () => {
+		const inputs = resolvePushInputs(baseOptions, environment);
+
+		expect({
+			rootGroups: inputs.rootGroups,
+			paths: inputs.paths
+		}).toStrictEqual({ rootGroups: groups, paths: [] });
+	});
+
+	it.each([
+		[
+			'root-groups is combined with paths',
+			{ ...baseOptions, paths: ['/nix/store/a'] }
+		],
+		[
+			'root-groups is combined with root',
+			{ ...baseOptions, root: 'github:owner/repo/main' }
+		],
+		[
+			'root-groups is combined with no-retain',
+			{ ...baseOptions, retain: 'false' }
+		],
+		[
+			'root-groups is not valid JSON',
+			{ ...baseOptions, rootGroups: '{not json' }
+		],
+		[
+			'root-groups does not match {root, paths}[]',
+			{ ...baseOptions, rootGroups: JSON.stringify([{ root: 'x' }]) }
+		]
+	])('rejects when %s', (_name, options) => {
+		expect(() => resolvePushInputs(options, environment)).toThrow(
+			InvalidInputError
+		);
+	});
+});
+
+describe('pushArgumentsForInvocations', () => {
+	const baseInputs: Pick<
+		PushInputs,
+		| 'url'
+		| 'audience'
+		| 'cache'
+		| 'ttl'
+		| 'retain'
+		| 'wait'
+		| 'waitTimeout'
+		| 'attestations'
+		| 'intermediatePathsFile'
+		| 'referencePathsFile'
+		| 'referenceSource'
+		| 'runRoot'
+		| 'runRootTtl'
+	> = {
+		url: new URL('https://cache.example.test'),
+		audience: '',
+		cache: '',
+		ttl: '',
+		retain: true,
+		wait: true,
+		waitTimeout: '',
+		attestations: [],
+		intermediatePathsFile: '/tmp/intermediates.txt',
+		referencePathsFile: '/tmp/references.txt',
+		referenceSource: 'https://cache.example.test/t/acme/reuse/reuse',
+		runRoot: 'github:owner/repo/_cupboard-seed/12345/app',
+		runRootTtl: '24h'
+	};
+
+	it('builds a single push when there is one invocation', () => {
+		const pushes: readonly PushInvocation[] = [
+			{ root: 'github:owner/repo/main', paths: ['/nix/store/a'] }
+		];
+
+		expect(pushArgumentsForInvocations(baseInputs, pushes)).toStrictEqual([
+			[
+				'--no-colour',
+				'push',
+				'https://cache.example.test',
+				'/nix/store/a',
+				'--github-oidc',
+				'--root',
+				'github:owner/repo/main',
+				'--intermediate-paths-file',
+				'/tmp/intermediates.txt',
+				'--reference-paths-file',
+				'/tmp/references.txt',
+				'--reference-source',
+				'https://cache.example.test/t/acme/reuse/reuse',
+				'--run-root',
+				'github:owner/repo/_cupboard-seed/12345/app',
+				'--run-root-ttl',
+				'24h'
+			]
+		]);
+	});
+
+	it('carries the intermediate and reference paths only on the first of several root pushes', () => {
+		const pushes: readonly PushInvocation[] = [
+			{ root: 'github:owner/repo/main/app', paths: ['/nix/store/a'] },
+			{ root: 'github:owner/repo/main/lib', paths: ['/nix/store/b'] }
+		];
+
+		expect(pushArgumentsForInvocations(baseInputs, pushes)).toStrictEqual([
+			[
+				'--no-colour',
+				'push',
+				'https://cache.example.test',
+				'/nix/store/a',
+				'--github-oidc',
+				'--root',
+				'github:owner/repo/main/app',
+				'--intermediate-paths-file',
+				'/tmp/intermediates.txt',
+				'--reference-paths-file',
+				'/tmp/references.txt',
+				'--reference-source',
+				'https://cache.example.test/t/acme/reuse/reuse',
+				'--run-root',
+				'github:owner/repo/_cupboard-seed/12345/app',
+				'--run-root-ttl',
+				'24h'
+			],
+			[
+				'--no-colour',
+				'push',
+				'https://cache.example.test',
+				'/nix/store/b',
+				'--github-oidc',
+				'--root',
+				'github:owner/repo/main/lib',
+				'--run-root',
+				'github:owner/repo/_cupboard-seed/12345/app',
+				'--run-root-ttl',
+				'24h'
+			]
+		]);
+	});
+});
+
+describe('aggregatePushSummaries', () => {
+	it('sums counts and concatenates paths and failures across pushes', () => {
+		const first = pushSummarySchema.parse({
+			uploadedPaths: 1,
+			reusedBlobs: 2,
+			skipped: 0,
+			uploadedBytes: 100,
+			failures: [],
+			paths: [
+				{
+					storePathHash: '0'.repeat(32),
+					storePath: `/nix/store/${'0'.repeat(32)}-app`,
+					outcome: 'committed'
+				}
+			]
+		});
+		const second = pushSummarySchema.parse({
+			uploadedPaths: 3,
+			reusedBlobs: 0,
+			skipped: 1,
+			uploadedBytes: 50,
+			failures: [
+				{
+					storePathHash: '1'.repeat(32),
+					storePath: `/nix/store/${'1'.repeat(32)}-lib`,
+					stage: 'upload',
+					reason: 'timeout'
+				}
+			],
+			paths: [
+				{
+					storePathHash: '2'.repeat(32),
+					storePath: `/nix/store/${'2'.repeat(32)}-lib`,
+					outcome: 'committed'
+				}
+			]
+		});
+
+		expect(aggregatePushSummaries([first, second])).toStrictEqual({
+			uploadedPaths: 4,
+			reusedBlobs: 2,
+			skipped: 1,
+			uploadedBytes: 150,
+			failures: second.failures,
+			paths: [...first.paths, ...second.paths]
+		});
+	});
+
+	it('returns zeroed counts and empty lists for no pushes', () => {
+		expect(aggregatePushSummaries([])).toStrictEqual({
+			uploadedPaths: 0,
+			reusedBlobs: 0,
+			skipped: 0,
+			uploadedBytes: 0,
+			failures: [],
+			paths: []
+		});
 	});
 });
 
