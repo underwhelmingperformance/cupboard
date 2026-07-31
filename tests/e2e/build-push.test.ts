@@ -269,7 +269,10 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 			try {
 				await runBuildPush(
 					{
-						command: config.command(scriptPath),
+						invocation: {
+							kind: 'command',
+							command: config.command(scriptPath)
+						},
 						receiptFile,
 						...config.options
 					},
