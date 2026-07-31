@@ -66,7 +66,7 @@ describe('attestationSubjects', () => {
 		const partitioned = attestationSubjects(
 			[attestPathInfo(builtPath, 0xaa), attestPathInfo(substitutedPath, 0xbb)],
 			{
-				version: 1,
+				version: 2,
 				paths: [builtPath, substitutedPath],
 				subjects: [
 					{
@@ -89,7 +89,7 @@ describe('attestationSubjects', () => {
 	it('rejects a NAR hash that changed after the receipt was written', () => {
 		expect(() =>
 			attestationSubjects([attestPathInfo(builtPath, 0xbb)], {
-				version: 1,
+				version: 2,
 				paths: [builtPath],
 				subjects: [
 					{

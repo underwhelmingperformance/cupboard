@@ -3,10 +3,13 @@ import path from 'node:path';
 import { env } from 'node:process';
 
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
+import {
+	type BuildReceipt,
+	buildReceiptSchema
+} from '@cupboard/protocol/build';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
-import { type BuildReceipt, buildReceiptSchema } from '../build-receipt.ts';
 import { InvalidInputError } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import { provided } from '../options.ts';

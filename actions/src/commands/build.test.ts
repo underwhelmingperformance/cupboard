@@ -17,9 +17,8 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import { buildReceiptSchema } from '@cupboard/protocol/build';
 import { afterEach, describe, expect, it } from 'vitest';
-
-import { buildReceiptSchema } from '../build-receipt.ts';
 
 import {
 	buildAction,
@@ -331,7 +330,7 @@ process.stdin.on('end', () => {
 				}
 			],
 			receipt: {
-				version: 1,
+				version: 2,
 				paths: [app],
 				subjects: [
 					{
