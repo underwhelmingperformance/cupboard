@@ -7,9 +7,12 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
-import { Nix } from './nix.ts';
+import { FakeDaemonTransport } from '../../../tests/support/fake-daemon-transport.ts';
+
+import { Nix, type NixDependencies } from './nix.ts';
 import {
 	InvalidNixStoreDirectoryError,
+	NixDaemonUnavailableError,
 	type NixStoreClient,
 	type NixValidPathInfo,
 	NotInNixStoreError
@@ -196,6 +199,80 @@ describe('Nix.open', () => {
 				realpath: (path) => path
 			})
 		).toThrow(InvalidNixStoreDirectoryError);
+	});
+});
+
+const noFiles = new Map<string, string>();
+
+function daemonDependencies(hasSocket: boolean): NixDependencies {
+	return {
+		env: {},
+		readFile: (filePath) => noFiles.get(filePath),
+		homeDirectory: () => noFiles.get('home'),
+		canWriteStateDirectory: () => true,
+		socketExists: () => hasSocket,
+		realpath: (path) => path
+	};
+}
+
+describe('Nix.openDaemon', () => {
+	it('reads through the daemon even when the state directory is writable', async () => {
+		const nix = Nix.openDaemon(daemonDependencies(true), {
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport({
+						[appPath]: {
+							hash: '11'.repeat(32),
+							narSize: 123,
+							references: [],
+							signatures: []
+						}
+					})
+				)
+		});
+
+		const expectedHash = NixSha256Hash.fromDigest(
+			Buffer.from('11'.repeat(32), 'hex')
+		);
+
+		await expect(
+			nix.queryPathInfo(`${appPath}/bin/app`)
+		).resolves.toStrictEqual({
+			storePath: appPath,
+			narHash: expectedHash,
+			narSize: 123,
+			references: [],
+			deriver: undefined,
+			ca: undefined,
+			signatures: [],
+			ultimate: false
+		});
+	});
+
+	it('refuses a daemonless install with a typed error', () => {
+		let outcome:
+			{ value: Nix } | { error: { name: string; socketPath: string } };
+		try {
+			const value = Nix.openDaemon(daemonDependencies(false));
+			outcome = { value };
+		} catch (error_: unknown) {
+			expect(error_).toBeInstanceOf(NixDaemonUnavailableError);
+
+			if (!(error_ instanceof NixDaemonUnavailableError)) {
+				throw error_;
+			}
+
+			outcome = {
+				error: { name: error_.name, socketPath: error_.socketPath }
+			};
+		}
+
+		expect(outcome).toStrictEqual({
+			error: {
+				name: 'NixDaemonUnavailableError',
+				socketPath: '/nix/var/nix/daemon-socket/socket'
+			}
+		});
 	});
 });
 

@@ -14,8 +14,10 @@ import {
 	NotInNixStoreError
 } from './nix-store.ts';
 import {
+	createNixDaemonStoreClient,
 	createNixStoreClient,
 	defaultStoreClientEnvironment,
+	type NixDaemonClientOptions,
 	type StoreClientEnvironment
 } from './store-client.ts';
 import { discoverNixStoreConfig } from './store-config.ts';
@@ -41,6 +43,30 @@ export class Nix {
 	): Nix {
 		const config = discoverNixStoreConfig(dependencies);
 		const store = createNixStoreClient(dependencies, config);
+
+		return new Nix(
+			store,
+			config.storeDirectory,
+			dependencies.realpath ?? defaultRealPath
+		);
+	}
+
+	/**
+	 * Open the daemon-backed store explicitly. The substitutable and
+	 * missing-path queries exist only behind the daemon, and the automatic
+	 * backend prefers the local reader whenever the state directory is
+	 * writable, so a caller that needs daemon-only operations selects the
+	 * daemon here. The daemon socket has to be present; a daemonless install
+	 * is refused with a typed error naming the probed socket path. Per-call
+	 * options merge over the discovered daemon settings, the caller winning
+	 * per key.
+	 */
+	static openDaemon(
+		dependencies: NixDependencies = defaultStoreClientEnvironment,
+		options: NixDaemonClientOptions = {}
+	): Nix {
+		const config = discoverNixStoreConfig(dependencies);
+		const store = createNixDaemonStoreClient(dependencies, config, options);
 
 		return new Nix(
 			store,

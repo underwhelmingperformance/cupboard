@@ -1,15 +1,21 @@
 import { accessSync, constants, existsSync } from 'node:fs';
 
-import { NixDaemonStoreClient } from './nix-daemon.ts';
+import { type NixDaemonConnector, NixDaemonStoreClient } from './nix-daemon.ts';
 import {
 	NixLocalStoreClient,
 	openLocalStoreDatabase
 } from './nix-local-store.ts';
-import { type NixStoreClient, UnsupportedNixStoreError } from './nix-store.ts';
+import {
+	NixDaemonUnavailableError,
+	type NixStoreClient,
+	UnsupportedNixStoreError
+} from './nix-store.ts';
 import {
 	defaultNixConfigEnvironment,
 	discoverNixStoreConfig,
 	type NixConfigEnvironment,
+	type NixDaemonOverrides,
+	type NixDaemonSetOptions,
 	type NixStoreConfig
 } from './store-config.ts';
 
@@ -63,6 +69,51 @@ export function createNixStoreClient(
 	return new NixLocalStoreClient(() =>
 		openLocalStoreDatabase(backend.stateDirectory)
 	);
+}
+
+/** Per-call adjustments for an explicitly daemon-backed client. */
+export interface NixDaemonClientOptions {
+	/** Merged over the discovered SetOptions fields, this value winning per key. */
+	readonly setOptions?: NixDaemonSetOptions;
+	/** Merged over the discovered overrides, this value winning per key. */
+	readonly overrides?: NixDaemonOverrides;
+	readonly connect?: NixDaemonConnector;
+}
+
+/**
+ * Open the daemon-backed store whenever its socket is present, whatever the
+ * automatic selection would pick. The substitutable and missing-path queries
+ * exist only behind the daemon, so a caller that needs them selects the daemon
+ * here; an install with no daemon socket is refused with
+ * {@link NixDaemonUnavailableError} naming the probed socket path.
+ */
+export function createNixDaemonStoreClient(
+	dependencies: StoreClientEnvironment = defaultStoreClientEnvironment,
+	config: NixStoreConfig = discoverNixStoreConfig(dependencies),
+	options: NixDaemonClientOptions = {}
+): NixDaemonStoreClient {
+	const socketPath = configuredDaemonSocketPath(config);
+
+	if (!dependencies.socketExists(socketPath)) {
+		throw new NixDaemonUnavailableError(socketPath);
+	}
+
+	return new NixDaemonStoreClient({
+		socketPath,
+		connect: options.connect,
+		setOptions: { ...config.daemonSetOptions, ...options.setOptions },
+		overrides: { ...config.daemonOverrides, ...options.overrides }
+	});
+}
+
+// A `unix://` store URI names the daemon socket directly; every other
+// configuration reaches the daemon through the state directory's socket.
+function configuredDaemonSocketPath(config: NixStoreConfig): string {
+	if (config.storeUri.startsWith(unixScheme)) {
+		return unixSocketPath(config.storeUri) ?? config.daemonSocketPath;
+	}
+
+	return config.daemonSocketPath;
 }
 
 interface StoreBackendProbes {
