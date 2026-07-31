@@ -1,6 +1,7 @@
 import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 
+import { Nix } from '@cupboard/nix';
 import {
 	type RootName,
 	selectorForCache,
@@ -36,6 +37,7 @@ import { PublicationCollection } from '../push/publication.ts';
 import { runPush } from '../push/push.ts';
 import { pushClientFor } from '../push/push-client.ts';
 import { parseRootName } from '../root-name.ts';
+import { parseStoreUri } from '../store-uri.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface PushOptions {
@@ -50,6 +52,7 @@ interface PushOptions {
 	readonly runRoot?: RootName;
 	readonly runRootTtl?: TtlSeconds;
 	readonly cache?: string;
+	readonly store?: string;
 	readonly wait?: boolean;
 	readonly waitTimeout?: WaitTimeoutSeconds;
 	readonly attest?: boolean;
@@ -260,6 +263,11 @@ export function registerPushCommand(
 		)
 		.option('--cache <name>', 'push to a named cache rather than the default')
 		.option(
+			'--store <uri>',
+			'read path metadata and NAR bytes from this remote ssh-ng store (default: the store Nix itself would use)',
+			parseStoreUri
+		)
+		.option(
 			'--attestation <bundle>',
 			'file a Sigstore DSSE bundle whose in-toto subject matches a pushed path',
 			collect,
@@ -371,6 +379,9 @@ export function registerPushCommand(
 				client: pushClientFor(url, token, {
 					cache: options.cache,
 					signal: programOptions.signal
+				}),
+				...(options.store !== undefined && {
+					nix: Nix.openDaemon(undefined, { storeUri: options.store })
 				}),
 				...(options.closure !== undefined && { closure: options.closure }),
 				...(options.referenceSource !== undefined && {

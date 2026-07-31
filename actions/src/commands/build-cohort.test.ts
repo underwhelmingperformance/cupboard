@@ -95,7 +95,8 @@ describe('resolveBuildCohortInputs', () => {
 			reuseView: inputs.reuseView,
 			ttl: inputs.ttl,
 			readUser: inputs.readUser,
-			readPassword: inputs.readPassword
+			readPassword: inputs.readPassword,
+			store: inputs.store
 		}).toStrictEqual({
 			key: 'cohort-x86_64-linux-ubuntu-latest-remote-abc123',
 			attrs: [
@@ -109,8 +110,18 @@ describe('resolveBuildCohortInputs', () => {
 			reuseView: '',
 			ttl: '',
 			readUser: '',
-			readPassword: ''
+			readPassword: '',
+			store: ''
 		});
+	});
+
+	it('passes the remote store through', () => {
+		const inputs = resolveBuildCohortInputs(
+			{ ...baseOptions(), store: 'ssh-ng://build@example.test' },
+			{ RUNNER_TEMP: '/tmp' }
+		);
+
+		expect(inputs.store).toBe('ssh-ng://build@example.test');
 	});
 
 	it('requires cohort-json', () => {
@@ -178,7 +189,7 @@ describe('resolveBuildCohortInputs', () => {
 
 describe('nixBuildArguments', () => {
 	it('runs keep-going with print-out-paths and no --no-link', () => {
-		expect(nixBuildArguments(['.#a^out', '.#b^out'], '')).toStrictEqual([
+		expect(nixBuildArguments(['.#a^out', '.#b^out'], '', '')).toStrictEqual([
 			'build',
 			'--keep-going',
 			'--print-out-paths',
@@ -189,12 +200,28 @@ describe('nixBuildArguments', () => {
 	});
 
 	it('carries an explicit max-jobs through', () => {
-		expect(nixBuildArguments(['.#a^out'], '4')).toStrictEqual([
+		expect(nixBuildArguments(['.#a^out'], '4', '')).toStrictEqual([
 			'build',
 			'--keep-going',
 			'--print-out-paths',
 			'--max-jobs',
 			'4',
+			'--',
+			'.#a^out'
+		]);
+	});
+
+	it('builds into the remote store while evaluating on the runner', () => {
+		expect(
+			nixBuildArguments(['.#a^out'], '', 'ssh-ng://build@example.test')
+		).toStrictEqual([
+			'build',
+			'--keep-going',
+			'--print-out-paths',
+			'--store',
+			'ssh-ng://build@example.test',
+			'--eval-store',
+			'auto',
 			'--',
 			'.#a^out'
 		]);
@@ -205,7 +232,11 @@ function parseJson(text: string): unknown {
 	return JSON.parse(text);
 }
 
-function planCohortSuccess(): readonly ReporterResultEvent[] {
+const measuredCapacity = { available: 1000, capacity: 2000, headroom: 100 };
+
+function planCohortSuccess(
+	capacity: unknown = measuredCapacity
+): readonly ReporterResultEvent[] {
 	return [
 		{
 			kind: 'plan-cohort',
@@ -221,7 +252,7 @@ function planCohortSuccess(): readonly ReporterResultEvent[] {
 					unknownCount: 0,
 					ceiling: { value: 5, source: 'configured' }
 				},
-				capacity: { available: 1000, capacity: 2000, headroom: 100 }
+				capacity
 			}
 		}
 	];
@@ -304,6 +335,7 @@ describe('buildCohortAction', () => {
 
 		expect(runNixBuild).toHaveBeenCalledExactlyOnceWith(
 			[libraryQueryInstallable, '.#packages.x86_64-linux.floating^out'],
+			'',
 			''
 		);
 
@@ -338,9 +370,83 @@ describe('buildCohortAction', () => {
 					unknownCount: 0,
 					ceiling: { value: 5, source: 'configured' }
 				},
-				capacity: { available: 1000, capacity: 2000, headroom: 100 }
+				capacity: measuredCapacity
 			}
 		});
+	});
+
+	it.each([
+		{
+			name: "no store keeps the plan and the build in this runner's store",
+			store: undefined,
+			planStoreArguments: [],
+			buildStore: '',
+			capacity: measuredCapacity
+		},
+		{
+			name: 'a remote store reaches the plan and the build',
+			store: 'ssh-ng://build@example.test',
+			planStoreArguments: ['--store', 'ssh-ng://build@example.test'],
+			buildStore: 'ssh-ng://build@example.test',
+			capacity: { skipped: 'remote-store' }
+		}
+	])('$name', async ({ store, planStoreArguments, buildStore, capacity }) => {
+		const runCupboardMock = vi.fn<typeof runCupboard>(() =>
+			Promise.resolve(planCohortSuccess(capacity))
+		);
+		const runNixBuild = vi.fn(() =>
+			Promise.resolve([libraryBuiltPath, floatingBuiltPath])
+		);
+		const options: BuildCohortOptions = {
+			...baseOptions(),
+			...(store !== undefined && { store })
+		};
+
+		await buildCohortAction(options, environment, {
+			runCupboard: runCupboardMock,
+			runNixBuild
+		});
+
+		const call = runCupboardMock.mock.calls[0];
+
+		if (call === undefined) {
+			throw new Error('runCupboard was not called');
+		}
+
+		const [, arguments_] = call;
+
+		expect(
+			arguments_.filter((value) => !value.startsWith(directory))
+		).toStrictEqual([
+			'--no-colour',
+			'plan',
+			'cohort',
+			canonicalHref(new URL('https://cache.example.test/t/acme')),
+			'--targets-file',
+			'--plan-file',
+			'--github-oidc',
+			...planStoreArguments
+		]);
+		expect(runNixBuild).toHaveBeenCalledExactlyOnceWith(
+			[libraryQueryInstallable, '.#packages.x86_64-linux.floating^out'],
+			'',
+			buildStore
+		);
+
+		const inputs = resolveBuildCohortInputs(options, environment);
+
+		expect(JSON.parse(await readFile(inputs.countsFile, 'utf8'))).toStrictEqual(
+			{
+				partition: {
+					counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
+					downloadSize: 100,
+					narSize: 200,
+					unknownCount: 0,
+					ceiling: { value: 5, source: 'configured' }
+				},
+				capacity
+			}
+		);
 	});
 
 	it('skips the plan-cohort invocation when no member evaluated', async () => {
@@ -366,6 +472,7 @@ describe('buildCohortAction', () => {
 				'.#packages.x86_64-linux.lib^out',
 				'.#packages.x86_64-linux.floating^out'
 			],
+			'',
 			''
 		);
 	});

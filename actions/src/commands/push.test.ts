@@ -30,6 +30,7 @@ import {
 } from './push.ts';
 
 const noExtras = {
+	store: '',
 	intermediatePathsFile: '',
 	referencePathsFile: '',
 	referenceSource: '',
@@ -75,6 +76,35 @@ describe('buildPushArguments', () => {
 		]);
 	});
 
+	it('carries the store the push reads from', () => {
+		expect(
+			buildPushArguments({
+				url: new URL('https://cache.example.test'),
+				paths: ['/nix/store/a'],
+				audience: '',
+				root: 'github:owner/repo/main',
+				cache: '',
+				ttl: '',
+				retain: true,
+				wait: true,
+				waitTimeout: '',
+				attestations: [],
+				...noExtras,
+				store: 'ssh-ng://build@example.test'
+			})
+		).toStrictEqual([
+			'--no-colour',
+			'push',
+			'https://cache.example.test',
+			'/nix/store/a',
+			'--github-oidc',
+			'--root',
+			'github:owner/repo/main',
+			'--store',
+			'ssh-ng://build@example.test'
+		]);
+	});
+
 	it('carries the intermediate, reference and run-root flags', () => {
 		expect(
 			buildPushArguments({
@@ -83,6 +113,7 @@ describe('buildPushArguments', () => {
 				audience: '',
 				root: 'github:owner/repo/main',
 				cache: '',
+				store: '',
 				ttl: '',
 				retain: true,
 				wait: true,
@@ -143,6 +174,7 @@ describe('resolvePushInputs', () => {
 		url: new URL(url),
 		paths: [storePath],
 		cache: '',
+		store: '',
 		audience: '',
 		root: 'github:owner/repo/main',
 		ttl: '',
@@ -161,6 +193,15 @@ describe('resolvePushInputs', () => {
 
 	it('applies defaults when optional flags are absent', () => {
 		expect(resolvePushInputs(baseOptions, environment)).toStrictEqual(defaults);
+	});
+
+	it('passes the remote store through', () => {
+		const resolved = resolvePushInputs(
+			{ ...baseOptions, store: 'ssh-ng://build@example.test' },
+			environment
+		);
+
+		expect(resolved.store).toBe('ssh-ng://build@example.test');
 	});
 
 	it('preserves the expected release source commit', () => {
@@ -453,6 +494,7 @@ describe('pushArgumentsForInvocations', () => {
 		| 'url'
 		| 'audience'
 		| 'cache'
+		| 'store'
 		| 'ttl'
 		| 'retain'
 		| 'wait'
@@ -467,6 +509,7 @@ describe('pushArgumentsForInvocations', () => {
 		url: new URL('https://cache.example.test'),
 		audience: '',
 		cache: '',
+		store: '',
 		ttl: '',
 		retain: true,
 		wait: true,

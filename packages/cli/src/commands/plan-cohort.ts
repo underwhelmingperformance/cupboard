@@ -1,6 +1,6 @@
 import { readFile, statfs, writeFile } from 'node:fs/promises';
 
-import { Nix, type NixDaemonTrust } from '@cupboard/nix';
+import { Nix, type NixDaemonTrust, type NixStoreKind } from '@cupboard/nix';
 import {
 	type RootName,
 	selectorForCache,
@@ -51,6 +51,7 @@ import {
 	viewServedPaths
 } from '../plan/destination-probe.ts';
 import { parseReadUser } from '../read-user.ts';
+import { parseStoreUri } from '../store-uri.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 import type { RootClient } from './root.ts';
@@ -77,6 +78,7 @@ export interface PlanCohortOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly planFile?: string;
+	readonly store?: string;
 	readonly storePath?: string;
 	readonly unknownCeiling?: number;
 	readonly unknownCeilingUntrustedFallback?: number;
@@ -87,10 +89,20 @@ export interface PlanCohortOptions {
 	readonly componentPublicationApplicable?: boolean;
 }
 
+/**
+ * The capacity entry a plan over a remote store records: ssh cannot statfs
+ * the remote filesystem, and a remote store is itself the design's answer to
+ * a runner whose local store is too small, so the local preflight does not
+ * apply and its skip is recorded in the plan.
+ */
+export interface RemoteStoreCapacitySkip {
+	readonly skipped: 'remote-store';
+}
+
 /** The realisation and publication partition {@link runPlanCohort} reports. */
 export interface PlanCohortResult {
 	readonly partition: AvailabilityPartition;
-	readonly capacity: CapacityCheckResult;
+	readonly capacity: CapacityCheckResult | RemoteStoreCapacitySkip;
 }
 
 /**
@@ -144,6 +156,8 @@ export interface PlanCohortRunOptions {
 	readonly targets: readonly ParsedCohortTarget[];
 	readonly cacheName: string;
 	readonly ttlSeconds?: TtlSeconds;
+	/** The kind of store the selected client reads through. */
+	readonly storeKind: NixStoreKind;
 	readonly storePath: string;
 	readonly planFile: string;
 	readonly ceiling: AvailabilityCeilingConfig;
@@ -198,6 +212,11 @@ export function registerPlanCommands(
 		.option(
 			'--plan-file <path>',
 			'destination for the detailed JSON partition and capacity result'
+		)
+		.option(
+			'--store <uri>',
+			'remote ssh-ng store whose own answers drive the partition (default: the local daemon)',
+			parseStoreUri
 		)
 		.option(
 			'--store-path <path>',
@@ -258,13 +277,16 @@ export function registerPlanCommands(
 				signal: programOptions.signal
 			});
 			const credentials = readCredentials(options);
-			const nix = Nix.openDaemon();
+			const storeSelection =
+				options.store === undefined ? {} : { storeUri: options.store };
+			const nix = Nix.openDaemon(undefined, storeSelection);
 
 			await runPlanCohort(
 				{
 					targets,
 					cacheName,
 					...(options.ttl !== undefined && { ttlSeconds: options.ttl }),
+					storeKind: nix.storeKind,
 					storePath: options.storePath ?? defaultStorePath,
 					planFile: options.planFile ?? defaultPlanFile(),
 					ceiling: {
@@ -298,6 +320,7 @@ export function registerPlanCommands(
 					daemonTrust: () => nix.daemonTrust(),
 					openReQueryClient: () =>
 						Nix.openDaemon(undefined, {
+							...storeSelection,
 							overrides: negativeNarinfoCacheBypass
 						}),
 					destinationServed: (paths) =>
@@ -398,10 +421,47 @@ export async function runPlanCohort(
 		throw error;
 	}
 
-	let capacity: CapacityCheckResult;
+	// A remote store's paths never land on this runner's filesystem, and ssh
+	// cannot statfs the remote one, so the capacity preflight only applies to
+	// a store on this machine; a remote plan records the skip.
+	const capacity: PlanCohortResult['capacity'] =
+		options.storeKind === 'ssh-ng'
+			? { skipped: 'remote-store' }
+			: await checkLocalCapacity(options, partition, reporter, dependencies);
 
+	const result: PlanCohortResult = { partition, capacity };
+
+	await writeFile(
+		options.planFile,
+		`${JSON.stringify(result, undefined, 2)}\n`
+	);
+
+	reporter.result({
+		kind: 'plan-cohort',
+		data: result,
+		rows: [
+			{ label: 'Attach only', value: String(partition.attachOnly.length) },
+			{
+				label: 'Publish by reference',
+				value: String(partition.publishByReference.length)
+			},
+			{ label: 'Left upstream', value: String(partition.leftUpstream.length) },
+			{ label: 'Build set', value: String(partition.buildSet.length) },
+			{ label: 'Plan file', value: options.planFile }
+		]
+	});
+}
+
+// The local store's capacity preflight, reporting a typed refusal with the
+// measured numbers before the underlying error propagates.
+async function checkLocalCapacity(
+	options: PlanCohortRunOptions,
+	partition: AvailabilityPartition,
+	reporter: Reporter,
+	dependencies: PlanCohortDependencies
+): Promise<CapacityCheckResult> {
 	try {
-		capacity = await reporter.phase('Checking store capacity', () =>
+		return await reporter.phase('Checking store capacity', () =>
 			checkStoreCapacity({
 				measurement: {
 					downloadSize: partition.downloadSize,
@@ -437,28 +497,6 @@ export async function runPlanCohort(
 
 		throw error;
 	}
-
-	const result: PlanCohortResult = { partition, capacity };
-
-	await writeFile(
-		options.planFile,
-		`${JSON.stringify(result, undefined, 2)}\n`
-	);
-
-	reporter.result({
-		kind: 'plan-cohort',
-		data: result,
-		rows: [
-			{ label: 'Attach only', value: String(partition.attachOnly.length) },
-			{
-				label: 'Publish by reference',
-				value: String(partition.publishByReference.length)
-			},
-			{ label: 'Left upstream', value: String(partition.leftUpstream.length) },
-			{ label: 'Build set', value: String(partition.buildSet.length) },
-			{ label: 'Plan file', value: options.planFile }
-		]
-	});
 }
 
 // One `roots.ensure` call per root named by a known-output target, carrying

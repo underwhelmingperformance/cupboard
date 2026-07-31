@@ -14,6 +14,7 @@ import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
 
 import {
+	InvalidStoreUriError,
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
 	ReferenceSourcePairError,
@@ -290,6 +291,37 @@ describe('push command', () => {
 		]);
 
 		expect(result).toBeInstanceOf(OidcRetentionChoiceRequiredError);
+	});
+
+	it('rejects a --store URI that names no ssh-ng destination', async () => {
+		const result = await parsePush([
+			'https://cache.example.workers.dev/t/acme',
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+			'--store',
+			'daemon'
+		]);
+
+		expect(result).toBeInstanceOf(InvalidStoreUriError);
+
+		if (!(result instanceof InvalidStoreUriError)) {
+			return;
+		}
+
+		expect(result.value).toBe('daemon');
+	});
+
+	it('parses an ssh-ng --store URI and still validates retention first', async () => {
+		const result = await parsePush([
+			'https://cache.example.workers.dev/t/acme',
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+			'--store',
+			'ssh-ng://build@example.test',
+			'--no-retain',
+			'--root',
+			'main'
+		]);
+
+		expect(result).toBeInstanceOf(NoRetainConflictError);
 	});
 
 	it('rejects --run-root-ttl without --run-root before authenticating', async () => {

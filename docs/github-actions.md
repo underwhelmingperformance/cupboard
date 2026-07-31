@@ -695,6 +695,25 @@ The workflow accepts `push: false` for a build-only validation run. In that mode
 it does not inspect the cache or derivation graph, and every cohort builds its
 targets directly without publishing them.
 
+### Building against a remote store
+
+A `store` input naming an `ssh-ng://` store URI hands the whole cohort to that
+store. The plan partitions availability with the remote store's own answers, the
+build runs `nix build --store <uri> --eval-store auto` so the results land on
+the remote store while evaluation stays on the runner, and the push reads path
+metadata and streams NAR bytes from the same store. The built closure is never
+copied into the runner's local store, so the runner's disk is bounded by
+evaluation, not by the size of the closure being built.
+
+Upload timing differs from a local build: the remote store reports its exact
+build results when the build completes, so upload starts after result discovery
+rather than overlapping the build.
+
+Because the paths never touch the runner's filesystem, the plan skips the local
+store-capacity preflight and records `capacity: {"skipped": "remote-store"}` in
+its plan file: ssh cannot measure the remote filesystem, and a remote store is
+itself the deployment answer to a runner whose disk cannot hold the build.
+
 ## Common tasks
 
 Routine changes to a working setup, and where each one's state lives.
