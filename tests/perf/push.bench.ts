@@ -186,11 +186,29 @@ function storeClientFor(source: NixStore): Nix {
 		};
 	};
 
+	const queryPathsInfo = (
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixValidPathInfo[]> =>
+		Promise.all(storePaths.map((storePath) => queryPathInfo(storePath)));
+
 	return Nix.forStore(
 		{
 			queryPathInfo,
-			resolveClosure: (storePaths: readonly StorePathString[]) =>
-				Promise.all(storePaths.map((storePath) => queryPathInfo(storePath)))
+			queryPathsInfo,
+			queryValidPathsInfo: queryPathsInfo,
+			queryValidPaths: (storePaths: readonly StorePathString[]) =>
+				Promise.resolve(storePaths),
+			querySubstitutablePaths: () => Promise.resolve([]),
+			queryDerivationOutputPaths: () => Promise.resolve([]),
+			queryMissing: () =>
+				Promise.resolve({
+					willBuild: [],
+					willSubstitute: [],
+					unknown: [],
+					downloadSize: 0,
+					narSize: 0
+				}),
+			resolveClosure: queryPathsInfo
 		},
 		{ storeDirectory: storeDirectorySchema.parse('/nix/store') }
 	);

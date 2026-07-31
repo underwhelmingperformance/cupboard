@@ -270,6 +270,179 @@ describe('NixDaemonStoreClient', () => {
 		expect(transport?.closed).toBe(true);
 	});
 
+	it('uses the negotiated path-info batch operation', async () => {
+		const missingPath = storePathSchema.parse(
+			'/nix/store/9123456789abcdfghijklmnpqrsvwxyz-missing'
+		);
+		const paths = {
+			[appPath]: {
+				hash: appHash,
+				narSize: 123,
+				references: [libraryPath],
+				signatures: []
+			},
+			[libraryPath]: {
+				hash: libraryHash,
+				narSize: 456,
+				references: [],
+				signatures: []
+			}
+		};
+		let connections = 0;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				connections += 1;
+
+				return Promise.resolve(
+					new FakeDaemonTransport(paths, {
+						features: ['queryPathInfos'],
+						expectedPathInfoBatch: [appPath, libraryPath, missingPath]
+					})
+				);
+			}
+		});
+
+		await expect(
+			client.queryValidPathsInfo([libraryPath, missingPath, appPath])
+		).resolves.toStrictEqual([
+			pathInfo(libraryPath, libraryHash, 456, []),
+			pathInfo(appPath, appHash, 123, [libraryPath])
+		]);
+		expect(connections).toBe(1);
+	});
+
+	it('rejects a batched query missing a path with a typed path error', async () => {
+		const missingPath = storePathSchema.parse(
+			'/nix/store/9123456789abcdfghijklmnpqrsvwxyz-missing'
+		);
+		const client = new NixDaemonStoreClient({
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport(
+						{
+							[appPath]: {
+								hash: appHash,
+								narSize: 123,
+								references: [],
+								signatures: []
+							}
+						},
+						{ features: ['queryPathInfos'] }
+					)
+				)
+		});
+
+		let outcome:
+			| { value: readonly NixValidPathInfo[] }
+			| { error: { name: string; storePath: string } };
+		try {
+			const value = await client.queryPathsInfo([appPath, missingPath]);
+			outcome = { value };
+		} catch (error_: unknown) {
+			expect(error_).toBeInstanceOf(NixStorePathNotFoundError);
+
+			if (!(error_ instanceof NixStorePathNotFoundError)) {
+				throw error_;
+			}
+
+			outcome = {
+				error: { name: error_.name, storePath: error_.storePath }
+			};
+		}
+
+		expect(outcome).toStrictEqual({
+			error: {
+				name: 'NixStorePathNotFoundError',
+				storePath: missingPath
+			}
+		});
+	});
+
+	it('falls back to pooled per-path queries in argument order', async () => {
+		const paths = {
+			[appPath]: {
+				hash: appHash,
+				narSize: 123,
+				references: [libraryPath],
+				signatures: []
+			},
+			[libraryPath]: {
+				hash: libraryHash,
+				narSize: 456,
+				references: [],
+				signatures: []
+			}
+		};
+		const transports: FakeDaemonTransport[] = [];
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				const transport = new FakeDaemonTransport(paths);
+				transports.push(transport);
+
+				return Promise.resolve(transport);
+			}
+		});
+
+		await expect(
+			client.queryPathsInfo([libraryPath, appPath])
+		).resolves.toStrictEqual([
+			pathInfo(libraryPath, libraryHash, 456, []),
+			pathInfo(appPath, appHash, 123, [libraryPath])
+		]);
+		expect(transports.map((transport) => transport.closed)).toStrictEqual([
+			true,
+			true
+		]);
+	});
+
+	it('reuses the probing connection as the fallback pool connection', async () => {
+		let connections = 0;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				connections += 1;
+
+				return Promise.resolve(
+					new FakeDaemonTransport({
+						[appPath]: {
+							hash: appHash,
+							narSize: 123,
+							references: [],
+							signatures: []
+						}
+					})
+				);
+			}
+		});
+
+		await expect(client.queryPathsInfo([appPath])).resolves.toStrictEqual([
+			pathInfo(appPath, appHash, 123, [])
+		]);
+		expect(connections).toBe(1);
+	});
+
+	it('filters unregistered paths from a pooled valid-path-info query', async () => {
+		const missingPath = storePathSchema.parse(
+			'/nix/store/9123456789abcdfghijklmnpqrsvwxyz-missing'
+		);
+		const client = new NixDaemonStoreClient({
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport({
+						[appPath]: {
+							hash: appHash,
+							narSize: 123,
+							references: [],
+							signatures: []
+						}
+					})
+				)
+		});
+
+		await expect(
+			client.queryValidPathsInfo([missingPath, appPath])
+		).resolves.toStrictEqual([pathInfo(appPath, appHash, 123, [])]);
+	});
+
 	it('holds temporary roots and queries on one session connection', async () => {
 		const transports: FakeDaemonTransport[] = [];
 		const client = new NixDaemonStoreClient({
@@ -751,6 +924,8 @@ class FakeDaemonTransport implements NixDaemonTransport {
 			readonly substitutable?: FakeSubstitutable;
 			readonly derivationOutputs?: FakeDerivationOutputs;
 			readonly missing?: FakeMissing;
+			readonly features?: readonly string[];
+			readonly expectedPathInfoBatch?: readonly string[];
 			readonly beforeOperation?: (request: Buffer) => Promise<void>;
 		} = {}
 	) {}
@@ -766,7 +941,10 @@ class FakeDaemonTransport implements NixDaemonTransport {
 		}
 
 		if (this.writeCount === 2) {
-			this.pendingBytes.push(stringSetResponse([]));
+			expect(readStringList(Buffer.from(bytes), 0)).toStrictEqual([
+				'queryPathInfos'
+			]);
+			this.pendingBytes.push(stringSetResponse(this.options.features ?? []));
 			return;
 		}
 
@@ -884,6 +1062,7 @@ function daemonOperationResponse(
 		readonly substitutable?: FakeSubstitutable;
 		readonly derivationOutputs?: FakeDerivationOutputs;
 		readonly missing?: FakeMissing;
+		readonly expectedPathInfoBatch?: readonly string[];
 	},
 	temporaryRoots: string[]
 ): Buffer {
@@ -922,7 +1101,43 @@ function daemonOperationResponse(
 		);
 	}
 
+	if (operation === 50) {
+		return queryPathInfosResponse(
+			request,
+			paths,
+			options.expectedPathInfoBatch
+		);
+	}
+
 	throw new Error(`Unexpected fake daemon operation: ${String(operation)}`);
+}
+
+function queryPathInfosResponse(
+	request: Buffer,
+	paths: Readonly<Record<string, FakePathInfo>>,
+	expectedPaths: readonly string[] | undefined
+): Buffer {
+	const requested = readRequestStringSet(request);
+
+	if (expectedPaths !== undefined) {
+		expect(requested).toStrictEqual(expectedPaths);
+	}
+
+	const infos = requested.flatMap((storePath) => {
+		const info = paths[storePath];
+
+		return info === undefined ? [] : [{ storePath, info }];
+	});
+	const response = new ProtocolWriter();
+	response.writeInteger(0x61_6c_74_73);
+	response.writeInteger(infos.length);
+
+	for (const { storePath, info } of infos) {
+		response.writeString(storePath);
+		writeUnkeyedPathInfo(response, info);
+	}
+
+	return response.bytes();
 }
 
 function queryMissingResponse(
@@ -1018,6 +1233,15 @@ function queryPathInfoResponse(
 	}
 
 	response.writeBoolean(true);
+	writeUnkeyedPathInfo(response, pathInfo);
+
+	return response.bytes();
+}
+
+function writeUnkeyedPathInfo(
+	response: ProtocolWriter,
+	pathInfo: FakePathInfo
+): void {
 	response.writeString(pathInfo.deriver ?? '');
 	response.writeString(pathInfo.hash);
 	response.writeStringSet(pathInfo.references);
@@ -1026,8 +1250,6 @@ function queryPathInfoResponse(
 	response.writeBoolean(pathInfo.ultimate ?? false);
 	response.writeStringSet(pathInfo.signatures);
 	response.writeString(pathInfo.ca ?? '');
-
-	return response.bytes();
 }
 
 interface FakeSetOptionsFields {
@@ -1106,7 +1328,11 @@ function readRequestStorePath(request: Buffer): string {
 }
 
 function readRequestStringSet(request: Buffer): string[] {
-	let offset = 8;
+	return readStringList(request, 8);
+}
+
+function readStringList(request: Buffer, start: number): string[] {
+	let offset = start;
 	const count = Number(request.readBigUInt64LE(offset));
 	offset += 8;
 	const values: string[] = [];

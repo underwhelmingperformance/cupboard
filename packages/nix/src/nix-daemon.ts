@@ -33,6 +33,12 @@ const opQueryValidPaths = 31;
 const opQuerySubstitutablePaths = 32;
 const opQueryMissing = 40;
 const opQueryDerivationOutputMap = 41;
+const opQueryPathInfos = 50;
+
+// Offered during the handshake; a daemon that advertises it back accepts the
+// batched path-info operation. No released daemon does yet, so the batch is
+// speculative and the per-path fallback carries current daemons.
+const featureQueryPathInfos = 'queryPathInfos';
 
 const stderrNext = 0x6f_6c_6d_67;
 const stderrRead = 0x64_61_74_61;
@@ -207,6 +213,61 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		return connection;
 	}
 
+	// One connection decides how a whole batch is answered: its handshake
+	// negotiated whether the daemon accepts the batched operation. A batch
+	// answer closes that connection; a fallback hands it on as the pool's
+	// first connection so the handshake round trip is not paid twice.
+	private async queryPathsInfoBatch(
+		storePaths: readonly StorePathString[]
+	): Promise<
+		| { readonly kind: 'batch'; readonly infos: readonly NixValidPathInfo[] }
+		| { readonly kind: 'fallback'; readonly connection: NixDaemonConnection }
+	> {
+		if (storePaths.length === 0) {
+			return { kind: 'batch', infos: [] };
+		}
+
+		const connection = await this.openConnection();
+
+		if (!connection.supportsQueryPathInfos) {
+			return { kind: 'fallback', connection };
+		}
+
+		try {
+			return {
+				kind: 'batch',
+				infos: await connection.queryPathsInfo(sortedUnique(storePaths))
+			};
+		} finally {
+			await connection.close();
+		}
+	}
+
+	private async queryPathsInfoBy<T>(
+		storePaths: readonly StorePathString[],
+		query: (
+			storePath: StorePathString,
+			pool: NixDaemonConnectionPool
+		) => Promise<T>,
+		initialConnection: NixDaemonConnection
+	): Promise<readonly T[]> {
+		const pool = new NixDaemonConnectionPool(
+			() => this.openConnection(),
+			defaultClosureConcurrency,
+			initialConnection
+		);
+
+		try {
+			return await mapWithConcurrency(
+				storePaths,
+				defaultClosureConcurrency,
+				(storePath) => query(storePath, pool)
+			);
+		} finally {
+			await pool.closeAll();
+		}
+	}
+
 	async resolveClosure(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly NixValidPathInfo[]> {
@@ -254,6 +315,66 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		}
 
 		return this.withConnection((session) => session.queryMissing(targets));
+	}
+
+	async queryPathsInfo(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixValidPathInfo[]> {
+		const batch = await this.queryPathsInfoBatch(storePaths);
+
+		if (batch.kind === 'batch') {
+			const infos = new Map(batch.infos.map((info) => [info.storePath, info]));
+
+			return storePaths.map((storePath) => {
+				const info = infos.get(storePath);
+
+				if (info === undefined) {
+					throw new NixStorePathNotFoundError(storePath);
+				}
+
+				return info;
+			});
+		}
+
+		return this.queryPathsInfoBy(
+			storePaths,
+			(storePath, pool) => pool.queryPathInfo(storePath),
+			batch.connection
+		);
+	}
+
+	async queryValidPathsInfo(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixValidPathInfo[]> {
+		const batch = await this.queryPathsInfoBatch(storePaths);
+
+		if (batch.kind === 'batch') {
+			const infos = new Map(batch.infos.map((info) => [info.storePath, info]));
+
+			return storePaths.flatMap((storePath) => {
+				const info = infos.get(storePath);
+
+				return info === undefined ? [] : [info];
+			});
+		}
+
+		const infos = await this.queryPathsInfoBy(
+			storePaths,
+			async (storePath, pool) => {
+				try {
+					return await pool.queryPathInfo(storePath);
+				} catch (error) {
+					if (error instanceof NixStorePathNotFoundError) {
+						return;
+					}
+
+					throw error;
+				}
+			},
+			batch.connection
+		);
+
+		return infos.filter((info) => info !== undefined);
 	}
 
 	/**
@@ -385,8 +506,17 @@ class NixDaemonConnectionPool {
 
 	constructor(
 		private readonly open: () => Promise<NixDaemonConnection>,
-		private readonly max: number
-	) {}
+		private readonly max: number,
+		initialConnection?: NixDaemonConnection
+	) {
+		if (initialConnection === undefined) {
+			return;
+		}
+
+		this.all.push(initialConnection);
+		this.free.push(initialConnection);
+		this.opened = 1;
+	}
 
 	private async acquire(): Promise<NixDaemonConnection> {
 		if (this.closed) {
@@ -512,6 +642,8 @@ class NixDaemonConnection {
 
 	private trustLevel: NixDaemonTrust = 'unknown';
 
+	private readonly features = new Set<string>();
+
 	constructor(
 		private readonly transport: NixDaemonTransport,
 		private readonly options: NixDaemonSetOptions,
@@ -550,10 +682,14 @@ class NixDaemonConnection {
 		}
 
 		const features = new NixDaemonWriter();
-		features.writeStringSet([]);
+		features.writeStringSet([featureQueryPathInfos]);
 
 		await this.transport.write(features.bytes());
-		await this.readStringSet();
+		const daemonFeatures = await this.readStringSet();
+
+		if (daemonFeatures.includes(featureQueryPathInfos)) {
+			this.features.add(featureQueryPathInfos);
+		}
 	}
 
 	private async postHandshake(): Promise<void> {
@@ -787,6 +923,10 @@ class NixDaemonConnection {
 		return this.trustLevel;
 	}
 
+	get supportsQueryPathInfos(): boolean {
+		return this.features.has(featureQueryPathInfos);
+	}
+
 	close(): Promise<void> {
 		return this.transport.close();
 	}
@@ -850,6 +990,49 @@ class NixDaemonConnection {
 		const substitutablePaths = await this.readStringSet();
 
 		return substitutablePaths.map((path) => requireStorePath(path));
+	}
+
+	async queryPathsInfo(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixValidPathInfo[]> {
+		const expected = new Set<string>(storePaths);
+		const request = new NixDaemonWriter();
+		request.writeInteger(opQueryPathInfos);
+		request.writeStringSet(storePaths);
+
+		await this.transport.write(request.bytes());
+		await this.processStderr();
+
+		const count = await this.readInteger();
+		const infos: NixValidPathInfo[] = [];
+
+		for (let index = 0; index < count; index += 1) {
+			const reported = await this.readString();
+
+			if (!expected.delete(reported)) {
+				throw new NixDaemonRemoteError(
+					`daemon returned path info for an unexpected path: ${reported}`
+				);
+			}
+
+			const storePath = requireStorePath(reported);
+			const pathInfo = await this.readUnkeyedPathInfo();
+
+			infos.push({
+				storePath,
+				narHash: pathInfo.narHash,
+				narSize: pathInfo.narSize,
+				references: pathInfo.references.map((reference) =>
+					requireStorePath(reference)
+				),
+				deriver: pathInfo.deriver,
+				ca: pathInfo.ca,
+				signatures: pathInfo.signatures,
+				ultimate: pathInfo.ultimate
+			});
+		}
+
+		return infos;
 	}
 
 	async addTempRoot(storePath: StorePathString): Promise<void> {

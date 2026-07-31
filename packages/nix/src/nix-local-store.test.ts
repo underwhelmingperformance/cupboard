@@ -129,6 +129,25 @@ describe('NixLocalStoreClient', () => {
 		).resolves.toStrictEqual([pathA, pathB]);
 	});
 
+	it('queries several paths through one database view', async () => {
+		await expect(client.queryPathsInfo([pathB, pathA])).resolves.toStrictEqual([
+			infoB,
+			infoA
+		]);
+	});
+
+	it('rejects a batch containing an unregistered path', async () => {
+		await expect(client.queryPathsInfo([pathA, missingPath])).rejects.toThrow(
+			NixStorePathNotFoundError
+		);
+	});
+
+	it('filters unregistered paths from a valid-path-info batch', async () => {
+		await expect(
+			client.queryValidPathsInfo([missingPath, pathB])
+		).resolves.toStrictEqual([infoB]);
+	});
+
 	it('queries registered outputs by their deriver', async () => {
 		await expect(
 			client.queryDerivationOutputPaths([missingDrvPath, deriverA, deriverA])

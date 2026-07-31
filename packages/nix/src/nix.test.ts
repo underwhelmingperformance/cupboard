@@ -46,6 +46,7 @@ interface RecordingStore extends NixStoreClient {
 	readonly substitutableBatches: string[][];
 	readonly drvBatches: string[][];
 	readonly missingBatches: string[][];
+	readonly infoBatches: string[][];
 	readonly closures: string[][];
 }
 
@@ -55,6 +56,7 @@ function recordingStore(): RecordingStore {
 	const substitutableBatches: string[][] = [];
 	const drvBatches: string[][] = [];
 	const missingBatches: string[][] = [];
+	const infoBatches: string[][] = [];
 	const closures: string[][] = [];
 
 	return {
@@ -63,11 +65,22 @@ function recordingStore(): RecordingStore {
 		substitutableBatches,
 		drvBatches,
 		missingBatches,
+		infoBatches,
 		closures,
 		queryPathInfo: (storePath) => {
 			queried.push(storePath);
 
 			return Promise.resolve(info(storePath));
+		},
+		queryPathsInfo: (storePaths) => {
+			infoBatches.push([...storePaths]);
+
+			return Promise.resolve(storePaths.map((storePath) => info(storePath)));
+		},
+		queryValidPathsInfo: (storePaths) => {
+			infoBatches.push([...storePaths]);
+
+			return Promise.resolve(storePaths.map((storePath) => info(storePath)));
 		},
 		queryValidPaths: (storePaths) => {
 			validBatches.push([...storePaths]);
@@ -231,6 +244,20 @@ describe('Nix queries', () => {
 		]);
 
 		expect(store.drvBatches).toStrictEqual([[appPath, libraryPath]]);
+	});
+
+	it('canonicalises every path in a batched info query', async () => {
+		const store = recordingStore();
+
+		await Promise.all([
+			nixOver(store).queryPathsInfo([`${appPath}/bin`, libraryPath]),
+			nixOver(store).queryValidPathsInfo([`${appPath}/bin`, libraryPath])
+		]);
+
+		expect(store.infoBatches).toStrictEqual([
+			[appPath, libraryPath],
+			[appPath, libraryPath]
+		]);
 	});
 
 	it('passes realisation targets through unchanged', async () => {

@@ -3249,6 +3249,16 @@ function nixStore(paths: Record<string, NixValidPathInfo>): Nix {
 		},
 		queryPathInfo: (storePath: StorePathString) =>
 			Promise.resolve(knownPathInfo(paths, storePath)),
+		queryPathsInfo: (storePaths: readonly StorePathString[]) =>
+			Promise.resolve(
+				storePaths.map((storePath) => knownPathInfo(paths, storePath))
+			),
+		queryValidPathsInfo: (storePaths: readonly StorePathString[]) =>
+			Promise.resolve(
+				storePaths
+					.filter((storePath) => paths[storePath] !== undefined)
+					.map((storePath) => knownPathInfo(paths, storePath))
+			),
 		queryValidPaths: (storePaths: readonly StorePathString[]) =>
 			Promise.resolve(
 				storePaths.filter((storePath) => paths[storePath] !== undefined)
