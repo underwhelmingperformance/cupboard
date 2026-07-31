@@ -51,12 +51,12 @@ describe('cupboard flake publish release coordinates', () => {
 				)
 		).toStrictEqual(
 			[
-				...Array.from({ length: 4 }, () => ({
+				...Array.from({ length: 2 }, () => ({
 					uses: '- uses: ./.cupboard/actions/setup',
 					expectedSourceCommit:
 						'expected-source-commit: ${{ job.workflow_sha }}'
 				})),
-				...Array.from({ length: 3 }, () => ({
+				...Array.from({ length: 1 }, () => ({
 					uses: '- uses: ./.cupboard/actions/push',
 					expectedSourceCommit:
 						'expected-source-commit: ${{ job.workflow_sha }}'
@@ -120,7 +120,7 @@ describe('cupboard build provenance', () => {
 					.find((line) => line.startsWith('receipt-file:'))
 			}))
 		).toStrictEqual([
-			...Array.from({ length: 3 }, () => ({
+			...Array.from({ length: 1 }, () => ({
 				file: 'cupboard-flake-publish.yml',
 				receipt: 'receipt-file: ${{ steps.build.outputs.receipt-file }}'
 			})),
@@ -129,58 +129,6 @@ describe('cupboard build provenance', () => {
 				receipt: 'receipt-file: ${{ steps.build.outputs.receipt-file }}'
 			}
 		]);
-	});
-});
-
-describe('cupboard flake publish output records', () => {
-	it('threads an internally generated artifact name through plan consumers', async () => {
-		const contents = await readFile(flakeWorkflow, 'utf8');
-
-		expect({
-			callerInput: contents.includes('      artifact-key:\n'),
-			planOutput: contents.includes(
-				'      plan-artifact-name: ${{ steps.plan.outputs.plan-artifact-name }}'
-			),
-			artifactNames:
-				contents.match(
-					/name: \$\{\{ needs\.plan\.outputs\.plan-artifact-name \}\}/gu
-				) ?? [],
-			uploadName: contents.includes(
-				'name: ${{ steps.plan.outputs.plan-artifact-name }}'
-			)
-		}).toStrictEqual({
-			callerInput: false,
-			planOutput: true,
-			artifactNames: Array.from(
-				{ length: 2 },
-				() => 'name: ${{ needs.plan.outputs.plan-artifact-name }}'
-			),
-			uploadName: true
-		});
-	});
-
-	it('keeps generated installable lists in runner files', async () => {
-		const contents = await readFile(flakeWorkflow, 'utf8');
-
-		expect({
-			fileOutputs:
-				contents.match(/echo "file=\$\{installables_file\}"/gu) ?? [],
-			fileInputs:
-				contents.match(
-					/installables-file: \$\{\{ steps\.installables\.outputs\.file \}\}/gu
-				) ?? [],
-			inlineOutputs: contents.match(/echo "value<</gu) ?? []
-		}).toStrictEqual({
-			fileOutputs: Array.from(
-				{ length: 2 },
-				() => 'echo "file=${installables_file}"'
-			),
-			fileInputs: Array.from(
-				{ length: 2 },
-				() => 'installables-file: ${{ steps.installables.outputs.file }}'
-			),
-			inlineOutputs: []
-		});
 	});
 });
 
