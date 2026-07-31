@@ -1013,6 +1013,26 @@ export class BuildCommandFailedError extends CliError {
 	}
 }
 
+/** A build-push run takes exactly one build input. */
+export class CohortInputError extends CliUsageError {
+	constructor() {
+		super('pass a build command after -- or --cohorts-file, and not both');
+		this.name = 'CohortInputError';
+	}
+}
+
+/** The cohorts file did not parse into the typed cohort schema. */
+export class CohortsFileInvalidError extends CliUsageError {
+	constructor(options?: { readonly cause: unknown }) {
+		super(
+			'the cohorts file must be JSON of the shape ' +
+				'{"cohorts": [{"command": [...]} | {"installables": [...]}]}',
+			options
+		);
+		this.name = 'CohortsFileInvalidError';
+	}
+}
+
 /**
  * The build succeeded but its publication or retention did not complete. The
  * exit code carries the classified sysexits category, so a cache failure is
