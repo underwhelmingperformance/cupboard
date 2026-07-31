@@ -56,6 +56,57 @@ describe('pushAuthorizationDetails', () => {
 		expect(grant).toMatchObject({ cache: '_default' });
 	});
 
+	it('requests a second grant for the run root beside the push grant', () => {
+		expect(
+			pushAuthorizationDetails({
+				cacheSelector: 'pr-1',
+				attest: false,
+				root: rootName('main'),
+				runRoot: rootName('ci/run-1')
+			})
+		).toStrictEqual([
+			{
+				type: 'cupboard_cache',
+				actions: [
+					'upload:negotiate',
+					'upload:status',
+					'upload:commit',
+					'root:set'
+				],
+				cache: 'pr-1',
+				root: rootName('main')
+			},
+			{
+				type: 'cupboard_cache',
+				actions: ['root:attach'],
+				cache: 'pr-1',
+				root: rootName('ci/run-1')
+			}
+		]);
+	});
+
+	it('requests the run-root grant for a push naming no target root', () => {
+		expect(
+			pushAuthorizationDetails({
+				cacheSelector: 'pr-1',
+				attest: false,
+				runRoot: rootName('ci/run-1')
+			})
+		).toStrictEqual([
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
+				cache: 'pr-1'
+			},
+			{
+				type: 'cupboard_cache',
+				actions: ['root:attach'],
+				cache: 'pr-1',
+				root: rootName('ci/run-1')
+			}
+		]);
+	});
+
 	// `--no-retain` carries no `root` on the grant intent, the same shape as a
 	// push that simply never names one: no separate "unretained" signal exists at
 	// this layer, since the CLI never requests root:set unless it names a root.

@@ -12,6 +12,13 @@ export interface PushGrantIntent {
 	readonly cacheSelector: string;
 	readonly attest: boolean;
 	readonly root?: RootName;
+	/**
+	 * The run root the push binds at negotiate. Attaching retains paths under
+	 * a name, so it needs its own explicit grant on its own root selector: the
+	 * request carries a second cache grant on the same cache for it, since a
+	 * run root and a target root are different roots with different lifetimes.
+	 */
+	readonly runRoot?: RootName;
 }
 
 export interface RootEnsureGrantIntent {
@@ -52,7 +59,17 @@ export function pushAuthorizationDetails(
 			actions,
 			cache: intent.cacheSelector,
 			...(intent.root !== undefined && { root: intent.root })
-		}
+		},
+		...(intent.runRoot === undefined
+			? []
+			: [
+					{
+						type: 'cupboard_cache',
+						actions: ['root:attach'],
+						cache: intent.cacheSelector,
+						root: intent.runRoot
+					}
+				])
 	]);
 }
 

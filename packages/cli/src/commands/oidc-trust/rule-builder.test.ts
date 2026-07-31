@@ -40,7 +40,7 @@ describe('jobWorkflowReferenceClaim', () => {
 
 describe('expandAllow', () => {
 	it('expands the shorthands into cache and root actions', () => {
-		expect(expandAllow(['push', 'root', 'attest'])).toStrictEqual({
+		expect(expandAllow(['push', 'root', 'attest', 'attach'])).toStrictEqual({
 			cacheActions: [
 				'upload:negotiate',
 				'upload:status',
@@ -49,7 +49,7 @@ describe('expandAllow', () => {
 				'attestation:negotiate',
 				'attestation:attach'
 			],
-			rootActions: ['root:set']
+			rootActions: ['root:set', 'root:attach']
 		});
 	});
 
@@ -167,6 +167,36 @@ describe('buildCacheGrant', () => {
 				'upload:confirm'
 			],
 			resources: { cache: { exact: '_default', validate: 'cacheName' } }
+		});
+	});
+
+	it('an attach allowance binds the named root like a root allowance does', () => {
+		expect(
+			buildCacheGrant({ allow: ['push', 'attach'], root: 'github:acme/ci/' })
+		).toStrictEqual({
+			type: 'cupboard_cache',
+			actions: [
+				'upload:negotiate',
+				'upload:status',
+				'upload:commit',
+				'upload:confirm',
+				'root:attach'
+			],
+			resources: {
+				cache: { exact: '_default', validate: 'cacheName' },
+				root: { validate: 'rootName', exact: 'github:acme/ci/' }
+			}
+		});
+	});
+
+	it('an attach allowance alone binds the root to the cache itself', () => {
+		expect(buildCacheGrant({ allow: ['attach'] })).toStrictEqual({
+			type: 'cupboard_cache',
+			actions: ['root:attach'],
+			resources: {
+				cache: { exact: '_default', validate: 'cacheName' },
+				root: { validate: 'rootName', equalsResource: 'cache' }
+			}
 		});
 	});
 
