@@ -212,6 +212,7 @@ function storeClientFor(source: NixStore): Nix {
 			narFromPath: (storePath: StorePathString): AsyncIterable<Uint8Array> => {
 				throw new Error(`No NAR stream is modelled for ${storePath}`);
 			},
+			buildPathsWithResults: () => Promise.resolve([]),
 			resolveClosure: queryPathsInfo
 		},
 		{ storeDirectory: storeDirectorySchema.parse('/nix/store') }

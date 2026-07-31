@@ -3847,7 +3847,8 @@ function nixStore(
 			}),
 		narFromPath: (storePath: StorePathString): AsyncIterable<Uint8Array> => {
 			throw new Error(`No NAR stream is modelled for ${storePath}`);
-		}
+		},
+		buildPathsWithResults: () => Promise.resolve([])
 	};
 
 	return Nix.forStore(store, {

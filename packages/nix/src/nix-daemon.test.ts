@@ -11,6 +11,7 @@ import {
 import { describe, expect, it } from 'vitest';
 
 import {
+	type FakeBuildResult,
 	FakeDaemonReadUnderflowError,
 	FakeDaemonTransport,
 	readRequestStorePath
@@ -25,6 +26,8 @@ import {
 } from './nix-daemon.ts';
 import {
 	InvalidNixStorePathError,
+	type NixBuildResult,
+	type NixDerivedPathString,
 	NixStorePathNotFoundError,
 	type NixValidPathInfo
 } from './nix-store.ts';
@@ -41,6 +44,186 @@ const runtimePath = storePathSchema.parse(
 const appHash = '11'.repeat(32);
 const libraryHash = '22'.repeat(32);
 const runtimeHash = '33'.repeat(32);
+const buildDrvPath = storePathSchema.parse(
+	'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv'
+);
+
+interface BuildResultCase {
+	readonly name: string;
+	readonly targets: readonly NixDerivedPathString[];
+	readonly expectedTargets: readonly string[];
+	readonly result: FakeBuildResult;
+	readonly expected: NixBuildResult;
+}
+
+const buildResultCases: readonly BuildResultCase[] = [
+	{
+		name: 'a built derivation with several outputs',
+		targets: [`${buildDrvPath}^*`],
+		expectedTargets: [`${buildDrvPath}!*`],
+		result: {
+			target: `${buildDrvPath}!*`,
+			status: 0,
+			errorMessage: '',
+			timesBuilt: 1,
+			nonDeterministic: false,
+			startTime: 100,
+			stopTime: 260,
+			cpuUserMicroseconds: 1500,
+			cpuSystemMicroseconds: 300,
+			builtOutputs: [
+				{
+					id: `sha256:${'aa'.repeat(32)}!out`,
+					realisation: JSON.stringify({ outPath: appPath })
+				},
+				{
+					id: `sha256:${'aa'.repeat(32)}!dev`,
+					realisation: JSON.stringify({ outPath: libraryPath })
+				}
+			]
+		},
+		expected: {
+			target: `${buildDrvPath}^*`,
+			outcome: {
+				kind: 'built',
+				outputs: { out: appPath, dev: libraryPath }
+			},
+			timesBuilt: 1,
+			nonDeterministic: false,
+			startTime: 100,
+			stopTime: 260
+		}
+	},
+	{
+		name: 'a substituted path',
+		targets: [appPath],
+		expectedTargets: [appPath],
+		result: {
+			target: appPath,
+			status: 1,
+			errorMessage: '',
+			timesBuilt: 0,
+			nonDeterministic: false,
+			startTime: 0,
+			stopTime: 0,
+			builtOutputs: []
+		},
+		expected: {
+			target: appPath,
+			outcome: { kind: 'substituted', outputs: {} },
+			timesBuilt: 0,
+			nonDeterministic: false,
+			startTime: 0,
+			stopTime: 0
+		}
+	},
+	{
+		name: 'an already valid path',
+		targets: [appPath],
+		expectedTargets: [appPath],
+		result: {
+			target: appPath,
+			status: 2,
+			errorMessage: '',
+			timesBuilt: 0,
+			nonDeterministic: false,
+			startTime: 0,
+			stopTime: 0,
+			builtOutputs: []
+		},
+		expected: {
+			target: appPath,
+			outcome: { kind: 'already-valid', outputs: {} },
+			timesBuilt: 0,
+			nonDeterministic: false,
+			startTime: 0,
+			stopTime: 0
+		}
+	},
+	{
+		name: 'a permanent failure',
+		targets: [`${buildDrvPath}^out`],
+		expectedTargets: [`${buildDrvPath}!out`],
+		result: {
+			target: `${buildDrvPath}!out`,
+			status: 3,
+			errorMessage: 'builder failed with exit code 1',
+			timesBuilt: 1,
+			nonDeterministic: false,
+			startTime: 10,
+			stopTime: 20,
+			builtOutputs: []
+		},
+		expected: {
+			target: `${buildDrvPath}^out`,
+			outcome: {
+				kind: 'permanent-failure',
+				message: 'builder failed with exit code 1'
+			},
+			timesBuilt: 1,
+			nonDeterministic: false,
+			startTime: 10,
+			stopTime: 20
+		}
+	},
+	{
+		name: 'a path no substituter can place',
+		targets: [appPath],
+		expectedTargets: [appPath],
+		result: {
+			target: appPath,
+			status: 14,
+			errorMessage: 'no substituters can build this path',
+			timesBuilt: 0,
+			nonDeterministic: false,
+			startTime: 0,
+			stopTime: 0,
+			builtOutputs: []
+		},
+		expected: {
+			target: appPath,
+			outcome: {
+				kind: 'no-substituters',
+				message: 'no substituters can build this path'
+			},
+			timesBuilt: 0,
+			nonDeterministic: false,
+			startTime: 0,
+			stopTime: 0
+		}
+	},
+	{
+		name: 'a resolution to an already valid output',
+		targets: [`${buildDrvPath}^out`],
+		expectedTargets: [`${buildDrvPath}!out`],
+		result: {
+			target: `${buildDrvPath}!out`,
+			status: 13,
+			errorMessage: '',
+			timesBuilt: 0,
+			nonDeterministic: false,
+			startTime: 0,
+			stopTime: 0,
+			builtOutputs: [
+				{
+					id: `sha256:${'bb'.repeat(32)}!out`,
+					realisation: JSON.stringify({ outPath: appPath })
+				}
+			]
+		},
+		expected: {
+			target: `${buildDrvPath}^out`,
+			outcome: {
+				kind: 'resolves-to-already-valid',
+				outputs: { out: appPath }
+			},
+			timesBuilt: 0,
+			nonDeterministic: false,
+			startTime: 0,
+			stopTime: 0
+		}
+	}
+];
 
 describe('connectToNixDaemon', () => {
 	// The fakes elsewhere bypass the socket transport entirely, so this is the
@@ -446,6 +629,42 @@ describe('NixDaemonStoreClient', () => {
 		await expect(
 			client.queryValidPathsInfo([missingPath, appPath])
 		).resolves.toStrictEqual([pathInfo(appPath, appHash, 123, [])]);
+	});
+
+	it.each(buildResultCases)(
+		'decodes the build result for $name',
+		async ({ targets, expectedTargets, result, expected }) => {
+			let transport: FakeDaemonTransport | undefined;
+			const client = new NixDaemonStoreClient({
+				connect: () => {
+					transport = new FakeDaemonTransport(
+						{},
+						{ builds: { expectedTargets, results: [result] } }
+					);
+
+					return Promise.resolve(transport);
+				}
+			});
+
+			await expect(
+				client.buildPathsWithResults(targets)
+			).resolves.toStrictEqual([expected]);
+			expect(transport?.closed).toBe(true);
+		}
+	);
+
+	it('answers an empty build request without opening a connection', async () => {
+		let connections = 0;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				connections += 1;
+
+				return Promise.resolve(new FakeDaemonTransport({}));
+			}
+		});
+
+		await expect(client.buildPathsWithResults([])).resolves.toStrictEqual([]);
+		expect(connections).toBe(0);
 	});
 
 	it('streams a NAR reassembled across daemon frames in order', async () => {

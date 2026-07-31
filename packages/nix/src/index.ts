@@ -3,6 +3,8 @@ export { Nix } from './nix.ts';
 export type { NixDaemonTrust } from './nix-daemon.ts';
 export type { NixSshStoreSpec } from './nix-daemon-ssh.ts';
 export type {
+	NixBuildOutcome,
+	NixBuildResult,
 	NixDerivedPathString,
 	NixMissingPartition,
 	NixStoreDirectorySource,
