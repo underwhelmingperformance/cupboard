@@ -27,7 +27,10 @@
       pnpmDepsHash = (nixpkgs.lib.importJSON ./pnpm-deps-hash.json).store;
 
       # `pnpm build:binary` bundles the CLI and both Workers, then injects the
-      # bundle into a copy of the Node binary as a single executable. The build
+      # bundle into a copy of the Node binary as a single executable. It also
+      # compiles the post-build hook helper with the stdenv toolchain (the
+      # sandbox's `CC`); install places it under `libexec/cupboard/`, where the
+      # CLI's helper resolution looks relative to `bin/cupboard`. The build
       # reads the version from CUPBOARD_BUILD_VERSION rather than Git, since the
       # flake source has no checkout. Darwin needs an ad-hoc codesign for the
       # rewritten Mach-O to run; sigtool provides it.
@@ -72,6 +75,8 @@
           installPhase = ''
             runHook preInstall
             install -Dm755 dist/release/package/cupboard "$out/bin/cupboard"
+            install -Dm755 dist/release/package/cupboard-hook-relay \
+              "$out/libexec/cupboard/cupboard-hook-relay"
             runHook postInstall
           '';
 

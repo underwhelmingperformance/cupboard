@@ -2,7 +2,8 @@ import { spawnSync } from 'node:child_process';
 import { chmod, copyFile, mkdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { arch, platform } from 'node:process';
+import { arch, env, platform } from 'node:process';
+import { pathToFileURL } from 'node:url';
 
 import {
 	CodedError,
@@ -37,6 +38,52 @@ const supportedArchitectures = new Map([
 ]);
 
 const sentinelFuse = 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2';
+
+export const hookHelperSourcePath =
+	'packages/cli/hook-helper/cupboard-hook-relay.c';
+export const hookHelperBinaryName = 'cupboard-hook-relay';
+
+export type CommandRunner = (
+	command: string,
+	arguments_: readonly string[]
+) => void;
+
+/**
+ * Compiles the post-build hook helper beside the CLI binary, so the tarball
+ * unpacks it exactly where the CLI's helper resolution looks. The four
+ * release platforms each compile natively; the Nix sandbox sets `CC` to the
+ * stdenv compiler, and the release runners fall back to the system `cc`.
+ */
+export function compileHookHelper(options: {
+	readonly binaryDirectory: string;
+	readonly runCommand: CommandRunner;
+	readonly compiler?: string;
+}): string {
+	const compiler = options.compiler ?? env.CC ?? 'cc';
+	const outputPath = path.join(options.binaryDirectory, hookHelperBinaryName);
+
+	options.runCommand(compiler, ['-O2', '-o', outputPath, hookHelperSourcePath]);
+
+	return outputPath;
+}
+
+/**
+ * The `tar` arguments for the release asset: the CLI binary and its hook
+ * helper side by side at the archive root.
+ */
+export function releaseArchiveArguments(
+	assetPath: string,
+	binaryDirectory: string
+): string[] {
+	return [
+		'-czf',
+		assetPath,
+		'-C',
+		binaryDirectory,
+		'cupboard',
+		hookHelperBinaryName
+	];
+}
 
 class UnsupportedPlatformError extends CodedError {
 	constructor(
@@ -106,7 +153,8 @@ async function main(): Promise<void> {
 	await writeFile(embeddedPayloadPath, JSON.stringify(payload));
 
 	await buildAndSmokeSea();
-	run('tar', ['-czf', assetPath, '-C', binaryDirectory, 'cupboard']);
+	compileHookHelper({ binaryDirectory, runCommand: run });
+	run('tar', releaseArchiveArguments(assetPath, binaryDirectory));
 
 	if (process.env.GITHUB_OUTPUT !== undefined) {
 		await writeFile(
@@ -309,14 +357,19 @@ function normaliseReleaseVersion(version: string): string {
 	return trimmed.startsWith('v') ? trimmed : `v${trimmed}`;
 }
 
-try {
-	await main();
-} catch (error: unknown) {
-	if (error instanceof CodedError) {
-		console.error(error.message);
-		process.exitCode = error.exitCode;
-	} else {
-		console.error(error);
-		process.exitCode = genericExitCode;
+if (
+	process.argv[1] !== undefined &&
+	import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+	try {
+		await main();
+	} catch (error: unknown) {
+		if (error instanceof CodedError) {
+			console.error(error.message);
+			process.exitCode = error.exitCode;
+		} else {
+			console.error(error);
+			process.exitCode = genericExitCode;
+		}
 	}
 }
