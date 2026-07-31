@@ -44,6 +44,7 @@ interface RecordingStore extends NixStoreClient {
 	readonly queried: string[];
 	readonly validBatches: string[][];
 	readonly substitutableBatches: string[][];
+	readonly drvBatches: string[][];
 	readonly closures: string[][];
 }
 
@@ -51,12 +52,14 @@ function recordingStore(): RecordingStore {
 	const queried: string[] = [];
 	const validBatches: string[][] = [];
 	const substitutableBatches: string[][] = [];
+	const drvBatches: string[][] = [];
 	const closures: string[][] = [];
 
 	return {
 		queried,
 		validBatches,
 		substitutableBatches,
+		drvBatches,
 		closures,
 		queryPathInfo: (storePath) => {
 			queried.push(storePath);
@@ -70,6 +73,11 @@ function recordingStore(): RecordingStore {
 		},
 		querySubstitutablePaths: (storePaths) => {
 			substitutableBatches.push([...storePaths]);
+
+			return Promise.resolve([]);
+		},
+		queryDerivationOutputPaths: (drvPaths) => {
+			drvBatches.push([...drvPaths]);
 
 			return Promise.resolve([]);
 		},
@@ -198,5 +206,16 @@ describe('Nix queries', () => {
 		]);
 
 		expect(store.substitutableBatches).toStrictEqual([[appPath, libraryPath]]);
+	});
+
+	it('canonicalises every derivation path in an output query', async () => {
+		const store = recordingStore();
+
+		await nixOver(store).queryDerivationOutputPaths([
+			`${appPath}/bin`,
+			libraryPath
+		]);
+
+		expect(store.drvBatches).toStrictEqual([[appPath, libraryPath]]);
 	});
 });

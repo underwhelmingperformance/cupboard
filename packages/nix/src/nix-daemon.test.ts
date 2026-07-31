@@ -270,6 +270,114 @@ describe('NixDaemonStoreClient', () => {
 		expect(transport?.closed).toBe(true);
 	});
 
+	it('reads realised derivation outputs through pooled daemon connections', async () => {
+		const appDrvPath = storePathSchema.parse(
+			'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv'
+		);
+		const libraryDrvPath = storePathSchema.parse(
+			'/nix/store/5123456789abcdfghijklmnpqrsvwxyz-lib.drv'
+		);
+		const transports: FakeDaemonTransport[] = [];
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				const transport = new FakeDaemonTransport(
+					{},
+					{
+						derivationOutputs: {
+							[appDrvPath]: { out: appPath, dev: undefined },
+							[libraryDrvPath]: { out: libraryPath }
+						}
+					}
+				);
+				transports.push(transport);
+
+				return Promise.resolve(transport);
+			}
+		});
+
+		await expect(
+			client.queryDerivationOutputPaths([
+				libraryDrvPath,
+				appDrvPath,
+				libraryDrvPath
+			])
+		).resolves.toStrictEqual([appPath, libraryPath]);
+		expect(transports.map((transport) => transport.closed)).toStrictEqual([
+			true,
+			true
+		]);
+	});
+
+	it('bounds concurrent derivation output queries to the daemon pool size', async () => {
+		const drvPaths = Array.from({ length: 17 }, (_, index) =>
+			storePathSchema.parse(
+				`/nix/store/${String(index).padStart(32, '0')}-output-${String(index)}.drv`
+			)
+		);
+		const firstFrontierStarted = Promise.withResolvers<undefined>();
+		const queuedQueryStarted = Promise.withResolvers<undefined>();
+		const releases = new Map<string, () => void>();
+		const started = new Set<string>();
+		let connections = 0;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				connections += 1;
+
+				return Promise.resolve(
+					new FakeDaemonTransport(
+						{},
+						{
+							derivationOutputs: {},
+							beforeOperation(request) {
+								const drvPath = readRequestStorePath(request);
+								started.add(drvPath);
+
+								if (started.size === 16) {
+									firstFrontierStarted.resolve(undefined);
+								} else if (started.size === 17) {
+									queuedQueryStarted.resolve(undefined);
+								}
+
+								return new Promise<undefined>((resolve) => {
+									releases.set(drvPath, () => {
+										resolve(undefined);
+									});
+								});
+							}
+						}
+					)
+				);
+			}
+		});
+
+		const result = client.queryDerivationOutputPaths(drvPaths);
+		await firstFrontierStarted.promise;
+
+		expect({ connections, started: started.size }).toStrictEqual({
+			connections: 16,
+			started: 16
+		});
+
+		const firstDrvPath = drvPaths[0];
+
+		if (firstDrvPath === undefined) {
+			throw new Error('Expected at least one derivation path');
+		}
+
+		releases.get(firstDrvPath)?.();
+		await queuedQueryStarted.promise;
+
+		for (const release of releases.values()) {
+			release();
+		}
+
+		await expect(result).resolves.toStrictEqual([]);
+		expect({ connections, started: started.size }).toStrictEqual({
+			connections: 16,
+			started: 17
+		});
+	});
+
 	it('resolves closure by walking daemon path references', async () => {
 		const client = new NixDaemonStoreClient({
 			connect: () =>
@@ -495,27 +603,29 @@ class FakeDaemonTransport implements NixDaemonTransport {
 			readonly expectedSetOptions?: FakeSetOptionsFields;
 			readonly expectedOverrides?: Readonly<Record<string, string>>;
 			readonly substitutable?: FakeSubstitutable;
+			readonly derivationOutputs?: FakeDerivationOutputs;
+			readonly beforeOperation?: (request: Buffer) => Promise<void>;
 		} = {}
 	) {}
 
-	write(bytes: Uint8Array): Promise<void> {
+	async write(bytes: Uint8Array): Promise<void> {
 		this.writeCount += 1;
 
 		if (this.writeCount === 1) {
 			this.pendingBytes.push(
 				handshakeResponse(this.options.protocolMinor ?? 38)
 			);
-			return Promise.resolve();
+			return;
 		}
 
 		if (this.writeCount === 2) {
 			this.pendingBytes.push(stringSetResponse([]));
-			return Promise.resolve();
+			return;
 		}
 
 		if (this.writeCount === 3) {
 			this.pendingBytes.push(postHandshakeResponse(this.options.trust ?? 0));
-			return Promise.resolve();
+			return;
 		}
 
 		if (this.writeCount === 4) {
@@ -537,14 +647,14 @@ class FakeDaemonTransport implements NixDaemonTransport {
 			}
 
 			this.pendingBytes.push(stderrLastResponse());
-			return Promise.resolve();
+			return;
 		}
 
+		const request = Buffer.from(bytes);
+		await this.options.beforeOperation?.(request);
 		this.pendingBytes.push(
-			daemonOperationResponse(Buffer.from(bytes), this.paths, this.options)
+			daemonOperationResponse(request, this.paths, this.options)
 		);
-
-		return Promise.resolve();
 	}
 
 	read(byteLength: number): Promise<Uint8Array> {
@@ -595,10 +705,17 @@ interface FakeSubstitutable {
 	readonly paths: readonly string[];
 }
 
+type FakeDerivationOutputs = Readonly<
+	Record<string, Readonly<Record<string, string | undefined>>>
+>;
+
 function daemonOperationResponse(
 	request: Buffer,
 	paths: Readonly<Record<string, FakePathInfo>>,
-	options: { readonly substitutable?: FakeSubstitutable }
+	options: {
+		readonly substitutable?: FakeSubstitutable;
+		readonly derivationOutputs?: FakeDerivationOutputs;
+	}
 ): Buffer {
 	const operation = Number(request.readBigUInt64LE(0));
 
@@ -614,7 +731,34 @@ function daemonOperationResponse(
 		return querySubstitutablePathsResponse(request, options.substitutable);
 	}
 
+	if (operation === 41) {
+		return queryDerivationOutputMapResponse(
+			request,
+			options.derivationOutputs ?? {}
+		);
+	}
+
 	throw new Error(`Unexpected fake daemon operation: ${String(operation)}`);
+}
+
+function queryDerivationOutputMapResponse(
+	request: Buffer,
+	outputs: FakeDerivationOutputs
+): Buffer {
+	const drvPath = readRequestStorePath(request);
+	const entries = Object.entries(outputs[drvPath] ?? {}).toSorted(
+		([left], [right]) => left.localeCompare(right)
+	);
+	const response = new ProtocolWriter();
+	response.writeInteger(0x61_6c_74_73);
+	response.writeInteger(entries.length);
+
+	for (const [output, storePath] of entries) {
+		response.writeString(output);
+		response.writeString(storePath ?? '');
+	}
+
+	return response.bytes();
 }
 
 function queryValidPathsResponse(

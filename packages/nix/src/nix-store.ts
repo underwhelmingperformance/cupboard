@@ -42,6 +42,14 @@ export interface NixStoreClient {
 	querySubstitutablePaths(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]>;
+	/**
+	 * The registered output paths of the given derivations, deduplicated and
+	 * sorted by store path. An output that was never built has no registered
+	 * path and is left out.
+	 */
+	queryDerivationOutputPaths(
+		drvPaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]>;
 }
 
 /**
