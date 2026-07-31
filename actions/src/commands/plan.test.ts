@@ -134,7 +134,7 @@ describe('planAction', () => {
 				'seed-matrix={"include":[]}\n' +
 				'target-matrix={"include":[{"attr":".#packages.x86_64-linux.app","system":"x86_64-linux","os":"ubuntu-latest","remote":true,"bestEffort":false,"rootSuffix":"x86_64-linux/app","outputs":["out"],"root":"github:owner/repo/main/x86_64-linux/app","runsOn":"ubuntu-latest"}]}\n' +
 				'fallback-matrix={"include":[]}\n' +
-				'cohort-matrix={"include":[{"key":"cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe","attrs":[".#packages.x86_64-linux.app"],"installables":[".#packages.x86_64-linux.app^out"],"system":"x86_64-linux","os":"ubuntu-latest","remote":true,"runsOn":"ubuntu-latest","roots":["github:owner/repo/main/x86_64-linux/app"]}]}\n' +
+				'cohort-matrix={"include":[{"key":"cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe","attrs":[".#packages.x86_64-linux.app"],"installables":[".#packages.x86_64-linux.app^out"],"queryInstallables":[null],"expectedPaths":[null],"system":"x86_64-linux","os":"ubuntu-latest","remote":true,"runsOn":"ubuntu-latest","roots":["github:owner/repo/main/x86_64-linux/app"]}]}\n' +
 				'cohort-count=1\n' +
 				'retained-count=0\n' +
 				'seed-count=0\n' +
@@ -1854,5 +1854,53 @@ describe('cohort-matrix output', () => {
 		expect(outputs).toContain('target-matrix={"include":[]}\n');
 		expect(outputs).toContain('cohort-matrix={"include":[]}\n');
 		expect(outputs).toContain('cohort-count=0\n');
+	});
+
+	it('carries the evaluated expected path and query installable for a surviving cohort', async () => {
+		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+		const appStorePath = `/nix/store/${'1'.repeat(32)}-app`;
+		const appNode = {
+			env: { out: appStorePath },
+			inputs: { drvs: {} },
+			outputs: { out: { path: `${'1'.repeat(32)}-app` } }
+		};
+		const evaluator: NixEvaluator = () =>
+			Promise.resolve({
+				stdout: JSON.stringify({
+					derivations: { [targetRootDrvPath]: appNode }
+				})
+			});
+		await planAction(
+			{ ...baseOptions, optimise: 'true' },
+			{
+				GITHUB_RUN_ID: '12345',
+				RUNNER_TEMP: planDirectory,
+				GITHUB_OUTPUT: path.join(planDirectory, 'output')
+			},
+			undefined,
+			{
+				evaluator,
+				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				fetcher: alwaysAvailableFetcher,
+				// No reconciled targets and no retained root: the pre-filter's
+				// coverage check comes back not-covered and the cohort is not
+				// pruned, letting this test observe the surviving entry's
+				// evaluated fields.
+				runner: preFilterRunner({})
+			}
+		);
+
+		const outputs = await readFile(path.join(planDirectory, 'output'), 'utf8');
+
+		expect(outputs).toContain(
+			'cohort-matrix={"include":[{"key":"cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe",' +
+				'"attrs":[".#packages.x86_64-linux.app"],' +
+				'"installables":[".#packages.x86_64-linux.app^out"],' +
+				`"queryInstallables":["${targetRootDrvPath}^out"],` +
+				`"expectedPaths":["${appStorePath}"],` +
+				'"system":"x86_64-linux","os":"ubuntu-latest","remote":true,"runsOn":"ubuntu-latest",' +
+				'"roots":["github:owner/repo/main/x86_64-linux/app"]}]}\n'
+		);
+		expect(outputs).toContain('cohort-count=1\n');
 	});
 });

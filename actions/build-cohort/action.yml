@@ -1,0 +1,138 @@
+name: Build a publish cohort
+description:
+  Check a publish cohort's availability partition and capacity against this
+  runner's store, build its missing targets with a plain `nix build
+  --keep-going`, and report the target, intermediate, reference and
+  left-upstream paths for the subsequent push.
+inputs:
+  cohort-json:
+    description: This job's entry from the plan cohort-matrix.
+    required: true
+  url:
+    description: cupboard Worker URL.
+    required: true
+  cupboard-path:
+    description: Path to the cupboard binary installed by actions/setup.
+    required: true
+  cache:
+    description: Named cache to inspect and publish to.
+    required: false
+  reuse-view:
+    description: Named reuse view to probe for substitutable paths.
+    required: false
+  ttl:
+    description: TTL applied when retaining an already cached target.
+    required: false
+  audience:
+    description: GitHub OIDC audience. Defaults to url.
+    required: false
+  read-user:
+    description: Username for private cache reads.
+    required: false
+  read-password:
+    description: Password for private cache reads.
+    required: false
+  max-jobs:
+    description: Maximum local build jobs. Empty uses the Nix default.
+    required: false
+  target-paths-file:
+    description: Where to write the cohort's target output paths.
+    required: false
+  intermediate-paths-file:
+    description: >-
+      Where to write built outputs that are not any target's own output.
+    required: false
+  reference-paths-file:
+    description: >-
+      Where to write paths the tenant already holds, publishable by reference.
+    required: false
+  left-upstream-file:
+    description: Where to record targets deliberately left upstream.
+    required: false
+  counts-file:
+    description: >-
+      Where to write the partition counts and capacity result for the receipt.
+    required: false
+outputs:
+  target-paths-file:
+    description: File containing the cohort's target output paths.
+    value: ${{ steps.build-cohort.outputs.target-paths-file }}
+  intermediate-paths-file:
+    description: File containing built outputs that are not target paths.
+    value: ${{ steps.build-cohort.outputs.intermediate-paths-file }}
+  reference-paths-file:
+    description: File containing paths publishable by reference.
+    value: ${{ steps.build-cohort.outputs.reference-paths-file }}
+  left-upstream-file:
+    description: File recording targets deliberately left upstream.
+    value: ${{ steps.build-cohort.outputs.left-upstream-file }}
+  counts-file:
+    description: File containing the partition counts and capacity result.
+    value: ${{ steps.build-cohort.outputs.counts-file }}
+runs:
+  using: composite
+  steps:
+    - name: Resolve the pinned toolchain
+      id: toolchain
+      shell: bash
+      run: |
+        manifest="$GITHUB_ACTION_PATH/../../package.json"
+        version="$(sed -n 's/.*"packageManager": *"pnpm@\([^+"]*\).*/\1/p' "$manifest")"
+        node_version="$(tr -d '\r\n' < "$GITHUB_ACTION_PATH/../../.node-version")"
+        test -n "$version" && test -n "$node_version"
+        echo "pnpm-version=$version" >> "$GITHUB_OUTPUT"
+        echo "node-version=$node_version" >> "$GITHUB_OUTPUT"
+
+    - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      with:
+        version: ${{ steps.toolchain.outputs.pnpm-version }}
+        package_json_file: ${{ github.action_path }}/../../package.json
+
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: ${{ steps.toolchain.outputs.node-version }}
+
+    - name: Install action dependencies
+      shell: bash
+      working-directory: ${{ github.action_path }}/../..
+      run: pnpm install --filter @cupboard/action... --prod --frozen-lockfile
+
+    - name: Build cohort
+      id: build-cohort
+      shell: bash
+      env:
+        COHORT_JSON: ${{ inputs.cohort-json }}
+        URL: ${{ inputs.url }}
+        CUPBOARD_PATH: ${{ inputs.cupboard-path }}
+        CACHE: ${{ inputs.cache }}
+        REUSE_VIEW: ${{ inputs.reuse-view }}
+        TTL: ${{ inputs.ttl }}
+        AUDIENCE: ${{ inputs.audience }}
+        READ_USER: ${{ inputs.read-user }}
+        READ_PASSWORD: ${{ inputs.read-password }}
+        MAX_JOBS: ${{ inputs.max-jobs }}
+        TARGET_PATHS_FILE: ${{ inputs.target-paths-file }}
+        INTERMEDIATE_PATHS_FILE: ${{ inputs.intermediate-paths-file }}
+        REFERENCE_PATHS_FILE: ${{ inputs.reference-paths-file }}
+        LEFT_UPSTREAM_FILE: ${{ inputs.left-upstream-file }}
+        COUNTS_FILE: ${{ inputs.counts-file }}
+      run: |
+        args=(build-cohort
+          --cohort-json "$COHORT_JSON"
+          --url "$URL"
+          --cupboard-path "$CUPBOARD_PATH"
+          --cache "$CACHE"
+          --reuse-view "$REUSE_VIEW"
+          --ttl "$TTL"
+          --audience "$AUDIENCE"
+          --read-user "$READ_USER"
+          --read-password "$READ_PASSWORD"
+          --max-jobs "$MAX_JOBS"
+          --target-paths-file "$TARGET_PATHS_FILE"
+          --intermediate-paths-file "$INTERMEDIATE_PATHS_FILE"
+          --reference-paths-file "$REFERENCE_PATHS_FILE"
+          --left-upstream-file "$LEFT_UPSTREAM_FILE"
+          --counts-file "$COUNTS_FILE")
+        node --experimental-transform-types \
+          --disable-warning=ExperimentalWarning \
+          "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"

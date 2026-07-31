@@ -12,6 +12,7 @@ import { Command, CommanderError } from 'commander';
 
 import { registerAttestCommand } from './commands/attest.ts';
 import { registerBuildCommand } from './commands/build.ts';
+import { registerBuildCohortCommand } from './commands/build-cohort.ts';
 import { registerPlanCommand } from './commands/plan.ts';
 import { registerPushCommand } from './commands/push.ts';
 import { registerSetupCommand } from './commands/setup.ts';
@@ -44,6 +45,7 @@ export function buildProgram(environment: Environment = env): Command {
 	registerPushCommand(program, environment);
 	registerAttestCommand(program, environment);
 	registerBuildCommand(program, environment);
+	registerBuildCohortCommand(program, environment);
 	registerPlanCommand(program, environment);
 
 	return program;

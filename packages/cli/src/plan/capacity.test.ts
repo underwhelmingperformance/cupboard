@@ -94,7 +94,7 @@ describe('checkStoreCapacity', () => {
 			available,
 			headroom,
 			detected: detected({ remoteStoreConfigured: true }),
-			exitCode: 75
+			exitCode: 69
 		});
 	});
 

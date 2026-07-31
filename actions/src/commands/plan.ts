@@ -427,6 +427,7 @@ export async function planAction(
 		inputs,
 		plan,
 		cohortDecisions,
+		evaluations,
 		dependencies.createArtifactName?.() ??
 			`cupboard-publish-plan-${randomUUID()}`
 	);
@@ -605,6 +606,7 @@ async function writePlan(
 	inputs: PlanInputs,
 	plan: PublishPlan,
 	cohortDecisions: readonly CohortPreFilterDecision[],
+	evaluations: readonly TargetEvaluation[],
 	artifactName: string
 ): Promise<void> {
 	const document = { ...plan, cohortPreFilter: cohortDecisions };
@@ -631,7 +633,12 @@ async function writePlan(
 		'fallback-matrix',
 		matrix('fallback', fallbackMatrix(inputs, plan))
 	);
-	const cohortEntries = cohortMatrix(inputs, plan.cohorts, cohortDecisions);
+	const cohortEntries = cohortMatrix(
+		inputs,
+		plan.cohorts,
+		cohortDecisions,
+		evaluations
+	);
 	await setOutput(
 		environment,
 		'cohort-matrix',
@@ -1348,16 +1355,28 @@ function targetMatrix(
 // A pruned cohort needs no job at all, so its entry is dropped rather than
 // carried through with a flag a workflow would have to remember to check;
 // the surviving entries carry every member's attr, installable and root, so
-// a cohort job builds and publishes without asking the plan anything further.
+// a cohort job builds and publishes without asking the plan anything
+// further. `installables` names each member the way `nix build` resolves it
+// (a flake reference); `queryInstallables` names the same member the way the
+// Nix daemon's store protocol does (a derivation store path), which is what
+// the cohort job's own availability partition queries against, so both
+// travel side by side rather than one being derived from the other at build
+// time. Neither is known until the target evaluates, so an unevaluated or
+// still-floating member reports `undefined` in both and its build-time
+// availability check treats it as always needing to build, per the design.
 function cohortMatrix(
 	inputs: PlanInputs,
 	cohorts: readonly Cohort[],
-	decisions: readonly CohortPreFilterDecision[]
+	decisions: readonly CohortPreFilterDecision[],
+	evaluations: readonly TargetEvaluation[]
 ): readonly object[] {
 	const prunedKeys = new Set(
 		decisions
 			.filter((decision) => decision.pruned)
 			.map((decision) => decision.key)
+	);
+	const evaluationByAttribute = new Map(
+		evaluations.map((evaluation) => [evaluation.target.attr, evaluation])
 	);
 
 	return cohorts
@@ -1366,6 +1385,12 @@ function cohortMatrix(
 			key: cohort.key,
 			attrs: cohort.targets.map((target) => target.attr),
 			installables: cohort.installables,
+			queryInstallables: cohort.targets.map((target) =>
+				queryInstallableFor(target, evaluationByAttribute.get(target.attr))
+			),
+			expectedPaths: cohort.targets.map((target) =>
+				expectedPathFor(target, evaluationByAttribute.get(target.attr))
+			),
 			system: cohort.system,
 			os: cohort.os,
 			remote: cohort.remote,
@@ -1374,6 +1399,43 @@ function cohortMatrix(
 				joinRoot(inputs.rootPrefix, target.rootSuffix)
 			)
 		}));
+}
+
+// The derived-path form of a target member, the way the Nix daemon's store
+// protocol names a realisation target: the evaluated root derivation and the
+// outputs the manifest selected, exactly as `Cohort.installables` builds the
+// flake-reference form from the same target's attr and outputs. A target
+// that did not evaluate has no derivation path to build this from.
+function queryInstallableFor(
+	target: PublishTarget,
+	evaluation: TargetEvaluation | undefined
+): string | undefined {
+	if (evaluation === undefined) {
+		return undefined;
+	}
+
+	return `${evaluation.rootDrvPath}^${target.outputs.join(',')}`;
+}
+
+// The single output path a build-time availability check can classify a
+// target member by. A target with more than one selected output has no one
+// path that represents it, and a target whose evaluation left any selected
+// output unresolved (a content-addressed or otherwise floating output) has
+// none at all; both report `undefined` and the target always joins the
+// build set, exactly as a manifest target with no predictable output does
+// elsewhere in the plan.
+function expectedPathFor(
+	target: PublishTarget,
+	evaluation: TargetEvaluation | undefined
+): string | undefined {
+	if (
+		target.outputs.length !== 1 ||
+		evaluation?.targetPaths.length !== target.outputs.length
+	) {
+		return undefined;
+	}
+
+	return evaluation.targetPaths[0];
 }
 
 // The exact retention values a seed or fallback group's push publishes with,

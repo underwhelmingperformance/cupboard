@@ -599,6 +599,62 @@ export class PushSummaryMissingError extends CodedError {
 	}
 }
 
+export class CohortPlanCommandError extends CodedError {
+	readonly wasReported: boolean;
+
+	constructor(
+		public readonly cohortKey: string,
+		options: { readonly cause: unknown; readonly wasReported?: boolean }
+	) {
+		super(`Could not plan cohort ${cohortKey}`, { cause: options.cause });
+		this.name = 'CohortPlanCommandError';
+		this.wasReported = options.wasReported ?? false;
+	}
+}
+
+export class CohortPlanResultMissingError extends CodedError {
+	constructor(public readonly cohortKey: string) {
+		super(`Cupboard recorded no plan-cohort result for ${cohortKey}`);
+		this.name = 'CohortPlanResultMissingError';
+	}
+}
+
+export class CohortPlanResultInvalidError extends CodedError {
+	constructor(
+		public readonly cohortKey: string,
+		options: { readonly cause: unknown }
+	) {
+		super(`Cupboard recorded an invalid plan-cohort result for ${cohortKey}`, {
+			cause: options.cause
+		});
+		this.name = 'CohortPlanResultInvalidError';
+	}
+}
+
+/**
+ * The cohort's own availability partition, computed on this runner's store,
+ * refused to build: either the unknown-availability count settled over the
+ * configured ceiling, or the measured substitutable bytes would not fit this
+ * store. The refusing `cupboard plan cohort` invocation already exited with
+ * the distinguishing sysexit (a routine transient for a ceiling breach, an
+ * unavailable resource for a capacity refusal), which this error adopts as
+ * its own so the job fails with the same numeric meaning.
+ */
+export class CohortPlanRefusedError extends CodedError {
+	constructor(
+		public readonly cohortKey: string,
+		public readonly status: number | null,
+		message: string
+	) {
+		super(message);
+		this.name = 'CohortPlanRefusedError';
+	}
+
+	override get exitCode(): number {
+		return this.status ?? genericExitCode;
+	}
+}
+
 export function wasAlreadyReported(error: unknown): boolean {
 	return (
 		typeof error === 'object' &&
