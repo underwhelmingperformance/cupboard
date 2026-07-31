@@ -71,6 +71,11 @@ outputs:
   fallback-matrix:
     description: Dynamic matrix for targets sharing unknown output paths.
     value: ${{ steps.plan.outputs.fallback-matrix }}
+  cohort-matrix:
+    description:
+      Dynamic matrix for surviving cohorts, pruned by the advisory destination
+      pre-filter.
+    value: ${{ steps.plan.outputs.cohort-matrix }}
   retained-count:
     description: Number of targets retained without a build.
     value: ${{ steps.plan.outputs.retained-count }}
@@ -83,6 +88,9 @@ outputs:
   fallback-count:
     description: Number of unknown-output fallback groups to build.
     value: ${{ steps.plan.outputs.fallback-count }}
+  cohort-count:
+    description: Number of cohort jobs that remain after pruning.
+    value: ${{ steps.plan.outputs.cohort-count }}
 runs:
   using: composite
   steps:

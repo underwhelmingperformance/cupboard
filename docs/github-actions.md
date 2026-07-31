@@ -279,7 +279,7 @@ cupboard oidc-trust add-github-branch "$tenant" \
 
 The empty grace prefix covers the default cache and every named cache, including
 the per-PR caches. The grace period must be long enough for the workflow's plan
-and target jobs to finish.
+and cohort jobs to finish.
 
 The view's priority of 50 sits above the destination cache's priority, which
 defaults to 40 on the server; Nix tries substituters lowest-priority-first, so
@@ -631,17 +631,43 @@ passed through separately: `actions/plan` accepts them as
 header on every narinfo probe.
 
 The plan first asks cupboard to retain each target whose output paths are
-already servable. Those targets get no runner job. Every remaining target gets
-its own job in the target matrix, which builds that target with `nix build`,
-attests the result, and publishes it with `cupboard push`, establishing its own
-retention root. A target that shares a dependency with another target simply
-builds it again; Nix substitutes it from the destination cache when a prior
-job's push already made it available there.
+already servable, then prunes what it can through an advisory pre-filter against
+the destination: a cohort whose targets are all already covered spawns no job at
+all. Every surviving cohort gets its own job in the cohort matrix. A cohort is
+one target by default; the manifest opts a group of targets into one cohort with
+a shared `cohort` label, so a multi-target cohort shares one job and one
+`nix build` invocation rather than fanning out further.
+
+Each cohort job computes its own availability partition and capacity check
+against its own store, independently of the plan's advisory pre-filter: which
+targets are already served and only need attaching, which the tenant already
+holds elsewhere and can be published by reference through the reuse view, which
+an upstream substituter already serves and are deliberately left there, and
+which must actually build. Only the last group reaches `nix build --keep-going`,
+and the job keeps its out-links until the push completes, so nothing collects
+the built closure out from under it in the meantime. The push that follows
+publishes the targets (built or attached) and any further built outputs that are
+not a target's own output, references the publish-by-reference paths from the
+reuse view, and establishes each target's own retention root; the left-upstream
+paths are not pushed at all; they stay served from the reuse view or the
+upstream substituter, and the cohort's own counts and left-upstream files record
+that choice. A target that shares a dependency with another cohort simply builds
+it again; Nix substitutes it from the destination cache once a prior cohort's
+push has made it available there, or from the per-run root described below
+sooner than that.
+
+Every cohort job's push also joins one retention root shared for the whole run,
+with a TTL set by `run-root-ttl` (default `24h`), so a cohort's shared output
+stays reachable for the rest of the run even before its own target root is
+established: a later cohort can substitute it there instead of rebuilding it.
+Cohort jobs do not yet attest their builds; `build-cohort` has no
+build-provenance receipt to give `actions/attest` the way `build-paths` does, so
+a cohort's push carries no attestation bundle until that lands.
 
 `intermediate-retention` controls what the plan does with a shared derivation it
 finds already resident in the destination cache while working out this
 partition. The opt-in `grace` refreshes that derivation's retention grace
-deadline, so it survives long enough for a later target job to substitute it
+deadline, so it survives long enough for a later cohort job to substitute it
 instead of rebuilding it; this requires a matching policy on the destination
 cache first (`cupboard policy add-grace`), and the plan fails closed if the
 policy's grace period is not positive. The default, `root`, leaves the deadline
@@ -650,7 +676,7 @@ alone.
 The plan job verifies up front that a grace policy covers the destination cache
 under `grace`, so a missing policy fails at plan time, whether or not this run's
 manifest produces a shared intermediate. One degradation stays silent: a grace
-period shorter than the span from plan to the last target job does not fail
+period shorter than the span from plan to the last cohort job does not fail
 anything, the collected intermediate is simply rebuilt, so the only symptom of
 too short a grace is the reuse quietly not happening.
 
@@ -666,8 +692,8 @@ GitHub-hosted runners, since the reclamation is destructive and permanent on a
 self-hosted machine.
 
 The workflow accepts `push: false` for a build-only validation run. In that mode
-it does not inspect the cache or derivation graph, and builds every target
-directly without attesting or publishing it.
+it does not inspect the cache or derivation graph, and every cohort builds its
+targets directly without publishing them.
 
 ## Common tasks
 
