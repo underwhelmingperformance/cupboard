@@ -14,6 +14,7 @@ import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+	ComponentRootTargetLimitError,
 	ConfirmCommandError,
 	ConfirmResultInvalidError,
 	ConfirmResultMissingError,
@@ -204,6 +205,57 @@ describe('resolvePlanInputs', () => {
 				rootSetMaxTargets
 			)
 		);
+	});
+
+	it('rejects an aggregate declaring more components than a retention root accepts', () => {
+		const components = Array.from(
+			{ length: rootSetMaxTargets + 1 },
+			(_, index) => ({ attr: `.#component-${String(index)}` })
+		);
+		let failure: unknown;
+
+		try {
+			resolvePlanInputs(
+				{
+					...baseOptions,
+					targets: JSON.stringify([{ ...target, components }])
+				},
+				environment
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expect(failure).toStrictEqual(
+			new ComponentRootTargetLimitError(
+				target.attr,
+				rootSetMaxTargets + 1,
+				rootSetMaxTargets
+			)
+		);
+	});
+
+	it('expands a component-publication target before validating and planning', () => {
+		const inputs = resolvePlanInputs(
+			{
+				...baseOptions,
+				targets: JSON.stringify([
+					{
+						...target,
+						components: [{ attr: '.#component-a' }, { attr: '.#component-b' }]
+					}
+				])
+			},
+			environment
+		);
+
+		expect(inputs.targets.map((entry) => entry.attr)).toStrictEqual([
+			'.#component-a',
+			'.#component-b'
+		]);
+		expect(
+			inputs.targets.every((entry) => entry.rootSuffix === target.rootSuffix)
+		).toBe(true);
 	});
 
 	it('preserves significant whitespace in both read credentials', () => {
@@ -1798,6 +1850,64 @@ describe('cohortPreFilter', () => {
 		);
 
 		expect(decisions).toStrictEqual([{ key: 'cohort-broken', pruned: false }]);
+	});
+
+	// Component publication's target root is shared: every component of one
+	// aggregate declares the same rootSuffix, so the pre-filter reconciles one
+	// root's list against several targets, each covered by its own path
+	// within it, exactly the mechanism any other root already uses.
+	it('prunes a component-publication cohort only once every component is covered by the shared root', async () => {
+		const componentA: TargetEvaluation = {
+			target: {
+				attr: '.#component-a',
+				rootDrvPath: targetRootDrvPath,
+				system: 'x86_64-linux',
+				os: 'ubuntu-latest',
+				remote: true,
+				bestEffort: true,
+				rootSuffix: 'system',
+				outputs: ['out']
+			},
+			rootDrvPath: '/nix/store/component-a.drv',
+			nodes: new Map(),
+			targetPaths: [outPath]
+		};
+		const componentB: TargetEvaluation = {
+			target: { ...componentA.target, attr: '.#component-b' },
+			rootDrvPath: '/nix/store/component-b.drv',
+			nodes: new Map(),
+			targetPaths: [developmentPath]
+		};
+		const systemRoot = 'github:owner/repo/main/system';
+		const cohort = singleCohort([componentA, componentB]);
+
+		const partiallyCovered = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts: [cohort] },
+			[componentA, componentB],
+			undefined,
+			preFilterRunner({
+				targetsByRoot: new Map([[systemRoot, [outPath]]]),
+				ensureRetainedRoots: new Set([systemRoot])
+			})
+		);
+
+		expect(partiallyCovered).toStrictEqual([
+			{ key: 'cohort-first', pruned: false }
+		]);
+
+		const fullyCovered = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts: [cohort] },
+			[componentA, componentB],
+			undefined,
+			preFilterRunner({
+				targetsByRoot: new Map([[systemRoot, [outPath, developmentPath]]]),
+				ensureRetainedRoots: new Set([systemRoot])
+			})
+		);
+
+		expect(fullyCovered).toStrictEqual([{ key: 'cohort-first', pruned: true }]);
 	});
 });
 

@@ -504,6 +504,31 @@ export class PublishRootTargetLimitError extends UsageError {
 	}
 }
 
+/**
+ * A component-publication target declares more components than a retention
+ * root accepts in one write (`rootSetMaxTargets`), which binds `root:set` and
+ * `roots.ensure` identically. A larger set has no remedy today: paging that
+ * write loses the all-or-nothing `retained` property retention depends on, so
+ * it needs a retention shape built on attach with a generation marker, which
+ * cupboard does not yet have, and the target is refused rather than paged or
+ * truncated.
+ */
+export class ComponentRootTargetLimitError extends UsageError {
+	constructor(
+		public readonly attribute: string,
+		public readonly count: number,
+		public readonly limit: number
+	) {
+		super(
+			`target ${attribute} declares ${String(count)} components, but a ` +
+				`retention root accepts at most ${String(limit)} targets in one ` +
+				`write; a larger component set needs a retention shape built on ` +
+				`attach with a generation marker, which cupboard does not yet support`
+		);
+		this.name = 'ComponentRootTargetLimitError';
+	}
+}
+
 export class ProbeTimeoutError extends CodedError {
 	constructor(public readonly url: string) {
 		super(

@@ -5253,11 +5253,18 @@ is the component list, and a system closure exceeds the `rootSetMaxTargets`
 input embeds the same root set body, and paging suits neither write: a paged
 ensure loses exactly the properties it exists for, all-or-nothing `retained` and
 retention refreshed in the same request, so the mode needs its own retention
-shape rather than paged writes. The central pre-filter has no aggregate output
-path to key on and prunes on the component roots; and there is no provenance for
-the aggregate the machine activates, because it was never built here. It is a
-mode, not the default, and it is what makes a local-only runner with a large
-system closure a supported configuration rather than a refusal.
+shape rather than paged writes. The manifest expresses the mode as a
+`components` list on the aggregate target; the planner expands it into one
+synthetic target per component, each carrying the aggregate's execution context
+and rootSuffix, so the aggregate itself is never evaluated, queried for
+realisation, or built. A manifest declaring more components than
+`rootSetMaxTargets` accepts is refused outright, naming the cap; the larger case
+is deferred to a retention shape built on attach with a generation marker. The
+central pre-filter has no aggregate output path to key on and prunes on the
+component roots; and there is no provenance for the aggregate the machine
+activates, because it was never built here. It is a mode, not the default, and
+it is what makes a local-only runner with a large system closure a supported
+configuration rather than a refusal.
 
 Garbage collection between cohorts is explicit. `build-push` may offer an opt-in
 “drain, then GC” setting, but must not delete arbitrary user store paths by

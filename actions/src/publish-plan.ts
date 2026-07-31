@@ -97,6 +97,32 @@ const derivationPathSchema = storePathSchema.refine(
 // limit.
 export const cohortLabelMaxLength = 100;
 
+const publishOutputsSchema = z
+	.array(
+		z.string().min(1).refine(isNixPositionalArgument, {
+			message:
+				'output must not start with a hyphen or contain control characters'
+		})
+	)
+	.min(1)
+	.default(['out'])
+	.transform((outputs) => [...new Set(outputs)]);
+
+/**
+ * One member of a component-publication target: its own attr and, once
+ * evaluated, its own derivation path. Everything else a component needs
+ * (execution context, retention root, best-effort and cohort membership) it
+ * takes from the aggregate target that declares it; see {@link expandComponents}.
+ */
+export const publishComponentSchema = z.strictObject({
+	attr: z.string().min(1).refine(isNixPositionalArgument, {
+		message: 'attr must not start with a hyphen or contain control characters'
+	}),
+	rootDrvPath: derivationPathSchema.optional(),
+	outputs: publishOutputsSchema
+});
+export type PublishComponent = z.output<typeof publishComponentSchema>;
+
 export const publishTargetSchema = z.strictObject({
 	attr: z.string().min(1).refine(isNixPositionalArgument, {
 		message: 'attr must not start with a hyphen or contain control characters'
@@ -114,16 +140,7 @@ export const publishTargetSchema = z.strictObject({
 		.refine((value) => canonicalRootSuffix(value) !== '', {
 			message: 'root suffix must contain more than slashes'
 		}),
-	outputs: z
-		.array(
-			z.string().min(1).refine(isNixPositionalArgument, {
-				message:
-					'output must not start with a hyphen or contain control characters'
-			})
-		)
-		.min(1)
-		.default(['out'])
-		.transform((outputs) => [...new Set(outputs)]),
+	outputs: publishOutputsSchema,
 	// Two targets naming the same cohort form one cohort (see cohortsFor); a
 	// target that omits it is its own cohort, keyed by its own identity.
 	cohort: z
@@ -133,7 +150,11 @@ export const publishTargetSchema = z.strictObject({
 		.refine(isValidRunnerLabel, {
 			message: `cohort must be a printable ASCII label of at most ${String(cohortLabelMaxLength)} characters without spaces`
 		})
-		.optional()
+		.optional(),
+	// Component publication: see expandComponents. Present, this target's own
+	// attr and rootDrvPath are never evaluated or built; its components are
+	// published in its place, under its own rootSuffix.
+	components: z.array(publishComponentSchema).min(1).optional()
 });
 
 // Retention treats every target sharing a root as retained once one of them
@@ -179,6 +200,43 @@ export const publishTargetsSchema = z
 	);
 
 export type PublishTarget = z.output<typeof publishTargetSchema>;
+
+/**
+ * Expands every component-publication target into one synthetic target per
+ * component, each carrying the aggregate's execution context (system, os,
+ * remote), best-effort flag and cohort label, and its own rootSuffix, so
+ * every component publishes under the one retention root the aggregate
+ * declares (the component-root shape: the root's target list is the
+ * component list, capped by the caller against `rootSetMaxTargets`). A
+ * target with no components passes through unchanged. The aggregate's own
+ * attr and rootDrvPath never appear in the result: an aggregate is never
+ * evaluated, queried for realisation, or built here, only substituted by the
+ * machine that activates it from the components this expansion publishes in
+ * its place.
+ */
+export function expandComponents(
+	targets: readonly PublishTarget[]
+): readonly PublishTarget[] {
+	return targets.flatMap((target) => {
+		if (target.components === undefined) {
+			return [target];
+		}
+
+		return target.components.map((component): PublishTarget => ({
+			attr: component.attr,
+			...(component.rootDrvPath !== undefined && {
+				rootDrvPath: component.rootDrvPath
+			}),
+			system: target.system,
+			os: target.os,
+			remote: target.remote,
+			bestEffort: target.bestEffort,
+			rootSuffix: target.rootSuffix,
+			outputs: component.outputs,
+			...(target.cohort !== undefined && { cohort: target.cohort })
+		}));
+	});
+}
 
 export interface DerivationOutput {
 	readonly name: string;
