@@ -352,6 +352,27 @@ describe('NixDaemonStoreClient', () => {
 		);
 	});
 
+	it.each([
+		{ name: 'a trusted client', wire: 1, expected: 'trusted' },
+		{ name: 'an untrusted client', wire: 2, expected: 'not-trusted' },
+		{ name: 'an unset trust flag', wire: 0, expected: 'unknown' }
+	])(
+		'surfaces the handshake trust flag for $name',
+		async ({ wire, expected }) => {
+			let transport: FakeDaemonTransport | undefined;
+			const client = new NixDaemonStoreClient({
+				connect: () => {
+					transport = new FakeDaemonTransport({}, { trust: wire });
+
+					return Promise.resolve(transport);
+				}
+			});
+
+			await expect(client.daemonTrust()).resolves.toBe(expected);
+			expect(transport?.closed).toBe(true);
+		}
+	);
+
 	it('rejects daemon protocol minors older than the SetOptions frame it sends', async () => {
 		let transport: FakeDaemonTransport | undefined;
 		const client = new NixDaemonStoreClient({
@@ -418,6 +439,7 @@ class FakeDaemonTransport implements NixDaemonTransport {
 		private readonly paths: Readonly<Record<string, FakePathInfo>>,
 		private readonly options: {
 			readonly protocolMinor?: number;
+			readonly trust?: number;
 			readonly expectedSetOptions?: FakeSetOptionsFields;
 			readonly expectedOverrides?: Readonly<Record<string, string>>;
 		} = {}
@@ -439,7 +461,7 @@ class FakeDaemonTransport implements NixDaemonTransport {
 		}
 
 		if (this.writeCount === 3) {
-			this.pendingBytes.push(postHandshakeResponse());
+			this.pendingBytes.push(postHandshakeResponse(this.options.trust ?? 0));
 			return Promise.resolve();
 		}
 
@@ -630,10 +652,10 @@ function stringSetResponse(values: readonly string[]): Buffer {
 	return response.bytes();
 }
 
-function postHandshakeResponse(): Buffer {
+function postHandshakeResponse(trust: number): Buffer {
 	const response = new ProtocolWriter();
 	response.writeString('2.33.3');
-	response.writeInteger(0);
+	response.writeInteger(trust);
 	response.writeInteger(0x61_6c_74_73);
 
 	return response.bytes();

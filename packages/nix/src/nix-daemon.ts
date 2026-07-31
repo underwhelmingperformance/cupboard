@@ -52,6 +52,12 @@ export interface NixDaemonTransport {
 	close(): Promise<void>;
 }
 
+/**
+ * Whether the daemon trusts this client, as the handshake reports it:
+ * `unknown` when the daemon leaves the flag unset.
+ */
+export type NixDaemonTrust = 'trusted' | 'not-trusted' | 'unknown';
+
 interface NixDaemonProtocolVersion {
 	readonly major: number;
 	readonly minor: number;
@@ -196,6 +202,21 @@ export class NixDaemonStoreClient implements NixStoreClient {
 			await connection.close();
 		}
 	}
+
+	/**
+	 * Whether the daemon trusts this client. The daemon silently drops an
+	 * untrusted client's setting overrides, so a caller that depends on a
+	 * forwarded setting checks this before relying on it.
+	 */
+	async daemonTrust(): Promise<NixDaemonTrust> {
+		const connection = await this.openConnection();
+
+		try {
+			return connection.trust;
+		} finally {
+			await connection.close();
+		}
+	}
 }
 
 // A lazily grown pool of daemon connections, each a serial request/response
@@ -332,6 +353,8 @@ class NixDaemonConnection {
 		minor: protocolMinor
 	};
 
+	private trustLevel: NixDaemonTrust = 'unknown';
+
 	constructor(
 		private readonly transport: NixDaemonTransport,
 		private readonly options: NixDaemonSetOptions,
@@ -394,7 +417,7 @@ class NixDaemonConnection {
 		}
 
 		if (this.version.minor >= 35) {
-			await this.readInteger();
+			this.trustLevel = trustFromWire(await this.readInteger());
 		}
 	}
 
@@ -595,6 +618,10 @@ class NixDaemonConnection {
 		}
 
 		return Number(value);
+	}
+
+	get trust(): NixDaemonTrust {
+		return this.trustLevel;
 	}
 
 	close(): Promise<void> {
@@ -828,6 +855,19 @@ function nixDaemonHash(base16Digest: string): NixSha256Hash {
 	}
 
 	return NixSha256Hash.fromDigest(Buffer.from(base16Digest, 'hex'));
+}
+
+// Worker-protocol trust values: 1 trusted, 2 not trusted, 0 unset.
+function trustFromWire(wire: number): NixDaemonTrust {
+	if (wire === 1) {
+		return 'trusted';
+	}
+
+	if (wire === 2) {
+		return 'not-trusted';
+	}
+
+	return 'unknown';
 }
 
 function versionToWire(version: NixDaemonProtocolVersion): number {
