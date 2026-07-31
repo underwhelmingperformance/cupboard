@@ -7,6 +7,8 @@ import {
 } from '@cupboard/nix-store/scalars';
 
 import {
+	type NixDerivedPathString,
+	type NixMissingPartition,
 	type NixStoreClient,
 	type NixValidPathInfo,
 	NotInNixStoreError
@@ -98,6 +100,17 @@ export class Nix {
 		return this.store.querySubstitutablePaths(
 			paths.map((path) => this.toStorePath(path))
 		);
+	}
+
+	/**
+	 * What realising the given targets would require. Targets pass through
+	 * unchanged: a derived path names a derivation and its outputs, not a
+	 * filesystem location, so there is nothing to canonicalise.
+	 */
+	async queryMissing(
+		targets: readonly NixDerivedPathString[]
+	): Promise<NixMissingPartition> {
+		return this.store.queryMissing(targets);
 	}
 
 	/** The registered output paths of the given derivations, sorted. */

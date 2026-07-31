@@ -6,6 +6,8 @@ import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 import {
 	defaultClosureConcurrency,
+	type NixDerivedPathString,
+	type NixMissingPartition,
 	type NixStoreClient,
 	NixStorePathNotFoundError,
 	type NixValidPathInfo,
@@ -28,6 +30,7 @@ const opSetOptions = 19;
 const opQueryPathInfo = 26;
 const opQueryValidPaths = 31;
 const opQuerySubstitutablePaths = 32;
+const opQueryMissing = 40;
 const opQueryDerivationOutputMap = 41;
 
 const stderrNext = 0x6f_6c_6d_67;
@@ -213,8 +216,8 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		const connection = await this.openConnection();
 
 		try {
-			return sortedUniquePaths(
-				await connection.queryValidPaths(sortedUniquePaths(storePaths))
+			return sortedUnique(
+				await connection.queryValidPaths(sortedUnique(storePaths))
 			);
 		} finally {
 			await connection.close();
@@ -227,9 +230,41 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		const connection = await this.openConnection();
 
 		try {
-			return sortedUniquePaths(
-				await connection.querySubstitutablePaths(sortedUniquePaths(storePaths))
+			return sortedUnique(
+				await connection.querySubstitutablePaths(sortedUnique(storePaths))
 			);
+		} finally {
+			await connection.close();
+		}
+	}
+
+	async queryMissing(
+		targets: readonly NixDerivedPathString[]
+	): Promise<NixMissingPartition> {
+		const candidates = sortedUnique(targets);
+
+		if (candidates.length === 0) {
+			return {
+				willBuild: [],
+				willSubstitute: [],
+				unknown: [],
+				downloadSize: 0,
+				narSize: 0
+			};
+		}
+
+		const connection = await this.openConnection();
+
+		try {
+			const partition = await connection.queryMissing(candidates);
+
+			return {
+				willBuild: sortedUnique(partition.willBuild),
+				willSubstitute: sortedUnique(partition.willSubstitute),
+				unknown: sortedUnique(partition.unknown),
+				downloadSize: partition.downloadSize,
+				narSize: partition.narSize
+			};
 		} finally {
 			await connection.close();
 		}
@@ -238,7 +273,7 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	async queryDerivationOutputPaths(
 		drvPaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]> {
-		const candidates = sortedUniquePaths(drvPaths);
+		const candidates = sortedUnique(drvPaths);
 		const pool = new NixDaemonConnectionPool(
 			() => this.openConnection(),
 			defaultClosureConcurrency
@@ -251,7 +286,7 @@ export class NixDaemonStoreClient implements NixStoreClient {
 				(drvPath) => pool.queryDerivationOutputPaths(drvPath)
 			);
 
-			return sortedUniquePaths(outputPathGroups.flat());
+			return sortedUnique(outputPathGroups.flat());
 		} finally {
 			await pool.closeAll();
 		}
@@ -655,6 +690,12 @@ class NixDaemonConnection {
 		return values;
 	}
 
+	private async readStorePathSet(): Promise<readonly StorePathString[]> {
+		const paths = await this.readStringSet();
+
+		return paths.map((path) => requireStorePath(path));
+	}
+
 	private async readString(): Promise<string> {
 		const length = await this.readInteger();
 		const bytes =
@@ -753,6 +794,31 @@ class NixDaemonConnection {
 		const substitutablePaths = await this.readStringSet();
 
 		return substitutablePaths.map((path) => requireStorePath(path));
+	}
+
+	async queryMissing(
+		targets: readonly NixDerivedPathString[]
+	): Promise<NixMissingPartition> {
+		const request = new NixDaemonWriter();
+		request.writeInteger(opQueryMissing);
+		request.writeStringSet(targets.map((target) => legacyDerivedPath(target)));
+
+		await this.transport.write(request.bytes());
+		await this.processStderr();
+
+		const buildPaths = await this.readStorePathSet();
+		const substitutePaths = await this.readStorePathSet();
+		const unknownPaths = await this.readStorePathSet();
+		const downloadSize = await this.readInteger();
+		const narSize = await this.readInteger();
+
+		return {
+			willBuild: buildPaths,
+			willSubstitute: substitutePaths,
+			unknown: unknownPaths,
+			downloadSize,
+			narSize
+		};
 	}
 
 	async queryDerivationOutputPaths(
@@ -983,12 +1049,22 @@ function nixDaemonHash(base16Digest: string): NixSha256Hash {
 	return NixSha256Hash.fromDigest(Buffer.from(base16Digest, 'hex'));
 }
 
-function sortedUniquePaths(
-	storePaths: readonly StorePathString[]
-): readonly StorePathString[] {
-	return [...new Set(storePaths)].toSorted((left, right) =>
+function sortedUnique<T extends string>(values: readonly T[]): readonly T[] {
+	return [...new Set(values)].toSorted((left, right) =>
 		left.localeCompare(right)
 	);
+}
+
+// The wire spells a derived path in the legacy form, with `!` between the
+// derivation and its outputs; the modern installable spelling uses `^`.
+function legacyDerivedPath(target: NixDerivedPathString): string {
+	const separator = target.indexOf('^');
+
+	if (separator === -1) {
+		return target;
+	}
+
+	return `${target.slice(0, separator)}!${target.slice(separator + 1)}`;
 }
 
 // Worker-protocol trust values: 1 trusted, 2 not trusted, 0 unset.
