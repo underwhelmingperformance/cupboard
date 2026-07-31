@@ -23,7 +23,7 @@ export {
 	UnsupportedNixStoreError,
 	UnsupportedNixStoreOperationError
 } from './nix-store.ts';
-export type { NixDaemonClientOptions } from './store-client.ts';
+export type { NixDaemonClientOptions, NixStoreKind } from './store-client.ts';
 export type {
 	NixDaemonOverrides,
 	NixDaemonSetOptions,

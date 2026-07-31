@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 
 import {
 	Nix,
+	type NixStoreKind,
 	NixStorePathNotFoundError,
 	type NixValidPathInfo
 } from '@cupboard/nix';
@@ -2173,6 +2174,197 @@ describe('runPush', () => {
 		});
 	});
 
+	it('streams NAR bytes through an ssh-ng store client, never the filesystem reader', async () => {
+		const narReads: string[] = [];
+		const fsReads: string[] = [];
+		const uploads: { readonly r2Key: string; readonly body: Uint8Array }[] = [];
+		const commits: string[] = [];
+		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
+
+		await runPush(publication([appPath]), reporter([]), {
+			client: {
+				preview: unexpectedPreviewCall,
+				negotiate: (body) =>
+					Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: body.paths.map((path) => ({
+								action: 'upload',
+								storePathHash: path.storePathHash,
+								narHash: path.narHash,
+								uploadId: 'upload-app',
+								r2Key,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}))
+						})
+					),
+				async uploadNar(key, body) {
+					uploads.push({ r2Key: key, body: await collectReadableStream(body) });
+				},
+				commit(target) {
+					commits.push(target.uploadId);
+
+					return Promise.resolve(fallbackCommitResponse());
+				},
+				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
+			} satisfies PushClient,
+			root: rootName('main'),
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }, [], {
+				storeKind: 'ssh-ng',
+				narFromPath: (storePath) => {
+					narReads.push(storePath);
+
+					return narBytes(appDigest);
+				}
+			}),
+			createNarArchive: (storePath) => {
+				fsReads.push(storePath);
+
+				return new FakeNarArchive(appDigest);
+			},
+			compressNar: (nar) => fakeNarUpload(nar, appDigest)
+		});
+
+		expect({
+			narReads,
+			fsReads,
+			commits,
+			uploads: uploads.map((upload) => ({
+				r2Key: upload.r2Key,
+				body: Buffer.from(upload.body).toString()
+			}))
+		}).toStrictEqual({
+			narReads: [appPath],
+			fsReads: [],
+			commits: ['upload-app'],
+			uploads: [{ r2Key, body: compressedNarBytes.toString() }]
+		});
+	});
+
+	it.each(['local-filesystem', 'daemon'] as const)(
+		'reads NAR bytes from the filesystem for a %s store',
+		async (storeKind) => {
+			const narReads: string[] = [];
+			const fsReads: string[] = [];
+			const commits: string[] = [];
+
+			await runPush(publication([appPath]), reporter([]), {
+				client: {
+					preview: unexpectedPreviewCall,
+					negotiate: (body) =>
+						Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: body.paths.map((path) => ({
+									action: 'upload',
+									storePathHash: path.storePathHash,
+									narHash: path.narHash,
+									uploadId: 'upload-app',
+									r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}))
+							})
+						),
+					uploadNar: () => Promise.resolve(),
+					commit(target) {
+						commits.push(target.uploadId);
+
+						return Promise.resolve(fallbackCommitResponse());
+					},
+					setRoot: (name, body) =>
+						Promise.resolve(rootSummary({ name, ...body }))
+				} satisfies PushClient,
+				root: rootName('main'),
+				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }, [], {
+					storeKind,
+					narFromPath: (storePath) => {
+						narReads.push(storePath);
+
+						return narBytes(appDigest);
+					}
+				}),
+				createNarArchive: (storePath) => {
+					fsReads.push(storePath);
+
+					return new FakeNarArchive(appDigest);
+				},
+				compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
+			});
+
+			expect({ narReads, fsReads, commits }).toStrictEqual({
+				narReads: [],
+				fsReads: [appPath],
+				commits: ['upload-app']
+			});
+		}
+	);
+
+	it('still verifies streamed NAR metadata for an ssh-ng store', async () => {
+		const payloads: ResultPayload[] = [];
+		const mismatch = new PushNarMetadataMismatchError(
+			appPath,
+			appDigest.narHash.toString(),
+			runtimeDigest.narHash.toString(),
+			appDigest.narSize,
+			runtimeDigest.narSize
+		);
+
+		let error: unknown;
+		try {
+			await runPush(publication([appPath]), reporter([], [], payloads), {
+				client: {
+					preview: unexpectedPreviewCall,
+					negotiate: (body) =>
+						Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: body.paths.map((path) => ({
+									action: 'upload',
+									storePathHash: path.storePathHash,
+									narHash: path.narHash,
+									uploadId: 'upload-app',
+									r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}))
+							})
+						),
+					uploadNar: () => Promise.resolve(),
+					commit: unexpectedCommitCall,
+					setRoot: unexpectedSetRootCall
+				} satisfies PushClient,
+				root: rootName('main'),
+				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }, [], {
+					storeKind: 'ssh-ng',
+					narFromPath: () => narBytes(appDigest)
+				}),
+				// The streamed bytes digest to the runtime NAR, so verification
+				// must refuse the upload.
+				compressNar: (nar) => fakeNarUpload(nar, runtimeDigest)
+			});
+		} catch (error_: unknown) {
+			error = error_;
+		}
+
+		expect(error).toBeInstanceOf(PushIncompleteError);
+
+		const summary = payloads.find(
+			(payload) => payload.kind === pushSummaryResultKind
+		);
+
+		expect(summary?.data).toStrictEqual({
+			uploadedPaths: 1,
+			reusedBlobs: 0,
+			skipped: 0,
+			uploadedBytes: 0,
+			failures: [
+				{
+					storePathHash: StorePath.hash(appPath),
+					storePath: appPath,
+					stage: 'upload',
+					reason: mismatch.message
+				}
+			],
+			paths: []
+		});
+	});
+
 	it('sets an expiring channel with --root and --ttl', async () => {
 		const roots: SetRootCall[] = [];
 		const clientCalls: unknown[] = [];
@@ -3643,6 +3835,14 @@ function deferredDependencies() {
 	} satisfies Partial<PushDependencies>;
 }
 
+// The NAR serialisation a fake store client streams for a path: one chunk
+// carrying the digest's bytes, the way FakeNarArchive yields them.
+async function* narBytes(digestValue: NarDigest): AsyncIterable<Uint8Array> {
+	await Promise.resolve();
+
+	yield digestValue.narHash.digestBytes();
+}
+
 class FakeNarArchive {
 	iterations = 0;
 
@@ -3797,7 +3997,13 @@ interface NixCall {
 
 function nixStore(
 	paths: Record<string, NixValidPathInfo>,
-	calls: NixCall[] = []
+	calls: NixCall[] = [],
+	options: {
+		readonly storeKind?: NixStoreKind;
+		readonly narFromPath?: (
+			storePath: StorePathString
+		) => AsyncIterable<Uint8Array>;
+	} = {}
 ): Nix {
 	const store = {
 		resolveClosure(storePaths: readonly StorePathString[]) {
@@ -3845,15 +4051,18 @@ function nixStore(
 				downloadSize: 0,
 				narSize: 0
 			}),
-		narFromPath: (storePath: StorePathString): AsyncIterable<Uint8Array> => {
-			throw new Error(`No NAR stream is modelled for ${storePath}`);
-		},
+		narFromPath:
+			options.narFromPath ??
+			((storePath: StorePathString): AsyncIterable<Uint8Array> => {
+				throw new Error(`No NAR stream is modelled for ${storePath}`);
+			}),
 		buildPathsWithResults: () => Promise.resolve([])
 	};
 
 	return Nix.forStore(store, {
 		storeDirectory: storeDirectorySchema.parse('/nix/store'),
-		realpath: (path) => path
+		realpath: (path) => path,
+		...(options.storeKind !== undefined && { storeKind: options.storeKind })
 	});
 }
 

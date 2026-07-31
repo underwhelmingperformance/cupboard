@@ -129,6 +129,11 @@ export interface PushDependencies {
 	readonly attest?: boolean;
 	readonly attestations?: readonly PushAttestationSource[];
 	readonly readAttestationBundle?: ReadAttestationBundle;
+	/**
+	 * The filesystem NAR reader, used when the selected store serves its paths
+	 * on this machine's filesystem. An ssh-ng store streams NAR content through
+	 * the store client and never consults this reader.
+	 */
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
 	readonly compressNar?: CompressNar;
 	/** How many NARs compress and upload at once; defaults to {@link defaultUploadConcurrency}. */
@@ -322,13 +327,22 @@ export async function runPush(
 		(publication.localEntries.length > 0 ? Nix.open() : undefined);
 	const createNarArchive =
 		dependencies.createNarArchive ?? ((storePath) => new NarArchive(storePath));
+	// The NAR source must observe the same bytes the store serves. A local
+	// filesystem store and a same-machine daemon store serve exactly the bytes
+	// at the store path, so the filesystem reader is the cheaper source for
+	// both; an ssh-ng store's paths live on the remote machine, so NAR content
+	// streams from the store client and the local filesystem is never touched.
+	const narSource =
+		nix?.storeKind === 'ssh-ng'
+			? (storePath: string): PushNarArchive => nix.narFromPath(storePath)
+			: createNarArchive;
 	const compressNar = dependencies.compressNar ?? compressNarToStream;
 
 	await runPushFlow(publication, reporter, {
 		...dependencies,
 		retention,
 		nix,
-		createNarArchive,
+		createNarArchive: narSource,
 		compressNar,
 		wait: dependencies.wait ?? true,
 		waitTimeoutSeconds:
