@@ -4351,28 +4351,25 @@ Step 4 depends on 2's read surfaces; step 5 depends on 3's shared matcher and on
 
 ## Build-time publication and bounded build stores
 
-Status: implemented on `feat/build-time-publication` through step 14 of the
-sequence below, every commit green under `pnpm check`, with the real-daemon
-end-to-end suites (`tests/e2e/nix-daemon.test.ts`,
-`tests/e2e/build-push.test.ts`) and the run-root lifecycle workers suite
-passing. The unlanded `agent/upstream-aware-publication` commit was split,
-re-branded, and landed where the design kept its pieces; its central
-substitutable filtering was not landed, because the partition runs on the build
-runner. Outstanding, in dependency order: the rollout fixture run on the
-measured flake update (the download gates, the headroom tuning, and the
+Status: implemented on `feat/build-time-publication`, every commit green under
+`pnpm check`, with the real-daemon end-to-end suites
+(`tests/e2e/nix-daemon.test.ts`, `tests/e2e/build-push.test.ts`), the
+diverted-store collection suite (`tests/e2e/build-push-gc.test.ts`, executed on
+Linux CI), and the run-root lifecycle workers suite passing. The unlanded
+`agent/upstream-aware-publication` commit was split, re-branded, and landed
+where the design kept its pieces; its central substitutable filtering was not
+landed, because the partition runs on the build runner. The packing mode is fed
+by `cupboard plan measure` on the plan runner's store; attestation bundles
+attach to published paths post-hoc through `cupboard attest attach`; the seed
+architecture's flake-publish remnants are removed, `actions/build-paths`
+remaining only for `cupboard-publish.yml`. Outstanding: the rollout fixture run
+on the measured flake update (the download gates, the headroom tuning, and the
 intermediate-substitution measurement that decides whether intermediate
-publication stays default); the live classic-remote-builder exercise, which
-needs a CI fixture with a second daemon; the Linux diverted-store fixture for
-the temp-root collection race; a measurement source for the packing mode
-(`enable-packing` is fully wired behind an injectable measurer whose default
-supplies nothing, so the mode is a safe no-op until per-target `queryMissing`
-measurements feed it); cohort-side attestation bundle attach (cohort jobs record
-repository provenance; the bundle attach the fan-out did at push time needs a
-post-hoc ordering); and step 15's seed-architecture removal, which stays gated
-on the fixture runs. The section argues from rejected alternatives throughout,
-because a design record exists partly to say why options were dropped; none of
-that framing follows the steps into the code, where comments describe the code
-as it is and this document keeps the history.
+publication stays default) and the live classic-remote-builder exercise, which
+needs a CI fixture with a second daemon. The section argues from rejected
+alternatives throughout, because a design record exists partly to say why
+options were dropped; none of that framing follows the steps into the code,
+where comments describe the code as it is and this document keeps the history.
 
 This section supersedes the separate seed-build architecture described in
 [Publish planning, retention grace, and tenant-wide reuse](#publish-planning-retention-grace-and-tenant-wide-reuse)
