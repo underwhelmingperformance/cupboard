@@ -2,6 +2,7 @@ import { createConnection, type Socket } from 'node:net';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import type { StorePathString } from '@cupboard/nix-store/scalars';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 import {
 	defaultClosureConcurrency,
@@ -27,6 +28,7 @@ const opSetOptions = 19;
 const opQueryPathInfo = 26;
 const opQueryValidPaths = 31;
 const opQuerySubstitutablePaths = 32;
+const opQueryDerivationOutputMap = 41;
 
 const stderrNext = 0x6f_6c_6d_67;
 const stderrRead = 0x64_61_74_61;
@@ -233,6 +235,28 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		}
 	}
 
+	async queryDerivationOutputPaths(
+		drvPaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]> {
+		const candidates = sortedUniquePaths(drvPaths);
+		const pool = new NixDaemonConnectionPool(
+			() => this.openConnection(),
+			defaultClosureConcurrency
+		);
+
+		try {
+			const outputPathGroups = await mapWithConcurrency(
+				candidates,
+				defaultClosureConcurrency,
+				(drvPath) => pool.queryDerivationOutputPaths(drvPath)
+			);
+
+			return sortedUniquePaths(outputPathGroups.flat());
+		} finally {
+			await pool.closeAll();
+		}
+	}
+
 	/**
 	 * Whether the daemon trusts this client. The daemon silently drops an
 	 * untrusted client's setting overrides, so a caller that depends on a
@@ -341,6 +365,18 @@ class NixDaemonConnectionPool {
 
 		try {
 			return await connection.queryPathInfo(storePath);
+		} finally {
+			await this.release(connection);
+		}
+	}
+
+	async queryDerivationOutputPaths(
+		drvPath: StorePathString
+	): Promise<readonly StorePathString[]> {
+		const connection = await this.acquire();
+
+		try {
+			return await connection.queryDerivationOutputPaths(drvPath);
 		} finally {
 			await this.release(connection);
 		}
@@ -717,6 +753,33 @@ class NixDaemonConnection {
 		const substitutablePaths = await this.readStringSet();
 
 		return substitutablePaths.map((path) => requireStorePath(path));
+	}
+
+	async queryDerivationOutputPaths(
+		drvPath: StorePathString
+	): Promise<readonly StorePathString[]> {
+		const request = new NixDaemonWriter();
+		request.writeInteger(opQueryDerivationOutputMap);
+		request.writeString(drvPath);
+
+		await this.transport.write(request.bytes());
+		await this.processStderr();
+
+		const outputPaths: StorePathString[] = [];
+		const count = await this.readInteger();
+
+		// One (output name, store path) pair per entry; an unbuilt output has an
+		// empty path.
+		for (let index = 0; index < count; index += 1) {
+			await this.readString();
+			const outputPath = emptyStringToUndefined(await this.readString());
+
+			if (outputPath !== undefined) {
+				outputPaths.push(requireStorePath(outputPath));
+			}
+		}
+
+		return outputPaths;
 	}
 }
 

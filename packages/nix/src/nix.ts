@@ -100,6 +100,15 @@ export class Nix {
 		);
 	}
 
+	/** The registered output paths of the given derivations, sorted. */
+	async queryDerivationOutputPaths(
+		drvPaths: readonly string[]
+	): Promise<readonly string[]> {
+		return this.store.queryDerivationOutputPaths(
+			drvPaths.map((drvPath) => this.toStorePath(drvPath))
+		);
+	}
+
 	/** The closure of the given paths, sorted by store path. */
 	async resolveClosure(
 		paths: readonly string[]

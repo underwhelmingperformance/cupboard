@@ -25,6 +25,11 @@ export interface NixStoreDatabase {
 	references(id: number): readonly string[];
 	/** The subset of the given paths registered as valid, in database order. */
 	validPaths(storePaths: readonly string[]): readonly string[];
+	/**
+	 * The registered output paths of the given derivations, deduplicated and
+	 * sorted.
+	 */
+	derivationOutputs(drvPaths: readonly string[]): readonly string[];
 	close(): void;
 }
 
@@ -93,6 +98,16 @@ export class NixLocalStoreClient implements NixStoreClient {
 	): Promise<readonly StorePathString[]> {
 		return Promise.reject(
 			new UnsupportedNixStoreOperationError('substitutable-path queries')
+		);
+	}
+
+	queryDerivationOutputPaths(
+		drvPaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]> {
+		return this.withDatabase((database) =>
+			database
+				.derivationOutputs([...new Set(drvPaths)])
+				.map((outputPath) => requireStorePath(outputPath))
 		);
 	}
 }
@@ -187,6 +202,31 @@ export function nixStoreDatabaseFromSqlite(
 		},
 		references: (id) =>
 			referencesStatement.all(id).map((row) => text(row.path, 'path')),
+		derivationOutputs(drvPaths) {
+			const outputs = new Set<string>();
+
+			for (
+				let offset = 0;
+				offset < drvPaths.length;
+				offset += placeholderBatchSize
+			) {
+				const batch = drvPaths.slice(offset, offset + placeholderBatchSize);
+				const placeholders = batch.map(() => '?').join(', ');
+				const statement = database.prepare(
+					`select DerivationOutputs.path
+					 from DerivationOutputs
+					 join ValidPaths on DerivationOutputs.drv = ValidPaths.id
+					 where ValidPaths.path in (${placeholders})`
+				);
+				const rows = statement.all(...batch);
+
+				for (const row of rows) {
+					outputs.add(text(row.path, 'path'));
+				}
+			}
+
+			return [...outputs].toSorted((left, right) => left.localeCompare(right));
+		},
 		validPaths(storePaths) {
 			const valid: string[] = [];
 

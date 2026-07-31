@@ -3253,7 +3253,8 @@ function nixStore(paths: Record<string, NixValidPathInfo>): Nix {
 			Promise.resolve(
 				storePaths.filter((storePath) => paths[storePath] !== undefined)
 			),
-		querySubstitutablePaths: () => Promise.resolve([])
+		querySubstitutablePaths: () => Promise.resolve([]),
+		queryDerivationOutputPaths: () => Promise.resolve([])
 	};
 
 	return Nix.forStore(store, {

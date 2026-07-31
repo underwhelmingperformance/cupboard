@@ -29,7 +29,12 @@ const missingPath = storePathSchema.parse(
 );
 const hashA = `sha256:${'aa'.repeat(32)}`;
 const hashB = `sha256:${'bb'.repeat(32)}`;
-const deriverA = '/nix/store/dddddddddddddddddddddddddddddddd-a.drv';
+const deriverA = storePathSchema.parse(
+	'/nix/store/dddddddddddddddddddddddddddddddd-a.drv'
+);
+const missingDrvPath = storePathSchema.parse(
+	'/nix/store/ffffffffffffffffffffffffffffffff-missing.drv'
+);
 const sigsA = 'cache-1:sigaaa cache-2:sigbbb';
 const caB = 'fixed:r:sha256:deadbeef';
 
@@ -72,6 +77,8 @@ function fakeDatabase(): NixStoreDatabase {
 		references: (id) => referencesById.get(id) ?? [],
 		validPaths: (storePaths) =>
 			storePaths.filter((storePath) => rowsByPath[storePath] !== undefined),
+		derivationOutputs: (drvPaths) =>
+			drvPaths.includes(deriverA) ? [pathA] : [],
 		close: vi.fn()
 	};
 }
@@ -122,6 +129,12 @@ describe('NixLocalStoreClient', () => {
 		).resolves.toStrictEqual([pathA, pathB]);
 	});
 
+	it('queries registered outputs by their deriver', async () => {
+		await expect(
+			client.queryDerivationOutputPaths([missingDrvPath, deriverA, deriverA])
+		).resolves.toStrictEqual([pathA]);
+	});
+
 	it('cannot query substituters without a daemon', async () => {
 		let outcome:
 			| { value: readonly string[] }
@@ -156,6 +169,7 @@ describe('NixLocalStoreClient', () => {
 			pathRow: (storePath) => rowsByPath[storePath],
 			references: () => ['/nix/store/notes.txt'],
 			validPaths: () => [],
+			derivationOutputs: () => [],
 			close: vi.fn()
 		}));
 
@@ -174,6 +188,7 @@ describe('NixLocalStoreClient', () => {
 			pathRow: (storePath) => (storePath === divertedPath ? rowA : undefined),
 			references: () => [divertedPath],
 			validPaths: () => [],
+			derivationOutputs: () => [],
 			close: vi.fn()
 		}));
 
@@ -203,6 +218,14 @@ function seededDatabase(): DatabaseSync {
 			'create table Refs (referrer integer not null, reference integer not null)'
 		)
 		.run();
+	database
+		.prepare(
+			`create table DerivationOutputs (
+				drv integer not null, id text not null, path text not null,
+				primary key (drv, id)
+			)`
+		)
+		.run();
 
 	// Each row leaves a different column NULL by omitting it, so the adapter is
 	// exercised on an absent deriver, ultimate, sigs and ca.
@@ -216,6 +239,14 @@ function seededDatabase(): DatabaseSync {
 			'insert into ValidPaths (id, path, hash, registrationTime, narSize, ca) values (?, ?, ?, ?, ?, ?)'
 		)
 		.run(2, pathB, hashB, 0, 50, caB);
+	database
+		.prepare(
+			'insert into ValidPaths (id, path, hash, registrationTime) values (?, ?, ?, ?)'
+		)
+		.run(3, deriverA, hashA, 0);
+	database
+		.prepare('insert into DerivationOutputs (drv, id, path) values (?, ?, ?)')
+		.run(3, 'out', pathA);
 
 	const insertReference = database.prepare(
 		'insert into Refs (referrer, reference) values (?, ?)'
@@ -241,6 +272,10 @@ describe('nixStoreDatabaseFromSqlite', () => {
 				pathB
 			]);
 			expect(database.validPaths([])).toStrictEqual([]);
+			expect(
+				database.derivationOutputs([missingDrvPath, deriverA, deriverA])
+			).toStrictEqual([pathA]);
+			expect(database.derivationOutputs([missingDrvPath])).toStrictEqual([]);
 		} finally {
 			database.close();
 		}
