@@ -1,4 +1,10 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+	mkdtempSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -18,10 +24,54 @@ import {
 	parsePathFile,
 	pushCommandAuthorizationDetails,
 	registerPushCommand,
+	resolvePushPath,
 	validateRetentionChoice
 } from './push.ts';
 
 const rootName = (value: string) => rootNameSchema.parse(value);
+
+describe('resolvePushPath', () => {
+	const storePath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
+
+	it.each([
+		{
+			name: 'a store path passes through without touching the filesystem',
+			path: storePath,
+			realpath: () => {
+				throw new Error('realpath should not be consulted for a store path');
+			},
+			expected: storePath
+		},
+		{
+			name: 'a symlink to a store path resolves to its target',
+			path: './result',
+			realpath: () => storePath,
+			expected: storePath
+		},
+		{
+			name: 'a file inside a store path resolves to the containing store path',
+			path: './result/bin/app',
+			realpath: () => `${storePath}/bin/app`,
+			expected: storePath
+		},
+		{
+			name: 'a symlink outside the store resolves to its non-store target',
+			path: './result',
+			realpath: () => '/tmp/out',
+			expected: '/tmp/out'
+		},
+		{
+			name: 'a location the filesystem cannot resolve passes through',
+			path: './missing',
+			realpath: () => {
+				throw new Error('no such file');
+			},
+			expected: './missing'
+		}
+	])('$name', ({ path: value, realpath, expected }) => {
+		expect(resolvePushPath(value, realpath)).toBe(expected);
+	});
+});
 
 describe('parsePathFile', () => {
 	it.each([
@@ -300,6 +350,60 @@ describe('push command', () => {
 			}
 
 			expect(result.storePath).toBe('./result');
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('rejects a symlink argument that resolves outside the store', async () => {
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
+		const target = path.join(directory, 'out');
+		const link = path.join(directory, 'result');
+		writeFileSync(target, 'artefact');
+		symlinkSync(target, link);
+
+		try {
+			const result = await parsePush([
+				'https://cache.example.workers.dev/t/acme',
+				link
+			]);
+
+			expect(result).toBeInstanceOf(InvalidStorePathError);
+
+			if (!(result instanceof InvalidStorePathError)) {
+				return;
+			}
+
+			expect(result.storePath).toBe(realpathSync(target));
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('resolves symlinks named by a path file before validation', async () => {
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
+		const target = path.join(directory, 'out');
+		const link = path.join(directory, 'intermediate');
+		const file = path.join(directory, 'intermediates.txt');
+		writeFileSync(target, 'artefact');
+		symlinkSync(target, link);
+		writeFileSync(file, `${link}\n`);
+
+		try {
+			const result = await parsePush([
+				'https://cache.example.workers.dev/t/acme',
+				'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+				'--intermediate-paths-file',
+				file
+			]);
+
+			expect(result).toBeInstanceOf(InvalidStorePathError);
+
+			if (!(result instanceof InvalidStorePathError)) {
+				return;
+			}
+
+			expect(result.storePath).toBe(realpathSync(target));
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}

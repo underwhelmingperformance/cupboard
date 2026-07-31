@@ -71,7 +71,7 @@ cupboard tenant create https://cupboard.example.workers.dev acme \
 
 # Tenant admin: sign in, then push
 cupboard login https://cupboard.example.workers.dev/t/acme
-cupboard push https://cupboard.example.workers.dev/t/acme "$(readlink ./result)"
+cupboard push https://cupboard.example.workers.dev/t/acme ./result
 
 # Print the nix.conf a client needs to substitute from the tenant
 cupboard config https://cupboard.example.workers.dev/t/acme \

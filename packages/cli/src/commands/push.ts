@@ -1,8 +1,10 @@
+import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 
 import {
 	type RootName,
 	selectorForCache,
+	storePathSchema,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
@@ -139,6 +141,54 @@ export function parsePathFile(contents: string): string[] {
 		.filter((line) => line !== '');
 }
 
+/**
+ * Resolves one CLI-supplied path to the store path it names, the way
+ * `nix path-info` does: a store path passes through untouched, and anything
+ * else resolves through the filesystem, with a `result` symlink and a file
+ * inside a store path both landing on the containing store path. The command
+ * layer parses; the domain gets store paths, so a location that still is not
+ * one is returned as resolved and refused by the publication collection's
+ * typed error.
+ */
+export function resolvePushPath(
+	path: string,
+	realpath: (path: string) => string = realpathSync
+): string {
+	if (storePathSchema.safeParse(path).success) {
+		return path;
+	}
+
+	let resolved: string;
+	try {
+		resolved = realpath(path);
+	} catch {
+		return path;
+	}
+
+	return containingStorePath(resolved) ?? resolved;
+}
+
+function resolvePushPaths(values: readonly string[]): string[] {
+	return values.map((value) => resolvePushPath(value));
+}
+
+// The store path containing a resolved location: the shortest leading run of
+// segments that parses as a store path, which is the entry directly under the
+// store directory.
+function containingStorePath(resolved: string): string | undefined {
+	const segments = resolved.split('/');
+
+	for (let end = 2; end <= segments.length; end += 1) {
+		const candidate = segments.slice(0, end).join('/');
+
+		if (storePathSchema.safeParse(candidate).success) {
+			return candidate;
+		}
+	}
+
+	return undefined;
+}
+
 function parseUploadConcurrency(value: string): number {
 	if (!/^\d+$/.test(value) || Number(value) < 1) {
 		throw new InvalidUploadConcurrencyError(value);
@@ -240,27 +290,26 @@ export function registerPushCommand(
 				'',
 				'Examples:',
 				'  # Push a build result to a tenant, pinning it under a named root',
-				'  cupboard push https://cache.example.workers.dev/t/acme "$(readlink ./result)" \\',
+				'  cupboard push https://cache.example.workers.dev/t/acme ./result \\',
 				'    --root github:acme/infra/main',
 				'',
 				'  # Preview a push without uploading anything',
-				'  cupboard push https://cache.example.workers.dev/t/acme "$(readlink ./result)" \\',
-				'    --dry-run',
+				'  cupboard push https://cache.example.workers.dev/t/acme ./result --dry-run',
 				'',
 				'  # Push from CI with a GitHub Actions OIDC token',
-				'  cupboard push --github-oidc https://cache.example.workers.dev/t/acme \\',
-				'    "$(readlink ./result)" --root github:acme/infra/main',
+				'  cupboard push --github-oidc https://cache.example.workers.dev/t/acme ./result \\',
+				'    --root github:acme/infra/main',
 				'',
 				'  # Push a shared intermediate without pinning it',
-				'  cupboard push --github-oidc https://cache.example.workers.dev/t/acme \\',
-				'    "$(readlink ./result)" --no-retain',
+				'  cupboard push --github-oidc https://cache.example.workers.dev/t/acme ./result \\',
+				'    --no-retain',
 				'',
 				'  # Publish the complete realised closure of the result',
-				'  cupboard push https://cache.example.workers.dev/t/acme "$(readlink ./result)" \\',
+				'  cupboard push https://cache.example.workers.dev/t/acme ./result \\',
 				'    --root github:acme/infra/main --closure',
 				'',
 				'  # Publish build-time intermediates alongside the target, unrooted',
-				'  cupboard push https://cache.example.workers.dev/t/acme "$(readlink ./result)" \\',
+				'  cupboard push https://cache.example.workers.dev/t/acme ./result \\',
 				'    --root github:acme/infra/main --intermediate-paths-file intermediates.txt'
 			].join('\n')
 		)
@@ -278,9 +327,11 @@ export function registerPushCommand(
 				throw new ReferenceSourcePairError();
 			}
 
-			// The files are transport; the collection is the type. Entries are
-			// store paths at the domain boundary: an argument or file line that is
-			// not one fails here, before any token is requested.
+			// The files are transport; the collection is the type. An argument or
+			// file line may name a store path through a symlink, so each resolves
+			// through the filesystem first; entries are store paths at the domain
+			// boundary, so a location that still is not one fails here, before any
+			// token is requested.
 			const intermediatePaths =
 				options.intermediatePathsFile === undefined
 					? undefined
@@ -292,9 +343,13 @@ export function registerPushCommand(
 					? undefined
 					: parsePathFile(await readFile(options.referencePathsFile, 'utf8'));
 			const publication = PublicationCollection.of({
-				targets: paths,
-				...(intermediatePaths !== undefined && { intermediatePaths }),
-				...(referencePaths !== undefined && { referencePaths })
+				targets: resolvePushPaths(paths),
+				...(intermediatePaths !== undefined && {
+					intermediatePaths: resolvePushPaths(intermediatePaths)
+				}),
+				...(referencePaths !== undefined && {
+					referencePaths: resolvePushPaths(referencePaths)
+				})
 			});
 			const reporter = commandUi(program, programOptions).reporter();
 			const raw = CupboardClient.fromUrl(url, {
