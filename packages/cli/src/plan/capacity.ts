@@ -1,4 +1,4 @@
-import { CliError, transientExitCode } from '../errors.ts';
+import { CliError, unavailableExitCode } from '../errors.ts';
 
 /**
  * The store-relative bytes a capacity preflight measures against: how much
@@ -76,11 +76,12 @@ export class StoreCapacityError extends CliError {
 		this.name = 'StoreCapacityError';
 	}
 
-	// A different runner, a remote store, or a smaller cohort could all fit
-	// where this one did not, so this is the CLI's transient category rather
-	// than a bare unclassified exit.
+	// Retrying the same plan on the same runner cannot resolve this: the
+	// remedy is a split, a remote store, or a larger runner, not another
+	// attempt, so this is the CLI's unavailable category rather than the
+	// transient one a routine retry could clear.
 	override get exitCode(): number {
-		return transientExitCode;
+		return unavailableExitCode;
 	}
 }
 
