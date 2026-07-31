@@ -34,6 +34,7 @@ export class FakeDaemonTransport implements NixDaemonTransport {
 			readonly missing?: FakeMissing;
 			readonly features?: readonly string[];
 			readonly expectedPathInfoBatch?: readonly string[];
+			readonly nar?: FakeNar;
 			readonly beforeOperation?: (request: Buffer) => Promise<void>;
 		} = {}
 	) {}
@@ -85,42 +86,58 @@ export class FakeDaemonTransport implements NixDaemonTransport {
 
 		const request = Buffer.from(bytes);
 		await this.options.beforeOperation?.(request);
-		this.pendingBytes.push(
-			daemonOperationResponse(
-				request,
-				this.paths,
-				this.options,
-				this.temporaryRoots
-			)
+		const response = daemonOperationResponse(
+			request,
+			this.paths,
+			this.options,
+			this.temporaryRoots
 		);
+		const buffers = Buffer.isBuffer(response) ? [response] : response;
+
+		for (const buffer of buffers) {
+			this.pendingBytes.push(buffer);
+		}
 	}
 
+	// Serves reads across pending buffers the way a socket delivers bytes
+	// regardless of how the peer's writes were framed.
 	read(byteLength: number): Promise<Uint8Array> {
 		if (byteLength === 0) {
 			return Promise.resolve(new Uint8Array());
 		}
 
-		const chunk = this.pendingBytes[0];
+		const available = this.pendingBytes.reduce(
+			(total, chunk) => total + chunk.byteLength,
+			0
+		);
 
-		if (chunk === undefined) {
+		if (available < byteLength) {
 			throw new FakeDaemonReadUnderflowError(byteLength);
 		}
 
-		const bytes = chunk.subarray(0, byteLength);
+		const result = Buffer.alloc(byteLength);
+		let offset = 0;
 
-		if (bytes.byteLength !== byteLength) {
-			throw new FakeDaemonReadUnderflowError(byteLength);
+		while (offset < byteLength) {
+			const chunk = this.pendingBytes[0];
+
+			if (chunk === undefined) {
+				throw new FakeDaemonReadUnderflowError(byteLength);
+			}
+
+			const take = Math.min(chunk.byteLength, byteLength - offset);
+			chunk.copy(result, offset, 0, take);
+			offset += take;
+
+			if (take === chunk.byteLength) {
+				this.pendingBytes.shift();
+				continue;
+			}
+
+			this.pendingBytes[0] = chunk.subarray(take);
 		}
 
-		this.pendingBytes[0] = chunk.subarray(byteLength);
-
-		const remaining = this.pendingBytes[0];
-
-		if (remaining.byteLength === 0) {
-			this.pendingBytes.shift();
-		}
-
-		return Promise.resolve(bytes);
+		return Promise.resolve(result);
 	}
 
 	close(): Promise<void> {
@@ -131,11 +148,16 @@ export class FakeDaemonTransport implements NixDaemonTransport {
 	}
 }
 
-class FakeDaemonReadUnderflowError extends Error {
+export class FakeDaemonReadUnderflowError extends Error {
 	constructor(public readonly byteLength: number) {
 		super(`Fake daemon read underflow: ${String(byteLength)}`);
 		this.name = 'FakeDaemonReadUnderflowError';
 	}
+}
+
+export interface FakeNar {
+	readonly expectedPath: string;
+	readonly frames: readonly Buffer[];
 }
 
 interface FakeSubstitutable {
@@ -164,9 +186,10 @@ function daemonOperationResponse(
 		readonly derivationOutputs?: FakeDerivationOutputs;
 		readonly missing?: FakeMissing;
 		readonly expectedPathInfoBatch?: readonly string[];
+		readonly nar?: FakeNar;
 	},
 	temporaryRoots: string[]
-): Buffer {
+): Buffer | readonly Buffer[] {
 	const operation = Number(request.readBigUInt64LE(0));
 
 	if (operation === 11) {
@@ -177,6 +200,16 @@ function daemonOperationResponse(
 		response.writeInteger(1);
 
 		return response.bytes();
+	}
+
+	if (operation === 38) {
+		if (options.nar === undefined) {
+			throw new Error('Unexpected NarFromPath request');
+		}
+
+		expect(readRequestStorePath(request)).toBe(options.nar.expectedPath);
+
+		return [stderrLastResponse(), ...options.nar.frames];
 	}
 
 	if (operation === 26) {

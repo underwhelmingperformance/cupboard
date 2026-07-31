@@ -3844,7 +3844,10 @@ function nixStore(
 				unknown: [],
 				downloadSize: 0,
 				narSize: 0
-			})
+			}),
+		narFromPath: (storePath: StorePathString): AsyncIterable<Uint8Array> => {
+			throw new Error(`No NAR stream is modelled for ${storePath}`);
+		}
 	};
 
 	return Nix.forStore(store, {

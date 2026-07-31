@@ -154,6 +154,12 @@ describe('NixLocalStoreClient', () => {
 		).resolves.toStrictEqual([pathA]);
 	});
 
+	it('cannot stream a NAR without a daemon', () => {
+		expect(() => client.narFromPath(pathA)).toThrow(
+			UnsupportedNixStoreOperationError
+		);
+	});
+
 	it.each([
 		{
 			name: 'substituters',

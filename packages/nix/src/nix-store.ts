@@ -95,6 +95,11 @@ export interface NixStoreClient {
 	queryMissing(
 		targets: readonly NixDerivedPathString[]
 	): Promise<NixMissingPartition>;
+	/**
+	 * The NAR serialisation of the given path, streamed as the store reads
+	 * it.
+	 */
+	narFromPath(storePath: StorePathString): AsyncIterable<Uint8Array>;
 }
 
 /**
