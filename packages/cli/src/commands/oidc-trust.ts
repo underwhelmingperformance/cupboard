@@ -516,7 +516,7 @@ function buildOidcTrustCommands(
 		)
 		.option(
 			'--allow <action>',
-			'an action set the rule may exchange for: push, attest, or root (repeatable)',
+			'an action set the rule may exchange for: push, attest, root, or attach (repeatable)',
 			collect,
 			[]
 		)

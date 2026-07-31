@@ -40,7 +40,10 @@ export function jobWorkflowReferenceClaim(value: string): ClaimMatch {
 
 // The cache operations each `--allow` shorthand expands to. `push` includes
 // byte-free confirmation because cache-aware publication refreshes paths it can
-// already substitute; `attest` and `root` cover their own write conversations.
+// already substitute; `attest`, `root` and `attach` cover their own write
+// conversations. `attach` is separate from `push`: attaching retains paths
+// under a name, so its grant binds a root selector, and folding it into `push`
+// would force a root binding on every push rule.
 const allowExpansions = {
 	push: [
 		'upload:negotiate',
@@ -49,10 +52,22 @@ const allowExpansions = {
 		'upload:confirm'
 	],
 	attest: ['attestation:negotiate', 'attestation:attach'],
-	root: ['root:set']
+	root: ['root:set'],
+	attach: ['root:attach']
 } as const;
 
 export type AllowShorthand = keyof typeof allowExpansions;
+
+// The shorthands whose operations act on a root: their grant must bind a root
+// selector, so the builder adds a root binding whenever one is allowed.
+const rootAllowShorthands: ReadonlySet<AllowShorthand> = new Set([
+	'root',
+	'attach'
+]);
+
+function isAllowShorthand(value: string): value is AllowShorthand {
+	return Object.hasOwn(allowExpansions, value);
+}
 
 // A named capture source baked into the CLI for a provider, so a common rule
 // needs no hand-written pattern. `github-pr` reads a GitHub Actions `ref` of the
@@ -116,13 +131,15 @@ export function expandAllow(values: readonly string[]): {
 	const rootActions = new Set<string>();
 
 	for (const value of values) {
-		if (!Object.hasOwn(allowExpansions, value)) {
+		if (!isAllowShorthand(value)) {
 			throw new UnknownAllowError(value);
 		}
 
-		const actions = allowExpansions[value as AllowShorthand];
+		const bucket = rootAllowShorthands.has(value) ? rootActions : cacheActions;
+		const actions = allowExpansions[value];
+
 		for (const action of actions) {
-			(value === 'root' ? rootActions : cacheActions).add(action);
+			bucket.add(action);
 		}
 	}
 

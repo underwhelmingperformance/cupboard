@@ -109,6 +109,31 @@ cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
 The trailing slash on the root makes it a prefix, so one grant covers every
 per-system root beneath it.
 
+## The run-root grant
+
+A build-time push may bind a run root at negotiate: every path the push commits
+is attached under that name and retained for the root's own time-to-live.
+Attaching is its own operation, `root:attach`, granted by the `attach`
+shorthand. Like `root`, it binds a root selector, so give the rule the exact
+name or trailing-slash prefix the run roots will use:
+
+```bash
+cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
+  --issuer https://token.actions.githubusercontent.com \
+  --audience https://cupboard.example.workers.dev/t/acme \
+  --allow push --allow attest --allow root --allow attach \
+  --root github:acme/infra/main/
+```
+
+A push that names both a target root and a run root asks for two grants on the
+same cache, one per root selector. Rule selection picks exactly one trust rule
+per exchange, so the same rule must permit both grants: splitting the
+target-root and run-root allowances across two rules leaves the exchange with
+whichever single rule was selected, and it cannot grant the other. The exchange
+asks for everything or nothing, so a rule that cannot grant both refuses the
+whole exchange, which is the safer failure: the push learns at token exchange,
+never by silently publishing without its retention.
+
 ## The flake publish workflow's grants
 
 The flake publish workflow depends on that prefix. Each of its jobs exchanges
