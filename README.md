@@ -99,6 +99,30 @@ Pass `--output-mode terminal` or `--output-mode json` to force the mode. Colour
 is a separate choice: `--colour` and `--no-colour` force ANSI on or off, and
 `NO_COLOR` is honoured otherwise.
 
+## Exit codes for `cupboard build-push`
+
+`cupboard build-push` runs a build command under streaming publication and
+settles the run with a final reconciliation. Its exit contract is numeric, so a
+retry system can branch on it without parsing output. A failed build exits with
+the build command's own status (or 128 plus the signal number when a signal
+killed it), and a successful build whose publication or retention did not
+complete exits with the sysexits vocabulary. A cache failure never presents as a
+build failure or vice versa; the build receipt records both causes when both
+fail.
+
+| Code | Meaning                                                              |
+| ---- | -------------------------------------------------------------------- |
+| 0    | The build succeeded and every selected path is published.            |
+| 1-n  | The build command itself failed; its own exit status passes through. |
+| 69   | A dependency the run needs is unavailable (`EX_UNAVAILABLE`).        |
+| 74   | A publication failure not otherwise classified (`EX_IOERR`).         |
+| 75   | A transient failure; retrying the run may succeed (`EX_TEMPFAIL`).   |
+| 77   | An authentication or authorisation failure (`EX_NOPERM`).            |
+| 130  | The run was interrupted; reserved for abort.                         |
+
+Other commands share the 69, 75 and 77 categories; 74 is specific to
+`build-push`, whose publication phase never exits with a bare 1.
+
 ## More
 
 - [docs/github-actions.md](./docs/github-actions.md) sets up building,

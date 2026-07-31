@@ -25,6 +25,7 @@ import { z } from 'zod';
 import { isAbortError } from './abort.ts';
 import { registerAttestCommands } from './commands/attest.ts';
 import { registerAuthKeyCommands } from './commands/auth-key.ts';
+import { registerBuildPushCommand } from './commands/build-push.ts';
 import { registerCacheCommands } from './commands/cache.ts';
 import { registerCheckCommand } from './commands/check.ts';
 import { registerConfigCommand } from './commands/config.ts';
@@ -157,6 +158,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerLoginCommand(program, options);
 	registerAttestCommands(program, options);
 	registerPushCommand(program, options);
+	registerBuildPushCommand(program, options);
 	registerConfigCommand(program, options);
 	registerPubkeyCommand(program, options);
 	registerStatsCommand(program, options);

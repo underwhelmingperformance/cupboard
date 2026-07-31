@@ -7,10 +7,14 @@ import { z } from 'zod';
 
 // The CLI's own failure categories, layered on the shared generic (1) and usage
 // (2) codes. The values follow the BSD sysexits convention (77 EX_NOPERM, 75
-// EX_TEMPFAIL, 69 EX_UNAVAILABLE).
+// EX_TEMPFAIL, 69 EX_UNAVAILABLE, 74 EX_IOERR).
 export const authExitCode = 77;
 export const transientExitCode = 75;
 export const unavailableExitCode = 69;
+// A publication failure with no more specific category: a transfer that did
+// not complete. Only build-push uses it, so retry systems branching on its
+// numeric contract never see a bare 1 for a lost upload.
+export const publicationExitCode = 74;
 
 export abstract class CliError extends CodedError {}
 
@@ -973,4 +977,75 @@ export class BuildEventOutsideStoreError extends BuildEventRejectedError {
 		);
 		this.name = 'BuildEventOutsideStoreError';
 	}
+}
+
+/**
+ * The supervised build command itself failed. The run exits with the child's
+ * own status, or 128 plus the number of the signal that killed it, so a build
+ * failure is never re-labelled as a cache failure.
+ */
+export class BuildCommandFailedError extends CliError {
+	constructor(
+		public readonly status: number | undefined,
+		public readonly signal: string | undefined,
+		private readonly code: number
+	) {
+		super(
+			signal === undefined
+				? `The build command failed with status ${String(status ?? code)}`
+				: `The build command was killed by ${signal}`
+		);
+		this.name = 'BuildCommandFailedError';
+	}
+
+	override get exitCode(): number {
+		return this.code;
+	}
+}
+
+/**
+ * The build succeeded but its publication or retention did not complete. The
+ * exit code carries the classified sysexits category, so a cache failure is
+ * never presented as a build failure; the receipt names each lost path.
+ */
+export class BuildPublicationFailedError extends CliError {
+	constructor(
+		public readonly failedPaths: readonly string[],
+		private readonly code: number,
+		options: { readonly cause?: unknown } = {}
+	) {
+		super(
+			failedPaths.length === 0
+				? 'Publication did not complete; the receipt records the cause'
+				: `${String(failedPaths.length)} path(s) failed to publish or ` +
+						`retain; the receipt records each cause: ${failedPaths.join(', ')}`,
+			options
+		);
+		this.name = 'BuildPublicationFailedError';
+	}
+
+	override get exitCode(): number {
+		return this.code;
+	}
+}
+
+/**
+ * The sysexits category a set of publication failures maps to:
+ * authentication first, then transient, then unavailable, and the
+ * publication code for anything not otherwise classified.
+ */
+export function publicationFailureExitCode(causes: readonly unknown[]): number {
+	const codes = new Set(
+		causes
+			.filter((cause): cause is CliError => cause instanceof CliError)
+			.map((cause) => cause.exitCode)
+	);
+
+	for (const code of [authExitCode, transientExitCode, unavailableExitCode]) {
+		if (codes.has(code)) {
+			return code;
+		}
+	}
+
+	return publicationExitCode;
 }
