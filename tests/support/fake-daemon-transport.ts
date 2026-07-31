@@ -146,6 +146,18 @@ export class FakeDaemonTransport implements NixDaemonTransport {
 
 		return Promise.resolve();
 	}
+
+	/**
+	 * The response frames buffered so far, cleared. A fake that bridges this
+	 * transport onto another byte channel (an ssh child's stdio) emits them
+	 * there after each write.
+	 */
+	takeResponses(): readonly Buffer[] {
+		const frames = [...this.pendingBytes];
+		this.pendingBytes.length = 0;
+
+		return frames;
+	}
 }
 
 export class FakeDaemonReadUnderflowError extends Error {

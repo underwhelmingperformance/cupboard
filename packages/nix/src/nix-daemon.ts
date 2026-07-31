@@ -1312,12 +1312,12 @@ class NixDaemonWriter {
 }
 
 class SocketNixDaemonTransport implements NixDaemonTransport {
-	private readonly reader: SocketReader;
+	private readonly reader: ByteStreamReader;
 
 	private closePromise?: Promise<void>;
 
 	constructor(private readonly socket: Socket) {
-		this.reader = new SocketReader(socket);
+		this.reader = new ByteStreamReader(socket);
 	}
 
 	write(bytes: Uint8Array): Promise<void> {
@@ -1356,7 +1356,21 @@ class SocketNixDaemonTransport implements NixDaemonTransport {
 	}
 }
 
-class SocketReader {
+/** The events a byte source emits for {@link ByteStreamReader} to buffer it. */
+export interface ByteStreamSource {
+	on(event: 'data', listener: (chunk: Buffer) => void): unknown;
+	once(
+		event: 'end' | 'close' | 'error',
+		listener: (error: Error) => void
+	): unknown;
+}
+
+/**
+ * Buffers a byte stream (a socket, a child process pipe) behind exact-length
+ * reads, the shape the daemon protocol consumes. The stream ending or failing
+ * settles any read the buffered bytes cannot satisfy.
+ */
+export class ByteStreamReader {
 	private readonly chunks: Buffer[] = [];
 
 	private bufferedBytes = 0;
@@ -1367,23 +1381,22 @@ class SocketReader {
 
 	private failure?: Error;
 
-	constructor(socket: Socket) {
-		socket.on('data', (chunk: Buffer) => {
+	constructor(source: ByteStreamSource) {
+		source.on('data', (chunk: Buffer) => {
 			this.chunks.push(chunk);
 			this.bufferedBytes += chunk.byteLength;
 			this.resolvePendingRead();
 		});
-		socket.once('end', () => {
+		source.once('end', () => {
 			this.ended = true;
 			this.resolvePendingRead();
 		});
-		socket.once('close', () => {
+		source.once('close', () => {
 			this.ended = true;
 			this.resolvePendingRead();
 		});
-		socket.once('error', (error) => {
-			this.failure = error;
-			this.resolvePendingRead();
+		source.once('error', (error) => {
+			this.fail(error);
 		});
 	}
 
@@ -1438,6 +1451,12 @@ class SocketReader {
 		}
 
 		return result;
+	}
+
+	/** Settle reads on a failure the source's own error event cannot carry. */
+	fail(error: Error): void {
+		this.failure = error;
+		this.resolvePendingRead();
 	}
 
 	read(byteLength: number): Promise<Uint8Array> {

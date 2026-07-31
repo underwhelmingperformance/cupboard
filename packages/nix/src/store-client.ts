@@ -2,6 +2,11 @@ import { accessSync, constants, existsSync } from 'node:fs';
 
 import { type NixDaemonConnector, NixDaemonStoreClient } from './nix-daemon.ts';
 import {
+	createSshNixDaemonConnector,
+	type NixSshStoreSpec,
+	parseSshNgStoreUri
+} from './nix-daemon-ssh.ts';
+import {
 	NixLocalStoreClient,
 	openLocalStoreDatabase
 } from './nix-local-store.ts';
@@ -42,7 +47,8 @@ export const defaultStoreClientEnvironment: StoreClientEnvironment = {
 
 export type StoreBackend =
 	| { readonly backend: 'daemon'; readonly socketPath: string }
-	| { readonly backend: 'local'; readonly stateDirectory: string };
+	| { readonly backend: 'local'; readonly stateDirectory: string }
+	| { readonly backend: 'ssh-ng'; readonly remote: NixSshStoreSpec };
 
 const unixScheme = 'unix://';
 
@@ -61,6 +67,14 @@ export function createNixStoreClient(
 	if (backend.backend === 'daemon') {
 		return new NixDaemonStoreClient({
 			socketPath: backend.socketPath,
+			setOptions: config.daemonSetOptions,
+			overrides: config.daemonOverrides
+		});
+	}
+
+	if (backend.backend === 'ssh-ng') {
+		return new NixDaemonStoreClient({
+			connect: createSshNixDaemonConnector(backend.remote),
 			setOptions: config.daemonSetOptions,
 			overrides: config.daemonOverrides
 		});
@@ -92,6 +106,18 @@ export function createNixDaemonStoreClient(
 	config: NixStoreConfig = discoverNixStoreConfig(dependencies),
 	options: NixDaemonClientOptions = {}
 ): NixDaemonStoreClient {
+	// An `ssh-ng` store reaches its daemon over ssh: there is no local socket
+	// to probe, and the remote daemon exists whenever ssh can start it.
+	const sshRemote = parseSshNgStoreUri(config.storeUri);
+
+	if (sshRemote !== undefined) {
+		return new NixDaemonStoreClient({
+			connect: options.connect ?? createSshNixDaemonConnector(sshRemote),
+			setOptions: { ...config.daemonSetOptions, ...options.setOptions },
+			overrides: { ...config.daemonOverrides, ...options.overrides }
+		});
+	}
+
 	const socketPath = configuredDaemonSocketPath(config);
 
 	if (!dependencies.socketExists(socketPath)) {
@@ -144,6 +170,12 @@ export function resolveStoreBackend(
 			backend: 'daemon',
 			socketPath: unixSocketPath(uri) ?? config.daemonSocketPath
 		};
+	}
+
+	const sshRemote = parseSshNgStoreUri(uri);
+
+	if (sshRemote !== undefined) {
+		return { backend: 'ssh-ng', remote: sshRemote };
 	}
 
 	throw new UnsupportedNixStoreError(uri);
