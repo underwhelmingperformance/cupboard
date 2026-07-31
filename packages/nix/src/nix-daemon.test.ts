@@ -270,6 +270,93 @@ describe('NixDaemonStoreClient', () => {
 		expect(transport?.closed).toBe(true);
 	});
 
+	it('holds temporary roots and queries on one session connection', async () => {
+		const transports: FakeDaemonTransport[] = [];
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				const transport = new FakeDaemonTransport({
+					[appPath]: {
+						hash: appHash,
+						narSize: 123,
+						references: [],
+						signatures: []
+					}
+				});
+				transports.push(transport);
+
+				return Promise.resolve(transport);
+			}
+		});
+
+		const outcome = await client.withConnection(async (session) => {
+			await session.addTempRoot(appPath);
+			await session.addTempRoot(libraryPath);
+
+			return {
+				valid: await session.queryValidPaths([libraryPath, appPath]),
+				info: await session.queryPathInfo(appPath)
+			};
+		});
+
+		expect(outcome).toStrictEqual({
+			valid: [appPath],
+			info: pathInfo(appPath, appHash, 123, [])
+		});
+		expect(
+			transports.map((transport) => ({
+				closed: transport.closed,
+				temporaryRoots: transport.temporaryRoots
+			}))
+		).toStrictEqual([{ closed: true, temporaryRoots: [appPath, libraryPath] }]);
+	});
+
+	it.each([
+		{ name: 'resolves', shouldFail: false },
+		{ name: 'rejects', shouldFail: true }
+	])(
+		'closes the session connection when the callback $name',
+		async ({ shouldFail }) => {
+			let transport: FakeDaemonTransport | undefined;
+			let openDuringCallback: boolean | undefined;
+			const client = new NixDaemonStoreClient({
+				connect: () => {
+					transport = new FakeDaemonTransport({
+						[appPath]: {
+							hash: appHash,
+							narSize: 123,
+							references: [],
+							signatures: []
+						}
+					});
+
+					return Promise.resolve(transport);
+				}
+			});
+
+			const run = client.withConnection(async (session) => {
+				await session.addTempRoot(appPath);
+				openDuringCallback = transport?.closed === false;
+
+				if (shouldFail) {
+					throw new SessionAbortedError();
+				}
+
+				return session.queryPathInfo(appPath);
+			});
+
+			await (shouldFail
+				? expect(run).rejects.toBeInstanceOf(SessionAbortedError)
+				: expect(run).resolves.toStrictEqual(
+						pathInfo(appPath, appHash, 123, [])
+					));
+
+			expect({ openDuringCallback, closed: transport?.closed }).toStrictEqual({
+				openDuringCallback: true,
+				closed: true
+			});
+		}
+	);
+
 	it('partitions realisation work through one QueryMissing operation', async () => {
 		const appDrvPath = storePathSchema.parse(
 			'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv'
@@ -652,6 +739,8 @@ class FakeDaemonTransport implements NixDaemonTransport {
 
 	closed = false;
 
+	readonly temporaryRoots: string[] = [];
+
 	constructor(
 		private readonly paths: Readonly<Record<string, FakePathInfo>>,
 		private readonly options: {
@@ -711,7 +800,12 @@ class FakeDaemonTransport implements NixDaemonTransport {
 		const request = Buffer.from(bytes);
 		await this.options.beforeOperation?.(request);
 		this.pendingBytes.push(
-			daemonOperationResponse(request, this.paths, this.options)
+			daemonOperationResponse(
+				request,
+				this.paths,
+				this.options,
+				this.temporaryRoots
+			)
 		);
 	}
 
@@ -751,6 +845,13 @@ class FakeDaemonTransport implements NixDaemonTransport {
 	}
 }
 
+class SessionAbortedError extends Error {
+	constructor() {
+		super('Session callback aborted');
+		this.name = 'SessionAbortedError';
+	}
+}
+
 class FakeDaemonReadUnderflowError extends Error {
 	constructor(public readonly byteLength: number) {
 		super(`Fake daemon read underflow: ${String(byteLength)}`);
@@ -783,9 +884,20 @@ function daemonOperationResponse(
 		readonly substitutable?: FakeSubstitutable;
 		readonly derivationOutputs?: FakeDerivationOutputs;
 		readonly missing?: FakeMissing;
-	}
+	},
+	temporaryRoots: string[]
 ): Buffer {
 	const operation = Number(request.readBigUInt64LE(0));
+
+	if (operation === 11) {
+		temporaryRoots.push(readRequestStorePath(request));
+
+		const response = new ProtocolWriter();
+		response.writeInteger(0x61_6c_74_73);
+		response.writeInteger(1);
+
+		return response.bytes();
+	}
 
 	if (operation === 26) {
 		return queryPathInfoResponse(request, paths);
