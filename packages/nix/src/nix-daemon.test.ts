@@ -270,6 +270,63 @@ describe('NixDaemonStoreClient', () => {
 		expect(transport?.closed).toBe(true);
 	});
 
+	it('partitions realisation work through one QueryMissing operation', async () => {
+		const appDrvPath = storePathSchema.parse(
+			'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv'
+		);
+		let transport: FakeDaemonTransport | undefined;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				transport = new FakeDaemonTransport(
+					{},
+					{
+						missing: {
+							expectedTargets: [libraryPath, `${appDrvPath}!out`],
+							willBuild: [appPath],
+							willSubstitute: [runtimePath, libraryPath],
+							unknown: [],
+							downloadSize: 4096,
+							narSize: 16_384
+						}
+					}
+				);
+
+				return Promise.resolve(transport);
+			}
+		});
+
+		await expect(
+			client.queryMissing([libraryPath, `${appDrvPath}^out`, libraryPath])
+		).resolves.toStrictEqual({
+			willBuild: [appPath],
+			willSubstitute: [libraryPath, runtimePath],
+			unknown: [],
+			downloadSize: 4096,
+			narSize: 16_384
+		});
+		expect(transport?.closed).toBe(true);
+	});
+
+	it('answers an empty QueryMissing without opening a connection', async () => {
+		let connections = 0;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				connections += 1;
+
+				return Promise.resolve(new FakeDaemonTransport({}));
+			}
+		});
+
+		await expect(client.queryMissing([])).resolves.toStrictEqual({
+			willBuild: [],
+			willSubstitute: [],
+			unknown: [],
+			downloadSize: 0,
+			narSize: 0
+		});
+		expect(connections).toBe(0);
+	});
+
 	it('reads realised derivation outputs through pooled daemon connections', async () => {
 		const appDrvPath = storePathSchema.parse(
 			'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv'
@@ -604,6 +661,7 @@ class FakeDaemonTransport implements NixDaemonTransport {
 			readonly expectedOverrides?: Readonly<Record<string, string>>;
 			readonly substitutable?: FakeSubstitutable;
 			readonly derivationOutputs?: FakeDerivationOutputs;
+			readonly missing?: FakeMissing;
 			readonly beforeOperation?: (request: Buffer) => Promise<void>;
 		} = {}
 	) {}
@@ -709,12 +767,22 @@ type FakeDerivationOutputs = Readonly<
 	Record<string, Readonly<Record<string, string | undefined>>>
 >;
 
+interface FakeMissing {
+	readonly expectedTargets: readonly string[];
+	readonly willBuild: readonly string[];
+	readonly willSubstitute: readonly string[];
+	readonly unknown: readonly string[];
+	readonly downloadSize: number;
+	readonly narSize: number;
+}
+
 function daemonOperationResponse(
 	request: Buffer,
 	paths: Readonly<Record<string, FakePathInfo>>,
 	options: {
 		readonly substitutable?: FakeSubstitutable;
 		readonly derivationOutputs?: FakeDerivationOutputs;
+		readonly missing?: FakeMissing;
 	}
 ): Buffer {
 	const operation = Number(request.readBigUInt64LE(0));
@@ -731,6 +799,10 @@ function daemonOperationResponse(
 		return querySubstitutablePathsResponse(request, options.substitutable);
 	}
 
+	if (operation === 40) {
+		return queryMissingResponse(request, options.missing);
+	}
+
 	if (operation === 41) {
 		return queryDerivationOutputMapResponse(
 			request,
@@ -739,6 +811,27 @@ function daemonOperationResponse(
 	}
 
 	throw new Error(`Unexpected fake daemon operation: ${String(operation)}`);
+}
+
+function queryMissingResponse(
+	request: Buffer,
+	missing: FakeMissing | undefined
+): Buffer {
+	if (missing === undefined) {
+		throw new Error('Unexpected QueryMissing request');
+	}
+
+	expect(readRequestStringSet(request)).toStrictEqual(missing.expectedTargets);
+
+	const response = new ProtocolWriter();
+	response.writeInteger(0x61_6c_74_73);
+	response.writeStringSet(missing.willBuild);
+	response.writeStringSet(missing.willSubstitute);
+	response.writeStringSet(missing.unknown);
+	response.writeInteger(missing.downloadSize);
+	response.writeInteger(missing.narSize);
+
+	return response.bytes();
 }
 
 function queryDerivationOutputMapResponse(

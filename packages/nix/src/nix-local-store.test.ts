@@ -135,12 +135,22 @@ describe('NixLocalStoreClient', () => {
 		).resolves.toStrictEqual([pathA]);
 	});
 
-	it('cannot query substituters without a daemon', async () => {
+	it.each([
+		{
+			name: 'substituters',
+			operation: 'substitutable-path queries',
+			query: () => client.querySubstitutablePaths([pathA])
+		},
+		{
+			name: 'the realisation partition',
+			operation: 'missing-path queries',
+			query: () => client.queryMissing([pathA])
+		}
+	])('cannot query $name without a daemon', async ({ operation, query }) => {
 		let outcome:
-			| { value: readonly string[] }
-			| { error: { name: string; operation: string } };
+			{ value: unknown } | { error: { name: string; operation: string } };
 		try {
-			const value = await client.querySubstitutablePaths([pathA]);
+			const value = await query();
 			outcome = { value };
 		} catch (error_: unknown) {
 			expect(error_).toBeInstanceOf(UnsupportedNixStoreOperationError);
@@ -157,7 +167,7 @@ describe('NixLocalStoreClient', () => {
 		expect(outcome).toStrictEqual({
 			error: {
 				name: 'UnsupportedNixStoreOperationError',
-				operation: 'substitutable-path queries'
+				operation
 			}
 		});
 	});

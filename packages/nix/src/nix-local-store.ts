@@ -6,6 +6,8 @@ import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import type { StorePathString } from '@cupboard/nix-store/scalars';
 
 import {
+	type NixDerivedPathString,
+	type NixMissingPartition,
 	type NixStoreClient,
 	NixStoreDatabaseError,
 	NixStorePathNotFoundError,
@@ -108,6 +110,14 @@ export class NixLocalStoreClient implements NixStoreClient {
 			database
 				.derivationOutputs([...new Set(drvPaths)])
 				.map((outputPath) => requireStorePath(outputPath))
+		);
+	}
+
+	queryMissing(
+		_targets: readonly NixDerivedPathString[]
+	): Promise<NixMissingPartition> {
+		return Promise.reject(
+			new UnsupportedNixStoreOperationError('missing-path queries')
 		);
 	}
 }

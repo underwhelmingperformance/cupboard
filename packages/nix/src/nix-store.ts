@@ -22,6 +22,28 @@ export interface NixValidPathInfo {
 	readonly ultimate: boolean;
 }
 
+/**
+ * A realisation target the way an installable names one: a plain store path,
+ * or a derivation path followed by `^` and the outputs it should produce
+ * (`^*` for all of them).
+ */
+export type NixDerivedPathString =
+	StorePathString | `${StorePathString}^${string}`;
+
+/**
+ * What realising a set of targets would require, partitioned the way
+ * `Store::queryMissing` answers it. An already-valid target appears in no
+ * set. `downloadSize` and `narSize` describe the substitutable set: the bytes
+ * substitution would download and the NAR bytes it would materialise.
+ */
+export interface NixMissingPartition {
+	readonly willBuild: readonly StorePathString[];
+	readonly willSubstitute: readonly StorePathString[];
+	readonly unknown: readonly StorePathString[];
+	readonly downloadSize: number;
+	readonly narSize: number;
+}
+
 /** Operations provided by a selected Nix store backend. */
 export interface NixStoreClient {
 	resolveClosure(
@@ -50,6 +72,14 @@ export interface NixStoreClient {
 	queryDerivationOutputPaths(
 		drvPaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]>;
+	/**
+	 * What realising the given targets would require, answered against this
+	 * store's validity and its configured substituters. Every set comes back
+	 * deduplicated and sorted by store path.
+	 */
+	queryMissing(
+		targets: readonly NixDerivedPathString[]
+	): Promise<NixMissingPartition>;
 }
 
 /**
