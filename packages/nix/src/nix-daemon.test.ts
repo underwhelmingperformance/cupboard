@@ -101,6 +101,123 @@ describe('NixDaemonStoreClient', () => {
 		expect(transport?.closed).toBe(true);
 	});
 
+	it('writes configured dedicated SetOptions fields', async () => {
+		const client = new NixDaemonStoreClient({
+			setOptions: {
+				keepFailed: true,
+				keepGoing: true,
+				tryFallback: true,
+				maxBuildJobs: 8,
+				maxSilentTime: 30,
+				buildCores: 4,
+				useSubstitutes: false
+			},
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport(
+						{
+							[appPath]: {
+								hash: appHash,
+								narSize: 123,
+								references: [],
+								signatures: []
+							}
+						},
+						{
+							expectedSetOptions: {
+								keepFailed: true,
+								keepGoing: true,
+								tryFallback: true,
+								maxBuildJobs: 8,
+								maxSilentTime: 30,
+								buildCores: 4,
+								useSubstitutes: false
+							}
+						}
+					)
+				)
+		});
+
+		await expect(client.queryPathInfo(appPath)).resolves.toStrictEqual(
+			pathInfo(appPath, appHash, 123, [])
+		);
+	});
+
+	it('writes the default SetOptions fields when nothing is configured', async () => {
+		const client = new NixDaemonStoreClient({
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport(
+						{
+							[appPath]: {
+								hash: appHash,
+								narSize: 123,
+								references: [],
+								signatures: []
+							}
+						},
+						{
+							expectedSetOptions: {
+								keepFailed: false,
+								keepGoing: false,
+								tryFallback: false,
+								maxBuildJobs: 1,
+								maxSilentTime: 0,
+								buildCores: 0,
+								useSubstitutes: true
+							}
+						}
+					)
+				)
+		});
+
+		await expect(client.queryPathInfo(appPath)).resolves.toStrictEqual(
+			pathInfo(appPath, appHash, 123, [])
+		);
+	});
+
+	it('forwards the sorted overrides map on every connection', async () => {
+		const overrides = {
+			substituters: 'https://cache.nixos.org https://cupboard.example/cache',
+			'trusted-public-keys': 'cache.nixos.org-1:key cupboard-1:key',
+			'sandbox-paths': '/build /work',
+			'netrc-file': '/tmp/cupboard-netrc'
+		};
+		const paths = {
+			[appPath]: {
+				hash: appHash,
+				narSize: 123,
+				references: [],
+				signatures: []
+			},
+			[libraryPath]: {
+				hash: libraryHash,
+				narSize: 456,
+				references: [],
+				signatures: []
+			}
+		};
+		let connections = 0;
+		const client = new NixDaemonStoreClient({
+			overrides,
+			connect: () => {
+				connections += 1;
+
+				return Promise.resolve(
+					new FakeDaemonTransport(paths, { expectedOverrides: overrides })
+				);
+			}
+		});
+
+		await expect(client.queryPathInfo(appPath)).resolves.toStrictEqual(
+			pathInfo(appPath, appHash, 123, [])
+		);
+		await expect(client.queryPathInfo(libraryPath)).resolves.toStrictEqual(
+			pathInfo(libraryPath, libraryHash, 456, [])
+		);
+		expect(connections).toBe(2);
+	});
+
 	it('resolves closure by walking daemon path references', async () => {
 		const client = new NixDaemonStoreClient({
 			connect: () =>
@@ -299,7 +416,11 @@ class FakeDaemonTransport implements NixDaemonTransport {
 
 	constructor(
 		private readonly paths: Readonly<Record<string, FakePathInfo>>,
-		private readonly options: { readonly protocolMinor?: number } = {}
+		private readonly options: {
+			readonly protocolMinor?: number;
+			readonly expectedSetOptions?: FakeSetOptionsFields;
+			readonly expectedOverrides?: Readonly<Record<string, string>>;
+		} = {}
 	) {}
 
 	write(bytes: Uint8Array): Promise<void> {
@@ -323,6 +444,23 @@ class FakeDaemonTransport implements NixDaemonTransport {
 		}
 
 		if (this.writeCount === 4) {
+			const request = readSetOptionsRequest(Buffer.from(bytes));
+
+			expect(request.overrides).toStrictEqual(
+				this.options.expectedOverrides ?? {}
+			);
+			expect(request.overrideNames).toStrictEqual(
+				[...request.overrideNames].toSorted((left, right) =>
+					left.localeCompare(right)
+				)
+			);
+
+			if (this.options.expectedSetOptions !== undefined) {
+				expect(request.setOptions).toStrictEqual(
+					this.options.expectedSetOptions
+				);
+			}
+
 			this.pendingBytes.push(stderrLastResponse());
 			return Promise.resolve();
 		}
@@ -400,6 +538,73 @@ function queryPathInfoResponse(
 	response.writeString(pathInfo.ca ?? '');
 
 	return response.bytes();
+}
+
+interface FakeSetOptionsFields {
+	readonly keepFailed: boolean;
+	readonly keepGoing: boolean;
+	readonly tryFallback: boolean;
+	readonly maxBuildJobs: number;
+	readonly maxSilentTime: number;
+	readonly buildCores: number;
+	readonly useSubstitutes: boolean;
+}
+
+function readSetOptionsRequest(request: Buffer): {
+	readonly setOptions: FakeSetOptionsFields;
+	readonly overrides: Readonly<Record<string, string>>;
+	readonly overrideNames: readonly string[];
+} {
+	let offset = 8;
+	const readInteger = (): number => {
+		const value = Number(request.readBigUInt64LE(offset));
+		offset += 8;
+
+		return value;
+	};
+	const readString = (): string => {
+		const length = readInteger();
+		const value = request.subarray(offset, offset + length).toString('utf8');
+		offset += length + ((8 - (length % 8)) % 8);
+
+		return value;
+	};
+
+	const isKeepFailed = readInteger() !== 0;
+	const shouldKeepGoing = readInteger() !== 0;
+	const shouldTryFallback = readInteger() !== 0;
+	readInteger();
+	const maxBuildJobs = readInteger();
+	const maxSilentTime = readInteger();
+	readInteger();
+	readInteger();
+	readInteger();
+	readInteger();
+	const buildCores = readInteger();
+	const shouldUseSubstitutes = readInteger() !== 0;
+	const count = readInteger();
+	const overrides: Record<string, string> = {};
+	const overrideNames: string[] = [];
+
+	for (let index = 0; index < count; index += 1) {
+		const key = readString();
+		overrideNames.push(key);
+		overrides[key] = readString();
+	}
+
+	return {
+		overrideNames,
+		setOptions: {
+			keepFailed: isKeepFailed,
+			keepGoing: shouldKeepGoing,
+			tryFallback: shouldTryFallback,
+			maxBuildJobs,
+			maxSilentTime,
+			buildCores,
+			useSubstitutes: shouldUseSubstitutes
+		},
+		overrides
+	};
 }
 
 function readRequestStorePath(request: Buffer): string {

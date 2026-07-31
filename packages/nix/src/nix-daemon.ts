@@ -11,6 +11,10 @@ import {
 	requireStorePath,
 	resolveClosureBy
 } from './nix-store.ts';
+import type {
+	NixDaemonOverrides,
+	NixDaemonSetOptions
+} from './store-config.ts';
 
 const defaultDaemonSocketPath = '/nix/var/nix/daemon-socket/socket';
 const workerMagic1 = 0x6e_69_78_63;
@@ -34,6 +38,8 @@ const stderrResult = 0x52_53_4c_54;
 export interface NixDaemonStoreClientOptions {
 	readonly socketPath?: string;
 	readonly connect?: NixDaemonConnector;
+	readonly setOptions?: NixDaemonSetOptions;
+	readonly overrides?: NixDaemonOverrides;
 }
 
 export type NixDaemonConnector = (
@@ -133,14 +139,24 @@ export class NixDaemonStoreClient implements NixStoreClient {
 
 	private readonly connect: NixDaemonConnector;
 
+	private readonly daemonSetOptions: NixDaemonSetOptions;
+
+	private readonly overrides: NixDaemonOverrides;
+
 	constructor(options: NixDaemonStoreClientOptions = {}) {
 		this.socketPath = options.socketPath ?? defaultDaemonSocketPath;
 		this.connect = options.connect ?? connectToNixDaemon;
+		this.daemonSetOptions = options.setOptions ?? {};
+		this.overrides = options.overrides ?? {};
 	}
 
 	private async openConnection(): Promise<NixDaemonConnection> {
 		const transport = await this.connect(this.socketPath);
-		const connection = new NixDaemonConnection(transport);
+		const connection = new NixDaemonConnection(
+			transport,
+			this.daemonSetOptions,
+			this.overrides
+		);
 
 		try {
 			await connection.initialise();
@@ -316,7 +332,11 @@ class NixDaemonConnection {
 		minor: protocolMinor
 	};
 
-	constructor(private readonly transport: NixDaemonTransport) {}
+	constructor(
+		private readonly transport: NixDaemonTransport,
+		private readonly options: NixDaemonSetOptions,
+		private readonly overrides: NixDaemonOverrides
+	) {}
 
 	private async handshake(): Promise<void> {
 		const request = new NixDaemonWriter();
@@ -384,19 +404,28 @@ class NixDaemonConnection {
 
 		// Nix worker-protocol 1.38 SetOptions fields, matching RemoteStore
 		// and daemon ClientSettings order.
-		request.writeBoolean(false);
-		request.writeBoolean(false);
-		request.writeBoolean(false);
+		request.writeBoolean(this.options.keepFailed ?? false);
+		request.writeBoolean(this.options.keepGoing ?? false);
+		request.writeBoolean(this.options.tryFallback ?? false);
 		request.writeInteger(0);
-		request.writeInteger(1);
-		request.writeInteger(0);
+		request.writeInteger(this.options.maxBuildJobs ?? 1);
+		request.writeInteger(this.options.maxSilentTime ?? 0);
 		request.writeBoolean(true);
 		request.writeInteger(0);
 		request.writeInteger(0);
 		request.writeInteger(0);
-		request.writeInteger(0);
-		request.writeBoolean(true);
-		request.writeInteger(0);
+		request.writeInteger(this.options.buildCores ?? 0);
+		request.writeBoolean(this.options.useSubstitutes ?? true);
+
+		const overrides = Object.entries(this.overrides).toSorted(
+			([left], [right]) => left.localeCompare(right)
+		);
+		request.writeInteger(overrides.length);
+
+		for (const [name, value] of overrides) {
+			request.writeString(name);
+			request.writeString(value);
+		}
 
 		await this.transport.write(request.bytes());
 		await this.processStderr();

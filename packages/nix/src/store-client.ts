@@ -53,7 +53,11 @@ export function createNixStoreClient(
 	const backend = resolveStoreBackend(config, dependencies);
 
 	if (backend.backend === 'daemon') {
-		return new NixDaemonStoreClient({ socketPath: backend.socketPath });
+		return new NixDaemonStoreClient({
+			socketPath: backend.socketPath,
+			setOptions: config.daemonSetOptions,
+			overrides: config.daemonOverrides
+		});
 	}
 
 	return new NixLocalStoreClient(() =>
