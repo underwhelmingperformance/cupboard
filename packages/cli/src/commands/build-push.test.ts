@@ -10,7 +10,11 @@ import {
 	RunRootTtlWithoutRunRootError
 } from '../errors.ts';
 
-import { parseCohortsFile, registerBuildPushCommand } from './build-push.ts';
+import {
+	betweenCohortCollector,
+	parseCohortsFile,
+	registerBuildPushCommand
+} from './build-push.ts';
 
 const tenantUrl = 'https://cupboard.example.workers.dev/t/acme';
 
@@ -192,5 +196,53 @@ describe('parseCohortsFile', () => {
 		}
 
 		expect(error).toBeInstanceOf(CohortsFileInvalidError);
+	});
+});
+
+describe('betweenCohortCollector', () => {
+	interface CollectorRun {
+		readonly commands: readonly (readonly string[])[];
+		readonly warnings: readonly { label: string; value?: string }[];
+	}
+
+	async function runCollector(exitStatus: number): Promise<CollectorRun> {
+		const commands: (readonly string[])[] = [];
+		const warnings: { label: string; value?: string }[] = [];
+		const collect = betweenCohortCollector(
+			{
+				warn(label, value) {
+					warnings.push({ label, value });
+				}
+			},
+			(options) => {
+				commands.push(options.command);
+
+				return Promise.resolve({ status: exitStatus, signal: undefined });
+			}
+		);
+
+		await collect();
+
+		return { commands, warnings };
+	}
+
+	it('sweeps with nix store gc, silently on success', async () => {
+		expect(await runCollector(0)).toStrictEqual({
+			commands: [['nix', 'store', 'gc']],
+			warnings: []
+		});
+	});
+
+	it('surfaces a failed sweep as a warning and carries on', async () => {
+		expect(await runCollector(5)).toStrictEqual({
+			commands: [['nix', 'store', 'gc']],
+			warnings: [
+				{
+					label: 'collection failed',
+					value:
+						'nix store gc exited 5; the next cohort builds with the store as it stands'
+				}
+			]
+		});
 	});
 });

@@ -104,6 +104,14 @@ on:
         required: false
         default: true
         type: boolean
+      gc-between-cohorts:
+        description:
+          Collect the local Nix store between build-push cohorts, so a later
+          cohort substitutes the earlier shared work from the cache. Off by
+          default; the run never deletes user store paths unless opted in.
+        required: false
+        default: false
+        type: boolean
       nix-config:
         description:
           Flake installable that evaluates to extra nix.conf text for builders.
@@ -416,6 +424,7 @@ jobs:
           read-password: ${{ secrets.read_password }}
           max-jobs: ${{ matrix.remote && '0' || '' }}
           push: ${{ inputs.push }}
+          gc-between-cohorts: ${{ inputs.gc-between-cohorts }}
           # Every cohort job in this run shares one root, so a later cohort
           # can substitute an earlier one's streamed work instead of
           # rebuilding it.

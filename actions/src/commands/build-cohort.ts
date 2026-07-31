@@ -201,6 +201,7 @@ export interface BuildCohortOptions {
 	readonly maxJobs?: string;
 	readonly store?: string;
 	readonly push?: string;
+	readonly gcBetweenCohorts?: string;
 	readonly runRoot?: string;
 	readonly runRootTtl?: string;
 	readonly receiptFile?: string;
@@ -224,6 +225,7 @@ export interface BuildCohortInputs {
 	readonly maxJobs: string;
 	readonly store: string;
 	readonly push: boolean;
+	readonly gcBetweenCohorts: boolean;
 	readonly runRoot: string;
 	readonly runRootTtl: string;
 	readonly receiptFile: string;
@@ -331,6 +333,11 @@ export function resolveBuildCohortInputs(
 		maxJobs,
 		store: provided(options.store) ?? '',
 		push: isEnabled('push', options.push, false),
+		gcBetweenCohorts: isEnabled(
+			'gc-between-cohorts',
+			options.gcBetweenCohorts,
+			false
+		),
 		runRoot,
 		runRootTtl,
 		receiptFile: outputPath('receipt.json', options.receiptFile),
@@ -389,6 +396,11 @@ export function registerBuildCohortCommand(
 		.option(
 			'--push <boolean>',
 			'publish the cohort: stream the build through cupboard build-push and set the target roots (true or false)',
+			'false'
+		)
+		.option(
+			'--gc-between-cohorts <boolean>',
+			'collect the local Nix store between build-push cohorts (true or false)',
 			'false'
 		)
 		.option(
@@ -582,7 +594,13 @@ export function buildPushCohortsFile(
 export function cohortBuildPushArguments(
 	inputs: Pick<
 		BuildCohortInputs,
-		'url' | 'audience' | 'cache' | 'runRoot' | 'runRootTtl' | 'receiptFile'
+		| 'url'
+		| 'audience'
+		| 'cache'
+		| 'gcBetweenCohorts'
+		| 'runRoot'
+		| 'runRootTtl'
+		| 'receiptFile'
 	>,
 	cohortsFile: string
 ): readonly string[] {
@@ -604,6 +622,10 @@ export function cohortBuildPushArguments(
 
 	if (inputs.cache !== '') {
 		arguments_.push('--cache', inputs.cache);
+	}
+
+	if (inputs.gcBetweenCohorts) {
+		arguments_.push('--gc-between-cohorts');
 	}
 
 	if (inputs.runRoot !== '') {

@@ -175,6 +175,12 @@ describe('cupboard flake publish cohort job', () => {
 
 		expect({
 			pushThreaded: contents.includes('push: ${{ inputs.push }}'),
+			gcThreaded: contents.includes(
+				'gc-between-cohorts: ${{ inputs.gc-between-cohorts }}'
+			),
+			gcWorkflowInput: contents.includes(
+				'      gc-between-cohorts:\n        description:'
+			),
 			runRootPerRun: contents.includes("format('{0}/_cupboard-run/{1}',"),
 			runRootTtlInput: contents.includes(
 				'run-root-ttl: ${{ inputs.run-root-ttl }}'
@@ -184,6 +190,8 @@ describe('cupboard flake publish cohort job', () => {
 			)
 		}).toStrictEqual({
 			pushThreaded: true,
+			gcThreaded: true,
+			gcWorkflowInput: true,
 			runRootPerRun: true,
 			runRootTtlInput: true,
 			runRootTtlWorkflowInput: true

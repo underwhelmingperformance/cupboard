@@ -760,6 +760,7 @@ describe('buildCohortAction publication', () => {
 				expectedPaths: [appPath, libraryBuiltPath, undefined]
 			}),
 			push: 'true',
+			gcBetweenCohorts: 'true',
 			reuseView: 'pr-view',
 			cache: 'builds',
 			ttl: '7d',
@@ -800,6 +801,7 @@ describe('buildCohortAction publication', () => {
 					receiptFile,
 					'--cache',
 					'builds',
+					'--gc-between-cohorts',
 					'--run-root',
 					runRoot,
 					'--run-root-ttl',
@@ -886,6 +888,17 @@ describe('buildCohortAction publication', () => {
 			'plan',
 			'build-push',
 			'push'
+		]);
+		expect(run.calls[1]).toStrictEqual([
+			'--no-colour',
+			'build-push',
+			url,
+			'--github-oidc',
+			'--no-retain',
+			'--cohorts-file',
+			path.join(directory, `cupboard-build-cohorts-${cohortKey}.json`),
+			'--receipt-file',
+			path.join(directory, 'cupboard-cohort-receipt.json')
 		]);
 		expect(run.calls[2]).toStrictEqual([
 			'--no-colour',
