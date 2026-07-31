@@ -50,18 +50,10 @@ describe('cupboard flake publish release coordinates', () => {
 					(left, right) => left.uses?.localeCompare(right.uses ?? '') ?? 0
 				)
 		).toStrictEqual(
-			[
-				...Array.from({ length: 2 }, () => ({
-					uses: '- uses: ./.cupboard/actions/setup',
-					expectedSourceCommit:
-						'expected-source-commit: ${{ job.workflow_sha }}'
-				})),
-				...Array.from({ length: 1 }, () => ({
-					uses: '- uses: ./.cupboard/actions/push',
-					expectedSourceCommit:
-						'expected-source-commit: ${{ job.workflow_sha }}'
-				}))
-			].toSorted((left, right) => left.uses.localeCompare(right.uses))
+			Array.from({ length: 2 }, () => ({
+				uses: '- uses: ./.cupboard/actions/setup',
+				expectedSourceCommit: 'expected-source-commit: ${{ job.workflow_sha }}'
+			}))
 		);
 	});
 
@@ -126,17 +118,19 @@ describe('cupboard flake publish cohort job', () => {
 		});
 	});
 
-	it('builds with build-cohort and publishes with push, not build-paths', async () => {
+	it('builds and publishes through build-cohort alone', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 
 		expect({
 			usesBuildCohort: contents.includes('./.cupboard/actions/build-cohort'),
 			usesPush: contents.includes('./.cupboard/actions/push'),
-			usesBuildPaths: contents.includes('./.cupboard/actions/build-paths')
+			usesBuildPaths: contents.includes('./.cupboard/actions/build-paths'),
+			rootGroupingStepRemoved: !contents.includes('root-groups')
 		}).toStrictEqual({
 			usesBuildCohort: true,
-			usesPush: true,
-			usesBuildPaths: false
+			usesPush: false,
+			usesBuildPaths: false,
+			rootGroupingStepRemoved: true
 		});
 	});
 
@@ -152,16 +146,11 @@ describe('cupboard flake publish cohort job', () => {
 		});
 	});
 
-	it('gates the push on push and having something to push, over one shared run root', async () => {
+	it('threads publication and the shared run root into build-cohort', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 
 		expect({
-			pushGated: contents.includes(
-				"inputs.push && steps.root-groups.outputs.has-content == 'true'"
-			),
-			rootGroupsInput: contents.includes(
-				'root-groups: ${{ steps.root-groups.outputs.json }}'
-			),
+			pushThreaded: contents.includes('push: ${{ inputs.push }}'),
 			runRootPerRun: contents.includes("format('{0}/_cupboard-run/{1}',"),
 			runRootTtlInput: contents.includes(
 				'run-root-ttl: ${{ inputs.run-root-ttl }}'
@@ -170,8 +159,7 @@ describe('cupboard flake publish cohort job', () => {
 				'      run-root-ttl:\n        description:'
 			)
 		}).toStrictEqual({
-			pushGated: true,
-			rootGroupsInput: true,
+			pushThreaded: true,
 			runRootPerRun: true,
 			runRootTtlInput: true,
 			runRootTtlWorkflowInput: true
@@ -180,10 +168,6 @@ describe('cupboard flake publish cohort job', () => {
 });
 
 describe('cupboard build provenance', () => {
-	// cupboard-flake-publish.yml's cohort job carries none: build-cohort does
-	// not emit a receipt-file in the shape attest expects, so its push carries
-	// no attestation bundle yet. cupboard-publish.yml's single build/attest/push
-	// job is unaffected by the cohort migration and still feeds one.
 	it('feeds every bundled attest action a current-run build receipt', async () => {
 		const workflows = await Promise.all(
 			[flakeWorkflow, publishWorkflow].map(async (file) => {
@@ -211,16 +195,24 @@ describe('cupboard build provenance', () => {
 			}))
 		).toStrictEqual([
 			{
+				file: 'cupboard-flake-publish.yml',
+				receipt: 'receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}'
+			},
+			{
 				file: 'cupboard-publish.yml',
 				receipt: 'receipt-file: ${{ steps.build.outputs.receipt-file }}'
 			}
 		]);
 	});
 
-	it('does not bundle an attest action into the flake publish cohort job', async () => {
+	it('attests the cohort job only when it streamed a build to publish', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 
-		expect(contents).not.toContain('./.cupboard/actions/attest');
+		expect(
+			contents.includes(
+				"inputs.push && steps.build-cohort.outputs.receipt-file != ''"
+			)
+		).toBe(true);
 	});
 });
 

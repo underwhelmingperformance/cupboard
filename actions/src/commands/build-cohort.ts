@@ -24,7 +24,12 @@ import {
 	MissingInputError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
-import { provided, providedReadUser, providedUrl } from '../options.ts';
+import {
+	isEnabled,
+	provided,
+	providedReadUser,
+	providedUrl
+} from '../options.ts';
 
 // The shape `cohortMatrix` (in plan.ts) emits for one surviving cohort: every
 // array is parallel, indexed the same as `attrs`. `queryInstallables` and
@@ -65,7 +70,7 @@ const cohortMatrixEntrySchema = z
 
 type CohortMatrixEntry = z.output<typeof cohortMatrixEntrySchema>;
 
-interface CohortMember {
+export interface CohortMember {
 	readonly attr: string;
 	/** The flake-reference form `nix build` resolves directly. */
 	readonly installable: string;
@@ -195,6 +200,10 @@ export interface BuildCohortOptions {
 	readonly readPassword?: string;
 	readonly maxJobs?: string;
 	readonly store?: string;
+	readonly push?: string;
+	readonly runRoot?: string;
+	readonly runRootTtl?: string;
+	readonly receiptFile?: string;
 	readonly targetPathsFile?: string;
 	readonly intermediatePathsFile?: string;
 	readonly referencePathsFile?: string;
@@ -214,6 +223,10 @@ export interface BuildCohortInputs {
 	readonly readPassword: string;
 	readonly maxJobs: string;
 	readonly store: string;
+	readonly push: boolean;
+	readonly runRoot: string;
+	readonly runRootTtl: string;
+	readonly receiptFile: string;
 	readonly targetPathsFile: string;
 	readonly intermediatePathsFile: string;
 	readonly referencePathsFile: string;
@@ -280,6 +293,25 @@ export function resolveBuildCohortInputs(
 		);
 	}
 
+	const maxJobs = provided(options.maxJobs) ?? '';
+
+	if (maxJobs !== '' && !/^\d+$/u.test(maxJobs)) {
+		throw new InvalidInputError(
+			'max-jobs',
+			'max-jobs must be a non-negative integer'
+		);
+	}
+
+	const runRoot = provided(options.runRoot) ?? '';
+	const runRootTtl = provided(options.runRootTtl) ?? '';
+
+	if (runRootTtl !== '' && runRoot === '') {
+		throw new InvalidInputError(
+			'run-root-ttl',
+			'run-root-ttl requires run-root'
+		);
+	}
+
 	const runnerTemporary = requireEnvironment(environment, 'RUNNER_TEMP');
 	const outputPath = (name: string, provided_: string | undefined): string =>
 		path.resolve(
@@ -296,8 +328,12 @@ export function resolveBuildCohortInputs(
 		audience: provided(options.audience) ?? '',
 		readUser,
 		readPassword,
-		maxJobs: provided(options.maxJobs) ?? '',
+		maxJobs,
 		store: provided(options.store) ?? '',
+		push: isEnabled('push', options.push, false),
+		runRoot,
+		runRootTtl,
+		receiptFile: outputPath('receipt.json', options.receiptFile),
 		targetPathsFile: outputPath('target-paths.txt', options.targetPathsFile),
 		intermediatePathsFile: outputPath(
 			'intermediate-paths.txt',
@@ -349,6 +385,20 @@ export function registerBuildCohortCommand(
 		.option(
 			'--store <uri>',
 			'remote ssh-ng store the plan and the build run against'
+		)
+		.option(
+			'--push <boolean>',
+			'publish the cohort: stream the build through cupboard build-push and set the target roots (true or false)',
+			'false'
+		)
+		.option(
+			'--run-root <name>',
+			'run root every published path joins as it commits'
+		)
+		.option('--run-root-ttl <ttl>', 'expire the run root after this duration')
+		.option(
+			'--receipt-file <path>',
+			'where to write the cupboard build-push receipt'
 		)
 		.option(
 			'--target-paths-file <path>',
@@ -414,6 +464,26 @@ export async function buildCohortAction(
 		...unqueryable.map((member) => member.installable)
 	];
 
+	// Streaming supervision runs through the local daemon's post-build hook,
+	// so a remote-store cohort keeps its plain remote build and publishes once
+	// the build is over.
+	const isStreamed =
+		inputs.push && inputs.store === '' && buildInstallables.length > 0;
+	const receiptFile = isStreamed ? inputs.receiptFile : '';
+
+	if (isStreamed) {
+		await runBuildPushCohort(
+			inputs,
+			buildInstallables,
+			environment,
+			runCupboard,
+			dependencies.cupboardRunDependencies
+		);
+	}
+
+	// For a streamed cohort the build is already realised, so this invocation
+	// resolves the targets' own output paths and pins them with out-links until
+	// the roots are set; for an unstreamed cohort it is the build itself.
 	const built =
 		buildInstallables.length === 0
 			? []
@@ -453,6 +523,17 @@ export async function buildCohortAction(
 		)}\n`
 	);
 
+	if (inputs.push) {
+		await publishCohort(
+			inputs,
+			members,
+			{ targetPaths, intermediatePaths, referencePaths },
+			environment,
+			runCupboard,
+			dependencies.cupboardRunDependencies
+		);
+	}
+
 	await setOutput(environment, 'target-paths-file', inputs.targetPathsFile);
 	await setOutput(
 		environment,
@@ -466,6 +547,259 @@ export async function buildCohortAction(
 	);
 	await setOutput(environment, 'left-upstream-file', inputs.leftUpstreamFile);
 	await setOutput(environment, 'counts-file', inputs.countsFile);
+	await setOutput(environment, 'receipt-file', receiptFile);
+}
+
+/**
+ * The cohorts file one supervised `cupboard build-push` run consumes: the
+ * whole build set as one constructed nix invocation, so the build keeps
+ * cross-target work sharing, with the attempt loop, local re-verification of
+ * remotely built derivations, and `--keep-going` the way the fan-out's build
+ * supervision ran.
+ */
+export function buildPushCohortsFile(
+	installables: readonly string[],
+	maxJobs: string
+): { readonly cohorts: readonly Record<string, unknown>[] } {
+	return {
+		cohorts: [
+			{
+				installables: [...installables],
+				verifyRebuilds: true,
+				keepGoing: true,
+				...(maxJobs !== '' && { maxJobs: Number(maxJobs) })
+			}
+		]
+	};
+}
+
+/**
+ * The `cupboard build-push` argv for one streamed cohort build. The run
+ * publishes without a target root: a root's declared list must also name its
+ * attach-only and reference targets, so the roots are set by the per-group
+ * pushes once every target path is known.
+ */
+export function cohortBuildPushArguments(
+	inputs: Pick<
+		BuildCohortInputs,
+		'url' | 'audience' | 'cache' | 'runRoot' | 'runRootTtl' | 'receiptFile'
+	>,
+	cohortsFile: string
+): readonly string[] {
+	const arguments_ = [
+		'--no-colour',
+		'build-push',
+		canonicalHref(inputs.url),
+		'--github-oidc',
+		'--no-retain',
+		'--cohorts-file',
+		cohortsFile,
+		'--receipt-file',
+		inputs.receiptFile
+	];
+
+	if (inputs.audience !== '') {
+		arguments_.push('--audience', inputs.audience);
+	}
+
+	if (inputs.cache !== '') {
+		arguments_.push('--cache', inputs.cache);
+	}
+
+	if (inputs.runRoot !== '') {
+		arguments_.push('--run-root', inputs.runRoot);
+	}
+
+	if (inputs.runRootTtl !== '') {
+		arguments_.push('--run-root-ttl', inputs.runRootTtl);
+	}
+
+	return arguments_;
+}
+
+async function runBuildPushCohort(
+	inputs: BuildCohortInputs,
+	buildInstallables: readonly string[],
+	environment: Environment,
+	runCupboard: typeof defaultRunCupboard,
+	cupboardRunDependencies: CupboardRunDependencies | undefined
+): Promise<void> {
+	const runnerTemporary = requireEnvironment(environment, 'RUNNER_TEMP');
+	const cohortsFile = path.join(
+		runnerTemporary,
+		`cupboard-build-cohorts-${inputs.cohort.key}.json`
+	);
+
+	await writeFile(
+		cohortsFile,
+		`${JSON.stringify(buildPushCohortsFile(buildInstallables, inputs.maxJobs), undefined, 2)}\n`
+	);
+
+	await runCupboard(
+		inputs.cupboardPath,
+		cohortBuildPushArguments(inputs, cohortsFile),
+		environment,
+		cupboardRunDependencies
+	);
+}
+
+/** One root group's own target paths, from a cohort declaring several roots. */
+export interface CohortRootGroup {
+	readonly root: string;
+	readonly paths: readonly string[];
+}
+
+/**
+ * Groups a cohort's flat target paths by root. A target's evaluated expected
+ * path, when known, names which root a path belongs to; a path with no
+ * matching expected path (an unevaluated or floating-output member, possible
+ * only in an opt-in multi-target cohort) joins the cohort's first root. A
+ * single-target cohort, the default, always has exactly one root.
+ */
+export function rootGroups(
+	members: readonly CohortMember[],
+	roots: readonly string[],
+	targetPaths: readonly string[]
+): readonly CohortRootGroup[] {
+	const pathToRoot = new Map(
+		members.flatMap((member) =>
+			member.expectedPath === undefined
+				? []
+				: [[member.expectedPath, member.root] as const]
+		)
+	);
+	const uniqueRoots = [...new Set(roots)];
+	const [firstRoot] = uniqueRoots;
+
+	if (firstRoot === undefined) {
+		return [];
+	}
+
+	const assigned = targetPaths.map((targetPath) => ({
+		path: targetPath,
+		root: pathToRoot.get(targetPath) ?? firstRoot
+	}));
+
+	return uniqueRoots
+		.map((root) => ({
+			root,
+			paths: assigned
+				.filter((entry) => entry.root === root)
+				.map((entry) => entry.path)
+		}))
+		.filter((group) => group.paths.length > 0);
+}
+
+interface CohortPushExtras {
+	readonly intermediatePathsFile: string;
+	readonly referencePathsFile: string;
+	readonly referenceSource: string;
+}
+
+/**
+ * The `cupboard push` argv for one root group: the group's every target path,
+ * built and attach-only alike, so the root's all-or-nothing replacement names
+ * the full declared list. A streamed cohort's built paths negotiate as
+ * already-present skips, so this invocation is the root setting, not a second
+ * upload.
+ */
+export function cohortPushArguments(
+	inputs: Pick<
+		BuildCohortInputs,
+		'url' | 'audience' | 'cache' | 'store' | 'ttl' | 'runRoot' | 'runRootTtl'
+	>,
+	group: CohortRootGroup,
+	extras: CohortPushExtras
+): readonly string[] {
+	const arguments_ = [
+		'--no-colour',
+		'push',
+		canonicalHref(inputs.url),
+		...group.paths,
+		'--github-oidc',
+		'--root',
+		group.root
+	];
+
+	if (inputs.audience !== '') {
+		arguments_.push('--audience', inputs.audience);
+	}
+
+	if (inputs.cache !== '') {
+		arguments_.push('--cache', inputs.cache);
+	}
+
+	if (inputs.store !== '') {
+		arguments_.push('--store', inputs.store);
+	}
+
+	if (inputs.ttl !== '') {
+		arguments_.push('--ttl', inputs.ttl);
+	}
+
+	if (extras.intermediatePathsFile !== '') {
+		arguments_.push('--intermediate-paths-file', extras.intermediatePathsFile);
+	}
+
+	if (extras.referencePathsFile !== '') {
+		arguments_.push(
+			'--reference-paths-file',
+			extras.referencePathsFile,
+			'--reference-source',
+			extras.referenceSource
+		);
+	}
+
+	if (inputs.runRoot !== '') {
+		arguments_.push('--run-root', inputs.runRoot);
+	}
+
+	if (inputs.runRootTtl !== '') {
+		arguments_.push('--run-root-ttl', inputs.runRootTtl);
+	}
+
+	return arguments_;
+}
+
+// One push per root group, the cohort-wide intermediate and reference paths
+// riding the first: they are not scoped to any one target root, and a later
+// group would otherwise republish them. Publish-by-reference paths only ever
+// come from the configured reuse view, whose served endpoint is their source.
+async function publishCohort(
+	inputs: BuildCohortInputs,
+	members: readonly CohortMember[],
+	paths: {
+		readonly targetPaths: readonly string[];
+		readonly intermediatePaths: readonly string[];
+		readonly referencePaths: readonly string[];
+	},
+	environment: Environment,
+	runCupboard: typeof defaultRunCupboard,
+	cupboardRunDependencies: CupboardRunDependencies | undefined
+): Promise<void> {
+	const groups = rootGroups(members, inputs.cohort.roots, paths.targetPaths);
+	const referenceSource =
+		inputs.reuseView === ''
+			? ''
+			: `${canonicalHref(inputs.url)}/reuse/${inputs.reuseView}`;
+	const hasReference =
+		referenceSource !== '' && paths.referencePaths.length > 0;
+	const hasIntermediates = paths.intermediatePaths.length > 0;
+
+	for (const [index, group] of groups.entries()) {
+		await runCupboard(
+			inputs.cupboardPath,
+			cohortPushArguments(inputs, group, {
+				intermediatePathsFile:
+					index === 0 && hasIntermediates ? inputs.intermediatePathsFile : '',
+				referencePathsFile:
+					index === 0 && hasReference ? inputs.referencePathsFile : '',
+				referenceSource: index === 0 && hasReference ? referenceSource : ''
+			}),
+			environment,
+			cupboardRunDependencies
+		);
+	}
 }
 
 function partitionCounts(result: PlanCohortResultData): {
