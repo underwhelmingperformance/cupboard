@@ -6,6 +6,7 @@ import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import type { StorePathString } from '@cupboard/nix-store/scalars';
 
 import {
+	type NixBuildResult,
 	type NixDerivedPathString,
 	type NixMissingPartition,
 	type NixStoreClient,
@@ -145,6 +146,14 @@ export class NixLocalStoreClient implements NixStoreClient {
 
 	narFromPath(_storePath: StorePathString): AsyncIterable<Uint8Array> {
 		throw new UnsupportedNixStoreOperationError('NAR streaming');
+	}
+
+	buildPathsWithResults(
+		_targets: readonly NixDerivedPathString[]
+	): Promise<readonly NixBuildResult[]> {
+		return Promise.reject(
+			new UnsupportedNixStoreOperationError('build requests')
+		);
 	}
 }
 

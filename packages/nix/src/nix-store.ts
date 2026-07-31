@@ -44,6 +44,43 @@ export interface NixMissingPartition {
 	readonly narSize: number;
 }
 
+/**
+ * How a build request settled for one derived path. A settled target carries
+ * the realised outputs the daemon reported by name; a failed one carries the
+ * daemon's message.
+ */
+export type NixBuildOutcome =
+	| {
+			readonly kind:
+				'built' | 'substituted' | 'already-valid' | 'resolves-to-already-valid';
+			readonly outputs: Readonly<Record<string, StorePathString>>;
+	  }
+	| {
+			readonly kind:
+				| 'permanent-failure'
+				| 'input-rejected'
+				| 'output-rejected'
+				| 'transient-failure'
+				| 'cached-failure'
+				| 'timed-out'
+				| 'misc-failure'
+				| 'dependency-failed'
+				| 'log-limit-exceeded'
+				| 'not-deterministic'
+				| 'no-substituters';
+			readonly message: string;
+	  };
+
+/** One target's build result, keyed by the derived path that named it. */
+export interface NixBuildResult {
+	readonly target: NixDerivedPathString;
+	readonly outcome: NixBuildOutcome;
+	readonly timesBuilt: number;
+	readonly nonDeterministic: boolean;
+	readonly startTime: number;
+	readonly stopTime: number;
+}
+
 /** Operations provided by a selected Nix store backend. */
 export interface NixStoreClient {
 	resolveClosure(
@@ -100,6 +137,14 @@ export interface NixStoreClient {
 	 * it.
 	 */
 	narFromPath(storePath: StorePathString): AsyncIterable<Uint8Array>;
+	/**
+	 * Build the given targets and report how each one settled: exact
+	 * per-target outcomes, with the realised outputs where the store reports
+	 * them.
+	 */
+	buildPathsWithResults(
+		targets: readonly NixDerivedPathString[]
+	): Promise<readonly NixBuildResult[]>;
 }
 
 /**

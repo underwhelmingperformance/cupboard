@@ -170,6 +170,11 @@ describe('NixLocalStoreClient', () => {
 			name: 'the realisation partition',
 			operation: 'missing-path queries',
 			query: () => client.queryMissing([pathA])
+		},
+		{
+			name: 'a build request',
+			operation: 'build requests',
+			query: () => client.buildPathsWithResults([pathA])
 		}
 	])('cannot query $name without a daemon', async ({ operation, query }) => {
 		let outcome:

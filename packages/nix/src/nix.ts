@@ -7,6 +7,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 
 import {
+	type NixBuildResult,
 	type NixDerivedPathString,
 	type NixMissingPartition,
 	type NixStoreClient,
@@ -166,6 +167,16 @@ export class Nix {
 	/** The NAR serialisation of the store path the argument names. */
 	narFromPath(path: string): AsyncIterable<Uint8Array> {
 		return this.store.narFromPath(this.toStorePath(path));
+	}
+
+	/**
+	 * Build the given targets and report how each settled. Targets pass
+	 * through unchanged, the way {@link queryMissing}'s do.
+	 */
+	async buildPathsWithResults(
+		targets: readonly NixDerivedPathString[]
+	): Promise<readonly NixBuildResult[]> {
+		return this.store.buildPathsWithResults(targets);
 	}
 
 	/** The registered output paths of the given derivations, sorted. */

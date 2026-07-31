@@ -35,6 +35,7 @@ export class FakeDaemonTransport implements NixDaemonTransport {
 			readonly features?: readonly string[];
 			readonly expectedPathInfoBatch?: readonly string[];
 			readonly nar?: FakeNar;
+			readonly builds?: FakeBuilds;
 			readonly beforeOperation?: (request: Buffer) => Promise<void>;
 		} = {}
 	) {}
@@ -172,6 +173,28 @@ export interface FakeNar {
 	readonly frames: readonly Buffer[];
 }
 
+export interface FakeBuilds {
+	readonly expectedTargets: readonly string[];
+	readonly results: readonly FakeBuildResult[];
+}
+
+export interface FakeBuildResult {
+	/** The derived path in its wire spelling, with `!` before outputs. */
+	readonly target: string;
+	readonly status: number;
+	readonly errorMessage: string;
+	readonly timesBuilt: number;
+	readonly nonDeterministic: boolean;
+	readonly startTime: number;
+	readonly stopTime: number;
+	readonly cpuUserMicroseconds?: number;
+	readonly cpuSystemMicroseconds?: number;
+	readonly builtOutputs: readonly {
+		readonly id: string;
+		readonly realisation: string;
+	}[];
+}
+
 interface FakeSubstitutable {
 	readonly expectedPaths: readonly string[];
 	readonly paths: readonly string[];
@@ -199,10 +222,15 @@ function daemonOperationResponse(
 		readonly missing?: FakeMissing;
 		readonly expectedPathInfoBatch?: readonly string[];
 		readonly nar?: FakeNar;
+		readonly builds?: FakeBuilds;
 	},
 	temporaryRoots: string[]
 ): Buffer | readonly Buffer[] {
 	const operation = Number(request.readBigUInt64LE(0));
+
+	if (operation === 46) {
+		return buildPathsWithResultsResponse(request, options.builds);
+	}
 
 	if (operation === 11) {
 		temporaryRoots.push(readRequestStorePath(request));
@@ -284,6 +312,57 @@ function queryPathInfosResponse(
 	}
 
 	return response.bytes();
+}
+
+function buildPathsWithResultsResponse(
+	request: Buffer,
+	builds: FakeBuilds | undefined
+): Buffer {
+	if (builds === undefined) {
+		throw new Error('Unexpected BuildPathsWithResults request');
+	}
+
+	expect(readRequestStringSet(request)).toStrictEqual(builds.expectedTargets);
+
+	const buildModeOffset = request.byteLength - 8;
+	expect(Number(request.readBigUInt64LE(buildModeOffset))).toBe(0);
+
+	const response = new ProtocolWriter();
+	response.writeInteger(0x61_6c_74_73);
+	response.writeInteger(builds.results.length);
+
+	for (const result of builds.results) {
+		response.writeString(result.target);
+		response.writeInteger(result.status);
+		response.writeString(result.errorMessage);
+		response.writeInteger(result.timesBuilt);
+		response.writeBoolean(result.nonDeterministic);
+		response.writeInteger(result.startTime);
+		response.writeInteger(result.stopTime);
+		writeOptionalInteger(response, result.cpuUserMicroseconds);
+		writeOptionalInteger(response, result.cpuSystemMicroseconds);
+		response.writeInteger(result.builtOutputs.length);
+
+		for (const output of result.builtOutputs) {
+			response.writeString(output.id);
+			response.writeString(output.realisation);
+		}
+	}
+
+	return response.bytes();
+}
+
+function writeOptionalInteger(
+	response: ProtocolWriter,
+	value: number | undefined
+): void {
+	if (value === undefined) {
+		response.writeBoolean(false);
+		return;
+	}
+
+	response.writeBoolean(true);
+	response.writeInteger(value);
 }
 
 function queryMissingResponse(

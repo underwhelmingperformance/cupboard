@@ -51,6 +51,7 @@ interface RecordingStore extends NixStoreClient {
 	readonly missingBatches: string[][];
 	readonly infoBatches: string[][];
 	readonly narRequests: string[];
+	readonly buildBatches: string[][];
 	readonly closures: string[][];
 }
 
@@ -62,6 +63,7 @@ function recordingStore(): RecordingStore {
 	const missingBatches: string[][] = [];
 	const infoBatches: string[][] = [];
 	const narRequests: string[] = [];
+	const buildBatches: string[][] = [];
 	const closures: string[][] = [];
 
 	return {
@@ -72,6 +74,7 @@ function recordingStore(): RecordingStore {
 		missingBatches,
 		infoBatches,
 		narRequests,
+		buildBatches,
 		closures,
 		queryPathInfo: (storePath) => {
 			queried.push(storePath);
@@ -118,6 +121,11 @@ function recordingStore(): RecordingStore {
 			narRequests.push(storePath);
 
 			return byteChunks(Buffer.from('nar'));
+		},
+		buildPathsWithResults: (targets) => {
+			buildBatches.push([...targets]);
+
+			return Promise.resolve([]);
 		},
 		resolveClosure: (storePaths) => {
 			closures.push([...storePaths]);
@@ -386,5 +394,13 @@ describe('Nix queries', () => {
 		expect(store.missingBatches).toStrictEqual([
 			[`${appPath}^out`, libraryPath]
 		]);
+	});
+
+	it('passes build targets through unchanged', async () => {
+		const store = recordingStore();
+
+		await nixOver(store).buildPathsWithResults([`${appPath}^out`, libraryPath]);
+
+		expect(store.buildBatches).toStrictEqual([[`${appPath}^out`, libraryPath]]);
 	});
 });

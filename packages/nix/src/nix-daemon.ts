@@ -6,6 +6,8 @@ import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 import {
 	defaultClosureConcurrency,
+	type NixBuildOutcome,
+	type NixBuildResult,
 	type NixDerivedPathString,
 	type NixMissingPartition,
 	type NixStoreClient,
@@ -35,6 +37,34 @@ const opNarFromPath = 38;
 const opQueryMissing = 40;
 const opQueryDerivationOutputMap = 41;
 const opQueryPathInfos = 50;
+const opBuildPathsWithResults = 46;
+
+const buildModeNormal = 0;
+
+// The keyed results encoding exists from worker protocol 1.34; the handshake
+// already refuses daemons below 1.38, so this bound documents the operation's
+// own requirement.
+const minimumBuildResultsMinor = 34;
+
+// BuildResult::Status wire values in declaration order; `cached-failure` is
+// reserved by the protocol.
+const buildStatusKinds = [
+	'built',
+	'substituted',
+	'already-valid',
+	'permanent-failure',
+	'input-rejected',
+	'output-rejected',
+	'transient-failure',
+	'cached-failure',
+	'timed-out',
+	'misc-failure',
+	'dependency-failed',
+	'log-limit-exceeded',
+	'not-deterministic',
+	'resolves-to-already-valid',
+	'no-substituters'
+] as const;
 
 // The NAR grammar's fixed words are all at most as long as its magic; a
 // structural token above that length is malformed.
@@ -184,6 +214,18 @@ export class InvalidNixDaemonNarError extends NixDaemonError {
 	constructor(public readonly reason: string) {
 		super(`The daemon sent bytes that do not form a NAR: ${reason}`);
 		this.name = 'InvalidNixDaemonNarError';
+	}
+}
+
+export class UnsupportedNixDaemonOperationError extends NixDaemonError {
+	constructor(
+		public readonly operation: string,
+		public readonly version: NixDaemonProtocolVersion
+	) {
+		super(
+			`The daemon's protocol ${String(version.major)}.${String(version.minor)} does not support ${operation}`
+		);
+		this.name = 'UnsupportedNixDaemonOperationError';
 	}
 }
 
@@ -346,6 +388,27 @@ export class NixDaemonStoreClient implements NixStoreClient {
 
 		try {
 			yield* connection.narFromPath(storePath);
+		} finally {
+			await connection.close();
+		}
+	}
+
+	/**
+	 * Build the given targets and report how each settled: exact per-target
+	 * outcomes with the realised outputs where the daemon reports them, which
+	 * is what remote-store reconciliation reads after a build.
+	 */
+	async buildPathsWithResults(
+		targets: readonly NixDerivedPathString[]
+	): Promise<readonly NixBuildResult[]> {
+		if (targets.length === 0) {
+			return [];
+		}
+
+		const connection = await this.openConnection();
+
+		try {
+			return await connection.buildPathsWithResults(sortedUnique(targets));
 		} finally {
 			await connection.close();
 		}
@@ -926,6 +989,54 @@ class NixDaemonConnection {
 		return paths.map((path) => requireStorePath(path));
 	}
 
+	// One keyed build result at protocol 1.38: the derived path, the status
+	// and message, the 1.29 timing fields, the 1.37 optional cpu times, and
+	// the built outputs map of realisations.
+	private async readKeyedBuildResult(): Promise<NixBuildResult> {
+		const target = modernDerivedPath(await this.readString());
+		const status = await this.readInteger();
+		const message = await this.readString();
+		const timesBuilt = await this.readInteger();
+		const isNonDeterministic = await this.readBoolean();
+		const startTime = await this.readInteger();
+		const stopTime = await this.readInteger();
+		await this.readOptionalInteger();
+		await this.readOptionalInteger();
+		const outputs = await this.readBuiltOutputs();
+
+		return {
+			target,
+			outcome: buildOutcome(status, message, outputs),
+			timesBuilt,
+			nonDeterministic: isNonDeterministic,
+			startTime,
+			stopTime
+		};
+	}
+
+	private async readOptionalInteger(): Promise<number | undefined> {
+		const isPresent = await this.readBoolean();
+
+		return isPresent ? this.readInteger() : undefined;
+	}
+
+	// The built outputs arrive as a map of derivation output ids
+	// (`<drvhash>!<name>`) to realisations serialised as JSON; the output
+	// name and the realised store path are what a build outcome carries.
+	private async readBuiltOutputs(): Promise<Record<string, StorePathString>> {
+		const count = await this.readInteger();
+		const outputs: Record<string, StorePathString> = {};
+
+		for (let index = 0; index < count; index += 1) {
+			const id = await this.readString();
+			const realisation = await this.readString();
+			outputs[outputNameFromDrvOutputId(id)] =
+				realisationOutputPath(realisation);
+		}
+
+		return outputs;
+	}
+
 	private async readString(): Promise<string> {
 		const length = await this.readInteger();
 		const bytes =
@@ -1220,6 +1331,34 @@ class NixDaemonConnection {
 		yield* this.copyNar();
 	}
 
+	async buildPathsWithResults(
+		targets: readonly NixDerivedPathString[]
+	): Promise<readonly NixBuildResult[]> {
+		if (this.version.minor < minimumBuildResultsMinor) {
+			throw new UnsupportedNixDaemonOperationError(
+				'BuildPathsWithResults',
+				this.version
+			);
+		}
+
+		const request = new NixDaemonWriter();
+		request.writeInteger(opBuildPathsWithResults);
+		request.writeStringSet(targets.map((target) => legacyDerivedPath(target)));
+		request.writeInteger(buildModeNormal);
+
+		await this.transport.write(request.bytes());
+		await this.processStderr();
+
+		const count = await this.readInteger();
+		const results: NixBuildResult[] = [];
+
+		for (let index = 0; index < count; index += 1) {
+			results.push(await this.readKeyedBuildResult());
+		}
+
+		return results;
+	}
+
 	async queryMissing(
 		targets: readonly NixDerivedPathString[]
 	): Promise<NixMissingPartition> {
@@ -1508,6 +1647,82 @@ function legacyDerivedPath(target: NixDerivedPathString): string {
 	}
 
 	return `${target.slice(0, separator)}!${target.slice(separator + 1)}`;
+}
+
+function modernDerivedPath(wire: string): NixDerivedPathString {
+	const separator = wire.indexOf('!');
+
+	if (separator === -1) {
+		return requireStorePath(wire);
+	}
+
+	const drvPath = requireStorePath(wire.slice(0, separator));
+
+	return `${drvPath}^${wire.slice(separator + 1)}`;
+}
+
+function outputNameFromDrvOutputId(id: string): string {
+	const separator = id.indexOf('!');
+
+	if (separator === -1) {
+		throw new NixDaemonRemoteError(`malformed derivation output id: ${id}`);
+	}
+
+	return id.slice(separator + 1);
+}
+
+function realisationOutputPath(json: string): StorePathString {
+	let parsed: unknown;
+
+	try {
+		parsed = JSON.parse(json);
+	} catch {
+		throw new NixDaemonRemoteError('realisation that is not JSON');
+	}
+
+	if (
+		parsed === null ||
+		typeof parsed !== 'object' ||
+		!('outPath' in parsed) ||
+		typeof parsed.outPath !== 'string'
+	) {
+		throw new NixDaemonRemoteError('realisation without an outPath');
+	}
+
+	return requireStorePath(parsed.outPath);
+}
+
+const buildSuccessKinds = [
+	'built',
+	'substituted',
+	'already-valid',
+	'resolves-to-already-valid'
+] as const;
+
+function isBuildSuccessKind(
+	kind: (typeof buildStatusKinds)[number]
+): kind is (typeof buildSuccessKinds)[number] {
+	const kinds: readonly string[] = buildSuccessKinds;
+
+	return kinds.includes(kind);
+}
+
+function buildOutcome(
+	status: number,
+	message: string,
+	outputs: Readonly<Record<string, StorePathString>>
+): NixBuildOutcome {
+	const kind = buildStatusKinds[status];
+
+	if (kind === undefined) {
+		throw new NixDaemonRemoteError(`unknown build status ${String(status)}`);
+	}
+
+	if (isBuildSuccessKind(kind)) {
+		return { kind, outputs };
+	}
+
+	return { kind, message };
 }
 
 // Worker-protocol trust values: 1 trusted, 2 not trusted, 0 unset.
