@@ -9,7 +9,11 @@ import type {
 	StorePathString,
 	TtlSeconds
 } from '@cupboard/nix-store/scalars';
-import type { BuildSubject, InvocationId } from '@cupboard/protocol/build';
+import type {
+	BuildSubject,
+	InvocationId,
+	ParsedBuildReceipt
+} from '@cupboard/protocol/build';
 import {
 	type BuildSummary,
 	buildSummaryResultKind,
@@ -169,13 +173,14 @@ export function childExitCode(exit: ChildExit): number {
  * contract. A failed build exits with the child's own status; a successful
  * build with failed publication or retention exits with a classified sysexits
  * code, never a bare 1, so a cache failure can never present as a build
- * failure or vice versa.
+ * failure or vice versa. A settled run resolves to its reconciled receipt, so
+ * a cohort sequence can aggregate the receipts it ran.
  */
 export async function runBuildPush(
 	options: BuildPushRunOptions,
 	reporter: Reporter,
 	dependencies: BuildPushDependencies
-): Promise<void> {
+): Promise<ParsedBuildReceipt> {
 	const preflight = await dependencies.preflight();
 	const plan = preflight.runtimePlan;
 
@@ -243,7 +248,7 @@ export async function runBuildPush(
 			exit
 		);
 
-		await settleRun(options, reporter, dependencies, {
+		return await settleRun(options, reporter, dependencies, {
 			exit,
 			batcher,
 			maxQueueDepth,
@@ -424,7 +429,7 @@ async function settleRun(
 	reporter: Reporter,
 	dependencies: BuildPushDependencies,
 	facts: RunFacts
-): Promise<void> {
+): Promise<ParsedBuildReceipt> {
 	const { exit, batcher } = facts;
 
 	try {
@@ -515,6 +520,8 @@ async function settleRun(
 
 		reportSummary(reporter, dependencies, facts, targets.length, result);
 		raiseExitContract(exit, result);
+
+		return result.receipt;
 	} catch (error) {
 		if (
 			isAbortError(error) ||

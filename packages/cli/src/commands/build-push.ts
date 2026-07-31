@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 
 import {
 	createNixDaemonStoreClient,
@@ -17,12 +17,18 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { invocationIdSchema } from '@cupboard/protocol/build';
 import type { Command } from 'commander';
+import { z } from 'zod';
 
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { pushAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
-import { runBuildPush } from '../build-push/build-push.ts';
+import {
+	type BuildInvocation,
+	runBuildPush
+} from '../build-push/build-push.ts';
+import { runCohortSequence } from '../build-push/cohorts.ts';
 import { preflightBuildPush } from '../build-push/preflight.ts';
+import type { ChildCommand } from '../build-push/supervisor.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient, storedCacheFor } from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
@@ -31,7 +37,11 @@ import {
 	parseWaitTimeout,
 	type WaitTimeoutSeconds
 } from '../duration.ts';
-import { InvalidUploadConcurrencyError } from '../errors.ts';
+import {
+	CohortInputError,
+	CohortsFileInvalidError,
+	InvalidUploadConcurrencyError
+} from '../errors.ts';
 import { pushClientFor } from '../push/push-client.ts';
 import { parseRootName } from '../root-name.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
@@ -53,6 +63,77 @@ interface BuildPushOptions {
 	readonly waitTimeout?: WaitTimeoutSeconds;
 	readonly uploadConcurrency?: number;
 	readonly receiptFile?: string;
+	readonly cohortsFile?: string;
+	readonly gcBetweenCohorts?: boolean;
+	readonly keepGoingCohorts?: boolean;
+}
+
+// The cohorts file is deliberately small: each cohort is either a child
+// command supervised unchanged, or the installables of a constructed nix
+// invocation with its attempt settings.
+const commandCohortSchema = z.strictObject({
+	command: z.array(z.string().min(1)).min(1)
+});
+const constructedCohortSchema = z.strictObject({
+	installables: z.array(z.string().min(1)).min(1),
+	attempts: z.number().int().positive().optional(),
+	verifyRebuilds: z.boolean().optional(),
+	keepGoing: z.boolean().optional(),
+	maxJobs: z.number().int().positive().optional()
+});
+const cohortsFileSchema = z.strictObject({
+	cohorts: z
+		.array(z.union([commandCohortSchema, constructedCohortSchema]))
+		.min(1)
+});
+
+function childCommand(parts: readonly string[]): ChildCommand {
+	const [executable, ...rest] = parts;
+
+	if (executable === undefined) {
+		throw new CohortsFileInvalidError();
+	}
+
+	return [executable, ...rest];
+}
+
+/**
+ * Parses a cohorts file's contents into the build invocations it names, in
+ * order. The file is transport only; a body that is not JSON of the small
+ * cohort shape refuses with {@link CohortsFileInvalidError}.
+ */
+export function parseCohortsFile(contents: string): readonly BuildInvocation[] {
+	let json: unknown;
+	try {
+		json = JSON.parse(contents);
+	} catch (error) {
+		throw new CohortsFileInvalidError({ cause: error });
+	}
+
+	const parsed = cohortsFileSchema.safeParse(json);
+
+	if (!parsed.success) {
+		throw new CohortsFileInvalidError({ cause: parsed.error });
+	}
+
+	return parsed.data.cohorts.map((cohort): BuildInvocation => {
+		if ('command' in cohort) {
+			return { kind: 'command', command: childCommand(cohort.command) };
+		}
+
+		return {
+			kind: 'constructed',
+			build: {
+				installables: cohort.installables,
+				...(cohort.attempts !== undefined && { attempts: cohort.attempts }),
+				...(cohort.verifyRebuilds !== undefined && {
+					verifyRebuilds: cohort.verifyRebuilds
+				}),
+				...(cohort.keepGoing !== undefined && { keepGoing: cohort.keepGoing }),
+				...(cohort.maxJobs !== undefined && { maxJobs: cohort.maxJobs })
+			}
+		};
+	});
 }
 
 function parseUploadConcurrency(value: string): number {
@@ -91,8 +172,8 @@ export function registerBuildPushCommand(
 		.usage('<url> [options] -- <build command...>')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument(
-			'<command...>',
-			'the build command to run, after a -- separator (e.g. nix build --no-link .#target)'
+			'[command...]',
+			'the build command to run, after a -- separator (e.g. nix build --no-link .#target); replaced by --cohorts-file for a multi-cohort run'
 		)
 		.option(
 			'--github-oidc',
@@ -152,7 +233,19 @@ export function registerBuildPushCommand(
 		)
 		.option(
 			'--receipt-file <path>',
-			'write the build receipt (JSON) to this file'
+			'write the build receipt (JSON) to this file; a multi-cohort run writes {"receipts": [...]} in cohort order'
+		)
+		.option(
+			'--cohorts-file <path>',
+			'JSON file naming the cohorts to build in order, each {"command": [...]} or {"installables": [...]}; replaces the -- build command'
+		)
+		.option(
+			'--gc-between-cohorts',
+			'collect the local Nix store between cohorts, so a later cohort substitutes the earlier shared work from the cache (default: off; nothing is collected after the last cohort)'
+		)
+		.option(
+			'--keep-going-cohorts',
+			'continue with the remaining cohorts after one fails; the run still exits with the first failed cohort status'
 		)
 		.addHelpText(
 			'after',
@@ -179,11 +272,16 @@ export function registerBuildPushCommand(
 			async (url: URL, commandParts: string[], options: BuildPushOptions) => {
 				validateRetentionChoice(options);
 
-				const [executable, ...childArguments] = commandParts;
-
-				if (executable === undefined) {
-					return;
+				// Exactly one build input: a -- command builds a single cohort, and a
+				// cohorts file names the multi-cohort form.
+				if (commandParts.length > 0 === (options.cohortsFile !== undefined)) {
+					throw new CohortInputError();
 				}
+
+				const cohorts: readonly BuildInvocation[] =
+					options.cohortsFile === undefined
+						? [{ kind: 'command', command: childCommand(commandParts) }]
+						: parseCohortsFile(await readFile(options.cohortsFile, 'utf8'));
 
 				const intermediatePaths =
 					options.intermediatePathsFile === undefined
@@ -210,74 +308,108 @@ export function registerBuildPushCommand(
 					authorizationDetails
 				});
 
-				const invocationId = invocationIdSchema.parse(randomUUID());
 				const config = discoverNixStoreConfig();
 				const daemon = createNixDaemonStoreClient(undefined, config);
 				const nix = Nix.forStore(daemon, {
 					storeDirectory: config.storeDirectory
 				});
+				// A multi-cohort run aggregates its receipts itself, so only the
+				// single-cohort form hands the receipt file to the run.
+				const perCohortReceiptFile =
+					cohorts.length === 1 ? options.receiptFile : undefined;
 
-				await runBuildPush(
-					{
-						invocation: {
-							kind: 'command',
-							command: [executable, ...childArguments]
+				// Each cohort is its own supervising invocation, with its own
+				// identity, runtime endpoint and preflight.
+				const runCohort = (
+					invocation: BuildInvocation
+				): ReturnType<typeof runBuildPush> => {
+					const invocationId = invocationIdSchema.parse(randomUUID());
+
+					return runBuildPush(
+						{
+							invocation,
+							...(targetRoot !== undefined && { root: targetRoot }),
+							...(options.ttl !== undefined && { ttlSeconds: options.ttl }),
+							...(options.runRoot !== undefined && {
+								runRoot: {
+									name: options.runRoot,
+									...(options.runRootTtl !== undefined && {
+										ttlSeconds: options.runRootTtl
+									})
+								}
+							}),
+							...(options.closure !== undefined && {
+								closure: options.closure
+							}),
+							...(intermediatePaths !== undefined && { intermediatePaths }),
+							...(perCohortReceiptFile !== undefined && {
+								receiptFile: perCohortReceiptFile
+							}),
+							...(options.wait !== undefined && { wait: options.wait }),
+							...(options.waitTimeout !== undefined && {
+								waitTimeoutSeconds: options.waitTimeout
+							}),
+							...(options.uploadConcurrency !== undefined && {
+								uploadConcurrency: options.uploadConcurrency
+							})
 						},
-						...(targetRoot !== undefined && { root: targetRoot }),
-						...(options.ttl !== undefined && { ttlSeconds: options.ttl }),
-						...(options.runRoot !== undefined && {
-							runRoot: {
-								name: options.runRoot,
-								...(options.runRootTtl !== undefined && {
-									ttlSeconds: options.runRootTtl
-								})
-							}
+						reporter,
+						{
+							client: pushClientFor(url, token, {
+								cache: options.cache,
+								signal: programOptions.signal
+							}),
+							store: nix,
+							batchStore: {
+								withConnection: (use) => daemon.withConnection(use)
+							},
+							storeDirectory: config.storeDirectory,
+							invocationId,
+							preflight: () =>
+								preflightBuildPush({
+									config,
+									socketExists: (socketPath) => existsSync(socketPath),
+									daemonTrust: () => daemon.daemonTrust(),
+									invocationId,
+									grants: authorizationDetails,
+									cache: cacheSelector,
+									...(options.runRoot !== undefined && {
+										runRoot: options.runRoot
+									}),
+									...(targetRoot !== undefined && {
+										targetRoots: [targetRoot]
+									})
+								}),
+							resolveClosure: (paths) => nix.resolveClosure(paths)
+						}
+					);
+				};
+
+				const result = await runCohortSequence(
+					{
+						cohorts,
+						...(options.gcBetweenCohorts === true && {
+							collectBetweenCohorts: true
 						}),
-						...(options.closure !== undefined && {
-							closure: options.closure
-						}),
-						...(intermediatePaths !== undefined && { intermediatePaths }),
-						...(options.receiptFile !== undefined && {
-							receiptFile: options.receiptFile
-						}),
-						...(options.wait !== undefined && { wait: options.wait }),
-						...(options.waitTimeout !== undefined && {
-							waitTimeoutSeconds: options.waitTimeout
-						}),
-						...(options.uploadConcurrency !== undefined && {
-							uploadConcurrency: options.uploadConcurrency
+						...(options.keepGoingCohorts === true && {
+							keepGoingCohorts: true
 						})
 					},
-					reporter,
-					{
-						client: pushClientFor(url, token, {
-							cache: options.cache,
-							signal: programOptions.signal
-						}),
-						store: nix,
-						batchStore: {
-							withConnection: (use) => daemon.withConnection(use)
-						},
-						storeDirectory: config.storeDirectory,
-						invocationId,
-						preflight: () =>
-							preflightBuildPush({
-								config,
-								socketExists: (socketPath) => existsSync(socketPath),
-								daemonTrust: () => daemon.daemonTrust(),
-								invocationId,
-								grants: authorizationDetails,
-								cache: cacheSelector,
-								...(options.runRoot !== undefined && {
-									runRoot: options.runRoot
-								}),
-								...(targetRoot !== undefined && {
-									targetRoots: [targetRoot]
-								})
-							}),
-						resolveClosure: (paths) => nix.resolveClosure(paths)
-					}
+					{ runCohort }
 				);
+
+				if (cohorts.length > 1 && options.receiptFile !== undefined) {
+					await writeFile(
+						options.receiptFile,
+						`${JSON.stringify({ receipts: result.receipts }, undefined, '\t')}\n`
+					);
+				}
+
+				const [firstFailure] = result.failures;
+
+				if (firstFailure !== undefined) {
+					throw firstFailure.error;
+				}
 			}
 		);
 }

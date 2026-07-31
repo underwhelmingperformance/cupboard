@@ -1,14 +1,16 @@
-import { Command, CommanderError } from 'commander';
+import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
 
 import {
+	CohortInputError,
+	CohortsFileInvalidError,
 	InvalidUploadConcurrencyError,
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
 	RunRootTtlWithoutRunRootError
 } from '../errors.ts';
 
-import { registerBuildPushCommand } from './build-push.ts';
+import { parseCohortsFile, registerBuildPushCommand } from './build-push.ts';
 
 const tenantUrl = 'https://cupboard.example.workers.dev/t/acme';
 
@@ -103,11 +105,82 @@ describe('registerBuildPushCommand', () => {
 		{
 			name: 'a missing build command',
 			arguments_: [tenantUrl],
-			error: CommanderError
+			error: CohortInputError
+		},
+		{
+			name: 'a build command combined with a cohorts file',
+			arguments_: [
+				tenantUrl,
+				'--cohorts-file',
+				'cohorts.json',
+				'--',
+				'nix',
+				'build'
+			],
+			error: CohortInputError
 		}
 	])('rejects $name', async ({ arguments_, error }) => {
 		const result = await parseBuildPush(arguments_);
 
 		expect(result).toBeInstanceOf(error);
+	});
+});
+
+describe('parseCohortsFile', () => {
+	it('parses command and constructed cohorts in order', () => {
+		const contents = JSON.stringify({
+			cohorts: [
+				{ command: ['nix', 'build', '--no-link', '.#app'] },
+				{
+					installables: ['.#lib'],
+					attempts: 2,
+					verifyRebuilds: true,
+					keepGoing: true,
+					maxJobs: 4
+				},
+				{ installables: ['.#docs'] }
+			]
+		});
+
+		expect(parseCohortsFile(contents)).toStrictEqual([
+			{ kind: 'command', command: ['nix', 'build', '--no-link', '.#app'] },
+			{
+				kind: 'constructed',
+				build: {
+					installables: ['.#lib'],
+					attempts: 2,
+					verifyRebuilds: true,
+					keepGoing: true,
+					maxJobs: 4
+				}
+			},
+			{ kind: 'constructed', build: { installables: ['.#docs'] } }
+		]);
+	});
+
+	it.each([
+		{ name: 'a body that is not JSON', contents: 'not json' },
+		{ name: 'a body with no cohorts', contents: '{"cohorts": []}' },
+		{
+			name: 'a cohort with an empty command',
+			contents: '{"cohorts": [{"command": []}]}'
+		},
+		{
+			name: 'a cohort naming both forms',
+			contents: '{"cohorts": [{"command": ["nix"], "installables": [".#app"]}]}'
+		},
+		{
+			name: 'a cohort with an unknown key',
+			contents: '{"cohorts": [{"installables": [".#app"], "surprise": 1}]}'
+		}
+	])('refuses $name', ({ contents }) => {
+		let error: unknown;
+		try {
+			parseCohortsFile(contents);
+		} catch (error_: unknown) {
+			error = error_;
+		}
+
+		expect(error).toBeInstanceOf(CohortsFileInvalidError);
 	});
 });
