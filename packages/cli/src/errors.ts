@@ -769,3 +769,50 @@ export class GithubCheckIncompleteError extends CliError {
 		return unavailableExitCode;
 	}
 }
+
+/**
+ * No candidate runtime directory yields a hook socket path that fits within
+ * `sun_path`, so the invocation endpoint cannot be created anywhere.
+ */
+export class SocketPathTooLongError extends CliError {
+	constructor(
+		public readonly socketPath: string,
+		public readonly limitBytes: number
+	) {
+		super(
+			`No runtime directory yields a hook socket path within ` +
+				`${String(limitBytes)} bytes; the shortest candidate was ${socketPath}`
+		);
+		this.name = 'SocketPathTooLongError';
+	}
+}
+
+/** A build event the invocation listener refused to accept. */
+export abstract class BuildEventRejectedError extends CliError {}
+
+export type BuildEventMalformedKind =
+	'missing-line' | 'invalid-json' | 'invalid-event';
+
+export class BuildEventMalformedError extends BuildEventRejectedError {
+	constructor(public readonly kind: BuildEventMalformedKind) {
+		super(`Rejected a malformed build event: ${kind}`);
+		this.name = 'BuildEventMalformedError';
+	}
+}
+
+/**
+ * A well-formed build event naming an output path outside the selected store
+ * directory. Only paths beneath that directory are publication candidates, so
+ * the event is refused before anything enters the accepted set.
+ */
+export class BuildEventOutsideStoreError extends BuildEventRejectedError {
+	constructor(
+		public readonly storePath: string,
+		public readonly storeDirectory: string
+	) {
+		super(
+			`Rejected a build event: ${storePath} is not beneath ${storeDirectory}`
+		);
+		this.name = 'BuildEventOutsideStoreError';
+	}
+}
