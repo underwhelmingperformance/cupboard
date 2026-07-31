@@ -367,7 +367,8 @@ describe('partitionAvailability', () => {
 			unknownCount: thrown.unknownCount,
 			ceiling: thrown.ceiling,
 			downloadSize: thrown.downloadSize,
-			narSize: thrown.narSize
+			narSize: thrown.narSize,
+			exitCode: thrown.exitCode
 		}).toStrictEqual({
 			unknownCount: 1,
 			ceiling: {
@@ -377,7 +378,8 @@ describe('partitionAvailability', () => {
 					'the daemon connection is not fully trusted, so its narinfo-cache-negative-ttl override cannot be relied on to take effect'
 			},
 			downloadSize: 1,
-			narSize: 2
+			narSize: 2,
+			exitCode: 75
 		});
 	});
 

@@ -6,6 +6,12 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
+/**
+ * Whether the daemon trusts this client, as the handshake reports it:
+ * `unknown` when the daemon leaves the flag unset.
+ */
+export type NixDaemonTrust = 'trusted' | 'not-trusted' | 'unknown';
+
 export interface NixValidPathInfo {
 	readonly storePath: StorePathString;
 	readonly narHash: NixSha256Hash;
@@ -145,6 +151,13 @@ export interface NixStoreClient {
 	buildPathsWithResults(
 		targets: readonly NixDerivedPathString[]
 	): Promise<readonly NixBuildResult[]>;
+	/**
+	 * Whether the daemon connection this client uses is trusted, so a caller
+	 * can tell whether a setting override it sent (such as a negative-cache
+	 * bypass) actually took effect. Only a daemon-backed store has a
+	 * connection to ask; a backend without one leaves this undefined.
+	 */
+	daemonTrust?(): Promise<NixDaemonTrust>;
 }
 
 /**

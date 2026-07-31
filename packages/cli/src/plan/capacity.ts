@@ -1,4 +1,4 @@
-import { CliError } from '../errors.ts';
+import { CliError, transientExitCode } from '../errors.ts';
 
 /**
  * The store-relative bytes a capacity preflight measures against: how much
@@ -74,6 +74,13 @@ export class StoreCapacityError extends CliError {
 				`${String(headroom)} byte headroom`
 		);
 		this.name = 'StoreCapacityError';
+	}
+
+	// A different runner, a remote store, or a smaller cohort could all fit
+	// where this one did not, so this is the CLI's transient category rather
+	// than a bare unclassified exit.
+	override get exitCode(): number {
+		return transientExitCode;
 	}
 }
 

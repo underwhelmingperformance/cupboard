@@ -96,6 +96,16 @@ export class InvalidUploadConcurrencyError extends CliUsageError {
 	}
 }
 
+export class InvalidCohortTargetsFileError extends CliUsageError {
+	constructor(
+		public readonly path: string,
+		detail: string
+	) {
+		super(`Invalid cohort targets file ${path}: ${detail}`);
+		this.name = 'InvalidCohortTargetsFileError';
+	}
+}
+
 export class InvalidDurationError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(

@@ -40,6 +40,7 @@ import {
 	registerControlOidcTrustCommands,
 	registerOidcTrustCommands
 } from './commands/oidc-trust.ts';
+import { registerPlanCommands } from './commands/plan-cohort.ts';
 import { registerPolicyCommands } from './commands/policy.ts';
 import { registerPubkeyCommand } from './commands/pubkey.ts';
 import { registerPushCommand } from './commands/push.ts';
@@ -176,6 +177,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerOidcTrustCommands(program, options);
 	registerGithubCommands(program, options);
 	registerCheckCommand(program, options);
+	registerPlanCommands(program, options);
 
 	return program;
 }
