@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+
 import {
 	type RootName,
 	selectorForCache,
@@ -38,6 +40,8 @@ interface PushOptions {
 	readonly audience?: Audience;
 	readonly root?: RootName;
 	readonly ttl?: TtlSeconds;
+	readonly closure?: boolean;
+	readonly intermediatePathsFile?: string;
 	readonly runRoot?: RootName;
 	readonly runRootTtl?: TtlSeconds;
 	readonly cache?: string;
@@ -120,6 +124,18 @@ function collect(value: string, previous: readonly string[]): string[] {
 	return [...previous, value];
 }
 
+/**
+ * Splits a newline-delimited path file into its lines: each is trimmed and
+ * blank lines are dropped. The file is transport only; the publication
+ * collection validates every line as a store path.
+ */
+export function parsePathFile(contents: string): string[] {
+	return contents
+		.split(/\r?\n/u)
+		.map((line) => line.trim())
+		.filter((line) => line !== '');
+}
+
 function parseUploadConcurrency(value: string): number {
 	if (!/^\d+$/.test(value) || Number(value) < 1) {
 		throw new InvalidUploadConcurrencyError(value);
@@ -163,6 +179,14 @@ export function registerPushCommand(
 			"publish without any retention root or pin; kept only by the cache's retention grace policy, if one matches"
 		)
 		.option(
+			'--closure',
+			'publish the complete realised closure of the requested paths (default: exactly the requested paths)'
+		)
+		.option(
+			'--intermediate-paths-file <path>',
+			'newline-delimited store paths to publish alongside the targets without retaining them as targets'
+		)
+		.option(
 			'--run-root <name>',
 			'bind a run root: every pushed path also joins this root as it commits. Independent of --root, and valid with --no-retain (the commits join the run root while the push declares no target root)',
 			parseRootName
@@ -204,19 +228,28 @@ export function registerPushCommand(
 				'',
 				'Examples:',
 				'  # Push a build result to a tenant, pinning it under a named root',
-				'  cupboard push https://cache.example.workers.dev/t/acme ./result \\',
+				'  cupboard push https://cache.example.workers.dev/t/acme "$(readlink ./result)" \\',
 				'    --root github:acme/infra/main',
 				'',
 				'  # Preview a push without uploading anything',
-				'  cupboard push https://cache.example.workers.dev/t/acme ./result --dry-run',
+				'  cupboard push https://cache.example.workers.dev/t/acme "$(readlink ./result)" \\',
+				'    --dry-run',
 				'',
 				'  # Push from CI with a GitHub Actions OIDC token',
-				'  cupboard push --github-oidc https://cache.example.workers.dev/t/acme ./result \\',
-				'    --root github:acme/infra/main',
+				'  cupboard push --github-oidc https://cache.example.workers.dev/t/acme \\',
+				'    "$(readlink ./result)" --root github:acme/infra/main',
 				'',
 				'  # Push a shared intermediate without pinning it',
-				'  cupboard push --github-oidc https://cache.example.workers.dev/t/acme ./result \\',
-				'    --no-retain'
+				'  cupboard push --github-oidc https://cache.example.workers.dev/t/acme \\',
+				'    "$(readlink ./result)" --no-retain',
+				'',
+				'  # Publish the complete realised closure of the result',
+				'  cupboard push https://cache.example.workers.dev/t/acme "$(readlink ./result)" \\',
+				'    --root github:acme/infra/main --closure',
+				'',
+				'  # Publish build-time intermediates alongside the target, unrooted',
+				'  cupboard push https://cache.example.workers.dev/t/acme "$(readlink ./result)" \\',
+				'    --root github:acme/infra/main --intermediate-paths-file intermediates.txt'
 			].join('\n')
 		)
 		.action(async (url: URL, paths: string[], options: PushOptions) => {
@@ -226,9 +259,19 @@ export function registerPushCommand(
 
 			validateRetentionChoice(options);
 
-			// Entries are store paths at the domain boundary: an argument that is
-			// not one fails here, before any token is requested.
-			const publication = PublicationCollection.of({ targets: paths });
+			// The file is transport; the collection is the type. Entries are store
+			// paths at the domain boundary: an argument or file line that is not
+			// one fails here, before any token is requested.
+			const intermediatePaths =
+				options.intermediatePathsFile === undefined
+					? undefined
+					: parsePathFile(
+							await readFile(options.intermediatePathsFile, 'utf8')
+						);
+			const publication = PublicationCollection.of({
+				targets: paths,
+				...(intermediatePaths !== undefined && { intermediatePaths })
+			});
 			const reporter = commandUi(program, programOptions).reporter();
 			const raw = CupboardClient.fromUrl(url, {
 				cache: options.cache,
@@ -250,6 +293,7 @@ export function registerPushCommand(
 					cache: options.cache,
 					signal: programOptions.signal
 				}),
+				...(options.closure !== undefined && { closure: options.closure }),
 				wait: options.wait,
 				signal: programOptions.signal,
 				attest: options.attest,

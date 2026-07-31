@@ -345,9 +345,11 @@ describe('command help', () => {
 		expect(help).toContain('cupboard push');
 		expect(help).toContain('--dry-run');
 		expect(help).toContain('--no-retain');
+		expect(help).toContain('--closure');
+		expect(help).toContain('--intermediate-paths-file');
 		expect(help).toContain(
-			'cupboard push --github-oidc https://cache.example.workers.dev/t/acme ./result \\\n' +
-				'    --root github:acme/infra/main'
+			'cupboard push --github-oidc https://cache.example.workers.dev/t/acme \\\n' +
+				'    "$(readlink ./result)" --root github:acme/infra/main'
 		);
 	});
 
