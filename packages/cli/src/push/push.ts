@@ -1,7 +1,11 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
-import { Nix, type NixValidPathInfo } from '@cupboard/nix';
+import {
+	Nix,
+	NixStorePathNotFoundError,
+	type NixValidPathInfo
+} from '@cupboard/nix';
 import { implicitPinName } from '@cupboard/nix-store/retention';
 import {
 	type RootName,
@@ -84,7 +88,8 @@ import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 
 import {
 	type PublicationCollection,
-	type PublicationEntry
+	type PublicationEntry,
+	type PublicationKind
 } from './publication.ts';
 import {
 	fetchReferenceMetadata as fetchReferenceMetadataFromSource,
@@ -194,12 +199,13 @@ type UploadDecisionOf<A extends ParsedUploadDecision['action']> = Extract<
 	{ action: A }
 >;
 
-// A path that could not be uploaded or committed. The push presses on with the
-// rest, then fails as a whole so nothing downstream treats it as finished.
+// A path that could not be resolved, uploaded or committed. The push presses
+// on with the rest, then fails as a whole so nothing downstream treats it as
+// finished.
 interface PushFailure {
 	readonly storePathHash: StorePathHash;
 	readonly storePath: string;
-	readonly stage: 'upload' | 'commit' | 'verify';
+	readonly stage: 'resolve' | 'upload' | 'commit' | 'verify';
 	readonly reason: string;
 }
 
@@ -352,14 +358,27 @@ interface PushRuntimeDependencies {
 
 // One publication path with its metadata resolved: a local entry carries the
 // store's path info and can read its NAR; a reference entry carries the served
-// metadata alone and never reads one.
+// metadata alone and never reads one. The kind travels with the path so a
+// vanished intermediate and a vanished target can part ways.
 type ResolvedPushPath =
-	| { readonly source: 'local'; readonly pathInfo: NixValidPathInfo }
+	| {
+			readonly source: 'local';
+			readonly kind: PublicationKind;
+			readonly pathInfo: NixValidPathInfo;
+	  }
 	| {
 			readonly source: 'reference';
+			readonly kind: PublicationKind;
 			readonly storePath: StorePathString;
 			readonly metadata: UploadPathMetadataFields;
 	  };
+
+// A path the store no longer held when its metadata or NAR was read: nothing
+// was published for it, and the summary records it as collected.
+interface CollectedPath {
+	readonly storePathHash: StorePathHash;
+	readonly storePath: string;
+}
 
 function resolvedStorePath(path: ResolvedPushPath): StorePathString {
 	return path.source === 'local' ? path.pathInfo.storePath : path.storePath;
@@ -390,6 +409,30 @@ function negotiationOf(path: ResolvedPushPath): UploadPathNegotiationFields {
 		...(metadata.deriver !== undefined && { deriver: metadata.deriver }),
 		...(metadata.ca !== undefined && { ca: metadata.ca })
 	};
+}
+
+// Whether a metadata or NAR read failed because the store no longer holds the
+// path: the store client's typed refusal, or the filesystem's for a NAR read
+// that started after the path was collected.
+function isVanishedPathError(error: unknown): boolean {
+	if (error instanceof NixStorePathNotFoundError) {
+		return true;
+	}
+
+	return error instanceof Error && 'code' in error && error.code === 'ENOENT';
+}
+
+// The publication kind behind a negotiation decision. A decision that no
+// resolved path backs cannot happen without a server fault; it reads as a
+// target so the loss is never silently downgraded to a collected outcome.
+function kindOfDecision(
+	negotiated: NegotiatedPaths,
+	decision: UploadDecisionOf<'upload' | 'commit'>
+): PublicationKind {
+	return (
+		negotiated.get(negotiatedPathKey(decision.storePathHash, decision.narHash))
+			?.kind ?? 'target'
+	);
 }
 
 // The path info behind a decision that needs the local store: a reference
@@ -451,6 +494,7 @@ async function resolveReferenceEntries(
 				index,
 				path: {
 					source: 'reference' as const,
+					kind: entry.kind,
 					storePath: entry.storePath,
 					metadata
 				}
@@ -477,11 +521,21 @@ async function runPushFlow(
 		wait: shouldWait,
 		waitTimeoutSeconds
 	} = dependencies;
+	// A path that fails to resolve, upload or commit is collected here, so the
+	// paths that can finish do. The push then fails as a whole (see the end of
+	// this function) so the incomplete result is never mistaken for a finished
+	// one. A vanished intermediate is not a failure: it is recorded as
+	// collected and the run continues.
+	const failures: PushFailure[] = [];
+	const collected: CollectedPath[] = [];
+
 	// The default publishes exactly the publication entries, resolving local
 	// metadata with no closure walk; `--closure` expands the local entries
 	// through the store and publishes the complete realised closure. A
 	// reference entry's served metadata comes from the reference source, so it
-	// never touches the store.
+	// never touches the store. A declared local path the store no longer holds
+	// is a typed per-path outcome, never a batch failure: a vanished
+	// intermediate is recorded as collected, a vanished target fails the run.
 	const resolved = await reporter.phase(
 		dependencies.closure === true
 			? 'Resolving store closure'
@@ -496,10 +550,40 @@ async function runPushFlow(
 					? []
 					: dependencies.closure === true
 						? await nix.resolveClosure(localPaths)
-						: await nix.queryPathsInfo(localPaths);
+						: await nix.queryValidPathsInfo(localPaths);
+			const present = new Set(localInfos.map((info) => info.storePath));
+
+			for (const storePath of localPaths) {
+				if (present.has(storePath)) {
+					continue;
+				}
+
+				const vanished = new NixStorePathNotFoundError(storePath);
+
+				if (publication.kindOf(storePath) === 'intermediate') {
+					collected.push({
+						storePathHash: StorePath.hash(storePath),
+						storePath
+					});
+					continue;
+				}
+
+				failures.push({
+					storePathHash: StorePath.hash(storePath),
+					storePath,
+					stage: 'resolve',
+					reason: failureReason(vanished)
+				});
+				ctx.warn(
+					'vanished target',
+					`${StorePath.basename(storePath)}: ${failureReason(vanished)}`
+				);
+			}
+
 			const paths: ResolvedPushPath[] = [
 				...localInfos.map((pathInfo): ResolvedPushPath => ({
 					source: 'local',
+					kind: publication.kindOf(pathInfo.storePath),
 					pathInfo
 				})),
 				...(await resolveReferenceEntries(
@@ -508,6 +592,10 @@ async function runPushFlow(
 				))
 			];
 			ctx.fact('paths', formatCount(paths.length));
+
+			if (collected.length > 0) {
+				ctx.fact('collected', formatCount(collected.length));
+			}
 
 			return paths;
 		}
@@ -554,11 +642,6 @@ async function runPushFlow(
 	warnDivergentSkips(reporter, divergent);
 
 	const uploadDecisions = negotiation.uploads.filter((item) => isUpload(item));
-
-	// A path that fails to upload or commit is collected here, so the paths that
-	// can finish do. The push then fails as a whole (see the end of this
-	// function) so the incomplete result is never mistaken for a finished one.
-	const failures: PushFailure[] = [];
 	const failedUploadIds = new Set<string>();
 	const negotiated = indexNegotiatedPaths(resolved);
 	const storePathByHash = new Map<StorePathHash, string>(
@@ -607,8 +690,24 @@ async function runPushFlow(
 						const storePath =
 							storePathByHash.get(decision.storePathHash) ??
 							decision.storePathHash;
-						const reason = failureReason(error);
 						failedUploadIds.add(decision.uploadId);
+
+						// An intermediate whose path vanished before its NAR read is
+						// recorded as collected and the run continues; a vanished
+						// target, and every other loss, joins the failures.
+						if (
+							isVanishedPathError(error) &&
+							kindOfDecision(negotiated, decision) === 'intermediate'
+						) {
+							collected.push({
+								storePathHash: decision.storePathHash,
+								storePath
+							});
+							bar.fact('collected', formatCount(collected.length));
+							return;
+						}
+
+						const reason = failureReason(error);
 						failures.push({
 							storePathHash: decision.storePathHash,
 							storePath,
@@ -659,6 +758,11 @@ async function runPushFlow(
 			decision.action
 		])
 	);
+	// A collected intermediate published nothing, so its negotiated action
+	// leaves the summary counts.
+	for (const path of collected) {
+		effectiveActions.delete(path.storePathHash);
+	}
 	const commitContext: CommitContext = {
 		client,
 		session,
@@ -872,7 +976,12 @@ async function runPushFlow(
 						shouldWait,
 						storePathByHash
 					)
-				)
+				),
+			...collected.map((path) => ({
+				storePathHash: path.storePathHash,
+				storePath: path.storePath,
+				outcome: 'collected' as const
+			}))
 		];
 		const summary = {
 			uploadedPaths,
@@ -897,6 +1006,9 @@ async function runPushFlow(
 				{ label: 'Already cached', value: formatCount(reusedBlobs) },
 				{ label: 'Skipped', value: formatCount(skipped) },
 				{ label: 'Bytes uploaded', value: formatBytes(uploadedBytes) },
+				...(collected.length > 0
+					? [{ label: 'Collected', value: formatCount(collected.length) }]
+					: []),
 				...attestationRows,
 				...retentionRows,
 				...pushSummaryPathRows(summaryPaths, retention),
@@ -990,6 +1102,13 @@ function graceRetainUntilRow(retainUntil: string): string {
 }
 
 function pushSummaryPathRow(path: PushSummaryPath): ResultRow {
+	if (path.outcome === 'collected') {
+		return {
+			label: path.storePathHash,
+			value: 'collected from the store before publication; not published'
+		};
+	}
+
 	if (path.grace?.retainUntil !== undefined) {
 		return {
 			label: path.storePathHash,
