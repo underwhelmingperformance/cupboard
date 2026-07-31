@@ -26,6 +26,7 @@ import {
 	IntermediateRootInvalidError,
 	InvalidInputError,
 	MatrixJobLimitError,
+	MissingInputError,
 	PublishRootTargetLimitError,
 	RootEnsureCommandError,
 	RootEnsureResultInvalidError,
@@ -396,6 +397,59 @@ describe('resolvePlanInputs', () => {
 				environment
 			)
 		).toThrow(InvalidInputError);
+	});
+
+	it('leaves packing disabled and its capacity at zero by default', () => {
+		const { enablePacking, packCapacity } = resolvePlanInputs(
+			baseOptions,
+			environment
+		);
+
+		expect({ enablePacking, packCapacity }).toStrictEqual({
+			enablePacking: false,
+			packCapacity: 0
+		});
+	});
+
+	it('resolves a positive pack-capacity when packing is enabled', () => {
+		const { enablePacking, packCapacity } = resolvePlanInputs(
+			{
+				...baseOptions,
+				enablePacking: 'true',
+				packCapacity: '1073741824'
+			},
+			environment
+		);
+
+		expect({ enablePacking, packCapacity }).toStrictEqual({
+			enablePacking: true,
+			packCapacity: 1_073_741_824
+		});
+	});
+
+	it('rejects enabling packing without a pack-capacity', () => {
+		expect(() =>
+			resolvePlanInputs({ ...baseOptions, enablePacking: 'true' }, environment)
+		).toThrow(new MissingInputError('pack-capacity'));
+	});
+
+	it.each([
+		['zero', '0'],
+		['negative', '-1'],
+		['not an integer', '1.5'],
+		['not a number', 'plenty']
+	])('rejects a pack-capacity that is %s', (_name, packCapacity) => {
+		expect(() =>
+			resolvePlanInputs(
+				{ ...baseOptions, enablePacking: 'true', packCapacity },
+				environment
+			)
+		).toThrow(
+			new InvalidInputError(
+				'pack-capacity',
+				'pack-capacity must be a positive integer number of bytes'
+			)
+		);
 	});
 });
 
@@ -1059,6 +1113,8 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 		reuseView: '',
 		runId: '12345',
 		temporaryDirectory: tmpdir(),
+		enablePacking: false,
+		packCapacity: 0,
 		...overrides
 	};
 }
@@ -2012,5 +2068,129 @@ describe('cohort-matrix output', () => {
 				'"roots":["github:owner/repo/main/x86_64-linux/app"]}]}\n'
 		);
 		expect(outputs).toContain('cohort-count=1\n');
+	});
+});
+
+describe('cohort packing', () => {
+	const appAStorePath = storePath(`/nix/store/${'1'.repeat(32)}-app`);
+	const targetB = {
+		...target,
+		attr: '.#packages.x86_64-linux.app-b',
+		rootDrvPath: storePath(`/nix/store/${'2'.repeat(32)}-app-b.drv`),
+		rootSuffix: 'x86_64-linux/app-b'
+	};
+	const appBStorePath = storePath(`/nix/store/${'2'.repeat(32)}-app-b`);
+
+	const twoTargetEvaluator: NixEvaluator = () =>
+		Promise.resolve({
+			stdout: JSON.stringify({
+				derivations: {
+					[targetRootDrvPath]: {
+						env: { out: appAStorePath },
+						inputs: { drvs: {} },
+						outputs: { out: { path: `${'1'.repeat(32)}-app` } }
+					},
+					[targetB.rootDrvPath]: {
+						env: { out: appBStorePath },
+						inputs: { drvs: {} },
+						outputs: { out: { path: `${'2'.repeat(32)}-app-b` } }
+					}
+				}
+			})
+		});
+
+	async function cohortAttributeGroups(
+		planDirectory: string,
+		options: Partial<PlanOptions>,
+		measurer?: (
+			cohorts: readonly Cohort[],
+			evaluations: readonly TargetEvaluation[]
+		) => Promise<ReadonlyMap<string, number>>
+	): Promise<readonly (readonly string[])[]> {
+		await planAction(
+			{
+				...baseOptions,
+				optimise: 'true',
+				targets: JSON.stringify([target, targetB]),
+				...options
+			},
+			{
+				GITHUB_RUN_ID: '12345',
+				RUNNER_TEMP: planDirectory,
+				GITHUB_OUTPUT: path.join(planDirectory, 'output')
+			},
+			undefined,
+			{
+				evaluator: twoTargetEvaluator,
+				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				fetcher: alwaysAvailableFetcher,
+				runner: preFilterRunner({}),
+				...(measurer !== undefined && { measurer })
+			}
+		);
+
+		const outputs = await readFile(path.join(planDirectory, 'output'), 'utf8');
+		const cohortMatrixLine = outputs
+			.split('\n')
+			.find((line) => line.startsWith('cohort-matrix='));
+
+		if (cohortMatrixLine === undefined) {
+			throw new Error('no cohort-matrix output line was recorded');
+		}
+
+		const parsed = JSON.parse(
+			cohortMatrixLine.slice('cohort-matrix='.length)
+		) as { include: { attrs: readonly string[] }[] };
+
+		return parsed.include.map((entry) =>
+			entry.attrs.toSorted((left, right) => left.localeCompare(right))
+		);
+	}
+
+	it('packs both surviving cohorts into one job when enabled and measured', async () => {
+		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+		// Comfortably above the default 5 GiB headroom floor, so the packing
+		// budget it leaves (about 1 GiB) dwarfs both measured sizes below and
+		// the two cohorts land in one bin.
+		const packCapacity = String(6 * 1024 ** 3);
+
+		const groups = await cohortAttributeGroups(
+			planDirectory,
+			{ enablePacking: 'true', packCapacity },
+			() =>
+				Promise.resolve(
+					new Map([
+						[target.attr, 100],
+						[targetB.attr, 200]
+					])
+				)
+		);
+
+		expect(groups).toStrictEqual([
+			[target.attr, targetB.attr].toSorted((left, right) =>
+				left.localeCompare(right)
+			)
+		]);
+	});
+
+	it('leaves the manifest cohorts untouched when packing is enabled but nothing is measured', async () => {
+		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+
+		const groups = await cohortAttributeGroups(planDirectory, {
+			enablePacking: 'true',
+			packCapacity: '1000'
+		});
+
+		expect(groups).toStrictEqual([[target.attr], [targetB.attr]]);
+	});
+
+	it('never calls the measurer, and leaves cohorts untouched, when packing is disabled', async () => {
+		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+		const measurer = vi.fn(() => Promise.resolve(new Map<string, number>()));
+
+		const groups = await cohortAttributeGroups(planDirectory, {}, measurer);
+
+		expect(measurer).not.toHaveBeenCalled();
+		expect(groups).toStrictEqual([[target.attr], [targetB.attr]]);
 	});
 });

@@ -55,6 +55,19 @@ inputs:
       availability never affects which targets build or what the destination
       retains.
     required: false
+  enable-packing:
+    description: >-
+      Opt in to measured cohort packing: price candidate cohort groupings from
+      measured store sizes under pack-capacity, rather than building one cohort
+      job per manifest cohort. Off by default; never repartitions a manifest
+      without a measurement to price the result against.
+    required: false
+    default: 'false'
+  pack-capacity:
+    description: >-
+      Disk budget, in bytes, that measured cohort packing prices candidate
+      groupings against. Required when enable-packing is true.
+    required: false
 outputs:
   plan-file:
     description: Detailed plan consumed by seed and fallback jobs.
@@ -154,6 +167,8 @@ runs:
         PLAN_FILE: ${{ inputs.plan-file }}
         OPTIMISE: ${{ inputs.optimise }}
         INTERMEDIATE_RETENTION: ${{ inputs.intermediate-retention }}
+        ENABLE_PACKING: ${{ inputs.enable-packing }}
+        PACK_CAPACITY: ${{ inputs.pack-capacity }}
       run: |
         args=(plan
           --targets "$TARGETS"
@@ -168,7 +183,11 @@ runs:
           --audience "$AUDIENCE"
           --plan-file "$PLAN_FILE"
           --optimise "$OPTIMISE"
-          --intermediate-retention "$INTERMEDIATE_RETENTION")
+          --intermediate-retention "$INTERMEDIATE_RETENTION"
+          --enable-packing "$ENABLE_PACKING")
+        if [ -n "$PACK_CAPACITY" ]; then
+          args+=(--pack-capacity "$PACK_CAPACITY")
+        fi
         node --experimental-transform-types \
           --disable-warning=ExperimentalWarning \
           "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"

@@ -146,6 +146,30 @@ describe('cupboard flake publish cohort job', () => {
 		});
 	});
 
+	it('threads the packing opt-in and its capacity through to the plan action', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+
+		expect({
+			enablePackingWorkflowInput: contents.includes(
+				'      enable-packing:\n        description:'
+			),
+			packCapacityWorkflowInput: contents.includes(
+				'      pack-capacity:\n        description:'
+			),
+			enablePackingActionInput: contents.includes(
+				'enable-packing: ${{ inputs.enable-packing }}'
+			),
+			packCapacityActionInput: contents.includes(
+				'pack-capacity: ${{ inputs.pack-capacity }}'
+			)
+		}).toStrictEqual({
+			enablePackingWorkflowInput: true,
+			packCapacityWorkflowInput: true,
+			enablePackingActionInput: true,
+			packCapacityActionInput: true
+		});
+	});
+
 	it('threads publication and the shared run root into build-cohort', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 
