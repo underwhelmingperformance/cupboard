@@ -4,7 +4,6 @@ import path from 'node:path';
 
 import {
 	rootNameMaxLength,
-	storedCacheSchema,
 	storeDirectorySchema,
 	storePathSchema,
 	type StorePathString
@@ -16,23 +15,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
 	ComponentRootTargetLimitError,
-	ConfirmCommandError,
-	ConfirmResultInvalidError,
-	ConfirmResultMissingError,
-	GraceCoverageCommandError,
-	GraceCoverageResultInvalidError,
-	GraceCoverageResultMissingError,
-	GraceDeadlineMissingError,
-	GracePolicyMissingError,
-	IntermediateRootInvalidError,
 	InvalidInputError,
 	MatrixJobLimitError,
 	MissingInputError,
 	PublishRootTargetLimitError,
 	RootEnsureCommandError,
 	RootEnsureResultInvalidError,
-	RootEnsureResultMissingError,
-	ZeroGracePolicyError
+	RootEnsureResultMissingError
 } from '../errors.ts';
 import {
 	type Cohort,
@@ -44,21 +33,15 @@ import {
 
 import {
 	cohortPreFilter,
-	confirmDestinationIntermediates,
 	ensureAvailableTargets,
 	type EnsureRunner,
-	fallbackMatrix,
-	groupRetention,
 	matrix,
 	maximumMatrixJobs,
 	packingMeasurer,
 	planAction,
 	type PlanInputs,
 	type PlanOptions,
-	resolvePlanInputs,
-	seedMatrix,
-	validateIntermediateRootTargetLimits,
-	verifyGraceCoverage
+	resolvePlanInputs
 } from './plan.ts';
 
 function storePath(value: string): StorePathString {
@@ -111,9 +94,6 @@ describe('planAction', () => {
 			plan: {
 				retained: [],
 				targets: [{ ...target, bestEffort: false, outputs: ['out'] }],
-				seedGroups: [],
-				fallbackGroups: [],
-				destinationIntermediates: [],
 				cohorts: [
 					{
 						key: 'cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe',
@@ -135,15 +115,11 @@ describe('planAction', () => {
 			outputs:
 				`plan-file=${path.join(directory, 'cupboard-publish-plan.json')}\n` +
 				'plan-artifact-name=cupboard-publish-plan-test\n' +
-				'seed-matrix={"include":[]}\n' +
 				'target-matrix={"include":[{"attr":".#packages.x86_64-linux.app","system":"x86_64-linux","os":"ubuntu-latest","remote":true,"bestEffort":false,"rootSuffix":"x86_64-linux/app","outputs":["out"],"root":"github:owner/repo/main/x86_64-linux/app","runsOn":"ubuntu-latest"}]}\n' +
-				'fallback-matrix={"include":[]}\n' +
 				'cohort-matrix={"include":[{"key":"cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe","attrs":[".#packages.x86_64-linux.app"],"installables":[".#packages.x86_64-linux.app^out"],"queryInstallables":[null],"expectedPaths":[null],"system":"x86_64-linux","os":"ubuntu-latest","remote":true,"runsOn":"ubuntu-latest","roots":["github:owner/repo/main/x86_64-linux/app"]}]}\n' +
 				'cohort-count=1\n' +
 				'retained-count=0\n' +
-				'seed-count=0\n' +
-				'target-count=1\n' +
-				'fallback-count=0\n'
+				'target-count=1\n'
 		});
 	});
 
@@ -151,15 +127,6 @@ describe('planAction', () => {
 		await expect(
 			planAction(
 				{ ...baseOptions, optimise: 'perhaps' },
-				{ RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' }
-			)
-		).rejects.toThrow(InvalidInputError);
-	});
-
-	it('rejects an unknown intermediate-retention value', async () => {
-		await expect(
-			planAction(
-				{ ...baseOptions, intermediateRetention: 'pins' },
 				{ RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' }
 			)
 		).rejects.toThrow(InvalidInputError);
@@ -202,7 +169,6 @@ describe('resolvePlanInputs', () => {
 
 		expect(failure).toStrictEqual(
 			new PublishRootTargetLimitError(
-				'target',
 				target.attr,
 				rootSetMaxTargets + 1,
 				rootSetMaxTargets
@@ -383,24 +349,6 @@ describe('resolvePlanInputs', () => {
 		expect((failure as Error).message).not.toContain(secret);
 	});
 
-	it('retains intermediates by grace when asked', () => {
-		expect(
-			resolvePlanInputs(
-				{ ...baseOptions, intermediateRetention: 'grace' },
-				environment
-			).intermediateRetention
-		).toBe('grace');
-	});
-
-	it('rejects when intermediate-retention is not root or grace', () => {
-		expect(() =>
-			resolvePlanInputs(
-				{ ...baseOptions, intermediateRetention: 'rootish' },
-				environment
-			)
-		).toThrow(InvalidInputError);
-	});
-
 	it('leaves packing disabled and its capacity at zero by default', () => {
 		const { enablePacking, packCapacity } = resolvePlanInputs(
 			baseOptions,
@@ -455,114 +403,10 @@ describe('resolvePlanInputs', () => {
 	});
 });
 
-describe('intermediate root target limits', () => {
-	const pathValue = storePath(
-		`/nix/store/${'0'.repeat(32)}-shared-intermediate`
-	);
-	const seedPlan = {
-		seedGroups: [
-			{
-				key: 'seed-x86_64-linux',
-				system: 'x86_64-linux',
-				os: 'ubuntu-latest',
-				remote: false,
-				targets: ['.#app'],
-				candidates: Array.from(
-					{ length: rootSetMaxTargets + 1 },
-					(_, index) => ({
-						drvPath: `/nix/store/intermediate-${String(index)}.drv`,
-						output: 'out',
-						path: pathValue
-					})
-				)
-			}
-		],
-		fallbackGroups: []
-	};
-	const fallbackTargets = publishTargetsSchema.parse([
-		{
-			...target,
-			outputs: Array.from(
-				{ length: Math.floor(rootSetMaxTargets / 2) + 1 },
-				(_, index) => `first-${String(index)}`
-			)
-		},
-		{
-			...target,
-			attr: '.#packages.x86_64-linux.other',
-			rootSuffix: 'x86_64-linux/other',
-			outputs: Array.from(
-				{ length: Math.ceil(rootSetMaxTargets / 2) },
-				(_, index) => `second-${String(index)}`
-			)
-		}
-	]);
-	const fallbackPlan = {
-		seedGroups: [],
-		fallbackGroups: [
-			{
-				key: 'fallback-x86_64-linux-1',
-				system: 'x86_64-linux',
-				os: 'ubuntu-latest',
-				remote: false,
-				targets: fallbackTargets
-			}
-		]
-	};
-
-	it.each([
-		{
-			kind: 'seed group' as const,
-			identifier: 'seed-x86_64-linux',
-			plan: seedPlan
-		},
-		{
-			kind: 'fallback group' as const,
-			identifier: 'fallback-x86_64-linux-1',
-			plan: fallbackPlan
-		}
-	])(
-		'rejects an oversized root-retained $kind',
-		({ kind, identifier, plan }) => {
-			let failure: unknown;
-
-			try {
-				validateIntermediateRootTargetLimits(
-					{ intermediateRetention: 'root' },
-					plan
-				);
-			} catch (error) {
-				failure = error;
-			}
-
-			expect(failure).toStrictEqual(
-				new PublishRootTargetLimitError(
-					kind,
-					identifier,
-					rootSetMaxTargets + 1,
-					rootSetMaxTargets
-				)
-			);
-		}
-	);
-
-	it.each([seedPlan, fallbackPlan])(
-		'accepts an oversized intermediate group retained by grace',
-		(plan) => {
-			expect(() => {
-				validateIntermediateRootTargetLimits(
-					{ intermediateRetention: 'grace' },
-					plan
-				);
-			}).not.toThrow();
-		}
-	);
-});
-
 describe('matrix', () => {
 	const entry = { key: 'entry' };
 
-	it.each(['seed', 'target', 'fallback'])(
+	it.each(['target', 'cohort'])(
 		'serialises a %s matrix at the job limit',
 		(name) => {
 			const entries = Array.from({ length: maximumMatrixJobs }, () => entry);
@@ -573,7 +417,7 @@ describe('matrix', () => {
 		}
 	);
 
-	it.each(['seed', 'target', 'fallback'])(
+	it.each(['target', 'cohort'])(
 		'refuses a %s matrix beyond the job limit',
 		(name) => {
 			const entries = Array.from(
@@ -867,237 +711,6 @@ describe('ensureAvailableTargets', () => {
 	);
 });
 
-describe('confirmDestinationIntermediates', () => {
-	let directory: string;
-
-	beforeEach(async () => {
-		directory = await mkdtemp(path.join(tmpdir(), 'cupboard-confirm-'));
-	});
-
-	const intermediates = [
-		storePath(`/nix/store/${'1'.repeat(32)}-shared`),
-		storePath(`/nix/store/${'2'.repeat(32)}-tools`)
-	];
-
-	it('confirms every intermediate in one command and passes on deadlines', async () => {
-		let recorded: string[] = [];
-		const runner: EnsureRunner = async (command, arguments_) => {
-			recorded = [command, ...arguments_];
-			await writeFile(
-				resultFileArgument(arguments_),
-				confirmedPathsResultLine([
-					{
-						storePathHash: '1'.repeat(32),
-						confirmed: true,
-						grace: { retainUntil: '2026-01-02T00:00:00.000Z' }
-					},
-					{
-						storePathHash: '2'.repeat(32),
-						confirmed: true,
-						grace: { retainUntil: '2026-01-02T00:00:00.000Z' }
-					}
-				])
-			);
-
-			return { stdout: '', stderr: '' };
-		};
-
-		await confirmDestinationIntermediates(
-			planInputs({
-				cache: storedCacheSchema.parse('builds'),
-				intermediateRetention: 'grace',
-				temporaryDirectory: directory
-			}),
-			intermediates,
-			runner
-		);
-
-		expect(recorded).toStrictEqual([
-			'/unused/cupboard',
-			'--output-mode',
-			'github',
-			'--no-colour',
-			'--result-file',
-			resultFileArgument(recorded.slice(1)),
-			'confirm',
-			'https://cupboard.example/t/acme',
-			...intermediates,
-			'--github-oidc',
-			'--audience',
-			'https://cupboard.example/t/acme',
-			'--cache',
-			'builds'
-		]);
-	});
-
-	it('runs no command when there is nothing to confirm', async () => {
-		const calls: string[][] = [];
-		const runner: EnsureRunner = (command, arguments_) => {
-			calls.push([command, ...arguments_]);
-			return Promise.resolve({ stdout: '', stderr: '' });
-		};
-
-		await confirmDestinationIntermediates(
-			planInputs({ temporaryDirectory: directory }),
-			[],
-			runner
-		);
-
-		expect(calls).toStrictEqual([]);
-	});
-
-	// A confirmed path with no grace fact means the cache lost its covering
-	// policy: the cache-level error names the remedy, not a per-path reason.
-	it('fails closed with the cache-level error when a confirmed path has no fact', async () => {
-		const runner = confirmResultRunner([
-			{ storePathHash: '1'.repeat(32), confirmed: true, grace: {} }
-		]);
-
-		await expect(
-			confirmDestinationIntermediates(
-				planInputs({ temporaryDirectory: directory }),
-				intermediates,
-				runner
-			)
-		).rejects.toBeInstanceOf(GracePolicyMissingError);
-	});
-
-	// A confirmed path whose fact names a zero-grace policy is a different
-	// condition from no policy at all, and its remedy is raising the value.
-	it('fails closed with the zero-grace error when the matched policy grants nothing', async () => {
-		const runner = confirmResultRunner([
-			{
-				storePathHash: '1'.repeat(32),
-				confirmed: true,
-				grace: { graceSeconds: 0 }
-			}
-		]);
-
-		await expect(
-			confirmDestinationIntermediates(
-				planInputs({ temporaryDirectory: directory }),
-				intermediates,
-				runner
-			)
-		).rejects.toBeInstanceOf(ZeroGracePolicyError);
-	});
-
-	// The real CLI records the result and then exits non-zero for an
-	// unconfirmed path, so the classification must read the recorded result
-	// out of the failed run.
-	it('fails closed on a path no longer committed at the destination', async () => {
-		let failure: unknown;
-
-		try {
-			const runner = confirmResultRunner(
-				[{ storePathHash: '1'.repeat(32), confirmed: false }],
-				{ fails: true }
-			);
-
-			await confirmDestinationIntermediates(
-				planInputs({ temporaryDirectory: directory }),
-				intermediates,
-				runner
-			);
-		} catch (error) {
-			failure = error;
-		}
-
-		expect(failure).toBeInstanceOf(GraceDeadlineMissingError);
-
-		if (failure instanceof GraceDeadlineMissingError) {
-			expect(failure.paths).toStrictEqual([
-				{ storePathHash: '1'.repeat(32), reason: 'not-present' }
-			]);
-		}
-	});
-
-	it('keeps a failure whose recorded result names nothing missing as a command error', async () => {
-		const runner = confirmResultRunner(
-			[
-				{
-					storePathHash: '1'.repeat(32),
-					confirmed: true,
-					grace: { retainUntil: '2026-01-02T00:00:00.000Z' }
-				}
-			],
-			{ fails: true }
-		);
-
-		await expect(
-			confirmDestinationIntermediates(
-				planInputs({ temporaryDirectory: directory }),
-				intermediates,
-				runner
-			)
-		).rejects.toBeInstanceOf(ConfirmCommandError);
-	});
-
-	it('maps a runner launch failure to a ConfirmCommandError carrying its cause', async () => {
-		const failure = new Error('spawn /missing/cupboard ENOENT');
-		const runner: EnsureRunner = () => Promise.reject(failure);
-		let thrown: unknown;
-
-		try {
-			await confirmDestinationIntermediates(
-				planInputs({ temporaryDirectory: directory }),
-				intermediates,
-				runner
-			);
-		} catch (error) {
-			thrown = error;
-		}
-
-		expect(thrown).toBeInstanceOf(ConfirmCommandError);
-
-		if (thrown instanceof ConfirmCommandError) {
-			expect(thrown.cause).toBe(failure);
-		}
-	});
-
-	it('rejects a run that records no confirmation result', async () => {
-		await expect(
-			confirmDestinationIntermediates(
-				planInputs({ temporaryDirectory: directory }),
-				intermediates,
-				resultFreeRunner
-			)
-		).rejects.toBeInstanceOf(ConfirmResultMissingError);
-	});
-
-	it('rejects a recorded result of a different kind as missing', async () => {
-		await expect(
-			confirmDestinationIntermediates(
-				planInputs({ temporaryDirectory: directory }),
-				intermediates,
-				foreignKindRunner
-			)
-		).rejects.toBeInstanceOf(ConfirmResultMissingError);
-	});
-
-	it.each([
-		['a malformed result line', 'not json\n'],
-		[
-			'confirmation data the schema refuses',
-			`${JSON.stringify({ kind: 'confirm-paths', data: { paths: 'all' } })}\n`
-		]
-	])('rejects %s as invalid', async (_name, line) => {
-		const runner: EnsureRunner = async (_command, arguments_) => {
-			await writeFile(resultFileArgument(arguments_), line);
-
-			return { stdout: '', stderr: '' };
-		};
-
-		await expect(
-			confirmDestinationIntermediates(
-				planInputs({ temporaryDirectory: directory }),
-				intermediates,
-				runner
-			)
-		).rejects.toBeInstanceOf(ConfirmResultInvalidError);
-	});
-});
-
 function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 	return {
 		targets: [],
@@ -1111,204 +724,11 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 		cupboardPath: '/unused/cupboard',
 		planFile: '/unused/cupboard-publish-plan.json',
 		optimise: true,
-		intermediateRetention: 'root',
-		reuseView: '',
-		runId: '12345',
 		temporaryDirectory: tmpdir(),
 		enablePacking: false,
 		packCapacity: 0,
 		...overrides
 	};
-}
-
-function resultFreeRunner(): Promise<{ stdout: string; stderr: string }> {
-	return Promise.resolve({ stdout: '', stderr: '' });
-}
-
-async function foreignKindRunner(
-	_command: string,
-	arguments_: readonly string[]
-): Promise<{ stdout: string; stderr: string }> {
-	await writeFile(
-		resultFileArgument(arguments_),
-		`${JSON.stringify({ kind: 'push-summary', data: {} })}\n`
-	);
-
-	return { stdout: '', stderr: '' };
-}
-
-// The seed and fallback pushes publish with exactly what their matrix entry
-// carries, so the four combinations of retention mode and reuse view are
-// decided and proven here; the workflow yml interpolates these values without
-// conditionals. An adoption group (a view-only shared output joining an
-// `adopt-` keyed seed group) follows the same retention as any other group:
-// the reuse view never affects what the destination retains.
-describe('seed and fallback retention wiring', () => {
-	const seedGroup = {
-		key: 'x86_64-linux',
-		system: 'x86_64-linux',
-		os: 'ubuntu-latest',
-		remote: false,
-		targets: [storePath(`/nix/store/${'0'.repeat(32)}-app`)],
-		candidates: []
-	};
-	const adoptionGroup = {
-		...seedGroup,
-		key: 'adopt-x86_64-linux'
-	};
-	const fallbackGroup = {
-		key: 'fallback-x86_64-linux',
-		system: 'x86_64-linux',
-		os: 'ubuntu-latest',
-		remote: false,
-		targets: []
-	};
-
-	it.each([
-		{
-			retention: 'root' as const,
-			reuseView: '',
-			expected: {
-				root: 'github:owner/repo/main/_cupboard-seed/12345/x86_64-linux',
-				ttl: '24h',
-				noRetain: false,
-				requireGrace: false
-			}
-		},
-		{
-			retention: 'root' as const,
-			reuseView: 'pr',
-			expected: {
-				root: 'github:owner/repo/main/_cupboard-seed/12345/x86_64-linux',
-				ttl: '24h',
-				noRetain: false,
-				requireGrace: false
-			}
-		},
-		{
-			retention: 'grace' as const,
-			reuseView: '',
-			expected: { root: '', ttl: '', noRetain: true, requireGrace: true }
-		},
-		{
-			retention: 'grace' as const,
-			reuseView: 'pr',
-			expected: { root: '', ttl: '', noRetain: true, requireGrace: true }
-		}
-	])(
-		'decides $retention retention with reuse view "$reuseView"',
-		({ retention, reuseView, expected }) => {
-			const inputs = planInputs({
-				intermediateRetention: retention,
-				reuseView
-			});
-			const groups =
-				reuseView === '' ? [seedGroup] : [seedGroup, adoptionGroup];
-			const plan = {
-				retained: [],
-				targets: [],
-				seedGroups: groups,
-				fallbackGroups: [fallbackGroup],
-				destinationIntermediates: []
-			};
-			const adoptionRoot =
-				retention === 'root'
-					? {
-							...expected,
-							root: 'github:owner/repo/main/_cupboard-seed/12345/adopt-x86_64-linux'
-						}
-					: expected;
-			const fallbackRoot =
-				retention === 'root'
-					? {
-							...expected,
-							root: 'github:owner/repo/main/_cupboard-seed/12345/fallback-x86_64-linux'
-						}
-					: expected;
-
-			expect({
-				seed: seedMatrix(inputs, plan),
-				fallback: fallbackMatrix(inputs, plan)
-			}).toStrictEqual({
-				seed:
-					reuseView === ''
-						? [groupEntry('x86_64-linux', expected)]
-						: [
-								groupEntry('x86_64-linux', expected),
-								groupEntry('adopt-x86_64-linux', adoptionRoot)
-							],
-				fallback: [groupEntry('fallback-x86_64-linux', fallbackRoot)]
-			});
-		}
-	);
-
-	it.each([
-		[
-			'a generated root is too long',
-			planInputs({
-				rootPrefix: 'p'.repeat(rootNameMaxLength - 1 - target.rootSuffix.length)
-			}),
-			'seed-x86_64-linux-ubuntu-latest-local-1234567890123456'
-		],
-		[
-			'a generated root contains a control character',
-			planInputs(),
-			'seed-x86_64-linux\nother'
-		]
-	] as const)('rejects when %s', (_name, inputs, key) => {
-		expect(() => groupRetention(inputs, key)).toThrow(
-			new IntermediateRootInvalidError(rootNameMaxLength)
-		);
-	});
-});
-
-function groupEntry(key: string, retentionValues: object): object {
-	return {
-		key,
-		system: 'x86_64-linux',
-		os: 'ubuntu-latest',
-		remote: false,
-		runsOn: 'ubuntu-latest',
-		...retentionValues
-	};
-}
-
-function confirmResultRunner(
-	paths: readonly {
-		readonly storePathHash: string;
-		readonly confirmed: boolean;
-		readonly grace?: {
-			readonly retainUntil?: string;
-			readonly graceSeconds?: number;
-		};
-	}[],
-	options: { readonly fails?: boolean } = {}
-): EnsureRunner {
-	return async (_command, arguments_) => {
-		await writeFile(
-			resultFileArgument(arguments_),
-			confirmedPathsResultLine(paths)
-		);
-
-		if (options.fails === true) {
-			throw new Error('cupboard exited 1');
-		}
-
-		return { stdout: '', stderr: '' };
-	};
-}
-
-function confirmedPathsResultLine(
-	paths: readonly {
-		readonly storePathHash: string;
-		readonly confirmed: boolean;
-		readonly grace?: {
-			readonly retainUntil?: string;
-			readonly graceSeconds?: number;
-		};
-	}[]
-): string {
-	return `${JSON.stringify({ kind: 'confirm-paths', data: { paths } })}\n`;
 }
 
 function evaluation(
@@ -1397,195 +817,6 @@ function buildRequiredResultLine(unavailable: readonly string[]): string {
 
 const alwaysAvailableFetcher: typeof fetch = () =>
 	Promise.resolve(Response.json({ missingStorePathHashes: [] }));
-
-function graceCoverageResultLine(data: unknown): string {
-	return `${JSON.stringify({ kind: 'grace-coverage', data })}\n`;
-}
-
-function coverageRunner(
-	data: unknown
-): (
-	command: string,
-	arguments_: readonly string[]
-) => Promise<{ stdout: string; stderr: string }> {
-	return async (_command, arguments_) => {
-		await writeFile(
-			resultFileArgument(arguments_),
-			graceCoverageResultLine(data)
-		);
-
-		return { stdout: '', stderr: '' };
-	};
-}
-
-describe('verifyGraceCoverage', () => {
-	let directory: string;
-
-	beforeEach(async () => {
-		directory = await mkdtemp(path.join(tmpdir(), 'cupboard-coverage-'));
-	});
-
-	it('passes a covered destination and threads the cache flag', async () => {
-		let recorded: string[] = [];
-		const runner: EnsureRunner = async (command, arguments_) => {
-			recorded = [command, ...arguments_];
-			await writeFile(
-				resultFileArgument(arguments_),
-				graceCoverageResultLine({ covered: true, graceSeconds: 86_400 })
-			);
-
-			return { stdout: '', stderr: '' };
-		};
-
-		await verifyGraceCoverage(
-			planInputs({
-				cache: storedCacheSchema.parse('builds'),
-				intermediateRetention: 'grace',
-				temporaryDirectory: directory
-			}),
-			runner
-		);
-
-		expect(recorded).toStrictEqual([
-			'/unused/cupboard',
-			'--output-mode',
-			'github',
-			'--no-colour',
-			'--result-file',
-			resultFileArgument(recorded.slice(1)),
-			'policy',
-			'grace-coverage',
-			'https://cupboard.example/t/acme',
-			'--github-oidc',
-			'--audience',
-			'https://cupboard.example/t/acme',
-			'--cache',
-			'builds'
-		]);
-	});
-
-	it('refuses an uncovered destination before anything is published', async () => {
-		await expect(
-			verifyGraceCoverage(
-				planInputs({
-					intermediateRetention: 'grace',
-					temporaryDirectory: directory
-				}),
-				coverageRunner({ covered: false })
-			)
-		).rejects.toBeInstanceOf(GracePolicyMissingError);
-	});
-
-	it('refuses an uncovered cache before any retention root is ensured', async () => {
-		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
-		const commands: string[] = [];
-		const runner: EnsureRunner = async (command, arguments_) => {
-			commands.push(arguments_[arguments_.indexOf('--result-file') + 3] ?? '');
-			await writeFile(
-				resultFileArgument(arguments_),
-				graceCoverageResultLine({ covered: false })
-			);
-
-			return { stdout: '', stderr: '' };
-		};
-		const appNode = {
-			env: { out: `/nix/store/${'1'.repeat(32)}-app` },
-			inputs: { drvs: {} },
-			outputs: { out: { path: `${'1'.repeat(32)}-app` } }
-		};
-		const evaluator: NixEvaluator = () =>
-			Promise.resolve({
-				stdout: JSON.stringify({
-					derivations: { [targetRootDrvPath]: appNode }
-				})
-			});
-
-		// Every probe answers 200, so the target counts as fully cached and a
-		// reachable ensure pass would have called `root ensure` for it.
-		await expect(
-			planAction(
-				{
-					...baseOptions,
-					optimise: 'true',
-					intermediateRetention: 'grace'
-				},
-				{
-					GITHUB_RUN_ID: '12345',
-					RUNNER_TEMP: planDirectory,
-					GITHUB_OUTPUT: path.join(planDirectory, 'output')
-				},
-				undefined,
-				{
-					evaluator,
-					storeDirectory: storeDirectorySchema.parse('/nix/store'),
-					fetcher: alwaysAvailableFetcher,
-					runner
-				}
-			)
-		).rejects.toBeInstanceOf(GracePolicyMissingError);
-
-		expect(commands).toStrictEqual(['grace-coverage']);
-	});
-
-	it('refuses a covering policy whose grace is zero', async () => {
-		await expect(
-			verifyGraceCoverage(
-				planInputs({
-					intermediateRetention: 'grace',
-					temporaryDirectory: directory
-				}),
-				coverageRunner({ covered: true, graceSeconds: 0 })
-			)
-		).rejects.toBeInstanceOf(ZeroGracePolicyError);
-	});
-
-	it('wraps a failing coverage command', async () => {
-		const failure = new Error('spawn /missing/cupboard ENOENT');
-		let thrown: unknown;
-
-		try {
-			await verifyGraceCoverage(
-				planInputs({
-					intermediateRetention: 'grace',
-					temporaryDirectory: directory
-				}),
-				() => Promise.reject(failure)
-			);
-		} catch (error) {
-			thrown = error;
-		}
-
-		expect(thrown).toBeInstanceOf(GraceCoverageCommandError);
-
-		if (thrown instanceof GraceCoverageCommandError) {
-			expect(thrown.cause).toBe(failure);
-		}
-	});
-
-	it('rejects a run that records no coverage result', async () => {
-		await expect(
-			verifyGraceCoverage(
-				planInputs({
-					intermediateRetention: 'grace',
-					temporaryDirectory: directory
-				}),
-				resultFreeRunner
-			)
-		).rejects.toBeInstanceOf(GraceCoverageResultMissingError);
-	});
-
-	it('rejects coverage data the schema refuses as invalid', async () => {
-		await expect(
-			verifyGraceCoverage(
-				planInputs({
-					intermediateRetention: 'grace',
-					temporaryDirectory: directory
-				}),
-				coverageRunner({ covered: 'maybe' })
-			)
-		).rejects.toBeInstanceOf(GraceCoverageResultInvalidError);
-	});
-});
 
 // Every command the pre-filter issues carries either 'targets' or 'ensure' at
 // the same position `root ensure`'s own argument list already uses, so one

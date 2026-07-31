@@ -27,9 +27,8 @@ export interface AvailabilityTarget {
  * The destination-side facts the planner cannot get from the local store: is
  * a path already served by the destination cache, and is it served by the
  * tenant's configured reuse view. Both answer over a batch of paths at once,
- * mirroring the existing HTTP probes (`availableCachePaths`/
- * `availableViewPaths`) that already answer them for the interim actions
- * planner.
+ * mirroring the existing HTTP probe (`availableCachePaths`) that already
+ * answers the destination question for the interim actions planner.
  */
 export interface DestinationAnswers {
 	readonly destinationServed: (

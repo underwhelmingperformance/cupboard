@@ -122,7 +122,7 @@ describe('buildPushArguments', () => {
 				intermediatePathsFile: '/tmp/intermediates.txt',
 				referencePathsFile: '/tmp/references.txt',
 				referenceSource: 'https://cache.example.test/t/acme/reuse/reuse',
-				runRoot: 'github:owner/repo/_cupboard-seed/12345/app',
+				runRoot: 'github:owner/repo/_cupboard-run/12345/app',
 				runRootTtl: '24h'
 			})
 		).toStrictEqual([
@@ -140,7 +140,7 @@ describe('buildPushArguments', () => {
 			'--reference-source',
 			'https://cache.example.test/t/acme/reuse/reuse',
 			'--run-root',
-			'github:owner/repo/_cupboard-seed/12345/app',
+			'github:owner/repo/_cupboard-run/12345/app',
 			'--run-root-ttl',
 			'24h'
 		]);
@@ -413,7 +413,7 @@ describe('resolvePushInputs reference and run-root pairing', () => {
 				...baseOptions,
 				referencePathsFile: '/tmp/references.txt',
 				referenceSource: 'https://cache.example.test/t/acme/reuse/reuse',
-				runRoot: 'github:owner/repo/_cupboard-seed/12345/app',
+				runRoot: 'github:owner/repo/_cupboard-run/12345/app',
 				runRootTtl: '24h'
 			},
 			environment
@@ -427,7 +427,7 @@ describe('resolvePushInputs reference and run-root pairing', () => {
 		}).toStrictEqual({
 			referencePathsFile: '/tmp/references.txt',
 			referenceSource: 'https://cache.example.test/t/acme/reuse/reuse',
-			runRoot: 'github:owner/repo/_cupboard-seed/12345/app',
+			runRoot: 'github:owner/repo/_cupboard-run/12345/app',
 			runRootTtl: '24h'
 		});
 	});
@@ -518,7 +518,7 @@ describe('pushArgumentsForInvocations', () => {
 		intermediatePathsFile: '/tmp/intermediates.txt',
 		referencePathsFile: '/tmp/references.txt',
 		referenceSource: 'https://cache.example.test/t/acme/reuse/reuse',
-		runRoot: 'github:owner/repo/_cupboard-seed/12345/app',
+		runRoot: 'github:owner/repo/_cupboard-run/12345/app',
 		runRootTtl: '24h'
 	};
 
@@ -543,7 +543,7 @@ describe('pushArgumentsForInvocations', () => {
 				'--reference-source',
 				'https://cache.example.test/t/acme/reuse/reuse',
 				'--run-root',
-				'github:owner/repo/_cupboard-seed/12345/app',
+				'github:owner/repo/_cupboard-run/12345/app',
 				'--run-root-ttl',
 				'24h'
 			]
@@ -572,7 +572,7 @@ describe('pushArgumentsForInvocations', () => {
 				'--reference-source',
 				'https://cache.example.test/t/acme/reuse/reuse',
 				'--run-root',
-				'github:owner/repo/_cupboard-seed/12345/app',
+				'github:owner/repo/_cupboard-run/12345/app',
 				'--run-root-ttl',
 				'24h'
 			],
@@ -585,7 +585,7 @@ describe('pushArgumentsForInvocations', () => {
 				'--root',
 				'github:owner/repo/main/lib',
 				'--run-root',
-				'github:owner/repo/_cupboard-seed/12345/app',
+				'github:owner/repo/_cupboard-run/12345/app',
 				'--run-root-ttl',
 				'24h'
 			]

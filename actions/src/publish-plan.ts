@@ -13,8 +13,7 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	cacheAvailabilityMaxPaths,
-	cacheAvailabilityResponseSchema,
-	reuseViewAvailabilityMaxPaths
+	cacheAvailabilityResponseSchema
 } from '@cupboard/protocol/cache-availability';
 import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
@@ -39,7 +38,7 @@ import {
 	TargetRootUnresolvedError
 } from './errors.ts';
 import { isNixPositionalArgument } from './options.ts';
-import { cacheUrlFor, reuseViewUrlFor } from './substituters.ts';
+import { cacheUrlFor } from './substituters.ts';
 
 const execFileAsync = promisify(execFile);
 
@@ -256,29 +255,6 @@ export interface TargetEvaluation {
 	readonly targetPaths: readonly StorePathString[];
 }
 
-export interface SeedCandidate {
-	readonly drvPath: string;
-	readonly output: string;
-	readonly path: StorePathString;
-}
-
-export interface SeedGroup {
-	readonly key: string;
-	readonly system: string;
-	readonly os: string;
-	readonly remote: boolean;
-	readonly targets: readonly string[];
-	readonly candidates: readonly SeedCandidate[];
-}
-
-export interface FallbackGroup {
-	readonly key: string;
-	readonly system: string;
-	readonly os: string;
-	readonly remote: boolean;
-	readonly targets: readonly PublishTarget[];
-}
-
 /**
  * One manifest-declared cohort: the targets that run together in one job.
  * Absent an explicit `cohort` label a target is its own cohort, so cohorts
@@ -312,12 +288,6 @@ export interface DerivationToTargetsEntry {
 export interface PublishPlan {
 	readonly retained: readonly PublishTarget[];
 	readonly targets: readonly PublishTarget[];
-	readonly seedGroups: readonly SeedGroup[];
-	readonly fallbackGroups: readonly FallbackGroup[];
-	// Shared outputs that qualified for seeding but are already served by the
-	// destination, so their seeds are omitted. Grace mode confirms these before
-	// relying on them, refreshing each one's retention deadline.
-	readonly destinationIntermediates: readonly StorePathString[];
 	readonly cohorts: readonly Cohort[];
 	readonly derivationToTargets: readonly DerivationToTargetsEntry[];
 }
@@ -337,24 +307,9 @@ interface ResolvedTargetRoot {
 	readonly rootDrvPath: string;
 }
 
-interface DerivationUse {
-	readonly identity: string;
-	readonly drvPath: string;
-	readonly output: string;
-	readonly path?: StorePathString;
-	readonly targets: Set<TargetEvaluation>;
-}
-
 export function planPublish(options: {
 	readonly evaluations: readonly TargetEvaluation[];
 	readonly retainedRoots: ReadonlySet<string>;
-	readonly availablePaths: ReadonlySet<StorePathString>;
-	// Paths substitutable through the configured reuse view; empty when no
-	// view is configured. A separate fact from destination availability: it
-	// changes where a shared output can be substituted from, never whether a
-	// target builds or what the destination retains.
-	readonly viewAvailablePaths?: ReadonlySet<StorePathString>;
-	readonly uses: ReadonlyMap<string, DerivationUse>;
 	readonly unevaluated?: readonly PublishTarget[];
 }): PublishPlan {
 	const retained: PublishTarget[] = [];
@@ -369,41 +324,10 @@ export function planPublish(options: {
 		pending.push(evaluation);
 	}
 
-	const pendingIndices = new Map(
-		pending.map((evaluation, index) => [evaluation, index] as const)
-	);
-	const fallbackIndices = fallbackTargetComponents(
-		options.uses,
-		pending,
-		pendingIndices
-	);
-	const fallbackTargets = new Set(fallbackIndices.flat());
 	const targets = [
 		...pending.map((evaluation) => evaluation.target),
 		...(options.unevaluated ?? [])
 	];
-	const { seedGroups, destinationIntermediates } = seedGroupsFor(
-		options.uses,
-		pending,
-		pendingIndices,
-		fallbackTargets,
-		options.availablePaths,
-		options.viewAvailablePaths ?? new Set()
-	);
-	const fallbackGroups = fallbackIndices.map((indices, groupIndex) => {
-		const evaluations = indices.map((index) => requireIndex(pending, index));
-		const first = requireIndex(evaluations, 0);
-
-		return {
-			key: `fallback-${first.target.system}-${String(groupIndex + 1)}`,
-			system: first.target.system,
-			os: first.target.os,
-			remote: first.target.remote,
-			targets: evaluations.map((evaluation) => evaluation.target)
-		};
-	});
-
-	assertDistinctGroupKeys([...seedGroups, ...fallbackGroups]);
 
 	// Cohorts partition the whole declared manifest, not just what still needs
 	// building, so a target already retained still keeps its place in the
@@ -416,384 +340,21 @@ export function planPublish(options: {
 	return {
 		retained,
 		targets,
-		seedGroups,
-		fallbackGroups,
-		destinationIntermediates,
 		cohorts: cohortsFor(allTargets),
 		derivationToTargets: derivationToTargetsFor(options.evaluations)
 	};
 }
 
-export function derivationUses(
-	evaluations: readonly TargetEvaluation[]
-): Map<string, DerivationUse> {
-	const uses = new Map<string, DerivationUse>();
-
-	for (const evaluation of evaluations) {
-		recordRootUses(uses, evaluation);
-		recordConsumedInputUses(uses, evaluation);
-	}
-
-	return uses;
-}
-
-// An evaluation's own target outputs are consumed by definition: they are
-// exactly the outputs that become its targetPaths.
-function recordRootUses(
-	uses: Map<string, DerivationUse>,
-	evaluation: TargetEvaluation
-): void {
-	const root = evaluation.nodes.get(evaluation.rootDrvPath);
-
-	if (root === undefined) {
-		return;
-	}
-
-	const selected = new Set(evaluation.target.outputs);
-
-	for (const output of root.outputs) {
-		if (selected.has(output.name)) {
-			recordDerivationUse(uses, root, output, evaluation);
-		}
-	}
-}
-
-// A node's declared inputs name the specific outputs of its dependencies it
-// actually references; an output no dependent names (a `dev` output beside a
-// consumed `out`, say) is not a use, even though the derivation graph still
-// contains it.
-function recordConsumedInputUses(
-	uses: Map<string, DerivationUse>,
-	evaluation: TargetEvaluation
-): void {
-	for (const node of evaluation.nodes.values()) {
-		recordConsumedInputsFor(uses, node, evaluation);
-	}
-}
-
-function recordConsumedInputsFor(
-	uses: Map<string, DerivationUse>,
-	node: DerivationNode,
-	evaluation: TargetEvaluation
-): void {
-	for (const [inputDrvPath, outputNames] of node.inputs) {
-		const inputNode = evaluation.nodes.get(inputDrvPath);
-
-		if (inputNode === undefined) {
-			continue;
-		}
-
-		for (const outputName of outputNames) {
-			const output = inputNode.outputs.find(
-				(candidate) => candidate.name === outputName
-			);
-
-			if (output !== undefined) {
-				recordDerivationUse(uses, inputNode, output, evaluation);
-			}
-		}
-	}
-}
-
+// The availability probe asks only about the paths the retained-target check
+// reads: each evaluated target's own predictable outputs.
 export function cacheProbePaths(
-	evaluations: readonly TargetEvaluation[],
-	uses: ReadonlyMap<string, DerivationUse>
+	evaluations: readonly TargetEvaluation[]
 ): StorePathString[] {
 	const paths = new Set<StorePathString>(
 		evaluations.flatMap((evaluation) => evaluation.targetPaths)
 	);
 
-	for (const use of uses.values()) {
-		if (use.targets.size >= 2 && use.path !== undefined) {
-			paths.add(use.path);
-		}
-	}
-
 	return paths.values().toArray();
-}
-
-// The planner only ever consumes view availability for shared outputs whose
-// users are still pending once retention settles, but retention is not known
-// until the roots are ensured, after this probe. The probe therefore carries
-// every shared output with at least two manifest users, the smallest superset
-// the planner can consume; probing target paths against the view would load
-// the gated lookup for answers nothing reads.
-export function viewProbePaths(
-	uses: ReadonlyMap<string, DerivationUse>
-): StorePathString[] {
-	const paths = new Set<StorePathString>();
-
-	for (const use of uses.values()) {
-		if (use.targets.size >= 2 && use.path !== undefined) {
-			paths.add(use.path);
-		}
-	}
-
-	return paths.values().toArray();
-}
-
-function recordDerivationUse(
-	uses: Map<string, DerivationUse>,
-	node: DerivationNode,
-	output: DerivationOutput,
-	evaluation: TargetEvaluation
-): void {
-	const identity = `${node.drvPath}^${output.name}`;
-	const existing = uses.get(identity);
-
-	if (existing !== undefined) {
-		existing.targets.add(evaluation);
-		return;
-	}
-
-	uses.set(identity, {
-		identity,
-		drvPath: node.drvPath,
-		output: output.name,
-		...(output.path !== undefined && { path: output.path }),
-		targets: new Set([evaluation])
-	});
-}
-
-// Projects a use's targets onto the `pending` array's indices, dropping any
-// target that isn't pending (a retained target using the same derivation, for
-// instance). Callers that reason about pending targets only must count and
-// group over this projection rather than the use's raw target set.
-function pendingUsers(
-	use: DerivationUse,
-	pendingIndices: ReadonlyMap<TargetEvaluation, number>
-): number[] {
-	return use.targets
-		.values()
-		.map((evaluation) => pendingIndices.get(evaluation))
-		.filter((index): index is number => index !== undefined)
-		.toArray();
-}
-
-function fallbackTargetComponents(
-	uses: ReadonlyMap<string, DerivationUse>,
-	pending: readonly TargetEvaluation[],
-	pendingIndices: ReadonlyMap<TargetEvaluation, number>
-): number[][] {
-	const parents = pending.map((_, index) => index);
-	const find = (index: number): number => {
-		const parent = requireIndex(parents, index);
-
-		if (parent === index) {
-			return index;
-		}
-
-		const root = find(parent);
-		parents[index] = root;
-
-		return root;
-	};
-	const union = (left: number, right: number): void => {
-		const leftRoot = find(left);
-		const rightRoot = find(right);
-
-		if (leftRoot !== rightRoot) {
-			parents[rightRoot] = leftRoot;
-		}
-	};
-	const fallback = new Set<number>();
-
-	for (const use of uses.values()) {
-		if (use.path !== undefined) {
-			continue;
-		}
-
-		const indices = pendingUsers(use, pendingIndices);
-
-		if (indices.length < 2) {
-			continue;
-		}
-
-		const contextGroups = Map.groupBy(indices, (index) =>
-			executionContextKey(requireIndex(pending, index).target)
-		);
-
-		for (const groupIndices of contextGroups.values()) {
-			connectFallbackTargets(groupIndices, fallback, union);
-		}
-	}
-
-	const groups = new Map<number, number[]>();
-
-	for (const index of fallback) {
-		const root = find(index);
-		const group = groups.get(root) ?? [];
-		group.push(index);
-		groups.set(root, group);
-	}
-
-	return groups
-		.values()
-		.map((group) => group.toSorted((left, right) => left - right))
-		.toArray()
-		.toSorted((left, right) => requireIndex(left, 0) - requireIndex(right, 0));
-}
-
-function connectFallbackTargets(
-	indices: readonly number[],
-	fallback: Set<number>,
-	union: (left: number, right: number) => void
-): void {
-	if (indices.length < 2) {
-		return;
-	}
-
-	const first = requireIndex(indices, 0);
-	fallback.add(first);
-
-	for (const index of indices.slice(1)) {
-		fallback.add(index);
-		union(first, index);
-	}
-}
-
-function seedGroupsFor(
-	uses: ReadonlyMap<string, DerivationUse>,
-	pending: readonly TargetEvaluation[],
-	pendingIndices: ReadonlyMap<TargetEvaluation, number>,
-	fallbackTargets: ReadonlySet<number>,
-	availablePaths: ReadonlySet<StorePathString>,
-	viewAvailablePaths: ReadonlySet<StorePathString>
-): {
-	readonly seedGroups: SeedGroup[];
-	readonly destinationIntermediates: readonly StorePathString[];
-} {
-	const buildGroups = new Map<
-		string,
-		{ evaluations: Set<number>; candidates: SeedCandidate[] }
-	>();
-	const adoptionGroups = new Map<
-		string,
-		{ evaluations: Set<number>; candidates: SeedCandidate[] }
-	>();
-	const destinationIntermediates = new Set<StorePathString>();
-
-	for (const use of uses.values()) {
-		if (use.path === undefined) {
-			continue;
-		}
-
-		const indices = pendingUsers(use, pendingIndices);
-
-		if (indices.length < 2) {
-			continue;
-		}
-
-		const targetIndices = new Set(indices)
-			.difference(fallbackTargets)
-			.values()
-			.toArray();
-
-		if (targetIndices.length < 2) {
-			continue;
-		}
-
-		// The qualification above is checked first, so this set holds exactly
-		// the outputs whose seeds the availability omitted, and nothing that
-		// would never have been seeded anyway.
-		if (availablePaths.has(use.path)) {
-			destinationIntermediates.add(use.path);
-			continue;
-		}
-
-		// A view-only output stays in the seed matrix under its own adoption
-		// group: the seed job's nix build substitutes it from the configured
-		// view and the publish adopts it into the destination. It never joins
-		// the confirm set above, since view availability says nothing about
-		// what the destination retains.
-		const groups = viewAvailablePaths.has(use.path)
-			? adoptionGroups
-			: buildGroups;
-		const contextGroups = Map.groupBy(targetIndices, (index) =>
-			executionContextKey(requireIndex(pending, index).target)
-		);
-
-		for (const [key, groupIndices] of contextGroups) {
-			addSeedCandidate(groups, key, groupIndices, use, use.path);
-		}
-	}
-
-	const seedGroups = [
-		...renderSeedGroups(buildGroups, 'seed', pending),
-		...renderSeedGroups(adoptionGroups, 'adopt', pending)
-	].toSorted((left, right) => left.key.localeCompare(right.key));
-
-	return {
-		seedGroups,
-		destinationIntermediates: [...destinationIntermediates].toSorted(
-			(left, right) => left.localeCompare(right)
-		)
-	};
-}
-
-function renderSeedGroups(
-	groups: ReadonlyMap<
-		string,
-		{ evaluations: Set<number>; candidates: SeedCandidate[] }
-	>,
-	prefix: 'seed' | 'adopt',
-	pending: readonly TargetEvaluation[]
-): SeedGroup[] {
-	return groups
-		.values()
-		.map((group): SeedGroup => {
-			const evaluationIndices = [...group.evaluations].toSorted(
-				(left, right) => left - right
-			);
-			const first = requireIndex(pending, requireIndex(evaluationIndices, 0));
-
-			return {
-				key: groupKey(prefix, first.target),
-				system: first.target.system,
-				os: first.target.os,
-				remote: first.target.remote,
-				targets: evaluationIndices.map(
-					(index) => requireIndex(pending, index).target.attr
-				),
-				candidates: group.candidates.toSorted((left, right) =>
-					`${left.drvPath}^${left.output}`.localeCompare(
-						`${right.drvPath}^${right.output}`
-					)
-				)
-			};
-		})
-		.toArray();
-}
-
-function addSeedCandidate(
-	groups: Map<
-		string,
-		{ evaluations: Set<number>; candidates: SeedCandidate[] }
-	>,
-	key: string,
-	indices: readonly number[],
-	use: DerivationUse,
-	path: StorePathString
-): void {
-	if (indices.length < 2) {
-		return;
-	}
-
-	const group = groups.get(key) ?? {
-		evaluations: new Set<number>(),
-		candidates: []
-	};
-
-	for (const index of indices) {
-		group.evaluations.add(index);
-	}
-
-	group.candidates.push({
-		drvPath: use.drvPath,
-		output: use.output,
-		path
-	});
-	groups.set(key, group);
 }
 
 export async function evaluateTargets(
@@ -1170,25 +731,6 @@ export function availableCachePaths(
 	);
 }
 
-/**
- * The subset of `paths` substitutable through a reuse view. View
- * substitutability is a separate fact from destination availability: it says
- * only that a build job can substitute the path, never that the destination
- * holds or retains it.
- */
-export function availableViewPaths(
-	options: ProbeOptions & {
-		readonly baseUrl: URL;
-		readonly view: string;
-	}
-): Promise<Set<StorePathString>> {
-	return availablePathsAt(
-		reuseViewUrlFor(options.baseUrl, options.view),
-		options,
-		reuseViewAvailabilityMaxPaths
-	);
-}
-
 async function availablePathsAt(
 	probeUrl: URL,
 	options: ProbeOptions,
@@ -1299,14 +841,10 @@ async function queryMissingStorePathHashes(
 	);
 }
 
-// Targets whose jobs run in the same place share seeding and fallback
-// groups; the label is compared canonically, so case-variant spellings of
-// one runner label do not split a shared output into separate builds.
 /**
- * Fails the plan when two groups would emit one key: the workflow selects
- * groups solely by key, and root mode derives each group's temporary
- * retention root from it, so a shared key would make colliding jobs consume
- * both groups and race on one root.
+ * Fails the plan when two cohorts would emit one key: the workflow selects
+ * jobs solely by key, so a shared key would make colliding jobs consume both
+ * cohorts.
  */
 export function assertDistinctGroupKeys(
 	groups: readonly { readonly key: string }[]
@@ -1322,30 +860,10 @@ export function assertDistinctGroupKeys(
 	}
 }
 
-// A group's key names its matrix entry and, in root mode, its temporary
-// seed root. The readable parts are joined with hyphens, which the
-// components may themselves contain, so a 64-bit hash of the unambiguous
-// tuple disambiguates: ('a-b', 'c') and ('a', 'b-c') read alike but never
-// collide. The digest is not injective, so {@link assertDistinctGroupKeys}
-// backstops it: any residual collision fails the plan loudly instead of
-// merging two groups onto one key and one retention root. The canonical
-// label keeps the key equal across case-variant spellings of one runner
-// label, exactly as the grouping is.
 // GitHub matches runner labels case-insensitively, so grouping and keying
 // compare this canonical form, never the raw spelling.
 function canonicalRunnerLabel(label: string): string {
 	return label.toLowerCase();
-}
-
-function groupKey(prefix: 'seed' | 'adopt', target: PublishTarget): string {
-	const os = canonicalRunnerLabel(target.os);
-	const mode = target.remote ? 'remote' : 'local';
-	const digest = createHash('sha256')
-		.update(JSON.stringify([target.system, os, target.remote]))
-		.digest('hex')
-		.slice(0, 16);
-
-	return `${prefix}-${target.system}-${os}-${mode}-${digest}`;
 }
 
 function executionContextKey(target: PublishTarget): string {
@@ -1409,9 +927,10 @@ function cohortFor(label: string, members: readonly PublishTarget[]): Cohort {
 	};
 }
 
-// Follows groupKey's shape: the readable context parts, hyphen-joined, plus a
-// digest disambiguating look-alike contexts. The label joins the digest
-// rather than the readable prefix, because per-target cohorts are the
+// A cohort's key: the readable context parts, hyphen-joined, plus a 64-bit
+// hash of the unambiguous tuple, so look-alike contexts (('a-b', 'c') and
+// ('a', 'b-c') read alike) never collide. The label joins the
+// digest rather than the readable prefix, because per-target cohorts are the
 // default and every target in one execution context needs a key distinct
 // from its siblings there; assertDistinctGroupKeys backstops any residual
 // collision the digest cannot rule out.
