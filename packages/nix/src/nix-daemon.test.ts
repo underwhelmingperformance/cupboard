@@ -218,6 +218,58 @@ describe('NixDaemonStoreClient', () => {
 		expect(connections).toBe(2);
 	});
 
+	it('queries valid paths in one daemon operation', async () => {
+		let transport: FakeDaemonTransport | undefined;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				transport = new FakeDaemonTransport({
+					[appPath]: {
+						hash: appHash,
+						narSize: 123,
+						references: [],
+						signatures: []
+					}
+				});
+
+				return Promise.resolve(transport);
+			}
+		});
+
+		await expect(
+			client.queryValidPaths([libraryPath, appPath, appPath])
+		).resolves.toStrictEqual([appPath]);
+		expect(transport?.closed).toBe(true);
+	});
+
+	it('asks the configured substituters for paths in one daemon operation', async () => {
+		let transport: FakeDaemonTransport | undefined;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				transport = new FakeDaemonTransport(
+					{},
+					{
+						substitutable: {
+							expectedPaths: [appPath, libraryPath, runtimePath],
+							paths: [runtimePath, appPath]
+						}
+					}
+				);
+
+				return Promise.resolve(transport);
+			}
+		});
+
+		await expect(
+			client.querySubstitutablePaths([
+				runtimePath,
+				appPath,
+				libraryPath,
+				appPath
+			])
+		).resolves.toStrictEqual([appPath, runtimePath]);
+		expect(transport?.closed).toBe(true);
+	});
+
 	it('resolves closure by walking daemon path references', async () => {
 		const client = new NixDaemonStoreClient({
 			connect: () =>
@@ -442,6 +494,7 @@ class FakeDaemonTransport implements NixDaemonTransport {
 			readonly trust?: number;
 			readonly expectedSetOptions?: FakeSetOptionsFields;
 			readonly expectedOverrides?: Readonly<Record<string, string>>;
+			readonly substitutable?: FakeSubstitutable;
 		} = {}
 	) {}
 
@@ -487,7 +540,9 @@ class FakeDaemonTransport implements NixDaemonTransport {
 			return Promise.resolve();
 		}
 
-		this.pendingBytes.push(queryPathInfoResponse(bytes, this.paths));
+		this.pendingBytes.push(
+			daemonOperationResponse(Buffer.from(bytes), this.paths, this.options)
+		);
 
 		return Promise.resolve();
 	}
@@ -535,11 +590,75 @@ class FakeDaemonReadUnderflowError extends Error {
 	}
 }
 
-function queryPathInfoResponse(
-	request: Uint8Array,
+interface FakeSubstitutable {
+	readonly expectedPaths: readonly string[];
+	readonly paths: readonly string[];
+}
+
+function daemonOperationResponse(
+	request: Buffer,
+	paths: Readonly<Record<string, FakePathInfo>>,
+	options: { readonly substitutable?: FakeSubstitutable }
+): Buffer {
+	const operation = Number(request.readBigUInt64LE(0));
+
+	if (operation === 26) {
+		return queryPathInfoResponse(request, paths);
+	}
+
+	if (operation === 31) {
+		return queryValidPathsResponse(request, paths);
+	}
+
+	if (operation === 32) {
+		return querySubstitutablePathsResponse(request, options.substitutable);
+	}
+
+	throw new Error(`Unexpected fake daemon operation: ${String(operation)}`);
+}
+
+function queryValidPathsResponse(
+	request: Buffer,
 	paths: Readonly<Record<string, FakePathInfo>>
 ): Buffer {
-	const storePath = readRequestStorePath(Buffer.from(request));
+	const requested = readRequestStringSet(request);
+	const substituteFlagOffset = request.byteLength - 8;
+
+	expect(Number(request.readBigUInt64LE(substituteFlagOffset))).toBe(0);
+
+	const response = new ProtocolWriter();
+	response.writeInteger(0x61_6c_74_73);
+	response.writeStringSet(
+		requested.filter((storePath) => paths[storePath] !== undefined)
+	);
+
+	return response.bytes();
+}
+
+function querySubstitutablePathsResponse(
+	request: Buffer,
+	substitutable: FakeSubstitutable | undefined
+): Buffer {
+	if (substitutable === undefined) {
+		throw new Error('Unexpected QuerySubstitutablePaths request');
+	}
+
+	expect(readRequestStringSet(request)).toStrictEqual(
+		substitutable.expectedPaths
+	);
+
+	const response = new ProtocolWriter();
+	response.writeInteger(0x61_6c_74_73);
+	response.writeStringSet(substitutable.paths);
+
+	return response.bytes();
+}
+
+function queryPathInfoResponse(
+	request: Buffer,
+	paths: Readonly<Record<string, FakePathInfo>>
+): Buffer {
+	const storePath = readRequestStorePath(request);
 	const pathInfo = paths[storePath];
 	const response = new ProtocolWriter();
 	response.writeInteger(0x61_6c_74_73);
@@ -635,6 +754,22 @@ function readRequestStorePath(request: Buffer): string {
 	offset += 8;
 
 	return request.subarray(offset, offset + length).toString('utf8');
+}
+
+function readRequestStringSet(request: Buffer): string[] {
+	let offset = 8;
+	const count = Number(request.readBigUInt64LE(offset));
+	offset += 8;
+	const values: string[] = [];
+
+	for (let index = 0; index < count; index += 1) {
+		const length = Number(request.readBigUInt64LE(offset));
+		offset += 8;
+		values.push(request.subarray(offset, offset + length).toString('utf8'));
+		offset += length + ((8 - (length % 8)) % 8);
+	}
+
+	return values;
 }
 
 function handshakeResponse(protocolMinor: number): Buffer {

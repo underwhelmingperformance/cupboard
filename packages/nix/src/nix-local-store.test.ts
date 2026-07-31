@@ -14,7 +14,8 @@ import {
 import {
 	InvalidNixStorePathError,
 	NixStorePathNotFoundError,
-	type NixValidPathInfo
+	type NixValidPathInfo,
+	UnsupportedNixStoreOperationError
 } from './nix-store.ts';
 
 const pathA = storePathSchema.parse(
@@ -69,6 +70,8 @@ function fakeDatabase(): NixStoreDatabase {
 	return {
 		pathRow: (storePath) => rowsByPath[storePath],
 		references: (id) => referencesById.get(id) ?? [],
+		validPaths: (storePaths) =>
+			storePaths.filter((storePath) => rowsByPath[storePath] !== undefined),
 		close: vi.fn()
 	};
 }
@@ -113,12 +116,46 @@ describe('NixLocalStoreClient', () => {
 		);
 	});
 
+	it('queries registered paths without loading their metadata', async () => {
+		await expect(
+			client.queryValidPaths([missingPath, pathB, pathB, pathA])
+		).resolves.toStrictEqual([pathA, pathB]);
+	});
+
+	it('cannot query substituters without a daemon', async () => {
+		let outcome:
+			| { value: readonly string[] }
+			| { error: { name: string; operation: string } };
+		try {
+			const value = await client.querySubstitutablePaths([pathA]);
+			outcome = { value };
+		} catch (error_: unknown) {
+			expect(error_).toBeInstanceOf(UnsupportedNixStoreOperationError);
+
+			if (!(error_ instanceof UnsupportedNixStoreOperationError)) {
+				throw error_;
+			}
+
+			outcome = {
+				error: { name: error_.name, operation: error_.operation }
+			};
+		}
+
+		expect(outcome).toStrictEqual({
+			error: {
+				name: 'UnsupportedNixStoreOperationError',
+				operation: 'substitutable-path queries'
+			}
+		});
+	});
+
 	// The store database holds the references, so a row that does not name a
 	// store path is refused at the read rather than carried into the closure.
 	it('refuses a reference that does not name a store path', async () => {
 		const brokenReferences = new NixLocalStoreClient(() => ({
 			pathRow: (storePath) => rowsByPath[storePath],
 			references: () => ['/nix/store/notes.txt'],
+			validPaths: () => [],
 			close: vi.fn()
 		}));
 
@@ -136,6 +173,7 @@ describe('NixLocalStoreClient', () => {
 		const diverted = new NixLocalStoreClient(() => ({
 			pathRow: (storePath) => (storePath === divertedPath ? rowA : undefined),
 			references: () => [divertedPath],
+			validPaths: () => [],
 			close: vi.fn()
 		}));
 
@@ -198,6 +236,11 @@ describe('nixStoreDatabaseFromSqlite', () => {
 			expect(database.pathRow(pathB)).toStrictEqual(rowB);
 			expect(database.pathRow('/nix/store/missing')).toBeUndefined();
 			expect(database.references(1)).toStrictEqual([pathA, pathB]);
+			expect(database.validPaths([missingPath, pathB, pathA])).toStrictEqual([
+				pathA,
+				pathB
+			]);
+			expect(database.validPaths([])).toStrictEqual([]);
 		} finally {
 			database.close();
 		}

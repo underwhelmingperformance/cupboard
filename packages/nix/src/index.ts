@@ -10,7 +10,8 @@ export {
 	NixStoreError,
 	NixStorePathNotFoundError,
 	NotInNixStoreError,
-	UnsupportedNixStoreError
+	UnsupportedNixStoreError,
+	UnsupportedNixStoreOperationError
 } from './nix-store.ts';
 export type {
 	NixDaemonOverrides,
