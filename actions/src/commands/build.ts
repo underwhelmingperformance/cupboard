@@ -5,10 +5,10 @@ import path from 'node:path';
 import { env } from 'node:process';
 
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
+import type { BuildReceipt } from '@cupboard/protocol/build';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
-import type { BuildReceipt } from '../build-receipt.ts';
 import { CommandFailedError, InvalidInputError } from '../errors.ts';
 import {
 	appendEnvironmentFile,
@@ -443,7 +443,7 @@ export async function buildAction(
 		finalPaths.map((storePath) => nix.queryPathInfo(storePath))
 	);
 	const subjects = receiptSubjects(attributed, finalInfos, preExisting);
-	const receipt: BuildReceipt = { version: 1, paths: finalPaths, subjects };
+	const receipt: BuildReceipt = { version: 2, paths: finalPaths, subjects };
 	await mkdir(path.dirname(pathsFile), { recursive: true });
 	await writeFile(
 		pathsFile,
