@@ -182,13 +182,16 @@ export async function authenticateGithubOidc(
 	options: {
 		readonly environment?: GithubOidcEnvironment;
 		readonly authorizationDetails?: AuthorizationDetails;
+		/** Clock, injectable for tests. */
+		readonly now?: () => number;
 	} = {}
 ): Promise<TokenProvider> {
 	const provider = new GithubOidcTokenProvider(
 		client,
 		audience,
 		options.authorizationDetails,
-		options.environment
+		options.environment,
+		options.now
 	);
 	await provider.get();
 
@@ -221,14 +224,24 @@ export function authenticateForPush(
 	return Promise.resolve(cachedOwnerProvider(client.baseUrl));
 }
 
+// A CI exchange issues an access token with no refresh token, so a token this
+// close to expiry is exchanged anew before it is handed out. GitHub issues
+// fresh OIDC tokens throughout a job's lifetime, and every request resolves
+// its bearer through the provider, so renewal on `get` keeps a run that
+// outlives one token authenticated to the end. The margin matches the push's
+// R2 credential renewal.
+const exchangedTokenRenewalMarginMs = 5 * 60 * 1000;
+
 class GithubOidcTokenProvider implements TokenProvider {
 	#token: string | undefined;
+	#expiresAtMs: number | undefined;
 
 	constructor(
 		private readonly client: CupboardClient,
 		private readonly audience: string,
 		private readonly authorizationDetails: AuthorizationDetails | undefined,
-		private readonly environment?: GithubOidcEnvironment
+		private readonly environment?: GithubOidcEnvironment,
+		private readonly now: () => number = Date.now
 	) {}
 
 	private async exchange(): Promise<string> {
@@ -238,22 +251,37 @@ class GithubOidcTokenProvider implements TokenProvider {
 			fetcher: this.client.fetcher,
 			signal: this.client.signal
 		});
-		const { access_token } = await this.client.tokenExchange(
+		const { access_token, expires_in } = await this.client.tokenExchange(
 			subjectToken,
 			subjectTokenTypeIdToken,
 			this.authorizationDetails
 		);
 
+		this.#token = access_token;
+		this.#expiresAtMs = this.now() + expires_in * 1000;
+
 		return access_token;
 	}
 
+	// Whether the cached token still clears the renewal margin.
+	private isFresh(): boolean {
+		return (
+			this.#expiresAtMs !== undefined &&
+			this.#expiresAtMs - this.now() > exchangedTokenRenewalMarginMs
+		);
+	}
+
 	async get(): Promise<string> {
-		return (this.#token ??= await this.exchange());
+		const cached = this.#token;
+
+		if (cached !== undefined && this.isFresh()) {
+			return cached;
+		}
+
+		return this.exchange();
 	}
 
 	async refresh(): Promise<string> {
-		this.#token = await this.exchange();
-
-		return this.#token;
+		return this.exchange();
 	}
 }
