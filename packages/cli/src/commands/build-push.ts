@@ -79,7 +79,8 @@ const constructedCohortSchema = z.strictObject({
 	attempts: z.number().int().positive().optional(),
 	verifyRebuilds: z.boolean().optional(),
 	keepGoing: z.boolean().optional(),
-	maxJobs: z.number().int().positive().optional()
+	// Zero is Nix's remote-builders-only setting: no local build slots.
+	maxJobs: z.number().int().nonnegative().optional()
 });
 const cohortsFileSchema = z.strictObject({
 	cohorts: z

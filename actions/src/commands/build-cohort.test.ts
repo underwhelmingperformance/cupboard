@@ -21,7 +21,8 @@ import {
 	buildCohortAction,
 	type BuildCohortOptions,
 	nixBuildArguments,
-	resolveBuildCohortInputs
+	resolveBuildCohortInputs,
+	rootGroups
 } from './build-cohort.ts';
 
 const appPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
@@ -604,5 +605,345 @@ describe('buildCohortAction', () => {
 				runNixBuild
 			})
 		).rejects.toBeInstanceOf(CohortPlanResultMissingError);
+	});
+});
+
+describe('rootGroups', () => {
+	const members = [
+		{
+			attr: 'app',
+			installable: '.#app^out',
+			expectedPath: appPath,
+			root: 'github:owner/repo/main/app'
+		},
+		{
+			attr: 'lib',
+			installable: '.#lib^out',
+			expectedPath: libraryBuiltPath,
+			root: 'github:owner/repo/main/lib'
+		},
+		{
+			attr: 'floating',
+			installable: '.#floating^out',
+			root: 'github:owner/repo/main/app'
+		}
+	];
+
+	it.each([
+		{
+			name: 'assigns each expected path to its own root',
+			roots: [
+				'github:owner/repo/main/app',
+				'github:owner/repo/main/lib',
+				'github:owner/repo/main/app'
+			],
+			targetPaths: [appPath, libraryBuiltPath],
+			expected: [
+				{ root: 'github:owner/repo/main/app', paths: [appPath] },
+				{ root: 'github:owner/repo/main/lib', paths: [libraryBuiltPath] }
+			]
+		},
+		{
+			name: 'sends a path with no expected match to the first root',
+			roots: [
+				'github:owner/repo/main/app',
+				'github:owner/repo/main/lib',
+				'github:owner/repo/main/app'
+			],
+			targetPaths: [appPath, libraryBuiltPath, floatingBuiltPath],
+			expected: [
+				{
+					root: 'github:owner/repo/main/app',
+					paths: [appPath, floatingBuiltPath]
+				},
+				{ root: 'github:owner/repo/main/lib', paths: [libraryBuiltPath] }
+			]
+		},
+		{
+			name: 'drops a root with no paths of its own',
+			roots: [
+				'github:owner/repo/main/app',
+				'github:owner/repo/main/lib',
+				'github:owner/repo/main/app'
+			],
+			targetPaths: [appPath],
+			expected: [{ root: 'github:owner/repo/main/app', paths: [appPath] }]
+		},
+		{
+			name: 'yields nothing for an empty cohort',
+			roots: [],
+			targetPaths: [],
+			expected: []
+		}
+	])('$name', ({ roots, targetPaths, expected }) => {
+		expect(rootGroups(members, roots, targetPaths)).toStrictEqual(expected);
+	});
+});
+
+describe('buildCohortAction publication', () => {
+	const cohortKey = 'cohort-x86_64-linux-ubuntu-latest-remote-abc123';
+	const url = canonicalHref(new URL('https://cache.example.test/t/acme'));
+	let directory: string;
+	let environment: Environment;
+
+	beforeEach(async () => {
+		directory = await mkdtemp(path.join(tmpdir(), 'cupboard-build-cohort-'));
+		environment = {
+			RUNNER_TEMP: directory,
+			GITHUB_OUTPUT: path.join(directory, 'github-output')
+		};
+	});
+
+	afterEach(async () => {
+		await rm(directory, { recursive: true, force: true });
+	});
+
+	interface PublicationRun {
+		readonly calls: readonly (readonly string[])[];
+		readonly receiptLine: string | undefined;
+		readonly cohortsFile: unknown;
+		readonly nixBuilds: readonly (readonly unknown[])[];
+	}
+
+	async function runPublicationFlow(
+		options: BuildCohortOptions
+	): Promise<PublicationRun> {
+		const calls: (readonly string[])[] = [];
+		const runCupboardMock = vi.fn<typeof runCupboard>(
+			(_binaryPath, arguments_) => {
+				calls.push(arguments_);
+
+				return Promise.resolve(
+					arguments_[1] === 'plan' ? planCohortSuccess() : []
+				);
+			}
+		);
+		const runNixBuild = vi.fn(() =>
+			Promise.resolve([libraryBuiltPath, floatingBuiltPath])
+		);
+
+		await buildCohortAction(options, environment, {
+			runCupboard: runCupboardMock,
+			runNixBuild
+		});
+
+		const outputRaw = await readFile(
+			path.join(directory, 'github-output'),
+			'utf8'
+		);
+		const cohortsFilePath = path.join(
+			directory,
+			`cupboard-build-cohorts-${cohortKey}.json`
+		);
+		let cohortsFile: unknown;
+		try {
+			cohortsFile = JSON.parse(await readFile(cohortsFilePath, 'utf8'));
+		} catch {
+			cohortsFile = undefined;
+		}
+
+		return {
+			calls,
+			receiptLine: outputRaw
+				.split('\n')
+				.find((line) => line.startsWith('receipt-file=')),
+			cohortsFile,
+			nixBuilds: runNixBuild.mock.calls
+		};
+	}
+
+	it('streams the build through build-push, then sets each root with one push per group', async () => {
+		const runRoot = 'github:owner/repo/_cupboard-run/1';
+		const run = await runPublicationFlow({
+			...baseOptions(),
+			cohortJson: cohortJson({
+				expectedPaths: [appPath, libraryBuiltPath, undefined]
+			}),
+			push: 'true',
+			reuseView: 'pr-view',
+			cache: 'builds',
+			ttl: '7d',
+			runRoot,
+			runRootTtl: '2d',
+			maxJobs: '0'
+		});
+
+		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
+		const referenceFile = path.join(
+			directory,
+			'cupboard-cohort-reference-paths.txt'
+		);
+		const cohortsFile = path.join(
+			directory,
+			`cupboard-build-cohorts-${cohortKey}.json`
+		);
+		const [plan, ...publication] = run.calls;
+
+		expect({
+			planCommand: plan?.[1],
+			publication,
+			cohortsFile: run.cohortsFile,
+			nixBuilds: run.nixBuilds,
+			receiptLine: run.receiptLine
+		}).toStrictEqual({
+			planCommand: 'plan',
+			publication: [
+				[
+					'--no-colour',
+					'build-push',
+					url,
+					'--github-oidc',
+					'--no-retain',
+					'--cohorts-file',
+					cohortsFile,
+					'--receipt-file',
+					receiptFile,
+					'--cache',
+					'builds',
+					'--run-root',
+					runRoot,
+					'--run-root-ttl',
+					'2d'
+				],
+				[
+					'--no-colour',
+					'push',
+					url,
+					appPath,
+					floatingBuiltPath,
+					'--github-oidc',
+					'--root',
+					'github:owner/repo/main/app',
+					'--cache',
+					'builds',
+					'--ttl',
+					'7d',
+					'--reference-paths-file',
+					referenceFile,
+					'--reference-source',
+					`${url}/reuse/pr-view`,
+					'--run-root',
+					runRoot,
+					'--run-root-ttl',
+					'2d'
+				],
+				[
+					'--no-colour',
+					'push',
+					url,
+					libraryBuiltPath,
+					'--github-oidc',
+					'--root',
+					'github:owner/repo/main/lib',
+					'--cache',
+					'builds',
+					'--ttl',
+					'7d',
+					'--run-root',
+					runRoot,
+					'--run-root-ttl',
+					'2d'
+				]
+			],
+			cohortsFile: {
+				cohorts: [
+					{
+						installables: [
+							libraryQueryInstallable,
+							'.#packages.x86_64-linux.floating^out'
+						],
+						verifyRebuilds: true,
+						keepGoing: true,
+						maxJobs: 0
+					}
+				]
+			},
+			nixBuilds: [
+				[
+					[libraryQueryInstallable, '.#packages.x86_64-linux.floating^out'],
+					'0',
+					''
+				]
+			],
+			receiptLine: `receipt-file=${receiptFile}`
+		});
+	});
+
+	it('publishes a single-root cohort with one push, no reference source without a reuse view', async () => {
+		const run = await runPublicationFlow({
+			...baseOptions(),
+			cohortJson: cohortJson({
+				roots: [
+					'github:owner/repo/main',
+					'github:owner/repo/main',
+					'github:owner/repo/main'
+				]
+			}),
+			push: 'true'
+		});
+
+		expect(run.calls.map((call) => call[1])).toStrictEqual([
+			'plan',
+			'build-push',
+			'push'
+		]);
+		expect(run.calls[2]).toStrictEqual([
+			'--no-colour',
+			'push',
+			url,
+			appPath,
+			libraryBuiltPath,
+			floatingBuiltPath,
+			'--github-oidc',
+			'--root',
+			'github:owner/repo/main'
+		]);
+	});
+
+	it('keeps a remote-store cohort on its plain build, publishing after it', async () => {
+		const run = await runPublicationFlow({
+			...baseOptions(),
+			cohortJson: cohortJson({
+				roots: [
+					'github:owner/repo/main',
+					'github:owner/repo/main',
+					'github:owner/repo/main'
+				]
+			}),
+			push: 'true',
+			store: 'ssh-ng://build@example.test'
+		});
+
+		expect({
+			invocations: run.calls.map((call) => call[1]),
+			push: run.calls[1],
+			cohortsFile: run.cohortsFile,
+			nixBuilds: run.nixBuilds,
+			receiptLine: run.receiptLine
+		}).toStrictEqual({
+			invocations: ['plan', 'push'],
+			push: [
+				'--no-colour',
+				'push',
+				url,
+				appPath,
+				libraryBuiltPath,
+				floatingBuiltPath,
+				'--github-oidc',
+				'--root',
+				'github:owner/repo/main',
+				'--store',
+				'ssh-ng://build@example.test'
+			],
+			cohortsFile: undefined,
+			nixBuilds: [
+				[
+					[libraryQueryInstallable, '.#packages.x86_64-linux.floating^out'],
+					'',
+					'ssh-ng://build@example.test'
+				]
+			],
+			receiptLine: 'receipt-file='
+		});
 	});
 });

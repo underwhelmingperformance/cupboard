@@ -1,9 +1,10 @@
 name: Build a publish cohort
 description:
   Check a publish cohort's availability partition and capacity against this
-  runner's store, build its missing targets with a plain `nix build
-  --keep-going`, and report the target, intermediate, reference and
-  left-upstream paths for the subsequent push.
+  runner's store, build its missing targets, and, when publication is enabled,
+  drive the build through `cupboard build-push` (streamed uploads, retry
+  attempts, remote attribution and the build receipt) and set each target root
+  with one push per root group.
 inputs:
   cohort-json:
     description: This job's entry from the plan cohort-matrix.
@@ -40,6 +41,23 @@ inputs:
       Remote ssh-ng store URI the plan, the build and the push run against.
       Empty plans and builds in this runner's own store.
     required: false
+  push:
+    description: >-
+      Publish the cohort. `true` streams the build through `cupboard build-push`
+      and sets each target root with one push per root group; `false` only
+      builds.
+    required: false
+  run-root:
+    description: Run root every published path joins as it commits.
+    required: false
+  run-root-ttl:
+    description: Expire the run root after this duration, such as 2d.
+    required: false
+  receipt-file:
+    description: >-
+      Where to write the `cupboard build-push` receipt. Defaults to a
+      runner-local path under RUNNER_TEMP.
+    required: false
   target-paths-file:
     description: Where to write the cohort's target output paths.
     required: false
@@ -74,6 +92,12 @@ outputs:
   counts-file:
     description: File containing the partition counts and capacity result.
     value: ${{ steps.build-cohort.outputs.counts-file }}
+  receipt-file:
+    description: >-
+      File containing the `cupboard build-push` receipt, ready for
+      actions/attest. Empty when the cohort did not stream a build (push
+      disabled, a remote store, or nothing to build).
+    value: ${{ steps.build-cohort.outputs.receipt-file }}
 runs:
   using: composite
   steps:
@@ -117,6 +141,10 @@ runs:
         READ_PASSWORD: ${{ inputs.read-password }}
         MAX_JOBS: ${{ inputs.max-jobs }}
         STORE: ${{ inputs.store }}
+        PUSH: ${{ inputs.push }}
+        RUN_ROOT: ${{ inputs.run-root }}
+        RUN_ROOT_TTL: ${{ inputs.run-root-ttl }}
+        RECEIPT_FILE: ${{ inputs.receipt-file }}
         TARGET_PATHS_FILE: ${{ inputs.target-paths-file }}
         INTERMEDIATE_PATHS_FILE: ${{ inputs.intermediate-paths-file }}
         REFERENCE_PATHS_FILE: ${{ inputs.reference-paths-file }}
@@ -135,6 +163,10 @@ runs:
           --read-password "$READ_PASSWORD"
           --max-jobs "$MAX_JOBS"
           --store "$STORE"
+          --push "$PUSH"
+          --run-root "$RUN_ROOT"
+          --run-root-ttl "$RUN_ROOT_TTL"
+          --receipt-file "$RECEIPT_FILE"
           --target-paths-file "$TARGET_PATHS_FILE"
           --intermediate-paths-file "$INTERMEDIATE_PATHS_FILE"
           --reference-paths-file "$REFERENCE_PATHS_FILE"

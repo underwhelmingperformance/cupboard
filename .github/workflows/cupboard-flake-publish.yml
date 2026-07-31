@@ -343,6 +343,7 @@ jobs:
     # A hung leg must not burn the 360-minute default.
     timeout-minutes: 180
     permissions:
+      attestations: write # record build provenance on the repository
       contents: read # check out the flake source
       id-token: write # OIDC token for the partition, roots.ensure and the push
     steps:
@@ -380,6 +381,10 @@ jobs:
           read-password: ${{ secrets.read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
 
+      # One build-cohort run is the whole cohort: the availability partition,
+      # the supervised `cupboard build-push` build with streamed uploads,
+      # retry attempts, remote attribution and the receipt, and one push per
+      # root group to set each target root over its full declared list.
       - uses: ./.cupboard/actions/build-cohort
         id: build-cohort
         with:
@@ -392,77 +397,7 @@ jobs:
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
           max-jobs: ${{ matrix.remote && '0' || '' }}
-
-      # No attest step here: build-cohort does not emit a receipt-file in the
-      # shape actions/attest expects (a per-path NAR hash and deriver read
-      # from a supervised build's own log). Cohort jobs publish without a
-      # build-provenance attestation until build-cohort has a receipt to give
-      # it.
-
-      - name: Group the cohort's target paths by root
-        id: root-groups
-        if: ${{ inputs.push }}
-        shell: bash
-        env:
-          ROOTS: ${{ toJSON(matrix.roots) }}
-          EXPECTED_PATHS: ${{ toJSON(matrix.expectedPaths) }}
-          TARGET_PATHS_FILE: ${{ steps.build-cohort.outputs.target-paths-file }}
-          REFERENCE_PATHS_FILE:
-            ${{ steps.build-cohort.outputs.reference-paths-file }}
-        run: |
-          set -euo pipefail
-          # A target's evaluated expected path, when known, is exactly the
-          # path a build realises or an attach-only classification retains,
-          # so it names which root a path in the cohort's flat target-paths
-          # file belongs to without reading build-cohort's own internals. A
-          # path with no matching expected path (an unevaluated or
-          # floating-output member, possible only in an opt-in multi-target
-          # cohort) joins the cohort's first root; a single-target cohort,
-          # the default, always has exactly one root, so this never applies
-          # there.
-          root_groups=$(jq -cn \
-            --argjson roots "${ROOTS}" \
-            --argjson expected "${EXPECTED_PATHS}" \
-            --rawfile targets "${TARGET_PATHS_FILE}" '
-              ($targets | split("\n") | map(select(length > 0))) as $paths
-              | [range(0; ($roots | length)) | {root: $roots[.], path: $expected[.]}] as $members
-              | ($members | map(select(.path != null)) | map({(.path): .root}) | add // {}) as $pathToRoot
-              | ($roots | unique) as $uniqueRoots
-              | ($uniqueRoots[0]) as $firstRoot
-              | ($paths | map({path: ., root: ($pathToRoot[.] // $firstRoot)})) as $assigned
-              | $uniqueRoots
-              | map(. as $r | {root: $r, paths: ([$assigned[] | select(.root == $r) | .path])})
-              | map(select(.paths | length > 0))
-            ')
-          has_content=false
-          if [ "${root_groups}" != '[]' ] || [ -s "${REFERENCE_PATHS_FILE}" ]; then
-            has_content=true
-          fi
-          {
-            echo "json=${root_groups}"
-            echo "has-content=${has_content}"
-          } >> "${GITHUB_OUTPUT}"
-
-      - uses: ./.cupboard/actions/push
-        if:
-          ${{ inputs.push && steps.root-groups.outputs.has-content == 'true' }}
-        with:
-          url: ${{ inputs.url }}
-          root-groups: ${{ steps.root-groups.outputs.json }}
-          cache: ${{ needs.configure.outputs.cache }}
-          ttl: ${{ needs.configure.outputs.ttl }}
-          intermediate-paths-file:
-            ${{ steps.build-cohort.outputs.intermediate-paths-file }}
-          # Publish-by-reference paths only ever come from the configured
-          # reuse view, so the pair is empty together with it, satisfying
-          # the push action's requirement that both are given or neither is.
-          reference-paths-file:
-            ${{ needs.configure.outputs.reuse-view != '' &&
-            steps.build-cohort.outputs.reference-paths-file || '' }}
-          reference-source:
-            ${{ needs.configure.outputs.reuse-view != '' &&
-            format('{0}/reuse/{1}', inputs.url,
-            needs.configure.outputs.reuse-view) || '' }}
+          push: ${{ inputs.push }}
           # Every cohort job in this run shares one root, so a later cohort
           # can substitute an earlier one's streamed work instead of
           # rebuilding it.
@@ -470,6 +405,12 @@ jobs:
             ${{ format('{0}/_cupboard-run/{1}',
             needs.configure.outputs.root-prefix, github.run_id) }}
           run-root-ttl: ${{ inputs.run-root-ttl }}
-          cupboard-version: ${{ inputs.cupboard-version }}
-          expected-source-commit: ${{ job.workflow_sha }}
-          release-repository: underwhelmingperformance/cupboard
+
+      # The build-push receipt carries the per-path NAR hashes, derivers and
+      # attempt attribution the provenance subjects need. A cohort that
+      # streamed no build (push disabled, a remote store, or nothing to
+      # build) has no receipt and nothing it can truthfully attest.
+      - uses: ./.cupboard/actions/attest
+        if: ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' }}
+        with:
+          receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}

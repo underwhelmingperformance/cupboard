@@ -158,6 +158,16 @@ describe('parseCohortsFile', () => {
 		]);
 	});
 
+	it('accepts a remote-builders-only cohort with zero local build jobs', () => {
+		const contents = JSON.stringify({
+			cohorts: [{ installables: ['.#app'], maxJobs: 0 }]
+		});
+
+		expect(parseCohortsFile(contents)).toStrictEqual([
+			{ kind: 'constructed', build: { installables: ['.#app'], maxJobs: 0 } }
+		]);
+	});
+
 	it.each([
 		{ name: 'a body that is not JSON', contents: 'not json' },
 		{ name: 'a body with no cohorts', contents: '{"cohorts": []}' },
