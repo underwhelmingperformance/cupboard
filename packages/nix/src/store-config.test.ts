@@ -69,6 +69,34 @@ describe('discoverNixStoreConfig', () => {
 		expect(config.storeUri).toBe('local');
 	});
 
+	it.each([
+		{
+			name: 'the system file',
+			fixture: {
+				files: { '/etc/nix/nix.conf': 'post-build-hook = /etc/nix/hook.sh\n' }
+			},
+			expected: '/etc/nix/hook.sh'
+		},
+		{
+			name: 'the inline NIX_CONFIG, shadowing the system file',
+			fixture: {
+				env: { NIX_CONFIG: 'post-build-hook = /inline/hook.sh' },
+				files: { '/etc/nix/nix.conf': 'post-build-hook = /etc/nix/hook.sh\n' }
+			},
+			expected: '/inline/hook.sh'
+		},
+		{
+			name: 'no configured hook',
+			fixture: {},
+			expected: undefined
+		}
+	])(
+		'surfaces the effective post-build-hook from $name',
+		({ fixture, expected }) => {
+			expect(discover(fixture).postBuildHook).toBe(expected);
+		}
+	);
+
 	it('lets the user file override the system file', () => {
 		const config = discover({
 			home: '/home/u',
