@@ -11,17 +11,20 @@ import {
 	NixStorePathNotFoundError,
 	type NixValidPathInfo,
 	requireStorePath,
-	resolveClosureBy
+	resolveClosureBy,
+	UnsupportedNixStoreOperationError
 } from './nix-store.ts';
 
 /**
- * A read view of the local Nix store's SQLite database, narrowed to the two
- * queries closure resolution needs. Injected so the client is tested without a
+ * A read view of the local Nix store's SQLite database, narrowed to the
+ * queries path metadata reads need. Injected so the client is tested without a
  * real database.
  */
 export interface NixStoreDatabase {
 	pathRow(storePath: string): NixStoreRow | undefined;
 	references(id: number): readonly string[];
+	/** The subset of the given paths registered as valid, in database order. */
+	validPaths(storePaths: readonly string[]): readonly string[];
 	close(): void;
 }
 
@@ -71,6 +74,27 @@ export class NixLocalStoreClient implements NixStoreClient {
 			requirePathInfo(database, storePath)
 		);
 	}
+
+	queryValidPaths(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]> {
+		return this.withDatabase((database) => {
+			const candidates = [...new Set(storePaths)];
+			const valid = new Set(database.validPaths(candidates));
+
+			return candidates
+				.filter((storePath) => valid.has(storePath))
+				.toSorted((left, right) => left.localeCompare(right));
+		});
+	}
+
+	querySubstitutablePaths(
+		_storePaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]> {
+		return Promise.reject(
+			new UnsupportedNixStoreOperationError('substitutable-path queries')
+		);
+	}
 }
 
 function requirePathInfo(
@@ -116,6 +140,9 @@ const queryPathInfoSql =
 	'select id, hash, registrationTime, deriver, narSize, ultimate, sigs, ca from ValidPaths where path = ?';
 const queryReferencesSql =
 	'select path from Refs join ValidPaths on reference = id where referrer = ?';
+// SQLite caps the number of bound placeholders per statement, so batched
+// membership queries stay well under it.
+const placeholderBatchSize = 500;
 
 /**
  * Open the local store database read-only. The shipped binary embeds a Node
@@ -133,7 +160,7 @@ export function openLocalStoreDatabase(
 	);
 }
 
-/** Adapt an open `node:sqlite` database to the two queries the local store needs. */
+/** Adapt an open `node:sqlite` database to the queries the local store needs. */
 export function nixStoreDatabaseFromSqlite(
 	database: DatabaseSync
 ): NixStoreDatabase {
@@ -160,6 +187,28 @@ export function nixStoreDatabaseFromSqlite(
 		},
 		references: (id) =>
 			referencesStatement.all(id).map((row) => text(row.path, 'path')),
+		validPaths(storePaths) {
+			const valid: string[] = [];
+
+			for (
+				let offset = 0;
+				offset < storePaths.length;
+				offset += placeholderBatchSize
+			) {
+				const batch = storePaths.slice(offset, offset + placeholderBatchSize);
+				const placeholders = batch.map(() => '?').join(', ');
+				const statement = database.prepare(
+					`select path from ValidPaths where path in (${placeholders})`
+				);
+				const rows = statement.all(...batch);
+
+				for (const row of rows) {
+					valid.push(text(row.path, 'path'));
+				}
+			}
+
+			return valid;
+		},
 		close() {
 			database.close();
 		}

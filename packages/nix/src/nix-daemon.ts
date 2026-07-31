@@ -25,6 +25,8 @@ const minimumProtocolMinor = 38;
 
 const opSetOptions = 19;
 const opQueryPathInfo = 26;
+const opQueryValidPaths = 31;
+const opQuerySubstitutablePaths = 32;
 
 const stderrNext = 0x6f_6c_6d_67;
 const stderrRead = 0x64_61_74_61;
@@ -198,6 +200,34 @@ export class NixDaemonStoreClient implements NixStoreClient {
 
 		try {
 			return await connection.queryPathInfo(storePath);
+		} finally {
+			await connection.close();
+		}
+	}
+
+	async queryValidPaths(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]> {
+		const connection = await this.openConnection();
+
+		try {
+			return sortedUniquePaths(
+				await connection.queryValidPaths(sortedUniquePaths(storePaths))
+			);
+		} finally {
+			await connection.close();
+		}
+	}
+
+	async querySubstitutablePaths(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]> {
+		const connection = await this.openConnection();
+
+		try {
+			return sortedUniquePaths(
+				await connection.querySubstitutablePaths(sortedUniquePaths(storePaths))
+			);
 		} finally {
 			await connection.close();
 		}
@@ -655,6 +685,39 @@ class NixDaemonConnection {
 			ultimate: pathInfo.ultimate
 		};
 	}
+
+	async queryValidPaths(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]> {
+		const request = new NixDaemonWriter();
+		request.writeInteger(opQueryValidPaths);
+		request.writeStringSet(storePaths);
+		// Whether the daemon may substitute the paths while answering; validity
+		// is a read, so substitution stays off.
+		request.writeBoolean(false);
+
+		await this.transport.write(request.bytes());
+		await this.processStderr();
+
+		const validPaths = await this.readStringSet();
+
+		return validPaths.map((path) => requireStorePath(path));
+	}
+
+	async querySubstitutablePaths(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]> {
+		const request = new NixDaemonWriter();
+		request.writeInteger(opQuerySubstitutablePaths);
+		request.writeStringSet(storePaths);
+
+		await this.transport.write(request.bytes());
+		await this.processStderr();
+
+		const substitutablePaths = await this.readStringSet();
+
+		return substitutablePaths.map((path) => requireStorePath(path));
+	}
 }
 
 class NixDaemonWriter {
@@ -855,6 +918,14 @@ function nixDaemonHash(base16Digest: string): NixSha256Hash {
 	}
 
 	return NixSha256Hash.fromDigest(Buffer.from(base16Digest, 'hex'));
+}
+
+function sortedUniquePaths(
+	storePaths: readonly StorePathString[]
+): readonly StorePathString[] {
+	return [...new Set(storePaths)].toSorted((left, right) =>
+		left.localeCompare(right)
+	);
 }
 
 // Worker-protocol trust values: 1 trusted, 2 not trusted, 0 unset.

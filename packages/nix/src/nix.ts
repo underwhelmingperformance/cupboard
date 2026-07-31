@@ -81,6 +81,25 @@ export class Nix {
 		return this.store.queryPathInfo(this.toStorePath(path));
 	}
 
+	/** The arguments this store holds as valid, deduplicated and sorted. */
+	async queryValidPaths(paths: readonly string[]): Promise<readonly string[]> {
+		return this.store.queryValidPaths(
+			paths.map((path) => this.toStorePath(path))
+		);
+	}
+
+	/**
+	 * The arguments available from the store's configured substituters,
+	 * deduplicated and sorted.
+	 */
+	async querySubstitutablePaths(
+		paths: readonly string[]
+	): Promise<readonly string[]> {
+		return this.store.querySubstitutablePaths(
+			paths.map((path) => this.toStorePath(path))
+		);
+	}
+
 	/** The closure of the given paths, sorted by store path. */
 	async resolveClosure(
 		paths: readonly string[]

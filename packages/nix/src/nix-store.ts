@@ -22,12 +22,26 @@ export interface NixValidPathInfo {
 	readonly ultimate: boolean;
 }
 
-/** A store backend: how a single path's info is fetched from this kind of store. */
+/** Operations provided by a selected Nix store backend. */
 export interface NixStoreClient {
 	resolveClosure(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly NixValidPathInfo[]>;
 	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo>;
+	/**
+	 * The subset of the given paths this store holds as valid, deduplicated
+	 * and sorted by store path.
+	 */
+	queryValidPaths(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]>;
+	/**
+	 * The subset of the given paths available from the store's configured
+	 * substituters, deduplicated and sorted by store path.
+	 */
+	querySubstitutablePaths(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]>;
 }
 
 /**
@@ -184,6 +198,13 @@ export class NixStoreDatabaseError extends NixStoreError {
 	constructor(message: string) {
 		super(message);
 		this.name = 'NixStoreDatabaseError';
+	}
+}
+
+export class UnsupportedNixStoreOperationError extends NixStoreError {
+	constructor(public readonly operation: string) {
+		super(`The selected Nix store does not support ${operation}`);
+		this.name = 'UnsupportedNixStoreOperationError';
 	}
 }
 
