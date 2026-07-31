@@ -26,6 +26,7 @@ const protocolMajor = 1;
 const protocolMinor = 38;
 const minimumProtocolMinor = 38;
 
+const opAddTemporaryRoot = 11;
 const opSetOptions = 19;
 const opQueryPathInfo = 26;
 const opQueryValidPaths = 31;
@@ -64,6 +65,31 @@ export interface NixDaemonTransport {
  * `unknown` when the daemon leaves the flag unset.
  */
 export type NixDaemonTrust = 'trusted' | 'not-trusted' | 'unknown';
+
+/**
+ * Operations bound to one open daemon connection. A temporary root taken
+ * through the session lives exactly as long as that connection: the daemon
+ * releases it when the connection closes, so the connection is the unit of
+ * pinning and the session's queries see the store with those roots held.
+ */
+export interface NixDaemonSession {
+	/**
+	 * Protect a path from garbage collection for the life of this session's
+	 * connection. There is no matching release; closing the connection is the
+	 * release.
+	 */
+	addTempRoot(storePath: StorePathString): Promise<void>;
+	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo>;
+	queryValidPaths(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]>;
+	querySubstitutablePaths(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]>;
+	queryMissing(
+		targets: readonly NixDerivedPathString[]
+	): Promise<NixMissingPartition>;
+}
 
 interface NixDaemonProtocolVersion {
 	readonly major: number;
@@ -201,70 +227,48 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	}
 
 	async queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo> {
-		const connection = await this.openConnection();
-
-		try {
-			return await connection.queryPathInfo(storePath);
-		} finally {
-			await connection.close();
-		}
+		return this.withConnection((session) => session.queryPathInfo(storePath));
 	}
 
 	async queryValidPaths(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]> {
-		const connection = await this.openConnection();
-
-		try {
-			return sortedUnique(
-				await connection.queryValidPaths(sortedUnique(storePaths))
-			);
-		} finally {
-			await connection.close();
-		}
+		return this.withConnection((session) =>
+			session.queryValidPaths(storePaths)
+		);
 	}
 
 	async querySubstitutablePaths(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]> {
-		const connection = await this.openConnection();
-
-		try {
-			return sortedUnique(
-				await connection.querySubstitutablePaths(sortedUnique(storePaths))
-			);
-		} finally {
-			await connection.close();
-		}
+		return this.withConnection((session) =>
+			session.querySubstitutablePaths(storePaths)
+		);
 	}
 
 	async queryMissing(
 		targets: readonly NixDerivedPathString[]
 	): Promise<NixMissingPartition> {
-		const candidates = sortedUnique(targets);
-
-		if (candidates.length === 0) {
-			return {
-				willBuild: [],
-				willSubstitute: [],
-				unknown: [],
-				downloadSize: 0,
-				narSize: 0
-			};
+		if (targets.length === 0) {
+			return emptyMissingPartition;
 		}
 
+		return this.withConnection((session) => session.queryMissing(targets));
+	}
+
+	/**
+	 * Run `use` against a session bound to one daemon connection, closing the
+	 * connection when `use` settles. A temporary root taken through the
+	 * session is held by that connection alone, so the callback's extent
+	 * decides exactly how long the roots protect their paths.
+	 */
+	async withConnection<T>(
+		use: (session: NixDaemonSession) => Promise<T>
+	): Promise<T> {
 		const connection = await this.openConnection();
 
 		try {
-			const partition = await connection.queryMissing(candidates);
-
-			return {
-				willBuild: sortedUnique(partition.willBuild),
-				willSubstitute: sortedUnique(partition.willSubstitute),
-				unknown: sortedUnique(partition.unknown),
-				downloadSize: partition.downloadSize,
-				narSize: partition.narSize
-			};
+			return await use(new NixDaemonConnectionSession(connection));
 		} finally {
 			await connection.close();
 		}
@@ -305,6 +309,58 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		} finally {
 			await connection.close();
 		}
+	}
+}
+
+const emptyMissingPartition: NixMissingPartition = {
+	willBuild: [],
+	willSubstitute: [],
+	unknown: [],
+	downloadSize: 0,
+	narSize: 0
+};
+
+// The session over one connection: the semantic layer of the batched queries,
+// deduplicating and sorting what goes on the wire and what comes back.
+class NixDaemonConnectionSession implements NixDaemonSession {
+	constructor(private readonly connection: NixDaemonConnection) {}
+
+	addTempRoot(storePath: StorePathString): Promise<void> {
+		return this.connection.addTempRoot(storePath);
+	}
+
+	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo> {
+		return this.connection.queryPathInfo(storePath);
+	}
+
+	async queryValidPaths(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]> {
+		return sortedUnique(
+			await this.connection.queryValidPaths(sortedUnique(storePaths))
+		);
+	}
+
+	async querySubstitutablePaths(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]> {
+		return sortedUnique(
+			await this.connection.querySubstitutablePaths(sortedUnique(storePaths))
+		);
+	}
+
+	async queryMissing(
+		targets: readonly NixDerivedPathString[]
+	): Promise<NixMissingPartition> {
+		const partition = await this.connection.queryMissing(sortedUnique(targets));
+
+		return {
+			willBuild: sortedUnique(partition.willBuild),
+			willSubstitute: sortedUnique(partition.willSubstitute),
+			unknown: sortedUnique(partition.unknown),
+			downloadSize: partition.downloadSize,
+			narSize: partition.narSize
+		};
 	}
 }
 
@@ -794,6 +850,17 @@ class NixDaemonConnection {
 		const substitutablePaths = await this.readStringSet();
 
 		return substitutablePaths.map((path) => requireStorePath(path));
+	}
+
+	async addTempRoot(storePath: StorePathString): Promise<void> {
+		const request = new NixDaemonWriter();
+		request.writeInteger(opAddTemporaryRoot);
+		request.writeString(storePath);
+
+		await this.transport.write(request.bytes());
+		await this.processStderr();
+		// The reply carries one confirmation integer.
+		await this.readInteger();
 	}
 
 	async queryMissing(
