@@ -16,6 +16,7 @@ import {
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import { invocationIdSchema } from '@cupboard/protocol/build';
+import type { Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
@@ -24,11 +25,17 @@ import { pushAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
 import {
 	type BuildInvocation,
+	childExitCode,
 	runBuildPush
 } from '../build-push/build-push.ts';
 import { runCohortSequence } from '../build-push/cohorts.ts';
 import { preflightBuildPush } from '../build-push/preflight.ts';
-import type { ChildCommand } from '../build-push/supervisor.ts';
+import {
+	type ChildCommand,
+	type ChildExit,
+	runChild,
+	type RunChildOptions
+} from '../build-push/supervisor.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient, storedCacheFor } from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
@@ -87,6 +94,35 @@ const cohortsFileSchema = z.strictObject({
 		.array(z.union([commandCohortSchema, constructedCohortSchema]))
 		.min(1)
 });
+
+/**
+ * The collector a cohort boundary invokes when the run opted into collection:
+ * `nix store gc`, which sweeps only dead paths, so live roots (a target root,
+ * the run root's server-side retention, a user's own gc roots) are untouched.
+ * A boundary only runs after the cohort's publication has drained, so no
+ * batch temporary roots are held either. Collection is an optimisation: a
+ * failed sweep surfaces as a warning and never fails a green build.
+ */
+export function betweenCohortCollector(
+	reporter: Pick<Reporter, 'warn'>,
+	runCollector: (options: RunChildOptions) => Promise<ChildExit> = runChild
+): () => Promise<void> {
+	return async () => {
+		const exit = await runCollector({
+			command: ['nix', 'store', 'gc'],
+			environment: process.env
+		});
+
+		if (exit.status === 0) {
+			return;
+		}
+
+		reporter.warn(
+			'collection failed',
+			`nix store gc exited ${String(childExitCode(exit))}; the next cohort builds with the store as it stands`
+		);
+	};
+}
 
 function childCommand(parts: readonly string[]): ChildCommand {
 	const [executable, ...rest] = parts;
@@ -396,7 +432,7 @@ export function registerBuildPushCommand(
 							keepGoingCohorts: true
 						})
 					},
-					{ runCohort }
+					{ runCohort, collect: betweenCohortCollector(reporter) }
 				);
 
 				if (cohorts.length > 1 && options.receiptFile !== undefined) {

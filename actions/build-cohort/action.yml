@@ -47,6 +47,12 @@ inputs:
       and sets each target root with one push per root group; `false` only
       builds.
     required: false
+  gc-between-cohorts:
+    description: >-
+      Collect the local Nix store between build-push cohorts, so a later cohort
+      substitutes the earlier shared work from the cache. Off by default; the
+      run never deletes user store paths unless opted in.
+    required: false
   run-root:
     description: Run root every published path joins as it commits.
     required: false
@@ -142,6 +148,7 @@ runs:
         MAX_JOBS: ${{ inputs.max-jobs }}
         STORE: ${{ inputs.store }}
         PUSH: ${{ inputs.push }}
+        GC_BETWEEN_COHORTS: ${{ inputs.gc-between-cohorts }}
         RUN_ROOT: ${{ inputs.run-root }}
         RUN_ROOT_TTL: ${{ inputs.run-root-ttl }}
         RECEIPT_FILE: ${{ inputs.receipt-file }}
@@ -164,6 +171,7 @@ runs:
           --max-jobs "$MAX_JOBS"
           --store "$STORE"
           --push "$PUSH"
+          --gc-between-cohorts "$GC_BETWEEN_COHORTS"
           --run-root "$RUN_ROOT"
           --run-root-ttl "$RUN_ROOT_TTL"
           --receipt-file "$RECEIPT_FILE"
