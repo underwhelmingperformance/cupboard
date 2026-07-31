@@ -90,12 +90,19 @@ export async function createInvocationRuntimeDirectory(
 ): Promise<InvocationRuntimePlan> {
 	const plan = planInvocationRuntime(options);
 
+	await createPlannedRuntimeDirectory(plan);
+
+	return plan;
+}
+
+/** Creates an already planned invocation directory, owner-only. */
+export async function createPlannedRuntimeDirectory(
+	plan: InvocationRuntimePlan
+): Promise<void> {
 	await mkdir(plan.directory, { mode: 0o700, recursive: true });
 	// The process umask masks the mode `mkdir` applies, so the owner-only mode
 	// is asserted explicitly.
 	await chmod(plan.directory, 0o700);
-
-	return plan;
 }
 
 /** Removes the invocation directory and the socket inside it. */
