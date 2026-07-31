@@ -26,6 +26,17 @@ export interface RootEnsureGrantIntent {
 	readonly root: RootName;
 }
 
+export interface RootListGrantIntent {
+	readonly cacheSelector: string;
+	/**
+	 * Present for a single root's target listing (`root targets`), absent for
+	 * a cache-wide listing (`root list`): the resource a listing route
+	 * declares carries a root only when it names one, and a grant with no
+	 * root only covers a root-free resource.
+	 */
+	readonly root?: RootName;
+}
+
 export interface ConfirmGrantIntent {
 	readonly cacheSelector: string;
 }
@@ -83,6 +94,25 @@ export function rootEnsureAuthorizationDetails(
 			actions: ['root:set'],
 			cache: intent.cacheSelector,
 			root: intent.root
+		}
+	]);
+}
+
+/**
+ * The read-only authority a CI read of a cache's roots, or one root's
+ * targets, needs: exactly `root:list`, never `root:set`, so a plan job's
+ * exchanged token can read a root's reconciled list and refresh nothing it
+ * does not already hold `root:set` for separately.
+ */
+export function rootListAuthorizationDetails(
+	intent: RootListGrantIntent
+): AuthorizationDetails {
+	return authorizationDetailsSchema.parse([
+		{
+			type: 'cupboard_cache',
+			actions: ['root:list'],
+			cache: intent.cacheSelector,
+			...(intent.root !== undefined && { root: intent.root })
 		}
 	]);
 }

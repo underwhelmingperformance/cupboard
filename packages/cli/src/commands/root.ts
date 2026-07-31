@@ -4,6 +4,7 @@ import {
 	selectorForCache,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
+import type { AuthorizationDetails } from '@cupboard/protocol/grants';
 import type {
 	ParsedRootEnsureResponse,
 	ParsedRootListEntry,
@@ -21,7 +22,10 @@ import {
 import type { Command } from 'commander';
 
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
-import { rootEnsureAuthorizationDetails } from '../auth/attenuate.ts';
+import {
+	rootEnsureAuthorizationDetails,
+	rootListAuthorizationDetails
+} from '../auth/attenuate.ts';
 import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient, storedCacheFor } from '../client/client.ts';
@@ -44,6 +48,27 @@ interface RootEnsureOptions extends RootSetOptions {
 interface RootOptions {
 	readonly cache?: string;
 	readonly yes?: boolean;
+}
+
+interface RootListingOptions extends RootOptions {
+	readonly githubOidc?: boolean;
+	readonly audience?: Audience;
+}
+
+/**
+ * The authority a listing command's token exchange requests: cache-wide for
+ * `root list`, narrowed to the one root `root targets` reads. Exported so the
+ * exact grant a CI read requests is provable without driving the command
+ * itself.
+ */
+export function rootListingAuthorizationDetails(
+	cacheSelector: string,
+	root?: RootName
+): AuthorizationDetails {
+	return rootListAuthorizationDetails({
+		cacheSelector,
+		...(root !== undefined && { root })
+	});
 }
 
 /**
@@ -201,18 +226,32 @@ export function registerRootCommands(
 		.description('List retention roots.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.option('--cache <name>', 'target a named cache rather than the default')
-		.action(async (url: URL, options: RootOptions) => {
+		.option(
+			'--github-oidc',
+			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+		)
+		.option(
+			'--audience <audience>',
+			'OIDC audience to request with --github-oidc (default: the tenant URL)',
+			parseAudience
+		)
+		.action(async (url: URL, options: RootListingOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
+			const cacheName = selectorForCache(storedCacheFor(options.cache));
+			const credential = await authenticateForPush(
+				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
+				{
+					githubOidc: options.githubOidc,
+					audience: options.audience ?? audienceSchema.parse(url),
+					authorizationDetails: rootListingAuthorizationDetails(cacheName)
+				}
+			);
 			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+				credential,
 				signal: programOptions.signal
 			});
 
-			await runRootList(
-				selectorForCache(storedCacheFor(options.cache)),
-				reporter,
-				rpc.roots
-			);
+			await runRootList(cacheName, reporter, rpc.roots);
 		});
 
 	root
@@ -221,19 +260,32 @@ export function registerRootCommands(
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'root name, e.g. github:owner/repo/main', parseRootName)
 		.option('--cache <name>', 'target a named cache rather than the default')
-		.action(async (url: URL, name: RootName, options: RootOptions) => {
+		.option(
+			'--github-oidc',
+			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+		)
+		.option(
+			'--audience <audience>',
+			'OIDC audience to request with --github-oidc (default: the tenant URL)',
+			parseAudience
+		)
+		.action(async (url: URL, name: RootName, options: RootListingOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
+			const cacheName = selectorForCache(storedCacheFor(options.cache));
+			const credential = await authenticateForPush(
+				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
+				{
+					githubOidc: options.githubOidc,
+					audience: options.audience ?? audienceSchema.parse(url),
+					authorizationDetails: rootListingAuthorizationDetails(cacheName, name)
+				}
+			);
 			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+				credential,
 				signal: programOptions.signal
 			});
 
-			await runRootTargets(
-				selectorForCache(storedCacheFor(options.cache)),
-				name,
-				reporter,
-				rpc.roots
-			);
+			await runRootTargets(cacheName, name, reporter, rpc.roots);
 		});
 
 	root
