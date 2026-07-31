@@ -444,6 +444,25 @@ export class ConfirmResultInvalidError extends CodedError {
 	}
 }
 
+export class MeasureResultMissingError extends CodedError {
+	constructor() {
+		super('Cupboard recorded no result while measuring the target sizes');
+		this.name = 'MeasureResultMissingError';
+	}
+}
+
+export class MeasureResultInvalidError extends CodedError {
+	constructor(options: { readonly cause: unknown }) {
+		super(
+			'Cupboard recorded an invalid result while measuring the target sizes',
+			{
+				cause: options.cause
+			}
+		);
+		this.name = 'MeasureResultInvalidError';
+	}
+}
+
 export class PublishPlanInvariantError extends CodedError {
 	constructor(public readonly subject: string) {
 		super(`Publish planner invariant failed: missing ${subject}`);
