@@ -50,6 +50,7 @@ interface RecordingStore extends NixStoreClient {
 	readonly drvBatches: string[][];
 	readonly missingBatches: string[][];
 	readonly infoBatches: string[][];
+	readonly narRequests: string[];
 	readonly closures: string[][];
 }
 
@@ -60,6 +61,7 @@ function recordingStore(): RecordingStore {
 	const drvBatches: string[][] = [];
 	const missingBatches: string[][] = [];
 	const infoBatches: string[][] = [];
+	const narRequests: string[] = [];
 	const closures: string[][] = [];
 
 	return {
@@ -69,6 +71,7 @@ function recordingStore(): RecordingStore {
 		drvBatches,
 		missingBatches,
 		infoBatches,
+		narRequests,
 		closures,
 		queryPathInfo: (storePath) => {
 			queried.push(storePath);
@@ -111,10 +114,36 @@ function recordingStore(): RecordingStore {
 				narSize: 0
 			});
 		},
+		narFromPath: (storePath) => {
+			narRequests.push(storePath);
+
+			return byteChunks(Buffer.from('nar'));
+		},
 		resolveClosure: (storePaths) => {
 			closures.push([...storePaths]);
 
 			return Promise.resolve(storePaths.map((storePath) => info(storePath)));
+		}
+	};
+}
+
+function byteChunks(
+	...chunks: readonly Uint8Array[]
+): AsyncIterable<Uint8Array> {
+	return {
+		[Symbol.asyncIterator]() {
+			let index = 0;
+
+			return {
+				next: () => {
+					const value = chunks[index];
+					index += 1;
+
+					return value === undefined
+						? Promise.resolve({ done: true as const, value: undefined })
+						: Promise.resolve({ done: false as const, value });
+				}
+			};
 		}
 	};
 }
@@ -335,6 +364,18 @@ describe('Nix queries', () => {
 			[appPath, libraryPath],
 			[appPath, libraryPath]
 		]);
+	});
+
+	it('canonicalises the path of a NAR stream', async () => {
+		const store = recordingStore();
+		const chunks = await Array.fromAsync(
+			nixOver(store).narFromPath(`${appPath}/bin`)
+		);
+
+		expect({ narRequests: store.narRequests, chunks }).toStrictEqual({
+			narRequests: [appPath],
+			chunks: [Buffer.from('nar')]
+		});
 	});
 
 	it('passes realisation targets through unchanged', async () => {

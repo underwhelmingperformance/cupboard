@@ -163,6 +163,11 @@ export class Nix {
 		return this.store.queryMissing(targets);
 	}
 
+	/** The NAR serialisation of the store path the argument names. */
+	narFromPath(path: string): AsyncIterable<Uint8Array> {
+		return this.store.narFromPath(this.toStorePath(path));
+	}
+
 	/** The registered output paths of the given derivations, sorted. */
 	async queryDerivationOutputPaths(
 		drvPaths: readonly string[]

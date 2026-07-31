@@ -142,6 +142,10 @@ export class NixLocalStoreClient implements NixStoreClient {
 			new UnsupportedNixStoreOperationError('missing-path queries')
 		);
 	}
+
+	narFromPath(_storePath: StorePathString): AsyncIterable<Uint8Array> {
+		throw new UnsupportedNixStoreOperationError('NAR streaming');
+	}
 }
 
 function requirePathInfo(

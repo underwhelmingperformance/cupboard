@@ -31,9 +31,15 @@ const opSetOptions = 19;
 const opQueryPathInfo = 26;
 const opQueryValidPaths = 31;
 const opQuerySubstitutablePaths = 32;
+const opNarFromPath = 38;
 const opQueryMissing = 40;
 const opQueryDerivationOutputMap = 41;
 const opQueryPathInfos = 50;
+
+// The NAR grammar's fixed words are all at most as long as its magic; a
+// structural token above that length is malformed.
+const maxNarWordLength = 'nix-archive-1'.length;
+const narChunkSize = 64 * 1024;
 
 // Offered during the handshake; a daemon that advertises it back accepts the
 // batched path-info operation. No released daemon does yet, so the batch is
@@ -95,6 +101,12 @@ export interface NixDaemonSession {
 	queryMissing(
 		targets: readonly NixDerivedPathString[]
 	): Promise<NixMissingPartition>;
+	/**
+	 * The NAR serialisation of the given path, streamed over this session's
+	 * connection. The stream must be drained before the session issues its
+	 * next operation: the connection is a serial request/response channel.
+	 */
+	narFromPath(storePath: StorePathString): AsyncIterable<Uint8Array>;
 }
 
 interface NixDaemonProtocolVersion {
@@ -165,6 +177,13 @@ export class InvalidNixDaemonHashError extends NixDaemonError {
 	constructor(public readonly hash: string) {
 		super(`Invalid Nix daemon SHA-256 hash: ${hash}`);
 		this.name = 'InvalidNixDaemonHashError';
+	}
+}
+
+export class InvalidNixDaemonNarError extends NixDaemonError {
+	constructor(public readonly reason: string) {
+		super(`The daemon sent bytes that do not form a NAR: ${reason}`);
+		this.name = 'InvalidNixDaemonNarError';
 	}
 }
 
@@ -315,6 +334,21 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		}
 
 		return this.withConnection((session) => session.queryMissing(targets));
+	}
+
+	/**
+	 * The NAR serialisation of the given path, streamed over a connection
+	 * dedicated to this stream and closed when it settles: on a full drain,
+	 * on an error, and when the consumer stops early.
+	 */
+	async *narFromPath(storePath: StorePathString): AsyncIterable<Uint8Array> {
+		const connection = await this.openConnection();
+
+		try {
+			yield* connection.narFromPath(storePath);
+		} finally {
+			await connection.close();
+		}
 	}
 
 	async queryPathsInfo(
@@ -482,6 +516,10 @@ class NixDaemonConnectionSession implements NixDaemonSession {
 			downloadSize: partition.downloadSize,
 			narSize: partition.narSize
 		};
+	}
+
+	narFromPath(storePath: StorePathString): AsyncIterable<Uint8Array> {
+		return this.connection.narFromPath(storePath);
 	}
 }
 
@@ -907,16 +945,141 @@ class NixDaemonConnection {
 	}
 
 	private async readInteger(): Promise<number> {
-		const bytes = await this.transport.read(8);
-		const value = Buffer.from(bytes).readBigUInt64LE();
+		return integerFromWire(await this.transport.read(8));
+	}
 
-		if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
-			throw new NixDaemonRemoteError(
-				`integer too large for JavaScript number: ${value.toString()}`
+	// A structural NAR token, decoded for the grammar walk, with the raw wire
+	// frames so the copy re-emits exactly what was read.
+	private async readNarWord(): Promise<{
+		readonly word: string;
+		readonly frames: readonly Uint8Array[];
+	}> {
+		const header = await this.transport.read(8);
+		const length = integerFromWire(header);
+
+		if (length > maxNarWordLength) {
+			throw new InvalidNixDaemonNarError(
+				`a grammar token of ${String(length)} bytes`
 			);
 		}
 
-		return Number(value);
+		if (length === 0) {
+			return { word: '', frames: [header] };
+		}
+
+		const padded = await this.transport.read(length + paddingLength(length));
+		const word = new TextDecoder().decode(padded.subarray(0, length));
+
+		return { word, frames: [header, padded] };
+	}
+
+	private async *copyNarWord(expected: string): AsyncIterable<Uint8Array> {
+		const { word, frames } = await this.readNarWord();
+
+		if (word !== expected) {
+			throw new InvalidNixDaemonNarError(
+				`'${word}' where '${expected}' belongs`
+			);
+		}
+
+		yield* frames;
+	}
+
+	// A value string (file contents, a symlink target, an entry name) passes
+	// through in bounded chunks without being decoded.
+	private async *copyNarBlob(): AsyncIterable<Uint8Array> {
+		const header = await this.transport.read(8);
+		const length = integerFromWire(header);
+		yield header;
+
+		let remaining = length + paddingLength(length);
+
+		while (remaining > 0) {
+			const chunk = await this.transport.read(
+				Math.min(remaining, narChunkSize)
+			);
+			remaining -= chunk.byteLength;
+			yield chunk;
+		}
+	}
+
+	// The daemon writes the NAR serialisation directly after the stderr
+	// stream settles, with no framing of its own: the NAR grammar is the only
+	// delimiter, so the copy walks the grammar to know where the archive
+	// ends while re-emitting every byte unchanged.
+	private async *copyNar(): AsyncIterable<Uint8Array> {
+		yield* this.copyNarWord('nix-archive-1');
+		yield* this.copyNarNode();
+	}
+
+	private async *copyNarNode(): AsyncIterable<Uint8Array> {
+		yield* this.copyNarWord('(');
+		yield* this.copyNarWord('type');
+
+		const { word, frames } = await this.readNarWord();
+		yield* frames;
+
+		if (word === 'regular') {
+			yield* this.copyNarRegular();
+			return;
+		}
+
+		if (word === 'symlink') {
+			yield* this.copyNarWord('target');
+			yield* this.copyNarBlob();
+			yield* this.copyNarWord(')');
+			return;
+		}
+
+		if (word === 'directory') {
+			yield* this.copyNarDirectory();
+			return;
+		}
+
+		throw new InvalidNixDaemonNarError(`a node of type '${word}'`);
+	}
+
+	private async *copyNarRegular(): AsyncIterable<Uint8Array> {
+		const { word, frames } = await this.readNarWord();
+		yield* frames;
+
+		if (word === 'executable') {
+			yield* this.copyNarWord('');
+			yield* this.copyNarWord('contents');
+			yield* this.copyNarBlob();
+			yield* this.copyNarWord(')');
+			return;
+		}
+
+		if (word === 'contents') {
+			yield* this.copyNarBlob();
+			yield* this.copyNarWord(')');
+			return;
+		}
+
+		throw new InvalidNixDaemonNarError(`'${word}' inside a regular file node`);
+	}
+
+	private async *copyNarDirectory(): AsyncIterable<Uint8Array> {
+		for (;;) {
+			const { word, frames } = await this.readNarWord();
+			yield* frames;
+
+			if (word === ')') {
+				return;
+			}
+
+			if (word !== 'entry') {
+				throw new InvalidNixDaemonNarError(`'${word}' inside a directory node`);
+			}
+
+			yield* this.copyNarWord('(');
+			yield* this.copyNarWord('name');
+			yield* this.copyNarBlob();
+			yield* this.copyNarWord('node');
+			yield* this.copyNarNode();
+			yield* this.copyNarWord(')');
+		}
 	}
 
 	get trust(): NixDaemonTrust {
@@ -1044,6 +1207,17 @@ class NixDaemonConnection {
 		await this.processStderr();
 		// The reply carries one confirmation integer.
 		await this.readInteger();
+	}
+
+	async *narFromPath(storePath: StorePathString): AsyncIterable<Uint8Array> {
+		const request = new NixDaemonWriter();
+		request.writeInteger(opNarFromPath);
+		request.writeString(storePath);
+
+		await this.transport.write(request.bytes());
+		await this.processStderr();
+
+		yield* this.copyNar();
 	}
 
 	async queryMissing(
@@ -1343,6 +1517,18 @@ function versionFromWire(wire: number): NixDaemonProtocolVersion {
 
 function paddingLength(length: number): number {
 	return (8 - (length % 8)) % 8;
+}
+
+function integerFromWire(bytes: Uint8Array): number {
+	const value = Buffer.from(bytes).readBigUInt64LE();
+
+	if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+		throw new NixDaemonRemoteError(
+			`integer too large for JavaScript number: ${value.toString()}`
+		);
+	}
+
+	return Number(value);
 }
 
 function emptyStringToUndefined(value: string): string | undefined {

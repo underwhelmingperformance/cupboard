@@ -11,12 +11,15 @@ import {
 import { describe, expect, it } from 'vitest';
 
 import {
+	FakeDaemonReadUnderflowError,
 	FakeDaemonTransport,
 	readRequestStorePath
 } from '../../../tests/support/fake-daemon-transport.ts';
+import { ProtocolWriter } from '../../../tests/support/protocol-writer.ts';
 
 import {
 	connectToNixDaemon,
+	InvalidNixDaemonNarError,
 	NixDaemonStoreClient,
 	UnsupportedNixDaemonProtocolError
 } from './nix-daemon.ts';
@@ -443,6 +446,136 @@ describe('NixDaemonStoreClient', () => {
 		await expect(
 			client.queryValidPathsInfo([missingPath, appPath])
 		).resolves.toStrictEqual([pathInfo(appPath, appHash, 123, [])]);
+	});
+
+	it('streams a NAR reassembled across daemon frames in order', async () => {
+		const bigContent = 'x'.repeat(150_000);
+		const contentFrame = narFrame(bigContent);
+		const frames = [
+			narFrame('nix-archive-1'),
+			narFrame('(', 'type', 'directory'),
+			narFrame('entry', '(', 'name', 'app', 'node'),
+			narFrame('(', 'type', 'regular', 'executable', '', 'contents'),
+			// The content token split mid-frame proves reassembly does not
+			// depend on how the daemon's writes were chunked.
+			contentFrame.subarray(0, 1000),
+			contentFrame.subarray(1000),
+			narFrame(')', ')'),
+			narFrame('entry', '(', 'name', 'lib', 'node'),
+			narFrame('(', 'type', 'symlink', 'target', './app', ')', ')'),
+			narFrame(')')
+		];
+		let transport: FakeDaemonTransport | undefined;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				transport = new FakeDaemonTransport(
+					{},
+					{ nar: { expectedPath: appPath, frames } }
+				);
+
+				return Promise.resolve(transport);
+			}
+		});
+
+		const chunks = await Array.fromAsync(client.narFromPath(appPath));
+
+		expect(Buffer.concat(chunks)).toStrictEqual(Buffer.concat(frames));
+		expect(transport?.closed).toBe(true);
+	});
+
+	it('surfaces a typed error for bytes that do not form a NAR', async () => {
+		let transport: FakeDaemonTransport | undefined;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				transport = new FakeDaemonTransport(
+					{},
+					{
+						nar: {
+							expectedPath: appPath,
+							frames: [narFrame('nix-archive-1', '(', 'type', 'weird')]
+						}
+					}
+				);
+
+				return Promise.resolve(transport);
+			}
+		});
+
+		let outcome: { drained: true } | { error: { name: string } };
+		try {
+			for await (const chunk of client.narFromPath(appPath)) {
+				void chunk;
+			}
+			outcome = { drained: true };
+		} catch (error_: unknown) {
+			expect(error_).toBeInstanceOf(InvalidNixDaemonNarError);
+
+			if (!(error_ instanceof InvalidNixDaemonNarError)) {
+				throw error_;
+			}
+
+			outcome = { error: { name: error_.name } };
+		}
+
+		expect(outcome).toStrictEqual({
+			error: { name: 'InvalidNixDaemonNarError' }
+		});
+		expect(transport?.closed).toBe(true);
+	});
+
+	it('closes the streaming connection when the stream fails mid-way', async () => {
+		let transport: FakeDaemonTransport | undefined;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				transport = new FakeDaemonTransport(
+					{},
+					{
+						nar: {
+							expectedPath: appPath,
+							// The archive stops mid-node, so a read runs out of
+							// bytes part-way through the copy.
+							frames: [narFrame('nix-archive-1', '(', 'type', 'regular')]
+						}
+					}
+				);
+
+				return Promise.resolve(transport);
+			}
+		});
+
+		const drain = async (): Promise<void> => {
+			for await (const chunk of client.narFromPath(appPath)) {
+				void chunk;
+			}
+		};
+
+		await expect(drain()).rejects.toBeInstanceOf(FakeDaemonReadUnderflowError);
+		expect(transport?.closed).toBe(true);
+	});
+
+	it('closes the streaming connection when the consumer stops early', async () => {
+		const frames = [
+			narFrame('nix-archive-1'),
+			narFrame('(', 'type', 'regular', 'contents', 'y'.repeat(100_000), ')')
+		];
+		let transport: FakeDaemonTransport | undefined;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				transport = new FakeDaemonTransport(
+					{},
+					{ nar: { expectedPath: appPath, frames } }
+				);
+
+				return Promise.resolve(transport);
+			}
+		});
+
+		for await (const chunk of client.narFromPath(appPath)) {
+			void chunk;
+			break;
+		}
+
+		expect(transport?.closed).toBe(true);
 	});
 
 	it('holds temporary roots and queries on one session connection', async () => {
@@ -897,6 +1030,16 @@ describe('NixDaemonStoreClient', () => {
 		expect(transport?.closed).toBe(true);
 	});
 });
+
+function narFrame(...values: readonly string[]): Buffer {
+	const writer = new ProtocolWriter();
+
+	for (const value of values) {
+		writer.writeString(value);
+	}
+
+	return writer.bytes();
+}
 
 class SessionAbortedError extends Error {
 	constructor() {
