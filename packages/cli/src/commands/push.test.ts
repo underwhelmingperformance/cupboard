@@ -4,7 +4,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	NoRetainConflictError,
-	OidcRetentionChoiceRequiredError
+	OidcRetentionChoiceRequiredError,
+	RunRootTtlWithoutRunRootError
 } from '../errors.ts';
 
 import {
@@ -31,6 +32,11 @@ describe('validateRetentionChoice', () => {
 			name: 'a mutating GitHub OIDC push naming neither --root nor --no-retain',
 			options: { githubOidc: true },
 			error: OidcRetentionChoiceRequiredError
+		},
+		{
+			name: '--run-root-ttl without --run-root',
+			options: { runRootTtl: ttlSecondsSchema.parse(3600) },
+			error: RunRootTtlWithoutRunRootError
 		}
 	])('rejects $name', ({ options, error }) => {
 		expect(() => {
@@ -45,7 +51,18 @@ describe('validateRetentionChoice', () => {
 			name: 'a GitHub OIDC dry run naming neither',
 			options: { githubOidc: true, dryRun: true }
 		},
-		{ name: 'an interactive push naming neither', options: {} }
+		{ name: 'an interactive push naming neither', options: {} },
+		// A run root is independent of the target-root choice: an unretained
+		// push may still bind one, attaching its commits to the run root while
+		// declaring no target root.
+		{
+			name: 'explicit unretained publication with a run root',
+			options: {
+				retain: false,
+				runRoot: rootName('ci/run-1'),
+				runRootTtl: ttlSecondsSchema.parse(3600)
+			}
+		}
 	])('accepts $name', ({ options }) => {
 		expect(() => {
 			validateRetentionChoice(options);
@@ -124,6 +141,42 @@ describe('pushCommandAuthorizationDetails', () => {
 					cache: '_default'
 				}
 			]
+		},
+		{
+			name: 'a push naming a run root requests its attach grant beside the push grant',
+			options: { root: rootName('main'), runRoot: rootName('ci/run-1') },
+			expected: [
+				{
+					type: 'cupboard_cache',
+					actions: [
+						'upload:negotiate',
+						'upload:status',
+						'upload:commit',
+						'attestation:negotiate',
+						'attestation:attach',
+						'root:set'
+					],
+					cache: '_default',
+					root: rootName('main')
+				},
+				{
+					type: 'cupboard_cache',
+					actions: ['root:attach'],
+					cache: '_default',
+					root: rootName('ci/run-1')
+				}
+			]
+		},
+		{
+			name: 'a dry run naming a run root still requests only preview',
+			options: { dryRun: true, runRoot: rootName('ci/run-1') },
+			expected: [
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:preview'],
+					cache: '_default'
+				}
+			]
 		}
 	])('$name', ({ options, expected }) => {
 		expect(pushCommandAuthorizationDetails(options, '_default')).toStrictEqual(
@@ -153,5 +206,16 @@ describe('push command', () => {
 		]);
 
 		expect(result).toBeInstanceOf(OidcRetentionChoiceRequiredError);
+	});
+
+	it('rejects --run-root-ttl without --run-root before authenticating', async () => {
+		const result = await parsePush([
+			'https://cache.example.workers.dev/t/acme',
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+			'--run-root-ttl',
+			'1h'
+		]);
+
+		expect(result).toBeInstanceOf(RunRootTtlWithoutRunRootError);
 	});
 });

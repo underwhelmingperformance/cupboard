@@ -244,6 +244,56 @@ describe('runPush', () => {
 		]);
 	});
 
+	it('carries the run root into the negotiate request', async () => {
+		const negotiations: Omit<UploadNegotiateRequest, 'pushId'>[] = [];
+
+		await runPush([appPath], reporter([]), {
+			runRoot: {
+				name: rootName('ci/run-1'),
+				ttlSeconds: ttlSecondsSchema.parse(3600)
+			},
+			client: {
+				preview: unexpectedPreviewCall,
+				negotiate(body) {
+					negotiations.push(body);
+
+					return Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: [
+								{
+									action: 'skip',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString()
+								}
+							]
+						})
+					);
+				},
+				uploadNar: unexpectedUploadNarCall,
+				commit: unexpectedCommitCall,
+				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
+			} satisfies PushClient,
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+		});
+
+		expect(negotiations).toStrictEqual([
+			{
+				attachRoot: { name: 'ci/run-1', ttlSeconds: 3600 },
+				paths: [
+					{
+						storePathHash: StorePath.hash(appPath),
+						storePath: appPath,
+						narHash: appDigest.narHash.toString(),
+						narSize: 123,
+						references: [],
+						deriver: undefined,
+						ca: undefined
+					}
+				]
+			}
+		]);
+	});
+
 	it('uploads NARs in parallel up to the limit', async () => {
 		const limit = 2;
 		const paths = ['1', '2', '3', '4'].map((n) =>

@@ -34,6 +34,7 @@ import {
 	type ParsedUploadNegotiateResponse,
 	type ParsedUploadPreviewDecision,
 	type ParsedUploadPreviewResponse,
+	type UploadAttachRoot,
 	type UploadNegotiateRequest,
 	type UploadPreviewRequest
 } from '@cupboard/protocol/upload';
@@ -81,6 +82,11 @@ export interface PushDependencies {
 	readonly client: PushClient;
 	readonly root?: RootName;
 	readonly ttlSeconds?: TtlSeconds;
+	// The run root this push binds at negotiate: the server attaches every
+	// committed path under it, for the root's own time-to-live. Independent of
+	// `root` and `retain`: an unretained push may still bind one, its commits
+	// joining the run root while it declares no target root.
+	readonly runRoot?: UploadAttachRoot;
 	// Whether this push retains what it publishes at all. Absent (or true) keeps
 	// today's behaviour: a named root with `root`, or an implicit pin per path
 	// otherwise. `false` is `--no-retain`: no root RPCs at all, so a path is kept
@@ -199,9 +205,13 @@ async function requireUploadGraceFacts(
 
 async function negotiateUpload(
 	client: PushClient,
-	paths: Omit<UploadNegotiateRequest, 'pushId'>['paths']
+	paths: Omit<UploadNegotiateRequest, 'pushId'>['paths'],
+	attachRoot?: UploadAttachRoot
 ): Promise<ParsedUploadNegotiateResponse> {
-	return client.negotiate({ paths });
+	return client.negotiate({
+		paths,
+		...(attachRoot !== undefined && { attachRoot })
+	});
 }
 
 // The read-only twin of `negotiateUpload`. A server that predates preview
@@ -300,6 +310,7 @@ interface PushRuntimeDependencies {
 	readonly compressNar: CompressNar;
 	readonly wait: boolean;
 	readonly waitTimeoutSeconds: WaitTimeoutSeconds;
+	readonly runRoot?: UploadAttachRoot;
 	readonly attest?: boolean;
 	readonly attestations?: readonly PushAttestationSource[];
 	readonly readAttestationBundle?: ReadAttestationBundle;
@@ -346,7 +357,8 @@ async function runPushFlow(
 
 			const response = await negotiateUpload(
 				client,
-				closure.map((pathInfo) => prepareStorePathNegotiation(pathInfo))
+				closure.map((pathInfo) => prepareStorePathNegotiation(pathInfo)),
+				dependencies.runRoot
 			);
 			const uploadCount = response.uploads.filter((decision) =>
 				isUpload(decision)
@@ -485,6 +497,9 @@ async function runPushFlow(
 		compressNar,
 		options: commitOptions,
 		hasGraceFacts,
+		...(dependencies.runRoot !== undefined && {
+			runRoot: dependencies.runRoot
+		}),
 		onBytes,
 		onRedriven: (fresh) => {
 			effectiveActions.set(fresh.storePathHash, fresh.action);
@@ -1430,6 +1445,9 @@ interface CommitContext {
 	readonly compressNar: CompressNar;
 	readonly options: CommitOptions;
 	readonly hasGraceFacts: boolean;
+	// The push's bound run root, carried into a re-drive's renegotiation so the
+	// fresh pending row is stamped with the same root as the original.
+	readonly runRoot?: UploadAttachRoot;
 	readonly onBytes: (count: number) => void;
 	readonly onRedriven: (fresh: ParsedUploadDecision) => void;
 }
@@ -1528,9 +1546,11 @@ async function redriveExpiredCommit(
 	context: CommitContext
 ): Promise<CommitOutcome> {
 	const pathInfo = findNegotiatedPath(context.negotiated, decision);
-	const renegotiation = await negotiateUpload(context.client, [
-		prepareStorePathNegotiation(pathInfo)
-	]);
+	const renegotiation = await negotiateUpload(
+		context.client,
+		[prepareStorePathNegotiation(pathInfo)],
+		context.runRoot
+	);
 	const fresh = renegotiation.uploads.at(0);
 
 	if (fresh === undefined) {
