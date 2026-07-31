@@ -100,13 +100,37 @@ describe('resolveStoreBackend', () => {
 			uri: 'unix://',
 			probes: {},
 			expected: daemon
+		},
+		{
+			name: 'an ssh-ng store',
+			uri: 'ssh-ng://build@example.test',
+			probes: {},
+			expected: {
+				backend: 'ssh-ng',
+				remote: { destination: 'build@example.test' }
+			}
+		},
+		{
+			name: 'an ssh-ng store naming its remote program',
+			uri: 'ssh-ng://example.test?remote-program=/opt/nix/bin/nix-daemon',
+			probes: {},
+			expected: {
+				backend: 'ssh-ng',
+				remote: {
+					destination: 'example.test',
+					remoteProgram: '/opt/nix/bin/nix-daemon'
+				}
+			}
 		}
 	])('selects $name', ({ uri, probes, expected }) => {
 		expect(resolve(uri, probes)).toStrictEqual(expected);
 	});
 
-	it('rejects an unsupported store scheme', () => {
-		expect(() => resolve('ssh://builder')).toThrow(UnsupportedNixStoreError);
+	it.each([
+		{ name: 'an unsupported scheme', uri: 'ssh://builder' },
+		{ name: 'an ssh-ng store with no destination', uri: 'ssh-ng://' }
+	])('rejects $name', ({ uri }) => {
+		expect(() => resolve(uri)).toThrow(UnsupportedNixStoreError);
 	});
 });
 
@@ -121,6 +145,14 @@ describe('createNixStoreClient', () => {
 		expect(
 			createNixStoreClient(environment({ NIX_REMOTE: 'local' }))
 		).toBeInstanceOf(NixLocalStoreClient);
+	});
+
+	it('builds a daemon client for an ssh-ng store', () => {
+		expect(
+			createNixStoreClient(
+				environment({ NIX_REMOTE: 'ssh-ng://build@example.test' })
+			)
+		).toBeInstanceOf(NixDaemonStoreClient);
 	});
 });
 
@@ -196,6 +228,33 @@ describe('createNixDaemonStoreClient', () => {
 		expect(outcome).toStrictEqual({
 			error: { socketPath: '/run/nix.sock' }
 		});
+	});
+
+	it('opens an ssh-ng store without probing a local socket', async () => {
+		const storePath = storePathSchema.parse(
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
+		);
+		const client = createNixDaemonStoreClient(
+			daemonEnvironment({ socket: false }),
+			{ ...baseConfig, storeUri: 'ssh-ng://build@example.test' },
+			{
+				connect: () =>
+					Promise.resolve(
+						new FakeDaemonTransport({
+							[storePath]: {
+								hash: '11'.repeat(32),
+								narSize: 123,
+								references: [],
+								signatures: []
+							}
+						})
+					)
+			}
+		);
+
+		await expect(client.queryValidPaths([storePath])).resolves.toStrictEqual([
+			storePath
+		]);
 	});
 
 	it('merges per-call options over the discovered daemon settings', async () => {

@@ -1,6 +1,7 @@
 export type { NixDependencies, RealPath } from './nix.ts';
 export { Nix } from './nix.ts';
 export type { NixDaemonTrust } from './nix-daemon.ts';
+export type { NixSshStoreSpec } from './nix-daemon-ssh.ts';
 export type {
 	NixDerivedPathString,
 	NixMissingPartition,
