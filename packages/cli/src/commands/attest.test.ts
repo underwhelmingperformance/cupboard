@@ -1,11 +1,29 @@
 import { Command, CommanderError } from 'commander';
 import { describe, expect, it } from 'vitest';
 
+import { AttestAttachBundleRequiredError } from '../errors.ts';
+
 import {
 	InvalidVerifierThresholdError,
 	parseVerifierThreshold,
 	registerAttestCommands
 } from './attest.ts';
+
+function silentProgram(): Command {
+	const program = new Command();
+	program.exitOverride();
+	program.configureOutput({
+		writeErr() {
+			return;
+		},
+		writeOut() {
+			return;
+		}
+	});
+	registerAttestCommands(program);
+
+	return program;
+}
 
 function thrownBy(run: () => unknown): unknown {
 	let thrown: unknown;
@@ -64,19 +82,33 @@ describe('parseVerifierThreshold', () => {
 	});
 });
 
+describe('attest attach command', () => {
+	it('requires at least one --attestation bundle before authenticating', async () => {
+		const program = silentProgram();
+
+		let result: unknown;
+		try {
+			await program.parseAsync(
+				[
+					'attest',
+					'attach',
+					'https://cache.example.workers.dev/t/acme',
+					'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
+				],
+				{ from: 'user' }
+			);
+			result = { kind: 'parsed' as const };
+		} catch (error: unknown) {
+			result = error;
+		}
+
+		expect(result).toBeInstanceOf(AttestAttachBundleRequiredError);
+	});
+});
+
 describe('attest verify command', () => {
 	it('requires a predicate type policy', async () => {
-		const program = new Command();
-		program.exitOverride();
-		program.configureOutput({
-			writeErr() {
-				return;
-			},
-			writeOut() {
-				return;
-			}
-		});
-		registerAttestCommands(program);
+		const program = silentProgram();
 
 		let result: unknown;
 		try {

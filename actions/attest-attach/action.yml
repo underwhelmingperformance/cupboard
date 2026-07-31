@@ -1,0 +1,91 @@
+name: Attach cupboard attestation bundles
+description:
+  Attach a signed Sigstore provenance bundle to the published store paths a
+  build receipt records, through `cupboard attest attach`. The bundle is
+  produced by actions/attest after publication, so this step files it against
+  the paths the cache already serves.
+inputs:
+  url:
+    description: cupboard Worker URL.
+    required: true
+  cupboard-path:
+    description: Path to the cupboard binary installed by actions/setup.
+    required: true
+  cache:
+    description: Named cache the paths were published to.
+    required: false
+  audience:
+    description: GitHub OIDC audience. Defaults to url.
+    required: false
+  receipt-file:
+    description: Current-run receipt produced by the build action.
+    required: true
+  bundle:
+    description: Sigstore attestation bundle produced by actions/attest.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Resolve the pinned toolchain
+      id: toolchain
+      shell: bash
+      # The workspace manifest's packageManager field is the single pnpm pin;
+      # the release integrity suffix, when present, is not part of the version.
+      run: |
+        manifest="$GITHUB_ACTION_PATH/../../package.json"
+        node_version_file="$GITHUB_ACTION_PATH/../../.node-version"
+        version="$(sed -n 's/.*"packageManager": *"pnpm@\([^+"]*\).*/\1/p' "$manifest")"
+        if [ -z "$version" ]; then
+          echo "::error::package.json declares no pnpm packageManager pin"
+          exit 1
+        fi
+        if [ ! -r "$node_version_file" ]; then
+          echo "::error::.node-version is not readable"
+          exit 1
+        fi
+        node_version="$(tr -d '\r\n' < "$node_version_file")"
+        if [ -z "$node_version" ]; then
+          echo "::error::.node-version declares no Node version"
+          exit 1
+        fi
+        echo "pnpm-version=$version" | tee -a "$GITHUB_OUTPUT"
+        echo "node-version=$node_version" | tee -a "$GITHUB_OUTPUT"
+
+    - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      with:
+        version: ${{ steps.toolchain.outputs.pnpm-version }}
+        # Point pnpm/action-setup's manifest lookup at this action's own
+        # manifest, not the caller's checkout, whose pinned pnpm would
+        # otherwise conflict with `version`. Parity between this pin and the
+        # workspace manifest is enforced by scripts/action-tool-parity.test.ts.
+        package_json_file: ${{ github.action_path }}/../../package.json
+
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: ${{ steps.toolchain.outputs.node-version }}
+
+    - name: Install action dependencies
+      shell: bash
+      working-directory: ${{ github.action_path }}/../..
+      run: pnpm install --filter @cupboard/action... --prod --frozen-lockfile
+
+    - name: Attach attestation bundles
+      shell: bash
+      env:
+        URL: ${{ inputs.url }}
+        CUPBOARD_PATH: ${{ inputs.cupboard-path }}
+        CACHE: ${{ inputs.cache }}
+        AUDIENCE: ${{ inputs.audience }}
+        RECEIPT_FILE: ${{ inputs.receipt-file }}
+        BUNDLE: ${{ inputs.bundle }}
+      run: |
+        args=(attest-attach
+          --url "$URL"
+          --cupboard-path "$CUPBOARD_PATH"
+          --cache "$CACHE"
+          --audience "$AUDIENCE"
+          --receipt-file "$RECEIPT_FILE"
+          --bundle "$BUNDLE")
+        node --experimental-transform-types \
+          --disable-warning=ExperimentalWarning \
+          "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"
