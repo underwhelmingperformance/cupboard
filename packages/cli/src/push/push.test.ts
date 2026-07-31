@@ -11,6 +11,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import type { AttestationNegotiateRequest } from '@cupboard/protocol/attestations';
+import { pushSummaryResultKind } from '@cupboard/protocol/reports';
 import {
 	type RootSetBody,
 	rootSetMaxTargets,
@@ -20,6 +21,7 @@ import {
 	type ParsedUploadPreviewResponse,
 	type UploadNegotiateRequest,
 	uploadNegotiateResponseSchema,
+	type UploadPathMetadataFields,
 	type UploadPreviewRequest,
 	uploadPreviewResponseSchema
 } from '@cupboard/protocol/upload';
@@ -41,6 +43,7 @@ import {
 	CupboardHttpError,
 	PushIncompleteError,
 	PushNarMetadataMismatchError,
+	ReferenceUploadRequiredError,
 	UploadGraceFactsUnsupportedError,
 	UploadVerificationFailedError
 } from '../errors.ts';
@@ -79,6 +82,21 @@ const runtimePath = storePathSchema.parse(
 const appDigest = digest(1, 123);
 const runtimeDigest = digest(2, 234);
 const compressedNarBytes = Buffer.from('compressed nar');
+
+// The served metadata a reference entry resolves for `appPath`: the path
+// fields negotiate carries plus the blob fields the served narinfo names.
+function referenceMetadata(): UploadPathMetadataFields {
+	return {
+		storePathHash: StorePath.hash(appPath),
+		storePath: appPath,
+		narHash: appDigest.narHash.toString(),
+		narSize: 123,
+		references: [],
+		fileHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+		fileSize: 99,
+		compression: 'zstd'
+	};
+}
 
 function fallbackCommitResponse() {
 	return {
@@ -1753,6 +1771,174 @@ describe('runPush', () => {
 					fields: { name: `pin:${StorePath.hash(appPath)}`, targets: [appPath] }
 				}
 			]
+		});
+	});
+
+	it('publishes a reference entry commit-only, without the store or a NAR read', async () => {
+		const nixCalls: NixCall[] = [];
+		const roots: SetRootCall[] = [];
+		const negotiations: Omit<UploadNegotiateRequest, 'pushId'>[] = [];
+		const commits: string[] = [];
+		const fetched: string[] = [];
+		let narReads = 0;
+
+		await runPush(
+			PublicationCollection.of({ targets: [], referencePaths: [appPath] }),
+			reporter([]),
+			{
+				referenceSource: {
+					url: new URL('https://cache.example.workers.dev/t/acme')
+				},
+				fetchReferenceMetadata: (source, storePathHash) => {
+					fetched.push(`${source.url.href} ${storePathHash}`);
+
+					return Promise.resolve(referenceMetadata());
+				},
+				client: {
+					preview: unexpectedPreviewCall,
+					negotiate(body) {
+						negotiations.push(body);
+
+						return Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: [
+									{
+										action: 'commit',
+										storePathHash: StorePath.hash(appPath),
+										narHash: appDigest.narHash.toString(),
+										uploadId: 'reuse-app'
+									}
+								]
+							})
+						);
+					},
+					uploadNar: unexpectedUploadNarCall,
+					commit(target) {
+						commits.push(target.uploadId);
+
+						return Promise.resolve(fallbackCommitResponse());
+					},
+					setRoot(name, body) {
+						roots.push({ fields: { name, ...body } });
+
+						return Promise.resolve(rootSummary({ name, ...body }));
+					}
+				} satisfies PushClient,
+				createNarArchive: () => {
+					narReads += 1;
+
+					return new FakeNarArchive(appDigest);
+				},
+				nix: nixStore({}, nixCalls)
+			}
+		);
+
+		expect({
+			nixCalls,
+			fetched,
+			negotiations,
+			commits,
+			narReads,
+			roots
+		}).toStrictEqual({
+			nixCalls: [],
+			fetched: [
+				`https://cache.example.workers.dev/t/acme ${StorePath.hash(appPath)}`
+			],
+			negotiations: [
+				{
+					paths: [
+						{
+							storePathHash: StorePath.hash(appPath),
+							storePath: appPath,
+							narHash: appDigest.narHash.toString(),
+							narSize: 123,
+							references: []
+						}
+					]
+				}
+			],
+			commits: ['reuse-app'],
+			narReads: 0,
+			roots: [
+				{
+					fields: { name: `pin:${StorePath.hash(appPath)}`, targets: [appPath] }
+				}
+			]
+		});
+	});
+
+	it('reports an upload demanded for a reference entry as a typed per-path failure', async () => {
+		const payloads: ResultPayload[] = [];
+		const uploadDemand = new ReferenceUploadRequiredError(appPath);
+		let narReads = 0;
+
+		let error: unknown;
+		try {
+			await runPush(
+				PublicationCollection.of({ targets: [], referencePaths: [appPath] }),
+				reporter([], [], payloads),
+				{
+					referenceSource: {
+						url: new URL('https://cache.example.workers.dev/t/acme')
+					},
+					fetchReferenceMetadata: () => Promise.resolve(referenceMetadata()),
+					client: {
+						preview: unexpectedPreviewCall,
+						negotiate: () =>
+							Promise.resolve(
+								uploadNegotiateResponseSchema.parse({
+									uploads: [
+										{
+											action: 'upload',
+											storePathHash: StorePath.hash(appPath),
+											narHash: appDigest.narHash.toString(),
+											uploadId: 'upload-app',
+											r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+											expiresAt: '2026-05-18T12:00:00.000Z'
+										}
+									]
+								})
+							),
+						uploadNar: unexpectedUploadNarCall,
+						commit: unexpectedCommitCall,
+						setRoot: unexpectedSetRootCall
+					} satisfies PushClient,
+					createNarArchive: () => {
+						narReads += 1;
+
+						return new FakeNarArchive(appDigest);
+					},
+					nix: nixStore({})
+				}
+			);
+		} catch (error_: unknown) {
+			error = error_;
+		}
+
+		expect(error).toBeInstanceOf(PushIncompleteError);
+
+		const summary = payloads.find(
+			(payload) => payload.kind === pushSummaryResultKind
+		);
+
+		expect({ narReads, data: summary?.data }).toStrictEqual({
+			narReads: 0,
+			data: {
+				uploadedPaths: 1,
+				reusedBlobs: 0,
+				skipped: 0,
+				uploadedBytes: 0,
+				failures: [
+					{
+						storePathHash: StorePath.hash(appPath),
+						storePath: appPath,
+						stage: 'upload',
+						reason: uploadDemand.message
+					}
+				],
+				paths: []
+			}
 		});
 	});
 

@@ -626,6 +626,45 @@ export class GraceTooShortError extends CliUsageError {
 	}
 }
 
+/** Reference paths and their source travel together. */
+export class ReferenceSourcePairError extends CliUsageError {
+	constructor() {
+		super(
+			'--reference-paths-file and --reference-source must be supplied together'
+		);
+		this.name = 'ReferenceSourcePairError';
+	}
+}
+
+/**
+ * The destination demanded an upload for a path published by reference. A
+ * reference entry never reads a NAR, so the demand cannot be met; the tenant
+ * was expected to hold the blob already.
+ */
+export class ReferenceUploadRequiredError extends CliError {
+	constructor(public readonly storePath: string) {
+		super(
+			`${storePath} is published by reference, but the destination demanded ` +
+				'an upload; the tenant was expected to hold the blob'
+		);
+		this.name = 'ReferenceUploadRequiredError';
+	}
+}
+
+/** The reference source served metadata for a different store path. */
+export class ReferencePathMismatchError extends CliError {
+	constructor(
+		public readonly requestedStorePath: string,
+		public readonly servedStorePath: string
+	) {
+		super(
+			`the reference source served metadata for ${servedStorePath} when ` +
+				`${requestedStorePath} was requested`
+		);
+		this.name = 'ReferencePathMismatchError';
+	}
+}
+
 /** The reference source did not serve the requested narinfo. */
 export class NarInfoUnavailableError extends CliError {
 	constructor(

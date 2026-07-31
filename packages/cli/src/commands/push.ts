@@ -27,6 +27,7 @@ import {
 	InvalidUploadConcurrencyError,
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
+	ReferenceSourcePairError,
 	RunRootTtlWithoutRunRootError
 } from '../errors.ts';
 import { PublicationCollection } from '../push/publication.ts';
@@ -42,6 +43,8 @@ interface PushOptions {
 	readonly ttl?: TtlSeconds;
 	readonly closure?: boolean;
 	readonly intermediatePathsFile?: string;
+	readonly referencePathsFile?: string;
+	readonly referenceSource?: URL;
 	readonly runRoot?: RootName;
 	readonly runRootTtl?: TtlSeconds;
 	readonly cache?: string;
@@ -187,6 +190,15 @@ export function registerPushCommand(
 			'newline-delimited store paths to publish alongside the targets without retaining them as targets'
 		)
 		.option(
+			'--reference-paths-file <path>',
+			'newline-delimited store paths the tenant already holds, published from the reference source with no local store read or NAR upload'
+		)
+		.option(
+			'--reference-source <url>',
+			'served cache endpoint the reference paths are read from (required with --reference-paths-file)',
+			parseWorkerUrl
+		)
+		.option(
 			'--run-root <name>',
 			'bind a run root: every pushed path also joins this root as it commits. Independent of --root, and valid with --no-retain (the commits join the run root while the push declares no target root)',
 			parseRootName
@@ -259,18 +271,30 @@ export function registerPushCommand(
 
 			validateRetentionChoice(options);
 
-			// The file is transport; the collection is the type. Entries are store
-			// paths at the domain boundary: an argument or file line that is not
-			// one fails here, before any token is requested.
+			if (
+				(options.referencePathsFile === undefined) !==
+				(options.referenceSource === undefined)
+			) {
+				throw new ReferenceSourcePairError();
+			}
+
+			// The files are transport; the collection is the type. Entries are
+			// store paths at the domain boundary: an argument or file line that is
+			// not one fails here, before any token is requested.
 			const intermediatePaths =
 				options.intermediatePathsFile === undefined
 					? undefined
 					: parsePathFile(
 							await readFile(options.intermediatePathsFile, 'utf8')
 						);
+			const referencePaths =
+				options.referencePathsFile === undefined
+					? undefined
+					: parsePathFile(await readFile(options.referencePathsFile, 'utf8'));
 			const publication = PublicationCollection.of({
 				targets: paths,
-				...(intermediatePaths !== undefined && { intermediatePaths })
+				...(intermediatePaths !== undefined && { intermediatePaths }),
+				...(referencePaths !== undefined && { referencePaths })
 			});
 			const reporter = commandUi(program, programOptions).reporter();
 			const raw = CupboardClient.fromUrl(url, {
@@ -294,6 +318,9 @@ export function registerPushCommand(
 					signal: programOptions.signal
 				}),
 				...(options.closure !== undefined && { closure: options.closure }),
+				...(options.referenceSource !== undefined && {
+					referenceSource: { url: options.referenceSource }
+				}),
 				wait: options.wait,
 				signal: programOptions.signal,
 				attest: options.attest,

@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
+	ReferenceSourcePairError,
 	RunRootTtlWithoutRunRootError
 } from '../errors.ts';
 
@@ -250,6 +251,58 @@ describe('push command', () => {
 		]);
 
 		expect(result).toBeInstanceOf(RunRootTtlWithoutRunRootError);
+	});
+
+	it.each([
+		{
+			name: '--reference-paths-file without --reference-source',
+			extraArguments: ['--reference-paths-file', 'references.txt']
+		},
+		{
+			name: '--reference-source without --reference-paths-file',
+			extraArguments: [
+				'--reference-source',
+				'https://cache.example.workers.dev/t/acme/reuse/reuse'
+			]
+		}
+	])('rejects $name', async ({ extraArguments }) => {
+		const result = await parsePush([
+			'https://cache.example.workers.dev/t/acme',
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+			...extraArguments
+		]);
+
+		expect(result).toBeInstanceOf(ReferenceSourcePairError);
+	});
+
+	it('rejects a reference paths file naming a non-store path', async () => {
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
+		const file = path.join(directory, 'references.txt');
+		writeFileSync(
+			file,
+			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime\n./result\n'
+		);
+
+		try {
+			const result = await parsePush([
+				'https://cache.example.workers.dev/t/acme',
+				'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+				'--reference-paths-file',
+				file,
+				'--reference-source',
+				'https://cache.example.workers.dev/t/acme/reuse/reuse'
+			]);
+
+			expect(result).toBeInstanceOf(InvalidStorePathError);
+
+			if (!(result instanceof InvalidStorePathError)) {
+				return;
+			}
+
+			expect(result.storePath).toBe('./result');
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
 	});
 
 	it('rejects a target that is not a store path before authenticating', async () => {
