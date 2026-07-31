@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	buildSummarySchema,
 	checkDiscrepancySchema,
 	checkReportSchema,
 	pushSummarySchema,
@@ -268,5 +269,64 @@ describe('pushSummarySchema', () => {
 		}
 	])('rejects $name', ({ value }) => {
 		expect(pushSummarySchema.safeParse(value).success).toBe(false);
+	});
+});
+
+describe('buildSummarySchema', () => {
+	const storePath = `/nix/store/${storePathHash}-app`;
+	const summary = {
+		store: 'ssh-ng://builder.example',
+		targetPaths: 2,
+		intermediatePaths: 5,
+		queueDepth: 3,
+		uploadedPaths: 4,
+		skipped: 3,
+		childExitStatus: 1,
+		unconfirmedPaths: [storePath]
+	};
+
+	it.each([
+		{
+			name: 'a failed run with an unconfirmed path',
+			value: summary
+		},
+		{
+			name: 'a clean run with nothing unconfirmed',
+			value: { ...summary, childExitStatus: 0, unconfirmedPaths: [] }
+		}
+	])('accepts $name', ({ value }) => {
+		expect(buildSummarySchema.parse(value)).toStrictEqual(value);
+	});
+
+	it.each([
+		{
+			name: 'an unknown key carrying a presigned URL',
+			value: {
+				...summary,
+				presignedUrl: 'https://r2.example/nar?signature=abc'
+			}
+		},
+		{
+			name: 'an unknown key carrying a credential',
+			value: { ...summary, accessToken: 'write-1' }
+		},
+		{
+			name: 'an empty store',
+			value: { ...summary, store: '' }
+		},
+		{
+			name: 'a negative count',
+			value: { ...summary, queueDepth: -1 }
+		},
+		{
+			name: 'a negative child exit status',
+			value: { ...summary, childExitStatus: -1 }
+		},
+		{
+			name: 'an unconfirmed path outside the store',
+			value: { ...summary, unconfirmedPaths: ['app'] }
+		}
+	])('rejects $name', ({ value }) => {
+		expect(buildSummarySchema.safeParse(value).success).toBe(false);
 	});
 });

@@ -133,6 +133,29 @@ export const pushSummarySchema = z.strictObject({
 });
 export type ParsedPushSummary = z.output<typeof pushSummarySchema>;
 
+// The `kind` under which `cupboard build-push` emits its final summary result.
+// A consumer that reads the reporter's result file addresses the summary by
+// this name.
+export const buildSummaryResultKind = 'build-summary';
+
+// The build-push summary result data: the store the run built against, how
+// many target and intermediate paths the run selected, the deepest the upload
+// queue reached, how many paths were uploaded or skipped, the child build
+// command's exit status, and the paths whose publication the run could not
+// confirm before it ended. Secrets, presigned URLs and raw credentials never
+// enter the summary.
+export const buildSummarySchema = z.strictObject({
+	store: z.string().min(1),
+	targetPaths: countSchema,
+	intermediatePaths: countSchema,
+	queueDepth: countSchema,
+	uploadedPaths: countSchema,
+	skipped: countSchema,
+	childExitStatus: z.number().int().nonnegative(),
+	unconfirmedPaths: z.array(storePathSchema)
+});
+export type ParsedBuildSummary = z.output<typeof buildSummarySchema>;
+
 export type CheckDiscrepancy = z.input<typeof checkDiscrepancySchema>;
 export type CheckReport = z.input<typeof checkReportSchema>;
 export type ControlCheckReport = z.input<typeof controlCheckReportSchema>;
@@ -140,3 +163,4 @@ export type VerifyReport = z.input<typeof verifyReportSchema>;
 export type PushFailure = z.input<typeof pushFailureSchema>;
 export type PushSummaryPath = z.input<typeof pushSummaryPathSchema>;
 export type PushSummary = z.input<typeof pushSummarySchema>;
+export type BuildSummary = z.input<typeof buildSummarySchema>;

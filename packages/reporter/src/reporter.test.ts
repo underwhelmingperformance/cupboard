@@ -8,6 +8,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import {
+	type BuildPushPhase,
+	buildPushPhases,
 	createGithubReporter,
 	createReporter,
 	formatCount,
@@ -404,6 +406,102 @@ describe('createReporter', () => {
 			{ event: 'warn', label: 'skipped', value: 'already present' },
 			{ event: 'warn', label: 'detached' },
 			{ event: 'info', message: 'all done' }
+		]);
+	});
+
+	// Each build-push phase runs as an ordinary phase unit under its declared
+	// label, with its counts carried as facts; nothing beyond the label, status,
+	// duration and facts enters the event.
+	const buildPushPhaseCases: readonly {
+		readonly phase: BuildPushPhase;
+		readonly label: string;
+		readonly facts: Readonly<Record<string, string | number>>;
+		readonly expected: Readonly<Record<string, string>>;
+	}[] = [
+		{
+			phase: 'build',
+			label: 'Building',
+			facts: { store: 'daemon', 'exit status': 0 },
+			expected: { store: 'daemon', 'exit status': '0' }
+		},
+		{
+			phase: 'queue',
+			label: 'Queueing completed paths',
+			facts: { depth: 4 },
+			expected: { depth: '4' }
+		},
+		{
+			phase: 'upload',
+			label: 'Uploading missing NARs',
+			facts: { uploaded: 3, skipped: 2 },
+			expected: { uploaded: '3', skipped: '2' }
+		},
+		{
+			phase: 'reconcile',
+			label: 'Reconciling build results',
+			facts: { targets: 2, intermediates: 5 },
+			expected: { targets: '2', intermediates: '5' }
+		},
+		{
+			phase: 'retention',
+			label: 'Recording retention',
+			facts: { roots: 1 },
+			expected: { roots: '1' }
+		}
+	];
+
+	it.each(buildPushPhaseCases)(
+		'emits the build-push $phase phase under its label',
+		async ({ phase, label, facts, expected }) => {
+			const { events, reporter } = jsonReporter();
+
+			const value = await reporter.phase(buildPushPhases[phase], (context) => {
+				for (const [factLabel, factValue] of Object.entries(facts)) {
+					context.fact(factLabel, factValue);
+				}
+
+				return 'done';
+			});
+
+			expect({ value, events: withoutDurations(events()) }).toStrictEqual({
+				value: 'done',
+				events: [
+					{
+						durationMs: 'number',
+						event: 'phase',
+						facts: expected,
+						label,
+						status: 'ok'
+					}
+				]
+			});
+		}
+	);
+
+	it('emits the build summary result with only its machine fields', () => {
+		const { events, reporter } = jsonReporter();
+		const summary = {
+			store: 'daemon',
+			targetPaths: 2,
+			intermediatePaths: 5,
+			queueDepth: 3,
+			uploadedPaths: 4,
+			skipped: 3,
+			childExitStatus: 0,
+			unconfirmedPaths: [`/nix/store/${'0'.repeat(32)}-app`]
+		};
+
+		reporter.result({
+			kind: 'build-summary',
+			data: summary,
+			rows: [
+				{ label: 'Uploaded paths', value: '4' },
+				{ label: 'Skipped', value: '3' }
+			]
+		});
+
+		expect(events()).toStrictEqual([
+			{ event: 'result', kind: 'build-summary', data: summary }
 		]);
 	});
 
