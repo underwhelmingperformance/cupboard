@@ -200,6 +200,11 @@ async function servedStatuses(
 	return Object.fromEntries(statuses);
 }
 
+// Temporary-root protection across a concurrent collection has no case here:
+// temporary roots exist only behind a daemon, macOS cannot build into a
+// diverted (`local?root=`) store, and collecting the host store discards real
+// data, so exercising `nix-store --gc` against a store this suite owns needs a
+// dedicated `nix-daemon --store` fixture for a diverted store on Linux.
 describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 	'build-push end to end',
 	() => {
