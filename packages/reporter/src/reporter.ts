@@ -129,6 +129,21 @@ export interface Reporter {
 /** Terminal (clack), line-delimited JSON, or GitHub Actions output. */
 export type ReporterMode = 'terminal' | 'json' | 'github';
 
+/**
+ * The phases `cupboard build-push` reports, in run order, each with the label
+ * its {@link Reporter.phase} unit carries in every mode. A machine consumer of
+ * the JSON stream addresses a phase event by its label.
+ */
+export const buildPushPhases = {
+	build: 'Building',
+	queue: 'Queueing completed paths',
+	upload: 'Uploading missing NARs',
+	reconcile: 'Reconciling build results',
+	retention: 'Recording retention'
+} as const;
+
+export type BuildPushPhase = keyof typeof buildPushPhases;
+
 export interface ReporterOptions {
 	/**
 	 * Where progress and diagnostics are written, one line at a time; defaults to
