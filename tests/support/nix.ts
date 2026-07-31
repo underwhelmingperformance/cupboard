@@ -1,3 +1,5 @@
+import { type ChildProcess, spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
@@ -100,6 +102,15 @@ export class NixStore {
 		return path.join(this.fsRoot, storePath);
 	}
 
+	/**
+	 * Collects everything no root protects. On the host store this would
+	 * discard real data, so it is only meaningful for a chroot store the test
+	 * owns.
+	 */
+	async collectGarbage(): Promise<void> {
+		await this.run('nix-store', ['--gc']);
+	}
+
 	async realise(storePath: string, options: RealiseOptions): Promise<void> {
 		await this.run('nix-store', [
 			'--realise',
@@ -117,6 +128,112 @@ export class NixStore {
 				? []
 				: ['--option', 'netrc-file', options.netrcFile])
 		]);
+	}
+}
+
+export interface DivertedNixDaemonOptions {
+	/** The diverted store's filesystem root. */
+	readonly root: string;
+	/** Home directory for the daemon's isolated configuration. */
+	readonly home: string;
+	/** Where the daemon listens; must be short enough for `sun_path`. */
+	readonly socketPath: string;
+}
+
+/**
+ * A dedicated `nix-daemon` serving a diverted (`local?root=`) store over its
+ * own socket. Temporary roots exist only behind a daemon connection, so a
+ * test that exercises them against a store it owns starts one of these and
+ * points a daemon client at {@link socketPath}. The daemon runs as the test
+ * user with the same isolated configuration the stores use.
+ */
+export class DivertedNixDaemon {
+	static async start(
+		options: DivertedNixDaemonOptions
+	): Promise<DivertedNixDaemon> {
+		const environment = {
+			...(await isolatedEnvironment(options.home)),
+			NIX_DAEMON_SOCKET_PATH: options.socketPath
+		};
+		const child = spawn(
+			'nix-daemon',
+			['--store', `local?root=${options.root}`],
+			{ env: environment, stdio: ['ignore', 'ignore', 'pipe'] }
+		);
+		const stderr: Buffer[] = [];
+		child.stderr.on('data', (chunk: Buffer) => {
+			stderr.push(chunk);
+		});
+
+		await waitForDaemonSocket(child, options.socketPath, () =>
+			Buffer.concat(stderr).toString('utf8')
+		);
+
+		return new DivertedNixDaemon(child, options.socketPath);
+	}
+
+	private constructor(
+		private readonly child: ChildProcess,
+		public readonly socketPath: string
+	) {}
+
+	async stop(): Promise<void> {
+		if (this.child.exitCode !== null || this.child.signalCode !== null) {
+			return;
+		}
+
+		const exited = new Promise<void>((resolve) => {
+			this.child.once('exit', () => {
+				resolve();
+			});
+		});
+		this.child.kill();
+		await exited;
+	}
+}
+
+const daemonStartTimeoutMs = 30_000;
+
+function waitForDaemonSocket(
+	child: ChildProcess,
+	socketPath: string,
+	stderr: () => string
+): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const deadline = Date.now() + daemonStartTimeoutMs;
+		const settle = (outcome: () => void): void => {
+			clearInterval(timer);
+			child.removeListener('exit', onExit);
+			outcome();
+		};
+		const onExit = (): void => {
+			settle(() => {
+				reject(new NixDaemonStartError(socketPath, stderr()));
+			});
+		};
+		const timer = setInterval(() => {
+			if (existsSync(socketPath)) {
+				settle(resolve);
+				return;
+			}
+
+			if (Date.now() > deadline) {
+				settle(() => {
+					reject(new NixDaemonStartError(socketPath, stderr()));
+				});
+			}
+		}, 50);
+		child.once('exit', onExit);
+	});
+}
+
+export class NixDaemonStartError extends Error {
+	constructor(
+		public readonly socketPath: string,
+		public readonly daemonStderr: string
+	) {
+		super(`nix-daemon did not open its socket at ${socketPath}`);
+		this.name = 'NixDaemonStartError';
 	}
 }
 
