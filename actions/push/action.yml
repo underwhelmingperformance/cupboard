@@ -38,6 +38,11 @@ inputs:
   cache:
     description: Named cache to push to.
     required: false
+  store:
+    description: >-
+      Remote ssh-ng store URI the push reads path metadata and NAR bytes from.
+      Empty reads the store Nix itself would use on this runner.
+    required: false
   audience:
     description: GitHub OIDC audience. Defaults to url.
     required: false
@@ -180,6 +185,7 @@ runs:
         EXPECTED_SOURCE_COMMIT: ${{ inputs.expected-source-commit }}
         INSTALL_DIR: ${{ inputs.install-dir }}
         CACHE: ${{ inputs.cache }}
+        STORE: ${{ inputs.store }}
         AUDIENCE: ${{ inputs.audience }}
         ROOT: ${{ inputs.root }}
         TTL: ${{ inputs.ttl }}
@@ -210,6 +216,7 @@ runs:
           --expected-source-commit "$EXPECTED_SOURCE_COMMIT"
           --install-dir "$INSTALL_DIR"
           --cache "$CACHE"
+          --store "$STORE"
           --audience "$AUDIENCE"
           --root "$ROOT"
           --ttl "$TTL"

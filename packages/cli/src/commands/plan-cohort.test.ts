@@ -11,8 +11,10 @@ import {
 } from '@cupboard/nix-store/scalars';
 import type { ParsedRootEnsureResponse } from '@cupboard/protocol/retention';
 import type { Reporter, ResultPayload } from '@cupboard/reporter';
+import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
 
+import { InvalidStoreUriError } from '../errors.ts';
 import {
 	type AvailabilityPartition,
 	UnknownPathsCeilingError
@@ -26,6 +28,7 @@ import type { ParsedCohortTarget } from '../plan/cohort-target.ts';
 import {
 	type PlanCohortDependencies,
 	type PlanCohortRunOptions,
+	registerPlanCommands,
 	runPlanCohort
 } from './plan-cohort.ts';
 import type { RootClient } from './root.ts';
@@ -120,6 +123,7 @@ function runOptions(
 	return {
 		targets: [],
 		cacheName: '_default',
+		storeKind: 'daemon',
 		storePath: '/nix/store',
 		planFile: path.join(tmpdir(), 'unused-cupboard-plan-cohort.json'),
 		ceiling: { value: 0, untrustedFallback: 0 },
@@ -350,5 +354,108 @@ describe('runPlanCohort', () => {
 				]
 			}
 		]);
+	});
+
+	it('records a capacity skip for a remote store without probing this filesystem', async () => {
+		const payloads: ResultPayload[] = [];
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
+		const planFile = path.join(directory, 'plan.json');
+		const remoteDependencies = dependencies({
+			rootClient: recordingRootClient([], buildRequired([])),
+			destinationServed: () => Promise.resolve(new Set([appPath])),
+			capacityProbe: () =>
+				Promise.reject(
+					new Error('the capacity probe must not be consulted here')
+				)
+		});
+
+		try {
+			await runPlanCohort(
+				runOptions({ targets: [target()], storeKind: 'ssh-ng', planFile }),
+				reporter(payloads),
+				remoteDependencies
+			);
+
+			const expectedResult = {
+				partition: {
+					attachOnly: [appPath],
+					publishByReference: [],
+					leftUpstream: [],
+					buildSet: [],
+					counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
+					downloadSize: 0,
+					narSize: 0,
+					unknownCount: 0,
+					ceiling: { value: 0, source: 'configured' }
+				},
+				capacity: { skipped: 'remote-store' }
+			};
+
+			expect(JSON.parse(await readFile(planFile, 'utf8'))).toStrictEqual(
+				expectedResult
+			);
+			expect(payloads).toStrictEqual([
+				{
+					kind: 'plan-cohort',
+					data: expectedResult,
+					rows: [
+						{ label: 'Attach only', value: '1' },
+						{ label: 'Publish by reference', value: '0' },
+						{ label: 'Left upstream', value: '0' },
+						{ label: 'Build set', value: '0' },
+						{ label: 'Plan file', value: planFile }
+					]
+				}
+			]);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+});
+
+function silentProgram(): Command {
+	const program = new Command();
+	program.exitOverride();
+	program.configureOutput({
+		writeErr() {
+			return;
+		},
+		writeOut() {
+			return;
+		}
+	});
+	registerPlanCommands(program);
+
+	return program;
+}
+
+describe('plan cohort command', () => {
+	it('rejects a --store URI that names no ssh-ng destination before authenticating', async () => {
+		let error: unknown;
+
+		try {
+			await silentProgram().parseAsync(
+				[
+					'plan',
+					'cohort',
+					'https://cache.example.workers.dev/t/acme',
+					'--targets-file',
+					'targets.json',
+					'--store',
+					'ssh://builder'
+				],
+				{ from: 'user' }
+			);
+		} catch (error_: unknown) {
+			error = error_;
+		}
+
+		expect(error).toBeInstanceOf(InvalidStoreUriError);
+
+		if (!(error instanceof InvalidStoreUriError)) {
+			return;
+		}
+
+		expect(error.value).toBe('ssh://builder');
 	});
 });

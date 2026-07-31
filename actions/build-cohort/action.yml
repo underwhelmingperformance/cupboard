@@ -35,6 +35,11 @@ inputs:
   max-jobs:
     description: Maximum local build jobs. Empty uses the Nix default.
     required: false
+  store:
+    description: >-
+      Remote ssh-ng store URI the plan, the build and the push run against.
+      Empty plans and builds in this runner's own store.
+    required: false
   target-paths-file:
     description: Where to write the cohort's target output paths.
     required: false
@@ -111,6 +116,7 @@ runs:
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
         MAX_JOBS: ${{ inputs.max-jobs }}
+        STORE: ${{ inputs.store }}
         TARGET_PATHS_FILE: ${{ inputs.target-paths-file }}
         INTERMEDIATE_PATHS_FILE: ${{ inputs.intermediate-paths-file }}
         REFERENCE_PATHS_FILE: ${{ inputs.reference-paths-file }}
@@ -128,6 +134,7 @@ runs:
           --read-user "$READ_USER"
           --read-password "$READ_PASSWORD"
           --max-jobs "$MAX_JOBS"
+          --store "$STORE"
           --target-paths-file "$TARGET_PATHS_FILE"
           --intermediate-paths-file "$INTERMEDIATE_PATHS_FILE"
           --reference-paths-file "$REFERENCE_PATHS_FILE"

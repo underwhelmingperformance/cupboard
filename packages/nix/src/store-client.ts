@@ -109,6 +109,8 @@ export function storeClientForBackend(
 
 /** Per-call adjustments for an explicitly daemon-backed client. */
 export interface NixDaemonClientOptions {
+	/** The store URI this client opens (default: the discovered `store` setting). */
+	readonly storeUri?: string;
 	/** Merged over the discovered SetOptions fields, this value winning per key. */
 	readonly setOptions?: NixDaemonSetOptions;
 	/** Merged over the discovered overrides, this value winning per key. */
@@ -128,9 +130,10 @@ export function createNixDaemonStoreClient(
 	config: NixStoreConfig = discoverNixStoreConfig(dependencies),
 	options: NixDaemonClientOptions = {}
 ): NixDaemonStoreClient {
+	const storeUri = options.storeUri ?? config.storeUri;
 	// An `ssh-ng` store reaches its daemon over ssh: there is no local socket
 	// to probe, and the remote daemon exists whenever ssh can start it.
-	const sshRemote = parseSshNgStoreUri(config.storeUri);
+	const sshRemote = parseSshNgStoreUri(storeUri);
 
 	if (sshRemote !== undefined) {
 		return new NixDaemonStoreClient({
@@ -140,7 +143,7 @@ export function createNixDaemonStoreClient(
 		});
 	}
 
-	const socketPath = configuredDaemonSocketPath(config);
+	const socketPath = configuredDaemonSocketPath(config, storeUri);
 
 	if (!dependencies.socketExists(socketPath)) {
 		throw new NixDaemonUnavailableError(socketPath);
@@ -156,9 +159,12 @@ export function createNixDaemonStoreClient(
 
 // A `unix://` store URI names the daemon socket directly; every other
 // configuration reaches the daemon through the state directory's socket.
-function configuredDaemonSocketPath(config: NixStoreConfig): string {
-	if (config.storeUri.startsWith(unixScheme)) {
-		return unixSocketPath(config.storeUri) ?? config.daemonSocketPath;
+function configuredDaemonSocketPath(
+	config: NixStoreConfig,
+	storeUri: string
+): string {
+	if (storeUri.startsWith(unixScheme)) {
+		return unixSocketPath(storeUri) ?? config.daemonSocketPath;
 	}
 
 	return config.daemonSocketPath;

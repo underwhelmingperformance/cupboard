@@ -357,8 +357,15 @@ describe('Nix.storeKind', () => {
 			sshNg: Nix.openDaemon({
 				...daemonDependencies(true),
 				env: { NIX_REMOTE: 'ssh-ng://builder.example' }
+			}).storeKind,
+			selectedSshNg: Nix.openDaemon(daemonDependencies(true), {
+				storeUri: 'ssh-ng://builder.example'
 			}).storeKind
-		}).toStrictEqual({ daemon: 'daemon', sshNg: 'ssh-ng' });
+		}).toStrictEqual({
+			daemon: 'daemon',
+			sshNg: 'ssh-ng',
+			selectedSshNg: 'ssh-ng'
+		});
 	});
 });
 

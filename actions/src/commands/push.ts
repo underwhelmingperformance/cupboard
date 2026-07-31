@@ -72,6 +72,7 @@ export interface PushOptions {
 	readonly expectedSourceCommit?: string;
 	readonly installDir?: string;
 	readonly cache?: string;
+	readonly store?: string;
 	readonly audience?: string;
 	readonly root?: string;
 	readonly ttl?: string;
@@ -98,6 +99,7 @@ export interface PushInputs {
 	readonly url: URL;
 	readonly paths: readonly string[];
 	readonly cache: StoredCache;
+	readonly store: string;
 	readonly audience: string;
 	readonly root: string;
 	readonly ttl: string;
@@ -138,6 +140,7 @@ interface PushArgumentsOptions {
 	readonly audience: string;
 	readonly root: string;
 	readonly cache: StoredCache;
+	readonly store: string;
 	readonly ttl: string;
 	readonly retain: boolean;
 	readonly wait: boolean;
@@ -188,6 +191,10 @@ export function registerPushCommand(
 			'directory for the downloaded cupboard binary'
 		)
 		.option('--cache <name>', 'named cache to push to')
+		.option(
+			'--store <uri>',
+			'remote ssh-ng store the push reads metadata and NAR bytes from'
+		)
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
 		.option('--root <root>', 'retention root for pushed paths')
 		.option('--ttl <ttl>', 'retention TTL such as 7d or 12h')
@@ -350,6 +357,7 @@ export function resolvePushInputs(
 		url,
 		paths: options.paths,
 		cache: providedCache(options.cache),
+		store: provided(options.store) ?? '',
 		audience: provided(options.audience) ?? '',
 		root: isRetained
 			? (explicitRoot ??
@@ -654,6 +662,10 @@ export function buildPushArguments(
 		arguments_.push('--cache', options.cache);
 	}
 
+	if (options.store !== '') {
+		arguments_.push('--store', options.store);
+	}
+
 	if (options.ttl !== '') {
 		arguments_.push('--ttl', options.ttl);
 	}
@@ -710,6 +722,7 @@ export function pushArgumentsForInvocations(
 		| 'url'
 		| 'audience'
 		| 'cache'
+		| 'store'
 		| 'ttl'
 		| 'retain'
 		| 'wait'
@@ -730,6 +743,7 @@ export function pushArgumentsForInvocations(
 			audience: inputs.audience,
 			root: push.root,
 			cache: inputs.cache,
+			store: inputs.store,
 			ttl: inputs.ttl,
 			retain: inputs.retain,
 			wait: inputs.wait,

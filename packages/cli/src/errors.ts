@@ -80,6 +80,15 @@ export class InvalidReadUserError extends CliUsageError {
 	}
 }
 
+export class InvalidStoreUriError extends CliUsageError {
+	constructor(public readonly value: string) {
+		super(
+			`Invalid --store (expected an ssh-ng:// URI naming a destination): ${value}`
+		);
+		this.name = 'InvalidStoreUriError';
+	}
+}
+
 export class InvalidClaimError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(`Invalid --claim (expected key=value): ${value}`);

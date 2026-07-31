@@ -120,9 +120,15 @@ const capacityResultSchema = z.object({
 	headroom: z.number()
 });
 
+// A plan against a remote store records this in place of a measured capacity
+// result: ssh cannot statfs the remote filesystem.
+const capacitySkipSchema = z.object({
+	skipped: z.literal('remote-store')
+});
+
 const planCohortResultDataSchema = z.object({
 	partition: partitionSchema,
-	capacity: capacityResultSchema
+	capacity: z.union([capacityResultSchema, capacitySkipSchema])
 });
 
 type PlanCohortResultData = z.output<typeof planCohortResultDataSchema>;
@@ -188,6 +194,7 @@ export interface BuildCohortOptions {
 	readonly readUser?: string;
 	readonly readPassword?: string;
 	readonly maxJobs?: string;
+	readonly store?: string;
 	readonly targetPathsFile?: string;
 	readonly intermediatePathsFile?: string;
 	readonly referencePathsFile?: string;
@@ -206,6 +213,7 @@ export interface BuildCohortInputs {
 	readonly readUser: string;
 	readonly readPassword: string;
 	readonly maxJobs: string;
+	readonly store: string;
 	readonly targetPathsFile: string;
 	readonly intermediatePathsFile: string;
 	readonly referencePathsFile: string;
@@ -289,6 +297,7 @@ export function resolveBuildCohortInputs(
 		readUser,
 		readPassword,
 		maxJobs: provided(options.maxJobs) ?? '',
+		store: provided(options.store) ?? '',
 		targetPathsFile: outputPath('target-paths.txt', options.targetPathsFile),
 		intermediatePathsFile: outputPath(
 			'intermediate-paths.txt',
@@ -337,6 +346,10 @@ export function registerBuildCohortCommand(
 		.option('--read-user <user>', 'username for private cache reads')
 		.option('--read-password <password>', 'password for private cache reads')
 		.option('--max-jobs <count>', 'maximum local build jobs')
+		.option(
+			'--store <uri>',
+			'remote ssh-ng store the plan and the build run against'
+		)
 		.option(
 			'--target-paths-file <path>',
 			"where to write the cohort's target output paths"
@@ -404,7 +417,7 @@ export async function buildCohortAction(
 	const built =
 		buildInstallables.length === 0
 			? []
-			: await runNix(buildInstallables, inputs.maxJobs);
+			: await runNix(buildInstallables, inputs.maxJobs, inputs.store);
 
 	// Every path a plain, single-invocation `nix build` prints belongs to one
 	// of this cohort's own requested installables: there is nothing else it
@@ -547,6 +560,10 @@ async function planCohort(
 		);
 	}
 
+	if (inputs.store !== '') {
+		arguments_.push('--store', inputs.store);
+	}
+
 	let results: readonly ReporterResultEvent[];
 
 	try {
@@ -627,16 +644,24 @@ function planCohortResult(
  * collection-window design. A cohort with one failing derivation still
  * reports whatever `--print-out-paths` prints for the survivors; only a
  * catastrophic failure that printed nothing at all is treated as this
- * command's own failure.
+ * command's own failure. A configured remote store owns the build:
+ * `--store` sends the results there while `--eval-store auto` keeps
+ * evaluation on the runner, so the built closure never enters the runner's
+ * local store.
  */
 export function nixBuildArguments(
 	installables: readonly string[],
-	maxJobs: string
+	maxJobs: string,
+	store: string
 ): readonly string[] {
 	const arguments_ = ['build', '--keep-going', '--print-out-paths'];
 
 	if (maxJobs !== '') {
 		arguments_.push('--max-jobs', maxJobs);
+	}
+
+	if (store !== '') {
+		arguments_.push('--store', store, '--eval-store', 'auto');
 	}
 
 	arguments_.push('--', ...installables);
@@ -646,9 +671,10 @@ export function nixBuildArguments(
 
 export async function runNixBuild(
 	installables: readonly string[],
-	maxJobs: string
+	maxJobs: string,
+	store: string
 ): Promise<readonly string[]> {
-	const arguments_ = nixBuildArguments(installables, maxJobs);
+	const arguments_ = nixBuildArguments(installables, maxJobs, store);
 
 	const { status, stdout } = await new Promise<{
 		readonly status: number | null;

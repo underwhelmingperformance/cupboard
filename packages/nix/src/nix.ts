@@ -66,7 +66,8 @@ export class Nix {
 	 * daemon here. The daemon socket has to be present; a daemonless install
 	 * is refused with a typed error naming the probed socket path. Per-call
 	 * options merge over the discovered daemon settings, the caller winning
-	 * per key.
+	 * per key; `storeUri` selects the store the client opens, an `ssh-ng`
+	 * URI reaching that remote's daemon over ssh.
 	 */
 	static openDaemon(
 		dependencies: NixDependencies = defaultStoreClientEnvironment,
@@ -74,12 +75,13 @@ export class Nix {
 	): Nix {
 		const config = discoverNixStoreConfig(dependencies);
 		const store = createNixDaemonStoreClient(dependencies, config, options);
+		const storeUri = options.storeUri ?? config.storeUri;
 
 		return new Nix(
 			store,
 			config.storeDirectory,
 			dependencies.realpath ?? defaultRealPath,
-			parseSshNgStoreUri(config.storeUri) === undefined ? 'daemon' : 'ssh-ng'
+			parseSshNgStoreUri(storeUri) === undefined ? 'daemon' : 'ssh-ng'
 		);
 	}
 

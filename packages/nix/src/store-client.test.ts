@@ -257,6 +257,34 @@ describe('createNixDaemonStoreClient', () => {
 		]);
 	});
 
+	it('opens the ssh-ng store a per-call storeUri names over a local configuration', async () => {
+		const storePath = storePathSchema.parse(
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
+		);
+		const client = createNixDaemonStoreClient(
+			daemonEnvironment({ socket: false }),
+			baseConfig,
+			{
+				storeUri: 'ssh-ng://build@example.test',
+				connect: () =>
+					Promise.resolve(
+						new FakeDaemonTransport({
+							[storePath]: {
+								hash: '11'.repeat(32),
+								narSize: 123,
+								references: [],
+								signatures: []
+							}
+						})
+					)
+			}
+		);
+
+		await expect(client.queryValidPaths([storePath])).resolves.toStrictEqual([
+			storePath
+		]);
+	});
+
 	it('merges per-call options over the discovered daemon settings', async () => {
 		const storePath = storePathSchema.parse(
 			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
