@@ -53,3 +53,18 @@ export const cohortPlanInputSchema = z.strictObject({
 	targets: z.array(cohortTargetSchema).min(1)
 });
 export type ParsedCohortPlanInput = z.output<typeof cohortPlanInputSchema>;
+
+// One target as `cupboard plan measure` reads it from its targets file: the
+// target identity the caller keys the reported sizes by, and the installable
+// whose own substitutable size the store prices. No expected path and no
+// root: measurement asks the store what realising the installable would
+// require, nothing about retention or the destination.
+export const measureTargetSchema = z.strictObject({
+	attr: z.string().min(1),
+	installable: cohortInstallableSchema
+});
+export type ParsedMeasureTarget = z.output<typeof measureTargetSchema>;
+
+export const measurePlanInputSchema = z.strictObject({
+	targets: z.array(measureTargetSchema).min(1)
+});

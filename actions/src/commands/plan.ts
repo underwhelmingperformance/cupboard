@@ -55,6 +55,8 @@ import {
 	IntermediateRootInvalidError,
 	InvalidInputError,
 	MatrixJobLimitError,
+	MeasureResultInvalidError,
+	MeasureResultMissingError,
 	MissingInputError,
 	PublishRootTargetLimitError,
 	PublishTargetsJsonError,
@@ -208,22 +210,16 @@ export interface PlanDependencies {
 	readonly runner?: EnsureRunner;
 	readonly createArtifactName?: () => string;
 	/**
-	 * Prices every surviving cohort's own measured substitutable NAR bytes,
-	 * keyed by target attr, when packing is enabled. Left unset in production
-	 * until a per-target measurement source (the cohort `plan-cohort`
-	 * invocation, or a per-target variant of it) is connected: enabling
-	 * packing without one leaves every cohort exactly as the manifest
-	 * declared it, because packing without a measurement would be a
-	 * heuristic rather than the price it claims to be.
+	 * Prices every surviving cohort target's own measured substitutable NAR
+	 * bytes, keyed by target attr, when packing is enabled. Defaults to
+	 * {@link packingMeasurer}, which shells to `cupboard plan measure` on this
+	 * runner's own store; injectable so tests can supply sizes directly.
 	 */
 	readonly measurer?: (
 		cohorts: readonly Cohort[],
 		evaluations: readonly TargetEvaluation[]
 	) => Promise<ReadonlyMap<string, number>>;
 }
-
-const defaultPackingMeasurer: NonNullable<PlanDependencies['measurer']> = () =>
-	Promise.resolve(new Map());
 
 export function registerPlanCommand(
 	program: Command,
@@ -526,7 +522,8 @@ export async function planAction(
 		evaluations,
 		dependencies.createArtifactName?.() ??
 			`cupboard-publish-plan-${randomUUID()}`,
-		dependencies.measurer ?? defaultPackingMeasurer
+		dependencies.measurer ??
+			packingMeasurer(inputs, reporter, dependencies.runner)
 	);
 }
 
@@ -1525,6 +1522,151 @@ async function packedCohortsFor(
 	});
 
 	return packed?.cohorts ?? cohorts;
+}
+
+// One measured target as `cupboard plan measure` reports it: the daemon's own
+// substitutable pricing of that target's installable, asked per target so the
+// answer is the target's own bytes rather than a grouping's union.
+const measurementSchema = z.object({
+	downloadSize: z.number(),
+	narSize: z.number()
+});
+const planMeasureResultSchema = z.object({
+	measurements: z.record(z.string(), measurementSchema)
+});
+
+interface MeasurableTarget {
+	readonly attr: string;
+	readonly installable: string;
+}
+
+/**
+ * The production packing measurer: prices each surviving cohort target's own
+ * substitutable NAR size by shelling to `cupboard plan measure` against this
+ * runner's store, per target, exactly the store queries the cohort partition
+ * itself asks. Best-effort by design: any failure yields no measurements at
+ * all, packing then leaves every cohort exactly as the manifest declared it,
+ * and the plan itself stays green.
+ */
+export function packingMeasurer(
+	inputs: PlanInputs,
+	reporter: Reporter,
+	runner: EnsureRunner = defaultEnsureRunner
+): NonNullable<PlanDependencies['measurer']> {
+	return async (cohorts, evaluations) => {
+		const evaluationByAttribute = new Map(
+			evaluations.map((evaluation) => [evaluation.target.attr, evaluation])
+		);
+		const targets = cohorts.flatMap((cohort) =>
+			cohort.targets.flatMap((target): MeasurableTarget[] => {
+				const installable = queryInstallableFor(
+					target,
+					evaluationByAttribute.get(target.attr)
+				);
+
+				return installable === undefined
+					? []
+					: [{ attr: target.attr, installable }];
+			})
+		);
+
+		if (targets.length === 0) {
+			return new Map();
+		}
+
+		try {
+			return await measureTargetSizes(inputs, targets, runner);
+		} catch (error) {
+			reporter.warn(
+				'Leaving every cohort as the manifest declared it: the packing measurement failed',
+				error instanceof Error ? error.message : String(error)
+			);
+
+			return new Map();
+		}
+	};
+}
+
+async function measureTargetSizes(
+	inputs: PlanInputs,
+	targets: readonly MeasurableTarget[],
+	runner: EnsureRunner
+): Promise<ReadonlyMap<string, number>> {
+	const identifier = randomUUID();
+	const targetsFile = path.join(
+		inputs.temporaryDirectory,
+		`cupboard-plan-measure-targets-${identifier}.json`
+	);
+	const resultFile = path.join(
+		inputs.temporaryDirectory,
+		`cupboard-plan-measure-${identifier}.jsonl`
+	);
+	const measureFile = path.join(
+		inputs.temporaryDirectory,
+		`cupboard-plan-measure-${identifier}.json`
+	);
+
+	await writeFile(targetsFile, `${JSON.stringify({ targets })}\n`);
+	await runner(inputs.cupboardPath, [
+		'--output-mode',
+		'github',
+		'--no-colour',
+		'--result-file',
+		resultFile,
+		'plan',
+		'measure',
+		'--targets-file',
+		targetsFile,
+		'--measure-file',
+		measureFile
+	]);
+
+	return measureResponse(await readMeasureResults(resultFile));
+}
+
+// A run that never opened its result file recorded no result; any other read
+// failure is the caller's environment misbehaving and propagates as itself.
+async function readMeasureResults(resultFile: string): Promise<string> {
+	try {
+		return await readFile(resultFile, 'utf8');
+	} catch (error) {
+		if (isFileNotFound(error)) {
+			throw new MeasureResultMissingError();
+		}
+
+		throw error;
+	}
+}
+
+function measureResponse(recorded: string): ReadonlyMap<string, number> {
+	let events: readonly ReporterResultEvent[];
+
+	try {
+		events = parseReporterResults(recorded);
+	} catch (error) {
+		throw new MeasureResultInvalidError({ cause: error });
+	}
+
+	for (const event of events) {
+		if (event.kind !== 'plan-measure') {
+			continue;
+		}
+
+		const response = planMeasureResultSchema.safeParse(event.data);
+
+		if (!response.success) {
+			throw new MeasureResultInvalidError({ cause: response.error });
+		}
+
+		return new Map(
+			Object.entries(response.data.measurements).map(([attribute, sizes]) => [
+				attribute,
+				sizes.narSize
+			])
+		);
+	}
+
+	throw new MeasureResultMissingError();
 }
 
 // The derived-path form of a target member, the way the Nix daemon's store

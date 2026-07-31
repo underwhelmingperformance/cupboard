@@ -11,6 +11,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import type { ParsedBuildReceipt } from '@cupboard/protocol/build';
 import { rootSetMaxTargets } from '@cupboard/protocol/retention';
+import type { Reporter } from '@cupboard/reporter';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -50,6 +51,7 @@ import {
 	groupRetention,
 	matrix,
 	maximumMatrixJobs,
+	packingMeasurer,
 	planAction,
 	type PlanInputs,
 	type PlanOptions,
@@ -2105,7 +2107,8 @@ describe('cohort packing', () => {
 		measurer?: (
 			cohorts: readonly Cohort[],
 			evaluations: readonly TargetEvaluation[]
-		) => Promise<ReadonlyMap<string, number>>
+		) => Promise<ReadonlyMap<string, number>>,
+		runner: EnsureRunner = preFilterRunner({})
 	): Promise<readonly (readonly string[])[]> {
 		await planAction(
 			{
@@ -2124,7 +2127,7 @@ describe('cohort packing', () => {
 				evaluator: twoTargetEvaluator,
 				storeDirectory: storeDirectorySchema.parse('/nix/store'),
 				fetcher: alwaysAvailableFetcher,
-				runner: preFilterRunner({}),
+				runner,
 				...(measurer !== undefined && { measurer })
 			}
 		);
@@ -2192,5 +2195,241 @@ describe('cohort packing', () => {
 
 		expect(measurer).not.toHaveBeenCalled();
 		expect(groups).toStrictEqual([[target.attr], [targetB.attr]]);
+	});
+
+	it('threads the sizes the plan measure invocation records into the packed grouping', async () => {
+		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+		const packCapacity = String(6 * 1024 ** 3);
+
+		const groups = await cohortAttributeGroups(
+			planDirectory,
+			{ enablePacking: 'true', packCapacity },
+			undefined,
+			packingRunner({
+				measurements: {
+					[target.attr]: { downloadSize: 10, narSize: 100 },
+					[targetB.attr]: { downloadSize: 20, narSize: 200 }
+				}
+			})
+		);
+
+		expect(groups).toStrictEqual([
+			[target.attr, targetB.attr].toSorted((left, right) =>
+				left.localeCompare(right)
+			)
+		]);
+	});
+
+	it('leaves the manifest cohorts untouched, and the plan green, when the measurement fails', async () => {
+		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+
+		const groups = await cohortAttributeGroups(
+			planDirectory,
+			{ enablePacking: 'true', packCapacity: String(6 * 1024 ** 3) },
+			undefined,
+			packingRunner({ failMeasure: true })
+		);
+
+		expect(groups).toStrictEqual([[target.attr], [targetB.attr]]);
+	});
+});
+
+function measureResultLine(
+	measurements: Readonly<
+		Record<string, { downloadSize: number; narSize: number }>
+	>
+): string {
+	return `${JSON.stringify({ kind: 'plan-measure', data: { measurements } })}\n`;
+}
+
+// The production measurer answers over the same runner protocol as every
+// other cupboard invocation, so the planAction packing tests drive it without
+// an injected measurer: the recorded sizes reach packCohorts, and a failed
+// measurement leaves the manifest's own cohorts standing.
+function packingRunner(options: {
+	readonly measurements?: Readonly<
+		Record<string, { downloadSize: number; narSize: number }>
+	>;
+	readonly failMeasure?: boolean;
+}): EnsureRunner {
+	const preFilter = preFilterRunner({});
+
+	return async (command, arguments_) => {
+		if (!arguments_.includes('measure')) {
+			return preFilter(command, arguments_);
+		}
+
+		if (options.failMeasure === true) {
+			throw new Error('cupboard exited 1');
+		}
+
+		await writeFile(
+			resultFileArgument(arguments_),
+			measureResultLine(options.measurements ?? {})
+		);
+
+		return { stdout: '', stderr: '' };
+	};
+}
+
+function noop(): void {
+	/* test double: nothing to record */
+}
+
+const neverMeasuresRunner: EnsureRunner = () =>
+	Promise.reject(new Error('the measure command must not run here'));
+
+function warningReporter(warnings: string[]): Reporter {
+	return {
+		phase: (_label, body) => Promise.resolve(body({ fact: noop, warn: noop })),
+		progress: (_label, _options, body) =>
+			Promise.resolve(body({ advance: noop, fact: noop, warn: noop })),
+		steps: (_label, body) =>
+			Promise.resolve(
+				body({
+					message: noop,
+					group: () => ({ message: noop, success: noop, error: noop }),
+					warn: noop
+				})
+			),
+		result: noop,
+		data: noop,
+		warn(label) {
+			warnings.push(label);
+		},
+		info: noop,
+		success: noop,
+		step: noop,
+		error: noop
+	};
+}
+
+function argumentAfter(arguments_: readonly string[], flag: string): string {
+	const value = arguments_.at(arguments_.indexOf(flag) + 1);
+
+	if (value === undefined) {
+		throw new Error(`the command did not carry a ${flag} argument`);
+	}
+
+	return value;
+}
+
+describe('packingMeasurer', () => {
+	let directory: string;
+
+	beforeEach(async () => {
+		directory = await mkdtemp(path.join(tmpdir(), 'cupboard-measure-'));
+	});
+
+	const outPath = storePath(`/nix/store/${'1'.repeat(32)}-out`);
+	const developmentPath = storePath(`/nix/store/${'2'.repeat(32)}-dev`);
+
+	it('measures every evaluated cohort target and keys each NAR size by attr', async () => {
+		const first = evaluation('first', outPath);
+		const second = evaluation('second', developmentPath);
+		let recorded: string[] = [];
+		const runner: EnsureRunner = async (command, arguments_) => {
+			recorded = [command, ...arguments_];
+			await writeFile(
+				resultFileArgument(arguments_),
+				measureResultLine({
+					'.#first': { downloadSize: 10, narSize: 100 },
+					'.#second': { downloadSize: 20, narSize: 200 }
+				})
+			);
+
+			return { stdout: '', stderr: '' };
+		};
+		const measurer = packingMeasurer(
+			planInputs({ temporaryDirectory: directory }),
+			warningReporter([]),
+			runner
+		);
+
+		const measurements = await measurer(
+			[singleCohort([first]), singleCohort([second])],
+			[first, second]
+		);
+
+		expect(measurements).toStrictEqual(
+			new Map([
+				['.#first', 100],
+				['.#second', 200]
+			])
+		);
+		expect(recorded).toStrictEqual([
+			'/unused/cupboard',
+			'--output-mode',
+			'github',
+			'--no-colour',
+			'--result-file',
+			resultFileArgument(recorded.slice(1)),
+			'plan',
+			'measure',
+			'--targets-file',
+			argumentAfter(recorded, '--targets-file'),
+			'--measure-file',
+			argumentAfter(recorded, '--measure-file')
+		]);
+		const writtenTargets = await readFile(
+			argumentAfter(recorded, '--targets-file'),
+			'utf8'
+		);
+
+		expect(JSON.parse(writtenTargets)).toStrictEqual({
+			targets: [
+				{ attr: '.#first', installable: '/nix/store/first.drv^out' },
+				{ attr: '.#second', installable: '/nix/store/second.drv^out' }
+			]
+		});
+	});
+
+	it('never runs the command when no cohort target carries an evaluated installable', async () => {
+		const first = evaluation('first', outPath);
+		const measurer = packingMeasurer(
+			planInputs({ temporaryDirectory: directory }),
+			warningReporter([]),
+			neverMeasuresRunner
+		);
+
+		const measurements = await measurer([singleCohort([first])], []);
+
+		expect(measurements).toStrictEqual(new Map());
+	});
+
+	it.each([
+		[
+			'the command fails',
+			(() =>
+				Promise.reject(new Error('cupboard exited 1'))) satisfies EnsureRunner
+		],
+		[
+			'the run records no result',
+			((_command: string, _arguments: readonly string[]) =>
+				Promise.resolve({ stdout: '', stderr: '' })) satisfies EnsureRunner
+		],
+		[
+			'the recorded result is invalid',
+			(async (_command: string, arguments_: readonly string[]) => {
+				await writeFile(resultFileArgument(arguments_), 'not a result event\n');
+
+				return { stdout: '', stderr: '' };
+			}) satisfies EnsureRunner
+		]
+	])('yields no sizes, and warns, when %s', async (_name, runner) => {
+		const first = evaluation('first', outPath);
+		const warnings: string[] = [];
+		const measurer = packingMeasurer(
+			planInputs({ temporaryDirectory: directory }),
+			warningReporter(warnings),
+			runner
+		);
+
+		const measurements = await measurer([singleCohort([first])], [first]);
+
+		expect({ measurements, warningCount: warnings.length }).toStrictEqual({
+			measurements: new Map(),
+			warningCount: 1
+		});
 	});
 });

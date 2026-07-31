@@ -54,6 +54,7 @@ import { parseReadUser } from '../read-user.ts';
 import { parseStoreUri } from '../store-uri.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
+import { registerPlanMeasureCommand } from './plan-measure.ts';
 import type { RootClient } from './root.ts';
 
 const maximumConcurrentRootEnsures = 8;
@@ -343,6 +344,8 @@ export function registerPlanCommands(
 				}
 			);
 		});
+
+	registerPlanMeasureCommand(plan, program, programOptions);
 }
 
 /**

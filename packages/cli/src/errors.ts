@@ -115,6 +115,16 @@ export class InvalidCohortTargetsFileError extends CliUsageError {
 	}
 }
 
+export class InvalidMeasureTargetsFileError extends CliUsageError {
+	constructor(
+		public readonly path: string,
+		detail: string
+	) {
+		super(`Invalid measure targets file ${path}: ${detail}`);
+		this.name = 'InvalidMeasureTargetsFileError';
+	}
+}
+
 export class InvalidDurationError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(
