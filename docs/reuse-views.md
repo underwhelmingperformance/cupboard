@@ -57,24 +57,15 @@ silently assumed default.
 ## Use by the flake publish workflow
 
 Passing `reuse-view` to `cupboard-flake-publish.yml` opts the run's
-`actions/setup` and `actions/plan` into it. `actions/setup` adds the view as a
-second Nix substituter, after the destination cache. `actions/plan` probes the
-view for shared intermediates with at least two manifest users; target paths are
-probed only against the destination, since the planner reads view availability
-for shared outputs alone. A hit there retains nothing by itself, since the
-destination stays the only retention boundary; it only lets the affected build
-job substitute the result instead of building it, and that job's own push still
-adopts and roots the result in the destination as usual.
-
-Intermediate handling depends on both `intermediate-retention` and whether
-`reuse-view` is set:
-
-| Retention mode | Reuse view | Destination intermediate                  | View-only intermediate                                                             | Missing intermediate                                        |
-| -------------- | ---------- | ----------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| `root`         | absent     | Seed omitted; the destination serves it   | not applicable                                                                     | Built and kept under the 24-hour seed root                  |
-| `root`         | present    | Seed omitted; the destination serves it   | Substituted through the view, then kept under the 24-hour seed root                | Built and kept under the 24-hour seed root                  |
-| `grace`        | absent     | Confirmed with a refreshed grace deadline | not applicable                                                                     | Built, published with `--no-retain`, needs a grace deadline |
-| `grace`        | present    | Confirmed with a refreshed grace deadline | Substituted through the view, published with `--no-retain`, needs a grace deadline | Built, published with `--no-retain`, needs a grace deadline |
+`actions/setup` and cohort jobs into it. `actions/setup` adds the view as a
+second Nix substituter, after the destination cache, so a cohort's build can
+substitute shared work through the view instead of rebuilding it. Each cohort
+job's own partition also probes the view for its targets' expected output paths:
+a target the view alone already serves is published by reference, so the
+destination adopts it without the bytes travelling through the runner. A hit
+there retains nothing by itself, since the destination stays the only retention
+boundary; the cohort's push still roots every target in the destination as
+usual.
 
 ## Adopting pull-request builds into a branch
 
@@ -105,8 +96,7 @@ jobs:
       cupboard-version: vX.Y.Z
 ```
 
-If the merged commit's outputs already sit in the PR's cache from CI, the plan
-substitutes them through the view rather than rebuilding, then the seed or
-fallback job's push adopts and roots them in the destination under `main`'s own
-roots. A target the PR never built plans and builds exactly as it would without
-a view.
+If the merged commit's outputs already sit in the PR's cache from CI, the cohort
+job publishes them by reference through the view, and the destination adopts and
+roots them under `main`'s own roots without rebuilding. A target the PR never
+built plans and builds exactly as it would without a view.

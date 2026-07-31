@@ -12,20 +12,13 @@ import {
 	CachePublicKeyRequestFailedError,
 	ChecksumMismatchError,
 	CommandFailedError,
-	ConfirmCommandError,
-	ConfirmResultInvalidError,
-	ConfirmResultMissingError,
 	CupboardReportedError,
 	DerivationGraphShapeError,
 	DerivationNodeMissingError,
 	DerivationRootCountError,
 	DuplicateGroupKeyError,
 	GithubApiError,
-	GraceCoverageCommandError,
-	GraceCoverageResultInvalidError,
-	GraceCoverageResultMissingError,
 	GracePolicyMissingError,
-	IntermediateRootInvalidError,
 	InvalidChecksumLineError,
 	InvalidInputError,
 	LegacyPushSummaryError,
@@ -46,8 +39,7 @@ import {
 	TargetEvaluationError,
 	TargetEvaluationResponseError,
 	TargetRootUnresolvedError,
-	UnsupportedPlatformError,
-	ZeroGracePolicyError
+	UnsupportedPlatformError
 } from './errors.ts';
 
 describe('action errors', () => {
@@ -56,11 +48,6 @@ describe('action errors', () => {
 		[
 			'InvalidInputError',
 			new InvalidInputError('version', 'bad'),
-			usageExitCode
-		],
-		[
-			'IntermediateRootInvalidError',
-			new IntermediateRootInvalidError(256),
 			usageExitCode
 		],
 		[
@@ -173,43 +160,8 @@ describe('action errors', () => {
 			genericExitCode
 		],
 		[
-			'GraceCoverageCommandError',
-			new GraceCoverageCommandError({ cause: new Error('boom') }),
-			genericExitCode
-		],
-		[
-			'GraceCoverageResultMissingError',
-			new GraceCoverageResultMissingError(),
-			genericExitCode
-		],
-		[
-			'GraceCoverageResultInvalidError',
-			new GraceCoverageResultInvalidError({ cause: new Error('boom') }),
-			genericExitCode
-		],
-		[
 			'GracePolicyMissingError',
 			new GracePolicyMissingError(''),
-			genericExitCode
-		],
-		[
-			'ZeroGracePolicyError',
-			new ZeroGracePolicyError('builds'),
-			genericExitCode
-		],
-		[
-			'ConfirmCommandError',
-			new ConfirmCommandError({ cause: new Error('boom') }),
-			genericExitCode
-		],
-		[
-			'ConfirmResultMissingError',
-			new ConfirmResultMissingError(),
-			genericExitCode
-		],
-		[
-			'ConfirmResultInvalidError',
-			new ConfirmResultInvalidError({ cause: new Error('boom') }),
 			genericExitCode
 		],
 		[
@@ -537,22 +489,6 @@ describe('CacheInfoInvalidError', () => {
 			new CacheInfoInvalidError('view', 'https://cache.example.test', { cause })
 				.cause
 		).toBe(cause);
-	});
-});
-
-describe('ConfirmCommandError', () => {
-	it('carries the causal error by reference', () => {
-		const cause = new Error('root cause');
-
-		expect(new ConfirmCommandError({ cause }).cause).toBe(cause);
-	});
-});
-
-describe('ConfirmResultInvalidError', () => {
-	it('carries the causal error by reference', () => {
-		const cause = new Error('root cause');
-
-		expect(new ConfirmResultInvalidError({ cause }).cause).toBe(cause);
 	});
 });
 

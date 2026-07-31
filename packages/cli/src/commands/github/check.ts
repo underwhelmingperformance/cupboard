@@ -269,7 +269,7 @@ async function checkGracePolicy(
 			return {
 				check,
 				status: 'failed',
-				detail: `no grace policy covers the ${cacheLabel} cache: intermediate-retention grace publishes intermediates nothing retains`
+				detail: `no grace policy covers the ${cacheLabel} cache: a require-grace push publishes paths nothing retains`
 			};
 		}
 

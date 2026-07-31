@@ -537,7 +537,7 @@ describe('runGithubCheck', () => {
 				{
 					label: 'grace policy',
 					value:
-						'failed: no grace policy covers the default cache: intermediate-retention grace publishes intermediates nothing retains'
+						'failed: no grace policy covers the default cache: a require-grace push publishes paths nothing retains'
 				},
 				{
 					label: 'reuse view',

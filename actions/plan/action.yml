@@ -1,7 +1,7 @@
 name: Plan cupboard flake publication
 description:
   Evaluate a typed flake target manifest, retain targets already held by the
-  cache, and group missing shared derivations for one-time seeding.
+  cache, and emit the cohort matrix the build jobs consume.
 inputs:
   targets:
     description:
@@ -39,22 +39,6 @@ inputs:
       Inspect the cache and derivation graph. False emits every target directly.
     required: false
     default: 'true'
-  intermediate-retention:
-    description: >-
-      How seed and fallback intermediates are retained. 'root' keeps the
-      temporary per-run seed roots; 'grace' relies on the destination cache's
-      retention grace policy and refreshes the deadline of every
-      destination-resident intermediate, failing unless each one is positive.
-    required: false
-    default: 'root'
-  reuse-view:
-    description: >-
-      Named reuse view to probe for shared outputs missing from the destination.
-      A view-only output joins an adoption seed group whose build substitutes it
-      through the view before publishing it to the destination; view
-      availability never affects which targets build or what the destination
-      retains.
-    required: false
   enable-packing:
     description: >-
       Opt in to measured cohort packing: price candidate cohort groupings from
@@ -70,20 +54,14 @@ inputs:
     required: false
 outputs:
   plan-file:
-    description: Detailed plan consumed by seed and fallback jobs.
+    description: Detailed plan consumed by the cohort jobs.
     value: ${{ steps.plan.outputs.plan-file }}
   plan-artifact-name:
     description: Unique name for transferring this invocation's plan.
     value: ${{ steps.plan.outputs.plan-artifact-name }}
-  seed-matrix:
-    description: Dynamic matrix for shared prerequisite groups.
-    value: ${{ steps.plan.outputs.seed-matrix }}
   target-matrix:
     description: Dynamic matrix for independent targets.
     value: ${{ steps.plan.outputs.target-matrix }}
-  fallback-matrix:
-    description: Dynamic matrix for targets sharing unknown output paths.
-    value: ${{ steps.plan.outputs.fallback-matrix }}
   cohort-matrix:
     description:
       Dynamic matrix for surviving cohorts, pruned by the advisory destination
@@ -92,15 +70,9 @@ outputs:
   retained-count:
     description: Number of targets retained without a build.
     value: ${{ steps.plan.outputs.retained-count }}
-  seed-count:
-    description: Number of shared prerequisite groups to build.
-    value: ${{ steps.plan.outputs.seed-count }}
   target-count:
     description: Number of target builds that remain.
     value: ${{ steps.plan.outputs.target-count }}
-  fallback-count:
-    description: Number of unknown-output fallback groups to build.
-    value: ${{ steps.plan.outputs.fallback-count }}
   cohort-count:
     description: Number of cohort jobs that remain after pruning.
     value: ${{ steps.plan.outputs.cohort-count }}
@@ -162,11 +134,9 @@ runs:
         TTL: ${{ inputs.ttl }}
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
-        REUSE_VIEW: ${{ inputs.reuse-view }}
         AUDIENCE: ${{ inputs.audience }}
         PLAN_FILE: ${{ inputs.plan-file }}
         OPTIMISE: ${{ inputs.optimise }}
-        INTERMEDIATE_RETENTION: ${{ inputs.intermediate-retention }}
         ENABLE_PACKING: ${{ inputs.enable-packing }}
         PACK_CAPACITY: ${{ inputs.pack-capacity }}
       run: |
@@ -179,11 +149,9 @@ runs:
           --ttl "$TTL"
           --read-user "$READ_USER"
           --read-password "$READ_PASSWORD"
-          --reuse-view "$REUSE_VIEW"
           --audience "$AUDIENCE"
           --plan-file "$PLAN_FILE"
           --optimise "$OPTIMISE"
-          --intermediate-retention "$INTERMEDIATE_RETENTION"
           --enable-packing "$ENABLE_PACKING")
         if [ -n "$PACK_CAPACITY" ]; then
           args+=(--pack-capacity "$PACK_CAPACITY")

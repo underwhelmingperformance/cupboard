@@ -47,8 +47,7 @@ unnecessary rate-limit failures.
 
 This is the shortest complete setup for publishing pull-request builds to
 short-lived `pr-<number>` caches, then reusing those builds when `main` is
-published. It also keeps shared intermediates through a tenant retention grace
-period instead of creating a temporary root for every workflow run.
+published.
 
 The example assumes that cupboard is deployed, the tenant exists, its reads are
 public, and `cupboard login` has stored its owner credential. Everything is
@@ -180,7 +179,6 @@ jobs:
       url: https://cupboard.example.workers.dev/t/acme
       targets: .#cupboardOutputs
       preset: pull-request-and-branch
-      intermediate-retention: grace
       reuse-view: pull-requests
       cupboard-version: vX.Y.Z
 ```
@@ -663,22 +661,6 @@ established: a later cohort can substitute it there instead of rebuilding it.
 Cohort jobs do not yet attest their builds; `build-cohort` has no
 build-provenance receipt to give `actions/attest` the way `build-paths` does, so
 a cohort's push carries no attestation bundle until that lands.
-
-`intermediate-retention` controls what the plan does with a shared derivation it
-finds already resident in the destination cache while working out this
-partition. The opt-in `grace` refreshes that derivation's retention grace
-deadline, so it survives long enough for a later cohort job to substitute it
-instead of rebuilding it; this requires a matching policy on the destination
-cache first (`cupboard policy add-grace`), and the plan fails closed if the
-policy's grace period is not positive. The default, `root`, leaves the deadline
-alone.
-
-The plan job verifies up front that a grace policy covers the destination cache
-under `grace`, so a missing policy fails at plan time, whether or not this run's
-manifest produces a shared intermediate. One degradation stays silent: a grace
-period shorter than the span from plan to the last cohort job does not fail
-anything, the collected intermediate is simply rebuilt, so the only symptom of
-too short a grace is the reuse quietly not happening.
 
 `reuse-view` opts the run into reading shared intermediates through a named
 tenant reuse view when the destination is missing them; see

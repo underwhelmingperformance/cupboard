@@ -19,18 +19,12 @@ import {
 	type ParsedBuildReceipt
 } from '@cupboard/protocol/build';
 import {
-	graceCoverageResponseSchema,
-	type ParsedGraceCoverageResponse,
 	type ParsedRootEnsureResponse,
 	type ParsedRootTarget,
 	rootEnsureResponseSchema,
 	rootSetMaxTargets,
 	rootTargetSchema
 } from '@cupboard/protocol/retention';
-import {
-	type ParsedUploadConfirmResponse,
-	uploadConfirmResponseSchema
-} from '@cupboard/protocol/upload';
 import {
 	createGithubReporter,
 	parseReporterResults,
@@ -44,15 +38,6 @@ import { z } from 'zod';
 
 import {
 	ComponentRootTargetLimitError,
-	ConfirmCommandError,
-	ConfirmResultInvalidError,
-	ConfirmResultMissingError,
-	GraceCoverageCommandError,
-	GraceCoverageResultInvalidError,
-	GraceCoverageResultMissingError,
-	GraceDeadlineMissingError,
-	GracePolicyMissingError,
-	IntermediateRootInvalidError,
 	InvalidInputError,
 	MatrixJobLimitError,
 	MeasureResultInvalidError,
@@ -66,8 +51,7 @@ import {
 	RootEnsureResultMissingError,
 	RootTargetsCommandError,
 	RootTargetsResultInvalidError,
-	RootTargetsResultMissingError,
-	ZeroGracePolicyError
+	RootTargetsResultMissingError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import {
@@ -80,13 +64,11 @@ import {
 import { packCohorts } from '../packing.ts';
 import {
 	availableCachePaths,
-	availableViewPaths,
 	cacheProbePaths,
 	type Cohort,
 	type CohortPreFilterDecision,
 	cohortPreFilterDecision,
 	cohortsFor,
-	derivationUses,
 	evaluateTargetCoverage,
 	evaluateTargets,
 	expandComponents,
@@ -97,8 +79,7 @@ import {
 	type PublishTarget,
 	publishTargetsSchema,
 	type TargetCoverage,
-	type TargetEvaluation,
-	viewProbePaths
+	type TargetEvaluation
 } from '../publish-plan.ts';
 
 export type EnsureRunner = (
@@ -156,12 +137,10 @@ export interface PlanOptions {
 	readonly ttl?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
-	readonly reuseView?: string;
 	readonly audience?: string;
 	readonly cupboardPath?: string;
 	readonly planFile?: string;
 	readonly optimise?: string;
-	readonly intermediateRetention?: string;
 	readonly previousReceiptFile?: string;
 	readonly enablePacking?: string;
 	readonly packCapacity?: string;
@@ -179,9 +158,6 @@ export interface PlanInputs {
 	readonly cupboardPath: string;
 	readonly planFile: string;
 	readonly optimise: boolean;
-	readonly intermediateRetention: 'root' | 'grace';
-	readonly reuseView: string;
-	readonly runId: string;
 	readonly temporaryDirectory: string;
 	// Absent when the caller has no receipt to pass, such as a repository's
 	// first run: the cohort pre-filter then finds no target left upstream,
@@ -244,19 +220,11 @@ export function registerPlanCommand(
 		.option('--ttl <ttl>', 'TTL applied when retaining a cached target')
 		.option('--read-user <user>', 'username for private cache reads')
 		.option('--read-password <password>', 'password for private cache reads')
-		.option(
-			'--reuse-view <name>',
-			'named tenant reuse view to probe for substitutable intermediates'
-		)
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
 		.option('--plan-file <path>', 'destination for the detailed JSON plan')
 		.option(
 			'--optimise <value>',
 			'inspect the cache and derivation graph: true or false'
-		)
-		.option(
-			'--intermediate-retention <value>',
-			"how seed and fallback intermediates are retained: 'root' or 'grace'"
 		)
 		.option(
 			'--previous-receipt-file <path>',
@@ -328,18 +296,7 @@ export function resolvePlanInputs(
 		);
 	}
 
-	const intermediateRetention =
-		provided(options.intermediateRetention) ?? 'root';
-
-	if (intermediateRetention !== 'root' && intermediateRetention !== 'grace') {
-		throw new InvalidInputError(
-			'intermediate-retention',
-			"intermediate-retention must be 'root' or 'grace'"
-		);
-	}
-
 	const temporaryDirectory = requireEnvironment(environment, 'RUNNER_TEMP');
-	const runId = requireEnvironment(environment, 'GITHUB_RUN_ID');
 	const isPackingEnabled = isEnabled(
 		'enable-packing',
 		options.enablePacking,
@@ -354,12 +311,9 @@ export function resolvePlanInputs(
 		ttl: provided(options.ttl) ?? '',
 		readUser,
 		readPassword,
-		reuseView: provided(options.reuseView) ?? '',
 		audience: provided(options.audience) ?? '',
 		cupboardPath,
 		optimise: isEnabled('optimise', options.optimise, true),
-		intermediateRetention,
-		runId,
 		temporaryDirectory,
 		planFile:
 			provided(options.planFile) ??
@@ -427,7 +381,6 @@ function validateTargetOutputLimits(targets: readonly PublishTarget[]): void {
 		}
 
 		throw new PublishRootTargetLimitError(
-			'target',
 			target.attr,
 			target.outputs.length,
 			rootSetMaxTargets
@@ -547,8 +500,7 @@ async function optimisedPlan(
 		);
 	}
 
-	const uses = derivationUses(evaluations);
-	const probePaths = cacheProbePaths(evaluations, uses);
+	const probePaths = cacheProbePaths(evaluations);
 	const credentials =
 		inputs.readUser === ''
 			? {}
@@ -564,52 +516,6 @@ async function optimisedPlan(
 		...credentials,
 		...fetcher
 	});
-	// The view probe is a second, separate fact: it says where a shared
-	// output can be substituted from, never what the destination retains.
-	const viewAvailablePaths =
-		inputs.reuseView === ''
-			? undefined
-			: await availableViewPaths({
-					baseUrl: inputs.url,
-					view: inputs.reuseView,
-					paths: viewProbePaths(uses),
-					...credentials,
-					...fetcher
-				});
-	// Grace mode fails closed at plan time, in two halves. Coverage first: a
-	// destination with no usable grace policy keeps nothing alive, so the run
-	// refuses here, before the ensure calls below touch any retention root,
-	// whether or not this manifest happens to produce a shared intermediate.
-	if (inputs.intermediateRetention === 'grace') {
-		await verifyGraceCoverage(inputs, dependencies.runner);
-	} else {
-		// Removing retained targets can split fallback groups, but cannot enlarge
-		// them. Known outputs need a separate pass without fallback exclusions:
-		// a split fallback group can expose seed candidates that it hid.
-		const maximumFallbackPlan = planPublish({
-			evaluations,
-			retainedRoots: new Set(),
-			availablePaths,
-			...(viewAvailablePaths !== undefined && { viewAvailablePaths }),
-			uses,
-			unevaluated: unevaluated.map((failure) => failure.target)
-		});
-		const seedEligibleUses = new Map(
-			uses.entries().filter(([, use]) => use.path !== undefined)
-		);
-		const maximumSeedPlan = planPublish({
-			evaluations,
-			retainedRoots: new Set(),
-			availablePaths,
-			...(viewAvailablePaths !== undefined && { viewAvailablePaths }),
-			uses: seedEligibleUses,
-			unevaluated: unevaluated.map((failure) => failure.target)
-		});
-		validateIntermediateRootTargetLimits(inputs, {
-			seedGroups: maximumSeedPlan.seedGroups,
-			fallbackGroups: maximumFallbackPlan.fallbackGroups
-		});
-	}
 
 	const retainedRoots = await ensureAvailableTargets(
 		inputs,
@@ -620,75 +526,16 @@ async function optimisedPlan(
 	const plan = planPublish({
 		evaluations,
 		retainedRoots,
-		availablePaths,
-		...(viewAvailablePaths !== undefined && { viewAvailablePaths }),
-		uses,
 		unevaluated: unevaluated.map((failure) => failure.target)
 	});
 
-	// The second half: the intermediates that already reside at the
-	// destination have their deadlines refreshed, and the plan fails unless
-	// every deadline comes back positive.
-	if (inputs.intermediateRetention === 'grace') {
-		await confirmDestinationIntermediates(
-			inputs,
-			plan.destinationIntermediates,
-			dependencies.runner
-		);
-	}
-
 	return { plan, evaluations };
-}
-
-export function validateIntermediateRootTargetLimits(
-	inputs: Pick<PlanInputs, 'intermediateRetention'>,
-	plan: Pick<PublishPlan, 'seedGroups' | 'fallbackGroups'>
-): void {
-	if (inputs.intermediateRetention === 'grace') {
-		return;
-	}
-
-	for (const group of plan.seedGroups) {
-		validateIntermediateRootTargetLimit(
-			'seed group',
-			group.key,
-			group.candidates.length
-		);
-	}
-
-	for (const group of plan.fallbackGroups) {
-		const count = group.targets.reduce(
-			(total, target) => total + target.outputs.length,
-			0
-		);
-		validateIntermediateRootTargetLimit('fallback group', group.key, count);
-	}
-}
-
-function validateIntermediateRootTargetLimit(
-	kind: 'seed group' | 'fallback group',
-	identifier: string,
-	count: number
-): void {
-	if (count <= rootSetMaxTargets) {
-		return;
-	}
-
-	throw new PublishRootTargetLimitError(
-		kind,
-		identifier,
-		count,
-		rootSetMaxTargets
-	);
 }
 
 function unoptimisedPlan(targets: readonly PublishTarget[]): PublishPlan {
 	return {
 		retained: [],
 		targets,
-		seedGroups: [],
-		fallbackGroups: [],
-		destinationIntermediates: [],
 		cohorts: cohortsFor(targets),
 		// No graph was evaluated, so there is nothing to invert.
 		derivationToTargets: []
@@ -715,18 +562,8 @@ async function writePlan(
 	await setOutput(environment, 'plan-artifact-name', artifactName);
 	await setOutput(
 		environment,
-		'seed-matrix',
-		matrix('seed', seedMatrix(inputs, plan))
-	);
-	await setOutput(
-		environment,
 		'target-matrix',
 		matrix('target', targetMatrix(inputs, plan))
-	);
-	await setOutput(
-		environment,
-		'fallback-matrix',
-		matrix('fallback', fallbackMatrix(inputs, plan))
 	);
 	const prunedKeys = new Set(
 		cohortDecisions
@@ -750,13 +587,7 @@ async function writePlan(
 	);
 	await setOutput(environment, 'cohort-count', String(cohortEntries.length));
 	await setOutput(environment, 'retained-count', String(plan.retained.length));
-	await setOutput(environment, 'seed-count', String(plan.seedGroups.length));
 	await setOutput(environment, 'target-count', String(plan.targets.length));
-	await setOutput(
-		environment,
-		'fallback-count',
-		String(plan.fallbackGroups.length)
-	);
 }
 
 export async function ensureAvailableTargets(
@@ -1155,284 +986,6 @@ export async function cohortPreFilter(
 	);
 }
 
-// Establishes, before anything is published, that a grace policy covers the
-// destination cache, through `cupboard policy grace-coverage` under the same
-// OIDC identity the confirm calls use.
-export async function verifyGraceCoverage(
-	inputs: PlanInputs,
-	runner: EnsureRunner = defaultEnsureRunner
-): Promise<void> {
-	const resultFile = path.join(
-		inputs.temporaryDirectory,
-		`cupboard-grace-coverage-${randomUUID()}.jsonl`
-	);
-	const arguments_ = [
-		'--output-mode',
-		'github',
-		'--no-colour',
-		'--result-file',
-		resultFile,
-		'policy',
-		'grace-coverage',
-		canonicalHref(inputs.url),
-		'--github-oidc'
-	];
-
-	if (inputs.audience !== '') {
-		arguments_.push('--audience', inputs.audience);
-	}
-
-	if (inputs.cache !== '') {
-		arguments_.push('--cache', inputs.cache);
-	}
-
-	try {
-		await runner(inputs.cupboardPath, arguments_);
-	} catch (error) {
-		const replayed = replayCapturedCommandOutput(error);
-
-		throw new GraceCoverageCommandError({
-			cause: error,
-			wasReported: replayed.wasReported
-		});
-	}
-
-	const coverage = coverageResponse(await readCoverageResults(resultFile));
-
-	if (!coverage.covered) {
-		throw new GracePolicyMissingError(inputs.cache);
-	}
-
-	// A zero-grace policy covers the cache without ever materialising a
-	// deadline, so every publication would fail later with a per-path
-	// diagnosis pointing away from the real problem: the policy itself.
-	if (coverage.graceSeconds === 0) {
-		throw new ZeroGracePolicyError(inputs.cache);
-	}
-}
-
-// A run that never opened its result file recorded no result; any other read
-// failure is the caller's environment misbehaving and propagates as itself.
-async function readCoverageResults(resultFile: string): Promise<string> {
-	try {
-		return await readFile(resultFile, 'utf8');
-	} catch (error) {
-		if (isFileNotFound(error)) {
-			throw new GraceCoverageResultMissingError();
-		}
-
-		throw error;
-	}
-}
-
-function coverageResponse(recorded: string): ParsedGraceCoverageResponse {
-	let events: readonly ReporterResultEvent[];
-
-	try {
-		events = parseReporterResults(recorded);
-	} catch (error) {
-		throw new GraceCoverageResultInvalidError({ cause: error });
-	}
-
-	for (const event of events) {
-		if (event.kind !== 'grace-coverage') {
-			continue;
-		}
-
-		const response = graceCoverageResponseSchema.safeParse(event.data);
-
-		if (!response.success) {
-			throw new GraceCoverageResultInvalidError({ cause: response.error });
-		}
-
-		return response.data;
-	}
-
-	throw new GraceCoverageResultMissingError();
-}
-
-// Refreshes the retention deadline of every destination-resident intermediate
-// through `cupboard confirm`, the publication-free half of grace mode's
-// fail-closed rule: an intermediate the plan omits from seeding must carry a
-// positive deadline before a later job relies on substituting it.
-export async function confirmDestinationIntermediates(
-	inputs: PlanInputs,
-	storePaths: readonly StorePathString[],
-	runner: EnsureRunner = defaultEnsureRunner
-): Promise<void> {
-	if (storePaths.length === 0) {
-		return;
-	}
-
-	const resultFile = path.join(
-		inputs.temporaryDirectory,
-		`cupboard-confirm-${randomUUID()}.jsonl`
-	);
-	const arguments_ = [
-		'--output-mode',
-		'github',
-		'--no-colour',
-		'--result-file',
-		resultFile,
-		'confirm',
-		canonicalHref(inputs.url),
-		...storePaths,
-		'--github-oidc'
-	];
-
-	if (inputs.audience !== '') {
-		arguments_.push('--audience', inputs.audience);
-	}
-
-	if (inputs.cache !== '') {
-		arguments_.push('--cache', inputs.cache);
-	}
-
-	try {
-		await runner(inputs.cupboardPath, arguments_);
-	} catch (error) {
-		const replayed = replayCapturedCommandOutput(error);
-		// An unconfirmed path makes the CLI exit non-zero after it has already
-		// recorded the per-path result, so the failure carries the
-		// classification's input; only a run with no recorded result stays a
-		// bare command error.
-		const recorded = await confirmResponseIfRecorded(resultFile);
-
-		if (recorded === undefined) {
-			throw new ConfirmCommandError({
-				cause: error,
-				wasReported: replayed.wasReported
-			});
-		}
-
-		classifyMissingGrace(inputs, recorded);
-
-		// The result names nothing missing, so the failure is something else;
-		// it stays a command error carrying the CLI's own failure.
-		throw new ConfirmCommandError({
-			cause: error,
-			wasReported: replayed.wasReported
-		});
-	}
-
-	classifyMissingGrace(
-		inputs,
-		confirmResponse(await readConfirmResults(resultFile))
-	);
-}
-
-// A confirmed path with no deadline means the cache itself has no usable
-// grace policy: the confirm endpoint answers an empty grace fact exactly when
-// no policy matched and names a matched zero-grace policy in `graceSeconds`,
-// and resolution is cache-level, so one such path implies every path and the
-// cache-level error names the actual remedy. An unconfirmed path is genuinely
-// per-path: the confirm no longer found it committed, which points at
-// reseeding.
-function classifyMissingGrace(
-	inputs: PlanInputs,
-	response: ParsedUploadConfirmResponse
-): void {
-	const missing = response.paths.filter(
-		(confirmed) => confirmed.grace?.retainUntil === undefined
-	);
-
-	if (
-		missing.some(
-			(confirmed) => confirmed.confirmed && confirmed.grace?.graceSeconds === 0
-		)
-	) {
-		throw new ZeroGracePolicyError(inputs.cache);
-	}
-
-	if (missing.some((confirmed) => confirmed.confirmed)) {
-		throw new GracePolicyMissingError(inputs.cache);
-	}
-
-	const perPath = missing.map((confirmed) => ({
-		storePathHash: confirmed.storePathHash,
-		reason: 'not-present' as const
-	}));
-
-	if (perPath.length > 0) {
-		throw new GraceDeadlineMissingError(perPath);
-	}
-}
-
-// The recorded confirm result of a failing run, when one exists: any absence
-// or malformation reads as "nothing recorded", since the run's own failure is
-// about to surface either way.
-async function confirmResponseIfRecorded(
-	resultFile: string
-): Promise<ParsedUploadConfirmResponse | undefined> {
-	let recorded: string;
-
-	try {
-		recorded = await readFile(resultFile, 'utf8');
-	} catch {
-		return undefined;
-	}
-
-	let events: readonly ReporterResultEvent[];
-
-	try {
-		events = parseReporterResults(recorded);
-	} catch {
-		return undefined;
-	}
-
-	for (const event of events) {
-		if (event.kind !== 'confirm-paths') {
-			continue;
-		}
-
-		const response = uploadConfirmResponseSchema.safeParse(event.data);
-
-		return response.success ? response.data : undefined;
-	}
-
-	return undefined;
-}
-
-// A run that never opened its result file recorded no result; any other read
-// failure is the caller's environment misbehaving and propagates as itself.
-async function readConfirmResults(resultFile: string): Promise<string> {
-	try {
-		return await readFile(resultFile, 'utf8');
-	} catch (error) {
-		if (isFileNotFound(error)) {
-			throw new ConfirmResultMissingError();
-		}
-
-		throw error;
-	}
-}
-
-function confirmResponse(recorded: string): ParsedUploadConfirmResponse {
-	let events: readonly ReporterResultEvent[];
-
-	try {
-		events = parseReporterResults(recorded);
-	} catch (error) {
-		throw new ConfirmResultInvalidError({ cause: error });
-	}
-
-	for (const event of events) {
-		if (event.kind !== 'confirm-paths') {
-			continue;
-		}
-
-		const response = uploadConfirmResponseSchema.safeParse(event.data);
-
-		if (!response.success) {
-			throw new ConfirmResultInvalidError({ cause: response.error });
-		}
-
-		return response.data;
-	}
-
-	throw new ConfirmResultMissingError();
-}
-
 // Each target job's matrix entry carries the full root its push publishes
 // under, computed by the same construction the ensure calls use, so the two
 // paths a target can take to retention name one root. The `runs-on` value is
@@ -1704,69 +1257,6 @@ function expectedPathFor(
 	}
 
 	return evaluation.targetPaths[0];
-}
-
-// The exact retention values a seed or fallback group's push publishes with,
-// decided here so every combination of retention mode and reuse view is
-// provable by tests: root mode keeps each
-// group's outputs under a temporary per-run seed root, grace mode publishes
-// them unretained and requires a positive grace deadline for each.
-export function groupRetention(
-	inputs: Pick<PlanInputs, 'intermediateRetention' | 'rootPrefix' | 'runId'>,
-	key: string
-): {
-	readonly root: string;
-	readonly ttl: string;
-	readonly noRetain: boolean;
-	readonly requireGrace: boolean;
-} {
-	if (inputs.intermediateRetention === 'grace') {
-		return { root: '', ttl: '', noRetain: true, requireGrace: true };
-	}
-
-	const root = joinRoot(
-		inputs.rootPrefix,
-		`_cupboard-seed/${inputs.runId}/${key}`
-	);
-
-	if (!rootNameSchema.safeParse(root).success) {
-		throw new IntermediateRootInvalidError(rootNameMaxLength);
-	}
-
-	return {
-		root,
-		ttl: '24h',
-		noRetain: false,
-		requireGrace: false
-	};
-}
-
-export function seedMatrix(
-	inputs: PlanInputs,
-	plan: Pick<PublishPlan, 'seedGroups'>
-): readonly object[] {
-	return plan.seedGroups.map((group) => ({
-		key: group.key,
-		system: group.system,
-		os: group.os,
-		remote: group.remote,
-		runsOn: group.os,
-		...groupRetention(inputs, group.key)
-	}));
-}
-
-export function fallbackMatrix(
-	inputs: PlanInputs,
-	plan: Pick<PublishPlan, 'fallbackGroups'>
-): readonly object[] {
-	return plan.fallbackGroups.map((group) => ({
-		key: group.key,
-		system: group.system,
-		os: group.os,
-		remote: group.remote,
-		runsOn: group.os,
-		...groupRetention(inputs, group.key)
-	}));
 }
 
 // GitHub runs at most this many jobs for a single matrix; an oversized plan

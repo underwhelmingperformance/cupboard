@@ -53,16 +53,6 @@ on:
         required: false
         default: ''
         type: string
-      intermediate-retention:
-        description:
-          How seed and fallback intermediates are retained. 'root' keeps the
-          temporary per-run seed roots at a 24h TTL; 'grace' relies on the
-          destination cache's retention grace policy instead. workflow_call
-          inputs have no enum, so an invalid value is caught by the plan action
-          before any push. Named destination roots are unaffected either way.
-        required: false
-        default: 'root'
-        type: string
       run-root-ttl:
         description:
           TTL for the per-run root every cohort job's push attaches to, such as
@@ -338,11 +328,9 @@ jobs:
           cache: ${{ needs.configure.outputs.cache }}
           root-prefix: ${{ needs.configure.outputs.root-prefix }}
           ttl: ${{ needs.configure.outputs.ttl }}
-          intermediate-retention: ${{ inputs.intermediate-retention }}
           optimise: ${{ inputs.push }}
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
-          reuse-view: ${{ needs.configure.outputs.reuse-view }}
           enable-packing: ${{ inputs.enable-packing }}
           pack-capacity: ${{ inputs.pack-capacity }}
 

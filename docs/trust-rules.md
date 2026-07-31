@@ -138,11 +138,11 @@ never by silently publishing without its retention.
 
 The flake publish workflow depends on that prefix. Each of its jobs exchanges
 its own OIDC token under the same trust rule: the plan job ensures a retention
-root for each already-cached target, and the seed, fallback and target jobs push
-and attest. Every root it writes, one per target and one per shared-output
-group, sits beneath the `root-prefix` the caller passes, so a single prefix
-grant covers them all. Trust it with the branch preset, pinning
-`job_workflow_ref` to cupboard's reusable file:
+root for each already-cached target, and the cohort jobs push and attest. Every
+root it writes, one per target plus the shared per-run root, sits beneath the
+`root-prefix` the caller passes, so a single prefix grant covers them all. Trust
+it with the branch preset, pinning `job_workflow_ref` to cupboard's reusable
+file:
 
 ```bash
 # Trust main's flake publish. The preset grants github:acme/app/main/, a
@@ -174,16 +174,6 @@ where the reusable workflow lives, not the caller's repository. The plan and
 build jobs run inside cupboard's workflow, so that is the claim their token
 carries; the caller is still pinned, by the repository ids and `ref` the preset
 sets.
-
-With `intermediate-retention: grace`, the seed and fallback jobs no longer write
-a root at all, so the prefix grant above only needs to cover the target jobs'
-named per-target roots; the trust rule itself needs no change, since an unused
-`root` allowance is harmless. The plan job's confirmation calls need
-`upload:confirm`. The `push` shorthand used by both presets includes that action
-explicitly, so no separate `--allow` is needed for grace mode. A hand-written
-grant containing only `upload:commit` cannot mint confirmation authority: commit
-is confined to upload-specific state, while confirm can refresh any committed
-path in the cache.
 
 ## Capture rules
 
