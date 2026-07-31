@@ -5,6 +5,7 @@ import { Writable } from 'node:stream';
 
 import { afterAll, beforeAll, bench } from 'vitest';
 
+import { PublicationCollection } from '../../packages/cli/src/push/publication.ts';
 import { type PushClient, runPush } from '../../packages/cli/src/push/push.ts';
 import { Nix, type NixValidPathInfo } from '../../packages/nix/src/index.ts';
 import {
@@ -283,7 +284,7 @@ function pushBatch(concurrency: number): () => Promise<void> {
 		const batch = takeBatch(harness);
 		const { reporter, lines } = captureReporter();
 
-		await runPush(batch, reporter, {
+		await runPush(PublicationCollection.of({ targets: batch }), reporter, {
 			nix: harness.nix,
 			client: harness.client,
 			wait: false,
