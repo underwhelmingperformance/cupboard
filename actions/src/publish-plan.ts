@@ -28,6 +28,7 @@ import {
 	CacheAvailabilityResponseMalformedError,
 	CacheAvailabilityResponseSchemaError,
 	CacheAvailabilityResponseUnexpectedHashError,
+	CohortExecutionContextError,
 	DerivationGraphShapeError,
 	DerivationNodeMissingError,
 	DerivationRootCountError,
@@ -90,6 +91,12 @@ const derivationPathSchema = storePathSchema.refine(
 	{ message: 'rootDrvPath must name a derivation in /nix/store' }
 );
 
+// A cohort label composes into a cohort's key (see cohortKey), which is
+// destined for the same role a matrix job's key plays today, so it is bounded
+// like any other job-identifying string rather than left to grow without
+// limit.
+export const cohortLabelMaxLength = 100;
+
 export const publishTargetSchema = z.strictObject({
 	attr: z.string().min(1).refine(isNixPositionalArgument, {
 		message: 'attr must not start with a hyphen or contain control characters'
@@ -116,7 +123,17 @@ export const publishTargetSchema = z.strictObject({
 		)
 		.min(1)
 		.default(['out'])
-		.transform((outputs) => [...new Set(outputs)])
+		.transform((outputs) => [...new Set(outputs)]),
+	// Two targets naming the same cohort form one cohort (see cohortsFor); a
+	// target that omits it is its own cohort, keyed by its own identity.
+	cohort: z
+		.string()
+		.min(1)
+		.max(cohortLabelMaxLength)
+		.refine(isValidRunnerLabel, {
+			message: `cohort must be a printable ASCII label of at most ${String(cohortLabelMaxLength)} characters without spaces`
+		})
+		.optional()
 });
 
 // Retention treats every target sharing a root as retained once one of them
@@ -204,6 +221,36 @@ export interface FallbackGroup {
 	readonly targets: readonly PublishTarget[];
 }
 
+/**
+ * One manifest-declared cohort: the targets that run together in one job.
+ * Absent an explicit `cohort` label a target is its own cohort, so cohorts
+ * partition the whole manifest, retained targets included, exactly as
+ * declared; nothing here depends on what the destination already holds.
+ */
+export interface Cohort {
+	readonly key: string;
+	readonly system: string;
+	readonly os: string;
+	readonly remote: boolean;
+	readonly targets: readonly PublishTarget[];
+	// The multi-installable build request a cohort job hands to `nix build`:
+	// one `attr^outputs` form per member, the same shape a target job builds
+	// today.
+	readonly installables: readonly string[];
+}
+
+/**
+ * One derivation and the target identities (attrs) whose evaluated graph
+ * contains it. Built from the recursive graph {@link evaluateTargets}
+ * already read, so a streamed build's post-build hook can resolve a
+ * `DRV_PATH` to the target, and from there the root, it belongs to without
+ * asking Nix again.
+ */
+export interface DerivationToTargetsEntry {
+	readonly drvPath: string;
+	readonly targets: readonly string[];
+}
+
 export interface PublishPlan {
 	readonly retained: readonly PublishTarget[];
 	readonly targets: readonly PublishTarget[];
@@ -213,6 +260,8 @@ export interface PublishPlan {
 	// destination, so their seeds are omitted. Grace mode confirms these before
 	// relying on them, refreshing each one's retention deadline.
 	readonly destinationIntermediates: readonly StorePathString[];
+	readonly cohorts: readonly Cohort[];
+	readonly derivationToTargets: readonly DerivationToTargetsEntry[];
 }
 
 export interface UnevaluatedTarget {
@@ -298,12 +347,22 @@ export function planPublish(options: {
 
 	assertDistinctGroupKeys([...seedGroups, ...fallbackGroups]);
 
+	// Cohorts partition the whole declared manifest, not just what still needs
+	// building, so a target already retained still keeps its place in the
+	// cohort a later run's cohort job would see.
+	const allTargets = [
+		...options.evaluations.map((evaluation) => evaluation.target),
+		...(options.unevaluated ?? [])
+	];
+
 	return {
 		retained,
 		targets,
 		seedGroups,
 		fallbackGroups,
-		destinationIntermediates
+		destinationIntermediates,
+		cohorts: cohortsFor(allTargets),
+		derivationToTargets: derivationToTargetsFor(options.evaluations)
 	};
 }
 
@@ -1237,6 +1296,110 @@ function executionContextKey(target: PublishTarget): string {
 		canonicalRunnerLabel(target.os),
 		target.remote
 	]);
+}
+
+/**
+ * Partitions targets into cohorts: the manifest's own statement of which
+ * targets run together in one job. A target's cohort is its explicit
+ * `cohort` label when it has one, and its own identity (`attr`) otherwise, so
+ * per-target cohorts are the default and a shared label is the only way two
+ * targets join one cohort; nothing here groups or splits a manifest on its
+ * own initiative. Partitions the whole manifest, not only what still needs
+ * building, because cohort identity is a property of the manifest, not of
+ * what the destination happens to hold this run.
+ */
+export function cohortsFor(targets: readonly PublishTarget[]): Cohort[] {
+	const byLabel = new Map<string, PublishTarget[]>();
+
+	for (const target of targets) {
+		const label = target.cohort ?? target.attr;
+		const members = byLabel.get(label) ?? [];
+		members.push(target);
+		byLabel.set(label, members);
+	}
+
+	const cohorts = byLabel
+		.entries()
+		.map(([label, members]) => cohortFor(label, members))
+		.toArray()
+		.toSorted((left, right) => left.key.localeCompare(right.key));
+
+	assertDistinctGroupKeys(cohorts);
+
+	return cohorts;
+}
+
+function cohortFor(label: string, members: readonly PublishTarget[]): Cohort {
+	const first = requireIndex(members, 0);
+	const context = executionContextKey(first);
+
+	for (const member of members) {
+		if (executionContextKey(member) !== context) {
+			throw new CohortExecutionContextError(label, first.attr, member.attr);
+		}
+	}
+
+	return {
+		key: cohortKey(label, first),
+		system: first.system,
+		os: first.os,
+		remote: first.remote,
+		targets: members,
+		installables: members.map(
+			(member) => `${member.attr}^${member.outputs.join(',')}`
+		)
+	};
+}
+
+// Follows groupKey's shape: the readable context parts, hyphen-joined, plus a
+// digest disambiguating look-alike contexts. The label joins the digest
+// rather than the readable prefix, because per-target cohorts are the
+// default and every target in one execution context needs a key distinct
+// from its siblings there; assertDistinctGroupKeys backstops any residual
+// collision the digest cannot rule out.
+function cohortKey(label: string, target: PublishTarget): string {
+	const os = canonicalRunnerLabel(target.os);
+	const mode = target.remote ? 'remote' : 'local';
+	const digest = createHash('sha256')
+		.update(JSON.stringify([target.system, os, target.remote, label]))
+		.digest('hex')
+		.slice(0, 16);
+
+	return `cohort-${target.system}-${os}-${mode}-${digest}`;
+}
+
+/**
+ * Inverts each evaluated target's recursive graph into a map from a
+ * derivation to the target identities (attrs) whose graph contains it. Built
+ * once from evaluation, ahead of any build, so a streamed build's post-build
+ * hook can resolve a `DRV_PATH` to its owning target without asking Nix
+ * again; the recursive graph already holds evidence about the dependency
+ * graph, not an instruction to build every node it names.
+ */
+export function derivationToTargetsFor(
+	evaluations: readonly TargetEvaluation[]
+): DerivationToTargetsEntry[] {
+	const targetsByDrvPath = new Map<string, Set<string>>();
+
+	for (const evaluation of evaluations) {
+		for (const drvPath of evaluation.nodes.keys()) {
+			const attributes = targetsByDrvPath.get(drvPath) ?? new Set<string>();
+			attributes.add(evaluation.target.attr);
+			targetsByDrvPath.set(drvPath, attributes);
+		}
+	}
+
+	return targetsByDrvPath
+		.entries()
+		.map(([drvPath, attributes]) => ({
+			drvPath,
+			targets: attributes
+				.values()
+				.toArray()
+				.toSorted((left, right) => left.localeCompare(right))
+		}))
+		.toArray()
+		.toSorted((left, right) => left.drvPath.localeCompare(right.drvPath));
 }
 
 function requireIndex<T>(values: readonly T[], index: number): T {

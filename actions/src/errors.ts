@@ -356,6 +356,25 @@ export class DuplicateGroupKeyError extends CodedError {
 	}
 }
 
+/**
+ * Two targets name the same cohort but declare different execution contexts
+ * (system, os, remote). A cohort is the manifest's own statement that its
+ * members run together in one job, so members that could never share a job
+ * are a manifest error, not a planning decision to resolve either way.
+ */
+export class CohortExecutionContextError extends UsageError {
+	constructor(
+		public readonly cohort: string,
+		public readonly firstAttribute: string,
+		public readonly conflictingAttribute: string
+	) {
+		super(
+			`cohort '${cohort}' groups '${firstAttribute}' and '${conflictingAttribute}' across different execution contexts (system, os, remote); a cohort must run in one job`
+		);
+		this.name = 'CohortExecutionContextError';
+	}
+}
+
 export class ConfirmCommandError extends CodedError {
 	readonly wasReported: boolean;
 

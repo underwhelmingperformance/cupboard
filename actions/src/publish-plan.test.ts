@@ -16,6 +16,7 @@ import {
 	CacheAvailabilityResponseMalformedError,
 	CacheAvailabilityResponseSchemaError,
 	CacheAvailabilityResponseUnexpectedHashError,
+	CohortExecutionContextError,
 	DerivationGraphShapeError,
 	DerivationRootCountError,
 	DuplicateGroupKeyError,
@@ -27,6 +28,9 @@ import {
 	availableCachePaths,
 	availableViewPaths,
 	cacheProbePaths,
+	cohortLabelMaxLength,
+	cohortsFor,
+	derivationToTargetsFor,
 	derivationUses,
 	evaluateTargets,
 	evaluationFromJson,
@@ -131,6 +135,45 @@ describe('planPublish', () => {
 			],
 			fallbackGroups: []
 		});
+	});
+
+	// Cohort identity partitions the whole manifest, so a target the plan
+	// already retains keeps its place in its cohort: a future cohort job
+	// still needs to see it, since the central plan's retained check is
+	// advisory rather than authoritative for that job's own build.
+	it('keeps a retained target in its cohort alongside pending members', () => {
+		const retained = { ...target('retained'), cohort: 'shared-cohort' };
+		const first = { ...target('first'), cohort: 'shared-cohort' };
+		const evaluations = [
+			evaluation(
+				retained,
+				'retained',
+				storePath('/nix/store/44444444444444444444444444444444-retained'),
+				undefined
+			),
+			evaluation(first, 'first', firstPath, undefined)
+		];
+
+		const plan = planPublish({
+			evaluations,
+			retainedRoots: new Set(['retained']),
+			availablePaths: new Set(),
+			uses: derivationUses(evaluations)
+		});
+
+		expect(
+			plan.cohorts.map((cohort) => ({
+				key: cohort.key,
+				targets: cohort.targets.map((entry) => entry.rootSuffix),
+				installables: cohort.installables
+			}))
+		).toStrictEqual([
+			{
+				key: 'cohort-x86_64-linux-ubuntu-latest-remote-878e3921d9b0584a',
+				targets: ['retained', 'first'],
+				installables: ['.#retained^out', '.#first^out']
+			}
+		]);
 	});
 
 	it('does not seed an output shared with a retained target when only one target is pending', () => {
@@ -518,6 +561,109 @@ describe('planPublish', () => {
 			seedGroups: [],
 			fallbackGroups: []
 		});
+	});
+});
+
+describe('cohortsFor', () => {
+	it.each([
+		{
+			name: 'gives each target its own cohort when no label is declared',
+			targets: [target('first'), target('second')],
+			// cohortsFor sorts by key, so the lower digest sorts first
+			// regardless of manifest order.
+			expected: [
+				{
+					key: 'cohort-x86_64-linux-ubuntu-latest-remote-2c2db096c3b05512',
+					targets: ['.#second'],
+					installables: ['.#second^out']
+				},
+				{
+					key: 'cohort-x86_64-linux-ubuntu-latest-remote-641f63bc0d1c9f54',
+					targets: ['.#first'],
+					installables: ['.#first^out']
+				}
+			]
+		},
+		{
+			name: 'groups targets sharing one cohort label into one cohort',
+			targets: [
+				{ ...target('first'), cohort: 'group-a' },
+				{ ...target('second'), cohort: 'group-a' }
+			],
+			expected: [
+				{
+					key: 'cohort-x86_64-linux-ubuntu-latest-remote-19d359dca18f4835',
+					targets: ['.#first', '.#second'],
+					installables: ['.#first^out', '.#second^out']
+				}
+			]
+		}
+	])('$name', ({ targets, expected }) => {
+		expect(
+			cohortsFor(targets).map((cohort) => ({
+				key: cohort.key,
+				targets: cohort.targets.map((entry) => entry.attr),
+				installables: cohort.installables
+			}))
+		).toStrictEqual(expected);
+	});
+
+	it('is deterministic across repeated calls over the same manifest', () => {
+		const targets = [
+			{ ...target('first'), cohort: 'group-a' },
+			{ ...target('second'), cohort: 'group-a' },
+			target('third')
+		];
+
+		expect(cohortsFor(targets).map((cohort) => cohort.key)).toStrictEqual(
+			cohortsFor(targets).map((cohort) => cohort.key)
+		);
+	});
+
+	it('carries every member of a multi-target cohort in the build request, output lists included', () => {
+		const targets = [
+			{ ...target('first'), cohort: 'group-a', outputs: ['out', 'dev'] },
+			{ ...target('second'), cohort: 'group-a' }
+		];
+
+		expect(
+			cohortsFor(targets).map((cohort) => cohort.installables)
+		).toStrictEqual([['.#first^out,dev', '.#second^out']]);
+	});
+
+	// A cohort is one job, so its members must share where that job runs; a
+	// manifest asking for one cohort across two execution contexts cannot be
+	// satisfied and is refused rather than silently split or merged.
+	it('refuses a cohort whose members span execution contexts', () => {
+		const targets = [
+			{ ...target('first'), cohort: 'group-a' },
+			{ ...target('second'), cohort: 'group-a', remote: false }
+		];
+
+		expect(() => cohortsFor(targets)).toThrow(
+			new CohortExecutionContextError('group-a', '.#first', '.#second')
+		);
+	});
+});
+
+describe('derivationToTargetsFor', () => {
+	it('inverts a shared derivation to every target whose graph contains it', () => {
+		const first = target('first');
+		const second = target('second');
+		const evaluations = [
+			evaluation(first, 'first', firstPath, sharedPath),
+			evaluation(second, 'second', secondPath, sharedPath)
+		];
+
+		expect(derivationToTargetsFor(evaluations)).toStrictEqual([
+			{ drvPath: '/nix/store/first.drv', targets: ['.#first'] },
+			{ drvPath: '/nix/store/second.drv', targets: ['.#second'] },
+			{ drvPath: '/nix/store/shared.drv', targets: ['.#first', '.#second'] }
+		]);
+	});
+
+	it('returns nothing for an empty evaluation set', () => {
+		expect(derivationToTargetsFor([])).toStrictEqual([]);
 	});
 });
 
@@ -1091,6 +1237,51 @@ describe('runner label validation', () => {
 		});
 
 		expect(result.success).toBe(false);
+	});
+});
+
+describe('cohort label validation', () => {
+	it('omits the field by default, leaving the target its own cohort', () => {
+		expect(publishTargetSchema.parse(target('app'))).toStrictEqual(
+			target('app')
+		);
+	});
+
+	it('accepts a valid cohort label', () => {
+		const result = publishTargetSchema.safeParse({
+			...target('app'),
+			cohort: 'linux-primary'
+		});
+
+		expect(result).toMatchObject({
+			success: true,
+			data: { cohort: 'linux-primary' }
+		});
+	});
+
+	it.each([
+		{ name: 'an empty label', cohort: '' },
+		{
+			name: 'a label over the length limit',
+			cohort: 'a'.repeat(cohortLabelMaxLength + 1)
+		},
+		{ name: 'a label containing a space', cohort: 'linux primary' },
+		{ name: 'a non-ASCII label', cohort: '\u{3A3}-cohort' }
+	])('rejects $name', ({ cohort }) => {
+		const result = publishTargetSchema.safeParse({
+			...target('app'),
+			cohort
+		});
+
+		expect(result.success).toBe(false);
+	});
+
+	it('accepts a cohort label at the length limit', () => {
+		const cohort = 'a'.repeat(cohortLabelMaxLength);
+
+		expect(
+			publishTargetSchema.safeParse({ ...target('app'), cohort }).success
+		).toBe(true);
 	});
 });
 

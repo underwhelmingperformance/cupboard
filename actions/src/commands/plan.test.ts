@@ -106,7 +106,18 @@ describe('planAction', () => {
 				targets: [{ ...target, bestEffort: false, outputs: ['out'] }],
 				seedGroups: [],
 				fallbackGroups: [],
-				destinationIntermediates: []
+				destinationIntermediates: [],
+				cohorts: [
+					{
+						key: 'cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe',
+						system: 'x86_64-linux',
+						os: 'ubuntu-latest',
+						remote: true,
+						targets: [{ ...target, bestEffort: false, outputs: ['out'] }],
+						installables: ['.#packages.x86_64-linux.app^out']
+					}
+				],
+				derivationToTargets: []
 			},
 			outputs:
 				`plan-file=${path.join(directory, 'cupboard-publish-plan.json')}\n` +
