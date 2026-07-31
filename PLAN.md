@@ -4883,13 +4883,12 @@ excludes. A general relay such as `socat` would put a multi-purpose tool into
 every consumer's closure, a closure-size cost at odds with a tool whose subject
 is closure transfer, and leave its timeout and error behaviour outside
 cupboard's tests. The helper ships with cupboard itself: the Nix package
-compiles it with the stdenv toolchain and generates its absolute store path the
-way the server's build version already is, and the npm distribution carries it
-as per-platform prebuilt binaries selected the way esbuild's are. The supervisor
-resolves the helper from its own installation, so resolution evaluates nothing,
-runs no `nix` subprocess, and depends on no substituter; preflight refuses,
-before the expensive build starts, only an installation that is missing its
-helper.
+compiles it with the stdenv toolchain and installs it under `libexec/cupboard/`
+beside `bin/cupboard`, and each release tarball carries it as a per-platform
+prebuilt binary beside the `cupboard` executable. The supervisor resolves the
+helper from its own installation, so resolution evaluates nothing, runs no `nix`
+subprocess, and depends on no substituter; preflight refuses, before the
+expensive build starts, only an installation that is missing its helper.
 
 One connection carries one message, so concurrent firings cannot interleave and
 framing stays a newline. Delivery is fire-and-forget. The hook does not wait for
