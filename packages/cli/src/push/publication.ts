@@ -88,7 +88,21 @@ export class PublicationCollection {
 		);
 	}
 
-	private constructor(readonly entries: readonly PublicationEntry[]) {}
+	readonly #kinds: ReadonlyMap<string, PublicationKind>;
+
+	private constructor(readonly entries: readonly PublicationEntry[]) {
+		this.#kinds = new Map(
+			entries.map((entry) => [entry.storePath, entry.kind])
+		);
+	}
+
+	/**
+	 * The kind a resolved path publishes under: a declared entry keeps its
+	 * declaration, and a path the closure expansion added is an intermediate.
+	 */
+	kindOf(storePath: string): PublicationKind {
+		return this.#kinds.get(storePath) ?? 'intermediate';
+	}
 
 	/** Every entry's store path, deduplicated, declared targets first. */
 	get storePaths(): readonly StorePathString[] {

@@ -186,6 +186,12 @@ describe('pushSummarySchema', () => {
 						storePath,
 						stage: 'verify',
 						reason: 'timed out'
+					},
+					{
+						storePathHash,
+						storePath,
+						stage: 'resolve',
+						reason: 'vanished'
 					}
 				],
 				paths: [
@@ -200,7 +206,8 @@ describe('pushSummarySchema', () => {
 						storePathHash,
 						outcome: 'pending',
 						grace: { graceSeconds: 86_400 }
-					}
+					},
+					{ storePathHash, storePath, outcome: 'collected' }
 				]
 			}
 		},

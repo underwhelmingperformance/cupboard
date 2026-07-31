@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto';
 
-import { Nix, type NixValidPathInfo } from '@cupboard/nix';
+import {
+	Nix,
+	NixStorePathNotFoundError,
+	type NixValidPathInfo
+} from '@cupboard/nix';
 import {
 	graceSecondsSchema,
 	rootNameSchema,
@@ -1673,7 +1677,7 @@ describe('runPush', () => {
 		});
 
 		expect({ nixCalls, clientCalls, roots }).toStrictEqual({
-			nixCalls: [{ method: 'queryPathsInfo', paths: [appPath] }],
+			nixCalls: [{ method: 'queryValidPathsInfo', paths: [appPath] }],
 			clientCalls: [
 				{ method: 'negotiate', paths: [appPath] },
 				{ method: 'setRoot', fields: { name: 'main', targets: [appPath] } }
@@ -1939,6 +1943,233 @@ describe('runPush', () => {
 				],
 				paths: []
 			}
+		});
+	});
+
+	it.each([
+		{
+			name: 'records an intermediate vanished at resolution as collected',
+			input: { targets: [appPath], intermediatePaths: [runtimePath] },
+			expected: {
+				errorClass: undefined,
+				clientCalls: [
+					{ method: 'negotiate', paths: [appPath] },
+					{ method: 'setRoot', fields: { name: 'main', targets: [appPath] } }
+				],
+				data: {
+					uploadedPaths: 0,
+					reusedBlobs: 0,
+					skipped: 1,
+					uploadedBytes: 0,
+					failures: [],
+					paths: [
+						{
+							storePathHash: StorePath.hash(appPath),
+							storePath: appPath,
+							outcome: 'already-present'
+						},
+						{
+							storePathHash: StorePath.hash(runtimePath),
+							storePath: runtimePath,
+							outcome: 'collected'
+						}
+					]
+				}
+			}
+		},
+		{
+			name: 'fails the run for a target vanished at resolution',
+			input: { targets: [appPath, runtimePath] },
+			expected: {
+				errorClass: PushIncompleteError,
+				clientCalls: [{ method: 'negotiate', paths: [appPath] }],
+				data: {
+					uploadedPaths: 0,
+					reusedBlobs: 0,
+					skipped: 1,
+					uploadedBytes: 0,
+					failures: [
+						{
+							storePathHash: StorePath.hash(runtimePath),
+							storePath: runtimePath,
+							stage: 'resolve',
+							reason: new NixStorePathNotFoundError(runtimePath).message
+						}
+					],
+					paths: [
+						{
+							storePathHash: StorePath.hash(appPath),
+							storePath: appPath,
+							outcome: 'already-present'
+						}
+					]
+				}
+			}
+		}
+	])('$name', async ({ input, expected }) => {
+		const clientCalls: unknown[] = [];
+		const payloads: ResultPayload[] = [];
+
+		let error: unknown;
+		try {
+			await runPush(
+				PublicationCollection.of(input),
+				reporter([], [], payloads),
+				{
+					client: skipClient([], clientCalls),
+					root: rootName('main'),
+					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+				}
+			);
+		} catch (error_: unknown) {
+			error = error_;
+		}
+
+		const summary = payloads.find(
+			(payload) => payload.kind === pushSummaryResultKind
+		);
+
+		expect({
+			errorClass: error?.constructor,
+			clientCalls,
+			data: summary?.data
+		}).toStrictEqual({
+			errorClass: expected.errorClass,
+			clientCalls: expected.clientCalls,
+			data: expected.data
+		});
+	});
+
+	it.each([
+		{
+			name: 'records an intermediate vanished at its NAR read as collected',
+			input: { targets: [appPath], intermediatePaths: [runtimePath] },
+			expected: {
+				errorClass: undefined,
+				roots: [{ fields: { name: 'main', targets: [appPath] } }],
+				data: {
+					uploadedPaths: 0,
+					reusedBlobs: 0,
+					skipped: 1,
+					uploadedBytes: 0,
+					failures: [],
+					paths: [
+						{
+							storePathHash: StorePath.hash(appPath),
+							storePath: appPath,
+							outcome: 'already-present'
+						},
+						{
+							storePathHash: StorePath.hash(runtimePath),
+							storePath: runtimePath,
+							outcome: 'collected'
+						}
+					]
+				}
+			}
+		},
+		{
+			name: 'fails the run for a target vanished at its NAR read',
+			input: { targets: [appPath, runtimePath] },
+			expected: {
+				errorClass: PushIncompleteError,
+				roots: [],
+				data: {
+					uploadedPaths: 1,
+					reusedBlobs: 0,
+					skipped: 1,
+					uploadedBytes: 0,
+					failures: [
+						{
+							storePathHash: StorePath.hash(runtimePath),
+							storePath: runtimePath,
+							stage: 'upload',
+							reason: new NixStorePathNotFoundError(runtimePath).message
+						}
+					],
+					paths: [
+						{
+							storePathHash: StorePath.hash(appPath),
+							storePath: appPath,
+							outcome: 'already-present'
+						}
+					]
+				}
+			}
+		}
+	])('$name', async ({ input, expected }) => {
+		const roots: SetRootCall[] = [];
+		const payloads: ResultPayload[] = [];
+		const vanished = new NixStorePathNotFoundError(runtimePath);
+
+		let error: unknown;
+		try {
+			await runPush(
+				PublicationCollection.of(input),
+				reporter([], [], payloads),
+				{
+					client: {
+						preview: unexpectedPreviewCall,
+						negotiate: (body) =>
+							Promise.resolve(
+								uploadNegotiateResponseSchema.parse({
+									uploads: body.paths.map((path) =>
+										path.storePath === runtimePath
+											? {
+													action: 'upload',
+													storePathHash: path.storePathHash,
+													narHash: path.narHash,
+													uploadId: 'upload-runtime',
+													r2Key: `nar/${runtimeDigest.narHash.toString()}.nar.zst`,
+													expiresAt: '2026-05-18T12:00:00.000Z'
+												}
+											: {
+													action: 'skip',
+													storePathHash: path.storePathHash,
+													narHash: path.narHash
+												}
+									)
+								})
+							),
+						uploadNar: unexpectedUploadNarCall,
+						commit: unexpectedCommitCall,
+						setRoot(name, body) {
+							roots.push({ fields: { name, ...body } });
+
+							return Promise.resolve(rootSummary({ name, ...body }));
+						}
+					} satisfies PushClient,
+					root: rootName('main'),
+					createNarArchive: (storePath) => {
+						if (storePath === runtimePath) {
+							throw vanished;
+						}
+
+						return new FakeNarArchive(appDigest);
+					},
+					compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar)),
+					nix: nixStore({
+						[appPath]: pathInfo(appPath, appDigest, []),
+						[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+					})
+				}
+			);
+		} catch (error_: unknown) {
+			error = error_;
+		}
+
+		const summary = payloads.find(
+			(payload) => payload.kind === pushSummaryResultKind
+		);
+
+		expect({
+			errorClass: error?.constructor,
+			roots,
+			data: summary?.data
+		}).toStrictEqual({
+			errorClass: expected.errorClass,
+			roots: expected.roots,
+			data: expected.data
 		});
 	});
 
@@ -3560,7 +3791,7 @@ function knownPathInfo(
 }
 
 interface NixCall {
-	readonly method: 'resolveClosure' | 'queryPathsInfo';
+	readonly method: 'resolveClosure' | 'queryValidPathsInfo';
 	readonly paths: readonly string[];
 }
 
@@ -3587,19 +3818,19 @@ function nixStore(
 		},
 		queryPathInfo: (storePath: StorePathString) =>
 			Promise.resolve(knownPathInfo(paths, storePath)),
-		queryPathsInfo: (storePaths: readonly StorePathString[]) => {
-			calls.push({ method: 'queryPathsInfo', paths: storePaths });
+		queryPathsInfo: (storePaths: readonly StorePathString[]) =>
+			Promise.resolve(
+				storePaths.map((storePath) => knownPathInfo(paths, storePath))
+			),
+		queryValidPathsInfo: (storePaths: readonly StorePathString[]) => {
+			calls.push({ method: 'queryValidPathsInfo', paths: storePaths });
 
 			return Promise.resolve(
-				storePaths.map((storePath) => knownPathInfo(paths, storePath))
-			);
-		},
-		queryValidPathsInfo: (storePaths: readonly StorePathString[]) =>
-			Promise.resolve(
 				storePaths
 					.filter((storePath) => paths[storePath] !== undefined)
 					.map((storePath) => knownPathInfo(paths, storePath))
-			),
+			);
+		},
 		queryValidPaths: (storePaths: readonly StorePathString[]) =>
 			Promise.resolve(
 				storePaths.filter((storePath) => paths[storePath] !== undefined)

@@ -92,13 +92,14 @@ export type ParsedControlCheckReport = z.output<
 // name.
 export const pushSummaryResultKind = 'push-summary';
 
-// A path that failed to upload, commit or verify. The push presses on with the
-// rest, so a failure is reported alongside whatever succeeded, not in place of
-// it.
+// A path that failed to resolve, upload, commit or verify. The push presses on
+// with the rest, so a failure is reported alongside whatever succeeded, not in
+// place of it. The `resolve` stage names a declared target the store no longer
+// held when its metadata was read.
 export const pushFailureSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	storePath: storePathSchema,
-	stage: z.enum(['upload', 'commit', 'verify']),
+	stage: z.enum(['resolve', 'upload', 'commit', 'verify']),
 	reason: z.string()
 });
 export type ParsedPushFailure = z.output<typeof pushFailureSchema>;
@@ -107,15 +108,17 @@ export type ParsedPushFailure = z.output<typeof pushFailureSchema>;
 // status values: `already-present` is a negotiate skip (already committed
 // before this push touched it); `committed` is a fresh upload or a reused blob
 // that settled; `pending` is a deferred upload the push did not wait for
-// (`--no-wait`). `grace` carries a materialised `retainUntil` for
-// `already-present` and `committed` outcomes, or the captured `graceSeconds`
-// for a `pending` one whose deadline is not yet known; absent when no policy
-// matched, or when the push carried no retention plan at all (an older
-// server's legacy response).
+// (`--no-wait`); `collected` is an intermediate the store no longer held when
+// its metadata or NAR was read, so nothing was published for it. `grace`
+// carries a materialised `retainUntil` for `already-present` and `committed`
+// outcomes, or the captured `graceSeconds` for a `pending` one whose deadline
+// is not yet known; absent for a `collected` path, when no policy matched, or
+// when the push carried no retention plan at all (an older server's legacy
+// response).
 export const pushSummaryPathSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	storePath: storePathSchema.optional(),
-	outcome: z.enum(['committed', 'already-present', 'pending']),
+	outcome: z.enum(['committed', 'already-present', 'pending', 'collected']),
 	grace: uploadGraceFactSchema.optional()
 });
 export type ParsedPushSummaryPath = z.output<typeof pushSummaryPathSchema>;
