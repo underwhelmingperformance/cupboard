@@ -1,3 +1,8 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+import { InvalidStorePathError } from '@cupboard/nix-store/errors';
 import { rootNameSchema, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
@@ -9,12 +14,40 @@ import {
 } from '../errors.ts';
 
 import {
+	parsePathFile,
 	pushCommandAuthorizationDetails,
 	registerPushCommand,
 	validateRetentionChoice
 } from './push.ts';
 
 const rootName = (value: string) => rootNameSchema.parse(value);
+
+describe('parsePathFile', () => {
+	it.each([
+		{
+			name: 'newline-delimited paths',
+			contents: '/nix/store/a\n/nix/store/b\n',
+			expected: ['/nix/store/a', '/nix/store/b']
+		},
+		{
+			name: 'lines with surrounding whitespace and CRLF endings',
+			contents: ' /nix/store/a \r\n\t/nix/store/b\r\n',
+			expected: ['/nix/store/a', '/nix/store/b']
+		},
+		{
+			name: 'blank lines dropped',
+			contents: '\n/nix/store/a\n\n\n/nix/store/b\n\n',
+			expected: ['/nix/store/a', '/nix/store/b']
+		},
+		{
+			name: 'an empty file',
+			contents: '',
+			expected: []
+		}
+	])('parses $name', ({ contents, expected }) => {
+		expect(parsePathFile(contents)).toStrictEqual(expected);
+	});
+});
 
 describe('validateRetentionChoice', () => {
 	it.each([
@@ -217,5 +250,49 @@ describe('push command', () => {
 		]);
 
 		expect(result).toBeInstanceOf(RunRootTtlWithoutRunRootError);
+	});
+
+	it('rejects a target that is not a store path before authenticating', async () => {
+		const result = await parsePush([
+			'https://cache.example.workers.dev/t/acme',
+			'./result'
+		]);
+
+		expect(result).toBeInstanceOf(InvalidStorePathError);
+
+		if (!(result instanceof InvalidStorePathError)) {
+			return;
+		}
+
+		expect(result.storePath).toBe('./result');
+	});
+
+	it('rejects an intermediate paths file naming a non-store path', async () => {
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
+		const file = path.join(directory, 'intermediates.txt');
+		writeFileSync(
+			file,
+			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime\nnot-a-path\n'
+		);
+
+		try {
+			const result = await parsePush([
+				'https://cache.example.workers.dev/t/acme',
+				'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+				'--closure',
+				'--intermediate-paths-file',
+				file
+			]);
+
+			expect(result).toBeInstanceOf(InvalidStorePathError);
+
+			if (!(result instanceof InvalidStorePathError)) {
+				return;
+			}
+
+			expect(result.storePath).toBe('not-a-path');
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
 	});
 });

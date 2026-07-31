@@ -29,7 +29,8 @@ A **tenant admin** owns one tenant within a deployment. They push paths, manage
 the tenant's caches and retention, and rotate the keys that sign its narinfos.
 These commands address the tenant, so their URL carries the tenant slug:
 
-- `cupboard push` uploads a store path closure and optionally pins it.
+- `cupboard push` uploads store paths (their complete closure with `--closure`)
+  and optionally pins them.
 - `cupboard cache`, `cupboard policy`, and `cupboard root` manage named caches
   and what is kept.
 - `cupboard key` and `cupboard auth-key` rotate the tenant's signing keys.
@@ -70,7 +71,7 @@ cupboard tenant create https://cupboard.example.workers.dev acme \
 
 # Tenant admin: sign in, then push
 cupboard login https://cupboard.example.workers.dev/t/acme
-cupboard push https://cupboard.example.workers.dev/t/acme ./result
+cupboard push https://cupboard.example.workers.dev/t/acme "$(readlink ./result)"
 
 # Print the nix.conf a client needs to substitute from the tenant
 cupboard config https://cupboard.example.workers.dev/t/acme \
