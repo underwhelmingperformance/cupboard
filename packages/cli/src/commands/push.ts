@@ -24,7 +24,8 @@ import {
 	AttestationsDisabledError,
 	InvalidUploadConcurrencyError,
 	NoRetainConflictError,
-	OidcRetentionChoiceRequiredError
+	OidcRetentionChoiceRequiredError,
+	RunRootTtlWithoutRunRootError
 } from '../errors.ts';
 import { runPush } from '../push/push.ts';
 import { pushClientFor } from '../push/push-client.ts';
@@ -36,6 +37,8 @@ interface PushOptions {
 	readonly audience?: Audience;
 	readonly root?: RootName;
 	readonly ttl?: TtlSeconds;
+	readonly runRoot?: RootName;
+	readonly runRootTtl?: TtlSeconds;
 	readonly cache?: string;
 	readonly wait?: boolean;
 	readonly waitTimeout?: WaitTimeoutSeconds;
@@ -56,7 +59,13 @@ interface PushOptions {
 export function validateRetentionChoice(
 	options: Pick<
 		PushOptions,
-		'retain' | 'root' | 'ttl' | 'githubOidc' | 'dryRun'
+		| 'retain'
+		| 'root'
+		| 'ttl'
+		| 'githubOidc'
+		| 'dryRun'
+		| 'runRoot'
+		| 'runRootTtl'
 	>
 ): void {
 	if (options.retain === false && options.root !== undefined) {
@@ -65,6 +74,14 @@ export function validateRetentionChoice(
 
 	if (options.retain === false && options.ttl !== undefined) {
 		throw new NoRetainConflictError('--ttl');
+	}
+
+	// The run root is independent of the target-root choice: an unretained
+	// push may still bind one, its commits joining the run root while the
+	// push declares no target root. Only a TTL with no run root to carry it
+	// is refused.
+	if (options.runRootTtl !== undefined && options.runRoot === undefined) {
+		throw new RunRootTtlWithoutRunRootError();
 	}
 
 	if (
@@ -83,7 +100,7 @@ export function validateRetentionChoice(
  * read-only preview operation, never a push's full upload grant.
  */
 export function pushCommandAuthorizationDetails(
-	options: Pick<PushOptions, 'dryRun' | 'attest' | 'root'>,
+	options: Pick<PushOptions, 'dryRun' | 'attest' | 'root' | 'runRoot'>,
 	cacheSelector: string
 ): AuthorizationDetails {
 	if (options.dryRun === true) {
@@ -93,7 +110,8 @@ export function pushCommandAuthorizationDetails(
 	return pushAuthorizationDetails({
 		cacheSelector,
 		attest: options.attest !== false,
-		...(options.root !== undefined && { root: options.root })
+		...(options.root !== undefined && { root: options.root }),
+		...(options.runRoot !== undefined && { runRoot: options.runRoot })
 	});
 }
 
@@ -142,6 +160,16 @@ export function registerPushCommand(
 		.option(
 			'--no-retain',
 			"publish without any retention root or pin; kept only by the cache's retention grace policy, if one matches"
+		)
+		.option(
+			'--run-root <name>',
+			'bind a run root: every pushed path also joins this root as it commits. Independent of --root, and valid with --no-retain (the commits join the run root while the push declares no target root)',
+			parseRootName
+		)
+		.option(
+			'--run-root-ttl <duration>',
+			'expire the run root after this duration (e.g. 7d, 12h); default per the tenant retention policy, else permanent',
+			parseTtl
 		)
 		.option('--cache <name>', 'push to a named cache rather than the default')
 		.option(
@@ -224,6 +252,14 @@ export function registerPushCommand(
 				attestations: options.attestation.map((path) => ({ path })),
 				...(options.root !== undefined && { root: options.root }),
 				...(options.ttl !== undefined && { ttlSeconds: options.ttl }),
+				...(options.runRoot !== undefined && {
+					runRoot: {
+						name: options.runRoot,
+						...(options.runRootTtl !== undefined && {
+							ttlSeconds: options.runRootTtl
+						})
+					}
+				}),
 				...(options.retain !== undefined && { retain: options.retain }),
 				...(options.waitTimeout !== undefined && {
 					waitTimeoutSeconds: options.waitTimeout

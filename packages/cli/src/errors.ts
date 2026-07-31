@@ -491,6 +491,13 @@ export class NoRetainConflictError extends CliUsageError {
 	}
 }
 
+export class RunRootTtlWithoutRunRootError extends CliUsageError {
+	constructor() {
+		super('--run-root-ttl requires --run-root');
+		this.name = 'RunRootTtlWithoutRunRootError';
+	}
+}
+
 export class OidcRetentionChoiceRequiredError extends CliUsageError {
 	constructor() {
 		super(
