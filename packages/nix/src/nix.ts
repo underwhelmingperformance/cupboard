@@ -83,6 +83,30 @@ export class Nix {
 		return this.store.queryPathInfo(this.toStorePath(path));
 	}
 
+	/**
+	 * Path information for every argument, in argument order. An argument the
+	 * store does not hold fails the whole query.
+	 */
+	async queryPathsInfo(
+		paths: readonly string[]
+	): Promise<readonly NixValidPathInfo[]> {
+		return this.store.queryPathsInfo(
+			paths.map((path) => this.toStorePath(path))
+		);
+	}
+
+	/**
+	 * Path information for the arguments the store holds, in argument order;
+	 * one it does not hold is left out.
+	 */
+	async queryValidPathsInfo(
+		paths: readonly string[]
+	): Promise<readonly NixValidPathInfo[]> {
+		return this.store.queryValidPathsInfo(
+			paths.map((path) => this.toStorePath(path))
+		);
+	}
+
 	/** The arguments this store holds as valid, deduplicated and sorted. */
 	async queryValidPaths(paths: readonly string[]): Promise<readonly string[]> {
 		return this.store.queryValidPaths(

@@ -82,6 +82,28 @@ export class NixLocalStoreClient implements NixStoreClient {
 		);
 	}
 
+	queryPathsInfo(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixValidPathInfo[]> {
+		return this.withDatabase((database) =>
+			storePaths.map((storePath) => requirePathInfo(database, storePath))
+		);
+	}
+
+	queryValidPathsInfo(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixValidPathInfo[]> {
+		return this.withDatabase((database) =>
+			storePaths.flatMap((storePath) => {
+				const row = database.pathRow(storePath);
+
+				return row === undefined
+					? []
+					: [pathInfoFromRow(database, storePath, row)];
+			})
+		);
+	}
+
 	queryValidPaths(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]> {
@@ -132,6 +154,14 @@ function requirePathInfo(
 		throw new NixStorePathNotFoundError(storePath);
 	}
 
+	return pathInfoFromRow(database, storePath, row);
+}
+
+function pathInfoFromRow(
+	database: NixStoreDatabase,
+	storePath: StorePathString,
+	row: NixStoreRow
+): NixValidPathInfo {
 	const deriver = present(row.deriver);
 	const ca = present(row.ca);
 

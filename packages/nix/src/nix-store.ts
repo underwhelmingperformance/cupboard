@@ -51,6 +51,21 @@ export interface NixStoreClient {
 	): Promise<readonly NixValidPathInfo[]>;
 	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo>;
 	/**
+	 * Path information for every given path, in argument order. A path the
+	 * store does not hold fails the whole query with
+	 * {@link NixStorePathNotFoundError}.
+	 */
+	queryPathsInfo(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixValidPathInfo[]>;
+	/**
+	 * Path information for the given paths the store holds, in argument
+	 * order; a path it does not hold is left out.
+	 */
+	queryValidPathsInfo(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixValidPathInfo[]>;
+	/**
 	 * The subset of the given paths this store holds as valid, deduplicated
 	 * and sorted by store path.
 	 */
