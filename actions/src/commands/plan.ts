@@ -43,6 +43,7 @@ import type { Command } from 'commander';
 import { z } from 'zod';
 
 import {
+	ComponentRootTargetLimitError,
 	ConfirmCommandError,
 	ConfirmResultInvalidError,
 	ConfirmResultMissingError,
@@ -85,6 +86,7 @@ import {
 	derivationUses,
 	evaluateTargetCoverage,
 	evaluateTargets,
+	expandComponents,
 	joinRoot,
 	type NixEvaluator,
 	planPublish,
@@ -249,7 +251,11 @@ export function resolvePlanInputs(
 	options: PlanOptions,
 	environment: Environment
 ): PlanInputs {
-	const targets = parseTargets(options.targets);
+	const declaredTargets = parseTargets(options.targets);
+
+	validateComponentLimits(declaredTargets);
+
+	const targets = expandComponents(declaredTargets);
 
 	// A malformed URL would otherwise surface much later as a confusing OIDC
 	// or fetch failure.
@@ -359,6 +365,27 @@ function validateTargetOutputLimits(targets: readonly PublishTarget[]): void {
 			'target',
 			target.attr,
 			target.outputs.length,
+			rootSetMaxTargets
+		);
+	}
+}
+
+// Checked against the declared manifest, before expandComponents replaces
+// each component-publication target with its components: the component
+// count is exactly the target list the aggregate's one retention root would
+// have to accept in a single write.
+function validateComponentLimits(targets: readonly PublishTarget[]): void {
+	for (const target of targets) {
+		if (
+			target.components === undefined ||
+			target.components.length <= rootSetMaxTargets
+		) {
+			continue;
+		}
+
+		throw new ComponentRootTargetLimitError(
+			target.attr,
+			target.components.length,
 			rootSetMaxTargets
 		);
 	}

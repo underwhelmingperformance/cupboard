@@ -37,9 +37,12 @@ import {
 	evaluateTargetCoverage,
 	evaluateTargets,
 	evaluationFromJson,
+	expandComponents,
 	joinRoot,
 	type NixEvaluator,
 	planPublish,
+	type PublishComponent,
+	publishComponentSchema,
 	type PublishTarget,
 	publishTargetSchema,
 	publishTargetsSchema,
@@ -647,6 +650,162 @@ describe('cohortsFor', () => {
 		expect(() => cohortsFor(targets)).toThrow(
 			new CohortExecutionContextError('group-a', '.#first', '.#second')
 		);
+	});
+});
+
+function component(
+	overrides: Partial<PublishComponent> = {}
+): PublishComponent {
+	return { attr: '.#component-a', outputs: ['out'], ...overrides };
+}
+
+describe('expandComponents', () => {
+	it('passes a target with no components through unchanged', () => {
+		const targets = [target('app')];
+
+		expect(expandComponents(targets)).toStrictEqual(targets);
+	});
+
+	it("replaces an aggregate with its components, inheriting the aggregate's execution context, best-effort flag and cohort", () => {
+		const aggregate: PublishTarget = {
+			...target('system'),
+			cohort: 'group-a',
+			components: [
+				component({ attr: '.#component-a', rootDrvPath: manifestRootDrvPath }),
+				component({ attr: '.#component-b' })
+			]
+		};
+
+		expect(expandComponents([aggregate])).toStrictEqual([
+			{
+				attr: '.#component-a',
+				rootDrvPath: manifestRootDrvPath,
+				system: 'x86_64-linux',
+				os: 'ubuntu-latest',
+				remote: true,
+				bestEffort: true,
+				rootSuffix: 'system',
+				outputs: ['out'],
+				cohort: 'group-a'
+			},
+			{
+				attr: '.#component-b',
+				system: 'x86_64-linux',
+				os: 'ubuntu-latest',
+				remote: true,
+				bestEffort: true,
+				rootSuffix: 'system',
+				outputs: ['out'],
+				cohort: 'group-a'
+			}
+		]);
+	});
+
+	it('never carries the aggregate itself into the result', () => {
+		const aggregate: PublishTarget = {
+			...target('system'),
+			components: [component()]
+		};
+
+		expect(
+			expandComponents([aggregate]).map((entry) => entry.attr)
+		).toStrictEqual(['.#component-a']);
+	});
+
+	it('leaves an aggregate with no explicit cohort label uninherited, so each component keeps its own attr as its default label', () => {
+		const aggregate: PublishTarget = {
+			...target('system'),
+			components: [component({ attr: '.#component-a' })]
+		};
+
+		expect(expandComponents([aggregate])[0]).not.toHaveProperty('cohort');
+	});
+
+	it('expands components alongside ordinary targets in one manifest', () => {
+		const aggregate: PublishTarget = {
+			...target('system'),
+			components: [component()]
+		};
+		const ordinary = target('app');
+
+		expect(
+			expandComponents([aggregate, ordinary]).map((entry) => entry.attr)
+		).toStrictEqual(['.#component-a', '.#app']);
+	});
+});
+
+describe('expandComponents cohort interaction', () => {
+	it("gives each component its own cohort by default, sharing the aggregate's execution context", () => {
+		const aggregate: PublishTarget = {
+			...target('system'),
+			components: [
+				component({ attr: '.#component-a' }),
+				component({ attr: '.#component-b' })
+			]
+		};
+
+		const cohorts = cohortsFor(expandComponents([aggregate]));
+
+		expect(
+			cohorts
+				.map((cohort) => ({
+					attrs: cohort.targets.map((entry) => entry.attr),
+					system: cohort.system,
+					os: cohort.os,
+					remote: cohort.remote
+				}))
+				.toSorted((left, right) =>
+					left.attrs.join(',').localeCompare(right.attrs.join(','))
+				)
+		).toStrictEqual([
+			{
+				attrs: ['.#component-a'],
+				system: 'x86_64-linux',
+				os: 'ubuntu-latest',
+				remote: true
+			},
+			{
+				attrs: ['.#component-b'],
+				system: 'x86_64-linux',
+				os: 'ubuntu-latest',
+				remote: true
+			}
+		]);
+	});
+
+	it('shares one cohort across every component when the aggregate declares a label', () => {
+		const aggregate: PublishTarget = {
+			...target('system'),
+			cohort: 'group-a',
+			components: [
+				component({ attr: '.#component-a' }),
+				component({ attr: '.#component-b' })
+			]
+		};
+
+		const cohorts = cohortsFor(expandComponents([aggregate]));
+
+		expect(
+			cohorts.map((cohort) => cohort.targets.map((entry) => entry.attr))
+		).toStrictEqual([['.#component-a', '.#component-b']]);
+	});
+});
+
+describe('publishComponentSchema', () => {
+	it('defaults outputs to out', () => {
+		expect(
+			publishComponentSchema.parse({ attr: '.#component-a' })
+		).toStrictEqual({ attr: '.#component-a', outputs: ['out'] });
+	});
+
+	it.each([
+		{ field: 'attr', value: '--refresh' },
+		{ field: 'outputs', value: ['--refresh'] }
+	])('rejects an unsafe $field value', ({ field, value }) => {
+		expect(
+			publishComponentSchema.safeParse({ ...component(), [field]: value })
+				.success
+		).toBe(false);
 	});
 });
 
@@ -1335,6 +1494,28 @@ describe('publishTargetSchema', () => {
 		const unresolved = withoutRootDrvPath(target('app'));
 
 		expect(publishTargetSchema.parse(unresolved)).toStrictEqual(unresolved);
+	});
+
+	it('parses a component-publication target', () => {
+		const withComponents = {
+			...target('system'),
+			components: [{ attr: '.#component-a' }, { attr: '.#component-b' }]
+		};
+
+		expect(publishTargetSchema.parse(withComponents)).toStrictEqual({
+			...target('system'),
+			components: [
+				{ attr: '.#component-a', outputs: ['out'] },
+				{ attr: '.#component-b', outputs: ['out'] }
+			]
+		});
+	});
+
+	it('rejects an empty components list', () => {
+		expect(
+			publishTargetSchema.safeParse({ ...target('system'), components: [] })
+				.success
+		).toBe(false);
 	});
 });
 

@@ -714,6 +714,46 @@ store-capacity preflight and records `capacity: {"skipped": "remote-store"}` in
 its plan file: ssh cannot measure the remote filesystem, and a remote store is
 itself the deployment answer to a runner whose disk cannot hold the build.
 
+### Component publication for aggregate targets
+
+A NixOS system or a home-manager profile is a `buildEnv` over its packages: one
+target whose input closure can exceed a runner's disk even though every package
+in it is ordinary. A manifest target opts out of building that aggregate at all
+by declaring `components` instead:
+
+```nix
+{
+  attr = ".#nixosConfigurations.server.config.system.build.toplevel";
+  system = "x86_64-linux";
+  os = "ubuntu-latest";
+  remote = false;
+  rootSuffix = "x86_64-linux/server";
+  components = [
+    { attr = ".#nixosConfigurations.server.config.system.build.toplevel.foo"; }
+    { attr = ".#nixosConfigurations.server.config.system.build.toplevel.bar"; }
+  ];
+}
+```
+
+With `components` present, cupboard never evaluates, queries, or builds the
+aggregate's own `attr`: each component is published as its own target instead,
+so the runner's peak disk use falls from the whole environment's closure to the
+largest component's own input closure. Every component publishes under the
+aggregate's own `rootSuffix`, one retention root whose target list is every
+component's path; a manifest declaring more components than a root accepts in
+one write (1000) is refused before anything builds, since paging that write
+would lose the all-or-nothing property retention depends on. Components inherit
+the aggregate's system, os, remote, best-effort flag and cohort label, so by
+default each is its own cohort and its own job, and a shared `cohort` label on
+the aggregate groups them into one job exactly as it would for ordinary targets.
+
+The machine that activates the environment (a NixOS host running
+`nixos-rebuild switch`, a home-manager user running `home-manager switch`)
+substitutes the components from the cache and assembles the aggregate locally.
+cupboard never builds or attests the aggregate, because it was never realised
+here; each component is an ordinary cohort target otherwise, subject to the same
+attestation gap [described above](#publishing-a-target-manifest).
+
 ## Common tasks
 
 Routine changes to a working setup, and where each one's state lives.
