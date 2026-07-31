@@ -278,9 +278,8 @@ cupboard oidc-trust add-github-branch "$tenant" \
 ```
 
 The empty grace prefix covers the default cache and every named cache, including
-the per-PR caches. The grace period must be long enough for the workflow's plan,
-seed and target jobs to finish; 24 hours matches the reusable workflow's
-root-based fallback.
+the per-PR caches. The grace period must be long enough for the workflow's plan
+and target jobs to finish.
 
 The view's priority of 50 sits above the destination cache's priority, which
 defaults to 40 on the server; Nix tries substituters lowest-priority-first, so
@@ -632,40 +631,28 @@ passed through separately: `actions/plan` accepts them as
 header on every narinfo probe.
 
 The plan first asks cupboard to retain each target whose output paths are
-already servable. Those targets get no runner job. For the remaining targets,
-Nix's derivation JSON identifies outputs referenced by more than one target. An
-uncached shared output is built and pushed once before the target matrix fans
-out. Paths already served by cupboard are not seeded.
+already servable. Those targets get no runner job. Every remaining target gets
+its own job in the target matrix, which builds that target with `nix build`,
+attests the result, and publishes it with `cupboard push`, establishing its own
+retention root. A target that shares a dependency with another target simply
+builds it again; Nix substitutes it from the destination cache when a prior
+job's push already made it available there.
 
-Most output-addressed derivations expose their store path during evaluation.
-When Nix deliberately leaves a shared output path unknown, the planner groups
-the affected targets on one runner so Nix realises that derivation once. Their
-normal target jobs then substitute the result from cupboard and establish the
-individual retention roots. This fallback is based on the derivation graph; it
-does not guess from changed source files or attribute names. Like seeding, the
-grouped build is best-effort: when it fails, each affected target's own job
-retries the work and reports its own result.
+`intermediate-retention` controls what the plan does with a shared derivation it
+finds already resident in the destination cache while working out this
+partition. The opt-in `grace` refreshes that derivation's retention grace
+deadline, so it survives long enough for a later target job to substitute it
+instead of rebuilding it; this requires a matching policy on the destination
+cache first (`cupboard policy add-grace`), and the plan fails closed if the
+policy's grace period is not positive. The default, `root`, leaves the deadline
+alone.
 
-`intermediate-retention` chooses how the seed and fallback jobs keep the shared
-outputs they publish. The default, `root`, is today's behaviour: each shared
-output gets a temporary `_cupboard-seed/<run id>/<key>` root with a 24-hour TTL
-that simply expires; nothing removes it earlier once the run's target jobs have
-substituted the output. The opt-in `grace` instead publishes seed and fallback
-intermediates with no retention root at all, relying on the destination cache's
-own retention grace policy to keep them alive long enough for the target jobs to
-substitute; the plan job also refreshes the grace deadline of any shared output
-the destination already holds. This requires a matching policy on the
-destination cache first (`cupboard policy add-grace`), and the run fails closed:
-it stops the job if a published or already-cached intermediate has no positive
-grace deadline, rather than risk the target jobs substituting from bytes that
-could be collected before they run.
-
-The plan job verifies up front that a grace policy covers the destination cache,
-so a missing policy fails at plan time, before anything is published and whether
-or not this run's manifest produces a shared intermediate. One degradation stays
-silent: a grace period shorter than the span from plan to the last target job
-does not fail anything, the collected intermediate is simply rebuilt, so the
-only symptom of too short a grace is the reuse quietly not happening.
+The plan job verifies up front that a grace policy covers the destination cache
+under `grace`, so a missing policy fails at plan time, whether or not this run's
+manifest produces a shared intermediate. One degradation stays silent: a grace
+period shorter than the span from plan to the last target job does not fail
+anything, the collected intermediate is simply rebuilt, so the only symptom of
+too short a grace is the reuse quietly not happening.
 
 `reuse-view` opts the run into reading shared intermediates through a named
 tenant reuse view when the destination is missing them; see
