@@ -132,6 +132,22 @@ on:
         required: false
         default: ubuntu-latest
         type: string
+      enable-packing:
+        description: >-
+          Opt in to measured cohort packing: price candidate cohort groupings
+          from measured store sizes under pack-capacity, rather than one cohort
+          job per manifest cohort. Off by default; never repartitions a manifest
+          without a measurement to price the result against.
+        required: false
+        default: false
+        type: boolean
+      pack-capacity:
+        description:
+          Disk budget, in bytes, that measured cohort packing prices candidate
+          groupings against. Required when enable-packing is true.
+        required: false
+        default: ''
+        type: string
     secrets:
       builder_ssh_key:
         description: SSH private key authenticating to the remote builders.
@@ -319,6 +335,8 @@ jobs:
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
+          enable-packing: ${{ inputs.enable-packing }}
+          pack-capacity: ${{ inputs.pack-capacity }}
 
       - name: Summarise plan
         env:

@@ -75,6 +75,7 @@ import {
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
+import { packCohorts } from '../packing.ts';
 import {
 	availableCachePaths,
 	availableViewPaths,
@@ -160,6 +161,8 @@ export interface PlanOptions {
 	readonly optimise?: string;
 	readonly intermediateRetention?: string;
 	readonly previousReceiptFile?: string;
+	readonly enablePacking?: string;
+	readonly packCapacity?: string;
 }
 
 export interface PlanInputs {
@@ -182,6 +185,11 @@ export interface PlanInputs {
 	// first run: the cohort pre-filter then finds no target left upstream,
 	// never a reason to treat every target's absence as unexplained.
 	readonly previousReceiptFile?: string;
+	readonly enablePacking: boolean;
+	// Unused while packing is disabled; a positive number of bytes otherwise,
+	// checked at input resolution so a manifest cannot enable packing without
+	// naming the budget it prices candidate groupings against.
+	readonly packCapacity: number;
 }
 
 /**
@@ -199,7 +207,23 @@ export interface PlanDependencies {
 	readonly fetcher?: typeof fetch;
 	readonly runner?: EnsureRunner;
 	readonly createArtifactName?: () => string;
+	/**
+	 * Prices every surviving cohort's own measured substitutable NAR bytes,
+	 * keyed by target attr, when packing is enabled. Left unset in production
+	 * until a per-target measurement source (the cohort `plan-cohort`
+	 * invocation, or a per-target variant of it) is connected: enabling
+	 * packing without one leaves every cohort exactly as the manifest
+	 * declared it, because packing without a measurement would be a
+	 * heuristic rather than the price it claims to be.
+	 */
+	readonly measurer?: (
+		cohorts: readonly Cohort[],
+		evaluations: readonly TargetEvaluation[]
+	) => Promise<ReadonlyMap<string, number>>;
 }
+
+const defaultPackingMeasurer: NonNullable<PlanDependencies['measurer']> = () =>
+	Promise.resolve(new Map());
 
 export function registerPlanCommand(
 	program: Command,
@@ -243,6 +267,14 @@ export function registerPlanCommand(
 			"path to the previous run's build receipt, when the workflow has one, " +
 				'so the cohort pre-filter can recognise a target left upstream by an ' +
 				'unchanged manifest'
+		)
+		.option(
+			'--enable-packing <value>',
+			'opt in to measured cohort packing under a disk budget: true or false'
+		)
+		.option(
+			'--pack-capacity <bytes>',
+			'disk budget, in bytes, that measured cohort packing prices candidate groupings against'
 		)
 		.action((options: PlanOptions) => planAction(options, environment));
 }
@@ -312,6 +344,11 @@ export function resolvePlanInputs(
 
 	const temporaryDirectory = requireEnvironment(environment, 'RUNNER_TEMP');
 	const runId = requireEnvironment(environment, 'GITHUB_RUN_ID');
+	const isPackingEnabled = isEnabled(
+		'enable-packing',
+		options.enablePacking,
+		false
+	);
 
 	return {
 		targets,
@@ -331,10 +368,42 @@ export function resolvePlanInputs(
 		planFile:
 			provided(options.planFile) ??
 			path.join(temporaryDirectory, 'cupboard-publish-plan.json'),
+		enablePacking: isPackingEnabled,
+		packCapacity: resolvePackCapacity(isPackingEnabled, options.packCapacity),
 		...(provided(options.previousReceiptFile) !== undefined && {
 			previousReceiptFile: provided(options.previousReceiptFile)
 		})
 	};
+}
+
+// Packing prices candidate groupings against a disk budget that differs by
+// runner, so enabling it without naming that budget would silently price
+// every grouping against a made-up number; the input is required exactly
+// when packing is, mirroring the read-user/read-password cross-check above.
+function resolvePackCapacity(
+	isPackingEnabled: boolean,
+	value: string | undefined
+): number {
+	if (!isPackingEnabled) {
+		return 0;
+	}
+
+	const trimmed = provided(value);
+
+	if (trimmed === undefined) {
+		throw new MissingInputError('pack-capacity');
+	}
+
+	const parsed = Number(trimmed);
+
+	if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+		throw new InvalidInputError(
+			'pack-capacity',
+			'pack-capacity must be a positive integer number of bytes'
+		);
+	}
+
+	return parsed;
 }
 
 function validateTargetRoots(
@@ -456,7 +525,8 @@ export async function planAction(
 		cohortDecisions,
 		evaluations,
 		dependencies.createArtifactName?.() ??
-			`cupboard-publish-plan-${randomUUID()}`
+			`cupboard-publish-plan-${randomUUID()}`,
+		dependencies.measurer ?? defaultPackingMeasurer
 	);
 }
 
@@ -634,7 +704,8 @@ async function writePlan(
 	plan: PublishPlan,
 	cohortDecisions: readonly CohortPreFilterDecision[],
 	evaluations: readonly TargetEvaluation[],
-	artifactName: string
+	artifactName: string,
+	measurer: NonNullable<PlanDependencies['measurer']>
 ): Promise<void> {
 	const document = { ...plan, cohortPreFilter: cohortDecisions };
 
@@ -660,12 +731,21 @@ async function writePlan(
 		'fallback-matrix',
 		matrix('fallback', fallbackMatrix(inputs, plan))
 	);
-	const cohortEntries = cohortMatrix(
-		inputs,
-		plan.cohorts,
-		cohortDecisions,
-		evaluations
+	const prunedKeys = new Set(
+		cohortDecisions
+			.filter((decision) => decision.pruned)
+			.map((decision) => decision.key)
 	);
+	const survivingCohorts = plan.cohorts.filter(
+		(cohort) => !prunedKeys.has(cohort.key)
+	);
+	const packedCohorts = await packedCohortsFor(
+		inputs,
+		survivingCohorts,
+		evaluations,
+		measurer
+	);
+	const cohortEntries = cohortMatrix(inputs, packedCohorts, evaluations);
 	await setOutput(
 		environment,
 		'cohort-matrix',
@@ -1379,53 +1459,72 @@ function targetMatrix(
 	}));
 }
 
-// A pruned cohort needs no job at all, so its entry is dropped rather than
-// carried through with a flag a workflow would have to remember to check;
-// the surviving entries carry every member's attr, installable and root, so
-// a cohort job builds and publishes without asking the plan anything
-// further. `installables` names each member the way `nix build` resolves it
-// (a flake reference); `queryInstallables` names the same member the way the
-// Nix daemon's store protocol does (a derivation store path), which is what
-// the cohort job's own availability partition queries against, so both
-// travel side by side rather than one being derived from the other at build
-// time. Neither is known until the target evaluates, so an unevaluated or
-// still-floating member reports `undefined` in both and its build-time
-// availability check treats it as always needing to build, per the design.
+// A pruned cohort needs no job at all, so it never reaches this function;
+// the surviving cohorts it receives carry every member's attr, installable
+// and root, so a cohort job builds and publishes without asking the plan
+// anything further. `installables` names each member the way `nix build`
+// resolves it (a flake reference); `queryInstallables` names the same member
+// the way the Nix daemon's store protocol does (a derivation store path),
+// which is what the cohort job's own availability partition queries against,
+// so both travel side by side rather than one being derived from the other
+// at build time. Neither is known until the target evaluates, so an
+// unevaluated or still-floating member reports `undefined` in both and its
+// build-time availability check treats it as always needing to build, per
+// the design.
 function cohortMatrix(
 	inputs: PlanInputs,
 	cohorts: readonly Cohort[],
-	decisions: readonly CohortPreFilterDecision[],
 	evaluations: readonly TargetEvaluation[]
 ): readonly object[] {
-	const prunedKeys = new Set(
-		decisions
-			.filter((decision) => decision.pruned)
-			.map((decision) => decision.key)
-	);
 	const evaluationByAttribute = new Map(
 		evaluations.map((evaluation) => [evaluation.target.attr, evaluation])
 	);
 
-	return cohorts
-		.filter((cohort) => !prunedKeys.has(cohort.key))
-		.map((cohort) => ({
-			key: cohort.key,
-			attrs: cohort.targets.map((target) => target.attr),
-			installables: cohort.installables,
-			queryInstallables: cohort.targets.map((target) =>
-				queryInstallableFor(target, evaluationByAttribute.get(target.attr))
-			),
-			expectedPaths: cohort.targets.map((target) =>
-				expectedPathFor(target, evaluationByAttribute.get(target.attr))
-			),
-			system: cohort.system,
-			os: cohort.os,
-			remote: cohort.remote,
-			runsOn: cohort.os,
-			roots: cohort.targets.map((target) =>
-				joinRoot(inputs.rootPrefix, target.rootSuffix)
-			)
-		}));
+	return cohorts.map((cohort) => ({
+		key: cohort.key,
+		attrs: cohort.targets.map((target) => target.attr),
+		installables: cohort.installables,
+		queryInstallables: cohort.targets.map((target) =>
+			queryInstallableFor(target, evaluationByAttribute.get(target.attr))
+		),
+		expectedPaths: cohort.targets.map((target) =>
+			expectedPathFor(target, evaluationByAttribute.get(target.attr))
+		),
+		system: cohort.system,
+		os: cohort.os,
+		remote: cohort.remote,
+		runsOn: cohort.os,
+		roots: cohort.targets.map((target) =>
+			joinRoot(inputs.rootPrefix, target.rootSuffix)
+		)
+	}));
+}
+
+// Packing is opt-in and off by default leaves the surviving cohorts
+// untouched, so a disabled run never calls the measurer at all: the emitted
+// matrix is then byte-for-byte what the manifest's own cohorts produce.
+// Enabled with no measurement for a given cohort, it stays untouched the
+// same way `packCohorts` treats any other unpriced cohort, since a
+// repartition without a measurement would be a heuristic, not a price.
+async function packedCohortsFor(
+	inputs: PlanInputs,
+	cohorts: readonly Cohort[],
+	evaluations: readonly TargetEvaluation[],
+	measurer: NonNullable<PlanDependencies['measurer']>
+): Promise<readonly Cohort[]> {
+	if (!inputs.enablePacking) {
+		return cohorts;
+	}
+
+	const measurements = await measurer(cohorts, evaluations);
+	const packed = packCohorts({
+		enabled: true,
+		cohorts,
+		measurements,
+		capacity: inputs.packCapacity
+	});
+
+	return packed?.cohorts ?? cohorts;
 }
 
 // The derived-path form of a target member, the way the Nix daemon's store
