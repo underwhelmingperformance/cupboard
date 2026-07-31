@@ -8,6 +8,7 @@ import {
 	defaultClosureConcurrency,
 	type NixBuildOutcome,
 	type NixBuildResult,
+	type NixDaemonTrust,
 	type NixDerivedPathString,
 	type NixMissingPartition,
 	type NixStoreClient,
@@ -101,12 +102,6 @@ export interface NixDaemonTransport {
 	read(byteLength: number): Promise<Uint8Array>;
 	close(): Promise<void>;
 }
-
-/**
- * Whether the daemon trusts this client, as the handshake reports it:
- * `unknown` when the daemon leaves the flag unset.
- */
-export type NixDaemonTrust = 'trusted' | 'not-trusted' | 'unknown';
 
 /**
  * Operations bound to one open daemon connection. A temporary root taken

@@ -6,7 +6,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import type { ParsedRootEnsureResponse } from '@cupboard/protocol/retention';
 
-import { CliError } from '../errors.ts';
+import { CliError, transientExitCode } from '../errors.ts';
 
 /**
  * One manifest target from the availability partition's point of view: what
@@ -128,6 +128,13 @@ export class UnknownPathsCeilingError extends CliError {
 					: ` (${ceiling.fallbackReason})`)
 		);
 		this.name = 'UnknownPathsCeilingError';
+	}
+
+	// A different attempt, a trusted connection, or a cleared narinfo
+	// negative cache can all resolve what today's answer could not, so this
+	// is the CLI's transient category rather than a bare unclassified exit.
+	override get exitCode(): number {
+		return transientExitCode;
 	}
 }
 

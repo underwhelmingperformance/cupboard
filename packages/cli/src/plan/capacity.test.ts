@@ -87,12 +87,14 @@ describe('checkStoreCapacity', () => {
 			measured: thrown.measured,
 			available: thrown.available,
 			headroom: thrown.headroom,
-			detected: thrown.detected
+			detected: thrown.detected,
+			exitCode: thrown.exitCode
 		}).toStrictEqual({
 			measured: { downloadSize: 42, narSize, unknownCount: 3 },
 			available,
 			headroom,
-			detected: detected({ remoteStoreConfigured: true })
+			detected: detected({ remoteStoreConfigured: true }),
+			exitCode: 75
 		});
 	});
 

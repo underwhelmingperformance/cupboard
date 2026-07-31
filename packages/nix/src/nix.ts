@@ -9,6 +9,7 @@ import {
 import { parseSshNgStoreUri } from './nix-daemon-ssh.ts';
 import {
 	type NixBuildResult,
+	type NixDaemonTrust,
 	type NixDerivedPathString,
 	type NixMissingPartition,
 	type NixStoreClient,
@@ -176,6 +177,16 @@ export class Nix {
 		targets: readonly NixDerivedPathString[]
 	): Promise<NixMissingPartition> {
 		return this.store.queryMissing(targets);
+	}
+
+	/**
+	 * Whether the daemon connection this client uses is trusted. Only a
+	 * daemon-backed store (opened through {@link Nix.openDaemon}) has a
+	 * connection to ask; any other backend reports `unknown`, the same
+	 * answer an unset handshake flag gives.
+	 */
+	async daemonTrust(): Promise<NixDaemonTrust> {
+		return (await this.store.daemonTrust?.()) ?? 'unknown';
 	}
 
 	/** The NAR serialisation of the store path the argument names. */

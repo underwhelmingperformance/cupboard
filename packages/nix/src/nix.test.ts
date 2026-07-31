@@ -452,4 +452,19 @@ describe('Nix queries', () => {
 
 		expect(store.buildBatches).toStrictEqual([[`${appPath}^out`, libraryPath]]);
 	});
+
+	it('reports unknown daemon trust for a backend with no connection to ask', async () => {
+		const store = recordingStore();
+
+		await expect(nixOver(store).daemonTrust()).resolves.toBe('unknown');
+	});
+
+	it("delegates to the backend's own daemon trust when it has one", async () => {
+		const store: RecordingStore = {
+			...recordingStore(),
+			daemonTrust: () => Promise.resolve('trusted')
+		};
+
+		await expect(nixOver(store).daemonTrust()).resolves.toBe('trusted');
+	});
 });
