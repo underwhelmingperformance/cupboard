@@ -349,6 +349,41 @@ export class RootEnsureResultInvalidError extends CodedError {
 	}
 }
 
+export class RootTargetsCommandError extends CodedError {
+	readonly wasReported: boolean;
+
+	constructor(
+		public readonly root: string,
+		options: { readonly cause: unknown; readonly wasReported?: boolean }
+	) {
+		super(`Could not read the reconciled targets of ${root}`, {
+			cause: options.cause
+		});
+		this.name = 'RootTargetsCommandError';
+		this.wasReported = options.wasReported ?? false;
+	}
+}
+
+export class RootTargetsResultMissingError extends CodedError {
+	constructor(public readonly root: string) {
+		super(`Cupboard recorded no result while reading the targets of ${root}`);
+		this.name = 'RootTargetsResultMissingError';
+	}
+}
+
+export class RootTargetsResultInvalidError extends CodedError {
+	constructor(
+		public readonly root: string,
+		options: { readonly cause: unknown }
+	) {
+		super(
+			`Cupboard recorded an invalid result while reading the targets of ${root}`,
+			{ cause: options.cause }
+		);
+		this.name = 'RootTargetsResultInvalidError';
+	}
+}
+
 export class DuplicateGroupKeyError extends CodedError {
 	constructor(public readonly key: string) {
 		super(`Two publish plan groups share the key ${key}`);

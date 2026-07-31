@@ -9,6 +9,7 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import type { ParsedBuildReceipt } from '@cupboard/protocol/build';
 import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -31,6 +32,7 @@ import {
 	ZeroGracePolicyError
 } from '../errors.ts';
 import {
+	type Cohort,
 	joinRoot,
 	type NixEvaluator,
 	publishTargetsSchema,
@@ -38,6 +40,7 @@ import {
 } from '../publish-plan.ts';
 
 import {
+	cohortPreFilter,
 	confirmDestinationIntermediates,
 	ensureAvailableTargets,
 	type EnsureRunner,
@@ -117,7 +120,13 @@ describe('planAction', () => {
 						installables: ['.#packages.x86_64-linux.app^out']
 					}
 				],
-				derivationToTargets: []
+				derivationToTargets: [],
+				cohortPreFilter: [
+					{
+						key: 'cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe',
+						pruned: false
+					}
+				]
 			},
 			outputs:
 				`plan-file=${path.join(directory, 'cupboard-publish-plan.json')}\n` +
@@ -125,6 +134,8 @@ describe('planAction', () => {
 				'seed-matrix={"include":[]}\n' +
 				'target-matrix={"include":[{"attr":".#packages.x86_64-linux.app","system":"x86_64-linux","os":"ubuntu-latest","remote":true,"bestEffort":false,"rootSuffix":"x86_64-linux/app","outputs":["out"],"root":"github:owner/repo/main/x86_64-linux/app","runsOn":"ubuntu-latest"}]}\n' +
 				'fallback-matrix={"include":[]}\n' +
+				'cohort-matrix={"include":[{"key":"cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe","attrs":[".#packages.x86_64-linux.app"],"installables":[".#packages.x86_64-linux.app^out"],"system":"x86_64-linux","os":"ubuntu-latest","remote":true,"runsOn":"ubuntu-latest","roots":["github:owner/repo/main/x86_64-linux/app"]}]}\n' +
+				'cohort-count=1\n' +
 				'retained-count=0\n' +
 				'seed-count=0\n' +
 				'target-count=1\n' +
@@ -1463,5 +1474,385 @@ describe('verifyGraceCoverage', () => {
 				coverageRunner({ covered: 'maybe' })
 			)
 		).rejects.toBeInstanceOf(GraceCoverageResultInvalidError);
+	});
+});
+
+// Every command the pre-filter issues carries either 'targets' or 'ensure' at
+// the same position `root ensure`'s own argument list already uses, so one
+// index finds either one's root argument.
+function rootCommandTarget(arguments_: readonly string[]): string {
+	const index = arguments_.includes('targets')
+		? arguments_.indexOf('targets')
+		: arguments_.indexOf('ensure');
+	const root = arguments_.at(index + 2);
+
+	if (root === undefined) {
+		throw new Error('the command did not carry a root argument');
+	}
+
+	return root;
+}
+
+function rootTargetsResultLine(storePaths: readonly StorePathString[]): string {
+	return `${JSON.stringify({
+		kind: 'root-targets',
+		data: storePaths.map((storePathValue, index) => ({
+			storePathHash: String(index % 10).repeat(32),
+			storePath: storePathValue,
+			present: true
+		}))
+	})}\n`;
+}
+
+// Drives both calls the pre-filter makes for one target's root: `root
+// targets` answers with whatever reconciled list the test names for that
+// root (empty when unnamed), and `root ensure` answers retained or
+// build-required from a named set, refusing to answer for a root a test
+// wants to fail instead.
+function preFilterRunner(options: {
+	readonly targetsByRoot?: ReadonlyMap<string, readonly StorePathString[]>;
+	readonly ensureRetainedRoots?: ReadonlySet<string>;
+	readonly failTargetsForRoot?: string;
+	readonly failEnsureForRoot?: string;
+}): EnsureRunner {
+	return async (_command, arguments_) => {
+		const root = rootCommandTarget(arguments_);
+
+		if (arguments_.includes('targets')) {
+			if (options.failTargetsForRoot === root) {
+				throw new Error('root targets failed');
+			}
+
+			await writeFile(
+				resultFileArgument(arguments_),
+				rootTargetsResultLine(options.targetsByRoot?.get(root) ?? [])
+			);
+
+			return { stdout: '', stderr: '' };
+		}
+
+		if (options.failEnsureForRoot === root) {
+			throw new Error('root ensure failed');
+		}
+
+		await writeFile(
+			resultFileArgument(arguments_),
+			options.ensureRetainedRoots?.has(root) === true
+				? retainedResultLine(root)
+				: buildRequiredResultLine([`/nix/store/${'9'.repeat(32)}-unavailable`])
+		);
+
+		return { stdout: '', stderr: '' };
+	};
+}
+
+function singleCohort(evaluations: readonly TargetEvaluation[]): Cohort {
+	const targets = evaluations.map((entry) => entry.target);
+
+	return {
+		key: 'cohort-first',
+		system: 'x86_64-linux',
+		os: 'ubuntu-latest',
+		remote: true,
+		targets,
+		installables: targets.map(
+			(target) => `${target.attr}^${target.outputs.join(',')}`
+		)
+	};
+}
+
+describe('cohortPreFilter', () => {
+	let directory: string;
+
+	beforeEach(async () => {
+		directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-cohort-prefilter-')
+		);
+	});
+
+	const outPath = storePath(`/nix/store/${'1'.repeat(32)}-out`);
+	const developmentPath = storePath(`/nix/store/${'2'.repeat(32)}-dev`);
+	const changedPath = storePath(`/nix/store/${'3'.repeat(32)}-changed`);
+	const firstRoot = 'github:owner/repo/main/first';
+
+	it('prunes a cohort whose member is fully covered by its reconciled list, and still refreshes its root', async () => {
+		const ensuredRoots: string[] = [];
+		const first = evaluation('first', outPath);
+		const runner: EnsureRunner = async (_command, arguments_) => {
+			if (arguments_.includes('targets')) {
+				await writeFile(
+					resultFileArgument(arguments_),
+					rootTargetsResultLine([outPath])
+				);
+				return { stdout: '', stderr: '' };
+			}
+
+			const root = rootCommandTarget(arguments_);
+			ensuredRoots.push(root);
+			await writeFile(resultFileArgument(arguments_), retainedResultLine(root));
+			return { stdout: '', stderr: '' };
+		};
+
+		const decisions = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts: [singleCohort([first])] },
+			[first],
+			undefined,
+			runner
+		);
+
+		expect({ decisions, ensuredRoots }).toStrictEqual({
+			decisions: [{ key: 'cohort-first', pruned: true }],
+			ensuredRoots: [firstRoot]
+		});
+	});
+
+	it('does not prune when the reconciled list is no longer fully retained', async () => {
+		const first = evaluation('first', outPath);
+
+		const decisions = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts: [singleCohort([first])] },
+			[first],
+			undefined,
+			preFilterRunner({
+				targetsByRoot: new Map([[firstRoot, [outPath]]]),
+				ensureRetainedRoots: new Set()
+			})
+		);
+
+		expect(decisions).toStrictEqual([{ key: 'cohort-first', pruned: false }]);
+	});
+
+	it('does not prune, and records a reason, when the ensure call fails', async () => {
+		const first = evaluation('first', outPath);
+
+		const decisions = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts: [singleCohort([first])] },
+			[first],
+			undefined,
+			preFilterRunner({
+				targetsByRoot: new Map([[firstRoot, [outPath]]]),
+				failEnsureForRoot: firstRoot
+			})
+		);
+
+		expect(decisions).toStrictEqual([
+			{
+				key: 'cohort-first',
+				pruned: false,
+				reason:
+					'.#first: Could not ensure retention root github:owner/repo/main/first'
+			}
+		]);
+	});
+
+	it('does not prune, and records a reason, when reading the reconciled list fails', async () => {
+		const first = evaluation('first', outPath);
+
+		const decisions = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts: [singleCohort([first])] },
+			[first],
+			undefined,
+			preFilterRunner({ failTargetsForRoot: firstRoot })
+		);
+
+		expect(decisions).toStrictEqual([
+			{
+				key: 'cohort-first',
+				pruned: false,
+				reason:
+					'.#first: Could not read the reconciled targets of github:owner/repo/main/first'
+			}
+		]);
+	});
+
+	it('prunes when an absent output is covered by the previous receipt as left upstream for an unchanged manifest', async () => {
+		const multiOutputTarget = {
+			attr: '.#multi',
+			rootDrvPath: targetRootDrvPath,
+			system: 'x86_64-linux',
+			os: 'ubuntu-latest',
+			remote: true,
+			bestEffort: false,
+			rootSuffix: 'multi',
+			outputs: ['out', 'dev']
+		};
+		const multiOutputEvaluation: TargetEvaluation = {
+			target: multiOutputTarget,
+			rootDrvPath: '/nix/store/multi.drv',
+			nodes: new Map(),
+			targetPaths: [outPath, developmentPath]
+		};
+		const previousReceipt: ParsedBuildReceipt = {
+			version: 2,
+			paths: [],
+			subjects: [],
+			outcomes: [{ outcome: 'left-upstream', storePath: developmentPath }]
+		};
+		const multiRoot = 'github:owner/repo/main/multi';
+
+		const decisions = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts: [singleCohort([multiOutputEvaluation])] },
+			[multiOutputEvaluation],
+			previousReceipt,
+			preFilterRunner({
+				targetsByRoot: new Map([[multiRoot, [outPath]]]),
+				ensureRetainedRoots: new Set([multiRoot])
+			})
+		);
+
+		expect(decisions).toStrictEqual([{ key: 'cohort-first', pruned: true }]);
+	});
+
+	it('does not prune when the current output is a changed manifest neither the reconciled list nor the receipt covers', async () => {
+		const first = evaluation('first', changedPath);
+		// The receipt covers a stale path from before the manifest changed, not
+		// the target's current output.
+		const previousReceipt: ParsedBuildReceipt = {
+			version: 2,
+			paths: [],
+			subjects: [],
+			outcomes: [{ outcome: 'left-upstream', storePath: outPath }]
+		};
+
+		const decisions = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts: [singleCohort([first])] },
+			[first],
+			previousReceipt,
+			preFilterRunner({
+				targetsByRoot: new Map([[firstRoot, [outPath]]]),
+				ensureRetainedRoots: new Set([firstRoot])
+			})
+		);
+
+		expect(decisions).toStrictEqual([{ key: 'cohort-first', pruned: false }]);
+	});
+
+	it('never reads or ensures a target whose outputs are not all known, and always spawns it', async () => {
+		const calls: string[] = [];
+		const runner: EnsureRunner = (_command, arguments_) => {
+			calls.push(rootCommandTarget(arguments_));
+			return Promise.reject(new Error('should not be called'));
+		};
+		const unknownOutputTarget = {
+			attr: '.#unknown',
+			rootDrvPath: targetRootDrvPath,
+			system: 'x86_64-linux',
+			os: 'ubuntu-latest',
+			remote: true,
+			bestEffort: false,
+			rootSuffix: 'unknown',
+			outputs: ['out', 'dev']
+		};
+		const partiallyResolvedEvaluation: TargetEvaluation = {
+			target: unknownOutputTarget,
+			rootDrvPath: '/nix/store/unknown.drv',
+			nodes: new Map(),
+			targetPaths: [outPath]
+		};
+
+		const decisions = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts: [singleCohort([partiallyResolvedEvaluation])] },
+			[partiallyResolvedEvaluation],
+			undefined,
+			runner
+		);
+
+		expect({ decisions, calls }).toStrictEqual({
+			decisions: [{ key: 'cohort-first', pruned: false }],
+			calls: []
+		});
+	});
+
+	it('always spawns an unevaluated best-effort target', async () => {
+		const unevaluatedTarget = {
+			attr: '.#broken',
+			system: 'x86_64-linux',
+			os: 'ubuntu-latest',
+			remote: true,
+			bestEffort: true,
+			rootSuffix: 'broken',
+			outputs: ['out']
+		};
+		const cohort: Cohort = {
+			key: 'cohort-broken',
+			system: 'x86_64-linux',
+			os: 'ubuntu-latest',
+			remote: true,
+			targets: [unevaluatedTarget],
+			installables: ['.#broken^out']
+		};
+
+		const decisions = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts: [cohort] },
+			[],
+			undefined,
+			() => Promise.reject(new Error('should not be called'))
+		);
+
+		expect(decisions).toStrictEqual([{ key: 'cohort-broken', pruned: false }]);
+	});
+});
+
+describe('cohort-matrix output', () => {
+	it('excludes a pruned cohort from the emitted matrix and count, but not the target matrix', async () => {
+		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+		const appStorePath = `/nix/store/${'1'.repeat(32)}-app`;
+		const appNode = {
+			env: { out: appStorePath },
+			inputs: { drvs: {} },
+			outputs: { out: { path: `${'1'.repeat(32)}-app` } }
+		};
+		const evaluator: NixEvaluator = () =>
+			Promise.resolve({
+				stdout: JSON.stringify({
+					derivations: { [targetRootDrvPath]: appNode }
+				})
+			});
+		const runner: EnsureRunner = async (_command, arguments_) => {
+			if (arguments_.includes('targets')) {
+				await writeFile(
+					resultFileArgument(arguments_),
+					rootTargetsResultLine([storePath(appStorePath)])
+				);
+				return { stdout: '', stderr: '' };
+			}
+
+			const root = rootCommandTarget(arguments_);
+			await writeFile(resultFileArgument(arguments_), retainedResultLine(root));
+			return { stdout: '', stderr: '' };
+		};
+
+		await planAction(
+			{ ...baseOptions, optimise: 'true' },
+			{
+				GITHUB_RUN_ID: '12345',
+				RUNNER_TEMP: planDirectory,
+				GITHUB_OUTPUT: path.join(planDirectory, 'output')
+			},
+			undefined,
+			{
+				evaluator,
+				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				fetcher: alwaysAvailableFetcher,
+				runner
+			}
+		);
+
+		const outputs = await readFile(path.join(planDirectory, 'output'), 'utf8');
+
+		// The target is retained (its own output is fully cached), so the
+		// ordinary target matrix already carries nothing to build; the cohort
+		// matrix independently confirms the same target's cohort needs no job.
+		expect(outputs).toContain('target-matrix={"include":[]}\n');
+		expect(outputs).toContain('cohort-matrix={"include":[]}\n');
+		expect(outputs).toContain('cohort-count=0\n');
 	});
 });

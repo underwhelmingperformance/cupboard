@@ -15,11 +15,17 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
+	buildReceiptSchema,
+	type ParsedBuildReceipt
+} from '@cupboard/protocol/build';
+import {
 	graceCoverageResponseSchema,
 	type ParsedGraceCoverageResponse,
 	type ParsedRootEnsureResponse,
+	type ParsedRootTarget,
 	rootEnsureResponseSchema,
-	rootSetMaxTargets
+	rootSetMaxTargets,
+	rootTargetSchema
 } from '@cupboard/protocol/retention';
 import {
 	type ParsedUploadConfirmResponse,
@@ -55,6 +61,9 @@ import {
 	RootEnsureCommandError,
 	RootEnsureResultInvalidError,
 	RootEnsureResultMissingError,
+	RootTargetsCommandError,
+	RootTargetsResultInvalidError,
+	RootTargetsResultMissingError,
 	ZeroGracePolicyError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
@@ -69,8 +78,12 @@ import {
 	availableCachePaths,
 	availableViewPaths,
 	cacheProbePaths,
+	type Cohort,
+	type CohortPreFilterDecision,
+	cohortPreFilterDecision,
 	cohortsFor,
 	derivationUses,
+	evaluateTargetCoverage,
 	evaluateTargets,
 	joinRoot,
 	type NixEvaluator,
@@ -78,6 +91,7 @@ import {
 	type PublishPlan,
 	type PublishTarget,
 	publishTargetsSchema,
+	type TargetCoverage,
 	type TargetEvaluation,
 	viewProbePaths
 } from '../publish-plan.ts';
@@ -143,6 +157,7 @@ export interface PlanOptions {
 	readonly planFile?: string;
 	readonly optimise?: string;
 	readonly intermediateRetention?: string;
+	readonly previousReceiptFile?: string;
 }
 
 export interface PlanInputs {
@@ -161,6 +176,10 @@ export interface PlanInputs {
 	readonly reuseView: string;
 	readonly runId: string;
 	readonly temporaryDirectory: string;
+	// Absent when the caller has no receipt to pass, such as a repository's
+	// first run: the cohort pre-filter then finds no target left upstream,
+	// never a reason to treat every target's absence as unexplained.
+	readonly previousReceiptFile?: string;
 }
 
 /**
@@ -216,6 +235,12 @@ export function registerPlanCommand(
 		.option(
 			'--intermediate-retention <value>',
 			"how seed and fallback intermediates are retained: 'root' or 'grace'"
+		)
+		.option(
+			'--previous-receipt-file <path>',
+			"path to the previous run's build receipt, when the workflow has one, " +
+				'so the cohort pre-filter can recognise a target left upstream by an ' +
+				'unchanged manifest'
 		)
 		.action((options: PlanOptions) => planAction(options, environment));
 }
@@ -299,7 +324,10 @@ export function resolvePlanInputs(
 		temporaryDirectory,
 		planFile:
 			provided(options.planFile) ??
-			path.join(temporaryDirectory, 'cupboard-publish-plan.json')
+			path.join(temporaryDirectory, 'cupboard-publish-plan.json'),
+		...(provided(options.previousReceiptFile) !== undefined && {
+			previousReceiptFile: provided(options.previousReceiptFile)
+		})
 	};
 }
 
@@ -378,14 +406,27 @@ export async function planAction(
 	dependencies: PlanDependencies = {}
 ): Promise<void> {
 	const inputs = resolvePlanInputs(options, environment);
-	const plan = inputs.optimise
+	const { plan, evaluations } = inputs.optimise
 		? await optimisedPlan(inputs, reporter, dependencies)
-		: unoptimisedPlan(inputs.targets);
+		: { plan: unoptimisedPlan(inputs.targets), evaluations: [] };
+	// The pre-filter needs the same evaluated graph the plan itself used, so
+	// it only runs when planning did: the unoptimised path never inspects the
+	// cache, and spawning every cohort's job unfiltered matches that.
+	const cohortDecisions = inputs.optimise
+		? await cohortPreFilter(
+				inputs,
+				plan,
+				evaluations,
+				await readPreviousReceipt(inputs.previousReceiptFile, reporter),
+				dependencies.runner
+			)
+		: plan.cohorts.map((cohort) => ({ key: cohort.key, pruned: false }));
 
 	await writePlan(
 		environment,
 		inputs,
 		plan,
+		cohortDecisions,
 		dependencies.createArtifactName?.() ??
 			`cupboard-publish-plan-${randomUUID()}`
 	);
@@ -395,7 +436,10 @@ async function optimisedPlan(
 	inputs: PlanInputs,
 	reporter: Reporter,
 	dependencies: PlanDependencies
-): Promise<PublishPlan> {
+): Promise<{
+	readonly plan: PublishPlan;
+	readonly evaluations: readonly TargetEvaluation[];
+}> {
 	const { evaluations, unevaluated } = await evaluateTargets(
 		inputs.targets,
 		dependencies.storeDirectory ?? discoverNixStoreConfig().storeDirectory,
@@ -498,7 +542,7 @@ async function optimisedPlan(
 		);
 	}
 
-	return plan;
+	return { plan, evaluations };
 }
 
 export function validateIntermediateRootTargetLimits(
@@ -560,10 +604,16 @@ async function writePlan(
 	environment: Environment,
 	inputs: PlanInputs,
 	plan: PublishPlan,
+	cohortDecisions: readonly CohortPreFilterDecision[],
 	artifactName: string
 ): Promise<void> {
+	const document = { ...plan, cohortPreFilter: cohortDecisions };
+
 	await mkdir(path.dirname(inputs.planFile), { recursive: true });
-	await writeFile(inputs.planFile, `${JSON.stringify(plan, undefined, 2)}\n`);
+	await writeFile(
+		inputs.planFile,
+		`${JSON.stringify(document, undefined, 2)}\n`
+	);
 	await setOutput(environment, 'plan-file', inputs.planFile);
 	await setOutput(environment, 'plan-artifact-name', artifactName);
 	await setOutput(
@@ -581,6 +631,13 @@ async function writePlan(
 		'fallback-matrix',
 		matrix('fallback', fallbackMatrix(inputs, plan))
 	);
+	const cohortEntries = cohortMatrix(inputs, plan.cohorts, cohortDecisions);
+	await setOutput(
+		environment,
+		'cohort-matrix',
+		matrix('cohort', cohortEntries)
+	);
+	await setOutput(environment, 'cohort-count', String(cohortEntries.length));
 	await setOutput(environment, 'retained-count', String(plan.retained.length));
 	await setOutput(environment, 'seed-count', String(plan.seedGroups.length));
 	await setOutput(environment, 'target-count', String(plan.targets.length));
@@ -727,6 +784,264 @@ function ensureResponse(
 	}
 
 	throw new RootEnsureResultMissingError(root);
+}
+
+// A target the previous run recorded as left upstream is still fine to leave
+// there: the store path is the same path that would be left upstream again,
+// so an unchanged one names an unchanged manifest without comparing the
+// manifest itself. A receipt with no outcomes section (a run that only
+// built) covers nothing.
+function leftUpstreamPathsFrom(
+	receipt: ParsedBuildReceipt | undefined
+): ReadonlySet<StorePathString> {
+	const outcomes = receipt?.outcomes ?? [];
+
+	return new Set(
+		outcomes
+			.filter((outcome) => outcome.outcome === 'left-upstream')
+			.map((outcome) => outcome.storePath)
+	);
+}
+
+// A missing or unusable receipt is not a plan failure: it simply leaves the
+// pre-filter with no left-upstream coverage, exactly as a repository's first
+// run has none.
+async function readPreviousReceipt(
+	filePath: string | undefined,
+	reporter: Reporter
+): Promise<ParsedBuildReceipt | undefined> {
+	if (filePath === undefined) {
+		return undefined;
+	}
+
+	try {
+		const parsed = buildReceiptSchema.safeParse(
+			JSON.parse(await readFile(filePath, 'utf8'))
+		);
+
+		if (!parsed.success) {
+			reporter.warn(
+				`Ignoring the previous receipt at ${filePath}: it does not match the build receipt schema`
+			);
+			return undefined;
+		}
+
+		return parsed.data;
+	} catch (error) {
+		reporter.warn(
+			`Ignoring the previous receipt at ${filePath}: ${error instanceof Error ? error.message : String(error)}`
+		);
+		return undefined;
+	}
+}
+
+// The store paths a root's last reconciliation wrote, freshly probed: the
+// pre-filter's whole reason to exist is that this is not the current
+// manifest's target list, so a content-addressed or upstream-left output the
+// manifest no longer names still refreshes here rather than churning the
+// job that would otherwise reconcile it away.
+async function readRootTargets(
+	inputs: PlanInputs,
+	root: string,
+	runner: EnsureRunner
+): Promise<ReadonlySet<StorePathString>> {
+	const resultFile = path.join(
+		inputs.temporaryDirectory,
+		`cupboard-root-targets-${randomUUID()}.jsonl`
+	);
+	const arguments_ = [
+		'--output-mode',
+		'github',
+		'--no-colour',
+		'--result-file',
+		resultFile,
+		'root',
+		'targets',
+		canonicalHref(inputs.url),
+		root,
+		'--github-oidc'
+	];
+
+	if (inputs.audience !== '') {
+		arguments_.push('--audience', inputs.audience);
+	}
+
+	if (inputs.cache !== '') {
+		arguments_.push('--cache', inputs.cache);
+	}
+
+	try {
+		await runner(inputs.cupboardPath, arguments_);
+	} catch (error) {
+		const replayed = replayCapturedCommandOutput(error);
+
+		throw new RootTargetsCommandError(root, {
+			cause: error,
+			wasReported: replayed.wasReported
+		});
+	}
+
+	const targets = rootTargetsResponse(
+		root,
+		await readRootTargetsResults(root, resultFile)
+	);
+
+	return new Set(targets.map((target) => target.storePath));
+}
+
+// A run that never opened its result file recorded no result; any other read
+// failure is the caller's environment misbehaving and propagates as itself.
+async function readRootTargetsResults(
+	root: string,
+	resultFile: string
+): Promise<string> {
+	try {
+		return await readFile(resultFile, 'utf8');
+	} catch (error) {
+		if (isFileNotFound(error)) {
+			throw new RootTargetsResultMissingError(root);
+		}
+
+		throw error;
+	}
+}
+
+function rootTargetsResponse(
+	root: string,
+	recorded: string
+): readonly ParsedRootTarget[] {
+	let events: readonly ReporterResultEvent[];
+
+	try {
+		events = parseReporterResults(recorded);
+	} catch (error) {
+		throw new RootTargetsResultInvalidError(root, { cause: error });
+	}
+
+	for (const event of events) {
+		if (event.kind !== 'root-targets') {
+			continue;
+		}
+
+		const response = z.array(rootTargetSchema).safeParse(event.data);
+
+		if (!response.success) {
+			throw new RootTargetsResultInvalidError(root, { cause: response.error });
+		}
+
+		return response.data;
+	}
+
+	throw new RootTargetsResultMissingError(root);
+}
+
+// One target's coverage, gathered by the IO the pure decision in
+// evaluateTargetCoverage cannot itself perform. An unevaluated target, or one
+// whose outputs are not all known before building, never reaches the read or
+// ensure calls at all: the pre-filter reaches only targets whose output
+// paths are known before building, per the design.
+async function targetCoverageOutcome(
+	target: PublishTarget,
+	evaluationByAttribute: ReadonlyMap<string, TargetEvaluation>,
+	leftUpstreamPaths: ReadonlySet<StorePathString>,
+	inputs: PlanInputs,
+	runner: EnsureRunner
+): Promise<TargetCoverage> {
+	const evaluation = evaluationByAttribute.get(target.attr);
+
+	if (evaluation?.targetPaths.length !== target.outputs.length) {
+		return { attr: target.attr, status: 'unknown-output' };
+	}
+
+	const root = joinRoot(inputs.rootPrefix, target.rootSuffix);
+	let reconciledPaths: ReadonlySet<StorePathString>;
+
+	try {
+		reconciledPaths = await readRootTargets(inputs, root, runner);
+	} catch (error) {
+		return {
+			attr: target.attr,
+			status: 'failed',
+			reason: error instanceof Error ? error.message : String(error)
+		};
+	}
+
+	// An empty reconciled list means the root has nothing to refresh yet
+	// (a target left entirely upstream may never have one): there is
+	// nothing to ensure, so the check proceeds vacuously retained and the
+	// receipt's left-upstream coverage decides the rest.
+	if (reconciledPaths.size === 0) {
+		return evaluateTargetCoverage(
+			target,
+			evaluation.targetPaths,
+			{ retained: true, reconciledPaths },
+			leftUpstreamPaths
+		);
+	}
+
+	try {
+		const response = await ensureRoot(
+			inputs,
+			root,
+			[...reconciledPaths],
+			runner
+		);
+
+		return evaluateTargetCoverage(
+			target,
+			evaluation.targetPaths,
+			{ retained: response.status === 'retained', reconciledPaths },
+			leftUpstreamPaths
+		);
+	} catch (error) {
+		return {
+			attr: target.attr,
+			status: 'failed',
+			reason: error instanceof Error ? error.message : String(error)
+		};
+	}
+}
+
+/**
+ * The advisory destination pre-filter: for every cohort in the plan, decides
+ * whether its job can be pruned because every member is already covered.
+ * Machine-independent by construction, since it only reads and refreshes
+ * retention roots; a spawned job's own partition against its own store stays
+ * authoritative regardless of what this finds. A failure anywhere in a
+ * cohort spawns that cohort's job and carries the reason, never composing a
+ * build set and never failing the plan itself.
+ */
+export async function cohortPreFilter(
+	inputs: PlanInputs,
+	plan: Pick<PublishPlan, 'cohorts'>,
+	evaluations: readonly TargetEvaluation[],
+	previousReceipt: ParsedBuildReceipt | undefined,
+	runner: EnsureRunner = defaultEnsureRunner
+): Promise<readonly CohortPreFilterDecision[]> {
+	const evaluationByAttribute = new Map(
+		evaluations.map((evaluation) => [evaluation.target.attr, evaluation])
+	);
+	const leftUpstreamPaths = leftUpstreamPathsFrom(previousReceipt);
+	const targets = plan.cohorts.flatMap((cohort) => cohort.targets);
+	const coverageEntries = await mapWithConcurrency(
+		targets,
+		maximumConcurrentRootEnsures,
+		(target) =>
+			targetCoverageOutcome(
+				target,
+				evaluationByAttribute,
+				leftUpstreamPaths,
+				inputs,
+				runner
+			)
+	);
+	const coverageByAttribute = new Map(
+		coverageEntries.map((entry) => [entry.attr, entry])
+	);
+
+	return plan.cohorts.map((cohort) =>
+		cohortPreFilterDecision(cohort, coverageByAttribute)
+	);
 }
 
 // Establishes, before anything is published, that a grace policy covers the
@@ -1028,6 +1343,37 @@ function targetMatrix(
 		root: joinRoot(inputs.rootPrefix, target.rootSuffix),
 		runsOn: target.os
 	}));
+}
+
+// A pruned cohort needs no job at all, so its entry is dropped rather than
+// carried through with a flag a workflow would have to remember to check;
+// the surviving entries carry every member's attr, installable and root, so
+// a cohort job builds and publishes without asking the plan anything further.
+function cohortMatrix(
+	inputs: PlanInputs,
+	cohorts: readonly Cohort[],
+	decisions: readonly CohortPreFilterDecision[]
+): readonly object[] {
+	const prunedKeys = new Set(
+		decisions
+			.filter((decision) => decision.pruned)
+			.map((decision) => decision.key)
+	);
+
+	return cohorts
+		.filter((cohort) => !prunedKeys.has(cohort.key))
+		.map((cohort) => ({
+			key: cohort.key,
+			attrs: cohort.targets.map((target) => target.attr),
+			installables: cohort.installables,
+			system: cohort.system,
+			os: cohort.os,
+			remote: cohort.remote,
+			runsOn: cohort.os,
+			roots: cohort.targets.map((target) =>
+				joinRoot(inputs.rootPrefix, target.rootSuffix)
+			)
+		}));
 }
 
 // The exact retention values a seed or fallback group's push publishes with,
