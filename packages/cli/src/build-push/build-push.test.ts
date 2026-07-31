@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -33,6 +33,7 @@ import {
 import type { PushClient } from '../push/push.ts';
 
 import {
+	type BuildInvocation,
 	type BuildPushDependencies,
 	type BuildPushRunOptions,
 	childExitCode,
@@ -54,6 +55,7 @@ function pathInfo(storePath: StorePathString): NixValidPathInfo {
 		narHash,
 		narSize: 4,
 		references: [],
+		deriver: drvA,
 		signatures: [],
 		ultimate: false
 	};
@@ -212,8 +214,18 @@ function recordingReporter(record: RecordedRun): Reporter {
 	};
 }
 
+interface ConstructedFlowConfig {
+	/** The stub nix succeeds once it has run this many times. */
+	readonly succeedOn: number;
+	readonly attempts?: number;
+	readonly verifyRebuilds?: boolean;
+	/** The machine the stub's activity log attributes; empty is local. */
+	readonly machine?: string;
+}
+
 interface FlowConfig {
 	readonly command?: ChildCommand;
+	readonly constructed?: ConstructedFlowConfig;
 	readonly emitEvent?: boolean;
 	readonly emitExitStatus?: number;
 	readonly valid?: readonly StorePathString[];
@@ -225,6 +237,74 @@ interface FlowConfig {
 interface FlowRun extends RecordedRun {
 	readonly error: unknown;
 	readonly receiptFile: string;
+	readonly sleeps: readonly number[];
+	readonly attemptIdsIssued: number;
+	readonly verifications: readonly ChildCommand[];
+}
+
+function activityLine(machine: string): string {
+	return JSON.stringify({
+		action: 'start',
+		id: 1,
+		level: 3,
+		parent: 0,
+		text: `building '${drvA}'`,
+		type: 105,
+		fields: [drvA, machine]
+	});
+}
+
+// A stand-in `nix` on the child's PATH: it writes the activity log the real
+// one would, counts its runs so an early attempt can fail, and on success
+// delivers the build event to the invocation's hook endpoint the way the hook
+// helper does.
+const stubNixScript = [
+	`#!${process.execPath}`,
+	"const fs = require('node:fs');",
+	"const net = require('node:net');",
+	'const args = process.argv.slice(2);',
+	"const logFile = args[args.indexOf('json-log-path') + 1];",
+	String.raw`fs.writeFileSync(logFile, process.env.STUB_LOG_LINE + '\n');`,
+	'let runs = 0;',
+	'try {',
+	"\truns = Number(fs.readFileSync(process.env.STUB_COUNT_FILE, 'utf8'));",
+	'} catch {}',
+	'runs += 1;',
+	'fs.writeFileSync(process.env.STUB_COUNT_FILE, String(runs));',
+	'if (runs < Number(process.env.STUB_SUCCEED_ON)) process.exit(1);',
+	'const socket = net.connect(process.env.STUB_SOCKET, () => {',
+	"\tsocket.write(process.env.STUB_EVENT + '\\n');",
+	'});',
+	"socket.on('close', () => process.exit(0));",
+	"socket.on('error', () => process.exit(1));"
+].join('\n');
+
+async function stubNixEnvironment(
+	workspace: string,
+	socketPath: string,
+	constructed: ConstructedFlowConfig
+): Promise<Record<string, string | undefined>> {
+	const stubDirectory = path.join(workspace, 'bin');
+
+	await mkdir(stubDirectory, { recursive: true });
+	await writeFile(path.join(stubDirectory, 'nix'), stubNixScript, {
+		mode: 0o755
+	});
+
+	return {
+		...process.env,
+		PATH: `${stubDirectory}:${process.env.PATH ?? ''}`,
+		STUB_LOG_LINE: activityLine(constructed.machine ?? ''),
+		STUB_COUNT_FILE: path.join(workspace, 'stub-count'),
+		STUB_SUCCEED_ON: String(constructed.succeedOn),
+		STUB_SOCKET: socketPath,
+		STUB_EVENT: JSON.stringify({
+			version: 1,
+			invocationId,
+			derivation: drvA,
+			outputPaths: [pathA]
+		})
+	};
 }
 
 const workspaces: string[] = [];
@@ -247,6 +327,13 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	const receiptFile = path.join(workspace, 'receipt.json');
 	const valid = new Set(config.valid);
 	const record: RecordedRun = { phases: [], results: [], warnings: [] };
+	const sleeps: number[] = [];
+	const verifications: ChildCommand[] = [];
+	let attemptIdsIssued = 0;
+	const environment =
+		config.constructed === undefined
+			? undefined
+			: await stubNixEnvironment(workspace, socketPath, config.constructed);
 
 	const client: PushClient = {
 		negotiate: (body) =>
@@ -314,7 +401,23 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		compressNar: () => ({
 			body: emptyStream(),
 			digest: () => ({ narHash, narSize: 4 })
-		})
+		}),
+		...(environment !== undefined && { environment }),
+		nextAttemptId: () => {
+			attemptIdsIssued += 1;
+
+			return `attempt-${String(attemptIdsIssued)}`;
+		},
+		sleep: (delayMs) => {
+			sleeps.push(delayMs);
+
+			return Promise.resolve();
+		},
+		runChild: (options) => {
+			verifications.push(options.command);
+
+			return Promise.resolve({ status: 0, signal: undefined });
+		}
 	};
 
 	const command: ChildCommand =
@@ -322,11 +425,26 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		(config.emitEvent === true
 			? emitEventCommand(socketPath, pathA, config.emitExitStatus ?? 0)
 			: ['sh', '-c', 'exit 0']);
+	const invocation: BuildInvocation =
+		config.constructed === undefined
+			? { kind: 'command', command }
+			: {
+					kind: 'constructed',
+					build: {
+						installables: ['.#app'],
+						...(config.constructed.attempts !== undefined && {
+							attempts: config.constructed.attempts
+						}),
+						...(config.constructed.verifyRebuilds === true && {
+							verifyRebuilds: true
+						})
+					}
+				};
 	let thrown: unknown;
 
 	try {
 		await runBuildPush(
-			{ command, receiptFile, ...config.options },
+			{ invocation, receiptFile, ...config.options },
 			recordingReporter(record),
 			dependencies
 		);
@@ -334,7 +452,14 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		thrown = error;
 	}
 
-	return { ...record, error: thrown, receiptFile };
+	return {
+		...record,
+		error: thrown,
+		receiptFile,
+		sleeps,
+		attemptIdsIssued,
+		verifications
+	};
 }
 
 describe('childExitCode', () => {
@@ -460,6 +585,114 @@ describe('runBuildPush', () => {
 			skipped: 1,
 			childExitStatus: 0,
 			unconfirmedPaths: []
+		});
+	});
+
+	it('adds no attempts around a user-supplied command', async () => {
+		const run = await runFlow({ emitEvent: true, valid: [pathA] });
+
+		expect({
+			error: run.error,
+			sleeps: run.sleeps,
+			attemptIdsIssued: run.attemptIdsIssued,
+			verifications: run.verifications
+		}).toStrictEqual({
+			error: undefined,
+			sleeps: [],
+			attemptIdsIssued: 0,
+			verifications: []
+		});
+	});
+
+	it('runs a constructed invocation under the attempt loop and attributes its subjects', async () => {
+		const run = await runFlow({
+			constructed: { succeedOn: 2 },
+			valid: [pathA]
+		});
+		const receipt: unknown = JSON.parse(
+			await readFile(run.receiptFile, 'utf8')
+		);
+
+		expect({
+			error: run.error,
+			sleeps: run.sleeps,
+			verifications: run.verifications,
+			receipt
+		}).toStrictEqual({
+			error: undefined,
+			sleeps: [15_000],
+			verifications: [],
+			receipt: {
+				version: 2,
+				paths: [pathA],
+				subjects: [
+					{
+						storePath: pathA,
+						narHash: narHash.digestHex(),
+						derivation: drvA,
+						attempt: 1,
+						attemptId: 'attempt-1'
+					}
+				],
+				outcomes: [{ outcome: 'destination-served', storePath: pathA }],
+				childExitStatus: 0,
+				uploaded: [],
+				failed: [],
+				collected: []
+			}
+		});
+	});
+
+	it('verifies remotely built derivations locally before attributing them', async () => {
+		const run = await runFlow({
+			constructed: {
+				succeedOn: 1,
+				verifyRebuilds: true,
+				machine: 'ssh://builder-1'
+			},
+			valid: [pathA]
+		});
+		const receipt: unknown = JSON.parse(
+			await readFile(run.receiptFile, 'utf8')
+		);
+
+		expect({
+			error: run.error,
+			verifications: run.verifications,
+			receipt
+		}).toStrictEqual({
+			error: undefined,
+			verifications: [
+				[
+					'nix',
+					'build',
+					'--rebuild',
+					'--no-link',
+					'--builders',
+					'',
+					'--max-jobs',
+					'1',
+					`${drvA}^*`
+				]
+			],
+			receipt: {
+				version: 2,
+				paths: [pathA],
+				subjects: [
+					{
+						storePath: pathA,
+						narHash: narHash.digestHex(),
+						derivation: drvA,
+						attempt: 1,
+						attemptId: 'attempt-1'
+					}
+				],
+				outcomes: [{ outcome: 'destination-served', storePath: pathA }],
+				childExitStatus: 0,
+				uploaded: [],
+				failed: [],
+				collected: []
+			}
 		});
 	});
 
