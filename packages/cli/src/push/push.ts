@@ -1,6 +1,3 @@
-import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-
 import {
 	Nix,
 	NixStorePathNotFoundError,
@@ -9,8 +6,6 @@ import {
 import { implicitPinName } from '@cupboard/nix-store/retention';
 import {
 	type RootName,
-	type Sha256HexDigest,
-	sha256HexDigestSchema,
 	type StorePathHash,
 	type StorePathString,
 	type TtlSeconds
@@ -18,7 +13,6 @@ import {
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import type {
 	AttestationAttachResponse,
-	AttestationDecision,
 	AttestationNegotiateRequest,
 	AttestationNegotiateResponse
 } from '@cupboard/protocol/attestations';
@@ -56,9 +50,17 @@ import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { UsageError } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
-import { z } from 'zod';
 
 import { isAbortError } from '../abort.ts';
+import {
+	type AttestationBundleSource,
+	defaultReadAttestationBundle,
+	type DivergentSkip,
+	prepareAttestationBundles,
+	type ReadAttestationBundle,
+	requireAttestationAttachClient,
+	runAttestationAttachment
+} from '../attest/attach.ts';
 import type { CommitOptions, CommitTarget } from '../client/client.ts';
 import type { CommitOutcome, CommitSession } from '../client/commit-socket.ts';
 import { isStaleUploadError } from '../client/rpc-errors.ts';
@@ -67,21 +69,16 @@ import {
 	waitTimeoutSecondsSchema
 } from '../duration.ts';
 import {
-	AttestationBundleInvalidError,
-	AttestationDivergedPathError,
-	AttestationSubjectNotPushedError,
-	AttestationUploadUnavailableError,
 	PushIncompleteError,
 	PushNarMetadataMismatchError,
 	ReferencePathMismatchError,
 	ReferenceSourcePairError,
 	ReferenceUploadRequiredError,
-	UnexpectedAttestationDecisionError,
 	UnexpectedUploadDecisionError,
 	UploadGraceFactsUnsupportedError,
 	UploadVerificationFailedError
 } from '../errors.ts';
-import { byteStream, countingByteStream } from '../io/byte-stream.ts';
+import { countingByteStream } from '../io/byte-stream.ts';
 import { compressNarToStream, type NarUploadStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
@@ -127,7 +124,7 @@ export interface PushDependencies {
 	readonly waitTimeoutSeconds?: WaitTimeoutSeconds;
 	readonly signal?: AbortSignal;
 	readonly attest?: boolean;
-	readonly attestations?: readonly PushAttestationSource[];
+	readonly attestations?: readonly AttestationBundleSource[];
 	readonly readAttestationBundle?: ReadAttestationBundle;
 	/**
 	 * The filesystem NAR reader, used when the selected store serves its paths
@@ -192,12 +189,6 @@ export type PushNarArchive =
 	ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>;
 
 export type CompressNar = (nar: PushNarArchive) => NarUploadStream;
-
-export interface PushAttestationSource {
-	readonly path: string;
-}
-
-export type ReadAttestationBundle = (path: string) => Promise<Uint8Array>;
 
 type UploadDecisionOf<A extends ParsedUploadDecision['action']> = Extract<
 	ParsedUploadDecision,
@@ -364,7 +355,7 @@ interface PushRuntimeDependencies {
 	readonly waitTimeoutSeconds: WaitTimeoutSeconds;
 	readonly runRoot?: UploadAttachRoot;
 	readonly attest?: boolean;
-	readonly attestations?: readonly PushAttestationSource[];
+	readonly attestations?: readonly AttestationBundleSource[];
 	readonly readAttestationBundle?: ReadAttestationBundle;
 	readonly uploadConcurrency?: number;
 	readonly dryRun?: boolean;
@@ -1351,16 +1342,10 @@ function planExpiry(ttlSeconds: number | undefined): string {
 interface AttachAttestationsDependencies {
 	readonly client: PushClient;
 	readonly enabled: boolean;
-	readonly sources: readonly PushAttestationSource[];
+	readonly sources: readonly AttestationBundleSource[];
 	readonly readBundle: ReadAttestationBundle;
 	readonly pendingStorePathHashes: ReadonlySet<StorePathHash>;
 	readonly divergent: ReadonlyMap<StorePathHash, DivergentSkip>;
-}
-
-interface PreparedAttestationBundle {
-	readonly storePathHash: StorePathHash;
-	readonly digest: string;
-	readonly bytes: Uint8Array;
 }
 
 interface AttestationSummary {
@@ -1381,7 +1366,11 @@ async function attachPushedAttestations(
 
 	return reporter.steps('Attestations', async (log) => {
 		const readStep = log.group('read');
-		const prepared = await prepareAttestationBundles(pathInfos, dependencies);
+		const prepared = await prepareAttestationBundles(pathInfos, {
+			sources: dependencies.sources,
+			readBundle: dependencies.readBundle,
+			divergent: dependencies.divergent
+		});
 		readStep.success(`${formatCount(prepared.length)} bundle(s)`);
 
 		const ready = prepared.filter(
@@ -1405,145 +1394,17 @@ async function attachPushedAttestations(
 			});
 		}
 
-		if (dependencies.client.negotiateAttestations === undefined) {
-			throw new AttestationUploadUnavailableError('negotiateAttestations');
-		}
-
-		const negotiateStep = log.group('negotiate');
-		const negotiation = await dependencies.client.negotiateAttestations({
-			bundles: ready.map((bundle) => ({
-				storePathHash: bundle.storePathHash,
-				digest: bundle.digest
-			}))
+		const outcome = await runAttestationAttachment(ready, log, {
+			client: requireAttestationAttachClient(dependencies.client)
 		});
-		const toUpload = negotiation.bundles.filter((decision) =>
-			isAttestationUpload(decision)
-		);
-		const reused = negotiation.bundles.filter((decision) =>
-			isAttestationSkip(decision)
-		).length;
-		negotiateStep.success(
-			`${formatCount(toUpload.length)} to upload, ${formatCount(reused)} reused`
-		);
-
-		const uploadStep = log.group('upload');
-		let uploadedBytes = 0;
-
-		// The bundles all address the same tenant, so they upload under the same
-		// bound as blob uploads; sending them one at a time pays a round-trip per
-		// bundle.
-		await mapWithConcurrency(
-			toUpload,
-			defaultUploadConcurrency,
-			async (decision) => {
-				const bundle = findAttestationBundle(ready, decision);
-
-				// The bundle streams to its staging key under the push prefix with
-				// the same credential the NARs use, so there is no separate upload
-				// path.
-				await dependencies.client.uploadNar(
-					decision.r2Key,
-					byteStream([bundle.bytes])
-				);
-
-				uploadedBytes += bundle.bytes.byteLength;
-			}
-		);
-
-		uploadStep.success(formatBytes(uploadedBytes));
-
-		const attachStep = log.group('attach');
-		let attached = 0;
-
-		await mapWithConcurrency(
-			toUpload,
-			defaultUploadConcurrency,
-			async (decision) => {
-				if (dependencies.client.attachAttestation === undefined) {
-					throw new AttestationUploadUnavailableError('attachAttestation');
-				}
-
-				await dependencies.client.attachAttestation(decision.uploadId);
-				attached += 1;
-			}
-		);
-
-		attachStep.success(`${formatCount(attached)} attached`);
 
 		return attestationResultRows({
-			uploaded: attached,
-			reused,
+			uploaded: outcome.attached,
+			reused: outcome.reused,
 			deferred,
-			uploadedBytes
+			uploadedBytes: outcome.uploadedBytes
 		});
 	});
-}
-
-async function prepareAttestationBundles(
-	pathInfos: readonly NixValidPathInfo[],
-	dependencies: AttachAttestationsDependencies
-): Promise<readonly PreparedAttestationBundle[]> {
-	const byNarHash = new Map(
-		pathInfos.map((pathInfo) => [pathInfo.narHash.digestHex(), pathInfo])
-	);
-	const prepared: PreparedAttestationBundle[] = [];
-	const seen = new Set<string>();
-
-	for (const source of dependencies.sources) {
-		const bytes = await dependencies.readBundle(source.path);
-		const parsed = parseAttestationBundle(source.path, bytes);
-		const digest = sha256Hex(bytes);
-
-		const matched = parsed.subjectDigests
-			.map((subjectDigest) => byNarHash.get(subjectDigest))
-			.filter((item) => item !== undefined);
-
-		if (matched.length === 0) {
-			throw new AttestationSubjectNotPushedError(
-				source.path,
-				parsed.subjectDigests
-			);
-		}
-
-		for (const pathInfo of matched) {
-			// The bundle describes the local bytes, but the cache committed a
-			// different NAR for this store path, so the attach can never succeed:
-			// fail here, before any bundle uploads, with both hashes named.
-			const diverged = dependencies.divergent.get(
-				StorePath.hash(pathInfo.storePath)
-			);
-
-			if (diverged !== undefined) {
-				throw new AttestationDivergedPathError(
-					diverged.storePath,
-					diverged.localNarHash,
-					diverged.cacheNarHash
-				);
-			}
-
-			recordPreparedBundle(pathInfo, digest, bytes, seen, prepared);
-		}
-	}
-
-	return prepared;
-}
-
-function recordPreparedBundle(
-	pathInfo: NixValidPathInfo,
-	digest: string,
-	bytes: Uint8Array,
-	seen: Set<string>,
-	prepared: PreparedAttestationBundle[]
-): void {
-	const storePathHash = StorePath.hash(pathInfo.storePath);
-	const key = `${storePathHash}\0${digest}`;
-
-	if (seen.has(key)) {
-		return;
-	}
-
-	seen.add(key);
-	prepared.push({ storePathHash, digest, bytes });
 }
 
 function attestationResultRows(
@@ -1927,16 +1788,6 @@ function verifyNarMetadata(
 	);
 }
 
-// A skip decision whose committed NAR differs from the local path's: the two
-// sides realised the same store path with different bytes, so the build is not
-// reproducible. The cache keeps its copy, and an attestation over the local
-// bytes can never attach to it.
-interface DivergentSkip {
-	readonly storePath: StorePathString;
-	readonly localNarHash: string;
-	readonly cacheNarHash: string;
-}
-
 function divergentSkips(
 	resolved: readonly ResolvedPushPath[],
 	decisions: readonly (ParsedUploadDecision | ParsedUploadPreviewDecision)[]
@@ -2042,120 +1893,4 @@ function isReusedBlobCommit(
 	decision: ParsedUploadDecision
 ): decision is Extract<ParsedUploadDecision, { action: 'commit' }> {
 	return decision.action === 'commit';
-}
-
-function isAttestationUpload(
-	decision: AttestationDecision
-): decision is Extract<AttestationDecision, { action: 'upload' }> {
-	return decision.action === 'upload';
-}
-
-function isAttestationSkip(
-	decision: AttestationDecision
-): decision is Extract<AttestationDecision, { action: 'skip' }> {
-	return decision.action === 'skip';
-}
-
-function findAttestationBundle(
-	bundles: readonly PreparedAttestationBundle[],
-	decision: Extract<AttestationDecision, { action: 'upload' }>
-): PreparedAttestationBundle {
-	const bundle = bundles.find(
-		(item) =>
-			item.storePathHash === decision.storePathHash &&
-			item.digest === decision.digest
-	);
-
-	if (bundle !== undefined) {
-		return bundle;
-	}
-
-	throw new UnexpectedAttestationDecisionError(
-		decision.storePathHash,
-		decision.digest
-	);
-}
-
-const inTotoPayloadType = 'application/vnd.in-toto+json';
-const inTotoStatementType = 'https://in-toto.io/Statement/v1';
-
-const dsseEnvelopeSchema = z.object({
-	payload: z.string(),
-	payloadType: z.literal(inTotoPayloadType)
-});
-
-const sigstoreBundleSubjectSchema = z.object({
-	digest: z.object({
-		sha256: sha256HexDigestSchema
-	})
-});
-
-const sigstoreBundleStatementSchema = z.object({
-	_type: z.literal(inTotoStatementType),
-	subject: z.array(sigstoreBundleSubjectSchema).min(1),
-	predicateType: z.string(),
-	predicate: z.unknown()
-});
-
-const sigstoreBundleSchema = z.object({
-	dsseEnvelope: dsseEnvelopeSchema
-});
-
-function parseAttestationBundle(
-	path: string,
-	bytes: Uint8Array
-): { readonly subjectDigests: readonly Sha256HexDigest[] } {
-	let json: unknown;
-
-	try {
-		const decoder = new TextDecoder();
-		json = JSON.parse(decoder.decode(bytes));
-	} catch {
-		throw new AttestationBundleInvalidError(path, 'bundle is not JSON');
-	}
-
-	const bundle = sigstoreBundleSchema.safeParse(json);
-
-	if (!bundle.success) {
-		throw new AttestationBundleInvalidError(
-			path,
-			'bundle does not carry a DSSE envelope'
-		);
-	}
-
-	let statementJson: unknown;
-
-	try {
-		statementJson = JSON.parse(
-			Buffer.from(bundle.data.dsseEnvelope.payload, 'base64').toString('utf8')
-		);
-	} catch {
-		throw new AttestationBundleInvalidError(
-			path,
-			'bundle DSSE payload is not JSON'
-		);
-	}
-
-	const statement = sigstoreBundleStatementSchema.safeParse(statementJson);
-
-	if (!statement.success) {
-		throw new AttestationBundleInvalidError(
-			path,
-			'bundle DSSE payload is not a supported in-toto statement'
-		);
-	}
-
-	return {
-		subjectDigests: statement.data.subject.map(
-			(subject) => subject.digest.sha256
-		)
-	};
-}
-
-function sha256Hex(bytes: Uint8Array): string {
-	return createHash('sha256').update(bytes).digest('hex');
-}
-
-async function defaultReadAttestationBundle(path: string): Promise<Uint8Array> {
-	return readFile(path);
 }

@@ -426,6 +426,22 @@ jobs:
       # streamed no build (push disabled, a remote store, or nothing to
       # build) has no receipt and nothing it can truthfully attest.
       - uses: ./.cupboard/actions/attest
+        id: attest
         if: ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' }}
         with:
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
+
+      # The provenance bundle is signed after publication, since it needs the
+      # receipt's subjects, so a dedicated step files it against the paths the
+      # cache already serves. Gated as the attest step is, plus the bundle
+      # itself: a cohort that built nothing locally signs nothing.
+      - uses: ./.cupboard/actions/attest-attach
+        if:
+          ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' &&
+          steps.attest.outputs.bundle-path != '' }}
+        with:
+          url: ${{ inputs.url }}
+          cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          cache: ${{ needs.configure.outputs.cache }}
+          receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
+          bundle: ${{ steps.attest.outputs.bundle-path }}

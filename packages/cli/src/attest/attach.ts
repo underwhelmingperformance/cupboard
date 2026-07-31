@@ -1,0 +1,621 @@
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+
+import { Nix, type NixValidPathInfo } from '@cupboard/nix';
+import {
+	type Sha256HexDigest,
+	sha256HexDigestSchema,
+	type StorePathHash,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
+import { StorePath } from '@cupboard/nix-store/store-path';
+import type {
+	AttestationAttachResponse,
+	AttestationDecision,
+	AttestationNegotiateRequest,
+	AttestationNegotiateResponse
+} from '@cupboard/protocol/attestations';
+import {
+	type AttestationAttachPath,
+	attestationAttachSummaryResultKind,
+	attestationAttachSummarySchema
+} from '@cupboard/protocol/reports';
+import {
+	formatBytes,
+	formatCount,
+	type Reporter,
+	type ResultRow,
+	type StepLog
+} from '@cupboard/reporter';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import { ORPCError } from '@orpc/client';
+import { z } from 'zod';
+
+import {
+	AttestationBundleInvalidError,
+	AttestationDivergedPathError,
+	AttestationSubjectNotPushedError,
+	AttestationUploadUnavailableError,
+	UnexpectedAttestationDecisionError
+} from '../errors.ts';
+import { byteStream } from '../io/byte-stream.ts';
+
+/** A local Sigstore DSSE bundle file whose subjects name store paths. */
+export interface AttestationBundleSource {
+	readonly path: string;
+}
+
+export type ReadAttestationBundle = (path: string) => Promise<Uint8Array>;
+
+/**
+ * The client surface an attestation attachment consumes: the contract-backed
+ * negotiate and attach conversations, plus the staging upload the bundle
+ * bytes stream through under the push credential.
+ */
+export interface AttestationAttachClient {
+	negotiateAttestations(
+		body: Omit<AttestationNegotiateRequest, 'pushId'>
+	): Promise<AttestationNegotiateResponse>;
+	uploadNar(r2Key: string, body: ReadableStream<Uint8Array>): Promise<void>;
+	attachAttestation(uploadId: string): Promise<AttestationAttachResponse>;
+}
+
+// The push client's attestation conversation is optional, for a minimal
+// client that never attaches; anything that does attach needs all three
+// operations, so the absence of one is a typed refusal.
+export function requireAttestationAttachClient(client: {
+	negotiateAttestations?: AttestationAttachClient['negotiateAttestations'];
+	attachAttestation?: AttestationAttachClient['attachAttestation'];
+	uploadNar: AttestationAttachClient['uploadNar'];
+}): AttestationAttachClient {
+	const { negotiateAttestations, attachAttestation } = client;
+
+	if (negotiateAttestations === undefined) {
+		throw new AttestationUploadUnavailableError('negotiateAttestations');
+	}
+
+	if (attachAttestation === undefined) {
+		throw new AttestationUploadUnavailableError('attachAttestation');
+	}
+
+	return {
+		negotiateAttestations: (body) => negotiateAttestations(body),
+		attachAttestation: (uploadId) => attachAttestation(uploadId),
+		uploadNar: (r2Key, body) => client.uploadNar(r2Key, body)
+	};
+}
+
+/**
+ * A skip decision whose committed NAR differs from the local path's: the two
+ * sides realised the same store path with different bytes, so the build is
+ * not reproducible. The cache keeps its copy, and an attestation over the
+ * local bytes can never attach to it.
+ */
+export interface DivergentSkip {
+	readonly storePath: StorePathString;
+	readonly localNarHash: string;
+	readonly cacheNarHash: string;
+}
+
+export interface PreparedAttestationBundle {
+	readonly storePathHash: StorePathHash;
+	readonly digest: string;
+	readonly bytes: Uint8Array;
+}
+
+export interface PrepareAttestationBundlesOptions {
+	readonly sources: readonly AttestationBundleSource[];
+	readonly readBundle: ReadAttestationBundle;
+	readonly divergent: ReadonlyMap<StorePathHash, DivergentSkip>;
+}
+
+/**
+ * Reads and parses the bundle sources, matching each bundle's in-toto subject
+ * digests against the given paths' NAR hashes. A bundle whose subjects match
+ * no path refuses, as does one describing a path whose cached NAR diverges
+ * from the local bytes; duplicate (path, bundle) pairs collapse to one entry.
+ */
+export async function prepareAttestationBundles(
+	pathInfos: readonly NixValidPathInfo[],
+	options: PrepareAttestationBundlesOptions
+): Promise<readonly PreparedAttestationBundle[]> {
+	const byNarHash = new Map(
+		pathInfos.map((pathInfo) => [pathInfo.narHash.digestHex(), pathInfo])
+	);
+	const prepared: PreparedAttestationBundle[] = [];
+	const seen = new Set<string>();
+
+	for (const source of options.sources) {
+		const bytes = await options.readBundle(source.path);
+		const parsed = parseAttestationBundle(source.path, bytes);
+		const digest = sha256Hex(bytes);
+
+		const matched = parsed.subjectDigests
+			.map((subjectDigest) => byNarHash.get(subjectDigest))
+			.filter((item) => item !== undefined);
+
+		if (matched.length === 0) {
+			throw new AttestationSubjectNotPushedError(
+				source.path,
+				parsed.subjectDigests
+			);
+		}
+
+		for (const pathInfo of matched) {
+			// The bundle describes the local bytes, but the cache committed a
+			// different NAR for this store path, so the attach can never succeed:
+			// fail here, before any bundle uploads, with both hashes named.
+			const diverged = options.divergent.get(
+				StorePath.hash(pathInfo.storePath)
+			);
+
+			if (diverged !== undefined) {
+				throw new AttestationDivergedPathError(
+					diverged.storePath,
+					diverged.localNarHash,
+					diverged.cacheNarHash
+				);
+			}
+
+			recordPreparedBundle(pathInfo, digest, bytes, seen, prepared);
+		}
+	}
+
+	return prepared;
+}
+
+function recordPreparedBundle(
+	pathInfo: NixValidPathInfo,
+	digest: string,
+	bytes: Uint8Array,
+	seen: Set<string>,
+	prepared: PreparedAttestationBundle[]
+): void {
+	const storePathHash = StorePath.hash(pathInfo.storePath);
+	const key = `${storePathHash}\0${digest}`;
+
+	if (seen.has(key)) {
+		return;
+	}
+
+	seen.add(key);
+	prepared.push({ storePathHash, digest, bytes });
+}
+
+// The bundles all address the same tenant, so they upload under the same
+// bound as blob uploads; sending them one at a time pays a round-trip per
+// bundle.
+const bundleConcurrency = 6;
+
+export interface AttestationAttachmentOptions {
+	readonly client: AttestationAttachClient;
+	/**
+	 * Tolerate a per-path attach refusal: the server answers `NOT_FOUND` when
+	 * no committed narinfo row backs the path, so with this set such a path
+	 * becomes an `unservable` outcome and the rest of the bundles attach. A
+	 * push leaves it unset: it just committed every path it attests, so the
+	 * refusal there is a fault worth failing on.
+	 */
+	readonly skipUnservable?: boolean;
+}
+
+/** One bundle's terminal state in the attachment conversation. */
+export interface AttestationBundleOutcome {
+	readonly storePathHash: StorePathHash;
+	readonly digest: string;
+	readonly outcome: 'attached' | 'reused' | 'unservable';
+}
+
+export interface AttestationAttachOutcome {
+	/** Bundles uploaded and attached. */
+	readonly attached: number;
+	/** Bundles the cache already held for their paths. */
+	readonly reused: number;
+	readonly uploadedBytes: number;
+	/** Paths whose attach the server refused for want of a committed copy. */
+	readonly unservableStorePathHashes: ReadonlySet<StorePathHash>;
+	readonly bundles: readonly AttestationBundleOutcome[];
+}
+
+// Whether an attach was refused because nothing committed backs it: the
+// pending row's path has no committed narinfo, or the row itself lapsed
+// before the attach ran. Both answer `NOT_FOUND`.
+function isUnservablePathAttachError(error: unknown): boolean {
+	return error instanceof ORPCError && error.code === 'NOT_FOUND';
+}
+
+/**
+ * Drives prepared bundles through the attestation conversation: negotiate
+ * decides per bundle whether to upload or skip, the bundle bytes stream to
+ * their staging keys, and attach verifies and references each staged bundle,
+ * reporting each stage through the given step log.
+ */
+export async function runAttestationAttachment(
+	prepared: readonly PreparedAttestationBundle[],
+	log: StepLog,
+	options: AttestationAttachmentOptions
+): Promise<AttestationAttachOutcome> {
+	const negotiateStep = log.group('negotiate');
+	const negotiation = await options.client.negotiateAttestations({
+		bundles: prepared.map((bundle) => ({
+			storePathHash: bundle.storePathHash,
+			digest: bundle.digest
+		}))
+	});
+	const toUpload = negotiation.bundles.filter((decision) =>
+		isAttestationUpload(decision)
+	);
+	const reused = negotiation.bundles.filter((decision) =>
+		isAttestationSkip(decision)
+	).length;
+	negotiateStep.success(
+		`${formatCount(toUpload.length)} to upload, ${formatCount(reused)} reused`
+	);
+
+	const uploadStep = log.group('upload');
+	let uploadedBytes = 0;
+
+	await mapWithConcurrency(toUpload, bundleConcurrency, async (decision) => {
+		const bundle = findAttestationBundle(prepared, decision);
+
+		// The bundle streams to its staging key under the push prefix with
+		// the same credential the NARs use, so there is no separate upload
+		// path.
+		await options.client.uploadNar(decision.r2Key, byteStream([bundle.bytes]));
+
+		uploadedBytes += bundle.bytes.byteLength;
+	});
+
+	uploadStep.success(formatBytes(uploadedBytes));
+
+	const attachStep = log.group('attach');
+	let attached = 0;
+	const unservableStorePathHashes = new Set<StorePathHash>();
+	// A decision names its path by the wire's plain strings; the prepared
+	// bundle it answers carries the branded pair, so outcomes record through
+	// the match.
+	const bundles: AttestationBundleOutcome[] = negotiation.bundles
+		.filter((decision) => isAttestationSkip(decision))
+		.flatMap((decision) => {
+			const match = prepared.find(
+				(item) =>
+					item.storePathHash === decision.storePathHash &&
+					item.digest === decision.digest
+			);
+
+			return match === undefined
+				? []
+				: [
+						{
+							storePathHash: match.storePathHash,
+							digest: match.digest,
+							outcome: 'reused' as const
+						}
+					];
+		});
+
+	await mapWithConcurrency(toUpload, bundleConcurrency, async (decision) => {
+		const bundle = findAttestationBundle(prepared, decision);
+
+		try {
+			await options.client.attachAttestation(decision.uploadId);
+			attached += 1;
+			bundles.push({
+				storePathHash: bundle.storePathHash,
+				digest: bundle.digest,
+				outcome: 'attached'
+			});
+		} catch (error) {
+			if (
+				options.skipUnservable !== true ||
+				!isUnservablePathAttachError(error)
+			) {
+				throw error;
+			}
+
+			unservableStorePathHashes.add(bundle.storePathHash);
+			bundles.push({
+				storePathHash: bundle.storePathHash,
+				digest: bundle.digest,
+				outcome: 'unservable'
+			});
+		}
+	});
+
+	attachStep.success(`${formatCount(attached)} attached`);
+
+	return {
+		attached,
+		reused,
+		uploadedBytes,
+		unservableStorePathHashes,
+		bundles
+	};
+}
+
+export interface AttestAttachDependencies {
+	readonly client: AttestationAttachClient;
+	/** The local store the named paths' NAR hashes are read from. */
+	readonly nix?: Nix;
+	readonly attestations: readonly AttestationBundleSource[];
+	readonly readAttestationBundle?: ReadAttestationBundle;
+}
+
+/**
+ * Attaches attestation bundles to already-published store paths: the named
+ * paths' NAR hashes come from the local store, each bundle's subjects match
+ * against them, and the bundles drive through the ordinary attestation
+ * conversation. A path the cache does not serve is a typed `unservable`
+ * outcome in the summary, never a run failure: the rest of the bundles still
+ * attach.
+ */
+export async function runAttestAttach(
+	paths: readonly string[],
+	reporter: Reporter,
+	dependencies: AttestAttachDependencies
+): Promise<void> {
+	const nix = dependencies.nix ?? Nix.open();
+	const readBundle =
+		dependencies.readAttestationBundle ?? defaultReadAttestationBundle;
+
+	const pathInfos = await reporter.phase(
+		'Resolving store paths',
+		async (ctx) => {
+			const infos = await nix.queryValidPathsInfo([...paths]);
+			ctx.fact('paths', formatCount(infos.length));
+
+			return infos;
+		}
+	);
+
+	const { prepared, outcome } = await reporter.steps(
+		'Attestations',
+		async (log) => {
+			const readStep = log.group('read');
+			const bundles = await prepareAttestationBundles(pathInfos, {
+				sources: dependencies.attestations,
+				readBundle,
+				divergent: new Map()
+			});
+			readStep.success(`${formatCount(bundles.length)} bundle(s)`);
+
+			return {
+				prepared: bundles,
+				outcome: await runAttestationAttachment(bundles, log, {
+					client: dependencies.client,
+					skipUnservable: true
+				})
+			};
+		}
+	);
+
+	const storePathByHash = new Map<StorePathHash, StorePathString>(
+		pathInfos.map((info) => [StorePath.hash(info.storePath), info.storePath])
+	);
+	const summaryPaths = attachSummaryPaths(prepared, outcome, storePathByHash);
+
+	for (const path of summaryPaths) {
+		if (path.outcome !== 'unservable') {
+			continue;
+		}
+
+		reporter.warn(
+			'unservable',
+			`${path.storePath === undefined ? path.storePathHash : StorePath.basename(path.storePath)}: the cache serves no committed copy of this path; attachment not recorded`
+		);
+	}
+
+	const summary = {
+		attached: outcome.attached,
+		reused: outcome.reused,
+		unservable: outcome.unservableStorePathHashes.size,
+		uploadedBytes: outcome.uploadedBytes,
+		paths: summaryPaths
+	};
+	// The summary is locally assembled, but a non-conforming server can
+	// contribute a value the schema refuses; the report must still render, so
+	// a validation failure downgrades to the unvalidated shape.
+	const validated = attestationAttachSummarySchema.safeParse(summary);
+
+	reporter.result({
+		kind: attestationAttachSummaryResultKind,
+		data: validated.success ? validated.data : summary,
+		rows: [
+			{
+				label: 'Attestations',
+				value:
+					`${formatCount(outcome.attached)} attached, ` +
+					`${formatCount(outcome.reused)} reused, ` +
+					`${formatCount(summary.unservable)} unservable`
+			},
+			{
+				label: 'Attestation upload',
+				value: formatBytes(outcome.uploadedBytes)
+			},
+			...summaryPaths.map((path): ResultRow => ({
+				label: path.storePathHash,
+				value: attachPathRow(path.outcome)
+			}))
+		]
+	});
+}
+
+function attachPathRow(outcome: AttestationAttachPath['outcome']): string {
+	switch (outcome) {
+		case 'attached': {
+			return 'attached';
+		}
+
+		case 'reused': {
+			return 'already attached';
+		}
+
+		case 'unservable': {
+			return 'not served by the cache; attachment not recorded';
+		}
+	}
+}
+
+// Folds the bundle-level outcomes into one outcome per covered path, in the
+// order the bundles were prepared. An unservable refusal is path-level, so it
+// wins over any bundle result; a path with at least one freshly attached
+// bundle reads as attached, and one whose every bundle was already held reads
+// as reused.
+function attachSummaryPaths(
+	prepared: readonly PreparedAttestationBundle[],
+	outcome: AttestationAttachOutcome,
+	storePathByHash: ReadonlyMap<StorePathHash, StorePathString>
+): readonly AttestationAttachPath[] {
+	const rank = { reused: 0, attached: 1, unservable: 2 } as const;
+	const outcomeByBundle = new Map(
+		outcome.bundles.map((bundle) => [
+			`${bundle.storePathHash}\0${bundle.digest}`,
+			bundle.outcome
+		])
+	);
+	const byPath = new Map<StorePathHash, AttestationAttachPath['outcome']>();
+
+	for (const bundle of prepared) {
+		const bundleOutcome = outcomeByBundle.get(
+			`${bundle.storePathHash}\0${bundle.digest}`
+		);
+
+		if (bundleOutcome === undefined) {
+			continue;
+		}
+
+		const current = byPath.get(bundle.storePathHash);
+
+		if (current === undefined || rank[bundleOutcome] > rank[current]) {
+			byPath.set(bundle.storePathHash, bundleOutcome);
+		}
+	}
+
+	return [...byPath].map(([storePathHash, pathOutcome]) => {
+		const storePath = storePathByHash.get(storePathHash);
+
+		return {
+			storePathHash,
+			...(storePath !== undefined && { storePath }),
+			outcome: pathOutcome
+		};
+	});
+}
+
+export function isAttestationUpload(
+	decision: AttestationDecision
+): decision is Extract<AttestationDecision, { action: 'upload' }> {
+	return decision.action === 'upload';
+}
+
+export function isAttestationSkip(
+	decision: AttestationDecision
+): decision is Extract<AttestationDecision, { action: 'skip' }> {
+	return decision.action === 'skip';
+}
+
+export function findAttestationBundle(
+	bundles: readonly PreparedAttestationBundle[],
+	decision: Extract<AttestationDecision, { action: 'upload' }>
+): PreparedAttestationBundle {
+	const bundle = bundles.find(
+		(item) =>
+			item.storePathHash === decision.storePathHash &&
+			item.digest === decision.digest
+	);
+
+	if (bundle !== undefined) {
+		return bundle;
+	}
+
+	throw new UnexpectedAttestationDecisionError(
+		decision.storePathHash,
+		decision.digest
+	);
+}
+
+const inTotoPayloadType = 'application/vnd.in-toto+json';
+const inTotoStatementType = 'https://in-toto.io/Statement/v1';
+
+const dsseEnvelopeSchema = z.object({
+	payload: z.string(),
+	payloadType: z.literal(inTotoPayloadType)
+});
+
+const sigstoreBundleSubjectSchema = z.object({
+	digest: z.object({
+		sha256: sha256HexDigestSchema
+	})
+});
+
+const sigstoreBundleStatementSchema = z.object({
+	_type: z.literal(inTotoStatementType),
+	subject: z.array(sigstoreBundleSubjectSchema).min(1),
+	predicateType: z.string(),
+	predicate: z.unknown()
+});
+
+const sigstoreBundleSchema = z.object({
+	dsseEnvelope: dsseEnvelopeSchema
+});
+
+export function parseAttestationBundle(
+	path: string,
+	bytes: Uint8Array
+): { readonly subjectDigests: readonly Sha256HexDigest[] } {
+	let json: unknown;
+
+	try {
+		const decoder = new TextDecoder();
+		json = JSON.parse(decoder.decode(bytes));
+	} catch {
+		throw new AttestationBundleInvalidError(path, 'bundle is not JSON');
+	}
+
+	const bundle = sigstoreBundleSchema.safeParse(json);
+
+	if (!bundle.success) {
+		throw new AttestationBundleInvalidError(
+			path,
+			'bundle does not carry a DSSE envelope'
+		);
+	}
+
+	let statementJson: unknown;
+
+	try {
+		statementJson = JSON.parse(
+			Buffer.from(bundle.data.dsseEnvelope.payload, 'base64').toString('utf8')
+		);
+	} catch {
+		throw new AttestationBundleInvalidError(
+			path,
+			'bundle DSSE payload is not JSON'
+		);
+	}
+
+	const statement = sigstoreBundleStatementSchema.safeParse(statementJson);
+
+	if (!statement.success) {
+		throw new AttestationBundleInvalidError(
+			path,
+			'bundle DSSE payload is not a supported in-toto statement'
+		);
+	}
+
+	return {
+		subjectDigests: statement.data.subject.map(
+			(subject) => subject.digest.sha256
+		)
+	};
+}
+
+function sha256Hex(bytes: Uint8Array): string {
+	return createHash('sha256').update(bytes).digest('hex');
+}
+
+export async function defaultReadAttestationBundle(
+	path: string
+): Promise<Uint8Array> {
+	return readFile(path);
+}

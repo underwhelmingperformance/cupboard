@@ -517,6 +517,13 @@ export class AttestationsDisabledError extends CliUsageError {
 	}
 }
 
+export class AttestAttachBundleRequiredError extends CliUsageError {
+	constructor() {
+		super('attest attach requires at least one --attestation bundle');
+		this.name = 'AttestAttachBundleRequiredError';
+	}
+}
+
 export class NoRetainConflictError extends CliUsageError {
 	constructor(public readonly flag: '--root' | '--ttl') {
 		super(`--no-retain cannot be combined with ${flag}`);

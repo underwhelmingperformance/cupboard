@@ -136,6 +136,39 @@ export const pushSummarySchema = z.strictObject({
 });
 export type ParsedPushSummary = z.output<typeof pushSummarySchema>;
 
+// The `kind` under which `cupboard attest attach` emits its final summary
+// result. A consumer that reads the reporter's result file addresses the
+// summary by this name.
+export const attestationAttachSummaryResultKind = 'attestation-attach-summary';
+
+// One named path's attachment outcome: `attached` filed at least one bundle
+// for the path, `reused` found every bundle for it already held, and
+// `unservable` means the cache serves no committed copy of the path, so its
+// bundles could not be recorded. Only paths a bundle's subjects name appear;
+// a named path no bundle describes has nothing to attach.
+export const attestationAttachPathSchema = z.strictObject({
+	storePathHash: storePathHashSchema,
+	storePath: storePathSchema.optional(),
+	outcome: z.enum(['attached', 'reused', 'unservable'])
+});
+export type ParsedAttestationAttachPath = z.output<
+	typeof attestationAttachPathSchema
+>;
+
+// The attach summary result data: bundle-level attached and reused counts,
+// the number of unservable paths, the staged bundle bytes, and each covered
+// path's outcome.
+export const attestationAttachSummarySchema = z.strictObject({
+	attached: countSchema,
+	reused: countSchema,
+	unservable: countSchema,
+	uploadedBytes: countSchema,
+	paths: z.array(attestationAttachPathSchema)
+});
+export type ParsedAttestationAttachSummary = z.output<
+	typeof attestationAttachSummarySchema
+>;
+
 // The `kind` under which `cupboard build-push` emits its final summary result.
 // A consumer that reads the reporter's result file addresses the summary by
 // this name.
@@ -166,4 +199,8 @@ export type VerifyReport = z.input<typeof verifyReportSchema>;
 export type PushFailure = z.input<typeof pushFailureSchema>;
 export type PushSummaryPath = z.input<typeof pushSummaryPathSchema>;
 export type PushSummary = z.input<typeof pushSummarySchema>;
+export type AttestationAttachPath = z.input<typeof attestationAttachPathSchema>;
+export type AttestationAttachSummary = z.input<
+	typeof attestationAttachSummarySchema
+>;
 export type BuildSummary = z.input<typeof buildSummarySchema>;

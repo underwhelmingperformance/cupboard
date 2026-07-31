@@ -2,6 +2,7 @@ import { rootNameSchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import {
+	attestAttachAuthorizationDetails,
 	confirmAuthorizationDetails,
 	previewAuthorizationDetails,
 	pushAuthorizationDetails,
@@ -174,6 +175,32 @@ describe('rootListAuthorizationDetails', () => {
 
 	it('requests the default cache selector', () => {
 		const [grant] = rootListAuthorizationDetails({ cacheSelector: '_default' });
+
+		expect(grant).toMatchObject({ cache: '_default' });
+	});
+});
+
+describe('attestAttachAuthorizationDetails', () => {
+	it('requests the attestation conversation and only the negotiate upload operation', () => {
+		expect(
+			attestAttachAuthorizationDetails({ cacheSelector: 'pr-1' })
+		).toStrictEqual([
+			{
+				type: 'cupboard_cache',
+				actions: [
+					'upload:negotiate',
+					'attestation:negotiate',
+					'attestation:attach'
+				],
+				cache: 'pr-1'
+			}
+		]);
+	});
+
+	it('requests the default cache selector', () => {
+		const [grant] = attestAttachAuthorizationDetails({
+			cacheSelector: '_default'
+		});
 
 		expect(grant).toMatchObject({ cache: '_default' });
 	});

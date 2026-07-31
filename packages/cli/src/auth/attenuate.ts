@@ -37,6 +37,10 @@ export interface RootListGrantIntent {
 	readonly root?: RootName;
 }
 
+export interface AttestAttachGrantIntent {
+	readonly cacheSelector: string;
+}
+
 export interface ConfirmGrantIntent {
 	readonly cacheSelector: string;
 }
@@ -81,6 +85,26 @@ export function pushAuthorizationDetails(
 						root: intent.runRoot
 					}
 				])
+	]);
+}
+
+/**
+ * The authority `attest attach` requests: the attestation conversation on the
+ * target cache, plus `upload:negotiate`, which issues the push credential the
+ * bundle bytes stage under and the signed push id the attestation negotiate
+ * names. No commit, status or root operation travels with it, so the
+ * exchanged token can file bundles against served paths but never publish a
+ * path or touch retention.
+ */
+export function attestAttachAuthorizationDetails(
+	intent: AttestAttachGrantIntent
+): AuthorizationDetails {
+	return authorizationDetailsSchema.parse([
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:negotiate', ...attestActions],
+			cache: intent.cacheSelector
+		}
 	]);
 }
 

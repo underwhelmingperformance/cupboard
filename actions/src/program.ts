@@ -11,6 +11,7 @@ import { workflowCommands } from '@cupboard/shared/github-actions';
 import { Command, CommanderError } from 'commander';
 
 import { registerAttestCommand } from './commands/attest.ts';
+import { registerAttestAttachCommand } from './commands/attest-attach.ts';
 import { registerBuildCommand } from './commands/build.ts';
 import { registerBuildCohortCommand } from './commands/build-cohort.ts';
 import { registerPlanCommand } from './commands/plan.ts';
@@ -44,6 +45,7 @@ export function buildProgram(environment: Environment = env): Command {
 	registerSetupCommand(program, environment);
 	registerPushCommand(program, environment);
 	registerAttestCommand(program, environment);
+	registerAttestAttachCommand(program, environment);
 	registerBuildCommand(program, environment);
 	registerBuildCohortCommand(program, environment);
 	registerPlanCommand(program, environment);

@@ -246,6 +246,49 @@ describe('cupboard build provenance', () => {
 			)
 		).toBe(true);
 	});
+
+	it('attaches the signed bundle to the published paths after the attest step', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+		const lines = contents.split('\n');
+		const [attachStep] = actionSteps(
+			lines,
+			/^ {6}- uses: \.\/\.cupboard\/actions\/attest-attach$/u
+		);
+		const trimmed = (attachStep ?? []).map((line) => line.trim());
+		const stepText = trimmed.join(' ');
+
+		expect({
+			attestStepNamed: contents.includes(
+				'- uses: ./.cupboard/actions/attest\n        id: attest\n'
+			),
+			followsAttest:
+				contents.indexOf('./.cupboard/actions/attest-attach') >
+				contents.indexOf('./.cupboard/actions/attest\n'),
+			gatedLikeAttestPlusBundle: stepText.includes(
+				"if: ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' && steps.attest.outputs.bundle-path != '' }}"
+			),
+			url: trimmed.includes('url: ${{ inputs.url }}'),
+			cupboardPath: trimmed.includes(
+				'cupboard-path: ${{ steps.setup.outputs.cupboard-path }}'
+			),
+			cache: trimmed.includes('cache: ${{ needs.configure.outputs.cache }}'),
+			receipt: trimmed.includes(
+				'receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}'
+			),
+			bundle: trimmed.includes(
+				'bundle: ${{ steps.attest.outputs.bundle-path }}'
+			)
+		}).toStrictEqual({
+			attestStepNamed: true,
+			followsAttest: true,
+			gatedLikeAttestPlusBundle: true,
+			url: true,
+			cupboardPath: true,
+			cache: true,
+			receipt: true,
+			bundle: true
+		});
+	});
 });
 
 describe('cupboard flake publish event preset', () => {

@@ -1,5 +1,6 @@
 import { env } from 'node:process';
 
+import { selectorForCache } from '@cupboard/nix-store/scalars';
 import { formatCount, type ResultRow } from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { VerifyResult, VerifyTrust } from '@cupboard/shared/sigstore';
@@ -7,14 +8,25 @@ import type { SlsaProvenanceSummary } from '@cupboard/shared/slsa';
 import type { Command } from 'commander';
 
 import {
+	requireAttestationAttachClient,
+	runAttestAttach
+} from '../attest/attach.ts';
+import {
 	verifyLocalAttestations,
 	verifyRemoteAttestations
 } from '../attest/verify.ts';
+import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
+import { attestAttachAuthorizationDetails } from '../auth/attenuate.ts';
+import { authenticateForPush } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { storedCacheFor } from '../client/client.ts';
+import { CupboardClient, storedCacheFor } from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import { CliUsageError } from '../errors.ts';
+import { AttestAttachBundleRequiredError, CliUsageError } from '../errors.ts';
+import { pushClientFor } from '../push/push-client.ts';
 import { parseReadUser } from '../read-user.ts';
+import { tenantUrlArgument } from '../url-argument.ts';
+
+import { resolvePushPath } from './push.ts';
 
 interface VerifyOptions {
 	readonly narHash?: string;
@@ -73,6 +85,17 @@ export function parseVerifierThreshold(option: string) {
 	};
 }
 
+interface AttachOptions {
+	readonly githubOidc?: boolean;
+	readonly audience?: Audience;
+	readonly cache?: string;
+	readonly attestation: readonly string[];
+}
+
+function collect(value: string, previous: readonly string[]): string[] {
+	return [...previous, value];
+}
+
 export function registerAttestCommands(
 	program: Command,
 	programOptions: ProgramOptions = {}
@@ -80,6 +103,73 @@ export function registerAttestCommands(
 	const attest = program
 		.command('attest')
 		.description('Work with filed Sigstore attestation bundles.');
+
+	attest
+		.command('attach')
+		.description(
+			'Attach Sigstore DSSE attestation bundles to store paths the cache already serves.'
+		)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.argument('<paths...>', 'published Nix store paths the bundles describe')
+		.option(
+			'--github-oidc',
+			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+		)
+		.option(
+			'--audience <audience>',
+			'OIDC audience to request with --github-oidc (default: the tenant URL)',
+			parseAudience
+		)
+		.option('--cache <name>', 'attach on a named cache rather than the default')
+		.option(
+			'--attestation <bundle>',
+			'Sigstore DSSE bundle whose in-toto subject matches a named path',
+			collect,
+			[]
+		)
+		.addHelpText(
+			'after',
+			[
+				'',
+				'Examples:',
+				'  # Attach a provenance bundle signed after the paths were published',
+				'  cupboard attest attach --github-oidc https://cache.example.workers.dev/t/acme \\',
+				'    /nix/store/...-app --attestation ./app.sigstore.json'
+			].join('\n')
+		)
+		.action(async (url: URL, paths: string[], options: AttachOptions) => {
+			if (options.attestation.length === 0) {
+				throw new AttestAttachBundleRequiredError();
+			}
+
+			const reporter = commandUi(program, programOptions).reporter();
+			const raw = CupboardClient.fromUrl(url, {
+				cache: options.cache,
+				signal: programOptions.signal
+			});
+			const cacheSelector = selectorForCache(storedCacheFor(options.cache));
+			const token = await authenticateForPush(raw, {
+				githubOidc: options.githubOidc,
+				audience: options.audience ?? audienceSchema.parse(url),
+				authorizationDetails: attestAttachAuthorizationDetails({
+					cacheSelector
+				})
+			});
+
+			await runAttestAttach(
+				paths.map((path) => resolvePushPath(path)),
+				reporter,
+				{
+					client: requireAttestationAttachClient(
+						pushClientFor(url, token, {
+							cache: options.cache,
+							signal: programOptions.signal
+						})
+					),
+					attestations: options.attestation.map((path) => ({ path }))
+				}
+			);
+		});
 
 	attest
 		.command('verify')
