@@ -4848,10 +4848,10 @@ umask.
 The socket is a choice among four transports, made on two properties: delivery
 without directory polling, and an immediate failure signal when no listener
 exists. Its price is equally explicit, the compiled helper and its per-platform
-npm builds, and the implementing step may revisit the choice if that packaging
-cost proves higher than the two properties are worth. The helper exists because
-`/bin/sh` cannot speak to a socket, not because the transport needs a daemon on
-the other end.
+release builds, and the implementing step may revisit the choice if that
+packaging cost proves higher than the two properties are worth. The helper
+exists because `/bin/sh` cannot speak to a socket, not because the transport
+needs a daemon on the other end.
 
 The other three transports place differently. A plain append to a shared file
 needs no helper and even survives a dead supervisor, but concurrent hook firings
@@ -5583,12 +5583,12 @@ complete-closure seed build whose cost is the problem this design addresses.
 9. Implement the invocation runtime directory, the socket listener, the
    versioned message format, the purpose-built helper, and the minimal `/bin/sh`
    hook script. Build the helper as part of the cupboard packages: the Nix
-   package generates its store path at build time and the npm distribution
-   carries per-platform prebuilt binaries, with preflight refusing an
-   installation that is missing its helper. Prove that the hook completes within
-   its budget with no runtime start-up, never performs network work, exits zero
-   on delivery failure, and that the socket path fits `sun_path` with the
-   documented fallback.
+   package installs it under `libexec/` and the release tarballs carry it as
+   per-platform prebuilt binaries, with preflight refusing an installation that
+   is missing its helper. Prove that the hook completes within its budget with
+   no runtime start-up, never performs network work, exits zero on delivery
+   failure, and that the socket path fits `sun_path` with the documented
+   fallback.
 10. Implement `cupboard build-push` for daemon-backed local stores:
     - preflight: the daemon trust flag read in-process from the handshake, a
       daemon-backed store (selected in preference to the local backend whenever
@@ -5755,8 +5755,8 @@ Real-Nix tests then cover the foreground supervisor:
   upgrade with a retryable status, and the refused client completes through
   durable status polling.
 - The hook helper resolves from cupboard's own installation, the Nix package's
-  pinned store path or the npm distribution's per-platform binary, and preflight
-  refuses an installation that is missing it.
+  `libexec/` or the release tarball's per-platform binary, and preflight refuses
+  an installation that is missing it.
 - A cohort with one failing derivation, under `keep-going`, still publishes
   every completed output under the run root, leaves a target root with an
   incomplete target list unreplaced and its previous generation retained, exits
@@ -5867,11 +5867,11 @@ that exists to keep those paths alive.
   must warn and exit zero.
 - The hook needs a compiled helper to reach the socket, because `/bin/sh` cannot
   write to one and the daemon's `PATH` guarantees nothing. The purpose-built C
-  helper ships with both distributions, pinned in the Nix package and prebuilt
-  per platform in the npm one, so resolution never depends on a substituter;
-  preflight must still refuse clearly when an installation is missing its
-  helper, and the npm build gains a per-platform compile step that CI must
-  cover.
+  helper ships with both distributions, installed by the Nix package and
+  prebuilt per platform in the release tarballs, so resolution never depends on
+  a substituter; preflight must still refuse clearly when an installation is
+  missing its helper, and the release build gains a per-platform compile step
+  that CI must cover.
 - Hook configuration under a multi-user daemon depends on Nix trust settings,
   and the daemon ignores an untrusted override with only a warning. Preflight
   must prove effectiveness through the daemon trust flag before the child
