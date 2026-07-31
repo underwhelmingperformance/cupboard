@@ -23,6 +23,7 @@ import { z } from 'zod';
 import {
 	describeExpiry,
 	type RootClient,
+	rootListingAuthorizationDetails,
 	runRootEnsure,
 	runRootList,
 	runRootRemove,
@@ -62,6 +63,34 @@ describe('describeExpiry', () => {
 		}
 	])('describes "$expected"', ({ root, expected }) => {
 		expect(describeExpiry(root)).toBe(expected);
+	});
+});
+
+describe('rootListingAuthorizationDetails', () => {
+	it('requests a cache-wide root:list grant when no root is named', () => {
+		expect(rootListingAuthorizationDetails('pr-1')).toStrictEqual([
+			{
+				type: 'cupboard_cache',
+				actions: ['root:list'],
+				cache: 'pr-1'
+			}
+		]);
+	});
+
+	it('narrows the grant to the named root for a single root listing', () => {
+		expect(
+			rootListingAuthorizationDetails(
+				'pr-1',
+				rootName('github:owner/repo/main')
+			)
+		).toStrictEqual([
+			{
+				type: 'cupboard_cache',
+				actions: ['root:list'],
+				cache: 'pr-1',
+				root: rootName('github:owner/repo/main')
+			}
+		]);
 	});
 });
 

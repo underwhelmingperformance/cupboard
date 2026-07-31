@@ -5,7 +5,8 @@ import {
 	confirmAuthorizationDetails,
 	previewAuthorizationDetails,
 	pushAuthorizationDetails,
-	rootEnsureAuthorizationDetails
+	rootEnsureAuthorizationDetails,
+	rootListAuthorizationDetails
 } from './attenuate.ts';
 
 const rootName = (value: string) => rootNameSchema.parse(value);
@@ -139,6 +140,42 @@ describe('rootEnsureAuthorizationDetails', () => {
 				root: rootName('github:owner/repo/pr-1/x86_64-linux/app')
 			}
 		]);
+	});
+});
+
+describe('rootListAuthorizationDetails', () => {
+	it('requests only root:list for the exact cache, naming no root, for a cache-wide listing', () => {
+		expect(
+			rootListAuthorizationDetails({ cacheSelector: 'pr-1' })
+		).toStrictEqual([
+			{
+				type: 'cupboard_cache',
+				actions: ['root:list'],
+				cache: 'pr-1'
+			}
+		]);
+	});
+
+	it('requests root:list narrowed to the named root for a single root listing', () => {
+		expect(
+			rootListAuthorizationDetails({
+				cacheSelector: 'pr-1',
+				root: rootName('github:owner/repo/pr-1/x86_64-linux/app')
+			})
+		).toStrictEqual([
+			{
+				type: 'cupboard_cache',
+				actions: ['root:list'],
+				cache: 'pr-1',
+				root: rootName('github:owner/repo/pr-1/x86_64-linux/app')
+			}
+		]);
+	});
+
+	it('requests the default cache selector', () => {
+		const [grant] = rootListAuthorizationDetails({ cacheSelector: '_default' });
+
+		expect(grant).toMatchObject({ cache: '_default' });
 	});
 });
 
