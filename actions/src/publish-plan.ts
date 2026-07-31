@@ -1402,6 +1402,96 @@ export function derivationToTargetsFor(
 		.toSorted((left, right) => left.drvPath.localeCompare(right.drvPath));
 }
 
+export type TargetCoverageStatus =
+	'covered' | 'not-covered' | 'unknown-output' | 'failed';
+
+/**
+ * Whether the advisory pre-filter found one target already covered: either
+ * its root's last reconciled list carries every one of its current outputs,
+ * or an absent one is recorded in the previous run's receipt as left
+ * upstream (the store path matches, so the content is unchanged). A target
+ * whose output paths are not all known before building never reaches
+ * `covered`, and a failed read or ensure call never reaches `not-covered`
+ * silently: both carry their own status so a cohort decision can tell "does
+ * not need building" from "could not tell".
+ */
+export interface TargetCoverage {
+	readonly attr: string;
+	readonly status: TargetCoverageStatus;
+	readonly reason?: string;
+}
+
+/**
+ * Decides one known-output target's coverage from facts already gathered:
+ * whether its root's reconciled list, freshly re-ensured, is still valid,
+ * and whether that list plus the previous receipt's left-upstream paths
+ * between them name every one of its current outputs. Callers assemble
+ * `unknown-output` and `failed` directly, since both are facts about
+ * reaching the check at all, not about what it found.
+ */
+export function evaluateTargetCoverage(
+	target: PublishTarget,
+	targetPaths: readonly StorePathString[],
+	check: {
+		readonly retained: boolean;
+		readonly reconciledPaths: ReadonlySet<StorePathString>;
+	},
+	leftUpstreamPaths: ReadonlySet<StorePathString>
+): TargetCoverage {
+	if (!check.retained) {
+		return { attr: target.attr, status: 'not-covered' };
+	}
+
+	const isCovered = targetPaths.every(
+		(path) => check.reconciledPaths.has(path) || leftUpstreamPaths.has(path)
+	);
+
+	return { attr: target.attr, status: isCovered ? 'covered' : 'not-covered' };
+}
+
+export interface CohortPreFilterDecision {
+	readonly key: string;
+	readonly pruned: boolean;
+	readonly reason?: string;
+}
+
+/**
+ * Reduces a cohort's member coverage to one prune decision. The pre-filter
+ * prunes jobs, never composes build sets, so this only ever decides whether
+ * the cohort's job is needed at all: pruned when every member is covered,
+ * and never pruned when any member is uncovered, unknown, or failed. A
+ * failed member makes the whole decision advisory rather than a refusal:
+ * the job spawns and the reason travels with it, so the plan itself never
+ * goes red for a check whose only job is to save runner minutes.
+ */
+export function cohortPreFilterDecision(
+	cohort: Cohort,
+	coverageByAttribute: ReadonlyMap<string, TargetCoverage>
+): CohortPreFilterDecision {
+	const coverage = cohort.targets.map(
+		(target): TargetCoverage =>
+			coverageByAttribute.get(target.attr) ?? {
+				attr: target.attr,
+				status: 'not-covered'
+			}
+	);
+	const failures = coverage.filter((entry) => entry.status === 'failed');
+
+	if (failures.length > 0) {
+		return {
+			key: cohort.key,
+			pruned: false,
+			reason: failures
+				.map((entry) => `${entry.attr}: ${entry.reason ?? 'unknown failure'}`)
+				.join('; ')
+		};
+	}
+
+	const isPruned = coverage.every((entry) => entry.status === 'covered');
+
+	return { key: cohort.key, pruned: isPruned };
+}
+
 function requireIndex<T>(values: readonly T[], index: number): T {
 	return requireValue(values[index], `index ${String(index)}`);
 }

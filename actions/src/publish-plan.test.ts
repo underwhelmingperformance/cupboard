@@ -28,10 +28,13 @@ import {
 	availableCachePaths,
 	availableViewPaths,
 	cacheProbePaths,
+	type Cohort,
 	cohortLabelMaxLength,
+	cohortPreFilterDecision,
 	cohortsFor,
 	derivationToTargetsFor,
 	derivationUses,
+	evaluateTargetCoverage,
 	evaluateTargets,
 	evaluationFromJson,
 	joinRoot,
@@ -40,6 +43,7 @@ import {
 	type PublishTarget,
 	publishTargetSchema,
 	publishTargetsSchema,
+	type TargetCoverage,
 	type TargetEvaluation,
 	viewProbePaths
 } from './publish-plan.ts';
@@ -664,6 +668,113 @@ describe('derivationToTargetsFor', () => {
 
 	it('returns nothing for an empty evaluation set', () => {
 		expect(derivationToTargetsFor([])).toStrictEqual([]);
+	});
+});
+
+describe('evaluateTargetCoverage', () => {
+	const first = target('first');
+
+	it.each([
+		{
+			name: 'every current output is in the reconciled list',
+			targetPaths: [firstPath],
+			check: { retained: true, reconciledPaths: new Set([firstPath]) },
+			leftUpstreamPaths: new Set<StorePathString>(),
+			status: 'covered' as const
+		},
+		{
+			name: 'an absent output is covered by a matching left-upstream receipt entry',
+			targetPaths: [firstPath, secondPath],
+			check: { retained: true, reconciledPaths: new Set([firstPath]) },
+			leftUpstreamPaths: new Set([secondPath]),
+			status: 'covered' as const
+		},
+		{
+			name: 'an absent output with no left-upstream coverage',
+			targetPaths: [firstPath, secondPath],
+			check: { retained: true, reconciledPaths: new Set([firstPath]) },
+			leftUpstreamPaths: new Set<StorePathString>(),
+			status: 'not-covered' as const
+		},
+		{
+			name: 'the reconciled list is no longer retained',
+			targetPaths: [firstPath],
+			check: { retained: false, reconciledPaths: new Set([firstPath]) },
+			leftUpstreamPaths: new Set<StorePathString>(),
+			status: 'not-covered' as const
+		},
+		{
+			name: 'a changed output the reconciled list and receipt both miss',
+			targetPaths: [secondPath],
+			check: { retained: true, reconciledPaths: new Set([firstPath]) },
+			leftUpstreamPaths: new Set([firstPath]),
+			status: 'not-covered' as const
+		}
+	])('$name', ({ targetPaths, check, leftUpstreamPaths, status }) => {
+		expect(
+			evaluateTargetCoverage(first, targetPaths, check, leftUpstreamPaths)
+		).toStrictEqual({ attr: first.attr, status });
+	});
+});
+
+describe('cohortPreFilterDecision', () => {
+	const cohort: Cohort = {
+		key: 'cohort-key',
+		system: 'x86_64-linux',
+		os: 'ubuntu-latest',
+		remote: true,
+		targets: [target('first'), target('second')],
+		installables: ['.#first^out', '.#second^out']
+	};
+
+	it('prunes only when every member is covered', () => {
+		expect(
+			cohortPreFilterDecision(
+				cohort,
+				coverageMap([
+					{ attr: '.#first', status: 'covered' },
+					{ attr: '.#second', status: 'covered' }
+				])
+			)
+		).toStrictEqual({ key: 'cohort-key', pruned: true });
+	});
+
+	it.each([
+		{ name: 'not-covered', status: 'not-covered' as const },
+		{ name: 'unknown-output', status: 'unknown-output' as const }
+	])('does not prune when one member is $name', ({ status }) => {
+		expect(
+			cohortPreFilterDecision(
+				cohort,
+				coverageMap([
+					{ attr: '.#first', status: 'covered' },
+					{ attr: '.#second', status }
+				])
+			)
+		).toStrictEqual({ key: 'cohort-key', pruned: false });
+	});
+
+	it('does not prune, and records a reason, when a member failed', () => {
+		expect(
+			cohortPreFilterDecision(
+				cohort,
+				coverageMap([
+					{ attr: '.#first', status: 'covered' },
+					{ attr: '.#second', status: 'failed', reason: 'network error' }
+				])
+			)
+		).toStrictEqual({
+			key: 'cohort-key',
+			pruned: false,
+			reason: '.#second: network error'
+		});
+	});
+
+	it('treats a member missing from the coverage map as not covered', () => {
+		expect(cohortPreFilterDecision(cohort, new Map())).toStrictEqual({
+			key: 'cohort-key',
+			pruned: false
+		});
 	});
 });
 
@@ -1894,6 +2005,12 @@ function multiOutputEvaluation(
 			]
 		])
 	};
+}
+
+function coverageMap(
+	entries: readonly TargetCoverage[]
+): Map<string, TargetCoverage> {
+	return new Map(entries.map((entry) => [entry.attr, entry]));
 }
 
 function serialisePlan(plan: ReturnType<typeof planPublish>): unknown {
