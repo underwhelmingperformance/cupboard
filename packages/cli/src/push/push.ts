@@ -36,6 +36,8 @@ import {
 	type ParsedUploadPreviewResponse,
 	type UploadAttachRoot,
 	type UploadNegotiateRequest,
+	type UploadPathMetadataFields,
+	type UploadPathNegotiationFields,
 	type UploadPreviewRequest
 } from '@cupboard/protocol/upload';
 import {
@@ -67,6 +69,9 @@ import {
 	AttestationUploadUnavailableError,
 	PushIncompleteError,
 	PushNarMetadataMismatchError,
+	ReferencePathMismatchError,
+	ReferenceSourcePairError,
+	ReferenceUploadRequiredError,
 	UnexpectedAttestationDecisionError,
 	UnexpectedUploadDecisionError,
 	UploadGraceFactsUnsupportedError,
@@ -77,7 +82,14 @@ import { compressNarToStream, type NarUploadStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 
-import { type PublicationCollection } from './publication.ts';
+import {
+	type PublicationCollection,
+	type PublicationEntry
+} from './publication.ts';
+import {
+	fetchReferenceMetadata as fetchReferenceMetadataFromSource,
+	type ReferenceSource
+} from './reference.ts';
 
 export interface PushDependencies {
 	readonly nix?: Nix;
@@ -87,6 +99,10 @@ export interface PushDependencies {
 	 * default resolves metadata for exactly the entries, with no closure walk.
 	 */
 	readonly closure?: boolean;
+	/** Where reference entries' served narinfo metadata is read from. */
+	readonly referenceSource?: ReferenceSource;
+	/** Reads one reference entry's served metadata; injectable for tests. */
+	readonly fetchReferenceMetadata?: typeof fetchReferenceMetadataFromSource;
 	readonly root?: RootName;
 	readonly ttlSeconds?: TtlSeconds;
 	// The run root this push binds at negotiate: the server attaches every
@@ -293,7 +309,11 @@ export async function runPush(
 		dependencies.ttlSeconds,
 		dependencies.retain ?? true
 	);
-	const nix = dependencies.nix ?? Nix.open();
+	// A reference-only publication reads no local metadata and needs no store
+	// on the system, so the store client only opens once a local entry needs it.
+	const nix =
+		dependencies.nix ??
+		(publication.localEntries.length > 0 ? Nix.open() : undefined);
 	const createNarArchive =
 		dependencies.createNarArchive ?? ((storePath) => new NarArchive(storePath));
 	const compressNar = dependencies.compressNar ?? compressNarToStream;
@@ -311,10 +331,13 @@ export async function runPush(
 }
 
 interface PushRuntimeDependencies {
-	readonly nix: Nix;
+	readonly nix?: Nix;
 	readonly client: PushClient;
 	readonly retention: RetentionPlan;
 	readonly closure?: boolean;
+	readonly referenceSource?: ReferenceSource;
+	readonly fetchReferenceMetadata?: typeof fetchReferenceMetadataFromSource;
+	readonly signal?: AbortSignal;
 	readonly createNarArchive: (storePath: string) => PushNarArchive;
 	readonly compressNar: CompressNar;
 	readonly wait: boolean;
@@ -325,6 +348,119 @@ interface PushRuntimeDependencies {
 	readonly readAttestationBundle?: ReadAttestationBundle;
 	readonly uploadConcurrency?: number;
 	readonly dryRun?: boolean;
+}
+
+// One publication path with its metadata resolved: a local entry carries the
+// store's path info and can read its NAR; a reference entry carries the served
+// metadata alone and never reads one.
+type ResolvedPushPath =
+	| { readonly source: 'local'; readonly pathInfo: NixValidPathInfo }
+	| {
+			readonly source: 'reference';
+			readonly storePath: StorePathString;
+			readonly metadata: UploadPathMetadataFields;
+	  };
+
+function resolvedStorePath(path: ResolvedPushPath): StorePathString {
+	return path.source === 'local' ? path.pathInfo.storePath : path.storePath;
+}
+
+function resolvedNarHash(path: ResolvedPushPath): string {
+	return path.source === 'local'
+		? path.pathInfo.narHash.toString()
+		: path.metadata.narHash;
+}
+
+// The fields negotiate carries for one path. A reference entry's served
+// metadata also names the blob (file hash, size, compression), which the
+// negotiate request does not carry, so only the path fields travel.
+function negotiationOf(path: ResolvedPushPath): UploadPathNegotiationFields {
+	if (path.source === 'local') {
+		return prepareStorePathNegotiation(path.pathInfo);
+	}
+
+	const { metadata } = path;
+
+	return {
+		storePathHash: metadata.storePathHash,
+		storePath: metadata.storePath,
+		narHash: metadata.narHash,
+		narSize: metadata.narSize,
+		references: metadata.references,
+		...(metadata.deriver !== undefined && { deriver: metadata.deriver }),
+		...(metadata.ca !== undefined && { ca: metadata.ca })
+	};
+}
+
+// The path info behind a decision that needs the local store: a reference
+// entry never reads a NAR, so a demand for one refuses with the typed
+// per-path error the upload phase records.
+function requireLocalPathInfo(path: ResolvedPushPath): NixValidPathInfo {
+	if (path.source === 'local') {
+		return path.pathInfo;
+	}
+
+	throw new ReferenceUploadRequiredError(path.storePath);
+}
+
+function localPathInfos(
+	resolved: readonly ResolvedPushPath[]
+): readonly NixValidPathInfo[] {
+	return resolved.flatMap((path) =>
+		path.source === 'local' ? [path.pathInfo] : []
+	);
+}
+
+// Resolves the reference entries through the reference source, preserving
+// entry order. The source must answer for the path that was asked: served
+// metadata naming another path refuses rather than publishing it.
+async function resolveReferenceEntries(
+	entries: readonly PublicationEntry[],
+	dependencies: PushRuntimeDependencies
+): Promise<readonly ResolvedPushPath[]> {
+	if (entries.length === 0) {
+		return [];
+	}
+
+	const source = dependencies.referenceSource;
+
+	if (source === undefined) {
+		throw new ReferenceSourcePairError();
+	}
+
+	const fetchMetadata =
+		dependencies.fetchReferenceMetadata ?? fetchReferenceMetadataFromSource;
+	const resolved = await mapWithConcurrency(
+		entries,
+		defaultUploadConcurrency,
+		async (entry, index) => {
+			const metadata = await fetchMetadata(
+				source,
+				StorePath.hash(entry.storePath),
+				{ signal: dependencies.signal }
+			);
+
+			if (metadata.storePath !== entry.storePath) {
+				throw new ReferencePathMismatchError(
+					entry.storePath,
+					metadata.storePath
+				);
+			}
+
+			return {
+				index,
+				path: {
+					source: 'reference' as const,
+					storePath: entry.storePath,
+					metadata
+				}
+			};
+		}
+	);
+
+	return resolved
+		.toSorted((left, right) => left.index - right.index)
+		.map((item) => item.path);
 }
 
 async function runPushFlow(
@@ -341,27 +477,44 @@ async function runPushFlow(
 		wait: shouldWait,
 		waitTimeoutSeconds
 	} = dependencies;
-	// The default publishes exactly the publication entries, resolving their
-	// metadata with no closure walk; `--closure` expands the entries through
-	// the store and publishes the complete realised closure.
-	const pathInfos = await reporter.phase(
+	// The default publishes exactly the publication entries, resolving local
+	// metadata with no closure walk; `--closure` expands the local entries
+	// through the store and publishes the complete realised closure. A
+	// reference entry's served metadata comes from the reference source, so it
+	// never touches the store.
+	const resolved = await reporter.phase(
 		dependencies.closure === true
 			? 'Resolving store closure'
 			: 'Resolving store paths',
 		async (ctx) => {
 			ctx.fact('roots', formatCount(publication.entries.length));
-			const resolved =
-				dependencies.closure === true
-					? await nix.resolveClosure(publication.storePaths)
-					: await nix.queryPathsInfo(publication.storePaths);
-			ctx.fact('paths', formatCount(resolved.length));
+			const localPaths = publication.localEntries.map(
+				(entry) => entry.storePath
+			);
+			const localInfos =
+				nix === undefined || localPaths.length === 0
+					? []
+					: dependencies.closure === true
+						? await nix.resolveClosure(localPaths)
+						: await nix.queryPathsInfo(localPaths);
+			const paths: ResolvedPushPath[] = [
+				...localInfos.map((pathInfo): ResolvedPushPath => ({
+					source: 'local',
+					pathInfo
+				})),
+				...(await resolveReferenceEntries(
+					publication.referenceEntries,
+					dependencies
+				))
+			];
+			ctx.fact('paths', formatCount(paths.length));
 
-			return resolved;
+			return paths;
 		}
 	);
 
 	if (dependencies.dryRun === true) {
-		await reportDryRun(reporter, client, pathInfos, retention);
+		await reportDryRun(reporter, client, resolved, retention);
 		return;
 	}
 
@@ -374,7 +527,7 @@ async function runPushFlow(
 
 			const response = await negotiateUpload(
 				client,
-				pathInfos.map((pathInfo) => prepareStorePathNegotiation(pathInfo)),
+				resolved.map((path) => negotiationOf(path)),
 				dependencies.runRoot
 			);
 			const uploadCount = response.uploads.filter((decision) =>
@@ -396,7 +549,7 @@ async function runPushFlow(
 		}
 	);
 
-	const divergent = divergentSkips(pathInfos, negotiation.uploads);
+	const divergent = divergentSkips(resolved, negotiation.uploads);
 
 	warnDivergentSkips(reporter, divergent);
 
@@ -407,11 +560,11 @@ async function runPushFlow(
 	// function) so the incomplete result is never mistaken for a finished one.
 	const failures: PushFailure[] = [];
 	const failedUploadIds = new Set<string>();
-	const negotiated = indexNegotiatedPaths(pathInfos);
+	const negotiated = indexNegotiatedPaths(resolved);
 	const storePathByHash = new Map<StorePathHash, string>(
-		pathInfos.map((pathInfo) => [
-			StorePath.hash(pathInfo.storePath),
-			pathInfo.storePath
+		resolved.map((path) => [
+			StorePath.hash(resolvedStorePath(path)),
+			resolvedStorePath(path)
 		])
 	);
 
@@ -678,7 +831,7 @@ async function runPushFlow(
 		}
 
 		const attestationRows = await attachPushedAttestations(
-			pathInfos,
+			localPathInfos(resolved),
 			reporter,
 			{
 				client,
@@ -769,7 +922,7 @@ async function runPushFlow(
 async function reportDryRun(
 	reporter: Reporter,
 	client: PushClient,
-	pathInfos: readonly NixValidPathInfo[],
+	resolved: readonly ResolvedPushPath[],
 	retention: RetentionPlan
 ): Promise<void> {
 	const preview = await reporter.phase(
@@ -781,7 +934,7 @@ async function reportDryRun(
 
 			const response = await previewUpload(
 				client,
-				pathInfos.map((pathInfo) => prepareStorePathNegotiation(pathInfo))
+				resolved.map((path) => negotiationOf(path))
 			);
 
 			ctx.fact(
@@ -803,7 +956,7 @@ async function reportDryRun(
 		}
 	);
 
-	warnDivergentSkips(reporter, divergentSkips(pathInfos, preview.uploads));
+	warnDivergentSkips(reporter, divergentSkips(resolved, preview.uploads));
 
 	const wouldUpload = preview.uploads.filter(
 		(decision) => decision.action === 'upload'
@@ -1446,7 +1599,9 @@ async function streamNarUpload(
 	decision: UploadDecisionOf<'upload'>,
 	context: UploadContext
 ): Promise<void> {
-	const pathInfo = findNegotiatedPath(context.negotiated, decision);
+	const pathInfo = requireLocalPathInfo(
+		findNegotiatedPath(context.negotiated, decision)
+	);
 	const upload = context.compressNar(
 		context.createNarArchive(pathInfo.storePath)
 	);
@@ -1566,10 +1721,10 @@ async function redriveExpiredCommit(
 	decision: UploadDecisionOf<'upload' | 'commit'>,
 	context: CommitContext
 ): Promise<CommitOutcome> {
-	const pathInfo = findNegotiatedPath(context.negotiated, decision);
+	const resolved = findNegotiatedPath(context.negotiated, decision);
 	const renegotiation = await negotiateUpload(
 		context.client,
-		[prepareStorePathNegotiation(pathInfo)],
+		[negotiationOf(resolved)],
 		context.runRoot
 	);
 	const fresh = renegotiation.uploads.at(0);
@@ -1600,7 +1755,9 @@ async function redriveExpiredCommit(
 
 	// The reaped row took the staged bytes with it, so re-stream the NAR to the
 	// fresh staging key before committing. The store path is still in the
-	// resolved set, so nothing local is needed beyond re-reading it.
+	// resolved set, so nothing local is needed beyond re-reading it; a
+	// reference entry has no NAR to re-read and refuses instead.
+	const pathInfo = requireLocalPathInfo(resolved);
 	const upload = context.compressNar(
 		context.createNarArchive(pathInfo.storePath)
 	);
@@ -1648,11 +1805,11 @@ interface DivergentSkip {
 }
 
 function divergentSkips(
-	pathInfos: readonly NixValidPathInfo[],
+	resolved: readonly ResolvedPushPath[],
 	decisions: readonly (ParsedUploadDecision | ParsedUploadPreviewDecision)[]
 ): ReadonlyMap<StorePathHash, DivergentSkip> {
-	const localByStorePathHash = new Map<StorePathHash, NixValidPathInfo>(
-		pathInfos.map((info) => [StorePath.hash(info.storePath), info])
+	const byStorePathHash = new Map<StorePathHash, ResolvedPushPath>(
+		resolved.map((path) => [StorePath.hash(resolvedStorePath(path)), path])
 	);
 	const divergent = new Map<StorePathHash, DivergentSkip>();
 
@@ -1661,15 +1818,15 @@ function divergentSkips(
 			continue;
 		}
 
-		const local = localByStorePathHash.get(decision.storePathHash);
+		const local = byStorePathHash.get(decision.storePathHash);
 
-		if (local === undefined || local.narHash.toString() === decision.narHash) {
+		if (local === undefined || resolvedNarHash(local) === decision.narHash) {
 			continue;
 		}
 
 		divergent.set(decision.storePathHash, {
-			storePath: local.storePath,
-			localNarHash: local.narHash.toString(),
+			storePath: resolvedStorePath(local),
+			localNarHash: resolvedNarHash(local),
 			cacheNarHash: decision.narHash
 		});
 	}
@@ -1698,22 +1855,22 @@ function warnDivergentSkips(
 // resolving a decision back to its path is one lookup. Built once: scanning
 // the resolved set and rehashing every store path on every lookup is quadratic
 // across a large push.
-type NegotiatedPaths = ReadonlyMap<string, NixValidPathInfo>;
+type NegotiatedPaths = ReadonlyMap<string, ResolvedPushPath>;
 
 function negotiatedPathKey(storePathHash: string, narHash: string): string {
 	return `${storePathHash}\0${narHash}`;
 }
 
 function indexNegotiatedPaths(
-	pathInfos: readonly NixValidPathInfo[]
+	resolved: readonly ResolvedPushPath[]
 ): NegotiatedPaths {
 	return new Map(
-		pathInfos.map((item) => [
+		resolved.map((path) => [
 			negotiatedPathKey(
-				StorePath.hash(item.storePath),
-				item.narHash.toString()
+				StorePath.hash(resolvedStorePath(path)),
+				resolvedNarHash(path)
 			),
-			item
+			path
 		])
 	);
 }
@@ -1721,13 +1878,13 @@ function indexNegotiatedPaths(
 function findNegotiatedPath(
 	negotiated: NegotiatedPaths,
 	decision: UploadDecisionOf<'upload' | 'commit'>
-): NixValidPathInfo {
-	const pathInfo = negotiated.get(
+): ResolvedPushPath {
+	const path = negotiated.get(
 		negotiatedPathKey(decision.storePathHash, decision.narHash)
 	);
 
-	if (pathInfo !== undefined) {
-		return pathInfo;
+	if (path !== undefined) {
+		return path;
 	}
 
 	throw new UnexpectedUploadDecisionError(

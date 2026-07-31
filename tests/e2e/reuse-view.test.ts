@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { Writable } from 'node:stream';
 
 import {
 	CacheInfo,
@@ -8,10 +9,13 @@ import {
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
+import { createReporter } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
+import { PublicationCollection } from '../../packages/cli/src/push/publication.ts';
+import { runPush } from '../../packages/cli/src/push/push.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import { NixStore } from '../support/nix.ts';
@@ -112,6 +116,90 @@ describe('Nix substitution through a reuse view', () => {
 						narInfoUrl: expectedNarUrl,
 						narInfoControl: 'no-store',
 						reuseNarStatus: 404
+					});
+				} finally {
+					await server.stop();
+				}
+			},
+			{ makeWritableBeforeCleanup: true }
+		));
+
+	it('publishes a view-held path to the destination by reference, with no NAR upload', () =>
+		withTemporaryDirectory(
+			'cupboard-e2e-reference-',
+			async (directory) => {
+				const server = await CupboardTestServer.start(directory);
+
+				try {
+					const token = await server.ownerAdminToken();
+					const rpc = tenantRpc(server.tenantUrl, { credential: token });
+					const source = await NixStore.host(
+						path.join(directory, 'source-home')
+					);
+					const storePath = await source.build(reuseDerivation);
+					const storePathHash = StorePath.hash(storePath);
+
+					// The path reaches only the selected source cache, so the
+					// destination (the default cache) does not serve it yet; the
+					// reuse view does.
+					await pushStorePaths(
+						{
+							client: server.pushClient(token, { cache: 'pr-1' }),
+							store: source
+						},
+						[storePath]
+					);
+					await rpc.reuseViews.set({
+						name: 'reuse',
+						selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					});
+
+					const before = await fetch(
+						server.tenantPath(`/${storePathHash}.narinfo`)
+					);
+
+					const uploads: string[] = [];
+					const destination = server.pushClient(token);
+					const sink = new Writable({
+						write(_chunk, _encoding, callback) {
+							callback();
+						}
+					});
+
+					await runPush(
+						PublicationCollection.of({
+							targets: [],
+							referencePaths: [storePath]
+						}),
+						createReporter({ stream: sink, out: sink }),
+						{
+							client: {
+								...destination,
+								uploadNar: (r2Key, body) => {
+									uploads.push(r2Key);
+
+									return destination.uploadNar(r2Key, body);
+								}
+							},
+							referenceSource: { url: server.tenantPath('/reuse/reuse') }
+						}
+					);
+
+					const after = await fetch(
+						server.tenantPath(`/${storePathHash}.narinfo`)
+					);
+					const served = NarInfo.parse(await after.text());
+
+					expect({
+						beforeStatus: before.status,
+						uploads,
+						afterStatus: after.status,
+						servedStorePath: served.storePath.value
+					}).toStrictEqual({
+						beforeStatus: 404,
+						uploads: [],
+						afterStatus: 200,
+						servedStorePath: storePath
 					});
 				} finally {
 					await server.stop();

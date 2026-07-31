@@ -20,8 +20,8 @@ describe('PublicationCollection', () => {
 			name: 'tags targets and intermediates with their declared kinds',
 			input: { targets: [appPath], intermediatePaths: [runtimePath] },
 			expected: [
-				{ storePath: appPath, kind: 'target' },
-				{ storePath: runtimePath, kind: 'intermediate' }
+				{ storePath: appPath, kind: 'target', source: 'local' },
+				{ storePath: runtimePath, kind: 'intermediate', source: 'local' }
 			]
 		},
 		{
@@ -31,8 +31,8 @@ describe('PublicationCollection', () => {
 				intermediatePaths: [runtimePath, runtimePath]
 			},
 			expected: [
-				{ storePath: appPath, kind: 'target' },
-				{ storePath: runtimePath, kind: 'intermediate' }
+				{ storePath: appPath, kind: 'target', source: 'local' },
+				{ storePath: runtimePath, kind: 'intermediate', source: 'local' }
 			]
 		},
 		{
@@ -42,16 +42,41 @@ describe('PublicationCollection', () => {
 				intermediatePaths: [appPath, builderPath]
 			},
 			expected: [
-				{ storePath: appPath, kind: 'target' },
-				{ storePath: builderPath, kind: 'intermediate' }
+				{ storePath: appPath, kind: 'target', source: 'local' },
+				{ storePath: builderPath, kind: 'intermediate', source: 'local' }
 			]
 		},
 		{
 			name: 'carries targets alone when no intermediates are declared',
 			input: { targets: [appPath, runtimePath] },
 			expected: [
-				{ storePath: appPath, kind: 'target' },
-				{ storePath: runtimePath, kind: 'target' }
+				{ storePath: appPath, kind: 'target', source: 'local' },
+				{ storePath: runtimePath, kind: 'target', source: 'local' }
+			]
+		},
+		{
+			name: 'tags reference paths as targets read from the reference source',
+			input: { targets: [appPath], referencePaths: [runtimePath] },
+			expected: [
+				{ storePath: appPath, kind: 'target', source: 'local' },
+				{ storePath: runtimePath, kind: 'target', source: 'reference' }
+			]
+		},
+		{
+			name: 'a path declared as a target and by reference reads from the source',
+			input: { targets: [appPath], referencePaths: [appPath] },
+			expected: [{ storePath: appPath, kind: 'target', source: 'reference' }]
+		},
+		{
+			name: 'a path declared as an intermediate and by reference is a target',
+			input: {
+				targets: [appPath],
+				intermediatePaths: [runtimePath],
+				referencePaths: [runtimePath]
+			},
+			expected: [
+				{ storePath: appPath, kind: 'target', source: 'local' },
+				{ storePath: runtimePath, kind: 'target', source: 'reference' }
 			]
 		}
 	])('$name', ({ input, expected }) => {
@@ -60,13 +85,17 @@ describe('PublicationCollection', () => {
 		expect({
 			entries: collection.entries,
 			storePaths: collection.storePaths,
-			targetPaths: collection.targetPaths
+			targetPaths: collection.targetPaths,
+			localEntries: collection.localEntries,
+			referenceEntries: collection.referenceEntries
 		}).toStrictEqual({
 			entries: expected,
 			storePaths: expected.map((entry) => entry.storePath),
 			targetPaths: expected
 				.filter((entry) => entry.kind === 'target')
-				.map((entry) => entry.storePath)
+				.map((entry) => entry.storePath),
+			localEntries: expected.filter((entry) => entry.source === 'local'),
+			referenceEntries: expected.filter((entry) => entry.source === 'reference')
 		});
 	});
 
