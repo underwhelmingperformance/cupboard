@@ -69,6 +69,7 @@ import {
 	availableCachePaths,
 	availableViewPaths,
 	cacheProbePaths,
+	cohortsFor,
 	derivationUses,
 	evaluateTargets,
 	joinRoot,
@@ -241,6 +242,7 @@ export function resolvePlanInputs(
 
 	validateTargetRoots(rootPrefix, targets);
 	validateTargetOutputLimits(targets);
+	validateCohorts(targets);
 
 	const cupboardPath = provided(options.cupboardPath);
 
@@ -332,6 +334,15 @@ function validateTargetOutputLimits(targets: readonly PublishTarget[]): void {
 			rootSetMaxTargets
 		);
 	}
+}
+
+// Cohort membership is a manifest-wide invariant, like rootSuffix uniqueness,
+// so a cohort spanning execution contexts is refused here, before evaluation
+// or building starts, rather than only once the plan is written. The result
+// is discarded: `optimisedPlan` and `unoptimisedPlan` each derive the plan's
+// own cohorts from the same manifest once planning proceeds.
+function validateCohorts(targets: readonly PublishTarget[]): void {
+	cohortsFor(targets);
 }
 
 function parseTargets(source: string | undefined): readonly PublishTarget[] {
@@ -538,7 +549,10 @@ function unoptimisedPlan(targets: readonly PublishTarget[]): PublishPlan {
 		targets,
 		seedGroups: [],
 		fallbackGroups: [],
-		destinationIntermediates: []
+		destinationIntermediates: [],
+		cohorts: cohortsFor(targets),
+		// No graph was evaluated, so there is nothing to invert.
+		derivationToTargets: []
 	};
 }
 
@@ -1053,7 +1067,7 @@ export function groupRetention(
 
 export function seedMatrix(
 	inputs: PlanInputs,
-	plan: PublishPlan
+	plan: Pick<PublishPlan, 'seedGroups'>
 ): readonly object[] {
 	return plan.seedGroups.map((group) => ({
 		key: group.key,
@@ -1067,7 +1081,7 @@ export function seedMatrix(
 
 export function fallbackMatrix(
 	inputs: PlanInputs,
-	plan: PublishPlan
+	plan: Pick<PublishPlan, 'fallbackGroups'>
 ): readonly object[] {
 	return plan.fallbackGroups.map((group) => ({
 		key: group.key,
