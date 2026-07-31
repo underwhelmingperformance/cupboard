@@ -93,7 +93,97 @@ describe('cupboard flake publish release coordinates', () => {
 	});
 });
 
+describe('cupboard flake publish cohort job', () => {
+	it('replaces the target fan-out with a cohort job gated on the cohort matrix', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+
+		expect({
+			planOutputsCohortMatrix: contents.includes(
+				'cohort-matrix: ${{ steps.plan.outputs.cohort-matrix }}'
+			),
+			planOutputsCohortCount: contents.includes(
+				'cohort-count: ${{ steps.plan.outputs.cohort-count }}'
+			),
+			cohortJob: contents.includes('\n  cohort:\n'),
+			gatedOnCohortCount: contents.includes(
+				"if: ${{ needs.plan.outputs.cohort-count != '0' }}"
+			),
+			matrixFromCohortMatrix: contents.includes(
+				'matrix: ${{ fromJSON(needs.plan.outputs.cohort-matrix) }}'
+			),
+			targetJobRemoved: !contents.includes('\n  target:\n'),
+			targetMatrixOutputRemoved: !contents.includes('target-matrix:'),
+			targetCountOutputRemoved: !contents.includes('target-count:')
+		}).toStrictEqual({
+			planOutputsCohortMatrix: true,
+			planOutputsCohortCount: true,
+			cohortJob: true,
+			gatedOnCohortCount: true,
+			matrixFromCohortMatrix: true,
+			targetJobRemoved: true,
+			targetMatrixOutputRemoved: true,
+			targetCountOutputRemoved: true
+		});
+	});
+
+	it('builds with build-cohort and publishes with push, not build-paths', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+
+		expect({
+			usesBuildCohort: contents.includes('./.cupboard/actions/build-cohort'),
+			usesPush: contents.includes('./.cupboard/actions/push'),
+			usesBuildPaths: contents.includes('./.cupboard/actions/build-paths')
+		}).toStrictEqual({
+			usesBuildCohort: true,
+			usesPush: true,
+			usesBuildPaths: false
+		});
+	});
+
+	it('carries no artifact upload or download steps', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+
+		expect({
+			uploadArtifact: contents.includes('actions/upload-artifact'),
+			downloadArtifact: contents.includes('actions/download-artifact')
+		}).toStrictEqual({
+			uploadArtifact: false,
+			downloadArtifact: false
+		});
+	});
+
+	it('gates the push on push and having something to push, over one shared run root', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+
+		expect({
+			pushGated: contents.includes(
+				"inputs.push && steps.root-groups.outputs.has-content == 'true'"
+			),
+			rootGroupsInput: contents.includes(
+				'root-groups: ${{ steps.root-groups.outputs.json }}'
+			),
+			runRootPerRun: contents.includes("format('{0}/_cupboard-run/{1}',"),
+			runRootTtlInput: contents.includes(
+				'run-root-ttl: ${{ inputs.run-root-ttl }}'
+			),
+			runRootTtlWorkflowInput: contents.includes(
+				'      run-root-ttl:\n        description:'
+			)
+		}).toStrictEqual({
+			pushGated: true,
+			rootGroupsInput: true,
+			runRootPerRun: true,
+			runRootTtlInput: true,
+			runRootTtlWorkflowInput: true
+		});
+	});
+});
+
 describe('cupboard build provenance', () => {
+	// cupboard-flake-publish.yml's cohort job carries none: build-cohort does
+	// not emit a receipt-file in the shape attest expects, so its push carries
+	// no attestation bundle yet. cupboard-publish.yml's single build/attest/push
+	// job is unaffected by the cohort migration and still feeds one.
 	it('feeds every bundled attest action a current-run build receipt', async () => {
 		const workflows = await Promise.all(
 			[flakeWorkflow, publishWorkflow].map(async (file) => {
@@ -120,15 +210,17 @@ describe('cupboard build provenance', () => {
 					.find((line) => line.startsWith('receipt-file:'))
 			}))
 		).toStrictEqual([
-			...Array.from({ length: 1 }, () => ({
-				file: 'cupboard-flake-publish.yml',
-				receipt: 'receipt-file: ${{ steps.build.outputs.receipt-file }}'
-			})),
 			{
 				file: 'cupboard-publish.yml',
 				receipt: 'receipt-file: ${{ steps.build.outputs.receipt-file }}'
 			}
 		]);
+	});
+
+	it('does not bundle an attest action into the flake publish cohort job', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+
+		expect(contents).not.toContain('./.cupboard/actions/attest');
 	});
 });
 

@@ -63,6 +63,15 @@ on:
         required: false
         default: 'root'
         type: string
+      run-root-ttl:
+        description:
+          TTL for the per-run root every cohort job's push attaches to, such as
+          7d or 12h. Streamed work stays reachable under it for the rest of the
+          run, so a later cohort can substitute an earlier one's shared output
+          instead of rebuilding it.
+        required: false
+        default: '24h'
+        type: string
       reuse-view:
         description:
           Named tenant reuse view to opt into for shared intermediates missing
@@ -90,7 +99,8 @@ on:
         default: false
         type: boolean
       push:
-        description: Attest and publish results; false only builds each target.
+        description:
+          Publish results; false only builds each cohort's targets directly.
         required: false
         default: true
         type: boolean
@@ -238,8 +248,8 @@ jobs:
       contents: read # check out the flake source
       id-token: write # OIDC token for the retention-root ensure calls
     outputs:
-      target-matrix: ${{ steps.plan.outputs.target-matrix }}
-      target-count: ${{ steps.plan.outputs.target-count }}
+      cohort-matrix: ${{ steps.plan.outputs.cohort-matrix }}
+      cohort-count: ${{ steps.plan.outputs.cohort-count }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -322,21 +332,19 @@ jobs:
             echo "- Independent targets: $(jq '.targets | length' "${PLAN_FILE}")"
           } >> "${GITHUB_STEP_SUMMARY}"
 
-  target:
+  cohort:
     needs: [configure, plan]
-    if: ${{ needs.plan.outputs.target-count != '0' }}
+    if: ${{ needs.plan.outputs.cohort-count != '0' }}
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.plan.outputs.target-matrix) }}
-    name: ${{ matrix.attr }}
+      matrix: ${{ fromJSON(needs.plan.outputs.cohort-matrix) }}
+    name: ${{ matrix.key }}
     runs-on: ${{ matrix.runsOn }}
     # A hung leg must not burn the 360-minute default.
     timeout-minutes: 180
-    continue-on-error: ${{ matrix.bestEffort }}
     permissions:
-      attestations: write # record build provenance on the repository
       contents: read # check out the flake source
-      id-token: write # OIDC token for the cache push and Sigstore signing
+      id-token: write # OIDC token for the partition, roots.ensure and the push
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -361,6 +369,7 @@ jobs:
           builder-known-hosts: ${{ inputs.builder-known-hosts }}
 
       - uses: ./.cupboard/actions/setup
+        id: setup
         with:
           cache-url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
@@ -371,30 +380,96 @@ jobs:
           read-password: ${{ secrets.read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
 
-      - uses: ./.cupboard/actions/build-paths
-        id: build
+      - uses: ./.cupboard/actions/build-cohort
+        id: build-cohort
         with:
-          installables: ${{ matrix.attr }}^${{ join(matrix.outputs, ',') }}
+          cohort-json: ${{ toJSON(matrix) }}
+          url: ${{ inputs.url }}
+          cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          cache: ${{ needs.configure.outputs.cache }}
+          reuse-view: ${{ needs.configure.outputs.reuse-view }}
+          ttl: ${{ needs.configure.outputs.ttl }}
+          read-user: ${{ secrets.read_user }}
+          read-password: ${{ secrets.read_password }}
           max-jobs: ${{ matrix.remote && '0' || '' }}
 
-      - uses: ./.cupboard/actions/attest
-        id: attest
+      # No attest step here: build-cohort does not emit a receipt-file in the
+      # shape actions/attest expects (a per-path NAR hash and deriver read
+      # from a supervised build's own log). Cohort jobs publish without a
+      # build-provenance attestation until build-cohort has a receipt to give
+      # it.
+
+      - name: Group the cohort's target paths by root
+        id: root-groups
         if: ${{ inputs.push }}
-        with:
-          receipt-file: ${{ steps.build.outputs.receipt-file }}
+        shell: bash
+        env:
+          ROOTS: ${{ toJSON(matrix.roots) }}
+          EXPECTED_PATHS: ${{ toJSON(matrix.expectedPaths) }}
+          TARGET_PATHS_FILE: ${{ steps.build-cohort.outputs.target-paths-file }}
+          REFERENCE_PATHS_FILE:
+            ${{ steps.build-cohort.outputs.reference-paths-file }}
+        run: |
+          set -euo pipefail
+          # A target's evaluated expected path, when known, is exactly the
+          # path a build realises or an attach-only classification retains,
+          # so it names which root a path in the cohort's flat target-paths
+          # file belongs to without reading build-cohort's own internals. A
+          # path with no matching expected path (an unevaluated or
+          # floating-output member, possible only in an opt-in multi-target
+          # cohort) joins the cohort's first root; a single-target cohort,
+          # the default, always has exactly one root, so this never applies
+          # there.
+          root_groups=$(jq -cn \
+            --argjson roots "${ROOTS}" \
+            --argjson expected "${EXPECTED_PATHS}" \
+            --rawfile targets "${TARGET_PATHS_FILE}" '
+              ($targets | split("\n") | map(select(length > 0))) as $paths
+              | [range(0; ($roots | length)) | {root: $roots[.], path: $expected[.]}] as $members
+              | ($members | map(select(.path != null)) | map({(.path): .root}) | add // {}) as $pathToRoot
+              | ($roots | unique) as $uniqueRoots
+              | ($uniqueRoots[0]) as $firstRoot
+              | ($paths | map({path: ., root: ($pathToRoot[.] // $firstRoot)})) as $assigned
+              | $uniqueRoots
+              | map(. as $r | {root: $r, paths: ([$assigned[] | select(.root == $r) | .path])})
+              | map(select(.paths | length > 0))
+            ')
+          has_content=false
+          if [ "${root_groups}" != '[]' ] || [ -s "${REFERENCE_PATHS_FILE}" ]; then
+            has_content=true
+          fi
+          {
+            echo "json=${root_groups}"
+            echo "has-content=${has_content}"
+          } >> "${GITHUB_OUTPUT}"
 
       - uses: ./.cupboard/actions/push
-        if: ${{ inputs.push }}
+        if:
+          ${{ inputs.push && steps.root-groups.outputs.has-content == 'true' }}
         with:
           url: ${{ inputs.url }}
-          paths: ${{ steps.build.outputs.paths }}
+          root-groups: ${{ steps.root-groups.outputs.json }}
           cache: ${{ needs.configure.outputs.cache }}
-          # The plan action computes each target's root with the same
-          # construction its ensure calls use, so the ensured root and the
-          # published root cannot drift apart.
-          root: ${{ matrix.root }}
           ttl: ${{ needs.configure.outputs.ttl }}
-          attestations: ${{ steps.attest.outputs.bundle-path }}
+          intermediate-paths-file:
+            ${{ steps.build-cohort.outputs.intermediate-paths-file }}
+          # Publish-by-reference paths only ever come from the configured
+          # reuse view, so the pair is empty together with it, satisfying
+          # the push action's requirement that both are given or neither is.
+          reference-paths-file:
+            ${{ needs.configure.outputs.reuse-view != '' &&
+            steps.build-cohort.outputs.reference-paths-file || '' }}
+          reference-source:
+            ${{ needs.configure.outputs.reuse-view != '' &&
+            format('{0}/reuse/{1}', inputs.url,
+            needs.configure.outputs.reuse-view) || '' }}
+          # Every cohort job in this run shares one root, so a later cohort
+          # can substitute an earlier one's streamed work instead of
+          # rebuilding it.
+          run-root:
+            ${{ format('{0}/_cupboard-run/{1}',
+            needs.configure.outputs.root-prefix, github.run_id) }}
+          run-root-ttl: ${{ inputs.run-root-ttl }}
           cupboard-version: ${{ inputs.cupboard-version }}
           expected-source-commit: ${{ job.workflow_sha }}
           release-repository: underwhelmingperformance/cupboard
