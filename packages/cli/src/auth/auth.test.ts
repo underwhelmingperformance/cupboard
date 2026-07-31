@@ -65,6 +65,48 @@ function federatingClient(): CupboardClient {
 	});
 }
 
+// Like `federatingClient`, but recording the subject token each exchange
+// presented, so a test can assert the exchange sequence itself.
+function renewingClient(): {
+	readonly client: CupboardClient;
+	readonly exchanged: () => readonly string[];
+} {
+	let issued = 0;
+	const subjects: string[] = [];
+
+	const client = new CupboardClient(
+		new URL('https://cupboard.test'),
+		(input, init) => {
+			const url = new URL(requestUrl(input));
+
+			if (url.origin === 'https://actions.example.com') {
+				issued += 1;
+
+				return Promise.resolve(
+					Response.json({ value: `subject-${String(issued)}` })
+				);
+			}
+
+			// The token endpoint takes a urlencoded string body.
+			const form = new URLSearchParams(
+				typeof init?.body === 'string' ? init.body : ''
+			);
+			subjects.push(form.get('subject_token') ?? '');
+
+			return Promise.resolve(
+				Response.json({
+					access_token: `write-${String(issued)}`,
+					token_type: 'Bearer',
+					expires_in: 900,
+					issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
+				} satisfies TokenResponse)
+			);
+		}
+	);
+
+	return { client, exchanged: () => subjects };
+}
+
 const target = new URL('https://cupboard.test');
 const audience = audienceSchema.parse('https://cache.example.workers.dev');
 
@@ -95,6 +137,45 @@ describe('authenticateGithubOidc', () => {
 			refreshed: 'write-2',
 			afterRefresh: 'write-2'
 		});
+	});
+
+	// The exchanged token lives for 900s and the renewal margin is five
+	// minutes, so it stays fresh until 600s have passed.
+	it.each([
+		{
+			name: 'keeps serving a token comfortably clear of expiry',
+			advanceMs: 599_000,
+			expected: {
+				token: 'write-1',
+				subsequent: 'write-1',
+				exchanged: ['subject-1']
+			}
+		},
+		{
+			name: 're-exchanges a token within the renewal margin before use',
+			advanceMs: 601_000,
+			expected: {
+				token: 'write-2',
+				subsequent: 'write-2',
+				exchanged: ['subject-1', 'subject-2']
+			}
+		}
+	])('$name', async ({ advanceMs, expected }) => {
+		let clock = 0;
+		const { client, exchanged } = renewingClient();
+		const provider = await authenticateGithubOidc(client, audience, {
+			environment: githubEnvironment,
+			now: () => clock
+		});
+
+		clock = advanceMs;
+
+		const token = await provider.get();
+		const subsequent = await provider.get();
+
+		expect({ token, subsequent, exchanged: exchanged() }).toStrictEqual(
+			expected
+		);
 	});
 });
 
