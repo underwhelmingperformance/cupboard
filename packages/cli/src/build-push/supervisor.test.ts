@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	type ChildExit,
 	type SignalSource,
+	superviseAttemptedBuild,
 	superviseBuild
 } from './supervisor.ts';
 
@@ -208,5 +209,124 @@ describe('superviseBuild', () => {
 		} finally {
 			await rm(readyFile, { force: true });
 		}
+	});
+});
+
+function attemptIds(): () => string {
+	let issued = 0;
+
+	return () => {
+		issued += 1;
+
+		return `attempt-${String(issued)}`;
+	};
+}
+
+describe('superviseAttemptedBuild', () => {
+	it('stops at the first success, sleeping a growing delay between attempts', async () => {
+		const directory = await runtimeDirectory();
+		const sleeps: number[] = [];
+		let calls = 0;
+
+		const result = await superviseAttemptedBuild({
+			command: (logFile) => {
+				calls += 1;
+
+				return [
+					'sh',
+					'-c',
+					`printf %s '{"call":${String(calls)}}' > "${logFile}"; exit ${calls < 2 ? '1' : '0'}`
+				];
+			},
+			attempts: 3,
+			environment: { PATH: '/usr/bin:/bin' },
+			runtimeDirectory: directory,
+			nextAttemptId: attemptIds(),
+			sleep: (delayMs) => {
+				sleeps.push(delayMs);
+
+				return Promise.resolve();
+			}
+		});
+
+		expect({ result, sleeps }).toStrictEqual({
+			result: {
+				exit: { status: 0, signal: undefined },
+				attempts: [
+					{
+						attempt: 1,
+						attemptId: 'attempt-1',
+						log: '{"call":1}',
+						exit: { status: 1, signal: undefined }
+					},
+					{
+						attempt: 2,
+						attemptId: 'attempt-2',
+						log: '{"call":2}',
+						exit: { status: 0, signal: undefined }
+					}
+				]
+			},
+			sleeps: [15_000]
+		});
+	});
+
+	it('spends every attempt on a persistent failure, keeping the final exit', async () => {
+		const directory = await runtimeDirectory();
+		const sleeps: number[] = [];
+
+		const result = await superviseAttemptedBuild({
+			command: () => ['sh', '-c', 'exit 2'],
+			attempts: 3,
+			environment: { PATH: '/usr/bin:/bin' },
+			runtimeDirectory: directory,
+			nextAttemptId: attemptIds(),
+			sleep: (delayMs) => {
+				sleeps.push(delayMs);
+
+				return Promise.resolve();
+			}
+		});
+
+		expect({ result, sleeps }).toStrictEqual({
+			result: {
+				exit: { status: 2, signal: undefined },
+				attempts: [
+					{
+						attempt: 1,
+						attemptId: 'attempt-1',
+						log: '',
+						exit: { status: 2, signal: undefined }
+					},
+					{
+						attempt: 2,
+						attemptId: 'attempt-2',
+						log: '',
+						exit: { status: 2, signal: undefined }
+					},
+					{
+						attempt: 3,
+						attemptId: 'attempt-3',
+						log: '',
+						exit: { status: 2, signal: undefined }
+					}
+				]
+			},
+			sleeps: [15_000, 30_000]
+		});
+	});
+
+	it('removes the runtime directory once the attempts are over', async () => {
+		const directory = await runtimeDirectory();
+
+		await superviseAttemptedBuild({
+			command: () => ['sh', '-c', 'exit 1'],
+			attempts: 2,
+			environment: { PATH: '/usr/bin:/bin' },
+			runtimeDirectory: directory,
+			sleep: () => Promise.resolve()
+		});
+
+		await expect(stat(directory)).rejects.toMatchObject({ code: 'ENOENT' });
 	});
 });

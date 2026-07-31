@@ -219,7 +219,10 @@ export function registerBuildPushCommand(
 
 				await runBuildPush(
 					{
-						command: [executable, ...childArguments],
+						invocation: {
+							kind: 'command',
+							command: [executable, ...childArguments]
+						},
 						...(targetRoot !== undefined && { root: targetRoot }),
 						...(options.ttl !== undefined && { ttlSeconds: options.ttl }),
 						...(options.runRoot !== undefined && {

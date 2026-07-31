@@ -9,7 +9,7 @@ import type {
 	StorePathString,
 	TtlSeconds
 } from '@cupboard/nix-store/scalars';
-import type { InvocationId } from '@cupboard/protocol/build';
+import type { BuildSubject, InvocationId } from '@cupboard/protocol/build';
 import {
 	type BuildSummary,
 	buildSummaryResultKind,
@@ -34,6 +34,13 @@ import {
 } from '../errors.ts';
 import type { CompressNar, PushClient, PushNarArchive } from '../push/push.ts';
 
+import {
+	type BuildAttempt,
+	derivationsRequiringVerification,
+	parseBuildActivities,
+	receiptSubjects,
+	verifiedAttribution
+} from './attribution.ts';
 import { type BatchStore, BuildOutputBatcher } from './batching.ts';
 import { renderHookScript } from './hook-script.ts';
 import { BuildEventListener } from './listener.ts';
@@ -52,14 +59,49 @@ import { createPlannedRuntimeDirectory } from './runtime-directory.ts';
 import {
 	type ChildCommand,
 	type ChildExit,
+	runChild,
+	type RunChildOptions,
 	type SignalSource,
-	superviseBuild
+	superviseAttemptedBuild,
+	superviseBuild,
+	type SupervisedAttempt
 } from './supervisor.ts';
 
 export const hookScriptFileName = 'post-build-hook.sh';
 
+/** Maximum attempts a constructed build invocation runs. */
+export const defaultBuildAttempts = 3;
+
+/**
+ * A nix invocation the run constructs itself: `nix build` over the given
+ * installables, wrapped in the bounded attempt loop with per-attempt activity
+ * logs, so a transient build failure retries and the receipt attributes each
+ * built path to the attempt that produced it.
+ */
+export interface ConstructedBuild {
+	readonly installables: readonly string[];
+	/** Maximum build attempts; defaults to {@link defaultBuildAttempts}. */
+	readonly attempts?: number;
+	/**
+	 * Locally rebuild remotely built or early-attempt-built derivations once
+	 * the build succeeds, refusing the run when a rebuild diverges.
+	 */
+	readonly verifyRebuilds?: boolean;
+	readonly keepGoing?: boolean;
+	readonly maxJobs?: number;
+}
+
+/**
+ * What the run builds: a user-supplied command supervised unchanged, with its
+ * own semantics and no attempts added, or a constructed nix invocation run
+ * under the attempt loop.
+ */
+export type BuildInvocation =
+	| { readonly kind: 'command'; readonly command: ChildCommand }
+	| { readonly kind: 'constructed'; readonly build: ConstructedBuild };
+
 export interface BuildPushRunOptions {
-	readonly command: ChildCommand;
+	readonly invocation: BuildInvocation;
 	/** The target root reconciliation replaces once every target confirms. */
 	readonly root?: RootName;
 	readonly ttlSeconds?: TtlSeconds;
@@ -94,6 +136,12 @@ export interface BuildPushDependencies {
 	readonly signalSource?: SignalSource;
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
 	readonly compressNar?: CompressNar;
+	/** Names a constructed invocation's attempts; injectable for tests. */
+	readonly nextAttemptId?: () => string;
+	/** Waits between a constructed invocation's attempts; injectable for tests. */
+	readonly sleep?: (delayMs: number) => Promise<void>;
+	/** Runs the verification rebuild child; injectable for tests. */
+	readonly runChild?: (options: RunChildOptions) => Promise<ChildExit>;
 }
 
 /**
@@ -180,27 +228,183 @@ export async function runBuildPush(
 			dependencies.environment ?? process.env,
 			hookScriptPath
 		);
-		const exit = await reporter.phase(buildPushPhases.build, () =>
-			superviseBuild({
-				command: options.command,
-				environment,
-				runtimeDirectory: plan.directory,
-				...(dependencies.signalSource !== undefined && {
-					signalSource: dependencies.signalSource
-				})
-			})
+		const { exit, attempts } = await reporter.phase(buildPushPhases.build, () =>
+			runInvocation(options.invocation, environment, plan, dependencies)
 		);
 		const accepted = listener.accepted;
+		const eventPaths = orderedUnique(
+			accepted.flatMap((event) => event.outputPaths)
+		);
+		const subjects = await attributeSubjects(
+			options.invocation,
+			dependencies,
+			attempts,
+			eventPaths,
+			exit
+		);
 
 		await settleRun(options, reporter, dependencies, {
 			exit,
 			batcher,
 			maxQueueDepth,
-			eventPaths: orderedUnique(accepted.flatMap((event) => event.outputPaths))
+			eventPaths,
+			subjects
 		});
 	} finally {
 		await listener.close();
 	}
+}
+
+// A user-supplied command runs exactly once, its semantics untouched; a
+// constructed invocation runs under the bounded attempt loop with a
+// per-attempt activity log.
+async function runInvocation(
+	invocation: BuildInvocation,
+	environment: ChildEnvironment,
+	plan: { readonly directory: string },
+	dependencies: BuildPushDependencies
+): Promise<{
+	readonly exit: ChildExit;
+	readonly attempts: readonly SupervisedAttempt[];
+}> {
+	if (invocation.kind === 'command') {
+		const exit = await superviseBuild({
+			command: invocation.command,
+			environment,
+			runtimeDirectory: plan.directory,
+			...(dependencies.signalSource !== undefined && {
+				signalSource: dependencies.signalSource
+			})
+		});
+
+		return { exit, attempts: [] };
+	}
+
+	return superviseAttemptedBuild({
+		command: (logFile) => constructedNixCommand(invocation.build, logFile),
+		attempts: invocation.build.attempts ?? defaultBuildAttempts,
+		environment,
+		runtimeDirectory: plan.directory,
+		...(dependencies.signalSource !== undefined && {
+			signalSource: dependencies.signalSource
+		}),
+		...(dependencies.nextAttemptId !== undefined && {
+			nextAttemptId: dependencies.nextAttemptId
+		}),
+		...(dependencies.sleep !== undefined && { sleep: dependencies.sleep })
+	});
+}
+
+// One constructed attempt's argv: a plain `nix build` over the installables,
+// with the attempt's activity log requested so attribution can read which
+// derivation ran where.
+function constructedNixCommand(
+	build: ConstructedBuild,
+	logFile: string
+): ChildCommand {
+	return [
+		'nix',
+		'build',
+		'--no-link',
+		'--option',
+		'json-log-path',
+		logFile,
+		...(build.keepGoing === true ? ['--keep-going'] : []),
+		...(build.maxJobs === undefined
+			? []
+			: ['--max-jobs', String(build.maxJobs)]),
+		...build.installables
+	];
+}
+
+// The local re-verification of derivations the successful attempt did not
+// itself build locally: a rebuild with remote builders off, refusing the run
+// when the rebuild diverges.
+function rebuildVerificationCommand(
+	derivations: readonly string[]
+): ChildCommand {
+	return [
+		'nix',
+		'build',
+		'--rebuild',
+		'--no-link',
+		'--builders',
+		'',
+		'--max-jobs',
+		'1',
+		...derivations.map((derivation) => `${derivation}^*`)
+	];
+}
+
+// The receipt subjects a successful constructed build attributes: the built
+// paths joined with the attempts' activity logs. The verification pass, when
+// requested, locally rebuilds what the successful attempt did not build
+// locally and attributes the verified derivations to that attempt; without
+// it, each path keeps the earliest attempt that built it. A hook event only
+// fires for an executed build, so a path that was valid before the run never
+// appears here.
+async function attributeSubjects(
+	invocation: BuildInvocation,
+	dependencies: BuildPushDependencies,
+	attempts: readonly SupervisedAttempt[],
+	eventPaths: readonly StorePathString[],
+	exit: ChildExit
+): Promise<readonly BuildSubject[]> {
+	if (
+		invocation.kind !== 'constructed' ||
+		exit.status !== 0 ||
+		eventPaths.length === 0
+	) {
+		return [];
+	}
+
+	const observed: readonly BuildAttempt[] = attempts.map((attempt) => ({
+		attempt: attempt.attempt,
+		attemptId: attempt.attemptId,
+		activities: parseBuildActivities(attempt.log)
+	}));
+	const successful = observed.at(-1);
+
+	if (successful === undefined) {
+		return [];
+	}
+
+	const infos = await dependencies.store.queryValidPathsInfo(eventPaths);
+
+	if (invocation.build.verifyRebuilds !== true) {
+		return receiptSubjects(observed, infos, new Set());
+	}
+
+	const derivations = derivationsRequiringVerification(
+		observed,
+		successful.attempt,
+		infos
+	);
+
+	if (derivations.length > 0) {
+		const runVerification = dependencies.runChild ?? runChild;
+		const verification = await runVerification({
+			command: rebuildVerificationCommand(derivations),
+			environment: dependencies.environment ?? process.env,
+			...(dependencies.signalSource !== undefined && {
+				signalSource: dependencies.signalSource
+			})
+		});
+
+		if (verification.status !== 0) {
+			throw new BuildCommandFailedError(
+				verification.status,
+				verification.signal,
+				childExitCode(verification)
+			);
+		}
+	}
+
+	return receiptSubjects(
+		[verifiedAttribution(successful, derivations)],
+		infos,
+		new Set()
+	);
 }
 
 interface RunFacts {
@@ -208,6 +412,7 @@ interface RunFacts {
 	readonly batcher: BuildOutputBatcher;
 	readonly maxQueueDepth: number;
 	readonly eventPaths: readonly StorePathString[];
+	readonly subjects: readonly BuildSubject[];
 }
 
 // The phases after the child exits: drain, reconcile, receipt, exit contract.
@@ -281,6 +486,7 @@ async function settleRun(
 					...(dependencies.compressNar !== undefined && {
 						compressNar: dependencies.compressNar
 					}),
+					...(facts.subjects.length > 0 && { subjects: facts.subjects }),
 					childExitStatus: childExitCode(exit)
 				});
 
