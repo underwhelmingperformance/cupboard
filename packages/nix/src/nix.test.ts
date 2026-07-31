@@ -313,6 +313,55 @@ describe('Nix.openDaemon', () => {
 	});
 });
 
+function openDependencies(overrides: {
+	readonly env?: Record<string, string>;
+	readonly canWrite?: boolean;
+	readonly socket?: boolean;
+}): NixDependencies {
+	return {
+		env: overrides.env ?? {},
+		readFile: (filePath) => noFiles.get(filePath),
+		homeDirectory: () => noFiles.get('home'),
+		canWriteStateDirectory: () => overrides.canWrite ?? true,
+		socketExists: () => overrides.socket ?? false,
+		realpath: (path) => path
+	};
+}
+
+describe('Nix.storeKind', () => {
+	it.each([
+		{
+			name: 'a writable local store as local-filesystem',
+			dependencies: openDependencies({}),
+			expected: 'local-filesystem'
+		},
+		{
+			name: 'the daemon behind an unwritable state directory as daemon',
+			dependencies: openDependencies({ canWrite: false, socket: true }),
+			expected: 'daemon'
+		},
+		{
+			name: 'an ssh-ng remote store as ssh-ng',
+			dependencies: openDependencies({
+				env: { NIX_REMOTE: 'ssh-ng://builder.example' }
+			}),
+			expected: 'ssh-ng'
+		}
+	])('opens $name', ({ dependencies, expected }) => {
+		expect(Nix.open(dependencies).storeKind).toBe(expected);
+	});
+
+	it('reports the explicitly opened daemon store by its remote form', () => {
+		expect({
+			daemon: Nix.openDaemon(daemonDependencies(true)).storeKind,
+			sshNg: Nix.openDaemon({
+				...daemonDependencies(true),
+				env: { NIX_REMOTE: 'ssh-ng://builder.example' }
+			}).storeKind
+		}).toStrictEqual({ daemon: 'daemon', sshNg: 'ssh-ng' });
+	});
+});
+
 describe('Nix queries', () => {
 	it('canonicalises before querying a single path', async () => {
 		const store = recordingStore();

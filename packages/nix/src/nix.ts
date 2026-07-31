@@ -6,6 +6,7 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 
+import { parseSshNgStoreUri } from './nix-daemon-ssh.ts';
 import {
 	type NixBuildResult,
 	type NixDerivedPathString,
@@ -16,10 +17,13 @@ import {
 } from './nix-store.ts';
 import {
 	createNixDaemonStoreClient,
-	createNixStoreClient,
 	defaultStoreClientEnvironment,
 	type NixDaemonClientOptions,
-	type StoreClientEnvironment
+	type NixStoreKind,
+	resolveStoreBackend,
+	type StoreClientEnvironment,
+	storeClientForBackend,
+	storeKindOf
 } from './store-client.ts';
 import { discoverNixStoreConfig } from './store-config.ts';
 
@@ -43,12 +47,13 @@ export class Nix {
 		dependencies: NixDependencies = defaultStoreClientEnvironment
 	): Nix {
 		const config = discoverNixStoreConfig(dependencies);
-		const store = createNixStoreClient(dependencies, config);
+		const backend = resolveStoreBackend(config, dependencies);
 
 		return new Nix(
-			store,
+			storeClientForBackend(backend, config),
 			config.storeDirectory,
-			dependencies.realpath ?? defaultRealPath
+			dependencies.realpath ?? defaultRealPath,
+			storeKindOf(backend)
 		);
 	}
 
@@ -72,29 +77,38 @@ export class Nix {
 		return new Nix(
 			store,
 			config.storeDirectory,
-			dependencies.realpath ?? defaultRealPath
+			dependencies.realpath ?? defaultRealPath,
+			parseSshNgStoreUri(config.storeUri) === undefined ? 'daemon' : 'ssh-ng'
 		);
 	}
 
-	/** Build a client over an explicit backend, store directory and path resolver. */
+	/**
+	 * Build a client over an explicit backend, store directory and path
+	 * resolver. The store kind defaults to `local-filesystem`, the kind whose
+	 * paths sit on this machine's filesystem.
+	 */
 	static forStore(
 		store: NixStoreClient,
 		options: {
 			readonly storeDirectory: StoreDirectory;
 			readonly realpath?: RealPath;
+			readonly storeKind?: NixStoreKind;
 		}
 	): Nix {
 		return new Nix(
 			store,
 			options.storeDirectory,
-			options.realpath ?? defaultRealPath
+			options.realpath ?? defaultRealPath,
+			options.storeKind ?? 'local-filesystem'
 		);
 	}
 
 	private constructor(
 		private readonly store: NixStoreClient,
 		private readonly storeDirectory: StoreDirectory,
-		private readonly realpath: RealPath
+		private readonly realpath: RealPath,
+		/** The kind of store backend this client reads through. */
+		public readonly storeKind: NixStoreKind
 	) {}
 
 	private resolveRealPath(path: string): string {

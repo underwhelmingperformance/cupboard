@@ -50,6 +50,19 @@ export type StoreBackend =
 	| { readonly backend: 'local'; readonly stateDirectory: string }
 	| { readonly backend: 'ssh-ng'; readonly remote: NixSshStoreSpec };
 
+/**
+ * The kind of store a resolved backend reads through: the discriminant a
+ * caller selects behaviour on, such as where NAR bytes come from. A
+ * `local-filesystem` store and a `daemon` store serve paths on this machine's
+ * filesystem; an `ssh-ng` store's paths live on the remote machine.
+ */
+export type NixStoreKind = 'local-filesystem' | 'daemon' | 'ssh-ng';
+
+/** The store kind a resolved backend answers as. */
+export function storeKindOf(backend: StoreBackend): NixStoreKind {
+	return backend.backend === 'local' ? 'local-filesystem' : backend.backend;
+}
+
 const unixScheme = 'unix://';
 
 /**
@@ -62,8 +75,17 @@ export function createNixStoreClient(
 	dependencies: StoreClientEnvironment = defaultStoreClientEnvironment,
 	config: NixStoreConfig = discoverNixStoreConfig(dependencies)
 ): NixStoreClient {
-	const backend = resolveStoreBackend(config, dependencies);
+	return storeClientForBackend(
+		resolveStoreBackend(config, dependencies),
+		config
+	);
+}
 
+/** The store client a resolved backend opens. */
+export function storeClientForBackend(
+	backend: StoreBackend,
+	config: NixStoreConfig
+): NixStoreClient {
 	if (backend.backend === 'daemon') {
 		return new NixDaemonStoreClient({
 			socketPath: backend.socketPath,
