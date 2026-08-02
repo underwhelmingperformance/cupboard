@@ -36,6 +36,7 @@ import {
 	evaluateTargets,
 	evaluationFromJson,
 	expandComponents,
+	isBestEffortCohort,
 	joinRoot,
 	type NixEvaluator,
 	planPublish,
@@ -179,6 +180,41 @@ describe('planPublish', () => {
 			retained: [],
 			targets: ['first', 'broken']
 		});
+	});
+});
+
+describe('isBestEffortCohort', () => {
+	it.each([
+		{
+			name: 'every member is best-effort',
+			members: [target('first'), target('second')],
+			tolerated: true
+		},
+		{
+			name: 'one member is required',
+			members: [target('first'), { ...target('second'), bestEffort: false }],
+			tolerated: false
+		},
+		{
+			name: 'every member is required',
+			members: [
+				{ ...target('first'), bestEffort: false },
+				{ ...target('second'), bestEffort: false }
+			],
+			tolerated: false
+		},
+		{
+			name: 'the cohort holds one best-effort target',
+			members: [target('first')],
+			tolerated: true
+		},
+		{
+			name: 'the cohort holds one required target',
+			members: [{ ...target('first'), bestEffort: false }],
+			tolerated: false
+		}
+	])('tolerates a failure when $name: $tolerated', ({ members, tolerated }) => {
+		expect(isBestEffortCohort(members)).toBe(tolerated);
 	});
 });
 

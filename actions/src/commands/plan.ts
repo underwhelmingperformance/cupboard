@@ -72,6 +72,7 @@ import {
 	evaluateTargetCoverage,
 	evaluateTargets,
 	expandComponents,
+	isBestEffortCohort,
 	joinRoot,
 	type NixEvaluator,
 	planPublish,
@@ -1031,7 +1032,8 @@ function targetMatrix(
 // at build time. Neither is known until the target evaluates, so an
 // unevaluated or still-floating member reports `undefined` in both and its
 // build-time availability check treats it as always needing to build, per
-// the design.
+// the design. `bestEffort` carries the cohort's own tolerance, which the
+// cohort job spends as its `continue-on-error`.
 function cohortMatrix(
 	inputs: PlanInputs,
 	cohorts: readonly Cohort[],
@@ -1054,6 +1056,7 @@ function cohortMatrix(
 		system: cohort.system,
 		os: cohort.os,
 		remote: cohort.remote,
+		bestEffort: isBestEffortCohort(cohort.targets),
 		runsOn: cohort.os,
 		roots: cohort.targets.map((target) =>
 			joinRoot(inputs.rootPrefix, target.rootSuffix)

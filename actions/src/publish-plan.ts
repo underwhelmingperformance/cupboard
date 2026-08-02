@@ -875,6 +875,16 @@ function executionContextKey(target: PublishTarget): string {
 }
 
 /**
+ * Whether a cohort's failure is one the manifest tolerates: true only when
+ * every member is a best-effort target. A cohort holding one required target
+ * is required, because its members build in one job and a required target's
+ * failure is the run's failure whoever it shares that job with.
+ */
+export function isBestEffortCohort(members: readonly PublishTarget[]): boolean {
+	return members.every((member) => member.bestEffort);
+}
+
+/**
  * Partitions targets into cohorts: the manifest's own statement of which
  * targets run together in one job. A target's cohort is its explicit
  * `cohort` label when it has one, and its own identity (`attr`) otherwise, so
