@@ -100,15 +100,17 @@ function emptyStream(): ReadableStream<Uint8Array> {
 }
 
 // A child that delivers one build event to the invocation's hook endpoint the
-// way the hook helper does: one newline-terminated line per connection,
-// exiting with the given status only once the listener has closed the
-// connection, so the event is accepted before the supervisor sees the child
-// end.
+// way the hook helper does: one newline-terminated line per connection. It
+// exits once the listener has closed the connection, or, when detached, as
+// soon as its bytes have reached the socket, the way a helper does whose
+// message the endpoint has yet to read.
 const emitEventScript = [
 	"const net = require('net');",
-	'const [socketPath, line, exitStatus] = process.argv.slice(1);',
+	'const [socketPath, line, exitStatus, mode] = process.argv.slice(1);',
 	'const socket = net.connect(socketPath, () => {',
-	"\tsocket.write(line + '\\n');",
+	"\tsocket.write(line + '\\n', () => {",
+	"\t\tif (mode === 'detached') process.exit(Number(exitStatus));",
+	'\t});',
 	'});',
 	"socket.on('close', () => process.exit(Number(exitStatus)));",
 	"socket.on('error', () => process.exit(1));"
@@ -117,7 +119,8 @@ const emitEventScript = [
 function emitEventCommand(
 	socketPath: string,
 	outputPath: StorePathString,
-	exitStatus: number
+	exitStatus: number,
+	mode: 'awaited' | 'detached'
 ): ChildCommand {
 	const line = JSON.stringify({
 		version: 1,
@@ -132,7 +135,8 @@ function emitEventCommand(
 		emitEventScript,
 		socketPath,
 		line,
-		String(exitStatus)
+		String(exitStatus),
+		mode
 	];
 }
 
@@ -228,6 +232,8 @@ interface FlowConfig {
 	readonly constructed?: ConstructedFlowConfig;
 	readonly emitEvent?: boolean;
 	readonly emitExitStatus?: number;
+	/** The emitting child exits without waiting for its message to be read. */
+	readonly emitDetached?: boolean;
 	readonly valid?: readonly StorePathString[];
 	readonly action?: UploadDecision['action'];
 	readonly uploadFailure?: Error;
@@ -423,7 +429,12 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	const command: ChildCommand =
 		config.command ??
 		(config.emitEvent === true
-			? emitEventCommand(socketPath, pathA, config.emitExitStatus ?? 0)
+			? emitEventCommand(
+					socketPath,
+					pathA,
+					config.emitExitStatus ?? 0,
+					config.emitDetached === true ? 'detached' : 'awaited'
+				)
 			: ['sh', '-c', 'exit 0']);
 	const invocation: BuildInvocation =
 		config.constructed === undefined
@@ -553,6 +564,31 @@ describe('runBuildPush', () => {
 
 	it('streams an accepted build event and writes the receipt file', async () => {
 		const run = await runFlow({ emitEvent: true, valid: [pathA] });
+		const receipt: unknown = JSON.parse(
+			await readFile(run.receiptFile, 'utf8')
+		);
+
+		expect({ error: run.error, receipt }).toStrictEqual({
+			error: undefined,
+			receipt: {
+				version: 2,
+				paths: [pathA],
+				subjects: [],
+				outcomes: [{ outcome: 'destination-served', storePath: pathA }],
+				childExitStatus: 0,
+				uploaded: [],
+				failed: [],
+				collected: []
+			}
+		});
+	});
+
+	it('accepts an event whose child exited before the endpoint read it', async () => {
+		const run = await runFlow({
+			emitEvent: true,
+			emitDetached: true,
+			valid: [pathA]
+		});
 		const receipt: unknown = JSON.parse(
 			await readFile(run.receiptFile, 'utf8')
 		);
