@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import type { Cohort } from './publish-plan.ts';
+import { type Cohort, isBestEffortCohort } from './publish-plan.ts';
 
 /**
  * The headroom shape `checkStoreCapacity` (packages/cli/src/plan/capacity.ts)
@@ -51,14 +51,18 @@ interface SizedCohort {
 	readonly size: number;
 }
 
-// A cohort's own execution context: cohorts sharing a job's runner and
-// remote setting are the only ones packing may combine, since a job runs
-// under one label with one builder configuration.
+// A cohort's own execution context: cohorts sharing a job's runner, remote
+// setting and failure tolerance are the only ones packing may combine, since
+// a job runs under one label, one builder configuration and one
+// continue-on-error. A best-effort target's failure is tolerated only where
+// every member of its job tolerates failure, so the tolerance belongs in the
+// context packing groups by.
 function executionContextKey(cohort: Cohort): string {
 	return JSON.stringify([
 		cohort.system,
 		cohort.os.toLowerCase(),
-		cohort.remote
+		cohort.remote,
+		isBestEffortCohort(cohort.targets)
 	]);
 }
 
@@ -70,6 +74,11 @@ function executionContextKey(cohort: Cohort): string {
  * room, or open a new one. Deterministic from the measurements alone, never a
  * heuristic over derivation counts or manifest order; a tie in size breaks by
  * the manifest's own cohort order, never at random.
+ *
+ * Candidates are packed within one execution context only, and a cohort's
+ * failure tolerance is part of that context: a best-effort target keeps the
+ * `continue-on-error` its manifest asked for because it is never packed
+ * alongside a required one.
  *
  * An explicit multi-target cohort (the manifest's own `cohort` label) is
  * never split or merged: it is not a candidate for packing at all, and
@@ -156,8 +165,8 @@ function measuredSizeOf(
 }
 
 // First-fit decreasing, run independently per execution context: a job runs
-// under one runner label and one remote setting, so packing only ever
-// combines cohorts that already share both.
+// under one runner label, one remote setting and one failure tolerance, so
+// packing only ever combines cohorts that already share all three.
 function packContext(
 	candidates: readonly SizedCohort[],
 	budget: number
