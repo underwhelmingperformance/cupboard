@@ -134,6 +134,38 @@ class DyingSshChild implements SshDaemonProcess {
 	}
 }
 
+// The ssh binary cannot start: the child reports the spawn failure through
+// its error event and, having never run, emits no exit.
+class UnspawnableSshChild implements SshDaemonProcess {
+	private errorListener: ((error: Error) => void) | undefined;
+
+	readonly stdout = new FakeByteSource();
+
+	killed = 0;
+
+	readonly stdin = {
+		write: (
+			_chunk: Uint8Array,
+			callback: (error?: Error | null) => void
+		): void => {
+			this.errorListener?.(this.spawnError);
+			callback();
+		}
+	};
+
+	constructor(private readonly spawnError: Error) {}
+
+	once(event: 'exit' | 'error', listener: (error: Error) => void): void {
+		if (event === 'error') {
+			this.errorListener = listener;
+		}
+	}
+
+	kill(): void {
+		this.killed += 1;
+	}
+}
+
 describe('parseSshNgStoreUri', () => {
 	it.each([
 		{
@@ -248,6 +280,23 @@ describe('createSshNixDaemonConnector', () => {
 		await expect(client.queryPathInfo(appPath)).rejects.toBeInstanceOf(
 			NixDaemonRemoteError
 		);
+	});
+
+	it('settles cleanup and surfaces the spawn error when the child cannot start', async () => {
+		const spawnError = new Error('spawn failed');
+		const children: UnspawnableSshChild[] = [];
+		const run: SshCommandRunner = () => {
+			const child = new UnspawnableSshChild(spawnError);
+			children.push(child);
+
+			return child;
+		};
+		const client = new NixDaemonStoreClient({
+			connect: createSshNixDaemonConnector({ destination: 'example.test' }, run)
+		});
+
+		await expect(client.queryPathInfo(appPath)).rejects.toBe(spawnError);
+		expect(children.map((child) => child.killed)).toStrictEqual([1]);
 	});
 
 	it('kills the child when the connection closes', async () => {

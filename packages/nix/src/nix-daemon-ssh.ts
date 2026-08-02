@@ -97,13 +97,16 @@ class SshNixDaemonTransport implements NixDaemonTransport {
 
 	constructor(private readonly child: SshDaemonProcess) {
 		this.reader = new ByteStreamReader(child.stdout);
-		// A spawn failure surfaces on the child, never on its stdout, so it is
-		// forwarded to settle any read waiting on bytes.
-		child.once('error', (error) => {
-			this.reader.fail(error);
-		});
 		this.exited = new Promise((resolve) => {
 			child.once('exit', () => {
+				resolve();
+			});
+			// A spawn failure surfaces on the child, never on its stdout, and a
+			// child that never spawned emits no exit. The error therefore
+			// settles both any read waiting on bytes and the promise close()
+			// awaits.
+			child.once('error', (error) => {
+				this.reader.fail(error);
 				resolve();
 			});
 		});
