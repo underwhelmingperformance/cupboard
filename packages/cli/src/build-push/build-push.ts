@@ -169,9 +169,10 @@ export function childExitCode(exit: ChildExit): number {
  * Runs the supplied build command under streaming publication and settles the
  * run: preflight, the invocation runtime endpoint and hook script, the child
  * with its composed environment, the batcher consuming hook events while the
- * build runs, then drain, reconciliation, the receipt, and the numeric exit
- * contract. A failed build exits with the child's own status; a successful
- * build with failed publication or retention exits with a classified sysexits
+ * build runs, then the quiesced hook endpoint, the drained uploads,
+ * reconciliation, the receipt, and the numeric exit contract. A failed build
+ * exits with the child's own status; a successful build with failed
+ * publication or retention exits with a classified sysexits
  * code, never a bare 1, so a cache failure can never present as a build
  * failure or vice versa. A settled run resolves to its reconciled receipt, so
  * a cohort sequence can aggregate the receipts it ran.
@@ -236,6 +237,13 @@ export async function runBuildPush(
 		const { exit, attempts } = await reporter.phase(buildPushPhases.build, () =>
 			runInvocation(options.invocation, environment, plan, dependencies)
 		);
+
+		// Every helper has connected by the time the child exits, though its
+		// message may still be undelivered. Quiescing the endpoint first makes
+		// the accepted set complete, so every event the batcher uploads is
+		// also reconciled, retained and receipted.
+		await listener.drain();
+
 		const accepted = listener.accepted;
 		const eventPaths = orderedUnique(
 			accepted.flatMap((event) => event.outputPaths)

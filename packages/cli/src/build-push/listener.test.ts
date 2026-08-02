@@ -1,9 +1,10 @@
+import { spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, rm, stat } from 'node:fs/promises';
 import { createConnection } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { platform } from 'node:process';
+import process, { platform } from 'node:process';
 
 import { storeDirectorySchema } from '@cupboard/nix-store/scalars';
 import type { ParsedBuildEvent } from '@cupboard/protocol/build';
@@ -47,7 +48,7 @@ afterEach(async () => {
 	);
 });
 
-async function startListener() {
+async function startListener(options: { drainTimeoutMs?: number } = {}) {
 	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-hook-'));
 	directories.push(directory);
 
@@ -59,6 +60,9 @@ async function startListener() {
 	const listener = await BuildEventListener.listen({
 		socketPath,
 		storeDirectory,
+		...(options.drainTimeoutMs !== undefined && {
+			drainTimeoutMs: options.drainTimeoutMs
+		}),
 		onEvent: (event) => {
 			events.push(event);
 			notify?.();
@@ -83,6 +87,24 @@ async function startListener() {
 	};
 
 	return { listener, socketPath, events, rejections, settledCount };
+}
+
+// A helper standing in for the hook's: it connects, writes one message and
+// exits as soon as the bytes have left it. Run synchronously, it completes
+// while the listener's event loop is blocked, so its connection is still
+// queued on the listening socket when the run comes to drain.
+const helperScript = [
+	"const net = require('net');",
+	'const [socketPath, line] = process.argv.slice(1);',
+	'const socket = net.connect(socketPath, () => {',
+	"\tsocket.write(line + '\\n', () => process.exit(0));",
+	'});',
+	"socket.on('error', () => process.exit(1));"
+].join('\n');
+
+function runHelper(socketPath: string, payload: string): number | null {
+	return spawnSync(process.execPath, ['-e', helperScript, socketPath, payload])
+		.status;
 }
 
 function send(socketPath: string, payload: string): Promise<void> {
@@ -225,6 +247,105 @@ describe('BuildEventListener', () => {
 				})
 			],
 			rejections: []
+		});
+	});
+
+	describe('drain', () => {
+		it('includes an event whose message lands after drain begins', async () => {
+			const harness = await startListener();
+			const event = buildEvent();
+			const client = createConnection(harness.socketPath);
+			await once(client, 'connect');
+
+			const drained = harness.listener.drain();
+			setTimeout(() => {
+				client.end(`${JSON.stringify(event)}\n`);
+			}, 10);
+			await drained;
+
+			expect({
+				events: harness.events,
+				rejections: harness.rejections,
+				accepted: [...harness.listener.accepted]
+			}).toStrictEqual({
+				events: [event],
+				rejections: [],
+				accepted: [event]
+			});
+		});
+
+		it('accepts a connection queued while the listener was blocked', async () => {
+			const harness = await startListener();
+			const event = buildEvent();
+			const status = runHelper(harness.socketPath, JSON.stringify(event));
+
+			await harness.listener.drain();
+
+			expect({
+				status,
+				events: harness.events,
+				rejections: harness.rejections,
+				accepted: [...harness.listener.accepted]
+			}).toStrictEqual({
+				status: 0,
+				events: [event],
+				rejections: [],
+				accepted: [event]
+			});
+		});
+
+		it('resolves when no connection is pending', async () => {
+			const harness = await startListener();
+
+			await harness.listener.drain();
+
+			expect({
+				events: harness.events,
+				rejections: harness.rejections
+			}).toStrictEqual({ events: [], rejections: [] });
+		});
+
+		it('cuts off a connection that never settles once the timeout elapses', async () => {
+			const harness = await startListener({ drainTimeoutMs: 50 });
+			const client = createConnection(harness.socketPath);
+			client.on('error', () => {
+				return;
+			});
+			await once(client, 'connect');
+			client.write(JSON.stringify(buildEvent()).slice(0, 5));
+			const closed = once(client, 'close');
+
+			await harness.listener.drain();
+			await closed;
+
+			expect({
+				events: harness.events,
+				rejections: harness.rejections
+			}).toStrictEqual({ events: [], rejections: [] });
+		});
+
+		it('refuses a connection arriving after drain', async () => {
+			const harness = await startListener();
+
+			await harness.listener.drain();
+
+			const client = createConnection(harness.socketPath, () => {
+				client.write(`${JSON.stringify(buildEvent())}\n`);
+			});
+			client.on('error', () => {
+				return;
+			});
+			await new Promise<void>((resolve) => {
+				client.on('close', () => {
+					resolve();
+				});
+			});
+
+			expect({
+				events: harness.events,
+				rejections: harness.rejections,
+				accepted: [...harness.listener.accepted]
+			}).toStrictEqual({ events: [], rejections: [], accepted: [] });
 		});
 	});
 });

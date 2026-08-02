@@ -16,11 +16,32 @@ import {
 
 const newlineByte = 0x0a;
 
+// The hook helper abandons a transfer after three seconds of inactivity, so a
+// connection still unsettled this long after the child exits has no writer
+// left behind it.
+const defaultDrainTimeoutMs = 3000;
+
+// Resolves with a poll phase behind it: the timer turn runs before the event
+// loop polls again, and the immediate that turn schedules runs after it, so
+// every connection already queued on a listening socket has been accepted by
+// the time the promise settles.
+function afterNextPoll(): Promise<void> {
+	return new Promise((resolve) => {
+		setTimeout(() => {
+			setImmediate(() => {
+				resolve();
+			});
+		}, 0);
+	});
+}
+
 export interface BuildEventListenerOptions {
 	readonly socketPath: string;
 	readonly storeDirectory: StoreDirectory;
 	readonly onEvent: (event: ParsedBuildEvent) => void;
 	readonly onRejected: (error: BuildEventRejectedError) => void;
+	/** Bounds the drain wait on a connection that never settles. */
+	readonly drainTimeoutMs?: number;
 }
 
 /**
@@ -42,7 +63,10 @@ export class BuildEventListener {
 	}
 
 	private readonly acceptedEvents: ParsedBuildEvent[] = [];
+	private readonly unsettledSockets = new Set<Socket>();
 	private readonly server: Server;
+	private draining = false;
+	private notifySettled: (() => void) | undefined;
 
 	private constructor(private readonly options: BuildEventListenerOptions) {
 		this.server = createServer((socket) => {
@@ -65,13 +89,35 @@ export class BuildEventListener {
 	}
 
 	private handleConnection(socket: Socket): void {
+		if (this.draining) {
+			socket.destroy();
+			return;
+		}
+
+		this.unsettledSockets.add(socket);
+
 		const chunks: Buffer[] = [];
 		let isSettled = false;
+		const settle = (): void => {
+			isSettled = true;
+			this.unsettledSockets.delete(socket);
+			this.notifySettled?.();
+		};
 
 		// A torn connection is a delivery failure the hook has already warned
 		// about; the connection is dropped and the listener stays up.
 		socket.on('error', () => {
 			socket.destroy();
+		});
+
+		// Destruction is terminal however it comes about, so the close event
+		// settles any connection nothing else has.
+		socket.on('close', () => {
+			if (isSettled) {
+				return;
+			}
+
+			settle();
 		});
 
 		socket.on('data', (chunk: string | Buffer) => {
@@ -87,9 +133,9 @@ export class BuildEventListener {
 				return;
 			}
 
-			isSettled = true;
 			this.accept(buffered.subarray(0, newline).toString('utf8'));
 			socket.end();
+			settle();
 		});
 
 		socket.on('end', () => {
@@ -97,7 +143,7 @@ export class BuildEventListener {
 				return;
 			}
 
-			isSettled = true;
+			settle();
 			this.options.onRejected(new BuildEventMalformedError('missing-line'));
 		});
 	}
@@ -139,6 +185,44 @@ export class BuildEventListener {
 
 	get accepted(): readonly ParsedBuildEvent[] {
 		return this.acceptedEvents;
+	}
+
+	/**
+	 * Quiesces the endpoint: refuses connections arriving from here on and
+	 * resolves once every accepted connection has reached its terminal state,
+	 * with its message recorded, its rejection reported, or the connection
+	 * closed. A connection that never settles is destroyed once the drain
+	 * timeout elapses, so the wait is always bounded. After drain resolves the
+	 * accepted set is complete.
+	 */
+	async drain(): Promise<void> {
+		// A helper that connected before this call may still be waiting for its
+		// connection to be dispatched, so the queued arrivals are accepted
+		// before the endpoint starts refusing them.
+		await afterNextPoll();
+
+		this.draining = true;
+
+		if (this.unsettledSockets.size === 0) {
+			return;
+		}
+
+		const deadline = setTimeout(() => {
+			for (const socket of this.unsettledSockets) {
+				socket.destroy();
+			}
+		}, this.options.drainTimeoutMs ?? defaultDrainTimeoutMs);
+
+		try {
+			while (this.unsettledSockets.size > 0) {
+				await new Promise<void>((resolve) => {
+					this.notifySettled = resolve;
+				});
+			}
+		} finally {
+			this.notifySettled = undefined;
+			clearTimeout(deadline);
+		}
 	}
 
 	async close(): Promise<void> {
