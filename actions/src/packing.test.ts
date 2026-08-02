@@ -164,6 +164,52 @@ describe('packCohorts', () => {
 		).toStrictEqual([['.#a'], ['.#b']]);
 	});
 
+	it.each([
+		{
+			name: 'both tolerate failure',
+			first: true,
+			second: true,
+			packed: [['.#a', '.#b']]
+		},
+		{
+			name: 'both are required',
+			first: false,
+			second: false,
+			packed: [['.#a', '.#b']]
+		},
+		{
+			name: 'one tolerates failure and the other is required',
+			first: true,
+			second: false,
+			packed: [['.#a'], ['.#b']]
+		}
+	])(
+		'packs two priced cohorts into one job when $name: $packed',
+		({ first, second, packed }) => {
+			const result = packCohorts({
+				enabled: true,
+				cohorts: [
+					singleton('.#a', { targets: [target('.#a', { bestEffort: first })] }),
+					singleton('.#b', { targets: [target('.#b', { bestEffort: second })] })
+				],
+				measurements: measurements([
+					['.#a', 10],
+					['.#b', 10]
+				]),
+				capacity: 1000,
+				headroom: { absoluteMinimum: 0, fraction: 0 }
+			});
+
+			expect(
+				result?.cohorts
+					.map((cohort) => cohort.targets.map((entry) => entry.attr))
+					.toSorted((left, right) =>
+						left.join(',').localeCompare(right.join(','))
+					)
+			).toStrictEqual(packed);
+		}
+	);
+
 	it('carries every emitted cohort’s own measured size, structurally', () => {
 		const explicit = singleton('.#group-a', {
 			key: 'cohort-group',
