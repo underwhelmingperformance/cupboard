@@ -369,6 +369,9 @@ jobs:
     runs-on: ${{ matrix.runsOn }}
     # A hung leg must not burn the 360-minute default.
     timeout-minutes: 180
+    # A cohort is best-effort only when every one of its targets is, so a
+    # cohort holding a required target still fails the run.
+    continue-on-error: ${{ matrix.bestEffort }}
     permissions:
       attestations: write # record build provenance on the repository
       contents: read # check out the flake source

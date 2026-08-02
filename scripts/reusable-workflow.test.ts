@@ -134,6 +134,23 @@ describe('cupboard flake publish cohort job', () => {
 		});
 	});
 
+	it("tolerates a best-effort cohort's failure without failing the run", async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+		const lines = contents.split('\n');
+		const cohortJob = lines.indexOf('  cohort:');
+		const nextJob = lines.findIndex(
+			(line, index) =>
+				index > cohortJob && /^ {2}\S/u.test(line) && line.endsWith(':')
+		);
+
+		expect(
+			lines
+				.slice(cohortJob, nextJob === -1 ? undefined : nextJob)
+				.map((line) => line.trim())
+				.filter((line) => line.startsWith('continue-on-error:'))
+		).toStrictEqual(['continue-on-error: ${{ matrix.bestEffort }}']);
+	});
+
 	it('carries no artifact upload or download steps', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 
