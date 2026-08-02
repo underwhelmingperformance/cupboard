@@ -165,6 +165,17 @@ export function childExitCode(exit: ChildExit): number {
 	return genericExitCode;
 }
 
+// The failure a child that did not succeed ends the run with, carrying its own
+// status or the signal that killed it. Every site that ends a run on a child
+// raises this one, so the numeric contract has a single statement.
+function childFailure(exit: ChildExit): BuildCommandFailedError {
+	return new BuildCommandFailedError(
+		exit.status,
+		exit.signal,
+		childExitCode(exit)
+	);
+}
+
 /**
  * Runs the supplied build command under streaming publication and settles the
  * run: preflight, the invocation runtime endpoint and hook script, the child
@@ -405,11 +416,7 @@ async function attributeSubjects(
 		});
 
 		if (verification.status !== 0) {
-			throw new BuildCommandFailedError(
-				verification.status,
-				verification.signal,
-				childExitCode(verification)
-			);
+			throw childFailure(verification);
 		}
 	}
 
@@ -429,9 +436,9 @@ interface RunFacts {
 }
 
 // The phases after the child exits: drain, reconcile, receipt, exit contract.
-// Once the build has ended, any loss here is a publication loss, so an escape
-// that carries no classified code is re-raised under the publication contract
-// and never as a bare 1.
+// A failed build ends under its own status; behind a build that succeeded, an
+// escape carrying no classified code is a publication loss, re-raised under
+// the publication contract and never as a bare 1.
 async function settleRun(
 	options: BuildPushRunOptions,
 	reporter: Reporter,
@@ -539,6 +546,13 @@ async function settleRun(
 			throw error;
 		}
 
+		// The sysexits codes classify a publication failure behind a build that
+		// succeeded, so a failed build carries its own status out of a failed
+		// settlement.
+		if (exit.status !== 0) {
+			throw childFailure(exit);
+		}
+
 		throw new BuildPublicationFailedError(
 			[],
 			publicationFailureExitCode([error]),
@@ -620,11 +634,7 @@ function reportSummary(
 // failure causes is re-raised as the abort so the run exits 130.
 function raiseExitContract(exit: ChildExit, result: ReconcileResult): void {
 	if (exit.status !== 0) {
-		throw new BuildCommandFailedError(
-			exit.status,
-			exit.signal,
-			childExitCode(exit)
-		);
+		throw childFailure(exit);
 	}
 
 	if (result.failures.length === 0) {
