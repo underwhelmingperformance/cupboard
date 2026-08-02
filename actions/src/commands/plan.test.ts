@@ -12,6 +12,7 @@ import type { ParsedBuildReceipt } from '@cupboard/protocol/build';
 import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import type { Reporter } from '@cupboard/reporter';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import {
 	ComponentRootTargetLimitError,
@@ -60,6 +61,47 @@ const target = {
 	remote: true,
 	rootSuffix: 'x86_64-linux/app'
 };
+
+const secondTarget = {
+	...target,
+	attr: '.#packages.x86_64-linux.app-b',
+	rootDrvPath: storePath(`/nix/store/${'3'.repeat(32)}-app-b.drv`),
+	rootSuffix: 'x86_64-linux/app-b'
+};
+
+const cohortToleranceEntrySchema = z.object({
+	attrs: z.array(z.string()),
+	bestEffort: z.boolean()
+});
+const cohortToleranceSchema = z.object({
+	include: z.array(cohortToleranceEntrySchema)
+});
+
+// Each emitted cohort's members and the tolerance the job spends as its
+// continue-on-error, ordered by the members themselves so the assertion does
+// not depend on the key digests cohort ordering runs on.
+async function cohortMatrixTolerance(
+	outputFile: string
+): Promise<readonly { attrs: readonly string[]; bestEffort: boolean }[]> {
+	const outputs = await readFile(outputFile, 'utf8');
+	const line = outputs
+		.split('\n')
+		.find((candidate) => candidate.startsWith('cohort-matrix='));
+
+	if (line === undefined) {
+		throw new Error('no cohort-matrix output line was recorded');
+	}
+
+	const parsed = cohortToleranceSchema.parse(
+		JSON.parse(line.slice('cohort-matrix='.length))
+	);
+
+	return parsed.include
+		.map((entry) => ({ attrs: entry.attrs, bestEffort: entry.bestEffort }))
+		.toSorted((left, right) =>
+			left.attrs.join(',').localeCompare(right.attrs.join(','))
+		);
+}
 
 const baseOptions: PlanOptions = {
 	targets: JSON.stringify([target]),
@@ -116,12 +158,63 @@ describe('planAction', () => {
 				`plan-file=${path.join(directory, 'cupboard-publish-plan.json')}\n` +
 				'plan-artifact-name=cupboard-publish-plan-test\n' +
 				'target-matrix={"include":[{"attr":".#packages.x86_64-linux.app","system":"x86_64-linux","os":"ubuntu-latest","remote":true,"bestEffort":false,"rootSuffix":"x86_64-linux/app","outputs":["out"],"root":"github:owner/repo/main/x86_64-linux/app","runsOn":"ubuntu-latest"}]}\n' +
-				'cohort-matrix={"include":[{"key":"cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe","attrs":[".#packages.x86_64-linux.app"],"installables":[".#packages.x86_64-linux.app^out"],"queryInstallables":[null],"expectedPaths":[null],"system":"x86_64-linux","os":"ubuntu-latest","remote":true,"runsOn":"ubuntu-latest","roots":["github:owner/repo/main/x86_64-linux/app"]}]}\n' +
+				'cohort-matrix={"include":[{"key":"cohort-x86_64-linux-ubuntu-latest-remote-5de0c136a0cc5dfe","attrs":[".#packages.x86_64-linux.app"],"installables":[".#packages.x86_64-linux.app^out"],"queryInstallables":[null],"expectedPaths":[null],"system":"x86_64-linux","os":"ubuntu-latest","remote":true,"bestEffort":false,"runsOn":"ubuntu-latest","roots":["github:owner/repo/main/x86_64-linux/app"]}]}\n' +
 				'cohort-count=1\n' +
 				'retained-count=0\n' +
 				'target-count=1\n'
 		});
 	});
+
+	it.each([
+		{
+			name: 'a manifest of best-effort targets',
+			targets: [
+				{ ...target, bestEffort: true },
+				{ ...secondTarget, bestEffort: true }
+			],
+			expected: [
+				{ attrs: [target.attr], bestEffort: true },
+				{ attrs: [secondTarget.attr], bestEffort: true }
+			]
+		},
+		{
+			name: 'a manifest that declares no tolerance at all',
+			targets: [target, secondTarget],
+			expected: [
+				{ attrs: [target.attr], bestEffort: false },
+				{ attrs: [secondTarget.attr], bestEffort: false }
+			]
+		},
+		{
+			name: 'a shared cohort mixing a best-effort target with a required one',
+			targets: [
+				{ ...target, bestEffort: true, cohort: 'group-a' },
+				{ ...secondTarget, bestEffort: false, cohort: 'group-a' }
+			],
+			expected: [{ attrs: [target.attr, secondTarget.attr], bestEffort: false }]
+		}
+	])(
+		'carries the cohort tolerance into the matrix for $name',
+		async ({ targets, expected }) => {
+			const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+			const output = path.join(directory, 'output');
+
+			await planAction(
+				{ ...baseOptions, targets: JSON.stringify(targets) },
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_RUN_ID: '12345',
+					GITHUB_OUTPUT: output
+				},
+				undefined,
+				{ createArtifactName: () => 'cupboard-publish-plan-test' }
+			);
+
+			expect(
+				await cohortMatrixTolerance(path.join(directory, 'output'))
+			).toStrictEqual(expected);
+		}
+	);
 
 	it('rejects an invalid optimisation input', async () => {
 		await expect(
@@ -1298,7 +1391,7 @@ describe('cohort-matrix output', () => {
 				'"installables":[".#packages.x86_64-linux.app^out"],' +
 				`"queryInstallables":["${targetRootDrvPath}^out"],` +
 				`"expectedPaths":["${appStorePath}"],` +
-				'"system":"x86_64-linux","os":"ubuntu-latest","remote":true,"runsOn":"ubuntu-latest",' +
+				'"system":"x86_64-linux","os":"ubuntu-latest","remote":true,"bestEffort":false,"runsOn":"ubuntu-latest",' +
 				'"roots":["github:owner/repo/main/x86_64-linux/app"]}]}\n'
 		);
 		expect(outputs).toContain('cohort-count=1\n');
