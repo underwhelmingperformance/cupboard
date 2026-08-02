@@ -234,6 +234,10 @@ export interface BuildCohortInputs {
 	readonly referencePathsFile: string;
 	readonly leftUpstreamFile: string;
 	readonly countsFile: string;
+	// Where the build's out-links live. They root the targets' reference
+	// closures for as long as the directory stands, so the job that owns it
+	// decides when those paths become collectable again.
+	readonly outLinkDirectory: string;
 }
 
 export function resolveBuildCohortInputs(
@@ -354,7 +358,11 @@ export function resolveBuildCohortInputs(
 			'left-upstream.json',
 			options.leftUpstreamFile
 		),
-		countsFile: outputPath('counts.json', options.countsFile)
+		countsFile: outputPath('counts.json', options.countsFile),
+		outLinkDirectory: path.join(
+			runnerTemporary,
+			`cupboard-out-links-${cohort.data.key}`
+		)
 	};
 }
 
@@ -499,7 +507,12 @@ export async function buildCohortAction(
 	const built =
 		buildInstallables.length === 0
 			? []
-			: await runNix(buildInstallables, inputs.maxJobs, inputs.store);
+			: await runNix(
+					buildInstallables,
+					inputs.maxJobs,
+					inputs.store,
+					inputs.outLinkDirectory
+				);
 
 	// Every path a plain, single-invocation `nix build` prints belongs to one
 	// of this cohort's own requested installables: there is nothing else it
@@ -560,6 +573,7 @@ export async function buildCohortAction(
 	await setOutput(environment, 'left-upstream-file', inputs.leftUpstreamFile);
 	await setOutput(environment, 'counts-file', inputs.countsFile);
 	await setOutput(environment, 'receipt-file', receiptFile);
+	await setOutput(environment, 'out-link-directory', inputs.outLinkDirectory);
 }
 
 /**
@@ -995,22 +1009,30 @@ function planCohortResult(
 
 /**
  * Runs `nix build --keep-going` over the given installables, out-links kept
- * in the job workspace (no `--no-link`): the out-link protects the built
+ * under a directory this invocation owns: the out-link protects the built
  * closure until the subsequent push reads it, per the interim workflow's
- * collection-window design. A cohort with one failing derivation still
- * reports whatever `--print-out-paths` prints for the survivors; only a
- * catastrophic failure that printed nothing at all is treated as this
- * command's own failure. A configured remote store owns the build:
- * `--store` sends the results there while `--eval-store auto` keeps
+ * collection-window design, and naming the directory gives the job one place
+ * to remove when it is done with those paths. A cohort with one failing
+ * derivation still reports whatever `--print-out-paths` prints for the
+ * survivors; only a catastrophic failure that printed nothing at all is
+ * treated as this command's own failure. A configured remote store owns the
+ * build: `--store` sends the results there while `--eval-store auto` keeps
  * evaluation on the runner, so the built closure never enters the runner's
  * local store.
  */
 export function nixBuildArguments(
 	installables: readonly string[],
 	maxJobs: string,
-	store: string
+	store: string,
+	outLinkDirectory: string
 ): readonly string[] {
-	const arguments_ = ['build', '--keep-going', '--print-out-paths'];
+	const arguments_ = [
+		'build',
+		'--keep-going',
+		'--print-out-paths',
+		'--out-link',
+		path.join(outLinkDirectory, 'result')
+	];
 
 	if (maxJobs !== '') {
 		arguments_.push('--max-jobs', maxJobs);
@@ -1028,9 +1050,17 @@ export function nixBuildArguments(
 export async function runNixBuild(
 	installables: readonly string[],
 	maxJobs: string,
-	store: string
+	store: string,
+	outLinkDirectory: string
 ): Promise<readonly string[]> {
-	const arguments_ = nixBuildArguments(installables, maxJobs, store);
+	await mkdir(outLinkDirectory, { recursive: true });
+
+	const arguments_ = nixBuildArguments(
+		installables,
+		maxJobs,
+		store,
+		outLinkDirectory
+	);
 
 	const { status, stdout } = await new Promise<{
 		readonly status: number | null;

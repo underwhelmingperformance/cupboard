@@ -104,6 +104,12 @@ outputs:
       actions/attest. Empty when the cohort did not stream a build (push
       disabled, a remote store, or nothing to build).
     value: ${{ steps.build-cohort.outputs.receipt-file }}
+  out-link-directory:
+    description: >-
+      Directory holding the build's out-links. They root the cohort's target
+      closures, so a job removes this directory once nothing further reads those
+      paths from the local store.
+    value: ${{ steps.build-cohort.outputs.out-link-directory }}
 runs:
   using: composite
   steps:
