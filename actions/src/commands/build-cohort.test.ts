@@ -73,6 +73,15 @@ function cohortJson(overrides: Record<string, unknown> = {}): string {
 	return JSON.stringify(cohortObject(overrides));
 }
 
+// Where the cohort's out-links land under a given RUNNER_TEMP: the job
+// removes exactly this directory to make the built closure collectable.
+function outLinkDirectory(runnerTemporary: string): string {
+	return path.join(
+		runnerTemporary,
+		'cupboard-out-links-cohort-x86_64-linux-ubuntu-latest-remote-abc123'
+	);
+}
+
 function baseOptions(): BuildCohortOptions {
 	return {
 		cohortJson: cohortJson(),
@@ -189,11 +198,17 @@ describe('resolveBuildCohortInputs', () => {
 });
 
 describe('nixBuildArguments', () => {
-	it('runs keep-going with print-out-paths and no --no-link', () => {
-		expect(nixBuildArguments(['.#a^out', '.#b^out'], '', '')).toStrictEqual([
+	const outLinks = '/tmp/cupboard-out-links-cohort';
+
+	it('keeps the out-links in the directory it is given, with no --no-link', () => {
+		expect(
+			nixBuildArguments(['.#a^out', '.#b^out'], '', '', outLinks)
+		).toStrictEqual([
 			'build',
 			'--keep-going',
 			'--print-out-paths',
+			'--out-link',
+			'/tmp/cupboard-out-links-cohort/result',
 			'--',
 			'.#a^out',
 			'.#b^out'
@@ -201,10 +216,12 @@ describe('nixBuildArguments', () => {
 	});
 
 	it('carries an explicit max-jobs through', () => {
-		expect(nixBuildArguments(['.#a^out'], '4', '')).toStrictEqual([
+		expect(nixBuildArguments(['.#a^out'], '4', '', outLinks)).toStrictEqual([
 			'build',
 			'--keep-going',
 			'--print-out-paths',
+			'--out-link',
+			'/tmp/cupboard-out-links-cohort/result',
 			'--max-jobs',
 			'4',
 			'--',
@@ -214,11 +231,18 @@ describe('nixBuildArguments', () => {
 
 	it('builds into the remote store while evaluating on the runner', () => {
 		expect(
-			nixBuildArguments(['.#a^out'], '', 'ssh-ng://build@example.test')
+			nixBuildArguments(
+				['.#a^out'],
+				'',
+				'ssh-ng://build@example.test',
+				outLinks
+			)
 		).toStrictEqual([
 			'build',
 			'--keep-going',
 			'--print-out-paths',
+			'--out-link',
+			'/tmp/cupboard-out-links-cohort/result',
 			'--store',
 			'ssh-ng://build@example.test',
 			'--eval-store',
@@ -337,7 +361,8 @@ describe('buildCohortAction', () => {
 		expect(runNixBuild).toHaveBeenCalledExactlyOnceWith(
 			[libraryQueryInstallable, '.#packages.x86_64-linux.floating^out'],
 			'',
-			''
+			'',
+			outLinkDirectory(directory)
 		);
 
 		const inputs = resolveBuildCohortInputs(baseOptions(), environment);
@@ -431,7 +456,8 @@ describe('buildCohortAction', () => {
 		expect(runNixBuild).toHaveBeenCalledExactlyOnceWith(
 			[libraryQueryInstallable, '.#packages.x86_64-linux.floating^out'],
 			'',
-			buildStore
+			buildStore,
+			outLinkDirectory(directory)
 		);
 
 		const inputs = resolveBuildCohortInputs(options, environment);
@@ -474,7 +500,8 @@ describe('buildCohortAction', () => {
 				'.#packages.x86_64-linux.floating^out'
 			],
 			'',
-			''
+			'',
+			outLinkDirectory(directory)
 		);
 	});
 
@@ -752,6 +779,28 @@ describe('buildCohortAction publication', () => {
 		};
 	}
 
+	// The job removes this directory to release the built closure once nothing
+	// further reads those paths, so the action has to name it.
+	it('reports the directory holding the out-links that root its targets', async () => {
+		const outputFile = path.join(directory, 'github-output');
+		const runNixBuild = vi.fn(() => Promise.resolve([libraryBuiltPath]));
+
+		await buildCohortAction(baseOptions(), environment, {
+			runCupboard: vi.fn<typeof runCupboard>(() =>
+				Promise.resolve(planCohortSuccess())
+			),
+			runNixBuild
+		});
+
+		const outputs = await readFile(outputFile, 'utf8');
+
+		expect(
+			outputs
+				.split('\n')
+				.filter((line) => line.startsWith('out-link-directory='))
+		).toStrictEqual([`out-link-directory=${outLinkDirectory(directory)}`]);
+	});
+
 	it('streams the build through build-push, then sets each root with one push per group', async () => {
 		const runRoot = 'github:owner/repo/_cupboard-run/1';
 		const run = await runPublicationFlow({
@@ -864,7 +913,8 @@ describe('buildCohortAction publication', () => {
 				[
 					[libraryQueryInstallable, '.#packages.x86_64-linux.floating^out'],
 					'0',
-					''
+					'',
+					outLinkDirectory(directory)
 				]
 			],
 			receiptLine: `receipt-file=${receiptFile}`
@@ -953,7 +1003,8 @@ describe('buildCohortAction publication', () => {
 				[
 					[libraryQueryInstallable, '.#packages.x86_64-linux.floating^out'],
 					'',
-					'ssh-ng://build@example.test'
+					'ssh-ng://build@example.test',
+					outLinkDirectory(directory)
 				]
 			],
 			receiptLine: 'receipt-file='

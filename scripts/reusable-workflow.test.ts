@@ -258,6 +258,41 @@ describe('cupboard flake publish cohort job', () => {
 	});
 });
 
+describe('cupboard cohort collection boundary', () => {
+	it('collects the local store after the cohort has published and attested', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+		const lines = contents.split('\n');
+		const collect = lines.indexOf('      - name: Collect the local store');
+		const attach = lines.indexOf(
+			'      - uses: ./.cupboard/actions/attest-attach'
+		);
+		const step = lines.slice(collect).map((line) => line.trim());
+		const releases = step.indexOf('rm -rf -- "${OUT_LINK_DIRECTORY}"');
+		const sweeps = step.indexOf('if ! nix store gc; then');
+
+		expect({
+			followsTheAttachStep: attach !== -1 && collect > attach,
+			gatedOnTheInput: step.includes(
+				'if: ${{ !cancelled() && inputs.gc-between-cohorts }}'
+			),
+			takesTheOutLinksFromBuildCohort: step.includes(
+				'${{ steps.build-cohort.outputs.out-link-directory }}'
+			),
+			releasesTheOutLinksBeforeSweeping:
+				releases !== -1 && sweeps !== -1 && releases < sweeps,
+			warnsWithoutFailingTheJob: step.some((line) =>
+				line.startsWith("echo '::warning::nix store gc failed")
+			)
+		}).toStrictEqual({
+			followsTheAttachStep: true,
+			gatedOnTheInput: true,
+			takesTheOutLinksFromBuildCohort: true,
+			releasesTheOutLinksBeforeSweeping: true,
+			warnsWithoutFailingTheJob: true
+		});
+	});
+});
+
 describe('cupboard build provenance', () => {
 	it('feeds every bundled attest action a current-run build receipt', async () => {
 		const workflows = await Promise.all(

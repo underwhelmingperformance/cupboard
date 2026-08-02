@@ -96,9 +96,12 @@ on:
         type: boolean
       gc-between-cohorts:
         description:
-          Collect the local Nix store between build-push cohorts, so a later
-          cohort substitutes the earlier shared work from the cache. Off by
-          default; the run never deletes user store paths unless opted in.
+          Release the build's out-links and collect the local Nix store once a
+          cohort job has published and attested its work, so a later cohort job
+          sharing the runner substitutes both the cohort's own outputs and its
+          shared dependencies from the cache. Off by default; the run never
+          deletes user store paths unless opted in, and only dead paths are ever
+          swept.
         required: false
         default: false
         type: boolean
@@ -462,3 +465,27 @@ jobs:
           cache: ${{ needs.configure.outputs.cache }}
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           bundle: ${{ steps.attest.outputs.bundle-path }}
+
+      # The cohort job is where a run of one cohort per job crosses a
+      # collection boundary. Every root has been set on the destination and
+      # the attestation steps have taken their last reading of this store, so
+      # the build's out-links have done their work; removing the directory
+      # that holds them makes the cohort's own outputs collectable here, and a
+      # later cohort job sharing the runner substitutes them from the cache.
+      # `nix store gc` then sweeps dead paths alone, leaving a user's own gc
+      # roots standing, and a sweep that fails is reported without failing the
+      # job. The boundary runs after a failed cohort too, where the disk it
+      # reclaims is worth most.
+      - name: Collect the local store
+        if: ${{ !cancelled() && inputs.gc-between-cohorts }}
+        env:
+          OUT_LINK_DIRECTORY:
+            ${{ steps.build-cohort.outputs.out-link-directory }}
+        run: |
+          set -uo pipefail
+          if [ -n "${OUT_LINK_DIRECTORY}" ]; then
+            rm -rf -- "${OUT_LINK_DIRECTORY}"
+          fi
+          if ! nix store gc; then
+            echo '::warning::nix store gc failed; a later cohort job builds with the store as it stands'
+          fi
