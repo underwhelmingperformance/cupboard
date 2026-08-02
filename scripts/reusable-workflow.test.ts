@@ -170,6 +170,28 @@ describe('cupboard flake publish cohort job', () => {
 		});
 	});
 
+	it('threads the remote store into the cohort build', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+		const lines = contents.split('\n');
+		const [buildCohortStep] = actionSteps(
+			lines,
+			/^ {6}- uses: \.\/\.cupboard\/actions\/build-cohort$/u
+		);
+		const trimmed = (buildCohortStep ?? []).map((line) => line.trim());
+
+		expect({
+			storeWorkflowInput: contents.includes(
+				'      store:\n        description:'
+			),
+			storeThreadedIntoBuildCohort: trimmed.includes(
+				'store: ${{ inputs.store }}'
+			)
+		}).toStrictEqual({
+			storeWorkflowInput: true,
+			storeThreadedIntoBuildCohort: true
+		});
+	});
+
 	it('threads publication and the shared run root into build-cohort', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 

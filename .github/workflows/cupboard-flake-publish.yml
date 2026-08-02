@@ -121,6 +121,17 @@ on:
         required: false
         default: ''
         type: string
+      store:
+        description: >-
+          Remote ssh-ng store URI every cohort job runs against: the cohort's
+          plan partitions availability with the remote store's own answers, the
+          build realises its results there, and the push reads path metadata and
+          streams NAR bytes from the same store, so the built closure never
+          enters the runner's local store. Empty plans and builds in each
+          runner's own store.
+        required: false
+        default: ''
+        type: string
       plan-runner:
         description: >-
           Runner label for the configure and plan jobs. The plan job evaluates
@@ -411,6 +422,7 @@ jobs:
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
           max-jobs: ${{ matrix.remote && '0' || '' }}
+          store: ${{ inputs.store }}
           push: ${{ inputs.push }}
           gc-between-cohorts: ${{ inputs.gc-between-cohorts }}
           # Every cohort job in this run shares one root, so a later cohort
