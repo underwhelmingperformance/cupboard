@@ -52,6 +52,13 @@ inputs:
       Disk budget, in bytes, that measured cohort packing prices candidate
       groupings against. Required when enable-packing is true.
     required: false
+  store:
+    description: >-
+      Remote ssh-ng store URI the cohorts build against. The packing measurement
+      asks that store for the bytes it is missing, so a candidate grouping is
+      priced against the store the results land on. Empty prices against this
+      runner's own store.
+    required: false
 outputs:
   plan-file:
     description: Detailed plan consumed by the cohort jobs.
@@ -139,6 +146,7 @@ runs:
         OPTIMISE: ${{ inputs.optimise }}
         ENABLE_PACKING: ${{ inputs.enable-packing }}
         PACK_CAPACITY: ${{ inputs.pack-capacity }}
+        STORE: ${{ inputs.store }}
       run: |
         args=(plan
           --targets "$TARGETS"
@@ -152,7 +160,8 @@ runs:
           --audience "$AUDIENCE"
           --plan-file "$PLAN_FILE"
           --optimise "$OPTIMISE"
-          --enable-packing "$ENABLE_PACKING")
+          --enable-packing "$ENABLE_PACKING"
+          --store "$STORE")
         if [ -n "$PACK_CAPACITY" ]; then
           args+=(--pack-capacity "$PACK_CAPACITY")
         fi

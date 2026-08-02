@@ -127,8 +127,9 @@ on:
           plan partitions availability with the remote store's own answers, the
           build realises its results there, and the push reads path metadata and
           streams NAR bytes from the same store, so the built closure never
-          enters the runner's local store. Empty plans and builds in each
-          runner's own store.
+          enters the runner's local store. Measured cohort packing prices its
+          candidate groupings against the same store's answers. Empty plans and
+          builds in each runner's own store.
         required: false
         default: ''
         type: string
@@ -344,6 +345,7 @@ jobs:
           read-password: ${{ secrets.read_password }}
           enable-packing: ${{ inputs.enable-packing }}
           pack-capacity: ${{ inputs.pack-capacity }}
+          store: ${{ inputs.store }}
 
       - name: Summarise plan
         env:
