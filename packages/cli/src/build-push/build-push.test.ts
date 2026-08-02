@@ -237,6 +237,8 @@ interface FlowConfig {
 	readonly valid?: readonly StorePathString[];
 	readonly action?: UploadDecision['action'];
 	readonly uploadFailure?: Error;
+	/** Requests the receipt in a directory the run never creates. */
+	readonly unwritableReceipt?: boolean;
 	readonly options?: Partial<BuildPushRunOptions>;
 }
 
@@ -330,7 +332,10 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 
 	const runtimeDirectory = path.join(workspace, 'run');
 	const socketPath = path.join(runtimeDirectory, 'hook.sock');
-	const receiptFile = path.join(workspace, 'receipt.json');
+	const receiptFile =
+		config.unwritableReceipt === true
+			? path.join(workspace, 'absent', 'receipt.json')
+			: path.join(workspace, 'receipt.json');
 	const valid = new Set(config.valid);
 	const record: RecordedRun = { phases: [], results: [], warnings: [] };
 	const sleeps: number[] = [];
@@ -791,6 +796,21 @@ describe('runBuildPush', () => {
 				uploadFailure: new DaemonRequiredError('/run/daemon.sock')
 			},
 			expected: { type: BuildPublicationFailedError, exitCode: 69 }
+		},
+		{
+			name: 'an unwritable receipt after a successful build exits 74',
+			config: { emitEvent: true, valid: [pathA], unwritableReceipt: true },
+			expected: { type: BuildPublicationFailedError, exitCode: 74 }
+		},
+		{
+			name: 'a failed build keeps its status when settlement fails too',
+			config: {
+				emitEvent: true,
+				emitExitStatus: 3,
+				valid: [pathA],
+				unwritableReceipt: true
+			},
+			expected: { type: BuildCommandFailedError, exitCode: 3 }
 		},
 		{
 			name: 'an abort surfaces as the abort, reserving 130',
