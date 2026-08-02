@@ -144,6 +144,7 @@ export interface PlanOptions {
 	readonly previousReceiptFile?: string;
 	readonly enablePacking?: string;
 	readonly packCapacity?: string;
+	readonly store?: string;
 }
 
 export interface PlanInputs {
@@ -168,6 +169,11 @@ export interface PlanInputs {
 	// checked at input resolution so a manifest cannot enable packing without
 	// naming the budget it prices candidate groupings against.
 	readonly packCapacity: number;
+	// The remote ssh-ng store this run's cohorts build against, empty when
+	// each cohort builds in its runner's own store. The packing measurement
+	// asks whichever store the cohorts will realise their results on, so a
+	// grouping is priced against the bytes that store is actually missing.
+	readonly store: string;
 }
 
 /**
@@ -239,6 +245,10 @@ export function registerPlanCommand(
 		.option(
 			'--pack-capacity <bytes>',
 			'disk budget, in bytes, that measured cohort packing prices candidate groupings against'
+		)
+		.option(
+			'--store <uri>',
+			'remote ssh-ng store the cohorts build against, whose own answers price the packing measurement'
 		)
 		.action((options: PlanOptions) => planAction(options, environment));
 }
@@ -320,6 +330,7 @@ export function resolvePlanInputs(
 			path.join(temporaryDirectory, 'cupboard-publish-plan.json'),
 		enablePacking: isPackingEnabled,
 		packCapacity: resolvePackCapacity(isPackingEnabled, options.packCapacity),
+		store: provided(options.store) ?? '',
 		...(provided(options.previousReceiptFile) !== undefined && {
 			previousReceiptFile: provided(options.previousReceiptFile)
 		})
@@ -1095,11 +1106,11 @@ interface MeasurableTarget {
 
 /**
  * The production packing measurer: prices each surviving cohort target's own
- * substitutable NAR size by shelling to `cupboard plan measure` against this
- * runner's store, per target, exactly the store queries the cohort partition
- * itself asks. Best-effort by design: any failure yields no measurements at
- * all, packing then leaves every cohort exactly as the manifest declared it,
- * and the plan itself stays green.
+ * substitutable NAR size by shelling to `cupboard plan measure` against the
+ * store the cohorts build against, per target, exactly the store queries the
+ * cohort partition itself asks. Best-effort by design: any failure yields no
+ * measurements at all, packing then leaves every cohort exactly as the
+ * manifest declared it, and the plan itself stays green.
  */
 export function packingMeasurer(
 	inputs: PlanInputs,
@@ -1171,7 +1182,8 @@ async function measureTargetSizes(
 		'--targets-file',
 		targetsFile,
 		'--measure-file',
-		measureFile
+		measureFile,
+		...(inputs.store === '' ? [] : ['--store', inputs.store])
 	]);
 
 	return measureResponse(await readMeasureResults(resultFile));

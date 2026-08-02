@@ -727,6 +727,7 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 		temporaryDirectory: tmpdir(),
 		enablePacking: false,
 		packCapacity: 0,
+		store: '',
 		...overrides
 	};
 }
@@ -1555,65 +1556,76 @@ describe('packingMeasurer', () => {
 	const outPath = storePath(`/nix/store/${'1'.repeat(32)}-out`);
 	const developmentPath = storePath(`/nix/store/${'2'.repeat(32)}-dev`);
 
-	it('measures every evaluated cohort target and keys each NAR size by attr', async () => {
-		const first = evaluation('first', outPath);
-		const second = evaluation('second', developmentPath);
-		let recorded: string[] = [];
-		const runner: EnsureRunner = async (command, arguments_) => {
-			recorded = [command, ...arguments_];
-			await writeFile(
-				resultFileArgument(arguments_),
-				measureResultLine({
-					'.#first': { downloadSize: 10, narSize: 100 },
-					'.#second': { downloadSize: 20, narSize: 200 }
-				})
+	it.each([
+		{ name: "this runner's own store", store: '', storeArguments: [] },
+		{
+			name: 'the store the cohorts build against',
+			store: 'ssh-ng://builds.example',
+			storeArguments: ['--store', 'ssh-ng://builds.example']
+		}
+	])(
+		'measures every evaluated cohort target against $name and keys each NAR size by attr',
+		async ({ store, storeArguments }) => {
+			const first = evaluation('first', outPath);
+			const second = evaluation('second', developmentPath);
+			let recorded: string[] = [];
+			const runner: EnsureRunner = async (command, arguments_) => {
+				recorded = [command, ...arguments_];
+				await writeFile(
+					resultFileArgument(arguments_),
+					measureResultLine({
+						'.#first': { downloadSize: 10, narSize: 100 },
+						'.#second': { downloadSize: 20, narSize: 200 }
+					})
+				);
+
+				return { stdout: '', stderr: '' };
+			};
+			const measurer = packingMeasurer(
+				planInputs({ temporaryDirectory: directory, store }),
+				warningReporter([]),
+				runner
 			);
 
-			return { stdout: '', stderr: '' };
-		};
-		const measurer = packingMeasurer(
-			planInputs({ temporaryDirectory: directory }),
-			warningReporter([]),
-			runner
-		);
+			const measurements = await measurer(
+				[singleCohort([first]), singleCohort([second])],
+				[first, second]
+			);
 
-		const measurements = await measurer(
-			[singleCohort([first]), singleCohort([second])],
-			[first, second]
-		);
+			expect(measurements).toStrictEqual(
+				new Map([
+					['.#first', 100],
+					['.#second', 200]
+				])
+			);
+			expect(recorded).toStrictEqual([
+				'/unused/cupboard',
+				'--output-mode',
+				'github',
+				'--no-colour',
+				'--result-file',
+				resultFileArgument(recorded.slice(1)),
+				'plan',
+				'measure',
+				'--targets-file',
+				argumentAfter(recorded, '--targets-file'),
+				'--measure-file',
+				argumentAfter(recorded, '--measure-file'),
+				...storeArguments
+			]);
+			const writtenTargets = await readFile(
+				argumentAfter(recorded, '--targets-file'),
+				'utf8'
+			);
 
-		expect(measurements).toStrictEqual(
-			new Map([
-				['.#first', 100],
-				['.#second', 200]
-			])
-		);
-		expect(recorded).toStrictEqual([
-			'/unused/cupboard',
-			'--output-mode',
-			'github',
-			'--no-colour',
-			'--result-file',
-			resultFileArgument(recorded.slice(1)),
-			'plan',
-			'measure',
-			'--targets-file',
-			argumentAfter(recorded, '--targets-file'),
-			'--measure-file',
-			argumentAfter(recorded, '--measure-file')
-		]);
-		const writtenTargets = await readFile(
-			argumentAfter(recorded, '--targets-file'),
-			'utf8'
-		);
-
-		expect(JSON.parse(writtenTargets)).toStrictEqual({
-			targets: [
-				{ attr: '.#first', installable: '/nix/store/first.drv^out' },
-				{ attr: '.#second', installable: '/nix/store/second.drv^out' }
-			]
-		});
-	});
+			expect(JSON.parse(writtenTargets)).toStrictEqual({
+				targets: [
+					{ attr: '.#first', installable: '/nix/store/first.drv^out' },
+					{ attr: '.#second', installable: '/nix/store/second.drv^out' }
+				]
+			});
+		}
+	);
 
 	it('never runs the command when no cohort target carries an evaluated installable', async () => {
 		const first = evaluation('first', outPath);

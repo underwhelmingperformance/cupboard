@@ -170,6 +170,26 @@ describe('cupboard flake publish cohort job', () => {
 		});
 	});
 
+	it('prices the packing measurement against the store the cohorts build against', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+		const lines = contents.split('\n');
+		const [planStep] = actionSteps(
+			lines,
+			/^ {6}- uses: \.\/\.cupboard\/actions\/plan$/u
+		);
+		const trimmed = new Set((planStep ?? []).map((line) => line.trim()));
+
+		expect({
+			storeThreadedIntoPlan: trimmed.has('store: ${{ inputs.store }}'),
+			packingThreadedIntoPlan: trimmed.has(
+				'enable-packing: ${{ inputs.enable-packing }}'
+			)
+		}).toStrictEqual({
+			storeThreadedIntoPlan: true,
+			packingThreadedIntoPlan: true
+		});
+	});
+
 	it('threads the remote store into the cohort build', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 		const lines = contents.split('\n');
