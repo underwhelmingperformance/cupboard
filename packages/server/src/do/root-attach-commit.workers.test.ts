@@ -333,6 +333,64 @@ describe('root attach at commit', () => {
 		});
 	});
 
+	it('a skip answered at negotiate attaches to the bound run root', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: 'a'.repeat(32)
+		});
+
+		// The path is canonical before the run root's push negotiates it: the
+		// answer is a skip, whose publication settles at negotiate with no
+		// commit to attach through.
+		await pushWithRoot(token, metadata);
+
+		const first = singleDecision(
+			await negotiateWithRoot(token, [metadata], runRoot)
+		);
+		const afterFirst = await rootTargetRows();
+
+		// Re-negotiating the served path under the same root re-inserts nothing.
+		const second = singleDecision(
+			await negotiateWithRoot(token, [metadata], runRoot)
+		);
+
+		const expected = [
+			{
+				cache: '',
+				rootName: runRoot.name,
+				storePathHash: metadata.storePathHash,
+				storePath: metadata.storePath
+			}
+		];
+
+		expect({
+			firstAction: first.action,
+			secondAction: second.action,
+			afterFirst,
+			afterSecond: await rootTargetRows(),
+			retention: await retentionState()
+		}).toStrictEqual({
+			firstAction: 'skip',
+			secondAction: 'skip',
+			afterFirst: expected,
+			afterSecond: expected,
+			retention: {
+				roots: [
+					{
+						cache: '',
+						name: runRoot.name,
+						expiresAt: '2026-01-01T01:00:00.000Z',
+						createdAt: '2026-01-01T00:00:00.000Z',
+						updatedAt: '2026-01-01T00:00:00.000Z'
+					}
+				],
+				grace: [],
+				caches: [{ name: '', graceManaged: false }]
+			}
+		});
+	});
+
 	it('a row from a rootless negotiate commits without attaching', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({

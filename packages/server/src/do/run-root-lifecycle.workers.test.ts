@@ -410,6 +410,85 @@ describe('run root lifecycle', () => {
 		});
 	});
 
+	it('a skip-attached path outlives the run root that first published it', async () => {
+		const token = await initialise();
+		const shared = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'shared',
+			storePathHash: 'a'.repeat(32)
+		});
+
+		await pushWithRoot(token, shared, runRoot);
+
+		// The second run's negotiate answers the shared path as a skip; its
+		// longer-lived root must hold the path once the first run's expires.
+		const decision = singleDecision(
+			await negotiateWithRoot(token, [shared], {
+				name: 'ci/run-2',
+				ttlSeconds: 7200
+			})
+		);
+
+		// Between the two expiries only the first run root has lapsed, and the
+		// second's attachment keeps the shared path servable.
+		vi.setSystemTime(new Date(testBase.getTime() + 1.5 * 3600 * 1000));
+		const afterFirstExpiry = await runGcResult();
+		const heldTargets = await rootTargetRows();
+
+		// Past the second run root's expiry, nothing retains the shared path.
+		vi.setSystemTime(new Date(testBase.getTime() + 3 * 3600 * 1000));
+		const afterSecondExpiry = await runGcResult();
+
+		const narInfoHashes = await runInDurableObject(
+			currentServer(),
+			(instance) =>
+				instance.context.db
+					.select({ storePathHash: schema.narInfos.storePathHash })
+					.from(schema.narInfos)
+					.all()
+					.map((row) => row.storePathHash)
+		);
+
+		expect({
+			action: decision.action,
+			afterFirstExpiry,
+			heldTargets,
+			afterSecondExpiry,
+			targets: await rootTargetRows(),
+			narInfoHashes
+		}).toStrictEqual({
+			action: 'skip',
+			afterFirstExpiry: {
+				ok: true,
+				pendingUploadsDeleted: 0,
+				pendingAttestationsDeleted: 0,
+				rootsExpired: 1,
+				pathsSwept: 0,
+				narInfosDeleted: 0,
+				orphanStagingDeleted: 0
+			},
+			heldTargets: [
+				{
+					cache: '',
+					rootName: 'ci/run-2',
+					storePathHash: shared.storePathHash,
+					storePath: shared.storePath
+				}
+			],
+			afterSecondExpiry: {
+				ok: true,
+				pendingUploadsDeleted: 0,
+				pendingAttestationsDeleted: 0,
+				rootsExpired: 1,
+				pathsSwept: 1,
+				narInfosDeleted: 1,
+				orphanStagingDeleted: 0
+			},
+			targets: [],
+			narInfoHashes: []
+		});
+	});
+
 	it('a second push substitutes shared work while the run root is live', async () => {
 		const token = await initialise();
 		const shared = uploadMetadata({

@@ -424,6 +424,19 @@ export class UploadsService {
 			resolvedGraceSeconds
 		);
 
+		// A skip settles wholly at negotiate: it plans no upload and no commit
+		// finalises it, so the bound run root gains each skipped path here. The
+		// map holds exactly the paths the loop below answers as skips, and the
+		// attach shares the synchronous stretch with the identity re-check
+		// above, so every row it references was just confirmed to serve.
+		if (body.attachRoot !== undefined) {
+			this.roots.attachRunRootTargets(
+				cache,
+				body.attachRoot.name,
+				body.paths.filter((path) => skipFacts.has(path.storePathHash))
+			);
+		}
+
 		const uploads: UploadDecision[] = [];
 		const armedReuseHashes = new Set<NixSha256HashString>();
 

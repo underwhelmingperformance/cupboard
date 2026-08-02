@@ -409,6 +409,37 @@ export class RootsService {
 			.run();
 	}
 
+	// Attaches already-served paths to a push's run root at negotiate. A path
+	// the cache already serves is answered as a skip, a publication that
+	// settles with no commit, so the root gains it here through the same
+	// additive, idempotent insert the commit gate applies, keyed by cache,
+	// root and store-path hash. Nothing is released, no grace transition runs
+	// and the root row is untouched. Chunked inserts on the single writer, so
+	// it needs no gate.
+	attachRunRootTargets(
+		cache: StoredCache,
+		name: RootName,
+		targets: readonly {
+			readonly storePathHash: StorePathHash;
+			readonly storePath: StorePathString;
+		}[]
+	): void {
+		for (const batch of chunk(targets, maxRootTargetInsertRows)) {
+			this.context.db
+				.insert(schema.retentionRootTargets)
+				.values(
+					batch.map((target) => ({
+						cache,
+						rootName: name,
+						storePathHash: target.storePathHash,
+						storePath: target.storePath
+					}))
+				)
+				.onConflictDoNothing()
+				.run();
+		}
+	}
+
 	async setRoot(
 		cache: StoredCache,
 		rootName: RootName,
