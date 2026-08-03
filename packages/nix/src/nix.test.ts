@@ -101,6 +101,11 @@ function recordingStore(): RecordingStore {
 
 			return Promise.resolve([]);
 		},
+		querySubstitutablePathInfos: (storePaths) => {
+			substitutableBatches.push([...storePaths]);
+
+			return Promise.resolve([]);
+		},
 		queryDerivationOutputPaths: (drvPaths) => {
 			drvBatches.push([...drvPaths]);
 

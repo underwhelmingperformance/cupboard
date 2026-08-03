@@ -22,6 +22,9 @@ export class FakeDaemonTransport implements NixDaemonTransport {
 
 	readonly temporaryRoots: string[] = [];
 
+	/** The store paths each substitutable-info request asked about, in order. */
+	readonly substitutablePathInfoRequests: (readonly string[])[] = [];
+
 	constructor(
 		private readonly paths: Readonly<Record<string, FakePathInfo>>,
 		private readonly options: {
@@ -30,6 +33,7 @@ export class FakeDaemonTransport implements NixDaemonTransport {
 			readonly expectedSetOptions?: FakeSetOptionsFields;
 			readonly expectedOverrides?: Readonly<Record<string, string>>;
 			readonly substitutable?: FakeSubstitutable;
+			readonly substitutablePathInfos?: FakeSubstitutablePathInfos;
 			readonly derivationOutputs?: FakeDerivationOutputs;
 			readonly missing?: FakeMissing;
 			readonly features?: readonly string[];
@@ -91,7 +95,10 @@ export class FakeDaemonTransport implements NixDaemonTransport {
 			request,
 			this.paths,
 			this.options,
-			this.temporaryRoots
+			{
+				temporaryRoots: this.temporaryRoots,
+				substitutablePathInfoRequests: this.substitutablePathInfoRequests
+			}
 		);
 		const buffers = Buffer.isBuffer(response) ? [response] : response;
 
@@ -200,6 +207,23 @@ interface FakeSubstitutable {
 	readonly paths: readonly string[];
 }
 
+export interface FakeSubstitutablePathInfo {
+	readonly storePath: string;
+	readonly deriver?: string;
+	readonly references: readonly string[];
+	readonly downloadSize: number;
+	readonly narSize: number;
+}
+
+/**
+ * What the fake daemon's permitted substituters offer, keyed by store path.
+ * A path with no entry is served by none of them, which is how the real
+ * operation reports a path its substituters do not have.
+ */
+export type FakeSubstitutablePathInfos = Readonly<
+	Record<string, FakeSubstitutablePathInfo>
+>;
+
 type FakeDerivationOutputs = Readonly<
 	Record<string, Readonly<Record<string, string | undefined>>>
 >;
@@ -218,13 +242,14 @@ function daemonOperationResponse(
 	paths: Readonly<Record<string, FakePathInfo>>,
 	options: {
 		readonly substitutable?: FakeSubstitutable;
+		readonly substitutablePathInfos?: FakeSubstitutablePathInfos;
 		readonly derivationOutputs?: FakeDerivationOutputs;
 		readonly missing?: FakeMissing;
 		readonly expectedPathInfoBatch?: readonly string[];
 		readonly nar?: FakeNar;
 		readonly builds?: FakeBuilds;
 	},
-	temporaryRoots: string[]
+	recorded: FakeDaemonRecordings
 ): Buffer | readonly Buffer[] {
 	const operation = Number(request.readBigUInt64LE(0));
 
@@ -233,7 +258,7 @@ function daemonOperationResponse(
 	}
 
 	if (operation === 11) {
-		temporaryRoots.push(readRequestStorePath(request));
+		recorded.temporaryRoots.push(readRequestStorePath(request));
 
 		const response = new ProtocolWriter();
 		response.writeInteger(0x61_6c_74_73);
@@ -254,6 +279,14 @@ function daemonOperationResponse(
 
 	if (operation === 26) {
 		return queryPathInfoResponse(request, paths);
+	}
+
+	if (operation === 30) {
+		return querySubstitutablePathInfosResponse(
+			request,
+			options.substitutablePathInfos,
+			recorded.substitutablePathInfoRequests
+		);
 	}
 
 	if (operation === 31) {
@@ -424,6 +457,46 @@ function queryValidPathsResponse(
 	return response.bytes();
 }
 
+// The request is a map from store path to the content address to look that
+// path up under, so each entry is two strings; the fake refuses anything but
+// the absent address cupboard sends.
+function querySubstitutablePathInfosResponse(
+	request: Buffer,
+	infos: FakeSubstitutablePathInfos | undefined,
+	requests: (readonly string[])[]
+): Buffer {
+	if (infos === undefined) {
+		throw new Error('Unexpected QuerySubstitutablePathInfos request');
+	}
+
+	const entries = readRequestStringMap(request);
+	const storePaths = entries.map(([storePath]) => storePath);
+
+	expect(entries.map(([, address]) => address)).toStrictEqual(
+		storePaths.map(() => '')
+	);
+	requests.push(storePaths);
+
+	const served = storePaths.flatMap((storePath) => {
+		const info = infos[storePath];
+
+		return info === undefined ? [] : [info];
+	});
+	const response = new ProtocolWriter();
+	response.writeInteger(0x61_6c_74_73);
+	response.writeInteger(served.length);
+
+	for (const info of served) {
+		response.writeString(info.storePath);
+		response.writeString(info.deriver ?? '');
+		response.writeStringSet(info.references);
+		response.writeInteger(info.downloadSize);
+		response.writeInteger(info.narSize);
+	}
+
+	return response.bytes();
+}
+
 function querySubstitutablePathsResponse(
 	request: Buffer,
 	substitutable: FakeSubstitutable | undefined
@@ -542,6 +615,35 @@ function readSetOptionsRequest(request: Buffer): {
 		},
 		overrides
 	};
+}
+
+/** The requests a fake daemon records for a test to assert against. */
+interface FakeDaemonRecordings {
+	readonly temporaryRoots: string[];
+	readonly substitutablePathInfoRequests: (readonly string[])[];
+}
+
+function readRequestStringMap(request: Buffer): [string, string][] {
+	let offset = 8;
+	const count = Number(request.readBigUInt64LE(offset));
+	offset += 8;
+
+	const readString = (): string => {
+		const length = Number(request.readBigUInt64LE(offset));
+		offset += 8;
+		const value = request.subarray(offset, offset + length).toString('utf8');
+		offset += length + ((8 - (length % 8)) % 8);
+
+		return value;
+	};
+	const entries: [string, string][] = [];
+
+	for (let index = 0; index < count; index += 1) {
+		const key = readString();
+		entries.push([key, readString()]);
+	}
+
+	return entries;
 }
 
 export function readRequestStorePath(request: Buffer): string {

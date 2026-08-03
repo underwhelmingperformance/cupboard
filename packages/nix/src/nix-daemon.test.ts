@@ -458,6 +458,78 @@ describe('NixDaemonStoreClient', () => {
 		expect(transport?.closed).toBe(true);
 	});
 
+	it('reports what the substituters offer, omitting a path none of them serves', async () => {
+		let transport: FakeDaemonTransport | undefined;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				transport = new FakeDaemonTransport(
+					{},
+					{
+						substitutablePathInfos: {
+							[appPath]: {
+								storePath: appPath,
+								deriver: buildDrvPath,
+								references: [libraryPath],
+								downloadSize: 512,
+								narSize: 2048
+							},
+							[runtimePath]: {
+								storePath: runtimePath,
+								references: [],
+								downloadSize: 0,
+								narSize: 64
+							}
+						}
+					}
+				);
+
+				return Promise.resolve(transport);
+			}
+		});
+
+		await expect(
+			client.querySubstitutablePathInfos([
+				runtimePath,
+				appPath,
+				libraryPath,
+				appPath
+			])
+		).resolves.toStrictEqual([
+			{
+				storePath: appPath,
+				deriver: buildDrvPath,
+				references: [libraryPath],
+				downloadSize: 512,
+				narSize: 2048
+			},
+			{
+				storePath: runtimePath,
+				references: [],
+				downloadSize: 0,
+				narSize: 64
+			}
+		]);
+		expect({
+			requests: transport?.substitutablePathInfoRequests,
+			closed: transport?.closed
+		}).toStrictEqual({
+			requests: [[appPath, libraryPath, runtimePath]],
+			closed: true
+		});
+	});
+
+	it('answers an empty substitutable-info batch without opening a connection', async () => {
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				throw new Error('the empty batch must not open a connection');
+			}
+		});
+
+		await expect(client.querySubstitutablePathInfos([])).resolves.toStrictEqual(
+			[]
+		);
+	});
+
 	it('uses the negotiated path-info batch operation', async () => {
 		const missingPath = storePathSchema.parse(
 			'/nix/store/9123456789abcdfghijklmnpqrsvwxyz-missing'

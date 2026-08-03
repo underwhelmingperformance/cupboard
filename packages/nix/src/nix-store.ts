@@ -29,6 +29,22 @@ export interface NixValidPathInfo {
 }
 
 /**
+ * What a substituter offers for one store path: enough metadata to walk the
+ * path's closure without fetching any of its bytes. A store answers with an
+ * entry only for a path one of its permitted substituters serves, whatever
+ * this machine's own store already holds.
+ */
+export interface NixSubstitutablePathInfo {
+	readonly storePath: StorePathString;
+	readonly deriver?: string;
+	readonly references: readonly StorePathString[];
+	/** Bytes the fetch would transfer; 0 when the substituter does not say. */
+	readonly downloadSize: number;
+	/** Bytes the path would occupy; 0 when the substituter does not say. */
+	readonly narSize: number;
+}
+
+/**
  * A realisation target the way an installable names one: a plain store path,
  * or a derivation path followed by `^` and the outputs it should produce
  * (`^*` for all of them).
@@ -122,6 +138,15 @@ export interface NixStoreClient {
 	querySubstitutablePaths(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]>;
+	/**
+	 * What the store's permitted substituters offer for each of the given
+	 * paths, sorted by store path. A path no substituter serves has no entry,
+	 * and a path this machine already holds is answered no differently from
+	 * one it does not: the question is what is available elsewhere.
+	 */
+	querySubstitutablePathInfos(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixSubstitutablePathInfo[]>;
 	/**
 	 * The registered output paths of the given derivations, deduplicated and
 	 * sorted by store path. An output that was never built has no registered
@@ -227,7 +252,7 @@ export async function resolveClosureBy(
 // claimed so a path reachable by several edges is queried once. A path is
 // claimed when it joins a frontier, before it is queried, so the next frontier
 // never re-schedules a path already in flight.
-function claimUnseen(
+export function claimUnseen(
 	candidates: readonly StorePathString[],
 	claimed: Set<string>
 ): StorePathString[] {

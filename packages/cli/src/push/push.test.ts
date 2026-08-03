@@ -4042,6 +4042,7 @@ function nixStore(
 				storePaths.filter((storePath) => paths[storePath] !== undefined)
 			),
 		querySubstitutablePaths: () => Promise.resolve([]),
+		querySubstitutablePathInfos: () => Promise.resolve([]),
 		queryDerivationOutputPaths: () => Promise.resolve([]),
 		queryMissing: () =>
 			Promise.resolve({
