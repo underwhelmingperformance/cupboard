@@ -536,18 +536,15 @@ function targetOutcome(
 		: { outcome: 'destination-served', storePath: first };
 }
 
-// Whether every path a target answers for is confirmed servable, the bar a
-// declared root must clear for every one of its targets before it is
-// replaced. A classified target was answered at plan time; a left-upstream
-// target is deliberately not served by the destination, so it never confirms.
+// Whether a target's answer is settled, the bar a declared root must clear for
+// every one of its targets before it is replaced. A classified target was
+// answered at plan time, left-upstream included: the destination deliberately
+// does not serve it, and that is an answer, so it clears the bar without
+// joining the root's contents.
 function isConfirmed(
 	resolved: ResolvedTarget,
 	ledger: PublicationLedger
 ): boolean {
-	if (resolved.classification === 'left-upstream') {
-		return false;
-	}
-
 	if (resolved.classification !== 'publish') {
 		return true;
 	}
@@ -559,7 +556,8 @@ function isConfirmed(
 	return resolved.resolution.paths.every((path) => ledger.servable.has(path));
 }
 
-function pathsOf(resolved: ResolvedTarget): readonly StorePathString[] {
+// The paths a target answers for, whoever ends up serving them.
+function answeredPathsOf(resolved: ResolvedTarget): readonly StorePathString[] {
 	if (resolved.resolution.kind === 'resolved') {
 		return resolved.resolution.paths;
 	}
@@ -567,10 +565,23 @@ function pathsOf(resolved: ResolvedTarget): readonly StorePathString[] {
 	return [fallbackPath(resolved.target)];
 }
 
-// Applies each declared target root whose every target confirmed servable,
-// replacing its target list in one call; a root with any unconfirmed target
-// is left exactly as it was. The run root is never among these: it was bound
-// at negotiate, commit by commit, and reconciliation does not touch it.
+// The paths a target contributes to its root's contents: what the destination
+// is to hold on the root's behalf. A left-upstream target contributes nothing,
+// because a consumer fetches it from elsewhere.
+function rootContentsOf(resolved: ResolvedTarget): readonly StorePathString[] {
+	if (resolved.classification === 'left-upstream') {
+		return [];
+	}
+
+	return answeredPathsOf(resolved);
+}
+
+// Applies each declared target root whose every target settled, replacing its
+// target list in one call with the paths the destination is to hold; a root
+// with any unconfirmed target is left exactly as it was. A root whose targets
+// all settled upstream is replaced with an empty list, which releases the
+// generation it named. The run root is never among these: it was bound at
+// negotiate, commit by commit, and reconciliation does not touch it.
 async function applyTargetRoots(
 	resolvedTargets: readonly ResolvedTarget[],
 	options: ReconcileOptions,
@@ -593,9 +604,10 @@ async function applyTargetRoots(
 	const roots: ReconciledRoot[] = [];
 
 	for (const [root, group] of groups) {
-		const targets = new Set(group.flatMap((item) => pathsOf(item)))
+		const targets = new Set(group.flatMap((item) => rootContentsOf(item)))
 			.values()
 			.toArray();
+		const answered = group.flatMap((item) => answeredPathsOf(item));
 
 		if (group.some((item) => !isConfirmed(item, ledger))) {
 			roots.push({ root, applied: false, targets });
@@ -611,7 +623,10 @@ async function applyTargetRoots(
 			});
 			roots.push({ root, applied: true, targets });
 		} catch (error) {
-			for (const storePath of targets) {
+			// Recorded against every path the group's targets answer for, not
+			// just the settled contents, so a root that settles over nothing
+			// still reports the refusal against the targets it was declared for.
+			for (const storePath of answered) {
 				recordFailure(ledger, storePath, 'retention', error);
 			}
 
