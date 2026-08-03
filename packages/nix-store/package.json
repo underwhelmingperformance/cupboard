@@ -13,6 +13,7 @@
 	"exports": {
 		"./cache-info": "./src/cache-info.ts",
 		"./cache-url": "./src/cache-url.ts",
+		"./derivation": "./src/derivation.ts",
 		"./encoding": "./src/encoding.ts",
 		"./errors": "./src/errors.ts",
 		"./hash": "./src/hash.ts",

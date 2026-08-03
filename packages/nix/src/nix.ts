@@ -1,11 +1,13 @@
 import { realpathSync } from 'node:fs';
 
+import { canSubstituteDerivation } from '@cupboard/nix-store/derivation';
 import {
 	type StoreDirectory,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 
+import { narRegularFileContents } from './nar-file.ts';
 import { parseSshNgStoreUri } from './nix-daemon-ssh.ts';
 import {
 	type NixBuildResult,
@@ -227,6 +229,21 @@ export class Nix {
 		targets: readonly NixDerivedPathString[]
 	): Promise<readonly NixBuildResult[]> {
 		return this.store.buildPathsWithResults(targets);
+	}
+
+	/**
+	 * Whether the named derivation's own `allowSubstitutes` option lets Nix
+	 * fetch its outputs rather than build them.
+	 *
+	 * No store operation reports a derivation's options, so the derivation
+	 * itself is read: a derivation is one regular file in the store, and its
+	 * serialisation carries the environment the option lives in. Reading it
+	 * costs the derivation's own bytes and nothing of its outputs.
+	 */
+	async canSubstituteDerivation(drvPath: string): Promise<boolean> {
+		const contents = await narRegularFileContents(this.narFromPath(drvPath));
+
+		return canSubstituteDerivation(new TextDecoder().decode(contents));
 	}
 
 	/** The registered output paths of the given derivations, sorted. */
