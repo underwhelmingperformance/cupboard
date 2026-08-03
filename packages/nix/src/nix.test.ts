@@ -47,6 +47,7 @@ interface RecordingStore extends NixStoreClient {
 	readonly queried: string[];
 	readonly validBatches: string[][];
 	readonly substitutableBatches: string[][];
+	readonly substitutableInfoBatches: string[][];
 	readonly drvBatches: string[][];
 	readonly missingBatches: string[][];
 	readonly infoBatches: string[][];
@@ -55,10 +56,16 @@ interface RecordingStore extends NixStoreClient {
 	readonly closures: string[][];
 }
 
-function recordingStore(): RecordingStore {
+function recordingStore(
+	substitutableOffers: ReadonlyMap<
+		StorePathString,
+		readonly StorePathString[]
+	> = new Map()
+): RecordingStore {
 	const queried: string[] = [];
 	const validBatches: string[][] = [];
 	const substitutableBatches: string[][] = [];
+	const substitutableInfoBatches: string[][] = [];
 	const drvBatches: string[][] = [];
 	const missingBatches: string[][] = [];
 	const infoBatches: string[][] = [];
@@ -70,6 +77,7 @@ function recordingStore(): RecordingStore {
 		queried,
 		validBatches,
 		substitutableBatches,
+		substitutableInfoBatches,
 		drvBatches,
 		missingBatches,
 		infoBatches,
@@ -102,9 +110,17 @@ function recordingStore(): RecordingStore {
 			return Promise.resolve([]);
 		},
 		querySubstitutablePathInfos: (storePaths) => {
-			substitutableBatches.push([...storePaths]);
+			substitutableInfoBatches.push([...storePaths]);
 
-			return Promise.resolve([]);
+			return Promise.resolve(
+				storePaths.flatMap((storePath) => {
+					const references = substitutableOffers.get(storePath);
+
+					return references === undefined
+						? []
+						: [{ storePath, references, downloadSize: 1, narSize: 2 }];
+				})
+			);
 		},
 		queryDerivationOutputPaths: (drvPaths) => {
 			drvBatches.push([...drvPaths]);
@@ -408,6 +424,32 @@ describe('Nix queries', () => {
 		]);
 
 		expect(store.substitutableBatches).toStrictEqual([[appPath, libraryPath]]);
+	});
+
+	it('canonicalises the root of a substitutable-closure walk and follows it', async () => {
+		const store = recordingStore(
+			new Map([
+				[appPath, [libraryPath]],
+				[libraryPath, []]
+			])
+		);
+
+		const verdict = await nixOver(store).resolveSubstitutableClosure(
+			`${appPath}/bin`
+		);
+
+		expect({
+			verdict,
+			batches: store.substitutableInfoBatches
+		}).toStrictEqual({
+			verdict: {
+				kind: 'served',
+				pathCount: 2,
+				downloadSize: 2,
+				narSize: 4
+			},
+			batches: [[appPath], [libraryPath]]
+		});
 	});
 
 	it('canonicalises every derivation path in an output query', async () => {
