@@ -27,6 +27,11 @@ import {
 	storeKindOf
 } from './store-client.ts';
 import { discoverNixStoreConfig } from './store-config.ts';
+import {
+	resolveSubstitutableClosure,
+	type SubstitutableClosureOptions,
+	type SubstitutableClosureVerdict
+} from './substitutable-closure.ts';
 
 /** Resolves a path's real location, injected so canonicalisation is testable. */
 export type RealPath = (path: string) => string;
@@ -167,6 +172,24 @@ export class Nix {
 	): Promise<readonly string[]> {
 		return this.store.querySubstitutablePaths(
 			paths.map((path) => this.toStorePath(path))
+		);
+	}
+
+	/**
+	 * Whether everything reachable from the argument is offered by this
+	 * client's substituters, proven by walking the references they report.
+	 * The substituters that answer are the ones this client's connection was
+	 * opened with, so a caller that needs a particular set of them opens a
+	 * client carrying that set.
+	 */
+	async resolveSubstitutableClosure(
+		path: string,
+		options: SubstitutableClosureOptions = {}
+	): Promise<SubstitutableClosureVerdict> {
+		return resolveSubstitutableClosure(
+			this.toStorePath(path),
+			(storePaths) => this.store.querySubstitutablePathInfos(storePaths),
+			options
 		);
 	}
 

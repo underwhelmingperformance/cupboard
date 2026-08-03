@@ -12,6 +12,7 @@ import {
 	NixDaemonStoreClient
 } from '../../packages/nix/src/nix-daemon.ts';
 import { NixStorePathNotFoundError } from '../../packages/nix/src/nix-store.ts';
+import { resolveSubstitutableClosure } from '../../packages/nix/src/substitutable-closure.ts';
 
 const socketPath =
 	process.env.NIX_DAEMON_SOCKET_PATH ?? '/nix/var/nix/daemon-socket/socket';
@@ -181,6 +182,25 @@ describe.skipIf(!existsSync(socketPath))('nix daemon end to end', () => {
 		);
 
 		expect(infos).toStrictEqual([]);
+	});
+
+	// A path this machine holds is still not held upstream, and the walk has
+	// to say so: with no substituter permitted, even a valid root fails.
+	it('refuses a closure whose root no permitted substituter offers', async (context) => {
+		const executable = requireExecutableStorePath(context);
+		const verdict = await withDaemon(
+			context,
+			(daemon) =>
+				resolveSubstitutableClosure(executable, (storePaths) =>
+					daemon.querySubstitutablePathInfos(storePaths)
+				),
+			{ substituters: '', 'extra-substituters': '' }
+		);
+
+		expect(verdict).toStrictEqual({
+			kind: 'not-served',
+			storePath: executable
+		});
 	});
 
 	it('reports one of the three trust levels', async (context) => {

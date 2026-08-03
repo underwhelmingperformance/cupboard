@@ -19,6 +19,7 @@ export type {
 	NixDerivedPathString,
 	NixMissingPartition,
 	NixStoreDirectorySource,
+	NixSubstitutablePathInfo,
 	NixValidPathInfo
 } from './nix-store.ts';
 export {
@@ -42,3 +43,8 @@ export type {
 	NixStoreConfig
 } from './store-config.ts';
 export { discoverNixStoreConfig } from './store-config.ts';
+export type {
+	SubstitutableClosureOptions,
+	SubstitutableClosureVerdict
+} from './substitutable-closure.ts';
+export { defaultSubstitutableClosureCap } from './substitutable-closure.ts';
