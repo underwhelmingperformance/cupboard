@@ -11,7 +11,8 @@ import {
 import {
 	discoverNixStoreConfig,
 	type NixConfigEnvironment,
-	type NixStoreConfig
+	type NixStoreConfig,
+	type NixSubstitutionSettings
 } from './store-config.ts';
 
 interface Fixture {
@@ -44,6 +45,14 @@ function thrownBy(fixture: Fixture): unknown {
 
 const overlongStoreDirectory = `/${'d'.repeat(storeDirectoryMaxLength)}`;
 
+// Nix's own defaults: substitution on, a derivation's `allowSubstitutes`
+// honoured, and the one compiled-in substituter.
+const defaultSubstitution: NixSubstitutionSettings = {
+	substitute: true,
+	alwaysAllowSubstitutes: false,
+	substituters: ['https://cache.nixos.org/']
+};
+
 describe('discoverNixStoreConfig', () => {
 	it('falls back to the compiled defaults with no configuration', () => {
 		expect(discover({})).toStrictEqual({
@@ -52,7 +61,8 @@ describe('discoverNixStoreConfig', () => {
 			stateDirectory: '/nix/var/nix',
 			daemonSocketPath: '/nix/var/nix/daemon-socket/socket',
 			daemonSetOptions: {},
-			daemonOverrides: {}
+			daemonOverrides: {},
+			substitution: defaultSubstitution
 		});
 	});
 
@@ -127,7 +137,8 @@ describe('discoverNixStoreConfig', () => {
 			stateDirectory: '/srv/nix',
 			daemonSocketPath: '/srv/nix/daemon-socket/socket',
 			daemonSetOptions: {},
-			daemonOverrides: {}
+			daemonOverrides: {},
+			substitution: defaultSubstitution
 		});
 	});
 
@@ -547,4 +558,108 @@ describe('discoverNixStoreConfig', () => {
 			source
 		});
 	});
+
+	it.each([
+		{
+			name: 'substitution turned off in the system file',
+			fixture: { files: { '/etc/nix/nix.conf': 'substitute = false\n' } },
+			expected: { ...defaultSubstitution, substitute: false }
+		},
+		{
+			name: 'substitution turned off under its deprecated spelling',
+			fixture: {
+				files: { '/etc/nix/nix.conf': 'build-use-substitutes = false\n' }
+			},
+			expected: { ...defaultSubstitution, substitute: false }
+		},
+		{
+			name: 'always-allow-substitutes turned on',
+			fixture: {
+				files: { '/etc/nix/nix.conf': 'always-allow-substitutes = true\n' }
+			},
+			expected: { ...defaultSubstitution, alwaysAllowSubstitutes: true }
+		},
+		{
+			name: 'a substituters list replacing the compiled default',
+			fixture: {
+				files: {
+					'/etc/nix/nix.conf':
+						'substituters = https://one.example https://two.example\n'
+				}
+			},
+			expected: {
+				...defaultSubstitution,
+				substituters: ['https://one.example', 'https://two.example']
+			}
+		},
+		{
+			name: 'a substituters list under its deprecated spelling',
+			fixture: {
+				files: { '/etc/nix/nix.conf': 'binary-caches = https://one.example\n' }
+			},
+			expected: {
+				...defaultSubstitution,
+				substituters: ['https://one.example']
+			}
+		},
+		{
+			name: 'an extra-substituters append over the compiled default',
+			fixture: {
+				env: { NIX_CONFIG: 'extra-substituters = https://cupboard.example' }
+			},
+			expected: {
+				...defaultSubstitution,
+				substituters: ['https://cache.nixos.org/', 'https://cupboard.example']
+			}
+		},
+		{
+			name: 'the system file replacing the list and NIX_CONFIG appending to it',
+			fixture: {
+				files: {
+					'/etc/nix/nix.conf': 'substituters = https://system.example\n'
+				},
+				env: { NIX_CONFIG: 'extra-substituters = https://cupboard.example' }
+			},
+			expected: {
+				...defaultSubstitution,
+				substituters: ['https://system.example', 'https://cupboard.example']
+			}
+		},
+		{
+			name: 'a later assignment discarding the appends before it',
+			fixture: {
+				files: {
+					'/etc/nix/nix.conf': 'extra-substituters = https://early.example\n'
+				},
+				env: { NIX_CONFIG: 'substituters = https://late.example' }
+			},
+			expected: {
+				...defaultSubstitution,
+				substituters: ['https://late.example']
+			}
+		},
+		{
+			name: 'a substituter listed twice',
+			fixture: {
+				files: {
+					'/etc/nix/nix.conf':
+						'substituters = https://one.example https://one.example\n'
+				}
+			},
+			expected: {
+				...defaultSubstitution,
+				substituters: ['https://one.example']
+			}
+		},
+		{
+			name: 'an empty substituters list',
+			fixture: { files: { '/etc/nix/nix.conf': 'substituters =\n' } },
+			expected: { ...defaultSubstitution, substituters: [] }
+		}
+	])(
+		'resolves the substitution settings from $name',
+		({ fixture, expected }) => {
+			expect(discover(fixture).substitution).toStrictEqual(expected);
+		}
+	);
 });
