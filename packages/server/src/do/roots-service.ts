@@ -8,6 +8,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, resolveRootTargets } from '@cupboard/nix-store/store-path';
 import {
+	type ParsedRootEnsureBody,
 	type ParsedRootSetBody,
 	type RootEnsureResponse,
 	rootListPageSize,
@@ -440,6 +441,10 @@ export class RootsService {
 		}
 	}
 
+	// Replaces a root's contents with exactly what the caller declares. An
+	// empty declaration is a replacement like any other: the target rows go,
+	// the root row and its resolved expiry stay, and every released target
+	// takes the grace a replaced generation takes.
 	async setRoot(
 		cache: StoredCache,
 		rootName: RootName,
@@ -465,7 +470,7 @@ export class RootsService {
 	async ensureRoot(
 		cache: StoredCache,
 		rootName: RootName,
-		body: ParsedRootSetBody
+		body: ParsedRootEnsureBody
 	): Promise<RootEnsureResponse> {
 		const requested = this.buildRootSetCommand(rootName, body);
 		const identities = await this.servableTargetIdentities(

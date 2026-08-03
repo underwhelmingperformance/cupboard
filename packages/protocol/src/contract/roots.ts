@@ -5,6 +5,7 @@ import {
 import { z } from 'zod';
 
 import {
+	rootEnsureBodySchema,
 	rootEnsureResponseSchema,
 	rootListPageSize,
 	rootListResponseSchema,
@@ -71,7 +72,11 @@ export const rootsContract = {
 		.output(rootTargetsPageSchema),
 
 	// CI sets roots with a token whose grant names the cache and root; the
-	// authoriser enforces both from the grant.
+	// authoriser enforces both from the grant. The declared list may be empty,
+	// which settles the root over nothing this cache holds; the `root set` and
+	// `root ensure` commands each require at least one store-path argument, so
+	// clearing a root is something a caller states in the request body rather
+	// than something a mistyped command can reach.
 	set: baseProcedure
 		.meta({
 			requires: 'root:set',
@@ -99,7 +104,7 @@ export const rootsContract = {
 			z.strictObject({
 				cacheName: cacheSelectorSchema,
 				name: rootNameSchema,
-				...rootSetBodySchema.shape
+				...rootEnsureBodySchema.shape
 			})
 		)
 		.output(rootEnsureResponseSchema),

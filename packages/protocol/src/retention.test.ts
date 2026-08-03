@@ -8,6 +8,7 @@ import {
 	retentionPolicyAddBodySchema,
 	retentionPolicyListResponseSchema,
 	retentionPolicyRemoveResponseSchema,
+	rootEnsureBodySchema,
 	rootEnsureResponseSchema,
 	rootListResponseSchema,
 	rootSetBodySchema,
@@ -29,6 +30,11 @@ describe('rootSetBodySchema', () => {
 			name: 'targets and ttl',
 			value: { targets: [storePath], ttlSeconds: 3600 },
 			expected: { targets: [storePath], ttlSeconds: 3600 }
+		},
+		{
+			name: 'an empty target list',
+			value: { targets: [] },
+			expected: { targets: [] }
 		}
 	])('accepts $name', ({ value, expected }) => {
 		expect(rootSetBodySchema.parse(value)).toStrictEqual(expected);
@@ -56,10 +62,6 @@ describe('rootSetBodySchema', () => {
 
 	it.each([
 		{
-			name: 'no targets',
-			value: { targets: [] }
-		},
-		{
 			name: 'a nested target path',
 			value: { targets: [`${storePath}/x`] }
 		},
@@ -69,6 +71,18 @@ describe('rootSetBodySchema', () => {
 		}
 	])('rejects $name', ({ value }) => {
 		expect(rootSetBodySchema.safeParse(value).success).toBe(false);
+	});
+});
+
+describe('rootEnsureBodySchema', () => {
+	it('accepts the targets it is asked about', () => {
+		const value = { targets: [storePath], ttlSeconds: 3600 };
+
+		expect(rootEnsureBodySchema.parse(value)).toStrictEqual(value);
+	});
+
+	it('rejects an empty target list', () => {
+		expect(rootEnsureBodySchema.safeParse({ targets: [] }).success).toBe(false);
 	});
 });
 
