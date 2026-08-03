@@ -3811,17 +3811,29 @@ describe('upload flow', () => {
 			]);
 		});
 
-		it('rejects a malformed root request', async () => {
+		// A set declares the root's whole contents and may declare nothing; an
+		// ensure asks which of the targets it names require a build, so it must
+		// name at least one.
+		it.each([
+			{
+				name: 'a target that is not a store path',
+				path: '/cache/_default/roots/main',
+				method: 'PUT',
+				body: { targets: ['not-a-store-path'] }
+			},
+			{
+				name: 'an ensure over no targets',
+				path: '/cache/_default/roots/main/ensure',
+				method: 'POST',
+				body: { targets: [] }
+			}
+		])('rejects $name', async ({ path, method, body }) => {
 			const token = await initialise();
-			const response = await authorisedFetch(
-				'/cache/_default/roots/main',
-				token,
-				{
-					body: JSON.stringify({ targets: [] }),
-					headers: { 'content-type': 'application/json' },
-					method: 'PUT'
-				}
-			);
+			const response = await authorisedFetch(path, token, {
+				body: JSON.stringify(body),
+				headers: { 'content-type': 'application/json' },
+				method
+			});
 
 			expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 		});

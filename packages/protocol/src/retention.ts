@@ -18,11 +18,26 @@ import { isoTimestampSchema } from './scalars.ts';
 // statement size within what a single Durable Object request can serve.
 export const rootSetMaxTargets = 1000;
 
+const rootTargetListSchema = z.array(storePathSchema).max(rootSetMaxTargets);
+
+// A root write declares the channel's whole contents, so the declared list may
+// be empty: a channel whose current generation is served from elsewhere names
+// nothing this cache holds. Settling empty clears the root's target rows,
+// keeps the root row and its expiry, and releases the paths the root held
+// under the ordinary retention grace.
 export const rootSetBodySchema = z.strictObject({
-	targets: z.array(storePathSchema).min(1).max(rootSetMaxTargets),
+	targets: rootTargetListSchema,
 	ttlSeconds: ttlSecondsSchema.optional()
 });
 export type ParsedRootSetBody = z.output<typeof rootSetBodySchema>;
+
+// An ensure asks whether the cache already holds the named targets and reports
+// which of them require a build, so it names at least one.
+export const rootEnsureBodySchema = z.strictObject({
+	targets: rootTargetListSchema.min(1),
+	ttlSeconds: ttlSecondsSchema.optional()
+});
+export type ParsedRootEnsureBody = z.output<typeof rootEnsureBodySchema>;
 
 export const rootTargetSchema = z.strictObject({
 	storePathHash: storePathHashSchema,

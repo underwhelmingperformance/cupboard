@@ -58,6 +58,8 @@ import {
 	expectSingleUploadDecision,
 	flakyD1,
 	issueServerSignedToken,
+	listRoots,
+	listRootTargets,
 	markUploadPendingVerification,
 	narBytes,
 	narInfoGeneration,
@@ -529,6 +531,70 @@ describe('retention grace transitions', () => {
 				{ storePathHash: released.storePathHash, retainUntil: dayAfterStart }
 			],
 			graceManaged: true
+		});
+	});
+
+	it('settles a root over nothing, releasing its whole target set', async () => {
+		await useTestServer('transition-settle-empty');
+		const { token } = await bootstrap();
+
+		const released = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('c'),
+			name: 'released'
+		});
+
+		await pushPath(token, released);
+		await addGracePolicy('', dayGraceSeconds);
+		await setRoot(token, { name: 'channel', targets: [released.storePath] });
+
+		// The channel has moved on to a generation this cache does not hold, so
+		// it settles over nothing: the root row and its expiry stay, the target
+		// rows go, and the released path takes the ordinary grace.
+		const settled = await setRoot(token, { name: 'channel', targets: [] });
+		const { roots } = await listRoots(token);
+		const remaining = await listRootTargets(token, 'channel');
+		const deadlines = await graceDeadlineRows(DEFAULT_CACHE);
+
+		// While the grace holds, a sweep leaves the released path alone.
+		await runGc();
+		const wasHeldDuringGrace =
+			(await narInfoGeneration(released.storePathHash)) !== undefined;
+
+		vi.setSystemTime(new Date('2026-01-03T00:00:00.000Z'));
+		await runGc();
+
+		expect({
+			settled,
+			roots,
+			remaining: remaining.targets,
+			deadlines,
+			duringGrace: wasHeldDuringGrace,
+			afterGrace:
+				(await narInfoGeneration(released.storePathHash)) !== undefined
+		}).toStrictEqual({
+			settled: {
+				name: 'channel',
+				expired: false,
+				createdAt: '2026-01-01T00:00:00.000Z',
+				updatedAt: '2026-01-01T00:00:00.000Z',
+				targets: []
+			},
+			roots: [
+				{
+					name: 'channel',
+					expired: false,
+					createdAt: '2026-01-01T00:00:00.000Z',
+					updatedAt: '2026-01-01T00:00:00.000Z',
+					targetCount: 0
+				}
+			],
+			remaining: [],
+			deadlines: [
+				{ storePathHash: released.storePathHash, retainUntil: dayAfterStart }
+			],
+			duringGrace: true,
+			afterGrace: false
 		});
 	});
 

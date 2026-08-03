@@ -7,6 +7,7 @@ import {
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import {
+	rootEnsureBodySchema,
 	rootSetBodySchema,
 	rootSetMaxTargets
 } from '@cupboard/protocol/retention';
@@ -165,7 +166,7 @@ describe('root ensure hardening', () => {
 				return roots.ensureRoot(
 					DEFAULT_CACHE,
 					rootName,
-					rootSetBodySchema.parse({ targets: [committed.storePath] })
+					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
 				);
 			}
 		);
@@ -197,7 +198,7 @@ describe('root ensure hardening', () => {
 				return roots.ensureRoot(
 					DEFAULT_CACHE,
 					rootName,
-					rootSetBodySchema.parse({ targets: [committed.storePath] })
+					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
 				);
 			}
 		);
@@ -234,7 +235,7 @@ describe('root ensure hardening', () => {
 				return roots.ensureRoot(
 					DEFAULT_CACHE,
 					rootName,
-					rootSetBodySchema.parse({ targets: [committed.storePath] })
+					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
 				);
 			}
 		);
@@ -279,7 +280,7 @@ describe('root ensure hardening', () => {
 				return roots.ensureRoot(
 					DEFAULT_CACHE,
 					rootName,
-					rootSetBodySchema.parse({ targets: [committed.storePath] })
+					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
 				);
 			}
 		);
@@ -413,7 +414,7 @@ describe('root ensure hardening', () => {
 				return roots.ensureRoot(
 					DEFAULT_CACHE,
 					rootName,
-					rootSetBodySchema.parse({ targets: [committed.storePath] })
+					rootEnsureBodySchema.parse({ targets: [committed.storePath] })
 				);
 			}
 		);
