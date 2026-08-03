@@ -62,16 +62,17 @@ cannot unwrap the control signing key it can read from shared D1.
 
 ## Current state
 
-The multi-tenant model described above is live on the `hono-orpc-refactor`
-branch, not deferred. The V1-V4 sections below record how the single-cache,
-single-owner cache was built up; the V5 section describes the multi-tenant
-target, which is now implemented. The early "single-tenant for now" framing has
-been overtaken by that work. Routing is Hono throughout, and the JSON admin APIs
-are contract-first oRPC: every admin procedure is declared once in
+The multi-tenant model described above is implemented in the current codebase,
+not deferred. The V1-V4 sections below record how the single-cache, single-owner
+cache was built up; the V5 section describes the multi-tenant target, which is
+now implemented. The early "single-tenant for now" framing has been overtaken by
+that work. Routing is Hono throughout, and the JSON admin APIs are
+contract-first oRPC: every admin procedure is declared once in
 `@cupboard/protocol/contract`, the server implements it with oRPC, and the CLI
-derives its typed clients from it. Only wire-format endpoints (`pubkey`,
-`signup`, the commit WebSocket, public reads, private Basic auth) stay outside
-the contract.
+derives its typed clients from it. Only wire-format surfaces stay outside the
+contract: OAuth token and discovery/JWKS endpoints, the Nix binary-cache
+protocol and public key, the commit WebSocket, streamed object serves, and their
+HTTP authentication mechanisms.
 
 ## V1
 
@@ -1059,9 +1060,9 @@ pure lexer handles text formats such as narinfo before a schema validates them.
 
 ## V5
 
-Status: implemented and live on `hono-orpc-refactor`. The sections below are the
-design record for the multi-tenant system that now runs; see "Current state"
-near the top of this document for how it maps onto the code.
+Status: implemented in the current codebase. The sections below are the design
+record for the multi-tenant system that now runs; see "Current state" near the
+top of this document for how it maps onto the code.
 
 V5 turns cupboard into a hosted, multi-tenant service. One operator runs the
 instance and onboards independent, mutually-distrusting tenants. Each tenant has
@@ -4349,27 +4350,7 @@ Step 4 depends on 2's read surfaces; step 5 depends on 3's shared matcher and on
   or root layouts keep the explicit inputs, and the two paths share no
   derivation logic, so a preset change cannot silently alter an explicit caller.
 
-## Build-time publication and bounded build stores
-
-Status: implemented on `feat/build-time-publication`, every commit green under
-`pnpm check`, with the real-daemon end-to-end suites
-(`tests/e2e/nix-daemon.test.ts`, `tests/e2e/build-push.test.ts`), the
-diverted-store collection suite (`tests/e2e/build-push-gc.test.ts`, executed on
-Linux CI), and the run-root lifecycle workers suite passing. The unlanded
-`agent/upstream-aware-publication` commit was split, re-branded, and landed
-where the design kept its pieces; its central substitutable filtering was not
-landed, because the partition runs on the build runner. The packing mode is fed
-by `cupboard plan measure` on the plan runner's store; attestation bundles
-attach to published paths post-hoc through `cupboard attest attach`; the seed
-architecture's flake-publish remnants are removed, `actions/build-paths`
-remaining only for `cupboard-publish.yml`. Outstanding: the rollout fixture run
-on the measured flake update (the download gates, the headroom tuning, and the
-intermediate-substitution measurement that decides whether intermediate
-publication stays default) and the live classic-remote-builder exercise, which
-needs a CI fixture with a second daemon. The section argues from rejected
-alternatives throughout, because a design record exists partly to say why
-options were dropped; none of that framing follows the steps into the code,
-where comments describe the code as it is and this document keeps the history.
+## Build-time publication and cohort builds
 
 This section supersedes the separate seed-build architecture described in
 [Publish planning, retention grace, and tenant-wide reuse](#publish-planning-retention-grace-and-tenant-wide-reuse)
@@ -4426,76 +4407,105 @@ invocation still needs it. Likewise, asking the destination which paths are
 missing avoids duplicate upload work but does not remove those paths from the
 builder's store.
 
-The seed phase is not required for work sharing. Nix already schedules a graph
-of derivations, deduplicates shared dependencies, and can build several
-installables in one invocation. The workflow should give Nix all targets that
-belong in one build lifetime and publish outputs as Nix completes them. A
-separate seed phase manually approximates work that Nix already knows how to
-coordinate.
+The cohort architecture is measured on the same flake update. On aarch64-darwin,
+against an empty store and the hosts' own substituters, the whole cohort costs
+735 derivations to build, 1,980 paths fetched, 3.4 GiB of download and 19.1 GiB
+unpacked. Those download and path figures are the union of every target the seed
+jobs served, to within measurement noise, and that union is the floor a target
+set can reach: whatever remains is the input closure of the derivations actually
+built, and no scheduling change reduces it. Peak disk was 19.1 GiB against about
+96 GiB free, so capacity is not the binding constraint on this workload and
+trading cache round trips for disk headroom buys nothing here. Grouping is what
+is left. The two targets in that cohort cost 3.4 GiB and 735 derivations
+together against 6.7 GiB and 1,413 apart, so the cohort label in the manifest is
+worth more than any change to how a cohort's build set is ordered or dispatched.
 
-“No seeding” therefore means no distinct build whose purpose is to manufacture
-intermediates for later builds. It does not mean no shared work:
+`scripts/measure-realisation` reproduces those numbers for any flake. It builds
+a store whose logical directory is still `/nix/store` but whose contents sit in
+a fresh temporary directory, seeds it with the targets' derivations, serves it
+through `nix daemon --stdio`, and asks `queryMissing` over the repository's own
+worker-protocol client. Every invocation replaces the configured substituter
+list rather than extending it, so the answer does not depend on what the
+measuring machine happens to have configured. It measures each target alone,
+each declared multi-target cohort together, and all targets as one group, and
+reports `willBuild`, `willSubstitute`, `unknown`, `downloadSize` and `narSize`
+for each, with an apart-against-together comparison. Given `--baseline` it gates
+a recorded report within a tolerance, which is how a regression in the numbers
+above becomes a failure rather than a surprise.
+
+The coalescing boundary is the cohort. One cohort is one runner, one execution
+context, one availability partition, and one recursive `nix build` over the
+build set that partition produced. Targets sharing a cohort share every
+derivation their closures have in common, because Nix coalesces them inside that
+single invocation:
 
 ```text
-target A ─┐
-          ├─ one Nix invocation ─ shared dependency built once
-target B ─┘                         │
-                                    └─ published as it becomes valid
+target A --+
+           +-- one cohort -- partition -> build -> publish -> reconcile
+target B --+          |
+                      +-- shared derivation built once
 ```
+
+Cohorts are independent. The same derivation may be built concurrently in two
+cohorts, and that duplication is an accepted consequence of the manifest's
+parallelism and failure-isolation boundary. Publication makes one runner's
+result substitutable to another opportunistically, but the design has no
+cross-cohort claims, leases, or dependency signalling.
 
 ### Goals
 
 - Make `cupboard build-push` the entrypoint for build-and-publish workflows.
-- Let Nix own derivation scheduling, dependency sharing, builder selection, and
-  substitution.
-- Upload novel outputs concurrently with the build without blocking Nix on
-  compression or network traffic.
+- Decide availability where the build runs, against that runner's own store and
+  substituter configuration, and confirm it again immediately before the build
+  set is dispatched.
+- Build only what the destination, the tenant's own reuse views, and the
+  configured upstreams do not already supply. Nix remains responsible for
+  executing derivations, choosing builders, and substituting the inputs
+  execution requires.
+- Publish each completed output as the build proceeds, with bounded publication
+  concurrency, so network work overlaps the remaining build instead of following
+  it.
 - Keep `cupboard push` as the explicit publication and reconciliation command.
-  In the normal `build-push` case its final use should find nothing left to
-  upload.
+  Final reconciliation remains authoritative even when streaming publication
+  leaves it no NAR bytes to upload.
 - Publish only the paths useful to the configured cache by default. Do not walk,
   realise, or upload the complete closure merely because it is locally
   reachable.
-- Realise only what building requires. `nix build` realises every installable it
-  is given, so the planner decides the build set before the invocation: a target
-  the destination already serves, or that the tenant can adopt by reference, or
-  that an upstream substituter supplies in the default mode, is never realised
-  locally just to be examined, copied, or rooted. For a target that must build,
-  the fetch set is that target's full input closure: classification bounds the
-  work to real build need, it does not shrink that closure, and a rebuilt
-  top-level target whose input closure exceeds the runner's store is the case
-  remote stores and explicit cohorts exist for.
 - Reuse tenant-published work from day one. A target whose NAR the tenant
   already holds is published to the destination cache by reference, with
   metadata from the served narinfo, moving no NAR bytes and realising nothing on
   the runner.
 - Preserve an explicit complete-closure mode for users who want a self-contained
   cache and accept its cost.
-- Treat local stores, classic remote builders, and remote stores as first-class
-  configurations, while being clear about which configurations can reduce
-  runner-local disk use.
-- Allow explicit target cohorts when one invocation cannot fit in the selected
-  store. Finish and drain one cohort before the next so cupboard can carry
-  shared work across the boundary.
+- Treat local stores, coordinator-reproducible classic remote builders, and
+  remote stores as explicit configurations, while being clear about their
+  verification and runner-local disk limits.
+- Make explicit cohorts the unit of coalescing, runner placement, failure
+  isolation, and accepted duplicate work. Shared derivations execute at most
+  once within a cohort and may execute once per cohort across the workflow.
 - Keep package system support in Nix. The flake graph and package metadata say
   which systems a package supports; cupboard must not grow a second
   package-to-system policy.
 
 ### Non-goals
 
-- Cupboard does not become a derivation scheduler or replace Hydra.
-- Cupboard does not assign individual derivations to workers.
-- The first version will not guess opaque disk-sized target partitions from
-  derivation count or historical heuristics.
-- Streaming upload is not presented as a solution to peak local disk use.
+- Cupboard does not become a distributed derivation scheduler or replace Hydra.
+  One foreground supervisor drives one cohort against one selected build store.
+- There is no cross-cohort exactly-once guarantee. Cohorts may duplicate work
+  across runners.
+- Cupboard does not guess opaque disk-sized target partitions from derivation
+  count or historical heuristics. Measured packing prices candidate groupings
+  from real sizes and is opt-in.
 - The default mode does not promise that cupboard alone contains every path in a
   target's closure. Complete closure is an explicit publication choice.
-- A local build cannot be made to fit when a single derivation's live build
-  graph and scratch space exceed the store's capacity: that requires a larger or
-  remote store. An aggregate target whose union exceeds the store is a different
-  case, because the target set is a choice; component publication under
-  [Peak disk and cohorts](#peak-disk-and-cohorts) is the local-only answer to
-  it.
+- Import-from-derivation is not refused. Forcing
+  `allow-import-from-derivation = false` would refuse real targets: the
+  home-manager configuration in the measured flake cannot evaluate without it.
+  Evaluation therefore runs under the operator's own setting, and cupboard
+  observes whatever derivations that evaluation produces.
+- A build cannot be made to fit when a single derivation's live input closure,
+  outputs, and scratch space exceed the store's capacity. Cohort choice can
+  lower the peak but cannot lower that per-derivation floor.
 
 ### What Cachix and Attic establish
 
@@ -4569,8 +4579,9 @@ collection is the type.
 Complete closure is opt-in:
 
 - The default resolves metadata only for the publication entries.
-- `--closure` expands those roots through the selected Nix store and publishes
-  the complete realised closure.
+- `--closure` materialises roots that exist only at an external substituter,
+  expands every selected root through the selected Nix store, and publishes the
+  complete realised closure.
 
 This supports both intended products. The default publishes targets and novel
 work without copying the world into cupboard. `--closure` produces a cache that
@@ -4578,124 +4589,198 @@ does not rely on other substituters, at the cost of enumerating, reading, and
 uploading the full closure. The default-mode cache is therefore an overlay over
 a consumer's other substituters, not a replacement for them: a consumer keeps
 those substituters configured alongside cupboard, and `--closure` is the mode
-that removes that requirement. The overlay inherits each upstream's retention:
-`cache.nixos.org` keeps content indefinitely, but Cachix and self-hosted caches
-expire theirs, and cupboard has no way to notice when a path it deliberately
-left upstream disappears. A middle position, a configured list of durable
-upstreams with everything else adopted, needs no local realisation: an upstream
-serves the NAR itself, so adoption is a copy of compressed bytes from upstream
-to destination, and the import from an existing binary cache under Later
-features is the same operation server-side with no runner disk at all. It is
-left as a possible extension on priority grounds, and the risk is recorded
-below.
+that removes that requirement.
 
-Selection follows three availability questions, each with its own primitive:
+The overlay inherits each upstream's retention. `cache.nixos.org` keeps content
+indefinitely, but the caches this workflow actually substitutes from,
+`nix-community.cachix.org` and `cache.numtide.com`, expire theirs, and cupboard
+has no way to notice when a path it deliberately left upstream disappears, so
+the overlay can rot silently. The intended middle position is a configured list
+of durable upstreams, with everything found at any other upstream adopted rather
+than left there. Adoption needs no runner disk: the upstream serves the NAR
+itself, so it is a copy of compressed bytes from upstream to destination, the
+same operation the import from an existing binary cache under
+[Later features](#later-features) performs entirely server-side.
+
+Each selected root is classified through three availability questions, asked on
+the cohort's own runner:
 
 1. What would realising a target require? `Store::queryMissing` (worker
    operation 40) partitions the unrealised frontier into `willBuild`,
    `willSubstitute`, and `unknown` against the operator's actual store and
    substituter configuration, and the same reply carries `downloadSize` and
-   `narSize` for the substitutable set, so a plan knows before anything is
-   fetched how many bytes substitution will download and how many NAR bytes it
-   will materialise. `narSize` is serialisation length, not on-disk cost: block
+   `narSize` for the substitutable set, so the plan knows before dispatch how
+   many bytes substitution will download and how many NAR bytes it will
+   materialise. `narSize` is serialisation length, not on-disk cost: block
    rounding on many small files lands above it and store-level hard links below
-   it, so even the substitutable part of the disk bound is approximate and the
-   capacity headroom absorbs the gap. It answers only for work not yet done: an
-   already-valid path never appears in its output, so it is the do-not-realise
-   decision, not a publication filter.
-2. Is a specific path, typically one already valid locally, also available from
-   a configured substituter? `QuerySubstitutablePaths` (worker operation 32)
-   answers that directly and is the do-not-publish decision for the default
-   mode. Its answer must not include cupboard itself: the destination and every
-   tenant view are configured as substituters on the runner, and an answer that
-   included them would class tenant-held content as left upstream and drop it
-   from the target root. The operation offers no per-call substituter override,
-   so the exclusion has a mechanism per step: `build-push` sends an overridden
-   substituter list through `SetOptions` (worker operation 19) on the connection
-   that asks the question, whose overrides the daemon applies only for trusted
-   clients, a requirement preflight already imposes, and the interim workflow
-   subtracts the destination-served and view-served answers from the
-   substitutable set. The child build's own substituters are untouched, because
-   substituting shared work from cupboard is the point. Both queries are more
-   general than hard-coding `cache.nixos.org` or recognising a fixed list of
-   upstream signatures; Attic's signature-name hint list and Cachix's
-   destination-only check both show how partial those approximations are.
+   it, so the size estimate is approximate and capacity headroom absorbs the
+   gap. The operation recursively follows substitutable narinfo references and
+   derivation inputs without downloading the NAR payloads. It answers only for
+   work not yet done: an already-valid path never appears in its output, so it
+   is a build-set and pricing candidate, not a trust or publication decision. In
+   particular, `willSubstitute` does not prove that the later substitution goal
+   will accept the narinfo.
+
+   Paths reported `unknown` are re-queried with `narinfo-cache-negative-ttl` set
+   to zero over `SetOptions`, because Nix negative-caches a failed narinfo
+   lookup for an hour and a bare re-query would read that cache rather than the
+   network. That override only takes effect on a trusted connection: the daemon
+   drops an untrusted client's settings outside a small allowlist at debug
+   level, the same silent-ignore hazard as `post-build-hook`. An untrusted
+   planner detects that its override was dropped and falls back to the nonzero
+   production ceiling with the reason recorded in the receipt, because with the
+   bypass silently gone a zero ceiling would fail the plan for a cause it cannot
+   see. The production default ceiling is small but nonzero, since a substituter
+   missing one answer is a routine transient.
+
+2. Is a target that Nix would substitute genuinely held upstream, closure and
+   all? This is the upstream confirmation, and it is authoritative for every
+   default-mode decision to leave a target where it is. It walks the candidate's
+   reference closure breadth-first over `QuerySubstitutablePathInfos` (worker
+   operation 30), one request per level, stopping at the first path no permitted
+   substituter serves and at a bounded path cap. It is metadata only: no NAR
+   payload is fetched, and a top-level narinfo whose references are not
+   themselves served does not confirm anything.
+
+   The confirmation runs on a separate daemon connection whose substituter list
+   is overridden. The permitted list excludes the destination cache and every
+   tenant reuse view, matched by origin and by path prefix, and clears
+   `extra-substituters` so the runner's appended entries cannot creep back in.
+   Without that exclusion, tenant-held content would be classed as left upstream
+   and dropped from the target root. The narinfo cache is overridden on the same
+   connection so a previously cached answer cannot satisfy the walk; the point
+   of the question is what the upstreams serve now. Both overrides depend on the
+   connection being trusted, and the daemon narrows an untrusted client's
+   substituter assignment to the substituters it already trusts rather than
+   refusing it. The consequence is one-directional and stated plainly: an
+   untrusted connection may refuse a target the permitted substituters do hold,
+   and can never confirm one they do not.
+
+   The confirmation does not itself validate signatures or content addresses.
+   The daemon's own trust policy decides that when it comes to substitute the
+   path. What the confirmation establishes is availability from the permitted
+   set, which is the fact the publication decision needs and the fact a
+   signature-name hint cannot supply.
+
+   Coverage only settles a target when Nix would actually be permitted to
+   substitute it. The eligibility test is the effective global `substitute`
+   setting, then effective `always-allow-substitutes`, then the derivation's own
+   parsed `allowSubstitutes` option read from its `.drv`. Global substitution
+   off refuses immediately; `always-allow-substitutes` short-circuits the
+   per-derivation read; otherwise a derivation that forbids substitution is
+   built regardless of what the upstreams hold, and a derivation whose `.drv`
+   cannot be read is refused rather than assumed. Each refusal carries its
+   reason into the partition and the receipt.
+
 3. Which selected paths does the cupboard destination already serve, and which
    can it adopt by reference? The destination query remains necessary because
-   “available somewhere” and “already adopted by this cache” are different
+   "available somewhere" and "already adopted by this cache" are different
    facts, and only the destination knows what the tenant's content store already
    holds.
 
-The availability questions are asked where the build runs. `queryMissing`
-answers for one store's validity and one machine's configured substituters, and
-the capacity check measures the disk actually at stake, so the partition and the
-preflight refusal are computed on the build runner against its selected store. A
-central plan job contributes the target manifest and cohort identity only; it
-cannot say what another machine needs to build.
+Asking the operator's configured substituters is more general than hard-coding
+`cache.nixos.org` or recognising a fixed list of upstream signatures; Attic's
+signature-name hint list and Cachix's destination-only check both show how
+partial those approximations are.
 
-The destination questions are machine-independent, though, so the plan job also
-applies an advisory pre-filter. The pre-filter is the `roots.ensure` call
-itself, carrying the target list reconciliation last wrote: a job is pruned only
-when every ensure returns `retained` and every manifest target absent from that
-list is one the previous run's receipt records as left upstream for an unchanged
-manifest. Ensuring the manifest's full list instead would churn forever, because
-an upstream-supplied target is never destination-servable: its ensure would
-return `build-required` on every run, spawning a job that builds nothing and
-reconciles the same reduced list again.
+The classification outcomes are:
 
-Ensure, and not a bare availability probe, because pruning must refresh the
-pruned targets' retention in the same request: probes never extend retention, so
-a quietly served target would be pruned run after run until its root aged out.
-
-The pre-filter reaches only targets whose output paths are known before
-building: `roots.ensure` names store paths, so a content-addressed or
-unknown-output target has nothing to ensure and its job spawns on every run.
-
-Advisory settles the failure story: an ensure that fails, through a maintenance
-refusal, a reset tenant, or an authorisation error, prunes nothing, every job
-spawns, and the receipt records the reason; the plan job never goes red for a
-check whose only job is to save runner minutes. The pre-filter prunes jobs,
-never composes build sets: a spawned job's own partition stays authoritative, so
-a stale central answer costs a no-op job, never a wrong build.
-
-Two jobs may now write a target root, so ownership is explicit: a target root
-belongs to exactly one matrix job, and a root that spans jobs is a manifest
-error. The two writers cannot disagree, because both write the same list: the
-pre-filter ensures what reconciliation last wrote, and any target that list does
-not cover fails the prune conditions and spawns the job, whose reconciliation is
-then the root's only writer.
-
-That partition determines the build set, because `nix build` realises every
-installable it is asked for, substitutable or not. Before any build starts, the
-planner classifies each manifest target:
-
-- Already served by the destination cache: no realisation and no publication.
-  One existing call answers this: `roots.ensure` probes the named root's targets
-  and returns `retained` or `build-required` with the unavailable list, so
-  refreshing the root and learning what is missing is a single request that
-  moves no NAR bytes.
+- Already served by the destination cache: in default mode, no realisation and
+  no NAR publication. The target is attached to the run root and named in the
+  target root at reconciliation. Complete-closure mode still expands the
+  target's realised references and publishes any members the destination does
+  not serve.
 - Absent from the destination but held by the tenant, in a reuse view or a
   sibling cache: published by reference. The client reads the served narinfo for
   the path's metadata, negotiates, and commits; the tenant's content store
   supplies the bytes it already has. Nothing is realised on the runner and no
   NAR is uploaded. The negotiate path's existence-oracle boundaries apply
   unchanged; adoption reveals nothing a plain push would not.
-- Supplied by an upstream substituter in the default mode: skipped entirely,
-  consistent with leaving upstream content upstream. A skipped target is also
-  omitted from the target root at reconciliation and recorded in the receipt as
-  left upstream: the destination cannot retain a path it does not hold, so the
-  target's availability follows the upstream's retention, and an operator who
-  wants it held and retained by cupboard selects `--closure`.
-- Requiring building (`willBuild`, and `unknown` treated conservatively as
-  build-needed): these targets, and only these, form the cohort handed to the
-  Nix invocation. Nix then fetches exactly the input closures those builds need,
-  which is the entire remaining download.
+- Supplied by an upstream substituter in the default mode: left upstream, only
+  when the upstream confirmation proved the whole closure and the substitution
+  eligibility test passes. A target left upstream is omitted from the target
+  root at reconciliation and recorded in the receipt as such: the destination
+  cannot retain a path it does not hold, so the target's availability follows
+  the upstream's retention, and an operator who wants it held and retained by
+  cupboard selects `--closure` or, once it exists, declares that upstream as
+  non-durable so the path is adopted instead.
+- Requiring building: the target joins the cohort's build set, which is the only
+  part handed to Nix.
+- Unknown: never authorises leaving a target upstream. A target that remains
+  unknown after the cache-bypassing re-query counts against the configured
+  ceiling; exceeding the ceiling fails the plan loudly rather than quietly
+  building or quietly skipping.
+
+The build set is confirmed once more immediately before dispatch. Between the
+partition and the build, another cohort or an upstream may have published a
+path, so `plan reprobe` re-asks the availability question for the build set and
+returns the surviving set together with the withdrawn paths. It reconciles no
+retention root and applies no unknown ceiling: it exists to shrink the build,
+not to make a policy decision a second time.
 
 On a quiet run this converges to a no-op: an unchanged manifest against a warm
 destination realises nothing, fetches nothing, uploads nothing, and refreshes
-roots. The no-op is about bytes and realisation: a spawned job still pays its
+roots. The no-op is about bytes and realisation. A spawned job still pays its
 runner allocation and a cold flake evaluation, minutes on a real flake, which is
 what the central pre-filter saves.
+
+The destination questions are machine-independent, so the plan job also applies
+an advisory pre-filter that prunes whole cohorts before their runners start.
+Complete-closure mode never prunes a cohort from a top-level destination result,
+because it must inspect and repair the destination's transitive reference
+closure. In default mode a cohort can be pruned when every target it declares is
+covered: either the target's paths are all in its root's last reconciled list,
+which the plan job re-settles with exactly that list so a pruned job still
+refreshes retention and a served target never ages out by being pruned, or the
+target was recorded as left upstream by the previous run's receipt. A root whose
+reconciled list is empty settles nothing and the check proceeds on the receipt's
+coverage alone, which is what keeps a root all of whose targets are deliberately
+upstream from freezing.
+
+The pre-filter prunes jobs, never composes build sets: a spawned job's own
+partition stays authoritative, so a stale central answer costs a no-op job and
+never a wrong build. A pre-filter call that fails, through a maintenance
+refusal, a reset tenant, or an authorisation error, prunes nothing, every job
+spawns, and the receipt records the reason; the plan job never goes red for a
+check whose only purpose is to save runner minutes.
+
+The receipt half of that pre-filter is not yet reachable. `cupboard-action plan`
+accepts `--previous-receipt-file`, but no composite action input and no workflow
+step supplies one, so a target left upstream is re-planned on every run and the
+left-upstream branch of the coverage check never fires. Wiring it needs four
+things together, and none of them is useful alone:
+
+- Per-cohort receipt fragments. Each surviving matrix job uploads its local
+  receipt as a uniquely named artifact keyed by workflow run and cohort, and the
+  plan job uploads a fragment naming the expected cohort keys and every entry it
+  pruned.
+- An aggregation job that runs even on failure. It downloads the fragments and
+  accepts exactly one schema-valid and identity-valid fragment for every
+  expected key. A failed or cancelled leg, a missing, duplicate or unexpected
+  fragment, or a non-settled receipt prevents aggregate state from being
+  published at all. Only a complete merge becomes the cross-run artifact.
+- A manifest digest that a stale receipt cannot pass. It is the deterministic
+  hash of the receipt schema, the manifest contents, the resolved identities of
+  every current target (root derivation, selected output names, known output
+  paths), the checked-out immutable source revision, a canonical digest of the
+  flake lock graph, the publication policy, and the execution context. Two
+  revisions with identical manifest text but a different locked source or a
+  different resolved root derivation must therefore have different digests.
+  Resolution happens before the older receipt is even looked up, and ambiguity
+  or failure in that resolution disables pruning.
+- A fresh upstream re-proof. `evaluateTargetCoverage` currently treats a
+  receipt's left-upstream entry as covered on a store-path match alone, with no
+  live probe, so a target left upstream once would be pruned forever without
+  recheck. The pre-filter must run the same upstream confirmation over each
+  recorded candidate before accepting it. The receipt identifies candidates; it
+  never proves current availability.
+
+Retrieval is scoped to the newest completed prior run for the same repository,
+workflow, ref, tenant, root namespace, manifest digest, and receipt schema, and
+requires explicit `actions: read` permission. Artifact retention defines the
+state expiry. Missing, incomplete, expired, inaccessible, malformed or
+mismatched state, an unavailable credential, or any inconclusive current probe
+prunes nothing and is reported as an advisory miss.
 
 Paths actually built by the supervised invocation are publication candidates:
 they represent work performed here rather than content deliberately left at an
@@ -4704,10 +4789,12 @@ before `build-push` started, since a post-build hook sees executed builds only.
 A target that is valid locally but absent from the destination must therefore
 still be published.
 
-The default path selection must not iterate the complete locally realised
-closure. Any closure walk is confined to explicit `--closure` mode. The target
-manifest, Nix build events, and final target results supply the bounded
-candidate set in the normal mode.
+The default publication path must not iterate or realise the complete local
+closure. The upstream confirmation follows narinfo metadata only and never turns
+those references into publication candidates. Reading and publishing the
+realised closure remains confined to explicit `--closure` mode. The target
+manifest, the build events, and the final target results supply the bounded
+candidate set in normal mode.
 
 ### The target manifest
 
@@ -4717,9 +4804,15 @@ policy layer:
 
 - a stable target identity;
 - the Nix installable or derivation output to build;
+- the checked-out immutable source revision and canonical flake-lock identity
+  captured by the workflow;
 - the expected top-level output path when Nix knows it before realisation;
-- the destination root name and retention settings; and
-- an optional explicit cohort identity.
+- the destination root name and retention settings;
+- an optional explicit cohort identity;
+- whether failure is best-effort for that target; and
+- the execution context whose build store, system, runner, and remote-builder,
+  substituter, and trust-policy configuration must be shared by every target in
+  the cohort.
 
 The conventional flake attribute remains `cupboardOutputs`. Do not introduce an
 underscore-prefixed private namespace for it: it is an intentional public input
@@ -4731,61 +4824,68 @@ attributes, and system-indexed flake outputs. Cupboard does not maintain a list
 saying, for example, that `chainctl` need not be evaluated on `aarch64-darwin`;
 the absence of that target from the applicable Nix graph is the policy.
 
-Use Nix's multi-installable operations where available. In particular,
-`nix derivation show` and the store query interface can accept several
-installables or derivation paths. One query should obtain the graph or output
-mapping for a whole target set rather than starting one Nix process per path.
+The cohort label is the manifest's most consequential field, because it decides
+how much coalescing Nix can do. Targets that share a label share one recursive
+invocation and therefore build each common derivation once; targets in separate
+cohorts pay it twice. Per-target cohorts remain the default, because they are
+the isolation and runner-placement boundary a repository gets without thinking
+about it, and a shared label is the explicit trade of isolation for coalescing.
+The manifest, not a heuristic, makes that trade.
 
-Recursive derivation data is evidence about the dependency graph, not an
-instruction to realise every node. Planning must distinguish evaluation from
-realisation. Seeing a platform archive or fixed-output derivation in recursive
-JSON does not mean that cupboard should build it during planning.
-
-Unknown-output derivations remain buildable. Nix reports their concrete output
-paths when they become valid, and `build-push` records those events. They do not
-require a fallback seed job or a speculative pre-build merely to discover the
-path.
+Targets in one cohort must agree on execution context. A cohort whose members
+demand different systems, stores, or substituter and trust configuration is a
+manifest error, refused before any runner is allocated.
 
 ### `cupboard build-push`
 
-The intended command shape is:
+The reusable workflow drives one cohort per matrix entry:
 
 ```console
-cupboard build-push <publication options> -- nix build --no-link <installables...>
+cupboard build-push <publication options> --cohorts-file <path>
 ```
 
-The command is a foreground supervisor, not a daemon manager:
+The cohorts file is a versioned, validated specification carrying the targets,
+their execution context, publication policy, and roots. The command is a
+foreground supervisor, not a daemon manager:
 
-1. Resolve the destination, authentication, retention plan, selected Nix store,
-   and publication mode.
-2. Create an invocation-specific runtime directory and local socket endpoint.
-3. Start the in-process upload queue and bounded worker pool.
-4. Run the supplied build command with an invocation-scoped post-build hook.
-5. Accept completed output paths from the hook and enqueue selected paths.
-6. Query the destination before preparing NARs, then compress and upload missing
-   paths concurrently with the remaining build.
-7. When the child exits, reconcile the target results and any recorded output
-   events through the ordinary push path.
-8. Drain uploads, verify publication, set retention roots, write the build
-   receipt, and remove the runtime directory.
+1. Resolve the destination, authentication, selected build store, publication
+   mode, and cohort specification.
+2. Compute the availability partition against that store and its configured
+   substituters: targets already served that only need attaching, targets to
+   publish by reference, targets left upstream, and the build set.
+3. Confirm the build set immediately before dispatch and drop anything that
+   became available in the meantime.
+4. Run one recursive Nix build over the surviving build set, with the
+   invocation-scoped post-build hook installed so completed outputs are observed
+   as they finish.
+5. Publish accepted outputs through the ordinary batched negotiate-and-commit
+   path while the build continues, attaching each committed path to the run root
+   as its generation finalises.
+6. Reconcile: resolve the manifest's targets to their output paths, publish
+   anything the event stream missed, wait for deferred server verification where
+   later substitution depends on it, replace the target roots, and write the
+   cohort receipt.
 
-The command preserves the child command's output and exit status. A failed build
-is still a failed build. The exit contract is numeric, not prose, so retry
-systems can branch on it: a build failure exits with the child's own exit
-status, and a successful build with failed publication or retention exits with
-the CLI's existing sysexits vocabulary (75 transient, 77 authentication, 69
-unavailable, plus 74, `EX_IOERR`, for a publication failure not otherwise
-classified, a new code: today an unclassified `CliError` exits 1), never a bare
-1 and never 130, which stays reserved for abort. 74 fits what the failure is, a
-transfer that did not complete; 70, `EX_SOFTWARE`, names an internal error and
-would mislabel it. Moving unclassified failures from 1 to 74 is a compatibility
-break for anything branching on exit 1, so it lands in a release whose notes
-call it out, with the sysexits table in the CLI documentation updated in the
-same change. The receipt is the authoritative record and carries both causes
-when build and publication both fail. A cache failure must never present as a
-build failure or vice versa. Cachix's daemon-mode `watch-exec` is the
-counterexample: it exits with the child's code alone, so CI treats a lost upload
-as a green run.
+Nix chooses builders and substitutes what execution requires. Cupboard does not
+reorder derivations inside the invocation, and the recursive build is what makes
+a shared derivation cost one execution for the whole cohort.
+
+The exit contract is numeric so retry systems can branch on it. A failed child
+build preserves its status exactly, interruption retains the signal contract,
+and publication-only or retention-only failures carry their typed sysexits
+values. When both a build and a publication or retention step fail, both causes
+are recorded in the receipt and the child's status is the one that survives, so
+a retry system cannot mistake a cache failure for a build failure or the
+reverse.
+
+Failure severity comes from `bestEffort`, declared per target. A target-root
+settlement failure affects every target declared for that root. Retention stays
+atomic in either case: advisory severity never permits a partial root
+replacement. Failures without a bounded target set, including authentication
+setup, token refresh, cohort receipt writing, and receipt aggregation, always
+fail the cohort or the workflow with their typed status. `bestEffort` therefore
+changes attributed failure severity, not publication selection or retention
+contents.
 
 Credentials must survive the whole run. A cohort can build for hours, and a CI
 token exchange issues an access token with no refresh token, so the token
@@ -4797,18 +4897,39 @@ reconciliation authenticates with a current token, never with whatever the
 streaming phase started with.
 
 The reporter exposes build, queue, upload, reconciliation, and retention phases
-in both terminal and JSON modes. JSON events include the selected store, target
-and intermediate path counts, queue depth, uploaded and skipped counts, child
-exit status, and final unconfirmed paths. Secrets, presigned URLs, and raw
-credentials never enter events or the hook protocol.
+in both terminal and JSON modes. JSON events include the selected build store,
+target and intermediate path counts, availability partition counts and
+substitutable sizes, queue depth, uploaded and skipped counts, and final
+unconfirmed paths. Secrets, presigned URLs, and raw credentials never enter
+events or the hook protocol.
+
+The receipt is the run's structured record and the input to attestation. Its
+subjects must say where each path came from, because a subject is a claim about
+provenance and a bare store path makes no such claim. Each subject carries the
+store path and NAR digest, the derivation, the build store the path was produced
+in, the machine the build activity ran on, and whether that result was verified.
+Attestation then refuses an unverified remotely produced subject rather than
+silently vouching for it.
+
+Three gaps stand between that and the current receipt. A standalone `build-push`
+with classic remote builders configured has verification off by default, since
+`verifyRebuilds` is only ever set by the action; a remotely produced path
+therefore reaches attestation unverified. `verifiedAttribution` blanks the
+machine once verification passes, so a verified subject reads as though it had
+been built locally and the provenance the subject exists to carry is discarded.
+And a cohort building into a remote store publishes with no provenance at all,
+because nothing records which store produced the path. Recording the build
+store, preserving the machine through verification, and refusing an unverified
+remote subject at attestation close all three.
 
 ### Invocation-scoped post-build hook
 
-Nix's post-build hook runs after each executed build and exposes the completed
-outputs in `OUT_PATHS`, space-separated, alongside `DRV_PATH`. It blocks the Nix
-build loop while it runs, so it must do local notification only. Compression,
-destination queries, retries, and uploads run in the supervising `cupboard`
-process.
+Nix's post-build hook is how the supervisor learns that an output finished
+without waiting for the whole invocation. It runs after each executed build and
+exposes the completed outputs in `OUT_PATHS`, space-separated, alongside
+`DRV_PATH`. It blocks the Nix build loop while it runs, so it must do local
+notification only. Compression, destination queries, retries, and uploads run in
+the supervising `cupboard` process.
 
 The hook's execution context is the store's, not the invoker's. Under a
 multi-user daemon the daemon executes the hook as root, with the daemon's
@@ -4947,12 +5068,10 @@ an operator's hook.
 Only trusted users can set `post-build-hook` through a daemon. The daemon does
 not error on an untrusted override; it ignores the setting with a warning and
 builds proceed without the hook. Preflight therefore proves effectiveness before
-the expensive build starts. The daemon handshake already carries the trusted
-flag at protocol 1.35, and the branch's `@cupboard/nix` client already consumes
-that field off the wire during its handshake while discarding the value, so
-surfacing it is a small client change and the check needs no subprocess; an
-untrusted connection gets an actionable error naming the `trusted-users`
-requirement.
+the expensive build starts. The daemon handshake carries the trusted flag at
+protocol 1.35 and the `@cupboard/nix` client reads it during its handshake, so
+the check needs no subprocess; an untrusted connection gets an actionable error
+naming the `trusted-users` requirement.
 
 Nix's own post-build-hook documentation calls direct upload from the hook
 unsuitable for unreliable networks and recommends passing paths to a daemon or
@@ -4966,49 +5085,58 @@ started, recovered, or stopped separately.
 
 ### Scheduling and work sharing
 
-`build-push` gives one cohort's installables to one Nix invocation. Nix decides
-which derivations are shared, which are substituted, which builder executes
-them, and how its configured build concurrency is used. Cupboard reacts to valid
-outputs; it does not assign derivations.
+Coalescing happens inside the cohort's recursive Nix invocation. Two targets in
+one cohort that share a dependency build it once because Nix, not cupboard,
+schedules that graph. Cupboard's contribution is choosing what enters the
+invocation at all: the partition removes everything the destination, the tenant
+views, and the confirmed upstreams already supply, and the dispatch-time
+re-probe removes anything that appeared since.
 
-This removes the need to calculate seed ownership, choose a seed job for a
-shared derivation, or reconstruct sharing in the workflow matrix. It also avoids
-the failure mode where a seed plan's recursively discovered graph is mistaken
-for a list of things that must be realised.
+Availability is therefore settled per cohort rather than per derivation. The
+invocation fixes its build lifetime before execution starts, so cupboard cannot
+re-ask the question about an interior derivation partway through, and it does
+not try to. What that costs is bounded by the measurement: the download is
+already at the union floor a target set can reach, and what remains is the input
+closure of the derivations actually built, which is not reducible by asking the
+question more often.
 
-Uploading an intermediate does not require knowing which final target owns it.
-The output is content-addressed by its Nix store path and can be useful to any
-later target. Final target roots establish retention after the build. Receipt
-attribution may record which derivation produced an output and which targets
-reference it, but that is reporting and provenance, not scheduling authority.
+Build activity retains both the derivation and the machine that executed it. A
+declared target produced by a classic remote builder is not trusted as
+successful until the coordinating local store runs a rebuild verification with
+remote builders disabled, one derivation at a time, and Nix confirms
+equivalence. The same gate applies to any remotely produced path selected as an
+attestation subject; an unverified intermediate may be published for reuse but
+cannot be attested. A mismatch is an attributed verification failure. A direct
+`ssh-ng` store is the selected coordinating store, not a classic remote builder,
+and retains the current operator-trust semantics.
 
-A cohort concentrates failure as well as work, so partial failure is part of the
-design, not an edge case: one flaky remote-builder connection that used to kill
-one fan-out target now sits inside the invocation that carries every target. The
-cohort invocation therefore runs with `keep-going`, set by the workflow on the
-`nix build` command line where the workflow constructs the command, so a failed
-derivation stops its dependents and nothing else. When `build-push` supervises a
-user-supplied command it does not alter the command's semantics; the receipt
-records what completed either way. On partial failure the run publishes
-everything that did complete under the run root, exits with the child's failure
-status, and carries per-target outcomes in the receipt. Target roots are
-all-or-nothing per root: a root whose declared targets did not all complete and
-confirm servable is not replaced, so its previous generation stays retained and
-a failed build of a new version is a no-op for the old one. Recovery is
-reclassification, not bookkeeping: the published work is destination-served on
-the next run, so a retry of the same job builds only the remainder. Retrying is
-the retry system's decision, taken on the numeric exit contract; the supervisor
-does not re-run failed derivations itself.
+That verification is only possible when the coordinator can run the build at
+all, so preflight must compare each declared target's system and required system
+features with the coordinating machine before classic remote builders are
+enabled. A cross-system target should fail immediately with a typed
+verification-capability refusal, rather than after a full remote build whose
+local verification rebuild then cannot run. Lifting the restriction to
+cross-platform builders requires a separately configured verification store,
+which is future work.
 
-Merging targets into one cohort also concentrates job-level failure, and that
-trade is named rather than implied: `keep-going` covers a failed derivation, not
-a dying runner, a full disk, or a network that drops mid-fetch, and any of those
-now takes out every target in the cohort where a fan-out loses one. What
-recovers it is the same reclassification, made cheap by streaming: everything
-published before the job died is destination-served on the retry, so the rerun
-resumes from the last completed work rather than repeating the cohort. A
-manifest that cannot tolerate that blast radius declares per-target cohorts and
-keeps the fan-out's isolation at the fan-out's duplication cost.
+`bestEffort` is declared per target, but a cohort is a job, and a job has one
+`continue-on-error`. The current aggregation takes the conjunction across a
+cohort's members, so a cohort holding one required target is required, and it
+spends that value as the job's `continue-on-error`. Both halves of that are
+wrong in the same situation: a shared cohort label mixing tolerated and required
+targets overrides the declared tolerance of the tolerated ones, and a wholly
+tolerated cohort swallows its failures with no attribution back to particular
+targets. The cheap fix is to refuse mixed tolerance under one cohort label as a
+manifest error, since the label is the operator's own choice and the two
+declarations genuinely conflict. The complete fix carries per-target severity
+through to the exit contract, so a cohort reports which targets failed and how
+badly rather than colouring the whole job.
+
+A retry recomputes the partition from scratch. Destination and substituter
+probes rediscover everything published before the failure, so the retry resumes
+from available outputs without a durable scheduler database. A manifest that
+needs a smaller failure domain declares more cohorts and accepts the
+corresponding cross-cohort duplication.
 
 ### Performance and consistency boundaries
 
@@ -5098,99 +5226,97 @@ materialising the complete closure, has not met the design.
 
 The store that owns the build determines what streaming can achieve:
 
-| Build configuration                                       | Event source                                                | Upload source | Runner-local disk effect                                                                      |
-| --------------------------------------------------------- | ----------------------------------------------------------- | ------------- | --------------------------------------------------------------------------------------------- |
-| Local store                                               | Invocation post-build hook                                  | Local store   | Overlaps upload; does not reduce the live build graph                                         |
-| Classic remote builders configured for the local store    | Local completion after the result is copied back            | Local store   | Preserves streaming, but the realised result and required closure still reach the local store |
-| Remote store such as `ssh-ng://…` selected with `--store` | Exact build results at completion; see the event gate below | Remote store  | Can avoid realising and copying the closure into the runner's local store                     |
+| Build configuration                                       | Completion source                         | Upload source | Runner-local disk effect                                                                                              |
+| --------------------------------------------------------- | ----------------------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Local store                                               | Post-build hook events                    | Local store   | Publication overlaps the build; the invocation's live set stays local until it exits                                  |
+| Coordinator-reproducible classic remote builders          | Post-build hook events on the coordinator | Local store   | Saves remote execution scratch, but each result, verification rebuild, and dependent's required closure lands locally |
+| Remote store such as `ssh-ng://…` selected with `--store` | `buildPathsWithResults` after the build   | Remote store  | Keeps the realised closure out of the runner's local store                                                            |
 
 A classic remote builder is a machine chosen by the local store to execute a
 derivation. The local store remains the coordinator and receives the result. It
 saves local CPU and may save build scratch space, but it is not a solution to
-the realised-closure footprint.
+the realised-closure footprint: every result still arrives in the coordinating
+store, and the local verification rebuild puts the work back on the coordinator
+anyway.
 
-A remote store owns the build request and its results. To solve the runner disk
-problem, cupboard must query path metadata and stream NAR bytes from that
-selected store rather than first copying the paths into the local store. Remote
-stores are an optimisation, not the only supported architecture: local builds
-with cupboard as a substituter remain first-class.
+A remote store owns the build request and its results. Cupboard queries path
+metadata and streams NAR bytes from that selected store rather than first
+copying paths into the runner's local store. There is no remote post-build hook,
+so remote-store mode reconciles after the build using `buildPathsWithResults`
+(worker protocol 1.34) for the exact outputs, which is why its completion source
+differs from the local one. Current Nix emits no structured event carrying
+completed output paths over that transport, and human log text is never parsed
+as a substitute.
 
-An invocation-scoped local `post-build-hook` setting is not forwarded into an
-`ssh-ng` remote store. Streaming from a remote store therefore needs one of:
+The reusable workflow declares a `store` input. It selects the build store; an
+empty value selects the local store intentionally, never by omission.
 
-- a stable remote-store progress event that carries exact completed output paths
-  to the local client; or
-- a compatible hook endpoint installed and run on the remote store host.
+Automatic collection between cohorts is a different question from store
+selection, and it is currently answered by the wrong party. The
+`gc-between-cohorts` input lets the caller decide, while the workflow supports
+self-hosted runners, so a caller who does not own the estate can ask for a sweep
+of a store shared with everything else on that machine. Collecting a store is
+only safe where the store dies with the job, so the gate belongs on the runner
+being ephemeral, read from the trusted
+[`runner.environment`][github-runner-context] value being `github-hosted` (the
+[GitHub-hosted job environment][github-hosted-runners] provisions a fresh store
+per job) rather than on a caller input. Self-hosted workflows and standalone CLI
+invocations then report collection as unsupported and leave the store untouched,
+whatever the caller asked for. The same reasoning applies to `maximise-space`,
+whose description already says to enable it only on ephemeral runners and
+enforces nothing.
 
-The first option preserves the no-daemon foreground model, and current Nix gets
-close without arriving. The `internal-json` log is structured and does carry
-per-derivation build activities; the build action already consumes `actBuild`
-start events, whose fields name the derivation and machine, to attribute outputs
-across retries and remote builders, and `ssh-ng` forwards activities. Combined
-with `QueryDerivationOutputMap` that yields exact outputs for executed
-derivations. It is still not a streaming event source, for three reasons: the
-start event names the derivation, not its outputs, so outputs are only
-resolvable by a follow-up query; the corresponding stop event carries no success
-verdict, so completion cannot be distinguished from failure without correlating
-other messages; and nothing guarantees the stream is complete across substituted
-results and content-addressed outputs. Those properties make it good attribution
-input for reconciliation and inadequate as the trigger for publication. The
-protocol's feature handshake offers nothing further: a 1.38 daemon advertises
-exactly one build-observability feature, `queryActiveBuilds`, which reports
-builds in flight, without outputs or a verdict, so it is not the missing event
-source either. The second option is not blocked by the transport, since a hook
-on the remote store host could reach the client's endpoint over a forwarded
-socket. It is blocked by what it requires: installing and running cupboard's
-hook on a host the invocation does not own, which is the separately managed
-component the foreground model exists to avoid. The initial remote-store mode
-therefore performs final reconciliation from the remote store, using
-`buildPathsWithResults` (worker protocol 1.34, available over any daemon-backed
-store including `ssh-ng`) for exact per-target outputs, and documents that
-upload starts after result discovery. It must not copy the closure locally
-merely to imitate streaming. The gate stays open for a future Nix that emits a
-complete per-derivation completion event with outputs and a verdict; tests would
-then have to prove the stream complete for local builds, substituted results,
-multi-output derivations, failures, and reconnects before streaming parity is
-claimed.
+[github-runner-context]:
+  https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#runner-context
+[github-hosted-runners]:
+  https://docs.github.com/en/actions/concepts/runners/github-hosted-runners
+
+Remote stores remain an optional deployment mode. The local-store path is the
+primary design; it manages pressure with the runner's own capacity and, where
+collection is permitted, with a sweep between cohorts, but it does not promise a
+hard upper bound on evaluation, outputs or build scratch.
 
 ### Peak disk and cohorts
 
-Most tenants never reach this section's bound. Packages, development shells, and
-CI artefacts are small against a runner's disk, classification alone keeps them
-that way, and the planner partition with the interim workflow is the whole story
-for them. The demanding shape is a small number of aggregate targets approaching
-the runner's disk, and it has two answers depending on deployment, a remote
-store or component publication, neither of which cupboard can choose for the
-operator.
-
-Streaming and selective publication solve upload cost. They do not permit
-garbage collection of paths still live in one Nix invocation. To bound local
-store use, introduce an explicit invocation boundary:
+The safe publication and collection boundary is the cohort:
 
 ```text
-build cohort A
-  → upload while building
-  → reconcile and drain
-  → command exits
-  → optionally garbage-collect
-build cohort B
-  → Nix substitutes shared outputs from cupboard
-  → upload new work
+build the cohort's build set
+  -> publish and verify outputs as they complete
+  -> attach outputs to the run root
+  -> release upload temporary roots
+  -> optionally collect the store before the next cohort
 ```
 
-This retains sharing without a seed phase. Cohort A performs useful target work,
-not speculative intermediate work, and its published shared dependencies can be
-reused by cohort B. The trade-off is that sharing crosses a cache round trip
-instead of one in-memory Nix scheduler.
+The lower bound is per dispatched derivation. Before Nix executes a derivation,
+every path in that derivation's declared input closure must be valid in the
+selected store, together with its output and build scratch space. That floor is
+not a scheduling artefact and no partition of the target set moves it: splitting
+a cohort moves derivations between invocations without changing any one
+derivation's input closure. An aggregate `buildEnv` may therefore still require
+nearly the whole component set at once.
 
-The eventual default is one cohort containing every compatible target selected
-for the job, which maximises Nix's native work sharing. That default is earned,
-not assumed: the interim workflow lands with per-target cohorts as its default,
-keeping the fan-out's failure isolation and disk profile, and the one-cohort
-default takes over only once measured packing and the tuned headroom exist to
-price the union before building it, with multi-target cohorts opt-in until then.
-Repositories with constrained local stores can declare several cohorts in their
-target manifest or invoke `build-push` several times. The workflow must not
+A capacity refusal must say so. When cupboard refuses because the measured
+substitutable input plus policy headroom exceeds free space, the diagnostic
+names the derivation, the measured estimate, the current free space, and the
+headroom, and it offers only options that can actually help: a larger store, a
+remote store, or fewer concurrent builds. It must not suggest splitting the
+cohort, and it should state why: no cohort split can go below one derivation's
+own live input closure. An operator told to split a manifest that already
+contains a single oversized derivation spends a round of CI discovering that for
+themselves.
+
+These measurements exclude build outputs and scratch space, and `narSize` is
+serialisation length rather than exact on-disk cost, so neither admission nor
+refusal is proof of whether the cohort will fit. Every `unknown` path makes the
+measurement under-count by an unmeasured amount and is reported with the
+refusal.
+
+The cohort is the explicit coalescing and runner boundary and its size
+determines one indivisible Nix invocation. Per-target cohorts remain the
+default, and a shared cohort label merges compatible targets into one
+invocation. Repositories choose that grouping to exchange cross-runner
+duplication and isolation for within-runner coalescing. The workflow must not
 silently repartition a manifest because:
 
 - output and build-scratch sizes are not generally knowable before building;
@@ -5199,123 +5325,47 @@ silently repartition a manifest because:
 - operators may prefer fewer remote builds, particular platform groupings, or a
   known CI matrix.
 
-The planner already holds the numbers a cohort decision needs: `queryMissing`
-reports the substitutable set's download and NAR sizes alongside the partition,
-before anything is fetched. The measured substitutable bytes exclude build
-outputs and scratch space, and `narSize` itself is not exact on disk, since
-block rounding can push the substituted bytes above it; the excluded costs
-dominate that gap. A measurement that only excludes can refuse a plan that
-cannot fit without promising that one will: preflight fails fast when the
-measured bytes cross the selected store's capacity less a configured headroom.
-The headroom is not decoration: a comparison against raw capacity refuses only
-the runs that were never close and admits the ones that are, because build
-outputs, scratch space, the NAR-to-disk gap, and any `unknown` remainder all
-land on top of the measured bytes. The headroom is the larger of an absolute
-minimum and a fraction of capacity, because build scratch does not scale with
-store size: a fraction alone is generous on a large store and nothing on a small
-one. Both values are provisional until the fixture's recorded measurements tune
-them, and the fixture records realised output bytes per built derivation so that
-the `willBuild` set, the dominant cost the measurement excludes entirely, gains
-an estimate the refusal can report. Every `unknown` path makes the measurement
-under-count by an unmeasured amount, which is a further reason the production
-`unknown` ceiling stays small and the refusal message reports the count
-alongside the sizes.
-
-The refusal reports the measured numbers and offers the options that exist in
-the configuration it detected, never a fixed list: a cohort split where the
-targets are separable, component publication where the oversized target is an
-aggregate, a remote store where one is configured or a larger runner where none
-is. A cohort split is never offered for an aggregate target, because the final
-`buildEnv` needs its whole input closure valid at once however the manifest is
-partitioned.
-
-Cohort suggestions derived from the same metadata are not build policy and must
-be explainable from measured store metadata. An opt-in packing mode clears that
-bar: the same store queries, asked per target or per candidate grouping, price a
-grouping before anything is fetched, so packing targets into cohorts under a
-disk budget with the configured headroom is measurement, not a heuristic. It
-stays opt-in, honouring the rule that the workflow never silently repartitions a
-manifest, and it matters most for an operator adopting cupboard on a small
-runner who does not know their own closure sizes and should not need to
-hand-tune a cohort list for a first green run. Historical estimates may improve
-reporting but cannot turn an uncertain cohort into a guaranteed fit; a packed
-cohort's measurement excludes the same costs as any other.
-
-An aggregate target is itself a choice, and unmaking it is the local-only
-answer. A system or home environment is a `buildEnv` over components; a
-component-publication mode publishes the components as the targets and leaves
-the aggregate to the machine that activates it, which realises the top-level
-environment from parts it substitutes. The runner's peak falls from the union to
-the largest component's input closure, and the machine paying the whole-closure
-cost is the one that was going to hold that closure anyway. Cohorts then do real
-work, because components genuinely can split across invocations with a drain and
-collection between them. The mode's costs stay written next to it: retention no
-longer travels through one target's reference closure, so the target root's list
-is the component list, and a system closure exceeds the `rootSetMaxTargets`
-(1000) request bound. That bound binds `roots.ensure` identically, because its
-input embeds the same root set body, and paging suits neither write: a paged
-ensure loses exactly the properties it exists for, all-or-nothing `retained` and
-retention refreshed in the same request, so the mode needs its own retention
-shape rather than paged writes. The manifest expresses the mode as a
-`components` list on the aggregate target; the planner expands it into one
-synthetic target per component, each carrying the aggregate's execution context
-and rootSuffix, so the aggregate itself is never evaluated, queried for
-realisation, or built. A manifest declaring more components than
-`rootSetMaxTargets` accepts is refused outright, naming the cap; the larger case
-is deferred to a retention shape built on attach with a generation marker. The
-central pre-filter has no aggregate output path to key on and prunes on the
-component roots; and there is no provenance for the aggregate the machine
-activates, because it was never built here. It is a mode, not the default, and
-it is what makes a local-only runner with a large system closure a supported
-configuration rather than a refusal.
-
-Garbage collection between cohorts is explicit. `build-push` may offer an opt-in
-“drain, then GC” setting, but must not delete arbitrary user store paths by
-default. Nix's `min-free` and `max-free` settings can collect unrelated dead
-paths under pressure; they cannot collect the active graph, because the
-invocation holds roots on the requested installables and their closures, none of
-which is dead until the invocation exits, and they cannot make an oversized
-single target fit. Whether the build-only inputs of already completed
-derivations become collectable mid-invocation turns on how long the daemon holds
-that connection's temporary roots; for a build set the size of the fixture's
-that is a real quantity, so the rollout fixture enables the settings and
-measures it rather than assuming either answer.
+Measured packing is the opt-in exception, and it is measured rather than
+guessed: the planner prices candidate groupings from each target's measured
+substitutable NAR size against a declared disk budget under the configured
+headroom, combines only cohorts that already share system, store and failure
+tolerance, and leaves any target it cannot price in its manifest-declared
+cohort. It chooses the scope in which derivations can coalesce; it does not turn
+an uncertain build into a guaranteed fit.
 
 ### Reconciliation and correctness
 
 Streaming is an optimisation over an explicit final state, not the source of
-truth. Target results are obtained programmatically, never by parsing the
-child's output: the child command is user-supplied and its stdout and stderr
-pass through untouched. The mechanism is the planner's own snapshot: the
-derivation graph captured before the build (`nix derivation show`, as the
-in-flight commit already does) plus the batched `QueryDerivationOutputMap` and
-path-info queries against the selected store after the child exits. This avoids
-a second flake evaluation; where re-evaluation is unavoidable it leans on the
-flake evaluation cache, and the receipt records evaluation time, because on a
-large flake a cold evaluation costs minutes. When `build-push` constructs the
-Nix invocation itself, `buildPathsWithResults` returns the same facts directly.
-A recorded option, not yet scheduled, attacks that cost with cupboard itself:
-the plan job already resolves targets to derivation paths, and a derivation is a
-store path cupboard can serve, so publishing the resolved `.drv` closure would
-let a build job substitute the derivations and build `<drv>^out` directly, with
-no flake evaluation on the build runner at all.
+truth. Target results are obtained programmatically from the manifest, the
+accepted build events, and batched `QueryDerivationOutputMap` and path-info
+queries against the build store. No human Nix output is parsed.
+
+Evaluation is now the dominant fixed cost. With the seed jobs gone and the byte
+costs collapsed, a cold flake evaluation on a fresh runner is what a run pays
+before it does anything useful, and the plan job of the measured run alone took
+nearly eight minutes; per-target cohorts pay that once per matrix entry. The
+recorded way out uses cupboard itself: the plan job already resolves targets to
+derivation paths, and a derivation is a store path cupboard can serve, so
+publishing the resolved `.drv` closure would let a cohort runner substitute the
+derivations and build `<drv>^out` directly, with no flake evaluation on the
+build runner at all. The receipt records evaluation time so the size of that
+prize stays visible.
 
 The final reconciliation:
 
-- resolves the manifest's targets to their output paths in the selected store;
+- resolves the manifest's targets to their output paths in the build store;
 - includes target paths that were valid before the invocation;
 - includes every accepted build-output event selected for publication;
 - re-queries the destination, making already uploaded paths cheap no-ops;
 - retries or reports paths whose streaming upload failed;
 - waits for deferred server verification when later substitution depends on the
   result;
-- applies the requested target roots only after their paths are confirmed
-  servable, leaving a root untouched when any of its declared targets is not;
-  and
+- applies a requested target root only when every target declared for that root
+  reached a successful terminal outcome, passing exactly the destination-held
+  subset, which may be empty; and
 - writes one receipt describing selected, skipped, uploaded, failed, and
-  retained paths, together with the planner's partition counts and substitutable
-  sizes: a raised `unknown` count is the record that a substituter did not
-  answer and the run degraded toward building.
+  retained paths, together with the partition counts and substitutable sizes: a
+  raised `unknown` count records that a substituter did not answer.
 
 This is why `cupboard push` remains an explicit operation underneath
 `build-push`. It provides safety and verification even though the ideal
@@ -5326,35 +5376,27 @@ hooks do not report paths that Nix did not build during the invocation. A final
 target that was already valid locally but missing from cupboard must still be
 queried and published. Conversely, a path substituted from another configured
 cache is not copied into cupboard by default merely because it became valid
-during the command, unless it is itself a requested target path that the planner
-selected for publication. The planner's classification stays authoritative: a
-target left upstream remains left upstream even when another target's build
-happens to realise it, so root contents do not depend on which targets share a
-run.
+during the command, unless it is itself a requested target path selected for
+publication. A target settled as left upstream stays left upstream even when
+another target's build happens to realise it during the same run, so root
+contents do not depend on execution order.
 
 Paths queued for upload are protected from local garbage collection with
 temporary roots. `AddTempRoot` is a worker-protocol operation with no matching
 release: the root lives exactly as long as the connection that took it, so the
 connection is the unit of pinning and its scope decides how much the run pins.
 The supervisor therefore takes roots on a connection scoped to the upload batch
-and closes it when the batch's reads complete. Mid-run the scope changes
-nothing, because the child invocation holds its own temporary roots on
-everything it requested for as long as it runs; batch scoping matters at the
-edges. A concurrent invocation sharing the store sees only the current batch
-pinned by the supervisor, and when the child exits, the drain releases promptly,
-which is what collection between cohorts depends on; a run-lifetime connection
-would go on pinning every published output until the very end of the run. The
-caller-controlled connection lifetime is a new client capability either way: the
-daemon client today opens and closes a connection per query, and a pooled
-`closeAll` would drop every root taken through it. Temporary roots also exist
-only behind the daemon; the daemonless local backend reads the store's SQLite
-database directly, with no connection to hold and no temp-root protocol, so
-streaming requires a daemon-backed store. Backend selection must honour that:
-the automatic backend prefers the local SQLite reader whenever the state
-directory is writable, so `build-push` selects the daemon whenever its socket
-exists; preflight refuses only when there is no daemon to select. A single-user
-daemonless install cannot stream at all. Nix's documented ordering applies: take
-the root first, then check validity, then read. A path that is nevertheless gone
+and closes it when the batch's reads complete. The caller-controlled connection
+lifetime is a client capability the ordinary daemon client does not have: it
+opens and closes a connection per query, and a pooled `closeAll` would drop
+every root taken through it. Temporary roots also exist only behind the daemon;
+the daemonless local backend reads the store's SQLite database directly, with no
+connection to hold and no temp-root protocol, so streaming requires a
+daemon-backed store. Backend selection must honour that: the automatic backend
+prefers the local SQLite reader whenever the state directory is writable, so
+`build-push` selects the daemon whenever its socket exists, and preflight
+refuses a truly daemonless install. Nix's documented ordering applies: take the
+root first, then check validity, then read. A path that is nevertheless gone
 when its NAR read starts is a typed per-path outcome, never a batch failure: a
 vanished intermediate is recorded as collected in the receipt, a vanished target
 fails the run with that reason. Attic shows the cost of getting this wrong twice
@@ -5363,26 +5405,30 @@ over, with no roots at all and one invalid path failing the whole batch plan.
 Destination-side, a streamed publication is retained by the root it belongs to,
 decided before the build and applied as the path commits. The run knows the root
 already: the manifest declares a destination root per target, and the planner's
-pre-build derivation-graph snapshot maps a derivation to the targets whose
-graphs contain it, so a hook event's `DRV_PATH` resolves to a root name.
-Derivations that only come into existence while the build runs, through
-import-from-derivation or dynamic derivations, are absent from the snapshot and
-have no attribution; they reach the destination through reconciliation instead.
+derivation-to-target map resolves a completed `DRV_PATH` to the targets whose
+graphs contain it. Derivations that only come into existence while the build
+runs, through dynamic derivations or import-from-derivation, are absent from
+that map and have no target attribution; they are ordinary publication
+candidates under the run root and reach no target root.
 
 Two roots with different lifecycles carry this, and they must be different
 roots. A root write replaces the whole target list and releases whatever the new
 list omits, so a run that attached to a root and then replaced it would discard
 everything it had just attached.
 
-- The **run root** accretes. Each committed path joins it, it carries a
-  time-to-live, and it is never replaced. It holds everything the invocation
-  publishes, targets included, from the moment each row is finalised.
+- The **run root** accretes. Each committed path and each destination hit
+  accepted through skip negotiation joins it, it carries a time-to-live, and it
+  is never replaced. It holds everything the invocation publishes or relies on
+  from the moment that path settles.
 - The **target root** declares. Reconciliation replaces its target list with the
-  manifest's targets, only when every one of them confirms servable, and it is
-  never attached to. Replacement is the right behaviour there, because a named
-  channel moving from one commit to the next is exactly a replacement, and
-  releasing the previous targets is the point; a root with an incomplete target
-  list is left untouched, so its previous generation stays retained.
+  manifest's destination-held targets, only when every declared target reaches a
+  successful terminal outcome, and it is never attached to. A target
+  deliberately left at a confirmed upstream satisfies the gate without entering
+  the root contents. The list may be empty, and an empty list is a legitimate
+  settled state rather than a failure: it is what a root all of whose targets
+  are upstream looks like, and treating it as an error would freeze that root
+  forever. A root with an incomplete target list is left untouched, so its
+  previous generation stays retained.
 
 That leaves no unprotected window. `root:attach` is applied inside the same
 gated section that finalises the generation, where the captured grace decision
@@ -5411,19 +5457,48 @@ expiry hands to the targets it releases, which is where a released path needs a
 recovery window and where the collector would otherwise strand an in-flight
 substitution.
 
-Concurrent `build-push` invocations may share one store. Hook settings apply per
-daemon client connection, so each invocation's hook fires only for the builds
-its own connection scheduled; a shared derivation built by the other invocation
-produces no event here and arrives through the already-valid reconciliation
-instead. Each invocation publishes and roots its own targets; the destination's
-idempotent operations absorb the overlap.
+Target-root writes are last-writer-wins, and that is a silent correctness fault
+rather than a cosmetic one. Two runs of the same workflow can overlap, and if
+the older one finishes last it replaces the root with an older target list. The
+root moves backwards, nothing reports it, and the next consumer resolves the
+stale generation. The cheap half of the fix is an ordered writer generation: the
+workflow derives a stable writer namespace from the repository, workflow, ref,
+tenant, and root layout, and an ordered generation from GitHub's `run_number`
+and `run_attempt`, and the root write compares that tuple inside the gated
+transaction that already finalises the generation. A greater generation replaces
+a lesser one, an equal generation with equal contents is idempotent, an equal
+generation with different contents conflicts, and an older generation is
+rejected outright. An older run completing last can then never roll a root back.
 
-The child build and publication have independent lifetimes. Signals stop
-accepting new work, forward cancellation to the child, drain or cancel uploads
-according to the command's documented timeout, and remove the runtime directory.
-An interrupted run is safe to repeat because destination negotiation,
-content-addressed blob upload, commit, and root replacement are idempotent at
-their existing boundaries.
+The expensive half can wait, and should be recognised as expensive rather than
+folded into the same step: fence state that survives root expiry, `root:remove`
+and garbage collection needs its own table and migration; a claimed root must
+reject an unfenced legacy write, which every existing `root:set` client is;
+transferring or resetting a writer needs its own contract procedures, CLI
+commands, distinct grant and audit path; and standalone `cupboard push` becomes
+an unfenced writer that must either use another root or ask for an
+administrative transfer. None of that is needed to stop a root moving backwards
+within one workflow's own writes.
+
+The reusable workflow should also declare its own concurrency group rather than
+documenting one for callers to add. A caller who omits it gets overlapping runs,
+and the workflow is the party that knows what its own writer namespace is.
+Concurrency remains a cost control rather than a correctness condition once the
+generation comparison exists, but it is free and the workflow can simply declare
+it.
+
+Concurrent `build-push` invocations may share one store. Each computes its own
+partition, and a derivation completed by another invocation appears as locally
+valid at the dispatch-time re-probe. Each invocation publishes and roots its own
+targets; the destination's idempotent operations absorb the overlap.
+
+Build requests and publication have independent lifetimes. Signals stop the
+child build, cancel active store operations, drain or cancel uploads according
+to the command's documented timeout, close and join every remote SSH child, and
+remove the runtime directory only after those lifetimes settle. An interrupted
+run is safe to repeat because availability is reconstructed and destination
+negotiation, content-addressed blob upload, commit, and root replacement are
+idempotent at their existing boundaries.
 
 ### Workflow migration
 
@@ -5436,44 +5511,39 @@ plan → seed jobs → target fan-out → fallback jobs → push
 to:
 
 ```text
-plan exact targets → build-push one or more useful target cohorts
-                   → final roots and receipts
+plan manifest and explicit cohorts
+  -> one cohort job per surviving matrix entry
+  -> one build-push invocation per cohort
+  -> final roots and cohort receipts
 ```
 
-It gets there in two moves, neither of which waits for streaming. The first
-drops the seed and fallback jobs and leaves the fan-out alone. That needs
-nothing from the client and is what removes the seed set's build-time input
-closures, so it is worth taking on its own rather than as a consequence of the
-migration.
-
-The second gives the remaining jobs the planner partition and
-publish-by-reference: each runs a plain `nix build` over its own build set and
-publishes with an ordinary `cupboard push` afterwards, per-target by default
-with multi-target cohorts opt-in. A multi-target cohort is where Nix's native
-sharing returns, since one invocation then builds every target it was given; the
-default stays per-target until measured packing can price that union before
-building it. What the shape lacks either way is the overlap of upload with the
-build, which is what `build-push` adds.
+The cohort matrix is the workflow boundary. Each matrix entry selects one runner
+and one compatible execution context, and the manifest's cohort label decides
+which targets share it. The plan job supplies the target manifest, cohort
+identity, execution context, roots, and `bestEffort` metadata, and prunes whole
+jobs through the advisory destination pre-filter; the cohort job's own partition
+stays authoritative.
 
 The workflow's per-run root retention mode carries forward as the run root
-`build-push` attaches to while streaming, and the declared target roots land at
-reconciliation as they do today. Named reuse views continue to let later jobs or
-later workflows substitute work published elsewhere in the tenant, and
+`build-push` attaches to as each batch commits, and the declared target roots
+land at reconciliation. Named reuse views continue to let later cohorts or
+workflows substitute work published elsewhere in the tenant, and
 publish-by-reference extends them from a substitution mechanism into a
-publication one. Those are cache lifetime and visibility mechanisms; they do not
-require a seed job.
+publication one.
 
 Target fan-out remains available when isolation or runner selection requires it.
-The workflow can also build several targets in one job to let Nix share work
-directly. The target manifest and workflow decide those cohort boundaries
-explicitly.
+Putting several targets in one cohort lets one invocation coalesce their shared
+derivations. The target manifest decides that boundary explicitly.
 
-Do not keep the seed architecture as an automatic fallback once `build-push`
-passes its rollout gates. Capability detection may reject an old cupboard
-release with a clear minimum-version error, but it must not silently restore a
-complete-closure seed build whose cost is the problem this design addresses.
+The seed architecture must not return as a silent automatic fallback. Capability
+detection may reject an old cupboard release with a clear minimum-version error,
+but it must not quietly restore a complete-closure seed build whose cost is the
+problem this design addresses.
 
 ### Implementation sequence
+
+Steps 1 to 13 record the shape the architecture has. Steps 14 onwards are the
+remaining work.
 
 1. Remove the seed and fallback jobs from the reusable workflow, leaving the
    existing target fan-out in place. The targets already run whatever became of
@@ -5482,22 +5552,20 @@ complete-closure seed build whose cost is the problem this design addresses.
    a seed set's build-time input closures while the steps that replace seeding
    properly are still being built, and it reverts in one commit if a tenant's
    measurements disagree.
-2. Complete and land the selective push contract, building on the in-flight
-   commit:
+2. Land the selective push contract:
    - one tagged publication collection at the domain boundary, retained targets
-     and unretained `intermediatePaths`, renaming the branch's additional set
-     for what it holds;
+     and unretained `intermediatePaths`;
    - complete closure only behind `--closure`;
    - branded store-path types throughout;
-   - the batched worker queries the commit adds: `QueryValidPaths` (31),
+   - the batched worker queries: `QueryValidPaths` (31),
      `QuerySubstitutablePaths` (32), and `QueryDerivationOutputMap` (41);
    - `QueryMissing` (40) for the realisation partition;
    - `AddTempRoot` (11), which the upload-batch root protection needs;
    - batched path info as concurrent `QueryPathInfo` over the connection pool,
-     because upstream has no batched operation: the commit's operation 50 sits
-     behind the daemon feature handshake for `queryPathInfos`, which no current
-     daemon advertises (a 1.38 daemon advertises only `queryActiveBuilds`), so
-     that branch stays explicitly speculative; and
+     because upstream has no batched operation: operation 50 sits behind the
+     daemon feature handshake for `queryPathInfos`, which no current daemon
+     advertises (a 1.38 daemon advertises only `queryActiveBuilds`), so that
+     branch stays explicitly speculative; and
    - a destination-missing query before any NAR preparation.
 3. Make the target manifest and planner produce the exact multi-installable
    build request, expected target outputs where known, target retention roots,
@@ -5506,26 +5574,15 @@ complete-closure seed build whose cost is the problem this design addresses.
    attaching, targets to publish by reference, targets left upstream, and the
    build set, which is the only part handed to Nix. The plan records the
    partition counts and the substitutable download and NAR sizes for the receipt
-   and the preflight capacity check; paths reported `unknown` are re-queried
-   with `narinfo-cache-negative-ttl` set to zero over `SetOptions`, because Nix
-   negative-caches a failed narinfo lookup for an hour and a bare re-query would
-   read that cache, not the network. That override only takes effect on a
-   trusted connection: the daemon drops an untrusted client's settings outside a
-   small allowlist at debug level, the same silent-ignore hazard as
-   `post-build-hook`. `build-push` already holds the override and the trust
-   preflight; the interim planner makes its own `SetOptions` call, since its
-   substituter exclusion is a set difference with no override to reuse, and
-   performs the same handshake trust check. A count that still exceeds the
+   and the preflight capacity check. Paths reported `unknown` are re-queried
+   with `narinfo-cache-negative-ttl` set to zero over `SetOptions`, on a
+   connection whose trust is checked first, and a count that still exceeds the
    configured ceiling fails the plan loudly. The ceiling is a workflow setting
-   with two different values: zero is the rollout fixture's gate and requires
-   the trusted connection the fixture's runner has, while an untrusted planner
-   falls back to the nonzero production default with the reason in the receipt,
-   because with the bypass silently dropped a zero ceiling would fail the plan
-   for a cause it cannot see. The production default is small but nonzero,
-   because a substituter missing one answer is a routine transient and a zero
-   ceiling would fail plans on flakiness alone. The planner also produces the
-   derivation-to-target map the streaming path resolves a `DRV_PATH` through.
-   Remove package-to-system policy from the planner.
+   with two different values: zero is the rollout fixture's gate and requires a
+   trusted connection, while an untrusted planner falls back to the nonzero
+   production default with the reason in the receipt. The planner also produces
+   the derivation-to-target map the streaming path resolves a `DRV_PATH`
+   through. Remove package-to-system policy from the planner.
 4. Add publish-by-reference: read the served narinfo from the tenant for a
    path's metadata and drive the ordinary negotiate-and-commit with it, so a
    path the tenant already holds reaches the destination cache without local
@@ -5534,41 +5591,28 @@ complete-closure seed build whose cost is the problem this design addresses.
    blob, the served narinfo carries every field the negotiate and commit shapes
    need (`NarHash`, `NarSize`, `References`, `Deriver`, `CA`, `FileHash`,
    `FileSize`, `Compression`), and the server signs the destination narinfo with
-   the tenant key, so no signature is copied. The client work is the narinfo
-   fetch and the mapping into the existing shapes, and the test is that the
-   destination serves the path afterwards.
-5. Migrate the reusable workflow to the interim shape: replace the target
-   fan-out with cohort jobs, per-target by default with multi-target cohorts
-   opt-in, each computing the availability partition and the capacity check
-   against its own store, running a plain `nix build` over the resulting build
-   set, and publishing with an ordinary `cupboard push`. The plan job supplies
-   the target manifest and cohort identity and prunes jobs through the advisory
-   destination pre-filter; the cohort job's own partition stays authoritative.
-   The pre-filter is `roots.ensure`, which requires `root:set`, so the plan
-   job's own token exchange asks for `root:set` on the target roots it may
-   refresh: an `authorization_details` change on a second job, not a widening of
-   the build job's. The all-or-nothing target-root rule applies here already:
-   under `keep-going` a partial build publishes what completed without a root,
-   and a target root is set only when every one of its declared targets built
-   and confirmed servable, so the interim shape never releases a root's previous
-   generation on a failed build. The interim shape also has a collection window
-   the supervised design closes elsewhere: between the build process exiting and
-   `cupboard push` reading, nothing would root the outputs, and `min-free` or
-   the opt-in collection could take them. The cohort job therefore keeps the
-   build's out-links until the push completes; `--no-link` belongs to the
-   supervised `build-push` shape, whose temporary roots replace it. Out-links
-   root the targets' reference closures only, so an unreferenced intermediate
-   bound for `intermediatePaths` can still vanish in the window; the interim
-   push records it as collected, a typed per-path outcome exactly as the
-   supervised design treats a vanished intermediate, and only a vanished target
-   fails the run. This ships the realisation and publication selection ahead of
-   streaming; upload overlap arrives with `build-push`.
-6. Add component publication and measured packing to the interim workflow, both
-   off by default: the manifest marks an aggregate target's components as the
-   published targets, and the planner prices candidate cohorts from the measured
-   sizes under the configured headroom. This step also decides the
-   component-root retention shape, because `rootSetMaxTargets` binds `root:set`
-   and `roots.ensure` alike and paging suits neither.
+   the tenant key, so no signature is copied.
+5. Migrate the reusable workflow to cohort jobs, per-target by default with
+   multi-target cohorts opt-in, each computing the availability partition and
+   capacity check against its own store, running `nix build` over the resulting
+   build set, and publishing with an ordinary `cupboard push`. The plan job
+   supplies the target manifest and cohort identity and prunes jobs through the
+   advisory destination pre-filter, which is `roots.ensure` and therefore
+   requires `root:set`: an `authorization_details` change on the plan job's own
+   token exchange, not a widening of the build job's. The all-or-nothing
+   target-root rule applies here already: under `keep-going` a partial build
+   publishes what completed without a root, and a target root is set only when
+   every one of its declared targets built and confirmed servable. The cohort
+   job keeps the build's out-links until the push completes, because between the
+   build process exiting and `cupboard push` reading, nothing else would root
+   the outputs and `min-free` or an opt-in collection could take them;
+   `--no-link` belongs to the supervised `build-push` shape, whose temporary
+   roots replace it. Out-links root the targets' reference closures only, so an
+   unreferenced intermediate can still vanish in that window: it is recorded as
+   collected, a typed per-path outcome, and only a vanished target fails the
+   run.
+6. Add measured packing, off by default. The planner prices candidate cohorts
+   from the measured sizes under the configured headroom.
 7. Add `root:attach`: a cache operation with a root resource, an additive and
    monotonic target write keyed by cache, root, and store-path hash, applied
    inside the gated section that finalises a generation. The root is bound at
@@ -5586,10 +5630,9 @@ complete-closure seed build whose cost is the problem this design addresses.
    unbounded listing becomes unservable exactly the way the current `list`
    failure does.
 8. Add a typed build-event and build-receipt domain model in
-   `@cupboard/protocol`, shared by the CLI and the actions and superseding the
-   receipt schema in `actions/src/build-receipt.ts`. Keep Nix process parsing,
-   hook transport, publication selection, and reporting behind interfaces that
-   can be tested independently.
+   `@cupboard/protocol`, shared by the CLI and the actions. Keep Nix process
+   parsing, hook transport, publication selection, and reporting behind
+   interfaces that can be tested independently.
 9. Implement the invocation runtime directory, the socket listener, the
    versioned message format, the purpose-built helper, and the minimal `/bin/sh`
    hook script. Build the helper as part of the cupboard packages: the Nix
@@ -5617,56 +5660,98 @@ complete-closure seed build whose cost is the problem this design addresses.
     - credential re-exchange across the run; and
     - final reconciliation, retention, receipt output, and the numeric exit
       contract.
-11. Exercise classic remote builders and document the point at which results
-    enter the local store. Fix any event or multi-output gaps before claiming
-    streaming support.
-12. Extend the Nix store client so a selected remote store can provide path
+11. Extend the Nix store client so a selected remote store can provide path
     metadata and NAR streams directly: `NarFromPath` alongside the batched query
     operations, over the same connection handling as the local daemon path.
     Remote-store mode reconciles after the build using `buildPathsWithResults`
-    for exact outputs, without a local copy; streaming there waits on a future
-    Nix exposing a complete per-derivation completion event.
-13. Move the interim cohort jobs onto `build-push`, one or more target cohorts
-    per run. `actions/plan` survives as the manifest planner feeding
-    `build-push`; the supervision that `actions/build-paths` carries today, its
-    retry attempts, remote attribution, and receipt writing, moves into
-    `build-push`. Preserve the run root and target roots, reuse-view
-    substitution, and attestations.
-14. Carry explicit cohort configuration, measured packing, and component
-    publication into the `build-push` workflow, and add an opt-in
-    GC-between-cohorts setting. Keep one cohort as the default.
-15. Remove what step 1 left of the seed architecture, the planner's seed-group
-    code, `actions/build-paths`, compatibility inputs, and temporary seed-root
-    naming, after the new workflow has run successfully on local,
-    classic-remote-builder, and remote-store fixtures.
+    for exact outputs, without a local copy.
+12. Move the cohort jobs onto `build-push`, one or more target cohorts per run.
+    `actions/plan` survives as the manifest planner feeding `build-push`; the
+    supervision that `actions/build-paths` carries, its retry attempts, remote
+    attribution, and receipt writing, moves into `build-push`. Preserve the run
+    root and target roots, reuse-view substitution, and attestations.
+13. Carry explicit cohort configuration and measured packing into the
+    `build-push` workflow. Per-target cohorts remain the default isolation
+    boundary; explicit shared labels and opt-in measured packing create
+    multi-target cohorts.
+14. [ ] Refuse mixed failure tolerance under one cohort label. A cohort label is
+        the operator's own grouping, so a label covering both a `bestEffort`
+        target and a required one is a manifest error rather than something to
+        resolve by conjunction. Report it at planning with both targets named.
+15. [ ] Gate collection on the runner being ephemeral rather than on a caller
+        input. Read the trusted `runner.environment` context in the reusable
+        workflow, permit collection only when it is `github-hosted` and the
+        selected store is local, and report collection as unsupported for
+        self-hosted and standalone execution. Apply the same rule to
+        `maximise-space`, whose ephemeral-runner requirement is currently only
+        prose.
+16. [ ] Compare each declared target's system and required system features with
+        the coordinating machine at preflight, before classic remote builders
+        are enabled, and refuse a target the coordinator cannot rebuild with a
+        typed verification-capability error. Without this the refusal arrives
+        only after a full remote build.
+17. [ ] Add an ordered writer generation to target-root writes. Derive the
+        writer namespace from repository, workflow, ref, tenant, and root
+        layout, and the generation from `(run_number, run_attempt)`; compare
+        both inside the existing gated transaction so a greater generation
+        replaces a lesser one, an equal generation is idempotent only for equal
+        contents, and an older generation is rejected. Declare the reusable
+        workflow's own concurrency group in the same step. Durable fence state
+        surviving root expiry and removal, the management procedures, the grant
+        and the audit path are a separate, larger piece of work.
+18. [ ] Record provenance on receipt subjects and enforce it at attestation.
+        Each subject carries the build store that produced the path, the machine
+        the build activity ran on, and its verification classification.
+        `verifiedAttribution` must stop blanking the machine, a standalone
+        `build-push` with remote builders must not silently attest unverified
+        results, and a remote-store cohort must record which store produced each
+        path. Attestation refuses an unverified remotely produced subject.
+19. [ ] Wire cross-run pruning end to end. Supply `--previous-receipt-file` from
+        the composite action and the workflow; upload per-cohort receipt
+        fragments and a plan-stage fragment naming the expected keys; add an
+        aggregation job that runs on failure and publishes state only for a
+        complete, identity-valid set; define the manifest digest over the
+        receipt schema, manifest contents, resolved target identities, source
+        revision, flake-lock digest, publication policy and execution context;
+        and re-run the upstream confirmation over every recorded left-upstream
+        candidate before accepting it. Any missing, expired, malformed or
+        inconclusive state prunes nothing and is an advisory miss.
+20. [ ] Make the capacity refusal name the per-derivation floor. The diagnostic
+        gives the derivation, estimate, free space and headroom, offers a larger
+        or remote store or fewer concurrent builds, and states that no cohort
+        split can go below one derivation's own live input closure.
+21. [ ] Publish the resolved `.drv` closure from the plan job so a cohort runner
+        can substitute the derivations and build `<drv>^out` without evaluating
+        the flake. With per-target cohorts the evaluation is currently paid once
+        per matrix entry, and the measured plan job took nearly eight minutes.
+22. [ ] Add a durable-upstreams policy: a configured list of upstreams whose
+        retention is trusted, with content found at any other upstream adopted
+        into the destination instead of left there. Adoption is a compressed
+        copy from upstream to destination and needs no runner disk, so it shares
+        its mechanism with the binary-cache import under Later features.
+23. [ ] Exercise classic remote builders in a fixture and document the point at
+        which results enter the local store. Cover machine attribution through
+        verification, the verification rebuild itself, and multi-output events.
+24. [ ] Run the measured flake fixture through per-target and explicit
+        multi-target cohorts, and record a `scripts/measure-realisation`
+        baseline the workflow gates against. The fixture must prove that a
+        confirmed-upstream target branch is not materialised in default mode,
+        that complete-closure mode does materialise and publish an upstream-only
+        closure, that each derivation shared within a cohort executes once, and
+        that cross-cohort duplication is tolerated.
+25. [ ] Remove `actions/build-paths` and the remaining seed-shaped inputs once
+        cupboard's own publish workflow has moved onto the cohort workflow.
 
-The sequence is two tracks behind one deletion. Step 1 stands alone and depends
-on nothing, which is why it goes first: the harmful thing stops before the work
-that replaces it begins. Runner disk is then bounded by 2 → 3 → 4 → 5 → 6 → 12;
-streaming publication is 7 to 11; the tracks share step 2 and meet at step 13.
-Within them: steps 2 and 3 are independent starting points; step 4 builds on
-step 2's contract work, step 5 needs the planner and adoption from steps 3 and
-4, and step 6 extends step 5's workflow. The tracks' independence up to step 13
-is conditional on step 6's retention-shape decision: attach alone cannot carry a
-component root, since it never releases a target and the root needs declarative
-replacement, but a shape built on attach plus a generation marker would borrow
-from step 7 and add that one cross-track edge. Steps 7, 8, and 9 proceed
-independently of all of those. Step 10 depends on 2, 3, 7, 8, and 9, taking the
-partition and capacity check from step 3's planner. Step 11 exercises step 10's
-supervisor against classic remote builders. Step 12 depends on the store
-abstraction from step 2 but not on workflow migration, and when bounded runner
-disk is the objective it is scheduled directly after step 6: a rebuilt aggregate
-target substitutes its whole input closure onto the runner even with `max-jobs`
-zero, tens of gibibytes on the fixture's target jobs, and nothing in steps 7 to
-11 changes that; only a remote store or component publication does. Step 13
-depends on the local `build-push` path and its receipts, and step 14 extends
-step 13's workflow. Step 15 is a deliberate removal after live validation, not a
-permanent compatibility branch.
+Steps 14 to 16 are small and independently landable. Step 17 touches the Durable
+Object's gated root transaction and its migration. Steps 18 and 19 both extend
+the receipt, so the receipt schema change should land once. Steps 20 to 22 are
+independent of each other and of everything above. Steps 23 and 24 are the
+fixture gates, and step 25 waits on step 24 passing.
 
 ### Verification
 
-Unit and integration coverage must prove the selection model before exercising
-large builds:
+Unit and integration coverage proves the selection model before exercising large
+builds:
 
 - Targets are retained and `intermediatePaths` are not added to the requested
   root or implicit pins; a transposition between the kinds is unrepresentable in
@@ -5678,34 +5763,72 @@ large builds:
 - A destination hit performs no NAR serialisation or upload, and an unchanged
   manifest against a warm destination is a no-op run: nothing is realised, no
   NAR bytes move, and the target roots are refreshed.
-- A path supplied by an intended configured substituter is not realised solely
-  for default publication, and a fully substitutable target selected in the
-  default mode causes no realisation and no fetch.
-- The upstream availability answer never includes the destination or a tenant
-  view, through the `SetOptions` override under `build-push` and the set
-  difference in the interim workflow, so tenant-held content is never classed as
-  left upstream.
-- The `unknown` re-query reaches the substituter rather than the negative
-  narinfo cache, proven against a fake substituter that counts requests, so the
-  test cannot pass on a cache read.
+- A path supplied by a configured substituter is not realised solely for default
+  publication, and a target confirmed fully upstream in the default mode causes
+  no realisation and no fetch.
+- The upstream confirmation never includes the destination or a tenant view,
+  through the substituter override on its own connection, so tenant-held content
+  is never classed as left upstream. Clearing `extra-substituters` is covered
+  too, so a runner-appended entry cannot reintroduce the destination.
+- The confirmation walks the whole reference closure: a top-level narinfo whose
+  reference no permitted substituter serves does not confirm the target, and the
+  path cap produces a distinct inconclusive verdict rather than a confirmation.
+- The confirmation's narinfo cache override reaches the substituter rather than
+  a cached answer, proven against a fake substituter that counts requests, so
+  the test cannot pass on a cache read. The same counting fixture covers the
+  `unknown` re-query.
+- An untrusted connection cannot confirm a target its permitted substituters do
+  not hold, and the one-directional consequence is asserted: refusal is
+  possible, false confirmation is not.
+- Substitution eligibility follows Nix's precedence: effective
+  `substitute = false` refuses every candidate, effective
+  `always-allow-substitutes = true` overrides the derivation option, and a
+  derivation with `allowSubstitutes = false` is built even when the upstreams
+  hold it. An unreadable `.drv` refuses rather than assumes. Each refusal reason
+  reaches the partition and the receipt.
 - An untrusted planner detects that the daemon dropped its settings override,
   falls back to the nonzero ceiling with the reason in the receipt, and never
   runs the zero gate.
-- The availability partition and the capacity check are computed on the build
-  runner against its selected store; a partition computed on another machine is
-  never consumed as a build set.
+- The availability partition is computed on the build runner against its
+  selected store; a partition computed on another machine is never consumed as a
+  build set.
+- The dispatch-time re-probe withdraws a path that became available between the
+  partition and the build, leaves the rest of the build set intact, reconciles
+  no root, and applies no unknown ceiling.
 - The pre-filter prunes through `roots.ensure`, so a job pruned on every run
   still has its targets' retention refreshed each time and a served target never
-  ages out of its root by being pruned.
+  ages out of its root by being pruned. A root with an empty reconciled list
+  settles nothing and is not treated as a failure.
 - A pre-filter call that fails, through a maintenance refusal, a reset tenant,
   or an authorisation error, prunes nothing: every job spawns, the receipt
   records the reason, and the plan job stays green.
 - A manifest target recorded as left upstream does not spawn its job forever:
-  the pre-filter ensures the previously reconciled list, and the job prunes when
-  that list is retained and the previous receipt covers the remainder.
+  the final workflow job persists the aggregate pruning receipt, the next plan
+  retrieves and validates it against the workflow identity and manifest digest,
+  freshly confirms the recorded targets' upstream closures, and prunes when the
+  previously reconciled list is retained and the receipt covers the remainder. A
+  missing, incomplete, expired, inaccessible, malformed, or mismatched artifact
+  prunes nothing, and an upstream path that has disappeared since the receipt
+  was written spawns the affected cohort.
+- Two revisions with identical manifest text but different locked source or
+  resolved root-derivation identity have different manifest digests. A prior
+  receipt cannot settle the newer revision, including when the selected output
+  path is unknown before execution; an unchanged derivation and source identity
+  still permits pruning on the following run.
+- Receipt finalisation merges plan-stage settlements for pruned entries with
+  every surviving cohort settlement and matches the explicit expected-cohort set
+  through the plan-stage artifact and uniquely named per-cohort fragments.
+  All-pruned and partially pruned runs produce complete state; a failed or
+  cancelled survivor, missing or duplicate fragment, unexpected key, or
+  non-settled receipt does not. Overlapping runs read only an older completed
+  run's artifact, and a plan job without effective `actions: read` permission
+  prunes nothing.
 - A packed cohort's grouping is derived from the measured sizes with the
-  configured headroom applied, and no grouping is produced when the packing mode
-  is off.
+  configured headroom applied, only combines cohorts sharing system, store and
+  failure tolerance, leaves an unpriced target in its declared cohort, and
+  produces no grouping when the packing mode is off.
+- A cohort label covering both a best-effort and a required target is refused at
+  planning, naming both targets.
 - The receipt carries the planner's partition counts and substitutable sizes,
   and a run whose substituter fails to answer shows the degradation as a raised
   `unknown` count.
@@ -5721,8 +5844,12 @@ large builds:
 - A target absent from the destination but held by a tenant reuse view is
   published by reference: no local realisation, no NAR upload, and the
   destination serves it afterwards.
+- `scripts/measure-realisation` produces a deterministic report for a fixture
+  flake against a fixed substituter list, and its budget check fails a report
+  that exceeds a recorded baseline outside the tolerance while passing an
+  unbudgeted key.
 
-Real-Nix tests then cover the foreground supervisor:
+Real-Nix tests cover the foreground supervisor:
 
 - A multi-output derivation produces one complete hook event and publishes every
   selected output, and concurrent firings each deliver a whole message, because
@@ -5781,8 +5908,8 @@ Long-run lifecycle tests cover the hours-long shape of real cohorts:
 - An access token that expires mid-run is re-exchanged and the run completes;
   final reconciliation and root replacement authenticate with a current token.
 - Every committed path is attached to the run root in the gate that finalised
-  its generation: a collection sweep running at any point during the cohort
-  reclaims none of them.
+  its generation, and a destination collection sweep during the build reclaims
+  none of them.
 - The run root grows past `rootSetMaxTargets` without an attach failing, because
   the bound applies to a request and not to a root.
 - Attach is idempotent under retry and order-independent across batches, and an
@@ -5799,74 +5926,66 @@ Long-run lifecycle tests cover the hours-long shape of real cohorts:
 - A parked commit verdict socket dropped mid-build resumes through durable
   status and does not fail the publication.
 
+Retention and root-writer tests cover replacement ordering:
+
+- A target root is replaced only when every declared target reaches a successful
+  terminal outcome; a failed or inconclusive target leaves the previous
+  generation untouched, and a root all of whose targets are confirmed upstream
+  settles an empty list rather than failing.
+- An older run finishing after a newer one cannot replace the newer root. An
+  equal generation with equal contents is idempotent, an equal generation with
+  different contents conflicts, and a greater generation replaces.
+- The reusable workflow declares its own concurrency group, asserted from the
+  workflow file.
+
 Store-mode tests prove the architectural claims:
 
 - A local-store run overlaps upload with later builds but retains its live graph
   until the Nix invocation exits.
 - A classic remote builder streams only after outputs reach the coordinating
-  local store and does not claim a local-disk saving.
-- A direct remote-store run reads metadata and NAR bytes from the remote store
-  and does not realise the result closure in the runner's local store.
-- A remote-store run reconciles exact outputs through `buildPathsWithResults`;
-  streaming there stays disabled until a future Nix passes an exact-output event
-  test.
-- Two explicit cohorts can drain, leave the first invocation, garbage-collect,
-  and substitute their shared output from cupboard in the second cohort.
-- A plan whose substitutable sizes alone exceed the selected store's capacity
-  less its headroom is refused at preflight, reporting the measured sizes and
-  offering only the options present in the detected configuration; a cohort
-  split is never offered for an aggregate target, and a single target larger
-  than the local capacity fails the same way rather than spawning more retries.
-- A component-publication run realises no aggregate target on the runner, and
-  its peak disk is bounded by the largest component's input closure rather than
-  the union.
-- A consumer of a component-published cache substitutes the components and
-  realises the top-level environment itself.
+  local store, preserves machine attribution through verification, verifies
+  declared targets locally before publication, and does not claim a local-disk
+  saving.
+- A classic remote builder offering a declared target system or required system
+  feature absent from the coordinator is refused at preflight with a typed
+  verification-capability result, before any remote build starts.
+- A direct remote-store run reads metadata and NAR bytes from the remote store,
+  does not realise the result closure in the runner's local store, reconciles
+  exact outputs through `buildPathsWithResults`, and records which store
+  produced each path.
+- Receipt subjects carry the build store, the machine, and the verification
+  classification. A verified remote result keeps its machine rather than reading
+  as local, and attestation refuses an unverified remotely produced subject.
+- Collection between cohorts runs only when the runner context is
+  `github-hosted` and the selected store is local. A self-hosted runner and a
+  standalone CLI invocation report it as unsupported and leave the store
+  untouched, whatever the caller asked for.
+- Two explicit cohorts share work through cupboard, and a capacity refusal names
+  the derivation, estimate, free space and headroom without offering a cohort
+  split.
 
-The workflow rollout uses the flake update that exposed the 186.6 GiB seed plan
-as its regression fixture. The fixture records evaluated derivations, paths
-realised, bytes added to each store, NAR bytes read, bytes uploaded, wall time,
-per-job evaluation time, and peak disk use. It also records the comparison the
-context rests on, the seed set against the union of the targets it served,
-broken down by source drops and toolchain instances, because that gap is
-measured and not yet explained: the direction follows from asking for interior
-derivations rather than targets, but nothing here accounts for its size on this
-flake, and a design that cited a cause it had not established would be guessing.
-Evaluation time earns its place in that list: with the seed jobs gone and the
-byte costs collapsed, a cold flake evaluation on a fresh runner is the dominant
-fixed cost left, and the plan job of the fixture run alone took nearly eight
-minutes. The gate is not merely that the job eventually passes: planning must
-not realise the recursive graph, default publication must not walk the complete
-closure, and no standalone seed job may recreate the original union of work. The
-download gates are absolute, because a plan-relative bound is only a consistency
-check that a re-inflated plan passes by predicting its own excess: each cohort's
-planned download is gated against a recorded baseline with a stated margin,
-around 3.5 GiB for the aarch64-darwin cohort against the 44.6 GiB the seed plan
-reported, confirmed and pinned by the first fixture run. A job downloading more
-than its own plan reported remains a failure too, as the consistency check it
-is. `unknown` does not excuse either bound: the planner re-queries the unknown
-remainder with the negative narinfo cache bypassed, and a count still above the
-configured ceiling, zero for the fixture, fails the plan loudly before anything
-is fetched, so an upstream outage surfaces as a failed plan with its counts in
-the receipt, never as a green run that downloaded everything. Zero is honest
-only because the re-query reaches the network: the fixture asks four
-substituters about roughly ten thousand paths, a single timeout from a
-third-party cache must not fail the plan for a reason that has nothing to do
-with cupboard, and a re-query that read the hour-long negative cache would
-repeat the same answer however often it was asked. Reaching the network in turn
-requires the trusted connection the fixture's runner has, because the daemon
-silently drops the cache bypass from an untrusted client; an untrusted planner
-falls back to the nonzero ceiling rather than promising a gate it cannot
-deliver. The fixture includes a rebuilt top-level target, whose input closure is
-the fetch set classification cannot shrink. It also settles a question the
-design otherwise assumes: whether publishing intermediates pays. The paths most
-likely to be shared between cohorts are also the ones most likely to be upstream
-already, so the fixture counts the intermediate paths the second cohort actually
-substitutes from cupboard and what they cost in storage; a small answer turns
-intermediate publication into an opt-in and simplifies the run-root machinery
-that exists to keep those paths alive.
+The measured rollout fixture uses the flake update that exposed the 186.6 GiB
+seed plan. It records evaluated derivations, paths realised, bytes added to the
+store, NAR bytes read, bytes uploaded, wall time, per-job evaluation time, and
+peak disk use, and it gates them against a recorded
+`scripts/measure-realisation` baseline. Evaluation time earns its place in that
+list: with the seed jobs gone and the byte costs collapsed, a cold flake
+evaluation on a fresh runner is the dominant fixed cost left, and the plan job
+of the measured run alone took nearly eight minutes. The fixture also records
+the comparison the context rests on, the seed set against the union of the
+targets it served, broken down by source drops and toolchain instances, because
+that gap is measured and not yet explained: the direction follows from asking
+for interior derivations rather than targets, but nothing here accounts for its
+size on this flake, and a design that cited a cause it had not established would
+be guessing. The gate is not merely that the job eventually passes: planning
+must not realise the recursive graph, default publication must not walk the
+complete closure, and no standalone seed job may recreate the original union of
+work. The fixture includes a rebuilt top-level target, whose required input
+closure remains irreducible, so the report does not attribute that floor to
+scheduling overhead. It also measures how often later cohorts substitute
+published intermediates and their storage cost.
 
-### Risks and open implementation gates
+### Risks and open gates
 
 - A Nix post-build hook blocks the build loop. Any network operation, unbounded
   local wait, or language-runtime start-up in the hook serialises the build and
@@ -5885,15 +6004,35 @@ that exists to keep those paths alive.
 - Hook configuration under a multi-user daemon depends on Nix trust settings,
   and the daemon ignores an untrusted override with only a warning. Preflight
   must prove effectiveness through the daemon trust flag before the child
-  starts.
+  starts. The same silent-ignore hazard governs the `SetOptions` overrides the
+  upstream confirmation and the `unknown` re-query depend on, which is why an
+  untrusted connection may refuse a target but can never falsely confirm one.
 - The post-build hook observes executed builds, not every already-valid or
   substituted result. Final reconciliation is required for correctness.
+- The upstream confirmation establishes availability from the permitted
+  substituters, not trust. It fetches no NAR and validates no signature or
+  content address; the daemon's own policy decides acceptance at substitution
+  time. A confirmation is therefore a statement about what the upstreams serve
+  now, and a substitute can still disappear immediately afterwards. Nix reports
+  the resulting failure normally, and cupboard never widens a left-upstream
+  decision into complete local realisation on its own.
+- Availability settles per cohort, so a target that becomes available partway
+  through an invocation is still built. The measurement bounds that cost: the
+  download already sits at the union floor, and the remainder is the input
+  closure of derivations actually built.
 - Classic remote builders do not solve local realised-closure pressure because
-  the coordinating store receives their results.
-- Current Nix emits no structured event carrying completed output paths, so
-  remote-store streaming has no event source; that mode reconciles after the
-  build with `buildPathsWithResults`. Do not parse human log text as a
-  substitute.
+  the coordinating store receives their results, and the local verification
+  rebuild puts the work back on the coordinator. The first classic-remote mode
+  is limited to targets whose system and required features the coordinator can
+  reproduce; a separately configured verification store is future work.
+- Receipt subjects without provenance are attestation claims the run cannot
+  support. Until the build store, machine and verification classification are
+  recorded and enforced, a standalone `build-push` with remote builders can
+  attest an unverified remote result, a verified result loses its machine
+  attribution, and a remote-store cohort publishes with none at all.
+- Current Nix emits no structured event carrying completed output paths over an
+  `ssh-ng` transport, so remote-store mode reconciles after the build with
+  `buildPathsWithResults`. Do not parse human log text as a substitute.
 - CI access tokens carry no refresh token, so a run longer than the token
   lifetime must re-exchange the runner's OIDC credential or its reconciliation
   fails at the worst moment.
@@ -5904,41 +6043,64 @@ that exists to keep those paths alive.
 - The run root's time-to-live is what keeps the unreferenced build outputs
   reusable, since no reference edge will ever reach them. A run root shorter
   than the gap between cohorts costs the next cohort a rebuild.
-- Roots now hold interior paths as well as declared targets, so a root listing
-  grows with them and `root:list` returns every target of every root in one
-  response. The bound lands with `root:attach` itself, because the first large
-  run after attach exists is already enough to make an unbounded listing
-  unservable.
+- Target-root writes are last-writer-wins until an ordered writer generation
+  exists, so two overlapping runs can move a root backwards with no report. A
+  caller-declared concurrency group is not a substitute, because the workflow
+  cannot require callers to declare one.
+- Cross-run pruning has two halves and does nothing until both exist. No caller
+  supplies `--previous-receipt-file`, so the receipt branch of the coverage
+  check is unreachable; and `evaluateTargetCoverage` accepts a receipt's
+  left-upstream entry on a store-path match with no live probe, so wiring the
+  receipt without the fresh confirmation would prune a target forever after one
+  upstream hit. Any permission, retrieval, validation, completeness, or
+  current-upstream failure must spawn the affected jobs, so pruning correctness
+  never depends on the artifact.
+- `bestEffort` aggregated as a conjunction across a cohort and spent as the
+  job's `continue-on-error` cannot express a mixed cohort. A shared label
+  overrides declared tolerance in one direction and swallows attribution in the
+  other; refusing the mixed label is the cheap remedy and per-target severity in
+  the exit contract is the complete one.
+- Automatic collection has an unacceptable blast radius in a store the workflow
+  does not own. Gating it on a caller input while self-hosted runners are
+  supported lets someone who does not own the estate sweep a shared store; the
+  gate belongs on the runner being ephemeral.
 - Complete-closure mode can be intrinsically expensive. Its cost is explicit,
-  reported, and never selected as a compatibility fallback.
-- Cohort size cannot be guaranteed from evaluation alone because output sizes,
-  build scratch space, and concurrent builder behaviour may be unknown.
-- A slow or unreachable substituter moves paths from `willSubstitute` to
-  `unknown`, which the planner treats as build-needed, so an outage quietly
-  restores the realisation cost this design removes. The planner re-queries the
-  unknown remainder with the negative narinfo cache bypassed, a bypass only a
-  trusted connection can apply, and fails the plan when the count exceeds its
-  configured ceiling; the receipt's partition counts are the record either way.
+  reported, and never selected as a compatibility fallback. It also cannot use a
+  top-level destination pre-filter, since a served root may still have a
+  reference cupboard does not hold, so every cohort runs in that mode.
 - Default mode inherits each upstream's retention, and the caches this workflow
   actually substitutes from, `nix-community.cachix.org` and `cache.numtide.com`,
   expire content. Cupboard has no detection for a path it deliberately left
-  upstream disappearing; until a durable-upstreams policy exists, the overlay
+  upstream disappearing; until the durable-upstreams policy exists, the overlay
   can rot silently and `--closure` is the only defence.
-- Automatic local garbage collection can remove unrelated user paths and is
-  therefore opt-in. It occurs only after publication drains and the Nix
-  invocation has exited.
+- Cohort size cannot be guaranteed from evaluation alone because output sizes,
+  build scratch space, and concurrent builder behaviour may be unknown. No
+  cohort split can go below one derivation's own live input closure, so an
+  aggregate `buildEnv` may still need a larger or remote store, and the refusal
+  must say so rather than suggesting a split.
+- Cohorts deliberately provide no cross-runner exclusion. Two cohorts can build
+  the same derivation after both observe it missing, and this remains correct
+  because store paths and destination publication are idempotent.
 - Streaming creates concurrency between store reads, NAR compression, uploads,
   and Nix GC. The batch-scoped temporary-root protection described under
   reconciliation exists only behind the daemon, so streaming requires a
-  daemon-backed store and caller-controlled connection lifetimes the client does
-  not have today.
+  daemon-backed store and caller-controlled connection lifetimes.
 - Reconciliation waits for deferred server verification, and that wait has a
   known failure shape: a commit whose verdict never arrives, through an orphaned
   commit row or a dropped socket, leaves an upload that never becomes servable
   and a push that times out having built successfully. This design leans harder
-  on the wait than the current workflow does, so the deferred-commit recovery
-  work, resuming orphaned verdicts through durable status and capping commit
-  sockets, is a prerequisite, not an optimisation.
+  on the wait than the seed workflow did, so the deferred-commit recovery work,
+  resuming orphaned verdicts through durable status and capping commit sockets,
+  is a prerequisite, not an optimisation.
+- Import-from-derivation and dynamic derivations produce derivations the
+  planner's map does not contain, so their outputs have no target attribution.
+  They are published under the run root as ordinary candidates and reach no
+  target root. Refusing them is not an option: real targets in the measured
+  flake require import-from-derivation to evaluate at all.
+- Evaluation is the dominant fixed cost once the byte costs collapse, and
+  per-target cohorts pay it once per matrix entry. Publishing the resolved
+  `.drv` closure is the recorded route out; until it exists, the cost is
+  reported rather than reduced.
 - The final exit contract must preserve both child and publication failures so
   retry systems do not mistake a cache failure for a build failure or vice
   versa.
