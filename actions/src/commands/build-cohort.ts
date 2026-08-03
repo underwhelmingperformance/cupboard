@@ -5,7 +5,11 @@ import { env } from 'node:process';
 
 import { rootNameSchema, storePathSchema } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
-import type { ReporterResultEvent } from '@cupboard/reporter';
+import {
+	createGithubReporter,
+	type Reporter,
+	type ReporterResultEvent
+} from '@cupboard/reporter';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
@@ -118,6 +122,24 @@ const partitionSchema = z.object({
 	unknownCount: z.number(),
 	ceiling: availabilityCeilingSchema
 });
+
+type PartitionData = z.output<typeof partitionSchema>;
+
+// One target `cupboard plan reprobe` took out of the build set, in the
+// partition's own vocabulary for where it belongs instead.
+const withdrawnTargetSchema = z.object({
+	installable: z.string().min(1),
+	storePath: storePathSchema,
+	outcome: z.enum(['attachOnly', 'publishByReference', 'leftUpstream'])
+});
+
+const planReprobeResultDataSchema = z.object({
+	buildSet: z.array(z.string().min(1)),
+	withdrawn: z.array(withdrawnTargetSchema)
+});
+
+type PlanReprobeResultData = z.output<typeof planReprobeResultDataSchema>;
+export type WithdrawnTargetData = z.output<typeof withdrawnTargetSchema>;
 
 const capacityResultSchema = z.object({
 	available: z.number(),
@@ -449,6 +471,7 @@ export interface BuildCohortDependencies {
 	readonly runCupboard?: typeof defaultRunCupboard;
 	readonly runNixBuild?: typeof runNixBuild;
 	readonly cupboardRunDependencies?: CupboardRunDependencies;
+	readonly reporter?: Reporter;
 }
 
 export async function buildCohortAction(
@@ -467,6 +490,7 @@ export async function buildCohortAction(
 
 	const runCupboard = dependencies.runCupboard ?? defaultRunCupboard;
 	const runNix = dependencies.runNixBuild ?? runNixBuild;
+	const reporter = dependencies.reporter ?? createGithubReporter();
 
 	const result =
 		queryable.length === 0
@@ -479,8 +503,29 @@ export async function buildCohortAction(
 					dependencies.cupboardRunDependencies
 				);
 
+	// The partition settled when the cohort started; the store, the destination
+	// and the reuse view are asked once more about the exact outputs still on
+	// the build set, so a target something has published in the meantime is
+	// withdrawn before Nix is asked to realise it.
+	const reprobe =
+		result === undefined
+			? undefined
+			: await reprobeCohort(
+					inputs,
+					result.partition,
+					queryable,
+					environment,
+					reporter,
+					runCupboard,
+					dependencies.cupboardRunDependencies
+				);
+	const partition =
+		result === undefined
+			? undefined
+			: withdrawFromPartition(result.partition, reprobe?.withdrawn ?? []);
+
 	const buildInstallables = [
-		...(result?.partition.buildSet ?? []),
+		...(partition?.buildSet ?? []),
 		...unqueryable.map((member) => member.installable)
 	];
 
@@ -520,13 +565,12 @@ export async function buildCohortAction(
 	// increment that derives genuine shared-dependency intermediates from the
 	// build log has somewhere to report them without changing this
 	// interface; for now it is always empty.
-	const targetPaths = [
-		...(result?.partition.attachOnly ?? []),
-		...built
-	].toSorted((left, right) => left.localeCompare(right));
+	const targetPaths = [...(partition?.attachOnly ?? []), ...built].toSorted(
+		(left, right) => left.localeCompare(right)
+	);
 	const intermediatePaths: readonly string[] = [];
-	const referencePaths = result?.partition.publishByReference ?? [];
-	const leftUpstream = result?.partition.leftUpstream ?? [];
+	const referencePaths = partition?.publishByReference ?? [];
+	const leftUpstream = partition?.leftUpstream ?? [];
 
 	await mkdir(path.dirname(inputs.targetPathsFile), { recursive: true });
 	await writeFile(inputs.targetPathsFile, linesOf(targetPaths));
@@ -540,8 +584,12 @@ export async function buildCohortAction(
 		inputs.countsFile,
 		`${JSON.stringify(
 			{
-				partition: result === undefined ? undefined : partitionCounts(result),
-				capacity: result?.capacity
+				partition:
+					partition === undefined ? undefined : partitionCounts(partition),
+				capacity: result?.capacity,
+				...(reprobe !== undefined && {
+					reprobe: { withdrawn: reprobe.withdrawn }
+				})
 			},
 			undefined,
 			2
@@ -838,24 +886,230 @@ async function publishCohort(
 	}
 }
 
-function partitionCounts(result: PlanCohortResultData): {
-	readonly counts: PlanCohortResultData['partition']['counts'];
+function partitionCounts(partition: PartitionData): {
+	readonly counts: PartitionData['counts'];
 	readonly downloadSize: number;
 	readonly narSize: number;
 	readonly unknownCount: number;
-	readonly ceiling: PlanCohortResultData['partition']['ceiling'];
+	readonly ceiling: PartitionData['ceiling'];
 } {
 	return {
-		counts: result.partition.counts,
-		downloadSize: result.partition.downloadSize,
-		narSize: result.partition.narSize,
-		unknownCount: result.partition.unknownCount,
-		ceiling: result.partition.ceiling
+		counts: partition.counts,
+		downloadSize: partition.downloadSize,
+		narSize: partition.narSize,
+		unknownCount: partition.unknownCount,
+		ceiling: partition.ceiling
 	};
 }
 
 function linesOf(paths: readonly string[]): string {
 	return paths.length === 0 ? '' : `${paths.join('\n')}\n`;
+}
+
+/**
+ * The partition as the re-probe leaves it: every withdrawn target moves out of
+ * the build set and into the bucket the re-probe classified it under, so the
+ * target paths, the reference paths, the left-upstream record and the pushes
+ * that set the target roots all read one partition rather than two.
+ */
+export function withdrawFromPartition(
+	partition: PartitionData,
+	withdrawn: readonly WithdrawnTargetData[]
+): PartitionData {
+	if (withdrawn.length === 0) {
+		return partition;
+	}
+
+	const withdrawnInstallables = new Set(
+		withdrawn.map((target) => target.installable)
+	);
+	const pathsOf = (
+		outcome: WithdrawnTargetData['outcome']
+	): readonly string[] =>
+		withdrawn
+			.filter((target) => target.outcome === outcome)
+			.map((target) => target.storePath);
+
+	return {
+		...partition,
+		attachOnly: [...partition.attachOnly, ...pathsOf('attachOnly')],
+		publishByReference: [
+			...partition.publishByReference,
+			...pathsOf('publishByReference')
+		],
+		leftUpstream: [...partition.leftUpstream, ...pathsOf('leftUpstream')],
+		buildSet: partition.buildSet.filter(
+			(installable) => !withdrawnInstallables.has(installable)
+		)
+	};
+}
+
+// The confirmation `cupboard plan reprobe` answers, asked of the store the
+// build itself runs against and of the destination this cohort publishes to.
+// Best-effort by design: a failed confirmation leaves the partition exactly as
+// the plan settled it and names the cause, so the cohort builds its whole
+// build set rather than failing on a question it only asked to save work.
+async function reprobeCohort(
+	inputs: BuildCohortInputs,
+	partition: PartitionData,
+	queryable: readonly CohortMember[],
+	environment: Environment,
+	reporter: Reporter,
+	runCupboard: typeof defaultRunCupboard,
+	cupboardRunDependencies: CupboardRunDependencies | undefined
+): Promise<PlanReprobeResultData | undefined> {
+	const targets = reprobeTargets(partition, queryable);
+
+	if (targets.length === 0) {
+		return undefined;
+	}
+
+	const runnerTemporary = requireEnvironment(environment, 'RUNNER_TEMP');
+	const targetsFile = path.join(
+		runnerTemporary,
+		`cupboard-plan-reprobe-targets-${inputs.cohort.key}.json`
+	);
+
+	await writeFile(
+		targetsFile,
+		`${JSON.stringify({ targets }, undefined, 2)}\n`
+	);
+
+	let results: readonly ReporterResultEvent[];
+
+	try {
+		results = await runCupboard(
+			inputs.cupboardPath,
+			planReprobeArguments(inputs, targetsFile),
+			environment,
+			cupboardRunDependencies
+		);
+	} catch (error) {
+		reporter.warn(
+			"Building the cohort's whole build set: the availability confirmation failed",
+			error instanceof Error ? error.message : String(error)
+		);
+
+		return undefined;
+	}
+
+	return planReprobeResult(results, reporter);
+}
+
+/** One build-set member as the confirmation's targets file names it. */
+interface ReprobeTargetEntry {
+	readonly attr: string;
+	readonly installable: string;
+	readonly expectedPath: string;
+	readonly root: string;
+}
+
+// The build-set members the confirmation can answer for: a member with no
+// predictable output has nothing to ask about, so it stays on the build set
+// without a question.
+function reprobeTargets(
+	partition: PartitionData,
+	queryable: readonly CohortMember[]
+): readonly ReprobeTargetEntry[] {
+	const entryByInstallable = new Map(
+		queryable.flatMap((member): (readonly [string, ReprobeTargetEntry])[] =>
+			member.queryInstallable === undefined || member.expectedPath === undefined
+				? []
+				: [
+						[
+							member.queryInstallable,
+							{
+								attr: member.attr,
+								installable: member.queryInstallable,
+								expectedPath: member.expectedPath,
+								root: member.root
+							}
+						]
+					]
+		)
+	);
+
+	return partition.buildSet.flatMap((installable) => {
+		const entry = entryByInstallable.get(installable);
+
+		return entry === undefined ? [] : [entry];
+	});
+}
+
+/**
+ * The `cupboard plan reprobe` argv for one cohort. No token is exchanged: the
+ * confirmation reconciles no retention root, so it asks the cache's own read
+ * endpoints with this run's read credentials, or with none at all for a public
+ * cache.
+ */
+export function planReprobeArguments(
+	inputs: Pick<
+		BuildCohortInputs,
+		'url' | 'cache' | 'reuseView' | 'readUser' | 'readPassword' | 'store'
+	>,
+	targetsFile: string
+): readonly string[] {
+	const arguments_ = [
+		'--no-colour',
+		'plan',
+		'reprobe',
+		canonicalHref(inputs.url),
+		'--targets-file',
+		targetsFile
+	];
+
+	if (inputs.cache !== '') {
+		arguments_.push('--cache', inputs.cache);
+	}
+
+	if (inputs.reuseView !== '') {
+		arguments_.push('--reuse-view', inputs.reuseView);
+	}
+
+	if (inputs.readUser !== '') {
+		arguments_.push(
+			'--read-user',
+			inputs.readUser,
+			'--read-password',
+			inputs.readPassword
+		);
+	}
+
+	if (inputs.store !== '') {
+		arguments_.push('--store', inputs.store);
+	}
+
+	return arguments_;
+}
+
+function planReprobeResult(
+	results: readonly ReporterResultEvent[],
+	reporter: Reporter
+): PlanReprobeResultData | undefined {
+	for (const event of results) {
+		if (event.kind !== 'plan-reprobe') {
+			continue;
+		}
+
+		const parsed = planReprobeResultDataSchema.safeParse(event.data);
+
+		if (parsed.success) {
+			return parsed.data;
+		}
+
+		reporter.warn(
+			"Building the cohort's whole build set: the availability confirmation reported an unreadable result",
+			z.prettifyError(parsed.error)
+		);
+
+		return undefined;
+	}
+
+	reporter.warn(
+		"Building the cohort's whole build set: the availability confirmation reported no result"
+	);
+
+	return undefined;
 }
 
 async function planCohort(

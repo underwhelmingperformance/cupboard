@@ -2,8 +2,9 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { storePathSchema } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
-import type { ReporterResultEvent } from '@cupboard/reporter';
+import type { Reporter, ReporterResultEvent } from '@cupboard/reporter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { runCupboard } from '../cupboard-run.ts';
@@ -21,8 +22,10 @@ import {
 	buildCohortAction,
 	type BuildCohortOptions,
 	nixBuildArguments,
+	planReprobeArguments,
 	resolveBuildCohortInputs,
-	rootGroups
+	rootGroups,
+	withdrawFromPartition
 } from './build-cohort.ts';
 
 const appPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
@@ -283,6 +286,65 @@ function planCohortSuccess(
 	];
 }
 
+function planReprobeSuccess(
+	withdrawn: readonly Record<string, unknown>[] = [],
+	buildSet: readonly string[] = [libraryQueryInstallable]
+): readonly ReporterResultEvent[] {
+	return [{ kind: 'plan-reprobe', data: { buildSet, withdrawn } }];
+}
+
+// Answers each cupboard invocation with the results that command reports, so a
+// test drives the plan and the confirmation that follows it independently.
+function cupboardStub(
+	answers: {
+		readonly plan?: readonly ReporterResultEvent[];
+		readonly reprobe?: readonly ReporterResultEvent[];
+	} = {}
+): typeof runCupboard {
+	return (_binaryPath, arguments_) => {
+		if (arguments_[1] !== 'plan') {
+			return Promise.resolve([]);
+		}
+
+		return Promise.resolve(
+			arguments_[2] === 'cohort'
+				? (answers.plan ?? planCohortSuccess())
+				: (answers.reprobe ?? planReprobeSuccess())
+		);
+	};
+}
+
+function noop(): void {
+	/* test double: nothing to record */
+}
+
+// Every reporter call a test double records, so an assertion sees exactly what
+// a run said rather than only what it produced.
+function recordingReporter(warnings: string[]): Reporter {
+	return {
+		phase: (_label, body) => Promise.resolve(body({ fact: noop, warn: noop })),
+		progress: (_label, _options, body) =>
+			Promise.resolve(body({ advance: noop, fact: noop, warn: noop })),
+		steps: (_label, body) =>
+			Promise.resolve(
+				body({
+					message: noop,
+					group: () => ({ message: noop, success: noop, error: noop }),
+					warn: noop
+				})
+			),
+		result: noop,
+		data: noop,
+		warn(label) {
+			warnings.push(label);
+		},
+		info: noop,
+		success: noop,
+		step: noop,
+		error: noop
+	};
+}
+
 describe('buildCohortAction', () => {
 	let directory: string;
 	let environment: Environment;
@@ -297,9 +359,7 @@ describe('buildCohortAction', () => {
 	});
 
 	it('drives the partition from a single plan-cohort invocation and writes structural outputs', async () => {
-		const runCupboardMock = vi.fn<typeof runCupboard>(() =>
-			Promise.resolve(planCohortSuccess())
-		);
+		const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
 		const runNixBuild = vi.fn(() =>
 			Promise.resolve([libraryBuiltPath, floatingBuiltPath])
 		);
@@ -417,8 +477,8 @@ describe('buildCohortAction', () => {
 			capacity: { skipped: 'remote-store' }
 		}
 	])('$name', async ({ store, planStoreArguments, buildStore, capacity }) => {
-		const runCupboardMock = vi.fn<typeof runCupboard>(() =>
-			Promise.resolve(planCohortSuccess(capacity))
+		const runCupboardMock = vi.fn<typeof runCupboard>(
+			cupboardStub({ plan: planCohortSuccess(capacity) })
 		);
 		const runNixBuild = vi.fn(() =>
 			Promise.resolve([libraryBuiltPath, floatingBuiltPath])
@@ -481,9 +541,7 @@ describe('buildCohortAction', () => {
 			queryInstallables: [undefined, undefined, undefined],
 			expectedPaths: [undefined, undefined, undefined]
 		});
-		const runCupboardMock = vi.fn<typeof runCupboard>(() =>
-			Promise.resolve(planCohortSuccess())
-		);
+		const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
 		const runNixBuild = vi.fn(() => Promise.resolve([]));
 
 		await buildCohortAction(
@@ -635,6 +693,327 @@ describe('buildCohortAction', () => {
 	});
 });
 
+// The cohort every re-probe test drives: both queryable members carry an
+// expected output, so the confirmation has something to ask about.
+function predictableCohort(): string {
+	return cohortJson({ expectedPaths: [appPath, libraryBuiltPath, undefined] });
+}
+
+function withdrawal(outcome: string): Record<string, unknown> {
+	return {
+		installable: libraryQueryInstallable,
+		storePath: libraryBuiltPath,
+		outcome
+	};
+}
+
+describe('buildCohortAction availability confirmation', () => {
+	let directory: string;
+	let environment: Environment;
+
+	beforeEach(async () => {
+		directory = await mkdtemp(path.join(tmpdir(), 'cupboard-build-cohort-'));
+		environment = { RUNNER_TEMP: directory, GITHUB_OUTPUT: '' };
+	});
+
+	afterEach(async () => {
+		await rm(directory, { recursive: true, force: true });
+	});
+
+	interface ConfirmedRun {
+		readonly targetsFile: unknown;
+		readonly built: readonly (readonly unknown[])[];
+		readonly targetPaths: readonly string[];
+		readonly referencePaths: readonly string[];
+		readonly leftUpstream: unknown;
+		readonly counts: unknown;
+		readonly warnings: readonly string[];
+	}
+
+	async function runConfirmedCohort(
+		reprobe: readonly ReporterResultEvent[] | Error
+	): Promise<ConfirmedRun> {
+		const warnings: string[] = [];
+		const runCupboardMock = vi.fn<typeof runCupboard>(
+			(binaryPath, arguments_) =>
+				reprobe instanceof Error && arguments_[2] === 'reprobe'
+					? Promise.reject(reprobe)
+					: cupboardStub({
+							...(!(reprobe instanceof Error) && { reprobe })
+						})(binaryPath, arguments_, environment)
+		);
+		// Nix prints an out-path for each installable it was actually given, so a
+		// withdrawn target contributes nothing to the built set.
+		const builtPathOf = new Map([
+			[libraryQueryInstallable, libraryBuiltPath],
+			['.#packages.x86_64-linux.floating^out', floatingBuiltPath]
+		]);
+		const runNixBuild = vi.fn((installables: readonly string[]) =>
+			Promise.resolve(
+				installables.flatMap((installable) => {
+					const built = builtPathOf.get(installable);
+
+					return built === undefined ? [] : [built];
+				})
+			)
+		);
+		const options: BuildCohortOptions = {
+			...baseOptions(),
+			cohortJson: predictableCohort()
+		};
+
+		await buildCohortAction(options, environment, {
+			runCupboard: runCupboardMock,
+			runNixBuild,
+			reporter: recordingReporter(warnings)
+		});
+
+		const inputs = resolveBuildCohortInputs(options, environment);
+		const targetsPath = path.join(
+			directory,
+			`cupboard-plan-reprobe-targets-${inputs.cohort.key}.json`
+		);
+		let targetsFile: unknown;
+
+		try {
+			targetsFile = parseJson(await readFile(targetsPath, 'utf8'));
+		} catch {
+			targetsFile = undefined;
+		}
+
+		const linesIn = async (file: string): Promise<readonly string[]> => {
+			const contents = await readFile(file, 'utf8');
+
+			return contents.split('\n').filter((line) => line !== '');
+		};
+
+		return {
+			targetsFile,
+			built: runNixBuild.mock.calls,
+			targetPaths: await linesIn(inputs.targetPathsFile),
+			referencePaths: await linesIn(inputs.referencePathsFile),
+			leftUpstream: parseJson(await readFile(inputs.leftUpstreamFile, 'utf8')),
+			counts: parseJson(await readFile(inputs.countsFile, 'utf8')),
+			warnings
+		};
+	}
+
+	it('asks only about the build set members whose output it can name', async () => {
+		const run = await runConfirmedCohort(planReprobeSuccess());
+
+		expect(run.targetsFile).toStrictEqual({
+			targets: [
+				{
+					attr: '.#packages.x86_64-linux.lib',
+					installable: libraryQueryInstallable,
+					expectedPath: libraryBuiltPath,
+					root: 'github:owner/repo/main/lib'
+				}
+			]
+		});
+	});
+
+	it.each([
+		{
+			outcome: 'attachOnly',
+			targetPaths: [appPath, floatingBuiltPath, libraryBuiltPath],
+			referencePaths: [referencePath],
+			leftUpstream: [leftUpstreamPath]
+		},
+		{
+			outcome: 'publishByReference',
+			targetPaths: [appPath, floatingBuiltPath],
+			referencePaths: [referencePath, libraryBuiltPath],
+			leftUpstream: [leftUpstreamPath]
+		},
+		{
+			outcome: 'leftUpstream',
+			targetPaths: [appPath, floatingBuiltPath],
+			referencePaths: [referencePath],
+			leftUpstream: [leftUpstreamPath, libraryBuiltPath]
+		}
+	])(
+		'withdraws a $outcome target from the build set and records it',
+		async ({ outcome, targetPaths, referencePaths, leftUpstream }) => {
+			const run = await runConfirmedCohort(
+				planReprobeSuccess([withdrawal(outcome)], [])
+			);
+
+			expect({
+				built: run.built,
+				targetPaths: run.targetPaths.toSorted((left, right) =>
+					left.localeCompare(right)
+				),
+				referencePaths: run.referencePaths,
+				leftUpstream: run.leftUpstream,
+				withdrawn: run.counts,
+				warnings: run.warnings
+			}).toStrictEqual({
+				built: [
+					[
+						['.#packages.x86_64-linux.floating^out'],
+						'',
+						'',
+						outLinkDirectory(directory)
+					]
+				],
+				targetPaths: targetPaths.toSorted((left, right) =>
+					left.localeCompare(right)
+				),
+				referencePaths,
+				leftUpstream: { leftUpstream },
+				withdrawn: {
+					partition: {
+						counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
+						downloadSize: 100,
+						narSize: 200,
+						unknownCount: 0,
+						ceiling: { value: 5, source: 'configured' }
+					},
+					capacity: measuredCapacity,
+					reprobe: { withdrawn: [withdrawal(outcome)] }
+				},
+				warnings: []
+			});
+		}
+	);
+
+	it.each([
+		{
+			name: 'the confirmation command fails',
+			reprobe: new CupboardReportedError(1, [], undefined, true)
+		},
+		{ name: 'the confirmation reports no result', reprobe: [] },
+		{
+			name: 'the confirmation reports a result it cannot read',
+			reprobe: [{ kind: 'plan-reprobe', data: { withdrawn: 'all of them' } }]
+		}
+	] satisfies readonly {
+		readonly name: string;
+		readonly reprobe: readonly ReporterResultEvent[] | Error;
+	}[])('builds the whole build set when $name', async ({ reprobe }) => {
+		const run = await runConfirmedCohort(reprobe);
+
+		expect({
+			built: run.built,
+			counts: run.counts,
+			warnings: run.warnings.length
+		}).toStrictEqual({
+			built: [
+				[
+					[libraryQueryInstallable, '.#packages.x86_64-linux.floating^out'],
+					'',
+					'',
+					outLinkDirectory(directory)
+				]
+			],
+			counts: {
+				partition: {
+					counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
+					downloadSize: 100,
+					narSize: 200,
+					unknownCount: 0,
+					ceiling: { value: 5, source: 'configured' }
+				},
+				capacity: measuredCapacity
+			},
+			warnings: 1
+		});
+	});
+});
+
+describe('planReprobeArguments', () => {
+	const url = new URL('https://cache.example.test/t/acme');
+
+	it.each([
+		{
+			name: 'a public cache on this runner asks for nothing more',
+			inputs: {
+				cache: '',
+				reuseView: '',
+				readUser: '',
+				readPassword: '',
+				store: ''
+			},
+			extra: []
+		},
+		{
+			name: 'a named cache, view, credential and remote store all travel',
+			inputs: {
+				cache: 'builds',
+				reuseView: 'pr-view',
+				readUser: 'reader',
+				readPassword: 'secret',
+				store: 'ssh-ng://build@example.test'
+			},
+			extra: [
+				'--cache',
+				'builds',
+				'--reuse-view',
+				'pr-view',
+				'--read-user',
+				'reader',
+				'--read-password',
+				'secret',
+				'--store',
+				'ssh-ng://build@example.test'
+			]
+		}
+	])('$name', ({ inputs, extra }) => {
+		expect(
+			planReprobeArguments({ url, ...inputs }, '/tmp/targets.json')
+		).toStrictEqual([
+			'--no-colour',
+			'plan',
+			'reprobe',
+			canonicalHref(url),
+			'--targets-file',
+			'/tmp/targets.json',
+			...extra
+		]);
+	});
+});
+
+describe('withdrawFromPartition', () => {
+	const partition = {
+		attachOnly: [appPath],
+		publishByReference: [referencePath],
+		leftUpstream: [leftUpstreamPath],
+		buildSet: [libraryQueryInstallable, appQueryInstallable],
+		counts: { willBuild: 2, willSubstitute: 0, unknown: 0 },
+		downloadSize: 100,
+		narSize: 200,
+		unknownCount: 0,
+		ceiling: { value: 5 as number, source: 'configured' as const }
+	};
+
+	it('returns the partition untouched when nothing was withdrawn', () => {
+		expect(withdrawFromPartition(partition, [])).toBe(partition);
+	});
+
+	it('moves every withdrawn target out of the build set at once', () => {
+		expect(
+			withdrawFromPartition(partition, [
+				{
+					installable: libraryQueryInstallable,
+					storePath: storePathSchema.parse(libraryBuiltPath),
+					outcome: 'attachOnly'
+				},
+				{
+					installable: appQueryInstallable,
+					storePath: storePathSchema.parse(floatingBuiltPath),
+					outcome: 'leftUpstream'
+				}
+			])
+		).toStrictEqual({
+			...partition,
+			attachOnly: [appPath, libraryBuiltPath],
+			leftUpstream: [leftUpstreamPath, floatingBuiltPath],
+			buildSet: []
+		});
+	});
+});
+
 describe('rootGroups', () => {
 	const members = [
 		{
@@ -740,9 +1119,7 @@ describe('buildCohortAction publication', () => {
 			(_binaryPath, arguments_) => {
 				calls.push(arguments_);
 
-				return Promise.resolve(
-					arguments_[1] === 'plan' ? planCohortSuccess() : []
-				);
+				return cupboardStub()(_binaryPath, arguments_, environment);
 			}
 		);
 		const runNixBuild = vi.fn(() =>
@@ -786,9 +1163,7 @@ describe('buildCohortAction publication', () => {
 		const runNixBuild = vi.fn(() => Promise.resolve([libraryBuiltPath]));
 
 		await buildCohortAction(baseOptions(), environment, {
-			runCupboard: vi.fn<typeof runCupboard>(() =>
-				Promise.resolve(planCohortSuccess())
-			),
+			runCupboard: vi.fn<typeof runCupboard>(cupboardStub()),
 			runNixBuild
 		});
 
@@ -827,16 +1202,29 @@ describe('buildCohortAction publication', () => {
 			directory,
 			`cupboard-build-cohorts-${cohortKey}.json`
 		);
-		const [plan, ...publication] = run.calls;
+		const [plan, reprobe, ...publication] = run.calls;
 
 		expect({
-			planCommand: plan?.[1],
+			planCommand: plan?.slice(1, 3),
+			reprobe,
 			publication,
 			cohortsFile: run.cohortsFile,
 			nixBuilds: run.nixBuilds,
 			receiptLine: run.receiptLine
 		}).toStrictEqual({
-			planCommand: 'plan',
+			planCommand: ['plan', 'cohort'],
+			reprobe: [
+				'--no-colour',
+				'plan',
+				'reprobe',
+				url,
+				'--targets-file',
+				path.join(directory, `cupboard-plan-reprobe-targets-${cohortKey}.json`),
+				'--cache',
+				'builds',
+				'--reuse-view',
+				'pr-view'
+			],
 			publication: [
 				[
 					'--no-colour',
