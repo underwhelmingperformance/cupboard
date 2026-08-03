@@ -27,7 +27,12 @@ const baseConfig: NixStoreConfig = {
 	stateDirectory: '/nix/var/nix',
 	daemonSocketPath: '/nix/var/nix/daemon-socket/socket',
 	daemonSetOptions: {},
-	daemonOverrides: {}
+	daemonOverrides: {},
+	substitution: {
+		substitute: true,
+		alwaysAllowSubstitutes: false,
+		substituters: ['https://cache.nixos.org/']
+	}
 };
 
 interface Probes {

@@ -37,6 +37,8 @@ export interface NixStoreConfig {
 	readonly daemonSetOptions: NixDaemonSetOptions;
 	/** The discovered settings a daemon connection forwards as overrides. */
 	readonly daemonOverrides: NixDaemonOverrides;
+	/** The discovered settings that decide what may be substituted, and from where. */
+	readonly substitution: NixSubstitutionSettings;
 	/**
 	 * The effective `post-build-hook` setting from the merged configuration.
 	 * Nix supports exactly one post-build hook, so a caller about to apply its
@@ -58,6 +60,32 @@ export interface NixDaemonSetOptions {
 
 /** Named settings a daemon connection forwards in its SetOptions frame. */
 export type NixDaemonOverrides = Readonly<Record<string, string>>;
+
+/**
+ * The effective settings deciding whether Nix would substitute a path rather
+ * than build it, and which stores it would try. Nix applies them in this
+ * order: nothing is substituted at all when `substitute` is off, and a
+ * derivation's own `allowSubstitutes = false` is honoured unless
+ * `alwaysAllowSubstitutes` overrules it.
+ */
+export interface NixSubstitutionSettings {
+	/** The `substitute` setting: whether Nix substitutes at all. */
+	readonly substitute: boolean;
+	/**
+	 * The `always-allow-substitutes` setting: whether a derivation's own
+	 * `allowSubstitutes = false` is ignored.
+	 */
+	readonly alwaysAllowSubstitutes: boolean;
+	/**
+	 * The `substituters` list in configured order, with each
+	 * `extra-substituters` assignment appended after it.
+	 */
+	readonly substituters: readonly string[];
+}
+
+// Nix's compiled-in `substituters` value, which applies to a configuration
+// that never assigns the setting.
+const defaultSubstituters = ['https://cache.nixos.org/'];
 
 /** Filesystem and environment access, injected so discovery is testable. */
 export interface NixConfigEnvironment {
@@ -93,7 +121,7 @@ export const defaultNixConfigEnvironment: NixConfigEnvironment = {
 export function discoverNixStoreConfig(
 	dependencies: NixConfigEnvironment = defaultNixConfigEnvironment
 ): NixStoreConfig {
-	const { settings, daemonSetOptions, daemonOverrides } =
+	const { settings, daemonSetOptions, daemonOverrides, substitution } =
 		mergedSettings(dependencies);
 	const storeDirectory = resolveStoreDirectory(dependencies, settings);
 	const stateDirectory =
@@ -112,6 +140,7 @@ export function discoverNixStoreConfig(
 		daemonSocketPath,
 		daemonSetOptions,
 		daemonOverrides,
+		substitution,
 		...(postBuildHook !== undefined && { postBuildHook })
 	};
 }
@@ -159,9 +188,10 @@ function mergedSettings(dependencies: NixConfigEnvironment): {
 	readonly settings: Map<string, string>;
 	readonly daemonSetOptions: NixDaemonSetOptions;
 	readonly daemonOverrides: NixDaemonOverrides;
+	readonly substitution: NixSubstitutionSettings;
 } {
 	const settings = new Map<string, string>();
-	const daemonSettings = new EffectiveDaemonSettings();
+	const daemonSettings = new EffectiveSettings();
 	const systemConfigPath = path.join(
 		nonEmpty(dependencies.env.NIX_CONF_DIR) ?? defaultSystemConfigDirectory,
 		'nix.conf'
@@ -202,7 +232,8 @@ function mergedSettings(dependencies: NixConfigEnvironment): {
 	return {
 		settings,
 		daemonSetOptions: daemonSettings.setOptions(),
-		daemonOverrides: daemonSettings.overrides()
+		daemonOverrides: daemonSettings.overrides(),
+		substitution: daemonSettings.substitution()
 	};
 }
 
@@ -250,7 +281,7 @@ function loadConfigFile(
 	filePath: string,
 	read: ReadFile,
 	into: Map<string, string>,
-	daemonSettings: EffectiveDaemonSettings,
+	daemonSettings: EffectiveSettings,
 	shouldMarkDaemonOverrides: boolean
 ): void {
 	const text = read(filePath);
@@ -275,7 +306,7 @@ function applyConfigText(
 	baseDirectory: string,
 	read: ReadFile,
 	into: Map<string, string>,
-	daemonSettings: EffectiveDaemonSettings,
+	daemonSettings: EffectiveSettings,
 	shouldMarkDaemonOverrides: boolean,
 	depth: number
 ): void {
@@ -327,7 +358,7 @@ function applyInclude(
 	baseDirectory: string,
 	read: ReadFile,
 	into: Map<string, string>,
-	daemonSettings: EffectiveDaemonSettings,
+	daemonSettings: EffectiveSettings,
 	shouldMarkDaemonOverrides: boolean,
 	depth: number
 ): void {
@@ -359,11 +390,15 @@ function applyInclude(
 	);
 }
 
-// The effective daemon-facing settings as the merge proceeds. A setting with a
-// dedicated SetOptions field always lands there; any other setting from a
-// user-owned source joins the named overrides, keyed by its canonical name.
-class EffectiveDaemonSettings {
+// The effective settings as the merge proceeds. A setting with a dedicated
+// SetOptions field always lands there; any other setting from a user-owned
+// source joins the named overrides, keyed by its canonical name. Every
+// setting, whichever source it came from, is also offered to the substitution
+// settings, which describe the configuration rather than the connection.
+class EffectiveSettings {
 	private readonly overridden = new EffectiveDaemonOverrides();
+
+	private readonly substituting = new EffectiveSubstitutionSettings();
 
 	private readonly dedicated: {
 		-readonly [Key in keyof NixDaemonSetOptions]: NixDaemonSetOptions[Key];
@@ -411,6 +446,8 @@ class EffectiveDaemonSettings {
 	}
 
 	apply(name: string, value: string, shouldMarkOverridden: boolean): void {
+		this.substituting.apply(name, value);
+
 		if (this.applySetOption(name, value)) {
 			return;
 		}
@@ -428,6 +465,57 @@ class EffectiveDaemonSettings {
 
 	setOptions(): NixDaemonSetOptions {
 		return { ...this.dedicated };
+	}
+
+	substitution(): NixSubstitutionSettings {
+		return this.substituting.values();
+	}
+}
+
+// The substitution settings as the merge proceeds, starting from Nix's own
+// defaults so a configuration that never mentions them still describes what
+// Nix would do. A plain `substituters` assignment replaces the list; an
+// `extra-substituters` one appends to whatever it holds.
+class EffectiveSubstitutionSettings {
+	private substitute = true;
+
+	private alwaysAllowSubstitutes = false;
+
+	private substituters: readonly string[] = defaultSubstituters;
+
+	apply(name: string, value: string): void {
+		const isAppend = name.startsWith('extra-');
+		const canonicalName = canonicalSettingName(
+			isAppend ? name.slice('extra-'.length) : name
+		);
+
+		if (canonicalName === 'substituters') {
+			const listed = value.split(/\s+/u).filter(Boolean);
+			this.substituters = isAppend ? [...this.substituters, ...listed] : listed;
+
+			return;
+		}
+
+		if (isAppend) {
+			return;
+		}
+
+		if (canonicalName === 'substitute') {
+			this.substitute = isEnabledSettingValue(name, value);
+			return;
+		}
+
+		if (canonicalName === 'always-allow-substitutes') {
+			this.alwaysAllowSubstitutes = isEnabledSettingValue(name, value);
+		}
+	}
+
+	values(): NixSubstitutionSettings {
+		return {
+			substitute: this.substitute,
+			alwaysAllowSubstitutes: this.alwaysAllowSubstitutes,
+			substituters: [...new Set(this.substituters)]
+		};
 	}
 }
 
