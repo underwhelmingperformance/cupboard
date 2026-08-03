@@ -78,6 +78,16 @@ export type LeftUpstreamVerdict =
 	| { readonly kind: 'substitutes-not-allowed' }
 	/** The derivation could not be read, so its option is unknown. */
 	| { readonly kind: 'derivation-unreadable'; readonly errorName: string }
+	/**
+	 * The daemon does not trust the confirmation's connection. It drops such a
+	 * client's settings, so the substituters that answered are the runner's own
+	 * and their answers may come from a narinfo cache the confirmation asked to
+	 * bypass; neither says anything about what an upstream serves.
+	 */
+	| {
+			readonly kind: 'connection-not-trusted';
+			readonly trust: NixDaemonTrust;
+	  }
 	| {
 			readonly kind: 'closure-not-served';
 			readonly missing: StorePathString;

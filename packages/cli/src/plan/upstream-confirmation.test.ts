@@ -1,4 +1,5 @@
 import type {
+	NixDaemonTrust,
 	NixSubstitutionSettings,
 	SubstitutableClosureVerdict
 } from '@cupboard/nix';
@@ -11,8 +12,8 @@ import { describe, expect, it } from 'vitest';
 import type { LeftUpstreamVerdict } from './availability-partition.ts';
 import {
 	confirmLeftUpstreamWith,
-	permittedSubstituterOverrides,
-	type PermittedSubstituterStore
+	type PermittedSubstituterStore,
+	upstreamConfirmationOverrides
 } from './upstream-confirmation.ts';
 
 function path(basename: string): StorePathString {
@@ -39,6 +40,7 @@ const served: SubstitutableClosureVerdict = {
 interface StoreDouble extends PermittedSubstituterStore {
 	readonly walked: string[];
 	readonly derivationsRead: string[];
+	readonly trustAsked: () => number;
 }
 
 class UnreadableDerivationError extends Error {
@@ -53,14 +55,22 @@ function storeDouble(
 		readonly closure?: SubstitutableClosureVerdict;
 		readonly allowsSubstitutes?: boolean;
 		readonly derivationFails?: boolean;
+		readonly trust?: NixDaemonTrust;
 	} = {}
 ): StoreDouble {
 	const walked: string[] = [];
 	const derivationsRead: string[] = [];
+	let trustAsked = 0;
 
 	return {
 		walked,
 		derivationsRead,
+		trustAsked: () => trustAsked,
+		daemonTrust: () => {
+			trustAsked += 1;
+
+			return Promise.resolve(options.trust ?? 'trusted');
+		},
 		resolveSubstitutableClosure: (storePath) => {
 			walked.push(storePath);
 
@@ -114,6 +124,51 @@ describe('confirmLeftUpstreamWith', () => {
 			verdict: { kind: 'confirmed' },
 			walked: [appPath],
 			derivationsRead: [drvPath]
+		});
+	});
+
+	// The trust of a connection is a property of the peer the daemon accepted,
+	// so one handshake answers for every candidate the confirmation settles.
+	it('asks the connection trust once however many candidates it settles', async () => {
+		const store = storeDouble();
+		const confirm = confirmLeftUpstreamWith({
+			substitution: defaultSubstitution,
+			store
+		});
+
+		const verdicts = [
+			await confirm({ installable: `${drvPath}^out`, storePath: appPath }),
+			await confirm({ installable: `${drvPath}^out`, storePath: missingPath })
+		];
+
+		expect({ verdicts, trustAsked: store.trustAsked() }).toStrictEqual({
+			verdicts: [{ kind: 'confirmed' }, { kind: 'confirmed' }],
+			trustAsked: 1
+		});
+	});
+
+	// A daemon drops an untrusted client's overrides, so the substituters such
+	// a connection asked are the runner's own and its answers may come from a
+	// narinfo cache the confirmation never bypassed.
+	it.each([
+		{ name: 'refuses the client', trust: 'not-trusted' as const },
+		{ name: 'leaves the trust unstated', trust: 'unknown' as const }
+	])('refuses a candidate when the daemon $name', async ({ trust }) => {
+		const store = storeDouble({ trust });
+
+		const verdict = await confirmLeftUpstreamWith({
+			substitution: defaultSubstitution,
+			store
+		})({ installable: `${drvPath}^out`, storePath: appPath });
+
+		expect({
+			verdict,
+			walked: store.walked,
+			derivationsRead: store.derivationsRead
+		}).toStrictEqual({
+			verdict: { kind: 'connection-not-trusted', trust },
+			walked: [],
+			derivationsRead: []
 		});
 	});
 
@@ -209,8 +264,9 @@ describe('confirmLeftUpstreamWith', () => {
 	});
 });
 
-describe('permittedSubstituterOverrides', () => {
+describe('upstreamConfirmationOverrides', () => {
 	const tenantUrl = new URL('https://cupboard.example.workers.dev/t/acme');
+	const freshNarinfo = { 'narinfo-cache-positive-ttl': '0' };
 
 	it.each([
 		{
@@ -258,10 +314,14 @@ describe('permittedSubstituterOverrides', () => {
 		}
 	])('excludes $name', ({ substituters, expected }) => {
 		expect(
-			permittedSubstituterOverrides(
+			upstreamConfirmationOverrides(
 				{ ...defaultSubstitution, substituters },
 				tenantUrl
 			)
-		).toStrictEqual({ substituters: expected, 'extra-substituters': '' });
+		).toStrictEqual({
+			substituters: expected,
+			'extra-substituters': '',
+			...freshNarinfo
+		});
 	});
 });

@@ -56,7 +56,7 @@ import {
 import { destinationAnswersFor } from '../plan/destination-probe.ts';
 import {
 	confirmLeftUpstreamWith,
-	permittedSubstituterOverrides
+	upstreamConfirmationOverrides
 } from '../plan/upstream-confirmation.ts';
 import { parseReadUser } from '../read-user.ts';
 import { parseStoreUri } from '../store-uri.ts';
@@ -303,10 +303,11 @@ export function registerPlanCommands(
 			// A separate connection for the upstream confirmation: its
 			// substituter list holds only what a consumer elsewhere could
 			// also reach, so content the tenant alone holds never reads as
-			// available upstream.
+			// available upstream, and it reads past the narinfo cache so the
+			// answers are the ones those substituters give now.
 			const permittedStore = Nix.openDaemon(undefined, {
 				...storeSelection,
-				overrides: permittedSubstituterOverrides(substitution, url)
+				overrides: upstreamConfirmationOverrides(substitution, url)
 			});
 
 			await runPlanCohort(

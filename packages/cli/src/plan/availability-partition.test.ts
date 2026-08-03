@@ -322,6 +322,10 @@ describe('partitionAvailability', () => {
 			} as const
 		},
 		{
+			name: 'the daemon does not trust the confirmation connection',
+			verdict: { kind: 'connection-not-trusted', trust: 'not-trusted' } as const
+		},
+		{
 			name: 'a reference is not served upstream',
 			verdict: { kind: 'closure-not-served', missing: otherPath } as const
 		},

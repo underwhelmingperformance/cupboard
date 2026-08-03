@@ -1,6 +1,7 @@
 import type {
 	Nix,
 	NixDaemonOverrides,
+	NixDaemonTrust,
 	NixDerivedPathString,
 	NixSubstitutionSettings,
 	SubstitutableClosureOptions
@@ -21,10 +22,13 @@ import type {
  * own destination cache and the tenant's reuse views are not among them: they
  * are configured on the runner, and content only they hold is the tenant's,
  * not something a target can be left upstream on.
+ *
+ * The connection reports its own trust, because the settings it was opened
+ * with hold only for a client the daemon trusts.
  */
 export type PermittedSubstituterStore = Pick<
 	Nix,
-	'resolveSubstitutableClosure' | 'canSubstituteDerivation'
+	'resolveSubstitutableClosure' | 'canSubstituteDerivation' | 'daemonTrust'
 >;
 
 export interface UpstreamConfirmationOptions {
@@ -36,7 +40,8 @@ export interface UpstreamConfirmationOptions {
 
 /**
  * Builds the check a target must pass before it is finally classed as left
- * upstream: Nix has to be willing to substitute it, and the permitted
+ * upstream: the daemon has to trust the connection carrying the confirmation's
+ * settings, Nix has to be willing to substitute the target, and the permitted
  * substituters have to hold its whole closure, proven by walking it.
  *
  * What a `confirmed` verdict does not cover is signature acceptance. Whether
@@ -47,9 +52,21 @@ export interface UpstreamConfirmationOptions {
 export function confirmLeftUpstreamWith(
 	options: UpstreamConfirmationOptions
 ): (candidate: LeftUpstreamCandidate) => Promise<LeftUpstreamVerdict> {
+	// Trust belongs to the peer the daemon accepted, so one handshake answers
+	// for every candidate this confirmation settles.
+	let trust: Promise<NixDaemonTrust> | undefined;
+
 	return async (candidate) => {
 		if (!options.substitution.substitute) {
 			return { kind: 'substitution-disabled' };
+		}
+
+		trust ??= options.store.daemonTrust();
+
+		const connectionTrust = await trust;
+
+		if (connectionTrust !== 'trusted') {
+			return { kind: 'connection-not-trusted', trust: connectionTrust };
 		}
 
 		const ineligible = await derivationRefusal(candidate, options);
@@ -76,17 +93,20 @@ export function confirmLeftUpstreamWith(
 }
 
 /**
- * The daemon overrides that leave a connection with only the permitted
- * substituters. The list is assigned outright, and the append that produced
- * the runner's own entries is cleared, so what the connection ends up with is
- * exactly this list.
+ * The daemon overrides a confirmation's connection carries.
  *
- * An untrusted client's assignment is narrowed by the daemon to the
- * substituters it already trusts, which can only shrink the list further. A
- * confirmation over such a connection may therefore refuse a target the
- * permitted substituters do hold, and never accepts one they do not.
+ * The substituter list is assigned outright, and the append that produced the
+ * runner's own entries is cleared, so what the connection ends up with is
+ * exactly the permitted list. Positive narinfo cache entries expire at once,
+ * so every answer the walk reads is one the substituter gives now: a target is
+ * left upstream on what its substituters serve today, not on what they served
+ * when the runner last asked.
+ *
+ * The daemon honours these for a trusted client only, so
+ * {@link confirmLeftUpstreamWith} settles the connection's trust before any
+ * answer over it decides a verdict.
  */
-export function permittedSubstituterOverrides(
+export function upstreamConfirmationOverrides(
 	substitution: NixSubstitutionSettings,
 	tenantUrl: URL
 ): NixDaemonOverrides {
@@ -94,7 +114,11 @@ export function permittedSubstituterOverrides(
 		(substituter) => !isTenantEndpoint(substituter, tenantUrl)
 	);
 
-	return { substituters: permitted.join(' '), 'extra-substituters': '' };
+	return {
+		substituters: permitted.join(' '),
+		'extra-substituters': '',
+		'narinfo-cache-positive-ttl': '0'
+	};
 }
 
 // Every cupboard endpoint a runner is configured with hangs off the tenant
