@@ -148,6 +148,7 @@ function dependencies(
 		store: missingStore(emptyMissing()),
 		daemonTrust: alwaysTrusted,
 		openReQueryClient: neverOpened,
+		confirmLeftUpstream: () => Promise.resolve({ kind: 'confirmed' }),
 		destinationServed: () => Promise.resolve(new Set()),
 		viewServed: () => Promise.resolve(new Set()),
 		capacityProbe: () =>
@@ -216,6 +217,7 @@ describe('runPlanCohort', () => {
 				attachOnly: [appPath, otherPath],
 				publishByReference: [],
 				leftUpstream: [],
+				leftUpstreamRejections: [],
 				buildSet: [],
 				counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
 				downloadSize: 0,
@@ -356,6 +358,56 @@ describe('runPlanCohort', () => {
 		]);
 	});
 
+	it('builds a candidate the upstream confirmation refuses and records the reason', async () => {
+		const payloads: ResultPayload[] = [];
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
+		const planFile = path.join(directory, 'plan.json');
+		const refusing = dependencies({
+			rootClient: recordingRootClient([], buildRequired([appPath])),
+			store: {
+				queryMissing: () => Promise.resolve(emptyMissing()),
+				querySubstitutablePaths: () => Promise.resolve([appPath]),
+				queryValidPaths: () => Promise.resolve([appPath])
+			},
+			confirmLeftUpstream: () =>
+				Promise.resolve({ kind: 'closure-not-served', missing: otherPath })
+		});
+
+		try {
+			await runPlanCohort(
+				runOptions({ targets: [target()], planFile }),
+				reporter(payloads),
+				refusing
+			);
+
+			const expectedPartition: AvailabilityPartition = {
+				attachOnly: [],
+				publishByReference: [],
+				leftUpstream: [],
+				leftUpstreamRejections: [
+					{ kind: 'closure-not-served', missing: otherPath, storePath: appPath }
+				],
+				buildSet: [appPath],
+				counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
+				downloadSize: 0,
+				narSize: 0,
+				unknownCount: 0,
+				ceiling: { value: 0, source: 'configured' }
+			};
+
+			expect(JSON.parse(await readFile(planFile, 'utf8'))).toStrictEqual({
+				partition: expectedPartition,
+				capacity: {
+					available: 10_000_000_000,
+					capacity: 10_000_000_000,
+					headroom: defaultHeadroomAbsoluteMinimum
+				}
+			});
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it('records a capacity skip for a remote store without probing this filesystem', async () => {
 		const payloads: ResultPayload[] = [];
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
@@ -381,6 +433,7 @@ describe('runPlanCohort', () => {
 					attachOnly: [appPath],
 					publishByReference: [],
 					leftUpstream: [],
+					leftUpstreamRejections: [],
 					buildSet: [],
 					counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
 					downloadSize: 0,

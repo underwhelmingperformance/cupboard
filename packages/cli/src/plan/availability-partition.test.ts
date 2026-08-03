@@ -14,6 +14,8 @@ import {
 	type AvailabilityPartitionOptions,
 	type AvailabilityTarget,
 	type DestinationAnswers,
+	type LeftUpstreamCandidate,
+	type LeftUpstreamVerdict,
 	partitionAvailability,
 	UnknownPathsCeilingError
 } from './availability-partition.ts';
@@ -131,6 +133,10 @@ function alwaysTrusted(): Promise<NixDaemonTrust> {
 	return Promise.resolve('trusted');
 }
 
+function alwaysConfirms(): Promise<LeftUpstreamVerdict> {
+	return Promise.resolve({ kind: 'confirmed' });
+}
+
 function neverOpened(): Pick<Nix, 'queryMissing'> {
 	return {
 		queryMissing() {
@@ -149,6 +155,7 @@ function baseOptions(
 		rootEnsureResults: new Map(),
 		daemonTrust: alwaysTrusted,
 		openReQueryClient: neverOpened,
+		confirmLeftUpstream: alwaysConfirms,
 		ceiling: defaultCeiling,
 		...overrides
 	};
@@ -256,6 +263,98 @@ describe('partitionAvailability', () => {
 
 		expect(partition.leftUpstream).toStrictEqual([appPath]);
 	});
+
+	it('confirms only the candidates it would leave upstream, once per path', async () => {
+		const store = new RecordingStore(
+			emptyMissing(),
+			[appPath, otherPath],
+			[appPath, otherPath]
+		);
+		const asked: LeftUpstreamCandidate[] = [];
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({ expectedPath: appPath, installable: `${appPath}^out` }),
+					target({ expectedPath: appPath, installable: `${appPath}^out` }),
+					// Served by the destination, so never a candidate.
+					target({ expectedPath: otherPath, installable: otherPath })
+				],
+				store,
+				destinationAnswers: answersFrom({
+					destinationServed: () => Promise.resolve(new Set([otherPath]))
+				}),
+				confirmLeftUpstream: (candidate) => {
+					asked.push(candidate);
+
+					return Promise.resolve({ kind: 'confirmed' });
+				}
+			})
+		);
+
+		expect({
+			asked,
+			leftUpstream: partition.leftUpstream,
+			attachOnly: partition.attachOnly,
+			rejections: partition.leftUpstreamRejections
+		}).toStrictEqual({
+			asked: [{ installable: `${appPath}^out`, storePath: appPath }],
+			leftUpstream: [appPath, appPath],
+			attachOnly: [otherPath],
+			rejections: []
+		});
+	});
+
+	it.each([
+		{
+			name: 'substitution is turned off',
+			verdict: { kind: 'substitution-disabled' } as const
+		},
+		{
+			name: 'the derivation withholds substitution',
+			verdict: { kind: 'substitutes-not-allowed' } as const
+		},
+		{
+			name: 'the derivation cannot be read',
+			verdict: {
+				kind: 'derivation-unreadable',
+				errorName: 'UnexpectedNarShapeError'
+			} as const
+		},
+		{
+			name: 'a reference is not served upstream',
+			verdict: { kind: 'closure-not-served', missing: otherPath } as const
+		},
+		{
+			name: 'the closure is larger than the walk allows',
+			verdict: { kind: 'closure-over-cap', maxPaths: 10 } as const
+		}
+	])(
+		'builds a candidate instead of leaving it upstream when $name',
+		async ({ verdict }) => {
+			const store = new RecordingStore(emptyMissing(), [appPath], [appPath]);
+
+			const partition = await partitionAvailability(
+				baseOptions({
+					targets: [
+						target({ expectedPath: appPath, installable: `${appPath}^out` })
+					],
+					store,
+					confirmLeftUpstream: () => Promise.resolve(verdict)
+				})
+			);
+
+			expect({
+				leftUpstream: partition.leftUpstream,
+				buildSet: partition.buildSet,
+				rejections: partition.leftUpstreamRejections
+			}).toStrictEqual({
+				leftUpstream: [],
+				buildSet: [`${appPath}^out`],
+				rejections: [{ ...verdict, storePath: appPath }]
+			});
+		}
+	);
 
 	it('re-queries only the unknown paths through the dedicated bypass client when the daemon is trusted', async () => {
 		const unknownPath = path('33333333333333333333333333333333-unknown');

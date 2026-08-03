@@ -1,6 +1,11 @@
 import { readFile, statfs, writeFile } from 'node:fs/promises';
 
-import { Nix, type NixDaemonTrust, type NixStoreKind } from '@cupboard/nix';
+import {
+	discoverNixStoreConfig,
+	Nix,
+	type NixDaemonTrust,
+	type NixStoreKind
+} from '@cupboard/nix';
 import {
 	type RootName,
 	selectorForCache,
@@ -30,6 +35,8 @@ import {
 	type AvailabilityCeilingConfig,
 	type AvailabilityPartition,
 	type AvailabilityTarget,
+	type LeftUpstreamCandidate,
+	type LeftUpstreamVerdict,
 	partitionAvailability,
 	UnknownPathsCeilingError
 } from '../plan/availability-partition.ts';
@@ -47,6 +54,10 @@ import {
 	type ParsedCohortTarget
 } from '../plan/cohort-target.ts';
 import { destinationAnswersFor } from '../plan/destination-probe.ts';
+import {
+	confirmLeftUpstreamWith,
+	permittedSubstituterOverrides
+} from '../plan/upstream-confirmation.ts';
 import { parseReadUser } from '../read-user.ts';
 import { parseStoreUri } from '../store-uri.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
@@ -142,6 +153,9 @@ export interface PlanCohortDependencies {
 	>;
 	readonly daemonTrust: () => Promise<NixDaemonTrust>;
 	readonly openReQueryClient: () => Pick<Nix, 'queryMissing'>;
+	readonly confirmLeftUpstream: (
+		candidate: LeftUpstreamCandidate
+	) => Promise<LeftUpstreamVerdict>;
 	readonly destinationServed: (
 		paths: readonly StorePathString[]
 	) => Promise<ReadonlySet<StorePathString>>;
@@ -285,6 +299,15 @@ export function registerPlanCommands(
 				...(options.reuseView !== undefined && { view: options.reuseView }),
 				...(credentials !== undefined && { credentials })
 			});
+			const { substitution } = discoverNixStoreConfig();
+			// A separate connection for the upstream confirmation: its
+			// substituter list holds only what a consumer elsewhere could
+			// also reach, so content the tenant alone holds never reads as
+			// available upstream.
+			const permittedStore = Nix.openDaemon(undefined, {
+				...storeSelection,
+				overrides: permittedSubstituterOverrides(substitution, url)
+			});
 
 			await runPlanCohort(
 				{
@@ -328,6 +351,14 @@ export function registerPlanCommands(
 							...storeSelection,
 							overrides: negativeNarinfoCacheBypass
 						}),
+					confirmLeftUpstream: confirmLeftUpstreamWith({
+						substitution,
+						store: permittedStore,
+						closure:
+							programOptions.signal === undefined
+								? {}
+								: { signal: programOptions.signal }
+					}),
 					destinationServed: answers.destinationServed,
 					viewServed: answers.viewServed,
 					capacityProbe: defaultCapacityProbe
@@ -388,6 +419,7 @@ export async function runPlanCohort(
 					rootEnsureResults,
 					daemonTrust: dependencies.daemonTrust,
 					openReQueryClient: dependencies.openReQueryClient,
+					confirmLeftUpstream: dependencies.confirmLeftUpstream,
 					ceiling: options.ceiling
 				})
 		);
