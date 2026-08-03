@@ -1,3 +1,4 @@
+export { NarFileTooLargeError, UnexpectedNarShapeError } from './nar-file.ts';
 export type { NixDependencies, RealPath } from './nix.ts';
 export { Nix } from './nix.ts';
 export type { NixDaemonSession } from './nix-daemon.ts';

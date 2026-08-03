@@ -56,12 +56,21 @@ interface RecordingStore extends NixStoreClient {
 	readonly closures: string[][];
 }
 
-function recordingStore(
-	substitutableOffers: ReadonlyMap<
+interface RecordingStoreOptions {
+	/** What the substituters offer, as a store path to its references. */
+	readonly substitutableOffers?: ReadonlyMap<
 		StorePathString,
 		readonly StorePathString[]
-	> = new Map()
-): RecordingStore {
+	>;
+	/** The bytes `narFromPath` streams for every path. */
+	readonly narBytes?: Uint8Array;
+}
+
+function recordingStore(options: RecordingStoreOptions = {}): RecordingStore {
+	const substitutableOffers =
+		options.substitutableOffers ??
+		new Map<StorePathString, readonly StorePathString[]>();
+	const narBytes = options.narBytes ?? Buffer.from('nar');
 	const queried: string[] = [];
 	const validBatches: string[][] = [];
 	const substitutableBatches: string[][] = [];
@@ -141,7 +150,7 @@ function recordingStore(
 		narFromPath: (storePath) => {
 			narRequests.push(storePath);
 
-			return byteChunks(Buffer.from('nar'));
+			return byteChunks(narBytes);
 		},
 		buildPathsWithResults: (targets) => {
 			buildBatches.push([...targets]);
@@ -154,6 +163,28 @@ function recordingStore(
 			return Promise.resolve(storePaths.map((storePath) => info(storePath)));
 		}
 	};
+}
+
+// The serialisation of a store path holding one regular file, which is what a
+// derivation in the store is.
+function regularFileNar(contents: string): Buffer {
+	const frame = (value: string): Buffer => {
+		const bytes = Buffer.from(value, 'utf8');
+		const header = Buffer.alloc(8);
+		header.writeBigUInt64LE(BigInt(bytes.byteLength));
+
+		return Buffer.concat([
+			header,
+			bytes,
+			Buffer.alloc((8 - (bytes.byteLength % 8)) % 8)
+		]);
+	};
+
+	return Buffer.concat(
+		['nix-archive-1', '(', 'type', 'regular', 'contents', contents, ')'].map(
+			(word) => frame(word)
+		)
+	);
 }
 
 function byteChunks(
@@ -427,12 +458,12 @@ describe('Nix queries', () => {
 	});
 
 	it('canonicalises the root of a substitutable-closure walk and follows it', async () => {
-		const store = recordingStore(
-			new Map([
+		const store = recordingStore({
+			substitutableOffers: new Map([
 				[appPath, [libraryPath]],
 				[libraryPath, []]
 			])
-		);
+		});
 
 		const verdict = await nixOver(store).resolveSubstitutableClosure(
 			`${appPath}/bin`
@@ -451,6 +482,37 @@ describe('Nix queries', () => {
 			batches: [[appPath], [libraryPath]]
 		});
 	});
+
+	it.each([
+		{
+			name: 'a derivation that withholds substitution',
+			environment: '[("allowSubstitutes","")]',
+			expected: false
+		},
+		{
+			name: 'a derivation that says nothing about substitution',
+			environment: '[("name","app")]',
+			expected: true
+		}
+	])(
+		'reads the substitution option out of $name in the store',
+		async ({ environment, expected }) => {
+			const aterm = `Derive([],[],[],"system","builder",[],${environment})`;
+			const store = recordingStore({ narBytes: regularFileNar(aterm) });
+
+			const isAllowed = await nixOver(store).canSubstituteDerivation(
+				`${appPath}/self.drv`
+			);
+
+			expect({
+				allowed: isAllowed,
+				narRequests: store.narRequests
+			}).toStrictEqual({
+				allowed: expected,
+				narRequests: [appPath]
+			});
+		}
+	);
 
 	it('canonicalises every derivation path in an output query', async () => {
 		const store = recordingStore();

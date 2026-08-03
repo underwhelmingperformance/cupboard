@@ -87,6 +87,16 @@ export class CacheInfoParseError extends ProtocolError {
 	}
 }
 
+// A derivation whose ATerm cannot be read. `reason` names what was wrong at
+// the point the read stopped, so a caller can tell a term in an unsupported
+// shape from bytes that are not a derivation at all.
+export class MalformedDerivationError extends ProtocolError {
+	constructor(public readonly reason: string) {
+		super(`Malformed derivation: ${reason}`);
+		this.name = 'MalformedDerivationError';
+	}
+}
+
 // Raised when a zstd stream cannot be decoded because its bytes are not a valid
 // frame, distinct from an error reading the underlying source. The server treats
 // this as a definitive verification failure (the bytes can never decode to the

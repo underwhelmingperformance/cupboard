@@ -5,14 +5,17 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import { storeDirectorySchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it, type TestContext } from 'vitest';
 
+import { Nix } from '../../packages/nix/src/nix.ts';
 import {
 	NixDaemonConnectionError,
 	NixDaemonStoreClient
 } from '../../packages/nix/src/nix-daemon.ts';
 import { NixStorePathNotFoundError } from '../../packages/nix/src/nix-store.ts';
 import { resolveSubstitutableClosure } from '../../packages/nix/src/substitutable-closure.ts';
+import { runCommand } from '../support/process.ts';
 
 const socketPath =
 	process.env.NIX_DAEMON_SOCKET_PATH ?? '/nix/var/nix/daemon-socket/socket';
@@ -61,6 +64,23 @@ function requireExecutableStorePath(
 	}
 
 	return storePathSchema.parse(executableStorePath);
+}
+
+// A derivation this Nix writes, with the given attributes folded in. It is
+// never built, so the builder need only be a plausible path.
+async function instantiate(attributes: string): Promise<string> {
+	const { stdout } = await runCommand('nix-instantiate', [
+		'--expr',
+		`derivation {
+			name = "cupboard-substitution-option";
+			system = builtins.currentSystem;
+			builder = "/bin/sh";
+			args = [ "-c" "echo hi > $out" ];
+			${attributes}
+		}`
+	]);
+
+	return stdout.trim();
 }
 
 describe.skipIf(!existsSync(socketPath))('nix daemon end to end', () => {
@@ -202,6 +222,39 @@ describe.skipIf(!existsSync(socketPath))('nix daemon end to end', () => {
 			storePath: executable
 		});
 	});
+
+	// The substitution option lives in the derivation's environment, which no
+	// store operation reports, so the parser is exercised against derivations
+	// this Nix wrote rather than against hand-built terms.
+	it.each([
+		{
+			name: 'a derivation that says nothing about substitution',
+			attributes: '',
+			expected: true
+		},
+		{
+			name: 'a derivation with allowSubstitutes = false',
+			attributes: 'allowSubstitutes = false;',
+			expected: false
+		},
+		{
+			name: 'structured attributes with allowSubstitutes = false',
+			attributes: '__structuredAttrs = true; allowSubstitutes = false;',
+			expected: false
+		}
+	])(
+		'reads the substitution option out of $name',
+		async ({ attributes, expected }) => {
+			const drvPath = await instantiate(attributes);
+			const nix = Nix.forStore(new NixDaemonStoreClient({ socketPath }), {
+				storeDirectory: storeDirectorySchema.parse('/nix/store')
+			});
+
+			await expect(nix.canSubstituteDerivation(drvPath)).resolves.toBe(
+				expected
+			);
+		}
+	);
 
 	it('reports one of the three trust levels', async (context) => {
 		const trust = await withDaemon(context, (daemon) => daemon.daemonTrust());
