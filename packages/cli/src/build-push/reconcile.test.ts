@@ -394,7 +394,7 @@ describe('reconcileBuild', () => {
 			}
 		},
 		{
-			name: 'omits a left-upstream target though it is locally valid',
+			name: 'settles a root empty when its only target is left upstream',
 			harness: { valid: [pathD] },
 			options: {
 				targets: [target(pathD, rootTwo)],
@@ -424,10 +424,96 @@ describe('reconcileBuild', () => {
 					failed: [],
 					collected: []
 				},
-				roots: [{ root: rootTwo, applied: false, targets: [pathD] }],
-				rootReplacements: [],
+				roots: [{ root: rootTwo, applied: true, targets: [] }],
+				rootReplacements: [{ name: rootTwo, body: { targets: [] } }],
 				negotiatedPaths: [],
 				failures: []
+			}
+		},
+		{
+			name: 'settles a mixed root with only the destination-held target',
+			harness: { valid: [pathA, pathD] },
+			options: {
+				targets: [target(pathA, rootTwo), target(pathD, rootTwo)],
+				partition: partitionOf({
+					leftUpstream: [pathD],
+					counts: { willBuild: 1, willSubstitute: 1, unknown: 0 }
+				}),
+				outcomes: new Map<StorePathString, BatchPathOutcome>([
+					[pathA, { outcome: 'published', storePath: pathA }]
+				])
+			},
+			expected: {
+				receipt: {
+					version: 2,
+					paths: [pathA],
+					subjects: [],
+					outcomes: [
+						{ outcome: 'built', storePath: pathA },
+						{ outcome: 'left-upstream', storePath: pathD }
+					],
+					planner: {
+						willBuild: 1,
+						willSubstitute: 1,
+						unknown: 0,
+						attached: 0,
+						adopted: 0,
+						leftUpstream: 1
+					},
+					substitutable: { downloadSize: 0, narSize: 0 },
+					uploaded: [pathA],
+					failed: [],
+					collected: []
+				},
+				roots: [{ root: rootTwo, applied: true, targets: [pathA] }],
+				rootReplacements: [{ name: rootTwo, body: { targets: [pathA] } }],
+				negotiatedPaths: [[pathA]],
+				failures: []
+			}
+		},
+		{
+			name: 'leaves a root unsettled when a failed target shares it with one left upstream',
+			harness: {
+				valid: [pathB, pathD],
+				actions: new Map<StorePathString, UploadDecision['action']>([
+					[pathB, 'upload']
+				]),
+				failUploads: new Set([pathB])
+			},
+			options: {
+				targets: [target(pathB, rootOne), target(pathD, rootOne)],
+				partition: partitionOf({
+					leftUpstream: [pathD],
+					counts: { willBuild: 1, willSubstitute: 1, unknown: 0 }
+				}),
+				candidates: [pathB]
+			},
+			expected: {
+				receipt: {
+					version: 2,
+					paths: [],
+					subjects: [],
+					outcomes: [
+						{ outcome: 'failed', storePath: pathB, reason: 'upload' },
+						{ outcome: 'left-upstream', storePath: pathD }
+					],
+					planner: {
+						willBuild: 1,
+						willSubstitute: 1,
+						unknown: 0,
+						attached: 0,
+						adopted: 0,
+						leftUpstream: 1
+					},
+					substitutable: { downloadSize: 0, narSize: 0 },
+					uploaded: [],
+					failed: [pathB],
+					collected: []
+				},
+				roots: [{ root: rootOne, applied: false, targets: [pathB] }],
+				rootReplacements: [],
+				negotiatedPaths: [[pathB]],
+				failures: [{ storePath: pathB, reason: 'upload' }]
 			}
 		},
 		{
@@ -599,6 +685,27 @@ describe('reconcileBuild', () => {
 			rootReplacements: []
 		});
 		expect(failure?.cause).toBeInstanceOf(UploadVerificationFailedError);
+	});
+
+	it('reports a refused empty settlement against the target it was declared for', async () => {
+		const harnessed = harness({ valid: [pathD] });
+		const refusal = new Error('root write refused');
+
+		const result = await reconcileWith(harnessed, {
+			targets: [target(pathD, rootTwo)],
+			partition: partitionOf({ leftUpstream: [pathD] }),
+			client: { ...harnessed.client, setRoot: () => Promise.reject(refusal) }
+		});
+
+		expect({
+			roots: result.roots,
+			failed: result.receipt.failed,
+			failures: result.failures
+		}).toStrictEqual({
+			roots: [{ root: rootTwo, applied: false, targets: [] }],
+			failed: [pathD],
+			failures: [{ storePath: pathD, reason: 'retention', cause: refusal }]
+		});
 	});
 
 	it('resolves a floating target through the pre-build derivation snapshot', async () => {
