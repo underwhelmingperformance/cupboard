@@ -129,6 +129,8 @@ Other commands share the 69, 75 and 77 categories; 74 is specific to
   attesting, and pushing outputs from GitHub Actions.
 - [docs/nix.md](./docs/nix.md) installs the CLI with Nix and adds a cache as a
   substituter.
+- [docs/measuring-realisation.md](./docs/measuring-realisation.md) measures what
+  publishing a flake's targets costs a cold runner, and gates that cost.
 - [AGENTS.md](./AGENTS.md) describes the repository layout and conventions.
 - [PLAN.md](./PLAN.md) tracks the feature plan and progress.
 
