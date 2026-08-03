@@ -227,14 +227,25 @@ export async function partitionAvailability(
 	};
 }
 
-type Classification =
+/**
+ * Where one target belongs once the three availability questions have been
+ * answered for it: a named bucket with the path that answers for it, or the
+ * build set.
+ */
+export type Classification =
 	| {
 			readonly bucket: 'attachOnly' | 'publishByReference' | 'leftUpstream';
 			readonly path: StorePathString;
 	  }
 	| { readonly bucket: 'buildSet' };
 
-function classify(
+/**
+ * Places one target given the destination, view and substitutability answers
+ * that apply to it, in the order the partition settles them. Exported so a
+ * later confirmation over a subset of the same targets classifies by these
+ * rules and no others.
+ */
+export function classify(
 	target: AvailabilityTarget,
 	destinationServedPaths: ReadonlySet<StorePathString>,
 	viewServedPaths: ReadonlySet<StorePathString>,

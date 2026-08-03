@@ -46,15 +46,13 @@ import {
 	cohortPlanInputSchema,
 	type ParsedCohortTarget
 } from '../plan/cohort-target.ts';
-import {
-	destinationServedPaths,
-	viewServedPaths
-} from '../plan/destination-probe.ts';
+import { destinationAnswersFor } from '../plan/destination-probe.ts';
 import { parseReadUser } from '../read-user.ts';
 import { parseStoreUri } from '../store-uri.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 import { registerPlanMeasureCommand } from './plan-measure.ts';
+import { registerPlanReprobeCommand } from './plan-reprobe.ts';
 import type { RootClient } from './root.ts';
 
 const maximumConcurrentRootEnsures = 8;
@@ -281,6 +279,12 @@ export function registerPlanCommands(
 			const storeSelection =
 				options.store === undefined ? {} : { storeUri: options.store };
 			const nix = Nix.openDaemon(undefined, storeSelection);
+			const answers = destinationAnswersFor({
+				baseUrl: url,
+				cache: storedCacheFor(options.cache),
+				...(options.reuseView !== undefined && { view: options.reuseView }),
+				...(credentials !== undefined && { credentials })
+			});
 
 			await runPlanCohort(
 				{
@@ -324,28 +328,15 @@ export function registerPlanCommands(
 							...storeSelection,
 							overrides: negativeNarinfoCacheBypass
 						}),
-					destinationServed: (paths) =>
-						destinationServedPaths({
-							paths,
-							...(credentials !== undefined && { credentials }),
-							baseUrl: url,
-							cache: storedCacheFor(options.cache)
-						}),
-					viewServed: (paths) =>
-						options.reuseView === undefined
-							? Promise.resolve(new Set())
-							: viewServedPaths({
-									paths,
-									...(credentials !== undefined && { credentials }),
-									baseUrl: url,
-									view: options.reuseView
-								}),
+					destinationServed: answers.destinationServed,
+					viewServed: answers.viewServed,
 					capacityProbe: defaultCapacityProbe
 				}
 			);
 		});
 
 	registerPlanMeasureCommand(plan, program, programOptions);
+	registerPlanReprobeCommand(plan, program, programOptions);
 }
 
 /**
@@ -549,7 +540,11 @@ async function ensureCohortRoots(
 	return new Map(entries);
 }
 
-async function readCohortTargets(
+/**
+ * Reads the cohort targets file every plan command over a cohort consumes: the
+ * targets as `build-cohort` writes them from a plan job's cohort-matrix entry.
+ */
+export async function readCohortTargets(
 	targetsFile: string
 ): Promise<readonly ParsedCohortTarget[]> {
 	let json: unknown;
@@ -572,8 +567,19 @@ async function readCohortTargets(
 	return parsed.data.targets;
 }
 
-function readCredentials(
-	options: PlanCohortOptions
+/** The read-credential options a private cache's own probes are given. */
+export interface ReadCredentialOptions {
+	readonly readUser?: ReadUser;
+	readonly readPassword?: string;
+}
+
+/**
+ * The credential pair a private cache's probes carry, or nothing at all for a
+ * public one. A half-supplied pair refuses: a probe that quietly dropped the
+ * password would report a private cache as serving nothing.
+ */
+export function readCredentials(
+	options: ReadCredentialOptions
 ): { readonly user: ReadUser; readonly password: string } | undefined {
 	if (
 		(options.readUser === undefined) !==
