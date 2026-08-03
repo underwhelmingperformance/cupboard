@@ -15,6 +15,7 @@ import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
 
+import type { DestinationAnswers } from './availability-partition.ts';
 import { DestinationProbeResponseError } from './destination-probe-errors.ts';
 
 const maximumConcurrentProbes = 4;
@@ -55,6 +56,42 @@ export function viewServedPaths(
 		options,
 		reuseViewAvailabilityMaxPaths
 	);
+}
+
+/**
+ * Where a tenant's destination and reuse-view answers come from, bound to one
+ * tenant, cache and credential. A run with no reuse view configured answers an
+ * empty set without a request, since there is no view to ask.
+ */
+export interface DestinationAnswerOptions {
+	readonly baseUrl: URL;
+	readonly cache: StoredCache;
+	readonly view?: string;
+	readonly credentials?: BasicCredential;
+	readonly fetcher?: typeof fetch;
+}
+
+/** The pair of destination-side answers a partition or a re-probe asks. */
+export function destinationAnswersFor(
+	options: DestinationAnswerOptions
+): DestinationAnswers {
+	const shared = {
+		baseUrl: options.baseUrl,
+		...(options.credentials !== undefined && {
+			credentials: options.credentials
+		}),
+		...(options.fetcher !== undefined && { fetcher: options.fetcher })
+	};
+	const view = options.view;
+
+	return {
+		destinationServed: (paths) =>
+			destinationServedPaths({ ...shared, paths, cache: options.cache }),
+		viewServed: (paths) =>
+			view === undefined
+				? Promise.resolve(new Set())
+				: viewServedPaths({ ...shared, paths, view })
+	};
 }
 
 async function availablePathsAt(

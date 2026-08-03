@@ -1,0 +1,143 @@
+import { Nix } from '@cupboard/nix';
+import { formatCount, type Reporter } from '@cupboard/reporter';
+import type { ReadUser } from '@cupboard/shared/http';
+import type { Command } from 'commander';
+
+import { commandUi, type ProgramOptions } from '../cli.ts';
+import { storedCacheFor } from '../client/client.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
+import type { DestinationAnswers } from '../plan/availability-partition.ts';
+import {
+	type AvailabilityReprobe,
+	reprobeAvailability
+} from '../plan/availability-reprobe.ts';
+import type { ParsedCohortTarget } from '../plan/cohort-target.ts';
+import { destinationAnswersFor } from '../plan/destination-probe.ts';
+import { parseReadUser } from '../read-user.ts';
+import { parseStoreUri } from '../store-uri.ts';
+import { tenantUrlArgument } from '../url-argument.ts';
+
+import { readCohortTargets, readCredentials } from './plan-cohort.ts';
+
+export interface PlanReprobeOptions {
+	readonly targetsFile: string;
+	readonly cache?: string;
+	readonly reuseView?: string;
+	readonly readUser?: ReadUser;
+	readonly readPassword?: string;
+	readonly store?: string;
+}
+
+export interface PlanReprobeRunOptions {
+	/** The build set as it stands, one entry per target Nix is about to realise. */
+	readonly targets: readonly ParsedCohortTarget[];
+}
+
+/**
+ * What {@link runPlanReprobe} needs from this run's environment, injectable so
+ * a command test drives it with doubles: the store the build itself will run
+ * against, and the destination-side answers for the same tenant and cache the
+ * partition asked.
+ */
+export interface PlanReprobeDependencies {
+	readonly store: Pick<Nix, 'querySubstitutablePaths' | 'queryValidPaths'>;
+	readonly destinationAnswers: DestinationAnswers;
+}
+
+const planReprobeResultKind = 'plan-reprobe';
+
+export function registerPlanReprobeCommand(
+	plan: Command,
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
+	plan
+		.command('reprobe')
+		.description(
+			'Confirm a build set still needs realising, immediately before it is built.'
+		)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.requiredOption(
+			'--targets-file <path>',
+			"JSON file describing the build set's targets"
+		)
+		.option('--cache <name>', 'target a named cache rather than the default')
+		.option(
+			'--reuse-view <name>',
+			'named tenant reuse view to probe for substitutable paths'
+		)
+		.option(
+			'--read-user <user>',
+			'username for private cache reads',
+			parseReadUser
+		)
+		.option('--read-password <password>', 'password for private cache reads')
+		.option(
+			'--store <uri>',
+			'remote ssh-ng store the build runs against (default: the local daemon)',
+			parseStoreUri
+		)
+		.action(async (url: URL, options: PlanReprobeOptions) => {
+			const reporter = commandUi(program, programOptions).reporter();
+			const targets = await readCohortTargets(options.targetsFile);
+			const credentials = readCredentials(options);
+			const storeSelection =
+				options.store === undefined ? {} : { storeUri: options.store };
+
+			await runPlanReprobe({ targets }, reporter, {
+				store: Nix.openDaemon(undefined, storeSelection),
+				destinationAnswers: destinationAnswersFor({
+					baseUrl: url,
+					cache: storedCacheFor(options.cache),
+					...(options.reuseView !== undefined && { view: options.reuseView }),
+					...(credentials !== undefined && { credentials })
+				})
+			});
+		});
+}
+
+/**
+ * Re-asks the availability questions over a settled build set and reports what
+ * has become available since the partition settled. The answer is a
+ * confirmation and never a second partition: no retention root is reconciled,
+ * no unknown ceiling applies, and a build set nothing has caught up with is
+ * reported unchanged.
+ */
+export async function runPlanReprobe(
+	options: PlanReprobeRunOptions,
+	reporter: Reporter,
+	dependencies: PlanReprobeDependencies
+): Promise<AvailabilityReprobe> {
+	const reprobe = await reporter.phase(
+		'Confirming the build set',
+		async (context) => {
+			const answer = await reprobeAvailability({
+				targets: options.targets.map((target) => ({
+					installable: target.installable,
+					...(target.expectedPath !== undefined && {
+						expectedPath: target.expectedPath
+					}),
+					root: target.root
+				})),
+				store: dependencies.store,
+				destinationAnswers: dependencies.destinationAnswers
+			});
+
+			context.fact('withdrawn', formatCount(answer.withdrawn.length));
+			context.fact('still to build', formatCount(answer.buildSet.length));
+
+			return answer;
+		}
+	);
+
+	reporter.result({
+		kind: planReprobeResultKind,
+		data: reprobe,
+		rows: [
+			{ label: 'Withdrawn', value: String(reprobe.withdrawn.length) },
+			{ label: 'Build set', value: String(reprobe.buildSet.length) }
+		]
+	});
+
+	return reprobe;
+}
