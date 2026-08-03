@@ -5,6 +5,7 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import type { ParsedRootEnsureResponse } from '@cupboard/protocol/retention';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 import { CliError, transientExitCode } from '../errors.ts';
 
@@ -52,6 +53,43 @@ export interface AvailabilityCeilingConfig {
 	readonly untrustedFallback: number;
 }
 
+/**
+ * A target the classification would leave upstream, paired with the path it
+ * resolved to, as the confirmation receives it. The installable comes along
+ * because a derivation carries its own substitution option, which the store
+ * path alone cannot answer for.
+ */
+export interface LeftUpstreamCandidate {
+	readonly installable: NixDerivedPathString;
+	readonly storePath: StorePathString;
+}
+
+/**
+ * What confirming a left-upstream candidate settled on. Only `confirmed`
+ * leaves the target upstream; every other verdict says why the target is
+ * built or published instead, so a plan records the reason rather than
+ * silently reclassifying.
+ */
+export type LeftUpstreamVerdict =
+	| { readonly kind: 'confirmed' }
+	/** The `substitute` setting is off, so nothing would be fetched at all. */
+	| { readonly kind: 'substitution-disabled' }
+	/** The derivation sets `allowSubstitutes = false` and nothing overrules it. */
+	| { readonly kind: 'substitutes-not-allowed' }
+	/** The derivation could not be read, so its option is unknown. */
+	| { readonly kind: 'derivation-unreadable'; readonly errorName: string }
+	| {
+			readonly kind: 'closure-not-served';
+			readonly missing: StorePathString;
+	  }
+	| { readonly kind: 'closure-over-cap'; readonly maxPaths: number };
+
+/** One rejected candidate, as the partition reports it. */
+export type LeftUpstreamRejection = Exclude<
+	LeftUpstreamVerdict,
+	{ readonly kind: 'confirmed' }
+> & { readonly storePath: StorePathString };
+
 export type CeilingSource = 'configured' | 'untrusted-fallback';
 
 export interface AvailabilityCeiling {
@@ -78,6 +116,15 @@ export interface AvailabilityPartitionOptions {
 	 * untrusted client's overrides.
 	 */
 	readonly openReQueryClient: () => Pick<Nix, 'queryMissing'>;
+	/**
+	 * Proves that a candidate really is held by substituters a consumer
+	 * elsewhere could reach, and that Nix would fetch it rather than build it.
+	 * Asked only of the targets the classification would otherwise leave
+	 * upstream, since no other target's answer would be used.
+	 */
+	readonly confirmLeftUpstream: (
+		candidate: LeftUpstreamCandidate
+	) => Promise<LeftUpstreamVerdict>;
 	readonly ceiling: AvailabilityCeilingConfig;
 }
 
@@ -93,6 +140,11 @@ export interface AvailabilityPartition {
 	readonly attachOnly: readonly StorePathString[];
 	readonly publishByReference: readonly StorePathString[];
 	readonly leftUpstream: readonly StorePathString[];
+	/**
+	 * The candidates the confirmation refused, with the reason each was
+	 * refused. Every one of them joins `buildSet` instead.
+	 */
+	readonly leftUpstreamRejections: readonly LeftUpstreamRejection[];
 	readonly buildSet: readonly NixDerivedPathString[];
 	readonly counts: {
 		readonly willBuild: number;
@@ -197,23 +249,30 @@ export async function partitionAvailability(
 	const leftUpstream: StorePathString[] = [];
 	const buildSet: NixDerivedPathString[] = [];
 	const buckets = { attachOnly, publishByReference, leftUpstream, buildSet };
-
-	for (const target of options.targets) {
-		const classification = classify(
+	const classified = options.targets.map((target) => ({
+		target,
+		classification: classify(
 			target,
 			destinationServedPaths,
 			viewServedPaths,
 			substitutableExternal,
 			options.rootEnsureResults
-		);
+		)
+	}));
+	const rejections = await confirmCandidates(classified, options);
+	const rejectedPaths = new Set(
+		rejections.map((rejection) => rejection.storePath)
+	);
 
-		addToBucket(buckets, target, classification);
+	for (const { target, classification } of classified) {
+		addToBucket(buckets, target, confirmed(classification, rejectedPaths));
 	}
 
 	return {
 		attachOnly,
 		publishByReference,
 		leftUpstream,
+		leftUpstreamRejections: rejections,
 		buildSet,
 		counts: {
 			willBuild: settled.willBuild.length,
@@ -238,6 +297,67 @@ export type Classification =
 			readonly path: StorePathString;
 	  }
 	| { readonly bucket: 'buildSet' };
+
+interface ClassifiedTarget {
+	readonly target: AvailabilityTarget;
+	readonly classification: Classification;
+}
+
+/**
+ * How many candidates are confirmed at once. Each confirmation walks a
+ * closure over its own daemon connections, so the fan-out stays small.
+ */
+const maximumConcurrentConfirmations = 4;
+
+// Only a target the classification would leave upstream is worth confirming,
+// and one candidate per distinct path: two targets resolving to the same path
+// get the same answer.
+async function confirmCandidates(
+	classified: readonly ClassifiedTarget[],
+	options: AvailabilityPartitionOptions
+): Promise<readonly LeftUpstreamRejection[]> {
+	const candidates = new Map<StorePathString, LeftUpstreamCandidate>();
+
+	for (const { target, classification } of classified) {
+		if (classification.bucket !== 'leftUpstream') {
+			continue;
+		}
+
+		candidates.set(classification.path, {
+			installable: target.installable,
+			storePath: classification.path
+		});
+	}
+
+	const verdicts = await mapWithConcurrency(
+		candidates.values().toArray(),
+		maximumConcurrentConfirmations,
+		async (candidate) => ({
+			storePath: candidate.storePath,
+			verdict: await options.confirmLeftUpstream(candidate)
+		})
+	);
+
+	return verdicts.flatMap(({ storePath, verdict }) =>
+		verdict.kind === 'confirmed' ? [] : [{ ...verdict, storePath }]
+	);
+}
+
+// A candidate the confirmation refused is not left upstream: it falls back to
+// the build set, where it would have gone had no substituter offered it.
+function confirmed(
+	classification: Classification,
+	rejectedPaths: ReadonlySet<StorePathString>
+): Classification {
+	if (
+		classification.bucket !== 'leftUpstream' ||
+		!rejectedPaths.has(classification.path)
+	) {
+		return classification;
+	}
+
+	return { bucket: 'buildSet' };
+}
 
 /**
  * Places one target given the destination, view and substitutability answers
