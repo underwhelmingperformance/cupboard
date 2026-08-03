@@ -200,6 +200,7 @@ function storeClientFor(source: NixStore): Nix {
 			queryValidPaths: (storePaths: readonly StorePathString[]) =>
 				Promise.resolve(storePaths),
 			querySubstitutablePaths: () => Promise.resolve([]),
+			querySubstitutablePathInfos: () => Promise.resolve([]),
 			queryDerivationOutputPaths: () => Promise.resolve([]),
 			queryMissing: () =>
 				Promise.resolve({

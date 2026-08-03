@@ -12,6 +12,7 @@ import {
 	type NixStoreClient,
 	NixStoreDatabaseError,
 	NixStorePathNotFoundError,
+	type NixSubstitutablePathInfo,
 	type NixValidPathInfo,
 	requireStorePath,
 	resolveClosureBy,
@@ -123,6 +124,14 @@ export class NixLocalStoreClient implements NixStoreClient {
 	): Promise<readonly StorePathString[]> {
 		return Promise.reject(
 			new UnsupportedNixStoreOperationError('substitutable-path queries')
+		);
+	}
+
+	querySubstitutablePathInfos(
+		_storePaths: readonly StorePathString[]
+	): Promise<readonly NixSubstitutablePathInfo[]> {
+		return Promise.reject(
+			new UnsupportedNixStoreOperationError('substitutable-path-info queries')
 		);
 	}
 

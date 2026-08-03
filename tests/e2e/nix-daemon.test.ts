@@ -35,10 +35,11 @@ function isPermissionDenied(error: unknown): boolean {
 
 async function withDaemon<T>(
 	context: Pick<TestContext, 'skip'>,
-	run: (daemon: NixDaemonStoreClient) => Promise<T>
+	run: (daemon: NixDaemonStoreClient) => Promise<T>,
+	overrides: Readonly<Record<string, string>> = {}
 ): Promise<T> {
 	try {
-		return await run(new NixDaemonStoreClient({ socketPath }));
+		return await run(new NixDaemonStoreClient({ socketPath, overrides }));
 	} catch (error) {
 		if (isPermissionDenied(error) && process.env.CI === undefined) {
 			context.skip();
@@ -143,6 +144,43 @@ describe.skipIf(!existsSync(socketPath))('nix daemon end to end', () => {
 			downloadSizeAtLeastZero: true,
 			narSizeAtLeastZero: true
 		});
+	});
+
+	it('offers substitutable info only for paths a substituter serves', async (context) => {
+		const executable = requireExecutableStorePath(context);
+		const infos = await withDaemon(context, (daemon) =>
+			daemon.querySubstitutablePathInfos([executable, absentPath])
+		);
+
+		expect({
+			offeredPathsWereAsked: infos.every(
+				(info) => info.storePath === executable
+			),
+			offeredTheAbsentPath: infos.some((info) => info.storePath === absentPath),
+			sizesAtLeastZero: infos.every(
+				(info) => info.downloadSize >= 0 && info.narSize >= 0
+			),
+			referencesListed: infos.every((info) => Array.isArray(info.references))
+		}).toStrictEqual({
+			offeredPathsWereAsked: true,
+			offeredTheAbsentPath: false,
+			sizesAtLeastZero: true,
+			referencesListed: true
+		});
+	});
+
+	// The walk that proves a closure is held upstream depends on this: the
+	// substituter list a connection sets decides the answer, so a connection
+	// that permits none can offer nothing, however much this machine holds.
+	it('offers nothing when the connection permits no substituters', async (context) => {
+		const executable = requireExecutableStorePath(context);
+		const infos = await withDaemon(
+			context,
+			(daemon) => daemon.querySubstitutablePathInfos([executable]),
+			{ substituters: '', 'extra-substituters': '' }
+		);
+
+		expect(infos).toStrictEqual([]);
 	});
 
 	it('reports one of the three trust levels', async (context) => {

@@ -13,6 +13,7 @@ import {
 	type NixMissingPartition,
 	type NixStoreClient,
 	NixStorePathNotFoundError,
+	type NixSubstitutablePathInfo,
 	type NixValidPathInfo,
 	requireStorePath,
 	resolveClosureBy
@@ -32,6 +33,7 @@ const minimumProtocolMinor = 38;
 const opAddTemporaryRoot = 11;
 const opSetOptions = 19;
 const opQueryPathInfo = 26;
+const opQuerySubstitutablePathInfos = 30;
 const opQueryValidPaths = 31;
 const opQuerySubstitutablePaths = 32;
 const opNarFromPath = 38;
@@ -46,6 +48,12 @@ const buildModeNormal = 0;
 // already refuses daemons below 1.38, so this bound documents the operation's
 // own requirement.
 const minimumBuildResultsMinor = 34;
+
+// From worker protocol 1.22 the substitutable-info request carries a map from
+// store path to the content address to look it up under; below that it is a
+// plain path set. The handshake already refuses daemons below 1.38, so this
+// bound documents the request encoding's own requirement.
+const minimumSubstitutablePathInfosMinor = 22;
 
 // BuildResult::Status wire values in declaration order; `cached-failure` is
 // reserved by the protocol.
@@ -123,6 +131,9 @@ export interface NixDaemonSession {
 	querySubstitutablePaths(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]>;
+	querySubstitutablePathInfos(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixSubstitutablePathInfo[]>;
 	queryMissing(
 		targets: readonly NixDerivedPathString[]
 	): Promise<NixMissingPartition>;
@@ -363,6 +374,18 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		);
 	}
 
+	async querySubstitutablePathInfos(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixSubstitutablePathInfo[]> {
+		if (storePaths.length === 0) {
+			return [];
+		}
+
+		return this.withConnection((session) =>
+			session.querySubstitutablePathInfos(storePaths)
+		);
+	}
+
 	async queryMissing(
 		targets: readonly NixDerivedPathString[]
 	): Promise<NixMissingPartition> {
@@ -559,6 +582,18 @@ class NixDaemonConnectionSession implements NixDaemonSession {
 	): Promise<readonly StorePathString[]> {
 		return sortedUnique(
 			await this.connection.querySubstitutablePaths(sortedUnique(storePaths))
+		);
+	}
+
+	async querySubstitutablePathInfos(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixSubstitutablePathInfo[]> {
+		const infos = await this.connection.querySubstitutablePathInfos(
+			sortedUnique(storePaths)
+		);
+
+		return infos.toSorted((left, right) =>
+			left.storePath.localeCompare(right.storePath)
 		);
 	}
 
@@ -1259,6 +1294,65 @@ class NixDaemonConnection {
 		const substitutablePaths = await this.readStringSet();
 
 		return substitutablePaths.map((path) => requireStorePath(path));
+	}
+
+	/**
+	 * What the substituters this connection permits offer for each given path.
+	 * The answer describes the substituters alone, so a path this machine
+	 * already holds is reported only when a substituter serves it too, and
+	 * nothing but metadata crosses the wire.
+	 *
+	 * Whether a path's signatures are acceptable is not decided here: the
+	 * daemon applies its own `trusted-public-keys` policy when a substitution
+	 * actually runs, and an answer from this operation is no claim that it
+	 * will accept the path then.
+	 */
+	async querySubstitutablePathInfos(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixSubstitutablePathInfo[]> {
+		if (this.version.minor < minimumSubstitutablePathInfosMinor) {
+			throw new UnsupportedNixDaemonOperationError(
+				'QuerySubstitutablePathInfos',
+				this.version
+			);
+		}
+
+		const request = new NixDaemonWriter();
+		request.writeInteger(opQuerySubstitutablePathInfos);
+		// A map from store path to the content address to look that path up
+		// under. Cupboard asks about paths exactly as the store names them, so
+		// every entry's address is absent, which the wire spells as an empty
+		// string.
+		request.writeInteger(storePaths.length);
+
+		for (const storePath of storePaths) {
+			request.writeString(storePath);
+			request.writeString('');
+		}
+
+		await this.transport.write(request.bytes());
+		await this.processStderr();
+
+		const count = await this.readInteger();
+		const infos: NixSubstitutablePathInfo[] = [];
+
+		for (let index = 0; index < count; index += 1) {
+			const storePath = requireStorePath(await this.readString());
+			const deriver = emptyStringToUndefined(await this.readString());
+			const references = await this.readStorePathSet();
+			const downloadSize = await this.readInteger();
+			const narSize = await this.readInteger();
+
+			infos.push({
+				storePath,
+				references,
+				downloadSize,
+				narSize,
+				...(deriver !== undefined && { deriver })
+			});
+		}
+
+		return infos;
 	}
 
 	async queryPathsInfo(
