@@ -27,6 +27,7 @@ const drvPath = path('33333333333333333333333333333333-app.drv');
 const defaultSubstitution: NixSubstitutionSettings = {
 	substitute: true,
 	alwaysAllowSubstitutes: false,
+	fallback: false,
 	substituters: ['https://cache.nixos.org/']
 };
 

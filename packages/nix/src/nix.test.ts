@@ -294,9 +294,9 @@ function daemonDependencies(hasSocket: boolean): NixDependencies {
 	};
 }
 
-describe('Nix.openDaemon', () => {
+describe('Nix.openForAvailability', () => {
 	it('reads through the daemon even when the state directory is writable', async () => {
-		const nix = Nix.openDaemon(daemonDependencies(true), {
+		const nix = Nix.openForAvailability(daemonDependencies(true), {
 			connect: () =>
 				Promise.resolve(
 					new FakeDaemonTransport({
@@ -328,11 +328,24 @@ describe('Nix.openDaemon', () => {
 		});
 	});
 
-	it('refuses a daemonless install with a typed error', () => {
+	// A daemonless install answers for itself, so the questions are asked of
+	// this process's own store.
+	it('opens this process own store when no daemon is running', () => {
+		expect(Nix.openForAvailability(daemonDependencies(false)).storeKind).toBe(
+			'local-filesystem'
+		);
+	});
+
+	// A store URI naming the daemon asked for that daemon, so a missing socket
+	// answers the caller's question.
+	it('refuses a store URI naming a daemon that is not running', () => {
 		let outcome:
 			{ value: Nix } | { error: { name: string; socketPath: string } };
 		try {
-			const value = Nix.openDaemon(daemonDependencies(false));
+			const value = Nix.openForAvailability({
+				...daemonDependencies(false),
+				env: { NIX_REMOTE: 'daemon' }
+			});
 			outcome = { value };
 		} catch (error_: unknown) {
 			expect(error_).toBeInstanceOf(NixDaemonUnavailableError);
@@ -396,12 +409,12 @@ describe('Nix.storeKind', () => {
 
 	it('reports the explicitly opened daemon store by its remote form', () => {
 		expect({
-			daemon: Nix.openDaemon(daemonDependencies(true)).storeKind,
-			sshNg: Nix.openDaemon({
+			daemon: Nix.openForAvailability(daemonDependencies(true)).storeKind,
+			sshNg: Nix.openForAvailability({
 				...daemonDependencies(true),
 				env: { NIX_REMOTE: 'ssh-ng://builder.example' }
 			}).storeKind,
-			selectedSshNg: Nix.openDaemon(daemonDependencies(true), {
+			selectedSshNg: Nix.openForAvailability(daemonDependencies(true), {
 				storeUri: 'ssh-ng://builder.example'
 			}).storeKind
 		}).toStrictEqual({

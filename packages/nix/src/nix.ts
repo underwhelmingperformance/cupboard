@@ -10,7 +10,6 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 
-import { parseSshNgStoreUri } from './nix-daemon-ssh.ts';
 import {
 	type NixBuildResult,
 	type NixDaemonTrust,
@@ -21,7 +20,7 @@ import {
 	NotInNixStoreError
 } from './nix-store.ts';
 import {
-	createNixDaemonStoreClient,
+	createAvailabilityStoreClient,
 	defaultStoreClientEnvironment,
 	type NixDaemonClientOptions,
 	type NixStoreKind,
@@ -68,29 +67,33 @@ export class Nix {
 	}
 
 	/**
-	 * Open the daemon-backed store explicitly. The substitutable and
-	 * missing-path queries exist only behind the daemon, and the automatic
-	 * backend prefers the local reader whenever the state directory is
-	 * writable, so a caller that needs daemon-only operations selects the
-	 * daemon here. The daemon socket has to be present; a daemonless install
-	 * is refused with a typed error naming the probed socket path. Per-call
-	 * options merge over the discovered daemon settings, the caller winning
-	 * per key; `storeUri` selects the store the client opens, an `ssh-ng`
-	 * URI reaching that remote's daemon over ssh.
+	 * Open a store that can answer what is available elsewhere, which the
+	 * automatic selection does not guarantee: it prefers the local reader
+	 * whenever the state directory is writable, and a local reader with no
+	 * substituters cannot say what they hold.
+	 *
+	 * A daemon answers whenever its socket is there. Without one this process
+	 * asks the substituters itself. Per-call options merge over the discovered
+	 * daemon settings, the caller winning per key: `storeUri` selects the
+	 * store, an `ssh-ng` URI reaching that remote's daemon over ssh, and a
+	 * `substituters` override selects which substituters answer either way.
 	 */
-	static openDaemon(
+	static openForAvailability(
 		dependencies: NixDependencies = defaultStoreClientEnvironment,
 		options: NixDaemonClientOptions = {}
 	): Nix {
 		const config = discoverNixStoreConfig(dependencies);
-		const store = createNixDaemonStoreClient(dependencies, config, options);
-		const storeUri = options.storeUri ?? config.storeUri;
+		const { client, kind } = createAvailabilityStoreClient(
+			dependencies,
+			config,
+			options
+		);
 
 		return new Nix(
-			store,
+			client,
 			config.storeDirectory,
 			dependencies.realpath ?? defaultRealPath,
-			parseSshNgStoreUri(storeUri) === undefined ? 'daemon' : 'ssh-ng'
+			kind
 		);
 	}
 
@@ -210,9 +213,8 @@ export class Nix {
 
 	/**
 	 * Whether the daemon connection this client uses is trusted. Only a
-	 * daemon-backed store (opened through {@link Nix.openDaemon}) has a
-	 * connection to ask; any other backend reports `unknown`, the same
-	 * answer an unset handshake flag gives.
+	 * daemon-backed store has a connection to ask; any other backend reports
+	 * `unknown`, the same answer an unset handshake flag gives.
 	 */
 	async daemonTrust(): Promise<NixDaemonTrust> {
 		return (await this.store.daemonTrust?.()) ?? 'unknown';

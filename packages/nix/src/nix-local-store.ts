@@ -3,6 +3,7 @@ import path from 'node:path';
 import process from 'node:process';
 import type { DatabaseSync } from 'node:sqlite';
 
+import { Derivation } from '@cupboard/nix-store/derivation';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	type StoreDirectory,
@@ -23,6 +24,8 @@ import {
 	resolveClosureBy,
 	UnsupportedNixStoreOperationError
 } from './nix-store.ts';
+import { queryMissingOver } from './realisation-partition.ts';
+import type { SubstituterClient } from './substituter.ts';
 
 /**
  * A read view of the local Nix store's SQLite database, narrowed to the
@@ -61,17 +64,54 @@ export interface NixStoreRow {
 	readonly ca: string | undefined;
 }
 
+/** What a local store reads beyond its database. */
+export interface NixLocalStoreOptions {
+	/** Where the store's paths sit, which is where a derivation is read from. */
+	readonly storeDirectory?: StoreDirectory;
+	readonly readStoreFile?: ReadStoreFile;
+	/**
+	 * Answers the questions about what is available elsewhere. Without one
+	 * this store has no substituters to ask, and the queries that depend on
+	 * them are unsupported.
+	 */
+	readonly substituters?: SubstituterClient;
+	/** The `substitute` and `always-allow-substitutes` settings. */
+	readonly substitution?: {
+		readonly substitute: boolean;
+		readonly alwaysAllowSubstitutes: boolean;
+	};
+}
+
 /**
  * Reads path information straight from the local store database, the way Nix's
  * `LocalStore` does, so closures resolve on a daemonless store with no running
- * `nix-daemon` to talk to.
+ * `nix-daemon` to talk to. Given substituters it answers for what is available
+ * elsewhere too, the way libstore does when it runs in the client.
  */
 export class NixLocalStoreClient implements NixStoreClient {
+	private readonly storeDirectory: StoreDirectory;
+
+	private readonly readStoreFile: ReadStoreFile;
+
+	private readonly substituters?: SubstituterClient;
+
+	private readonly substitution: {
+		readonly substitute: boolean;
+		readonly alwaysAllowSubstitutes: boolean;
+	};
+
 	constructor(
 		private readonly open: () => NixStoreDatabase,
-		private readonly storeDirectory: StoreDirectory = defaultStoreDirectory,
-		private readonly readStoreFile: ReadStoreFile = defaultReadStoreFile
-	) {}
+		options: NixLocalStoreOptions = {}
+	) {
+		this.storeDirectory = options.storeDirectory ?? defaultStoreDirectory;
+		this.readStoreFile = options.readStoreFile ?? defaultReadStoreFile;
+		this.substituters = options.substituters;
+		this.substitution = options.substitution ?? {
+			substitute: true,
+			alwaysAllowSubstitutes: false
+		};
+	}
 
 	private async withDatabase<T>(
 		use: (database: NixStoreDatabase) => T
@@ -137,19 +177,27 @@ export class NixLocalStoreClient implements NixStoreClient {
 	}
 
 	querySubstitutablePaths(
-		_storePaths: readonly StorePathString[]
+		storePaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]> {
-		return Promise.reject(
-			new UnsupportedNixStoreOperationError('substitutable-path queries')
-		);
+		if (this.substituters === undefined) {
+			return Promise.reject(
+				new UnsupportedNixStoreOperationError('substitutable-path queries')
+			);
+		}
+
+		return this.substituters.querySubstitutablePaths(storePaths);
 	}
 
 	querySubstitutablePathInfos(
-		_storePaths: readonly StorePathString[]
+		storePaths: readonly StorePathString[]
 	): Promise<readonly NixSubstitutablePathInfo[]> {
-		return Promise.reject(
-			new UnsupportedNixStoreOperationError('substitutable-path-info queries')
-		);
+		if (this.substituters === undefined) {
+			return Promise.reject(
+				new UnsupportedNixStoreOperationError('substitutable-path-info queries')
+			);
+		}
+
+		return this.substituters.querySubstitutablePathInfos(storePaths);
 	}
 
 	queryDerivationOutputPaths(
@@ -163,11 +211,24 @@ export class NixLocalStoreClient implements NixStoreClient {
 	}
 
 	queryMissing(
-		_targets: readonly NixDerivedPathString[]
+		targets: readonly NixDerivedPathString[]
 	): Promise<NixMissingPartition> {
-		return Promise.reject(
-			new UnsupportedNixStoreOperationError('missing-path queries')
-		);
+		const substituters = this.substituters;
+
+		if (substituters === undefined) {
+			return Promise.reject(
+				new UnsupportedNixStoreOperationError('missing-path queries')
+			);
+		}
+
+		return queryMissingOver(targets, {
+			...this.substitution,
+			validPaths: (storePaths) => this.queryValidPaths(storePaths),
+			readDerivation: async (drvPath) =>
+				Derivation.parse(await this.readDerivation(drvPath)),
+			substitutablePathInfos: (storePaths) =>
+				substituters.querySubstitutablePathInfos(storePaths)
+		});
 	}
 
 	async readDerivation(drvPath: StorePathString): Promise<string> {

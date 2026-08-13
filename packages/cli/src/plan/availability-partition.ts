@@ -121,7 +121,7 @@ export interface AvailabilityPartitionOptions {
 	readonly daemonTrust: () => Promise<NixDaemonTrust>;
 	/**
 	 * Opens a daemon connection carrying a `narinfo-cache-negative-ttl=0`
-	 * override, built by the caller on `Nix.openDaemon`. Reached only when
+	 * override, built by the caller on `Nix.openForAvailability`. Reached only when
 	 * `daemonTrust()` reports `'trusted'`, since the daemon silently drops an
 	 * untrusted client's overrides.
 	 */

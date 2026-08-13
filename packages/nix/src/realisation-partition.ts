@@ -1,0 +1,409 @@
+import type { Derivation } from '@cupboard/nix-store/derivation';
+import {
+	storePathSchema,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+
+import {
+	type NixDerivedPathString,
+	type NixMissingPartition,
+	NixStoreError,
+	type NixSubstitutablePathInfo
+} from './nix-store.ts';
+
+/** How many derivations the walk reads at once while it opens a level. */
+export const defaultDerivationReadConcurrency = 16;
+
+/**
+ * An output whose path only its build settles. There is no path yet to check
+ * validity or a substituter for, so the walk names the derivation and stops.
+ */
+export class FloatingOutputUnsupportedError extends NixStoreError {
+	constructor(
+		public readonly drvPath: StorePathString,
+		public readonly outputName: string
+	) {
+		super(
+			`The '${outputName}' output of ${drvPath} is content-addressed and floating, so its path is not known before it is built`
+		);
+		this.name = 'FloatingOutputUnsupportedError';
+	}
+}
+
+/** What the walk asks of the store and its substituters. */
+export interface RealisationPartitionSource {
+	/** Which of the given paths this store already holds. */
+	validPaths(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]>;
+	/** The derivation at the given path, which the store holds as a file. */
+	readDerivation(drvPath: StorePathString): Promise<Derivation>;
+	/** What the substituters offer for the given paths. */
+	substitutablePathInfos(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixSubstitutablePathInfo[]>;
+	/** The `substitute` setting: with it off, everything invalid is built. */
+	readonly substitute: boolean;
+	/**
+	 * The `always-allow-substitutes` setting, which overrules a derivation's
+	 * own `allowSubstitutes = false`.
+	 */
+	readonly alwaysAllowSubstitutes: boolean;
+}
+
+/**
+ * What realising the given targets would require, computed the way Nix's own
+ * `queryMissing` does: a walk out from each target that stops wherever the
+ * store already holds a path, follows a substitutable path into its
+ * references, and follows a path that must be built into the derivations it
+ * builds from.
+ *
+ * A path is reached once however many targets lead to it, so the sizes count
+ * the work one run does over all its targets.
+ */
+export async function queryMissingOver(
+	targets: readonly NixDerivedPathString[],
+	source: RealisationPartitionSource
+): Promise<NixMissingPartition> {
+	const walk = new RealisationWalk(source);
+
+	await walk.from(targets);
+
+	return walk.partition();
+}
+
+/** A target as the walk holds it: a derivation and the outputs it wants. */
+interface BuiltTarget {
+	readonly drvPath: StorePathString;
+	/** The output names wanted, or `undefined` for every one the derivation has. */
+	readonly outputNames?: ReadonlySet<string>;
+}
+
+class RealisationWalk {
+	private readonly willBuild = new Set<StorePathString>();
+
+	private readonly willSubstitute = new Set<StorePathString>();
+
+	private readonly unknown = new Set<StorePathString>();
+
+	private readonly visited = new Set<string>();
+
+	// What the substituters have already said about a path. A derivation's
+	// outputs are asked about to decide whether it builds, and each one is
+	// then walked for its references; the answer is the same both times.
+	private readonly offered = new Map<
+		StorePathString,
+		NixSubstitutablePathInfo | undefined
+	>();
+
+	private downloadSize = 0;
+
+	private narSize = 0;
+
+	constructor(private readonly source: RealisationPartitionSource) {}
+
+	// A derived path is reached once. Whichever target leads to it first
+	// accounts for it, so nothing is counted twice.
+	private claim(target: DerivedPath): boolean {
+		const key = keyOf(target);
+
+		if (this.visited.has(key)) {
+			return false;
+		}
+
+		this.visited.add(key);
+
+		return true;
+	}
+
+	// A path the store holds needs nothing. One a substituter offers is
+	// fetched, and brings its references with it. One nobody offers and
+	// nothing builds is a path this store cannot account for.
+	private async openOpaque(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly DerivedPath[]> {
+		if (storePaths.length === 0) {
+			return [];
+		}
+
+		const missing = await this.invalid(storePaths);
+		const offers = await this.offers(missing);
+		const edges: DerivedPath[] = [];
+
+		for (const storePath of missing) {
+			const offer = offers.get(storePath);
+
+			if (offer === undefined) {
+				this.unknown.add(storePath);
+				continue;
+			}
+
+			this.willSubstitute.add(storePath);
+			this.downloadSize += offer.downloadSize;
+			this.narSize += offer.narSize;
+			edges.push(...offer.references.map((reference) => opaque(reference)));
+		}
+
+		return edges;
+	}
+
+	// The whole level is opened together: the derivations are read at once,
+	// then every output they name is asked about in one batch, so a level of
+	// a thousand derivations costs one validity query and one substituter
+	// query.
+	private async openBuilt(
+		targets: readonly BuiltTarget[]
+	): Promise<readonly DerivedPath[]> {
+		if (targets.length === 0) {
+			return [];
+		}
+
+		const absent = new Set(
+			await this.invalid(targets.map(({ drvPath }) => drvPath))
+		);
+
+		// A derivation the store does not hold cannot say what it produces, so
+		// nothing below it can be accounted for either.
+		for (const drvPath of absent) {
+			this.unknown.add(drvPath);
+		}
+
+		const readable = targets.filter(({ drvPath }) => !absent.has(drvPath));
+		const read = await mapWithConcurrency(
+			readable,
+			defaultDerivationReadConcurrency,
+			async (target) => ({
+				target,
+				derivation: await this.source.readDerivation(target.drvPath)
+			})
+		);
+		const wanted = read.map(({ target, derivation }) => ({
+			target,
+			derivation,
+			outputs: wantedOutputs(derivation, target)
+		}));
+		const absentOutputs = new Set(
+			await this.invalid(wanted.flatMap(({ outputs }) => outputs))
+		);
+		const missing = wanted.map((entry) => ({
+			...entry,
+			missing: entry.outputs.filter((storePath) => absentOutputs.has(storePath))
+		}));
+		const offers = await this.offers(
+			missing
+				.filter(({ derivation }) => this.mayBeSubstituted(derivation))
+				.flatMap(({ missing: outputs }) => outputs)
+		);
+
+		return missing.flatMap((entry) => this.settle(entry, offers));
+	}
+
+	private settle(
+		entry: {
+			readonly target: BuiltTarget;
+			readonly derivation: Derivation;
+			readonly missing: readonly StorePathString[];
+		},
+		offers: ReadonlyMap<StorePathString, NixSubstitutablePathInfo>
+	): readonly DerivedPath[] {
+		if (entry.missing.length === 0) {
+			return [];
+		}
+
+		// Nix takes the outputs together: a derivation whose every wanted
+		// output can be fetched is fetched, and one that runs produces all of
+		// them, so a single output nobody offers means the whole derivation
+		// builds.
+		if (
+			!this.mayBeSubstituted(entry.derivation) ||
+			entry.missing.some((storePath) => !offers.has(storePath))
+		) {
+			return this.build(entry.target.drvPath, entry.derivation);
+		}
+
+		return entry.missing.map((storePath) => opaque(storePath));
+	}
+
+	private build(
+		drvPath: StorePathString,
+		derivation: Derivation
+	): readonly DerivedPath[] {
+		this.willBuild.add(drvPath);
+
+		return derivation.inputDerivations
+			.entries()
+			.map(([inputPath, outputNames]) => built(inputPath, new Set(outputNames)))
+			.toArray();
+	}
+
+	private mayBeSubstituted(derivation: Derivation): boolean {
+		if (!this.source.substitute) {
+			return false;
+		}
+
+		return this.source.alwaysAllowSubstitutes || derivation.allowsSubstitutes;
+	}
+
+	private async invalid(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]> {
+		const held = new Set(await this.source.validPaths(storePaths));
+
+		return storePaths.filter((storePath) => !held.has(storePath));
+	}
+
+	private async offers(
+		storePaths: readonly StorePathString[]
+	): Promise<ReadonlyMap<StorePathString, NixSubstitutablePathInfo>> {
+		const unasked = [
+			...new Set(storePaths.filter((storePath) => !this.offered.has(storePath)))
+		];
+
+		if (unasked.length > 0) {
+			const infos = await this.source.substitutablePathInfos(unasked);
+			const answered = new Map(infos.map((info) => [info.storePath, info]));
+
+			for (const storePath of unasked) {
+				this.offered.set(storePath, answered.get(storePath));
+			}
+		}
+
+		const known = new Map<StorePathString, NixSubstitutablePathInfo>();
+
+		for (const storePath of storePaths) {
+			const offer = this.offered.get(storePath);
+
+			if (offer !== undefined) {
+				known.set(storePath, offer);
+			}
+		}
+
+		return known;
+	}
+
+	/**
+	 * Walks out from the given targets a level at a time, so every path a
+	 * level reaches is asked about in one batch. Each substituter question is
+	 * a request, and a closure holds thousands of paths.
+	 */
+	async from(targets: readonly NixDerivedPathString[]): Promise<void> {
+		let frontier = targets.map((target) => parseDerivedPath(target));
+
+		while (frontier.length > 0) {
+			const fresh = frontier.filter((target) => this.claim(target));
+			const [built, opaque] = partitionTargets(fresh);
+
+			frontier = [
+				...(await this.openOpaque(opaque)),
+				...(await this.openBuilt(built))
+			];
+		}
+	}
+
+	partition(): NixMissingPartition {
+		return {
+			willBuild: sorted(this.willBuild),
+			willSubstitute: sorted(this.willSubstitute),
+			unknown: sorted(this.unknown),
+			downloadSize: this.downloadSize,
+			narSize: this.narSize
+		};
+	}
+}
+
+// Either a plain store path or a derivation with the outputs wanted from it,
+// which is what a target names and what every edge of the walk is.
+type DerivedPath =
+	| { readonly kind: 'opaque'; readonly storePath: StorePathString }
+	| ({ readonly kind: 'built' } & BuiltTarget);
+
+function opaque(storePath: StorePathString): DerivedPath {
+	return { kind: 'opaque', storePath };
+}
+
+function built(
+	drvPath: StorePathString,
+	outputNames?: ReadonlySet<string>
+): DerivedPath {
+	return {
+		kind: 'built',
+		drvPath,
+		...(outputNames !== undefined && { outputNames })
+	};
+}
+
+function parseDerivedPath(target: NixDerivedPathString): DerivedPath {
+	const separator = target.indexOf('^');
+
+	if (separator === -1) {
+		return opaque(storePathSchema.parse(target));
+	}
+
+	const drvPath = storePathSchema.parse(target.slice(0, separator));
+	const outputs = target.slice(separator + 1);
+
+	return outputs === '*'
+		? built(drvPath)
+		: built(drvPath, new Set(outputs.split(',').filter(Boolean)));
+}
+
+function keyOf(target: DerivedPath): string {
+	if (target.kind === 'opaque') {
+		return target.storePath;
+	}
+
+	const outputs =
+		target.outputNames === undefined
+			? '*'
+			: [...target.outputNames].toSorted(byCodeUnit).join(',');
+
+	return `${target.drvPath}^${outputs}`;
+}
+
+function partitionTargets(
+	targets: readonly DerivedPath[]
+): readonly [readonly BuiltTarget[], readonly StorePathString[]] {
+	const built_: BuiltTarget[] = [];
+	const opaque_: StorePathString[] = [];
+
+	for (const target of targets) {
+		if (target.kind === 'opaque') {
+			opaque_.push(target.storePath);
+		} else {
+			built_.push(target);
+		}
+	}
+
+	return [built_, opaque_];
+}
+
+// The paths the wanted outputs produce. A floating output has none to give.
+function wantedOutputs(
+	derivation: Derivation,
+	target: BuiltTarget
+): readonly StorePathString[] {
+	const wanted: StorePathString[] = [];
+
+	for (const [outputName, storePath] of derivation.outputs) {
+		if (
+			target.outputNames !== undefined &&
+			!target.outputNames.has(outputName)
+		) {
+			continue;
+		}
+
+		if (storePath === undefined) {
+			throw new FloatingOutputUnsupportedError(target.drvPath, outputName);
+		}
+
+		wanted.push(storePath);
+	}
+
+	return wanted;
+}
+
+function sorted(storePaths: ReadonlySet<StorePathString>): StorePathString[] {
+	return [...storePaths].toSorted(byCodeUnit);
+}

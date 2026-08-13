@@ -292,7 +292,7 @@ export function registerPlanCommands(
 			const credentials = readCredentials(options);
 			const storeSelection =
 				options.store === undefined ? {} : { storeUri: options.store };
-			const nix = Nix.openDaemon(undefined, storeSelection);
+			const nix = Nix.openForAvailability(undefined, storeSelection);
 			const answers = destinationAnswersFor({
 				baseUrl: url,
 				cache: storedCacheFor(options.cache),
@@ -305,7 +305,7 @@ export function registerPlanCommands(
 			// also reach, so content the tenant alone holds never reads as
 			// available upstream, and it reads past the narinfo cache so the
 			// answers are the ones those substituters give now.
-			const permittedStore = Nix.openDaemon(undefined, {
+			const permittedStore = Nix.openForAvailability(undefined, {
 				...storeSelection,
 				overrides: upstreamConfirmationOverrides(substitution, url)
 			});
@@ -348,7 +348,7 @@ export function registerPlanCommands(
 					store: nix,
 					daemonTrust: () => nix.daemonTrust(),
 					openReQueryClient: () =>
-						Nix.openDaemon(undefined, {
+						Nix.openForAvailability(undefined, {
 							...storeSelection,
 							overrides: negativeNarinfoCacheBypass
 						}),

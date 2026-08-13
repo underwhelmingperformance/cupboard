@@ -79,6 +79,11 @@ export interface NixSubstitutionSettings {
 	 */
 	readonly alwaysAllowSubstitutes: boolean;
 	/**
+	 * The `fallback` setting: whether a substituter that fails to answer is
+	 * carried on past.
+	 */
+	readonly fallback: boolean;
+	/**
 	 * The `substituters` list in configured order, with each
 	 * `extra-substituters` assignment appended after it.
 	 */
@@ -674,6 +679,8 @@ class EffectiveSubstitutionSettings {
 
 	private alwaysAllowSubstitutes = false;
 
+	private fallback = false;
+
 	private substituters: readonly string[] = defaultSubstituters;
 
 	apply(name: string, value: string): void {
@@ -700,6 +707,11 @@ class EffectiveSubstitutionSettings {
 
 		if (canonicalName === 'always-allow-substitutes') {
 			this.alwaysAllowSubstitutes = isEnabledSettingValue(name, value);
+			return;
+		}
+
+		if (canonicalName === 'fallback') {
+			this.fallback = isEnabledSettingValue(name, value);
 		}
 	}
 
@@ -707,6 +719,7 @@ class EffectiveSubstitutionSettings {
 		return {
 			substitute: this.substitute,
 			alwaysAllowSubstitutes: this.alwaysAllowSubstitutes,
+			fallback: this.fallback,
 			substituters: [...new Set(this.substituters)]
 		};
 	}

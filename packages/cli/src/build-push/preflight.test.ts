@@ -52,6 +52,7 @@ const config: NixStoreConfig = {
 	substitution: {
 		substitute: true,
 		alwaysAllowSubstitutes: false,
+		fallback: false,
 		substituters: ['https://cache.nixos.org/']
 	},
 	building: { systems: ['x86_64-linux'], features: ['big-parallel'] }
