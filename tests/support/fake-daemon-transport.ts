@@ -572,6 +572,12 @@ function readSetOptionsRequest(request: Buffer): {
 
 		return value;
 	};
+	const readSignedInteger = (): number => {
+		const value = Number(request.readBigInt64LE(offset));
+		offset += 8;
+
+		return value;
+	};
 	const readString = (): string => {
 		const length = readInteger();
 		const value = request.subarray(offset, offset + length).toString('utf8');
@@ -585,7 +591,9 @@ function readSetOptionsRequest(request: Buffer): {
 	const shouldTryFallback = readInteger() !== 0;
 	readInteger();
 	const maxBuildJobs = readInteger();
-	const maxSilentTime = readInteger();
+	// The daemon reads this one into a signed width, so a negative arrives as
+	// the number it was sent as rather than as the bytes it travelled in.
+	const maxSilentTime = readSignedInteger();
 	readInteger();
 	readInteger();
 	readInteger();

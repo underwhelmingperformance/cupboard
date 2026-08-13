@@ -76,8 +76,14 @@ export abstract class NamedMaterial {
 }
 
 // `atob` throws on material that is not base64, so the decode is the check.
-// Anything it refuses could never verify anything.
+// Anything it refuses could never verify anything. It reads past whitespace,
+// which a rendered value never carries and Nix's own decoder refuses, so the
+// material has to be whitespace-free to be material at all.
 function decodeMaterial(material: string): Uint8Array | undefined {
+	if (/\s/u.test(material)) {
+		return undefined;
+	}
+
 	try {
 		return base64ToBytes(material);
 	} catch {

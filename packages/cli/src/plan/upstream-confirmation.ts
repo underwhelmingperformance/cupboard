@@ -130,12 +130,11 @@ export interface UpstreamConfirmationOverrideOptions {
 /**
  * The overrides a confirmation's store is opened with.
  *
- * The substituter list is assigned outright, and the append that produced the
- * runner's own entries is cleared, so the substituters the confirmation asks
- * are exactly the permitted ones: the configured caches a consumer elsewhere
- * could also reach, less this tenant's own. Positive narinfo cache entries
- * expire at once, so an answer a daemon gives about one of them is the answer
- * that substituter gives now.
+ * The substituter list is assigned outright, so the substituters the
+ * confirmation asks are exactly the permitted ones: the configured caches a
+ * consumer elsewhere could also reach, less this tenant's own. Positive
+ * narinfo cache entries expire at once, so an answer a daemon gives about one
+ * of them is the answer that substituter gives now.
  *
  * A daemon honours these for a trusted client only, so
  * {@link confirmLeftUpstreamWith} settles the connection's trust before any
@@ -154,7 +153,6 @@ export function upstreamConfirmationOverrides(
 
 	return {
 		substituters: permitted.join(' '),
-		'extra-substituters': '',
 		'narinfo-cache-positive-ttl': '0'
 	};
 }

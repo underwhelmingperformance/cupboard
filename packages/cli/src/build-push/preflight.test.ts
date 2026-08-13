@@ -61,7 +61,8 @@ const config: NixStoreConfig = {
 		fallback: false,
 		substituters: ['https://cache.nixos.org/']
 	},
-	building: { systems: ['x86_64-linux'], features: ['big-parallel'] }
+	building: { systems: ['x86_64-linux'], features: ['big-parallel'] },
+	unknownSettings: []
 };
 
 const fixtures: string[] = [];

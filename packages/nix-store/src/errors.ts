@@ -1,9 +1,30 @@
+import type { StorePathString } from './scalars.ts';
+
 export abstract class ProtocolError extends Error {}
 
 export class MalformedNarInfoLineError extends ProtocolError {
 	constructor(public readonly line: string) {
 		super(`Malformed narinfo line: ${line}`);
 		this.name = 'MalformedNarInfoLineError';
+	}
+}
+
+/**
+ * A narinfo missing what Nix requires of one. Nix reads such a document as a
+ * corrupt answer, so nothing here is read out of it either.
+ */
+export class CorruptNarInfoError extends ProtocolError {
+	constructor(public readonly storePath: StorePathString) {
+		super(`The narinfo served for ${storePath} is missing required fields`);
+		this.name = 'CorruptNarInfoError';
+	}
+}
+
+/** A narinfo that describes a path other than the one it was asked for. */
+export class MismatchedNarInfoPathError extends ProtocolError {
+	constructor(public readonly storePath: StorePathString) {
+		super(`The narinfo served does not describe ${storePath}`);
+		this.name = 'MismatchedNarInfoPathError';
 	}
 }
 

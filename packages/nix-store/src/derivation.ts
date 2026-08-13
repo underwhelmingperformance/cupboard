@@ -22,28 +22,30 @@ export class Derivation {
 		return new Derivation(derivationTerm(aterm));
 	}
 
+	private readonly system: string;
 	private readonly environment: ReadonlyMap<string, string>;
-
-	private constructor(private readonly elements: readonly ATermValue[]) {
-		this.environment = derivationEnvironment(elements);
-	}
+	private readonly structured: Readonly<Record<string, unknown>> | undefined;
 
 	/**
 	 * Each output this derivation declares, by name, and the store path it
 	 * produces. The path is `undefined` for a floating content-addressed
 	 * output, whose path its build settles.
 	 */
-	get outputs(): ReadonlyMap<string, StorePathString | undefined> {
-		return derivationOutputs(this.elements);
-	}
+	readonly outputs: ReadonlyMap<string, StorePathString | undefined>;
 
 	/**
 	 * Each derivation this one builds from, and the outputs of it that this
 	 * derivation uses. Building any of these outputs is what building this
 	 * derivation first requires.
 	 */
-	get inputDerivations(): ReadonlyMap<StorePathString, readonly string[]> {
-		return derivationInputs(this.elements);
+	readonly inputDerivations: ReadonlyMap<StorePathString, readonly string[]>;
+
+	private constructor(elements: readonly ATermValue[]) {
+		this.outputs = derivationOutputs(elements);
+		this.inputDerivations = derivationInputs(elements);
+		this.system = derivationPlatform(elements);
+		this.environment = derivationEnvironment(elements);
+		this.structured = structuredAttributes(this.environment);
 	}
 
 	/**
@@ -54,15 +56,12 @@ export class Derivation {
 	 * anything else needs a builder that does.
 	 */
 	get buildRequirements(): DerivationBuildRequirements {
-		const platform = this.elements[platformIndex];
-
-		if (platform === undefined || isSequence(platform)) {
-			throw new MalformedDerivationError('the platform is not a string');
-		}
-
 		return {
-			system: platform,
-			requiredSystemFeatures: requiredSystemFeatures(this.environment)
+			system: this.system,
+			requiredSystemFeatures: requiredSystemFeatures(
+				this.environment,
+				this.structured
+			)
 		};
 	}
 
@@ -76,13 +75,14 @@ export class Derivation {
 	 * a `false` here when `always-allow-substitutes` is on.
 	 */
 	get allowsSubstitutes(): boolean {
-		return canSubstitute(this.environment);
+		return canSubstitute(this.environment, this.structured);
 	}
 }
 
-function canSubstitute(environment: ReadonlyMap<string, string>): boolean {
-	const structured = structuredAttributes(environment);
-
+function canSubstitute(
+	environment: ReadonlyMap<string, string>,
+	structured: Readonly<Record<string, unknown>> | undefined
+): boolean {
 	if (structured !== undefined) {
 		return canSubstituteStructured(structured);
 	}
@@ -207,11 +207,21 @@ function derivationInputs(
 	return required;
 }
 
-function requiredSystemFeatures(
-	environment: ReadonlyMap<string, string>
-): readonly string[] {
-	const structured = structuredAttributes(environment);
+// `"<system>"`. The platform the derivation's builder runs on.
+function derivationPlatform(elements: readonly ATermValue[]): string {
+	const platform = elements[platformIndex];
 
+	if (platform === undefined || isSequence(platform)) {
+		throw new MalformedDerivationError('the platform is not a string');
+	}
+
+	return platform;
+}
+
+function requiredSystemFeatures(
+	environment: ReadonlyMap<string, string>,
+	structured: Readonly<Record<string, unknown>> | undefined
+): readonly string[] {
 	if (structured === undefined) {
 		// Nix writes an unstructured list as its whitespace-joined members.
 		return orderedUnique(

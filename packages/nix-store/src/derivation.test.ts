@@ -46,6 +46,56 @@ function readBuildRequirements(aterm: string): DerivationBuildRequirements {
 	return Derivation.parse(aterm).buildRequirements;
 }
 
+function expectRefusal(read: () => unknown, reason: string): void {
+	let thrown: unknown;
+
+	try {
+		read();
+	} catch (error) {
+		thrown = error;
+	}
+
+	expect(thrown).toBeInstanceOf(MalformedDerivationError);
+
+	if (!(thrown instanceof MalformedDerivationError)) {
+		return;
+	}
+
+	expect({ name: thrown.name, reason: thrown.reason }).toStrictEqual({
+		name: 'MalformedDerivationError',
+		reason
+	});
+}
+
+describe('Derivation.parse', () => {
+	it.each([
+		{
+			name: 'an output that does not hold every field',
+			aterm: 'Derive([("out","","")],[],[],"aarch64-darwin","/bin/sh",[],[])',
+			reason: 'an output holds 3 fields where one has 4'
+		},
+		{
+			name: 'an input derivation that does not name its outputs',
+			aterm:
+				`Derive([("out","${outputPath}","","")],[("${derivationPath}")],[],` +
+				'"aarch64-darwin","/bin/sh",[],[])',
+			reason: 'an input derivation is not a path and its outputs'
+		},
+		{
+			name: 'a platform that is a list',
+			aterm: 'Derive([],[],[],["aarch64-darwin"],"/bin/sh",[],[])',
+			reason: 'the platform is not a string'
+		},
+		{
+			name: 'structured attributes that are not JSON',
+			aterm: derivation([['__json', 'not json']]),
+			reason: '__json is not valid JSON'
+		}
+	])('refuses $name when the derivation is parsed', ({ aterm, reason }) => {
+		expectRefusal(() => Derivation.parse(aterm), reason);
+	});
+});
+
 describe('Derivation.outputs', () => {
 	const developmentPath =
 		'/nix/store/1a2q0zvmgfg8ic2xmyq5dnzq6r5c6vjr-probe-dev';
@@ -264,24 +314,7 @@ describe('Derivation.allowsSubstitutes', () => {
 			reason: 'the structured allowSubstitutes attribute is not a boolean'
 		}
 	])('refuses $name', ({ aterm, reason }) => {
-		let thrown: unknown;
-
-		try {
-			canSubstitute(aterm);
-		} catch (error) {
-			thrown = error;
-		}
-
-		expect(thrown).toBeInstanceOf(MalformedDerivationError);
-
-		if (!(thrown instanceof MalformedDerivationError)) {
-			return;
-		}
-
-		expect({ name: thrown.name, reason: thrown.reason }).toStrictEqual({
-			name: 'MalformedDerivationError',
-			reason
-		});
+		expectRefusal(() => canSubstitute(aterm), reason);
 	});
 });
 
@@ -359,24 +392,7 @@ describe('Derivation.buildRequirements', () => {
 				'the structured requiredSystemFeatures attribute is not a list of strings'
 		}
 	])('refuses $name', ({ aterm, reason }) => {
-		let thrown: unknown;
-
-		try {
-			readBuildRequirements(aterm);
-		} catch (error) {
-			thrown = error;
-		}
-
-		expect(thrown).toBeInstanceOf(MalformedDerivationError);
-
-		if (!(thrown instanceof MalformedDerivationError)) {
-			return;
-		}
-
-		expect({ name: thrown.name, reason: thrown.reason }).toStrictEqual({
-			name: 'MalformedDerivationError',
-			reason
-		});
+		expectRefusal(() => readBuildRequirements(aterm), reason);
 	});
 });
 

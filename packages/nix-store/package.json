@@ -13,11 +13,13 @@
 	"exports": {
 		"./cache-info": "./src/cache-info.ts",
 		"./cache-url": "./src/cache-url.ts",
+		"./content-address": "./src/content-address.ts",
 		"./derivation": "./src/derivation.ts",
 		"./encoding": "./src/encoding.ts",
 		"./errors": "./src/errors.ts",
 		"./hash": "./src/hash.ts",
 		"./narinfo": "./src/narinfo.ts",
+		"./narinfo-reader": "./src/narinfo-reader.ts",
 		"./nix-config": "./src/nix-config.ts",
 		"./public-key": "./src/public-key.ts",
 		"./retention": "./src/retention.ts",

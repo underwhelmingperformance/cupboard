@@ -387,7 +387,8 @@ describe('partitionAvailability', () => {
 
 					return Promise.resolve({
 						kind: 'answered',
-						partition: bypassPartition
+						partition: bypassPartition,
+						sizes: new Map()
 					});
 				}
 			})
@@ -407,6 +408,68 @@ describe('partitionAvailability', () => {
 			downloadSize: 15,
 			narSize: 28,
 			ceiling: { value: defaultCeiling.value, source: 'configured' }
+		});
+	});
+
+	// The fresh answer walks the closures of the paths it resolved, so it names
+	// paths the first answer settled by another route. Each of those is one
+	// path, however many answers named it.
+	it('counts a path both answers name once', async () => {
+		const unknownPath = path('33333333333333333333333333333333-unknown');
+		const sharedSubstitute = path('44444444444444444444444444444444-shared');
+		const sharedBuild = path('55555555555555555555555555555555-built');
+		const store = new RecordingStore(
+			missingWith({
+				willBuild: [sharedBuild],
+				willSubstitute: [sharedSubstitute],
+				unknown: [unknownPath],
+				downloadSize: 10,
+				narSize: 20
+			})
+		);
+		// The fresh answer settles the unknown path, names the shared paths
+		// again, and leaves one the first answer had already settled unknown.
+		// Its bytes cover both paths it settled as substitutable.
+		const bypassPartition = missingWith({
+			willBuild: [sharedBuild],
+			willSubstitute: [unknownPath, sharedSubstitute],
+			unknown: [sharedBuild],
+			downloadSize: 5 + 3,
+			narSize: 8 + 6
+		});
+		const bypassSizes = new Map([
+			[unknownPath, { downloadSize: 5, narSize: 8 }],
+			[sharedSubstitute, { downloadSize: 3, narSize: 6 }]
+		]);
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({ expectedPath: unknownPath, installable: unknownPath })
+				],
+				store,
+				requeryUnknown: () =>
+					Promise.resolve({
+						kind: 'answered',
+						partition: bypassPartition,
+						sizes: bypassSizes
+					})
+			})
+		);
+
+		// The shared path's bytes are in both answers' totals and belong in the
+		// merged one once, so the fresh answer's figures for it come back out:
+		// 10 + 8 - 3 to download, and 20 + 14 - 6 of NAR.
+		expect({
+			counts: partition.counts,
+			unknownCount: partition.unknownCount,
+			downloadSize: partition.downloadSize,
+			narSize: partition.narSize
+		}).toStrictEqual({
+			counts: { willBuild: 1, willSubstitute: 2, unknown: 0 },
+			unknownCount: 0,
+			downloadSize: 15,
+			narSize: 28
 		});
 	});
 

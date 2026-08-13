@@ -394,7 +394,6 @@ describe('upstreamConfirmationOverrides', () => {
 			)
 		).toStrictEqual({
 			substituters: expected,
-			'extra-substituters': '',
 			...freshNarinfo
 		});
 	});
@@ -424,7 +423,6 @@ describe('upstreamConfirmationOverrides', () => {
 			)
 		).toStrictEqual({
 			substituters: expected,
-			'extra-substituters': '',
 			...freshNarinfo
 		});
 	});
@@ -441,7 +439,6 @@ describe('upstreamConfirmationOverrides', () => {
 			)
 		).toStrictEqual({
 			substituters: 'https://cache.nixos.org/',
-			'extra-substituters': '',
 			...freshNarinfo
 		});
 	});

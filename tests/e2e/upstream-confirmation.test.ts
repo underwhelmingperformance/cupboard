@@ -94,7 +94,7 @@ describe.skipIf(!existsSync(socketPath))('left-upstream confirmation', () => {
 			};
 			const seeding = new NixDaemonStoreClient({
 				socketPath,
-				overrides: { ...permitted, 'extra-substituters': '' }
+				overrides: permitted
 			});
 
 			await requireTrustedDaemon(context, seeding);
@@ -109,7 +109,7 @@ describe.skipIf(!existsSync(socketPath))('left-upstream confirmation', () => {
 			// do: it is the daemon's month-old memory of this substituter.
 			const remembered = await new NixDaemonStoreClient({
 				socketPath,
-				overrides: { ...permitted, 'extra-substituters': '' }
+				overrides: permitted
 			}).querySubstitutablePathInfos([storePath]);
 			const requestsWhileRemembered = substituter.narInfoRequests;
 

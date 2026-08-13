@@ -97,8 +97,15 @@ export interface NixStoreRow {
 
 /** What a local store reads beyond its database. */
 export interface NixLocalStoreOptions {
-	/** Where the store's paths sit, which is where a derivation is read from. */
+	/** The directory the store's paths are named under. */
 	readonly storeDirectory?: StoreDirectory;
+	/**
+	 * Where those paths sit on this machine, when that is somewhere other than
+	 * where they are named, which is where a derivation is read from. A store
+	 * under a root names its paths as any store does and holds them under the
+	 * root.
+	 */
+	readonly realStoreDirectory?: string;
 	readonly readStoreFile?: ReadStoreFile;
 	/**
 	 * Answers the questions about what is available elsewhere. Without one
@@ -124,6 +131,8 @@ export interface NixLocalStoreOptions {
 export class NixLocalStoreClient implements NixStoreClient {
 	private readonly storeDirectory: StoreDirectory;
 
+	private readonly realStoreDirectory: string;
+
 	private readonly readStoreFile: ReadStoreFile;
 
 	private readonly substituters?: SubstituterClient;
@@ -140,6 +149,7 @@ export class NixLocalStoreClient implements NixStoreClient {
 		options: NixLocalStoreOptions = {}
 	) {
 		this.storeDirectory = options.storeDirectory ?? defaultStoreDirectory;
+		this.realStoreDirectory = options.realStoreDirectory ?? this.storeDirectory;
 		this.readStoreFile = options.readStoreFile ?? defaultReadStoreFile;
 		this.substituters = options.substituters;
 		this.signal = options.signal;
@@ -275,7 +285,7 @@ export class NixLocalStoreClient implements NixStoreClient {
 	async readDerivation(drvPath: StorePathString): Promise<string> {
 		try {
 			return await this.readStoreFile(
-				path.join(this.storeDirectory, path.basename(drvPath))
+				path.join(this.realStoreDirectory, path.basename(drvPath))
 			);
 		} catch (error) {
 			// A reader that already said what went wrong says it; anything else
@@ -312,6 +322,21 @@ function requirePathInfo(
 	}
 
 	return pathInfoFromRow(database, storePath, row);
+}
+
+/**
+ * What the store's database holds for the path, or `undefined` for a path it
+ * does not hold.
+ */
+export function pathInfoIn(
+	database: NixStoreDatabase,
+	storePath: StorePathString
+): NixValidPathInfo | undefined {
+	const row = database.pathRow(storePath);
+
+	return row === undefined
+		? undefined
+		: pathInfoFromRow(database, storePath, row);
 }
 
 function pathInfoFromRow(

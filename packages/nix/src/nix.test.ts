@@ -341,6 +341,7 @@ describe('Nix.open', () => {
 				env: { NIX_STORE_DIR: 'relative/store' },
 				readFile: (filePath) => noConfigurationFiles[filePath],
 				homeDirectory: () => '/home/u',
+				workingDirectory: () => workingDirectory,
 				currentSystem: () => 'x86_64-linux',
 				directoryExists: () => true,
 				isSuperuser: () => false,
@@ -356,11 +357,15 @@ describe('Nix.open', () => {
 
 const noFiles = new Map<string, string>();
 
+/** The directory these fixtures run in. A relative path resolves against it. */
+const workingDirectory = '/work/dir';
+
 function daemonDependencies(hasSocket: boolean): NixDependencies {
 	return {
 		env: {},
 		readFile: (filePath) => noFiles.get(filePath),
 		homeDirectory: () => noFiles.get('home'),
+		workingDirectory: () => workingDirectory,
 		currentSystem: () => 'x86_64-linux',
 		directoryExists: () => true,
 		isSuperuser: () => false,
@@ -594,6 +599,7 @@ function openDependencies(overrides: {
 		env: overrides.env ?? {},
 		readFile: (filePath) => noFiles.get(filePath),
 		homeDirectory: () => noFiles.get('home'),
+		workingDirectory: () => workingDirectory,
 		currentSystem: () => 'x86_64-linux',
 		directoryExists: () => true,
 		isSuperuser: () => false,

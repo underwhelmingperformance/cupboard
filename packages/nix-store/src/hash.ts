@@ -16,20 +16,162 @@ import {
 } from './scalars.ts';
 
 const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
-const nixSha256Base32Length = 52;
-const sha256HexLength = 64;
-const sha256Prefix = 'sha256:';
+const sha256DigestBytes = 32;
 
-function decodeDigest(digest: string): Uint8Array {
-	if (digest.length === sha256HexLength) {
+/** An algorithm a Nix hash names, whichever value states the hash. */
+export type NixHashAlgorithm = 'md5' | 'sha1' | 'sha256' | 'sha512';
+
+/** A hash as a Nix value states it: the algorithm named, and the digest read. */
+export interface NixHash {
+	readonly algorithm: NixHashAlgorithm;
+	readonly bytes: Uint8Array;
+}
+
+interface NixHashSize {
+	readonly algorithm: NixHashAlgorithm;
+	readonly digestBytes: number;
+}
+
+// The algorithms a hash may name, with the digest size each writes. Nix reads
+// `blake3` as well, behind the blake3-hashes experimental feature, so a value
+// naming it states a hash a stock Nix has no reading of.
+function hashAlgorithm(name: string): NixHashSize | undefined {
+	switch (name) {
+		case 'md5': {
+			return { algorithm: name, digestBytes: 16 };
+		}
+		case 'sha1': {
+			return { algorithm: name, digestBytes: 20 };
+		}
+		case 'sha256': {
+			return { algorithm: name, digestBytes: sha256DigestBytes };
+		}
+		case 'sha512': {
+			return { algorithm: name, digestBytes: 64 };
+		}
+		default: {
+			return undefined;
+		}
+	}
+}
+
+function base32Length(digestBytes: number): number {
+	return Math.ceil((digestBytes * 8) / 5);
+}
+
+function base64Length(digestBytes: number): number {
+	return 4 * Math.ceil(digestBytes / 3);
+}
+
+function decodeBase16(digest: string): Uint8Array | undefined {
+	try {
 		return hexToBytes(digest);
+	} catch {
+		return undefined;
+	}
+}
+
+// Base64 states its own length, so a digest of the encoded length can still
+// decode to more bytes than the algorithm holds.
+function decodeBase64(
+	digest: string,
+	digestBytes: number
+): Uint8Array | undefined {
+	let bytes: Uint8Array;
+
+	try {
+		bytes = base64ToBytes(digest);
+	} catch {
+		return undefined;
 	}
 
-	if (digest.length === nixSha256Base32Length) {
-		return fromNixBase32(digest);
+	return bytes.byteLength === digestBytes ? bytes : undefined;
+}
+
+/**
+ * The digest a value states, read by the encoding its length names: base16,
+ * Nix's own base32, or base64, which is how Nix decides between them for a
+ * digest written without one.
+ */
+function decodeDigest(
+	digest: string,
+	digestBytes: number
+): Uint8Array | undefined {
+	if (digest.length === 2 * digestBytes) {
+		return decodeBase16(digest);
 	}
 
-	return base64ToBytes(digest);
+	if (digest.length === base32Length(digestBytes)) {
+		return decodeNixBase32(digest, digestBytes);
+	}
+
+	if (digest.length === base64Length(digestBytes)) {
+		return decodeBase64(digest, digestBytes);
+	}
+
+	return undefined;
+}
+
+/**
+ * The hash an `<algorithm>:<digest>` value states, or `undefined` for a value
+ * that states none. Nix takes the algorithm from before the colon and reads
+ * the digest by its length, so a digest of any other length, or one outside
+ * the alphabet its length names, is one Nix cannot read.
+ */
+export function decodeNixHash(value: string): NixHash | undefined {
+	const separator = value.indexOf(':');
+
+	if (separator === -1) {
+		return undefined;
+	}
+
+	return decodeNamedDigest(
+		value.slice(0, separator),
+		value.slice(separator + 1)
+	);
+}
+
+/**
+ * The hash a narinfo hash field states, in either spelling Nix writes one in:
+ * `<algorithm>:<digest>`, or the subresource integrity `<algorithm>-<base64>`.
+ * An integrity value is always base64 and is read by the bytes it decodes to.
+ */
+export function decodeNixHashField(value: string): NixHash | undefined {
+	if (value.includes(':')) {
+		return decodeNixHash(value);
+	}
+
+	const separator = value.indexOf('-');
+
+	if (separator === -1) {
+		return undefined;
+	}
+
+	const named = hashAlgorithm(value.slice(0, separator));
+
+	if (named === undefined) {
+		return undefined;
+	}
+
+	const bytes = decodeBase64(value.slice(separator + 1), named.digestBytes);
+
+	return bytes === undefined
+		? undefined
+		: { algorithm: named.algorithm, bytes };
+}
+
+function decodeNamedDigest(name: string, digest: string): NixHash | undefined {
+	const named = hashAlgorithm(name);
+
+	if (named === undefined) {
+		return undefined;
+	}
+
+	const bytes = decodeDigest(digest, named.digestBytes);
+
+	return bytes === undefined
+		? undefined
+		: { algorithm: named.algorithm, bytes };
 }
 
 export class NixSha256Hash {
@@ -53,21 +195,13 @@ export class NixSha256Hash {
 	 * database records NAR hashes in this `sha256:<base16>` form.
 	 */
 	static parsePrefixed(value: string): NixSha256Hash {
-		if (!value.startsWith(sha256Prefix)) {
+		const hash = decodeNixHash(value);
+
+		if (hash?.algorithm !== 'sha256') {
 			throw new InvalidNixSha256HashError(value);
 		}
 
-		const digest = value.slice(sha256Prefix.length);
-
-		try {
-			return this.fromDigest(decodeDigest(digest));
-		} catch (error) {
-			if (error instanceof InvalidNixSha256HashError) {
-				throw error;
-			}
-
-			throw new InvalidNixSha256HashError(value);
-		}
+		return this.fromDigest(hash.bytes);
 	}
 
 	static fromDigest(bytes: Uint8Array): NixSha256Hash {
@@ -141,20 +275,36 @@ export function toNixBase32(bytes: Uint8Array): string {
 }
 
 export function fromNixBase32(value: string): Uint8Array {
-	// A SHA-256 digest is exactly 52 Nix base32 characters; reject anything else
-	// so a short input cannot decode to a zeroed digest nor a long one silently
-	// drop its leading bits.
-	if (value.length !== nixSha256Base32Length) {
+	const bytes = decodeNixBase32(value, sha256DigestBytes);
+
+	if (bytes === undefined) {
 		throw new InvalidNixSha256HashError(value);
 	}
 
-	const bytes = new Uint8Array(32);
+	return bytes;
+}
+
+/**
+ * The digest a Nix base32 value states, or `undefined` when it states none for
+ * an algorithm of this size. A digest is exactly as long as the size demands,
+ * so a short input cannot decode to a zeroed digest nor a long one silently
+ * drop its leading bits.
+ */
+function decodeNixBase32(
+	value: string,
+	digestBytes: number
+): Uint8Array | undefined {
+	if (value.length !== base32Length(digestBytes)) {
+		return undefined;
+	}
+
+	const bytes = new Uint8Array(digestBytes);
 
 	for (let position = 0; position < value.length; position += 1) {
 		const digit = nixBase32Alphabet.indexOf(value.charAt(position));
 
 		if (digit === -1) {
-			throw new InvalidNixSha256HashError(value);
+			return undefined;
 		}
 
 		const index = value.length - 1 - position;
@@ -164,11 +314,11 @@ export function fromNixBase32(value: string): Uint8Array {
 			const bitValue = (digit >> bit) & 1;
 
 			if (sourceBit >= bytes.byteLength * 8) {
-				// The most-significant base32 digit spans more bits than a 256-bit
-				// digest holds. A canonical encoding leaves those overflow bits zero,
-				// so a value that sets them is rejected.
+				// The most-significant base32 digit spans more bits than the digest
+				// holds. A canonical encoding leaves those overflow bits zero, so a
+				// value that sets them states no digest of this size.
 				if (bitValue === 1) {
-					throw new InvalidNixSha256HashError(value);
+					return undefined;
 				}
 			} else {
 				const byteIndex = Math.floor(sourceBit / 8);

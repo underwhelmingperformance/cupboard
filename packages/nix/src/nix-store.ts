@@ -18,15 +18,33 @@ export type NixDaemonTrust = 'trusted' | 'not-trusted' | 'unknown';
  * from every query made without it, so a caller reading those answers as
  * "nobody holds this" is reading them one substituter short.
  */
-export interface UnreachableSubstituter {
+export type UnreachableSubstituter = {
 	readonly uri: string;
-	/** Why nothing could be asked of it. */
-	readonly reason:
-		| 'unreadable-uri'
-		/** A store this reader does not open, such as `s3://` or `ssh://`. */
-		| 'unsupported-scheme'
-		| 'no-cache-info';
-}
+} & UnreachableSubstituterCause;
+
+/** Why nothing could be asked of a substituter. */
+export type UnreachableSubstituterCause =
+	| { readonly reason: 'unreadable-uri' }
+	/** A store this reader does not open, such as `s3://` or `ssh://`. */
+	| { readonly reason: 'unsupported-scheme' }
+	| { readonly reason: 'no-cache-info' }
+	/**
+	 * The substituter, or a proxy standing in front of it, asked for a
+	 * credential this run does not hold. It may well hold the paths asked
+	 * about; nothing here could ask it.
+	 */
+	| { readonly reason: 'needs-credentials' }
+	| {
+			/**
+			 * The substituter serves another store's paths, so nothing it holds
+			 * answers a question about this one.
+			 */
+			readonly reason: 'store-directory-mismatch';
+			/** The store directory the substituter serves paths for. */
+			readonly servesStoreDirectory: StoreDirectory;
+			/** The store directory the answers are for. */
+			readonly queriedStoreDirectory: StoreDirectory;
+	  };
 
 export interface NixValidPathInfo {
 	readonly storePath: StorePathString;
@@ -358,12 +376,32 @@ export class InvalidNixStorePathError extends NixStoreError {
 	}
 }
 
+/** Why an `include` line could not be followed. */
+export type NixConfigIncludeFailure =
+	| 'too-many-nested-includes'
+	| 'file-does-not-exist'
+	/**
+	 * A relative target written where nothing names a directory for it to sit
+	 * under, which is every line of an inline `NIX_CONFIG`.
+	 */
+	| 'not-an-absolute-path';
+
+const includeFailureDescriptions: Readonly<
+	Record<NixConfigIncludeFailure, string>
+> = {
+	'too-many-nested-includes': 'too many nested includes',
+	'file-does-not-exist': 'the file does not exist',
+	'not-an-absolute-path': 'it is not an absolute path'
+};
+
 export class NixConfigIncludeError extends NixStoreError {
 	constructor(
 		public readonly target: string,
-		public readonly reason: string
+		public readonly reason: NixConfigIncludeFailure
 	) {
-		super(`Could not include Nix configuration ${target}: ${reason}`);
+		super(
+			`Could not include Nix configuration ${target}: ${includeFailureDescriptions[reason]}`
+		);
 		this.name = 'NixConfigIncludeError';
 	}
 }
@@ -386,15 +424,43 @@ export class NixConfigSyntaxError extends NixStoreError {
 }
 
 /**
+ * A netrc nothing can be read out of. Nix hands the file to libcurl, which
+ * fails the transfer over a line it cannot read rather than carrying on
+ * without the credentials the file was there to supply.
+ */
+export class NixNetrcSyntaxError extends NixStoreError {
+	constructor(public readonly found: string) {
+		super(`The netrc file could not be read: it holds ${found}`);
+		this.name = 'NixNetrcSyntaxError';
+	}
+}
+
+/** Why a `builders` value's `@file` entries could not be expanded. */
+export type NixMachineFileFailure =
+	'too-many-nested-machine-files' | 'file-could-not-be-read';
+
+const machineFileFailureDescriptions: Readonly<
+	Record<NixMachineFileFailure, string>
+> = {
+	'too-many-nested-machine-files': 'too many nested machine files',
+	'file-could-not-be-read': 'the file could not be read'
+};
+
+/**
  * A `builders` value whose `@file` entries could not be expanded. A machines
  * file may name another, so a chain of them can be followed only so far.
  */
 export class NixMachineFileError extends NixStoreError {
 	constructor(
-		public readonly builders: string,
-		public readonly reason: string
+		/** The builders value, or the machines file, the failure is about. */
+		public readonly source: string,
+		public readonly reason: NixMachineFileFailure,
+		options?: ErrorOptions
 	) {
-		super(`Could not read the Nix builders '${builders}': ${reason}`);
+		super(
+			`Could not read the Nix builders '${source}': ${machineFileFailureDescriptions[reason]}`,
+			options
+		);
 		this.name = 'NixMachineFileError';
 	}
 }
@@ -424,6 +490,23 @@ export class InvalidNixStoreDirectoryError extends NixStoreError {
 			`The ${source} setting '${storeDirectory}' does not name a Nix store directory: it must be an absolute path of one or more segments, none of them '.' or '..'`
 		);
 		this.name = 'InvalidNixStoreDirectoryError';
+	}
+}
+
+/**
+ * A local store URI naming a directory by something other than an absolute
+ * path. Nix reads each of these parameters as a path from the filesystem root,
+ * and refuses a store URI naming one any other way.
+ */
+export class InvalidNixStoreParameterError extends NixStoreError {
+	constructor(
+		public readonly parameter: string,
+		public readonly value: string
+	) {
+		super(
+			`The store parameter '${parameter}' names '${value}', which is not an absolute path`
+		);
+		this.name = 'InvalidNixStoreParameterError';
 	}
 }
 

@@ -258,7 +258,15 @@ export async function generatePublicKey(name: string): Promise<string> {
 	});
 }
 
-async function isolatedEnvironment(home: string): Promise<NodeJS.ProcessEnv> {
+/**
+ * An environment in which Nix reads no configuration but what the caller puts
+ * under `home`: an empty system `nix.conf` it is pointed at, and no user files
+ * at all. Every Nix invocation a test makes runs in one of these, so the
+ * machine's own settings never decide what the test observes.
+ */
+export async function isolatedEnvironment(
+	home: string
+): Promise<NodeJS.ProcessEnv> {
 	const configDirectory = path.join(home, 'nix-conf');
 	await mkdir(configDirectory, { recursive: true });
 	await writeFile(path.join(configDirectory, 'nix.conf'), '');

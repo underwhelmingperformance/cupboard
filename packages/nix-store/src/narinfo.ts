@@ -59,10 +59,35 @@ function single<S extends z.ZodType>(value: S) {
 	return z.tuple([value]).transform(([parsed]) => parsed);
 }
 
-const narInfoInteger = z
-	.tuple([z.string().regex(/^\d+$/)])
-	.transform(([digits]) => Math.trunc(Number(digits)))
-	.refine(Number.isSafeInteger);
+/**
+ * The size a narinfo `FileSize` or `NarSize` states, or `undefined` for a value
+ * that states none. Nix converts the whole value, so a value carrying anything
+ * beyond digits, or counting past what an exact integer holds, is not a size.
+ */
+export function narInfoSize(value: string): number | undefined {
+	if (!/^\d+$/u.test(value)) {
+		return undefined;
+	}
+
+	const size = Number(value);
+
+	return Number.isSafeInteger(size) ? size : undefined;
+}
+
+const narInfoInteger = z.tuple([z.string()]).transform(([digits], ctx) => {
+	const size = narInfoSize(digits);
+
+	if (size === undefined) {
+		ctx.addIssue({
+			code: 'custom',
+			message: `not a narinfo size: ${digits}`
+		});
+
+		return z.NEVER;
+	}
+
+	return size;
+});
 
 const references = z
 	.tuple([z.string()])
