@@ -60,31 +60,67 @@ function stepText(step: readonly string[] | undefined): string {
 }
 
 describe('cupboard flake publish release coordinates', () => {
-	it('pins every installing action to the called workflow commit', async () => {
+	it('resolves one canonical cupboard coordinate for every consuming job', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 		const lines = contents.split('\n');
-		const installs = actionSteps(
+		const [resolver] = actionSteps(
 			lines,
-			/^ {6}- uses: \.\/\.cupboard\/actions\/(?:setup|push)$/u
+			/^ {6}- uses: \.\/\.cupboard\/actions\/resolve-cupboard$/u
+		);
+		const setups = actionSteps(
+			lines,
+			/^ {6}- uses: \.\/\.cupboard\/actions\/setup$/u
+		);
+		const versionInput = contents.slice(
+			contents.indexOf('      cupboard-version:'),
+			contents.indexOf('      maximise-space:')
 		);
 
-		expect(
-			installs
-				.map((step) => ({
-					uses: step[0]?.trim(),
-					expectedSourceCommit: step
-						.map((line) => line.trim())
-						.find((line) => line.startsWith('expected-source-commit:'))
-				}))
-				.toSorted(
-					(left, right) => left.uses?.localeCompare(right.uses ?? '') ?? 0
-				)
-		).toStrictEqual(
-			Array.from({ length: 2 }, () => ({
-				uses: '- uses: ./.cupboard/actions/setup',
-				expectedSourceCommit: 'expected-source-commit: ${{ job.workflow_sha }}'
-			}))
-		);
+		expect({
+			versionOptional: contents.includes(
+				'      cupboard-version:\n        description:'
+			),
+			versionRequired: versionInput.includes('required: true'),
+			configurePermission:
+				contents.includes(
+					'configure:\n    name: Resolve the publication inputs\n'
+				) &&
+				contents.includes(
+					'permissions:\n      contents: read # resolve cupboard'
+				),
+			canonicalOutput: contents.includes(
+				'cupboard: ${{ steps.resolve-cupboard.outputs.cupboard }}'
+			),
+			resolver: (resolver ?? [])
+				.map((line) => line.trim())
+				.filter((line) => line !== ''),
+			setupCoordinates: setups.map((step) =>
+				step
+					.map((line) => line.trim())
+					.find((line) => line.startsWith('cupboard:'))
+			)
+		}).toStrictEqual({
+			versionOptional: true,
+			versionRequired: false,
+			configurePermission: true,
+			canonicalOutput: true,
+			resolver: [
+				'- uses: ./.cupboard/actions/resolve-cupboard',
+				'id: resolve-cupboard',
+				'with:',
+				'cupboard-version: ${{ inputs.cupboard-version }}',
+				'workflow-repository: ${{ job.workflow_repository }}',
+				'workflow-ref: ${{ job.workflow_ref }}',
+				'workflow-sha: ${{ job.workflow_sha }}',
+				'github-token: ${{ github.token }}',
+				'github-api-url: ${{ github.api_url }}',
+				'github-graphql-url: ${{ github.graphql_url }}'
+			],
+			setupCoordinates: Array.from(
+				{ length: 2 },
+				() => 'cupboard: ${{ needs.configure.outputs.cupboard }}'
+			)
+		});
 	});
 
 	it('configures classic builders only when no direct store is selected', async () => {
@@ -293,23 +329,25 @@ describe('cupboard flake publish release coordinates', () => {
 });
 
 describe('cupboard publish release coordinates', () => {
-	it('binds the documented immutable caller to one workflow and release source commit', async () => {
+	it('documents SHA-pinned automatic resolution without duplicate coordinates', async () => {
 		const documentation = await readFile(githubActionsDocumentation, 'utf8');
 		const reusableWorkflowSection = documentation.slice(
 			documentation.indexOf('## The reusable workflow\n'),
 			documentation.indexOf('### Publishing a target manifest\n')
 		);
 		const example =
-			/uses: underwhelmingperformance\/cupboard\/\.github\/workflows\/cupboard-publish\.yml@(?<workflowCommit>[0-9a-f]{40}) # vX\.Y\.Z[\s\S]*?cupboard-source-commit: (?<sourceCommit>[0-9a-f]{40})/u.exec(
+			/uses: underwhelmingperformance\/cupboard\/\.github\/workflows\/cupboard-publish\.yml@(?<workflowCommit>[0-9a-f]{40}) # vX\.Y\.Z/u.exec(
 				reusableWorkflowSection
 			);
 
 		expect({
 			workflowCommit: example?.groups?.workflowCommit,
-			sourceCommit: example?.groups?.sourceCommit
+			versionOverride: reusableWorkflowSection.includes('cupboard-version:'),
+			sourceCommit: reusableWorkflowSection.includes('cupboard-source-commit:')
 		}).toStrictEqual({
 			workflowCommit: '0123456789abcdef0123456789abcdef01234567',
-			sourceCommit: '0123456789abcdef0123456789abcdef01234567'
+			versionOverride: false,
+			sourceCommit: false
 		});
 	});
 
@@ -326,34 +364,42 @@ describe('cupboard publish release coordinates', () => {
 			lines,
 			/^ {6}- uses: \.\/\.cupboard\/actions\/push$/u
 		);
+		const [resolver] = actionSteps(
+			lines,
+			/^ {6}- uses: \.\/\.cupboard\/actions\/resolve-cupboard$/u
+		);
+		const versionInput = contents.slice(
+			contents.indexOf('      cupboard-version:'),
+			contents.indexOf('\n# The caller grants')
+		);
 		expect({
+			checkoutRepository: cupboardCheckout?.find((line) =>
+				line.startsWith('repository:')
+			),
 			checkoutRef: cupboardCheckout?.find((line) => line.startsWith('ref:')),
 			versionOptional: contents.includes(
-				'      cupboard-version:\n        description: Exact cupboard release tag to install.\n        required: false'
+				'      cupboard-version:\n        description:'
 			),
-			versionDefault: contents.includes('        default: v0.0.19'),
-			sourceCommitInput: contents.includes(
-				'      cupboard-source-commit:\n        description:'
+			versionDefault: /cupboard-version:[\s\S]*?default:/u.test(versionInput),
+			sourceCommitInput: contents.includes('cupboard-source-commit:'),
+			resolverCoordinate: stepText(resolver).includes(
+				'cupboard-version: ${{ inputs.cupboard-version }} workflow-repository: ${{ job.workflow_repository }} workflow-ref: ${{ job.workflow_ref }} workflow-sha: ${{ job.workflow_sha }}'
 			),
-			sourceCommitDefault: contents.includes(
-				'        default: 8830186db0d666c0962a5f5fb34cc97b2f4fbbbf'
+			setupCoordinate: stepText(setup).includes(
+				'cupboard: ${{ steps.resolve-cupboard.outputs.cupboard }}'
 			),
-			latestRemainsAvailable: contents.includes('        default: latest'),
-			setupExpectedSourceCommit: stepText(setup).includes(
-				'expected-source-commit: ${{ inputs.cupboard-source-commit || job.workflow_sha }}'
-			),
-			pushExpectedSourceCommit: stepText(push).includes(
-				'expected-source-commit: ${{ inputs.cupboard-source-commit || job.workflow_sha }}'
+			pushReusesSetup: stepText(push).includes(
+				'cupboard-path: ${{ steps.setup.outputs.cupboard-path }}'
 			)
 		}).toStrictEqual({
+			checkoutRepository: 'repository: ${{ job.workflow_repository }}',
 			checkoutRef: 'ref: ${{ job.workflow_sha }}',
 			versionOptional: true,
-			versionDefault: true,
-			sourceCommitInput: true,
-			sourceCommitDefault: true,
-			latestRemainsAvailable: false,
-			setupExpectedSourceCommit: true,
-			pushExpectedSourceCommit: true
+			versionDefault: false,
+			sourceCommitInput: false,
+			resolverCoordinate: true,
+			setupCoordinate: true,
+			pushReusesSetup: true
 		});
 	});
 
@@ -371,7 +417,7 @@ describe('cupboard publish release coordinates', () => {
 		);
 	});
 
-	it('keeps the documented moving-ref caller compatible without new inputs', async () => {
+	it('resolves an omitted version from the called workflow SHA', async () => {
 		const caller = await readFile(legacyPublishCaller, 'utf8');
 		const workflow = await readFile(publishWorkflow, 'utf8');
 
@@ -381,16 +427,14 @@ describe('cupboard publish release coordinates', () => {
 			),
 			omitsVersion: !caller.includes('cupboard-version:'),
 			omitsSource: !caller.includes('cupboard-source-commit:'),
-			immutableDefaults:
-				workflow.includes('        default: v0.0.19') &&
-				workflow.includes(
-					'        default: 8830186db0d666c0962a5f5fb34cc97b2f4fbbbf'
-				)
+			automaticResolution:
+				workflow.includes('- uses: ./.cupboard/actions/resolve-cupboard') &&
+				workflow.includes('workflow-sha: ${{ job.workflow_sha }}')
 		}).toStrictEqual({
 			callsMovingWorkflow: true,
 			omitsVersion: true,
 			omitsSource: true,
-			immutableDefaults: true
+			automaticResolution: true
 		});
 	});
 });
@@ -417,9 +461,7 @@ describe('cupboard release cache', () => {
 			releaseVersionPinned: publishJob.includes(
 				'cupboard-version: ${{ github.event.release.tag_name }}'
 			),
-			releaseSourcePinned: publishJob.includes(
-				'cupboard-source-commit: ${{ github.sha }}'
-			),
+			releaseSourcePinned: publishJob.includes('cupboard-source-commit:'),
 			flakehubRequiresCacheMatrix: flakehubJob.includes('    needs: publish')
 		}).toStrictEqual({
 			allRequiredPlatformsSettle: true,
@@ -427,7 +469,7 @@ describe('cupboard release cache', () => {
 			callerBestEffort: false,
 			reusableTolerance: false,
 			releaseVersionPinned: true,
-			releaseSourcePinned: true,
+			releaseSourcePinned: false,
 			flakehubRequiresCacheMatrix: true
 		});
 	});
@@ -440,12 +482,16 @@ describe('cupboard repository cache publishing', () => {
 			readFile(publishWorkflow, 'utf8')
 		]);
 		const versions = contents.match(/cupboard-version: v0\.0\.19/g)?.length;
+		const versionInput = reusableWorkflow.slice(
+			reusableWorkflow.indexOf('      cupboard-version:'),
+			reusableWorkflow.indexOf('\n# The caller grants')
+		);
 
 		expect({
 			versionPins: versions,
 			callerAvoidsFutureInput: !contents.includes('cupboard-source-commit:'),
-			reusableSourceCommitDefault: reusableWorkflow.includes(
-				'default: 8830186db0d666c0962a5f5fb34cc97b2f4fbbbf'
+			reusableVersionDefault: /cupboard-version:[\s\S]*?default:/u.test(
+				versionInput
 			),
 			explainsDeliberateSkew: contents.includes(
 				'The reusable workflow stays on @main for the tenant trust rule, while'
@@ -453,7 +499,7 @@ describe('cupboard repository cache publishing', () => {
 		}).toStrictEqual({
 			versionPins: 2,
 			callerAvoidsFutureInput: true,
-			reusableSourceCommitDefault: true,
+			reusableVersionDefault: false,
 			explainsDeliberateSkew: true
 		});
 	});
