@@ -3,15 +3,32 @@
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
+  # Nixpkgs 26.11 dropped Intel macOS. Keep the final supported branch as a
+  # narrow compatibility input so a workflow pinned to Cupboard source can
+  # still acquire the same platforms as a published release.
+  inputs.nixpkgs-x86_64-darwin.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
+
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      nixpkgs-x86_64-darwin,
+    }:
     let
       systems = [
         "x86_64-linux"
         "aarch64-linux"
+        "x86_64-darwin"
         "aarch64-darwin"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
+      packageSets = forAllSystems (
+        system:
+        if system == "x86_64-darwin" then
+          nixpkgs-x86_64-darwin.legacyPackages.${system}
+        else
+          nixpkgs.legacyPackages.${system}
+      );
 
       # The package is built from this flake's own source, so its version is the
       # revision it was built from. A pinned input therefore yields the matching
@@ -138,7 +155,7 @@
       packages = forAllSystems (
         system:
         let
-          cupboard = mkCupboard nixpkgs.legacyPackages.${system};
+          cupboard = mkCupboard packageSets.${system};
         in
         {
           inherit cupboard;
@@ -151,7 +168,7 @@
           # check:conformance-oracle` fails when the two drift apart. The `out`
           # output is the one holding `bin/nix`, and naming it keeps the build to
           # a single path the suite can read straight off.
-          conformanceNix = nixpkgs.legacyPackages.${system}.nix.out;
+          conformanceNix = packageSets.${system}.nix.out;
         }
       );
 
@@ -168,6 +185,6 @@
       nixosModules.default = cupboardModule;
       homeManagerModules.default = cupboardModule;
 
-      formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixfmt);
+      formatter = forAllSystems (system: packageSets.${system}.nixfmt);
     };
 }
