@@ -17,6 +17,37 @@ import {
 export const defaultDerivationReadConcurrency = 16;
 
 /**
+ * How many derived paths a walk visits before it gives up. Every edge it
+ * follows comes from an answer a substituter gave, so a substituter offering
+ * fresh references without end would otherwise walk without end.
+ */
+export const defaultRealisationWalkCap = 50_000;
+
+/**
+ * A walk that reached its cap, refused with the count it reached: a plan
+ * stopped part way through describes only part of the work.
+ */
+export class RealisationWalkOverCapError extends NixStoreError {
+	constructor(public readonly maxPaths: number) {
+		super(
+			`Working out what to realise visited more than ${String(maxPaths)} derived paths`
+		);
+		this.name = 'RealisationWalkOverCapError';
+	}
+}
+
+/** A target naming an output its derivation does not produce. */
+export class UndeclaredOutputError extends NixStoreError {
+	constructor(
+		public readonly drvPath: StorePathString,
+		public readonly outputName: string
+	) {
+		super(`${drvPath} does not have an output named '${outputName}'`);
+		this.name = 'UndeclaredOutputError';
+	}
+}
+
+/**
  * An output whose path only its build settles. There is no path yet to check
  * validity or a substituter for, so the walk names the derivation and stops.
  */
@@ -46,6 +77,13 @@ export interface RealisationPartitionSource {
 	): Promise<readonly NixSubstitutablePathInfo[]>;
 	/** The `substitute` setting: with it off, everything invalid is built. */
 	readonly substitute: boolean;
+	/**
+	 * How many derived paths the walk may visit (default:
+	 * {@link defaultRealisationWalkCap}).
+	 */
+	readonly maxPaths?: number;
+	/** Abandons the walk between levels, raising the signal's reason. */
+	readonly signal?: AbortSignal;
 	/**
 	 * The `always-allow-substitutes` setting, which overrules a derivation's
 	 * own `allowSubstitutes = false`.
@@ -106,6 +144,10 @@ class RealisationWalk {
 
 	// A derived path is reached once. Whichever target leads to it first
 	// accounts for it, so nothing is counted twice.
+	//
+	// The cap is applied here, as each path is reached, so a substituter
+	// offering references without end is stopped at the path that passes it
+	// and never has a level's worth of them gathered up first.
 	private claim(target: DerivedPath): boolean {
 		const key = keyOf(target);
 
@@ -113,9 +155,20 @@ class RealisationWalk {
 			return false;
 		}
 
+		const maxPaths = this.source.maxPaths ?? defaultRealisationWalkCap;
+
+		if (this.visited.size >= maxPaths) {
+			throw new RealisationWalkOverCapError(maxPaths);
+		}
+
 		this.visited.add(key);
 
 		return true;
+	}
+
+	/** The given targets this walk has not reached, now claimed for it. */
+	private claimed(targets: readonly DerivedPath[]): readonly DerivedPath[] {
+		return targets.filter((target) => this.claim(target));
 	}
 
 	// A path the store holds needs nothing. One a substituter offers is
@@ -143,7 +196,9 @@ class RealisationWalk {
 			this.willSubstitute.add(storePath);
 			this.downloadSize += offer.downloadSize;
 			this.narSize += offer.narSize;
-			edges.push(...offer.references.map((reference) => opaque(reference)));
+			edges.push(
+				...this.claimed(offer.references.map((reference) => opaque(reference)))
+			);
 		}
 
 		return edges;
@@ -197,7 +252,7 @@ class RealisationWalk {
 				.flatMap(({ missing: outputs }) => outputs)
 		);
 
-		return missing.flatMap((entry) => this.settle(entry, offers));
+		return this.claimed(missing.flatMap((entry) => this.settle(entry, offers)));
 	}
 
 	private settle(
@@ -289,11 +344,14 @@ class RealisationWalk {
 	 * a request, and a closure holds thousands of paths.
 	 */
 	async from(targets: readonly NixDerivedPathString[]): Promise<void> {
-		let frontier = targets.map((target) => parseDerivedPath(target));
+		let frontier = this.claimed(
+			targets.map((target) => parseDerivedPath(target))
+		);
 
 		while (frontier.length > 0) {
-			const fresh = frontier.filter((target) => this.claim(target));
-			const [built, opaque] = partitionTargets(fresh);
+			this.source.signal?.throwIfAborted();
+
+			const [built, opaque] = partitionTargets(frontier);
 
 			frontier = [
 				...(await this.openOpaque(opaque)),
@@ -344,9 +402,19 @@ function parseDerivedPath(target: NixDerivedPathString): DerivedPath {
 	const drvPath = storePathSchema.parse(target.slice(0, separator));
 	const outputs = target.slice(separator + 1);
 
-	return outputs === '*'
-		? built(drvPath)
-		: built(drvPath, new Set(outputs.split(',').filter(Boolean)));
+	if (outputs === '*') {
+		return built(drvPath);
+	}
+
+	const named = new Set(outputs.split(',').filter(Boolean));
+
+	// A target naming no outputs asks for nothing, which a walk cannot answer
+	// by reporting that nothing is needed.
+	if (named.size === 0) {
+		throw new UndeclaredOutputError(drvPath, outputs);
+	}
+
+	return built(drvPath, named);
 }
 
 function keyOf(target: DerivedPath): string {
@@ -365,18 +433,18 @@ function keyOf(target: DerivedPath): string {
 function partitionTargets(
 	targets: readonly DerivedPath[]
 ): readonly [readonly BuiltTarget[], readonly StorePathString[]] {
-	const built_: BuiltTarget[] = [];
-	const opaque_: StorePathString[] = [];
+	const builtTargets: BuiltTarget[] = [];
+	const opaquePaths: StorePathString[] = [];
 
 	for (const target of targets) {
 		if (target.kind === 'opaque') {
-			opaque_.push(target.storePath);
+			opaquePaths.push(target.storePath);
 		} else {
-			built_.push(target);
+			builtTargets.push(target);
 		}
 	}
 
-	return [built_, opaque_];
+	return [builtTargets, opaquePaths];
 }
 
 // The paths the wanted outputs produce. A floating output has none to give.
@@ -385,6 +453,17 @@ function wantedOutputs(
 	target: BuiltTarget
 ): readonly StorePathString[] {
 	const wanted: StorePathString[] = [];
+
+	// A target naming an output the derivation does not declare names
+	// something that cannot be realised, and a walk that quietly skipped it
+	// would report the target as needing nothing at all.
+	const named = target.outputNames ?? new Set<string>();
+
+	for (const outputName of named) {
+		if (!derivation.outputs.has(outputName)) {
+			throw new UndeclaredOutputError(target.drvPath, outputName);
+		}
+	}
 
 	for (const [outputName, storePath] of derivation.outputs) {
 		if (

@@ -7,12 +7,19 @@ import {
 	buildReceiptSchema,
 	type BuildReceiptV2,
 	type BuildReceiptV3,
-	type ParsedBuildReceipt
+	type BuildSubjectV3,
+	type ParsedBuildReceipt,
+	type SubjectVerification
 } from '@cupboard/protocol/build';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
-import { InvalidInputError } from '../errors.ts';
+import {
+	InvalidInputError,
+	SubjectDeriverMovedError,
+	SubjectNarHashMovedError,
+	SubjectNotHeldError
+} from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import { provided } from '../options.ts';
 
@@ -94,14 +101,29 @@ export function attestationSubjects(
 }
 
 /**
- * What a receipt carrying provenance lets this run attest. Each subject records
- * its own NAR hash as the store that realised it reported, so the checksums come
- * straight from the receipt and no store is opened here: a path a remote store
- * built is not on this machine to query. A subject nothing verified is refused,
- * because it was produced on a machine the run never established anything about.
+ * What this run holds for each subject a receipt names, keyed by store path. A
+ * path this machine does not hold has no entry.
+ */
+export type LocalPathInfos = ReadonlyMap<string, NixValidPathInfo>;
+
+/**
+ * What a receipt carrying provenance lets this run attest.
+ *
+ * A subject is signed under this repository's identity, so what this machine
+ * can check for itself, it checks. A subject this run built or reproduced must
+ * be in this store, under the NAR hash and deriver the receipt recorded: an
+ * absent path fails the run, as does one whose hash or deriver has moved since
+ * the receipt was written.
+ *
+ * A subject the selected build store realised is on that store, so this store
+ * may hold it or not. Held, it is checked the same way; absent, its checksum
+ * comes from the receipt, which is what the run established about it. A subject
+ * nothing verified is refused, because it was produced on a machine the run
+ * never established anything about.
  */
 export function provenancedSubjects(
-	receipt: BuildReceiptV3
+	receipt: BuildReceiptV3,
+	held: LocalPathInfos
 ): ResolvedAttestation {
 	const subjects: StorePathDigest[] = [];
 	const refused: RefusedSubject[] = [];
@@ -117,10 +139,62 @@ export function provenancedSubjects(
 			continue;
 		}
 
+		requireBacked(subject, held.get(subject.storePath));
+
 		subjects.push({ storePath: subject.storePath, sha256: subject.narHash });
 	}
 
 	return { subjects, skipped, refused };
+}
+
+// Which verifications name a build this machine ran, whose output its own
+// store therefore holds. A path the selected build store realised lives on
+// that store, and an unverified path was produced somewhere this run never
+// looked.
+const realisedHere: Record<SubjectVerification, boolean> = {
+	local: true,
+	'verified-rebuild': true,
+	'build-store': false,
+	unverified: false
+};
+
+// What a subject's checksum rests on must be in front of the run: the path
+// itself where this machine realised it, and the receipt where a build store
+// did.
+function requireBacked(
+	subject: BuildSubjectV3,
+	info: NixValidPathInfo | undefined
+): void {
+	if (info !== undefined) {
+		requireUnmoved(info, subject.narHash, subject.derivation);
+		return;
+	}
+
+	if (realisedHere[subject.verification]) {
+		throw new SubjectNotHeldError(subject.storePath, subject.verification);
+	}
+}
+
+// A subject whose path this store holds is one this run can check for itself,
+// and a checksum signed under this repository's identity is worth the read.
+function requireUnmoved(
+	info: NixValidPathInfo,
+	narHash: string,
+	derivation: string
+): void {
+	const held = info.narHash.digestHex();
+
+	if (held !== narHash) {
+		throw new SubjectNarHashMovedError(info.storePath, narHash, held);
+	}
+
+	if (info.deriver !== derivation) {
+		throw new SubjectDeriverMovedError(
+			info.storePath,
+			derivation,
+			info.deriver
+		);
+	}
 }
 
 export function renderChecksums(digests: readonly StorePathDigest[]): string {
@@ -171,22 +245,37 @@ export function resolveAttestInputs(
 	};
 }
 
-// What the receipt at hand lets this run attest. A receipt whose subjects carry
-// no provenance is a record of paths this machine built, so the local store is
-// re-read and each subject is checked against what it holds now.
+// What the receipt at hand lets this run attest. Both shapes are checked
+// against the local store: a receipt whose subjects carry no provenance is a
+// record of paths this machine built, and one that carries provenance may name
+// paths this machine built alongside paths another store did.
 async function resolveAttestation(
 	receipt: ParsedBuildReceipt
 ): Promise<ResolvedAttestation> {
+	const nix = Nix.open();
+
 	if (receipt.version === 3) {
-		return provenancedSubjects(receipt);
+		return provenancedSubjects(receipt, await heldLocally(nix, receipt));
 	}
 
-	const nix = Nix.open();
 	const infos = await Promise.all(
 		receipt.paths.map((storePath) => nix.queryPathInfo(storePath))
 	);
 
 	return { ...attestationSubjects(infos, receipt), refused: [] };
+}
+
+// The subjects this machine holds, which are the ones it can check. A subject
+// realised elsewhere is simply absent.
+async function heldLocally(
+	nix: Nix,
+	receipt: BuildReceiptV3
+): Promise<LocalPathInfos> {
+	const infos = await nix.queryValidPathsInfo(
+		receipt.subjects.map((subject) => subject.storePath)
+	);
+
+	return new Map(infos.map((info) => [info.storePath, info]));
 }
 
 export async function attestAction(

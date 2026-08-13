@@ -14,7 +14,6 @@ import {
 	NixDaemonStoreClient
 } from '../../packages/nix/src/nix-daemon.ts';
 import { NixStorePathNotFoundError } from '../../packages/nix/src/nix-store.ts';
-import { resolveSubstitutableClosure } from '../../packages/nix/src/substitutable-closure.ts';
 import { runCommand } from '../support/process.ts';
 
 const socketPath =
@@ -37,13 +36,12 @@ function isPermissionDenied(error: unknown): boolean {
 	return cause instanceof Error && 'code' in cause && cause.code === 'EPERM';
 }
 
-async function withDaemon<T>(
+async function skippingPermissionDenied<T>(
 	context: Pick<TestContext, 'skip'>,
-	run: (daemon: NixDaemonStoreClient) => Promise<T>,
-	overrides: Readonly<Record<string, string>> = {}
+	run: () => Promise<T>
 ): Promise<T> {
 	try {
-		return await run(new NixDaemonStoreClient({ socketPath, overrides }));
+		return await run();
 	} catch (error) {
 		if (isPermissionDenied(error) && process.env.CI === undefined) {
 			context.skip();
@@ -51,6 +49,16 @@ async function withDaemon<T>(
 
 		throw error;
 	}
+}
+
+async function withDaemon<T>(
+	context: Pick<TestContext, 'skip'>,
+	run: (daemon: NixDaemonStoreClient) => Promise<T>,
+	overrides: Readonly<Record<string, string>> = {}
+): Promise<T> {
+	return skippingPermissionDenied(context, () =>
+		run(new NixDaemonStoreClient({ socketPath, overrides }))
+	);
 }
 
 // The test process itself has to run from the store for its own store path to
@@ -205,16 +213,16 @@ describe.skipIf(!existsSync(socketPath))('nix daemon end to end', () => {
 	});
 
 	// A path this machine holds is still not held upstream, and the walk has
-	// to say so: with no substituter permitted, even a valid root fails.
+	// to say so: with no substituter permitted, even a valid root fails. The
+	// daemon answers for what this machine holds while the walk asks the
+	// permitted substituters itself, which here are none.
 	it('refuses a closure whose root no permitted substituter offers', async (context) => {
 		const executable = requireExecutableStorePath(context);
-		const verdict = await withDaemon(
-			context,
-			(daemon) =>
-				resolveSubstitutableClosure(executable, (storePaths) =>
-					daemon.querySubstitutablePathInfos(storePaths)
-				),
-			{ substituters: '', 'extra-substituters': '' }
+		const nix = Nix.openForAvailability(undefined, {
+			overrides: { substituters: '', 'extra-substituters': '' }
+		});
+		const verdict = await skippingPermissionDenied(context, () =>
+			nix.resolveSubstitutableClosure(executable)
 		);
 
 		expect(verdict).toStrictEqual({

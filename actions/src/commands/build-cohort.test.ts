@@ -274,6 +274,7 @@ function planCohortSuccess(
 					attachOnly: [appPath],
 					publishByReference: [referencePath],
 					leftUpstream: [leftUpstreamPath],
+					alreadyValid: [appPath],
 					buildSet: [libraryQueryInstallable],
 					counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
 					downloadSize: 100,
@@ -818,24 +819,16 @@ describe('buildCohortAction availability confirmation', () => {
 		{
 			outcome: 'attachOnly',
 			targetPaths: [appPath, floatingBuiltPath, libraryBuiltPath],
-			referencePaths: [referencePath],
-			leftUpstream: [leftUpstreamPath]
+			referencePaths: [referencePath]
 		},
 		{
 			outcome: 'publishByReference',
 			targetPaths: [appPath, floatingBuiltPath],
-			referencePaths: [referencePath, libraryBuiltPath],
-			leftUpstream: [leftUpstreamPath]
-		},
-		{
-			outcome: 'leftUpstream',
-			targetPaths: [appPath, floatingBuiltPath],
-			referencePaths: [referencePath],
-			leftUpstream: [leftUpstreamPath, libraryBuiltPath]
+			referencePaths: [referencePath, libraryBuiltPath]
 		}
 	])(
 		'withdraws a $outcome target from the build set and records it',
-		async ({ outcome, targetPaths, referencePaths, leftUpstream }) => {
+		async ({ outcome, targetPaths, referencePaths }) => {
 			const run = await runConfirmedCohort(
 				planReprobeSuccess([withdrawal(outcome)], [])
 			);
@@ -862,7 +855,7 @@ describe('buildCohortAction availability confirmation', () => {
 					left.localeCompare(right)
 				),
 				referencePaths,
-				leftUpstream: { leftUpstream },
+				leftUpstream: { leftUpstream: [leftUpstreamPath] },
 				withdrawn: {
 					partition: {
 						counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
@@ -888,6 +881,13 @@ describe('buildCohortAction availability confirmation', () => {
 		{
 			name: 'the confirmation reports a result it cannot read',
 			reprobe: [{ kind: 'plan-reprobe', data: { withdrawn: 'all of them' } }]
+		},
+		{
+			// A cupboard old enough to leave a target upstream from the
+			// confirmation names an outcome this action places nowhere, and
+			// building the target publishes what a consumer could not fetch.
+			name: 'the confirmation withdraws a target to an outcome it cannot place',
+			reprobe: planReprobeSuccess([withdrawal('leftUpstream')], [])
 		}
 	] satisfies readonly {
 		readonly name: string;
@@ -933,19 +933,17 @@ describe('planReprobeArguments', () => {
 				cache: '',
 				reuseView: '',
 				readUser: '',
-				readPassword: '',
-				store: ''
+				readPassword: ''
 			},
 			extra: []
 		},
 		{
-			name: 'a named cache, view, credential and remote store all travel',
+			name: 'a named cache, view and credential all travel',
 			inputs: {
 				cache: 'builds',
 				reuseView: 'pr-view',
 				readUser: 'reader',
-				readPassword: 'secret',
-				store: 'ssh-ng://build@example.test'
+				readPassword: 'secret'
 			},
 			extra: [
 				'--cache',
@@ -955,9 +953,7 @@ describe('planReprobeArguments', () => {
 				'--read-user',
 				'reader',
 				'--read-password',
-				'secret',
-				'--store',
-				'ssh-ng://build@example.test'
+				'secret'
 			]
 		}
 	])('$name', ({ inputs, extra }) => {
@@ -988,6 +984,20 @@ describe('cohortReceiptPushArguments', () => {
 				runRoot: '',
 				runRootTtl: ''
 			},
+			alreadyHeld: [],
+			held: [],
+			extra: []
+		},
+		{
+			name: 'a path the store already held is named as claimed by nothing',
+			inputs: {
+				audience: '',
+				cache: '',
+				runRoot: '',
+				runRootTtl: ''
+			},
+			alreadyHeld: [libraryBuiltPath],
+			held: ['--already-held', libraryBuiltPath],
 			extra: []
 		},
 		{
@@ -1007,9 +1017,11 @@ describe('cohortReceiptPushArguments', () => {
 				'github:owner/repo/_cupboard-run/1',
 				'--run-root-ttl',
 				'2d'
-			]
+			],
+			alreadyHeld: [],
+			held: []
 		}
-	])('$name', ({ inputs, extra }) => {
+	])('$name', ({ inputs, alreadyHeld, held, extra }) => {
 		expect(
 			cohortReceiptPushArguments(
 				{
@@ -1018,7 +1030,8 @@ describe('cohortReceiptPushArguments', () => {
 					receiptFile: '/tmp/receipt.json',
 					...inputs
 				},
-				paths
+				paths,
+				alreadyHeld
 			)
 		).toStrictEqual([
 			'--no-colour',
@@ -1031,6 +1044,7 @@ describe('cohortReceiptPushArguments', () => {
 			'ssh-ng://build@example.test',
 			'--receipt-file',
 			'/tmp/receipt.json',
+			...held,
 			...extra
 		]);
 	});
@@ -1041,6 +1055,7 @@ describe('withdrawFromPartition', () => {
 		attachOnly: [appPath],
 		publishByReference: [referencePath],
 		leftUpstream: [leftUpstreamPath],
+		alreadyValid: [appPath],
 		buildSet: [libraryQueryInstallable, appQueryInstallable],
 		counts: { willBuild: 2, willSubstitute: 0, unknown: 0 },
 		downloadSize: 100,
@@ -1064,13 +1079,13 @@ describe('withdrawFromPartition', () => {
 				{
 					installable: appQueryInstallable,
 					storePath: storePathSchema.parse(floatingBuiltPath),
-					outcome: 'leftUpstream'
+					outcome: 'publishByReference'
 				}
 			])
 		).toStrictEqual({
 			...partition,
 			attachOnly: [appPath, libraryBuiltPath],
-			leftUpstream: [leftUpstreamPath, floatingBuiltPath],
+			publishByReference: [referencePath, floatingBuiltPath],
 			buildSet: []
 		});
 	});
@@ -1467,7 +1482,9 @@ describe('buildCohortAction publication', () => {
 				'--store',
 				'ssh-ng://build@example.test',
 				'--receipt-file',
-				receiptFile
+				receiptFile,
+				'--already-held',
+				appPath
 			],
 			rootPush: [
 				'--no-colour',

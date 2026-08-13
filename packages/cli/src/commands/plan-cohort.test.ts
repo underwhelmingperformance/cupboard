@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import type { Nix, NixDaemonTrust, NixMissingPartition } from '@cupboard/nix';
+import type { Nix, NixMissingPartition } from '@cupboard/nix';
 import {
 	rootNameSchema,
 	storePathSchema,
@@ -17,7 +17,8 @@ import { describe, expect, it } from 'vitest';
 import { InvalidStoreUriError } from '../errors.ts';
 import {
 	type AvailabilityPartition,
-	UnknownPathsCeilingError
+	UnknownPathsCeilingError,
+	type UnknownRequeryOutcome
 } from '../plan/availability-partition.ts';
 import {
 	defaultHeadroomAbsoluteMinimum,
@@ -25,6 +26,7 @@ import {
 } from '../plan/capacity.ts';
 import type { ParsedCohortTarget } from '../plan/cohort-target.ts';
 
+import { requeryUnknownWith } from './plan-cohort.ts';
 import {
 	type PlanCohortDependencies,
 	type PlanCohortRunOptions,
@@ -75,18 +77,25 @@ function buildRequired(
 
 function missingStore(
 	missing: NixMissingPartition
-): Pick<Nix, 'queryMissing' | 'querySubstitutablePaths' | 'queryValidPaths'> {
+): Pick<
+	Nix,
+	| 'queryMissing'
+	| 'querySubstitutablePaths'
+	| 'queryValidPaths'
+	| 'unreachableSubstituters'
+> {
 	return {
 		queryMissing: () => Promise.resolve(missing),
 		querySubstitutablePaths: () => Promise.resolve([]),
-		queryValidPaths: () => Promise.resolve([])
+		queryValidPaths: () => Promise.resolve([]),
+		unreachableSubstituters: () => Promise.resolve([])
 	};
 }
 
-function requeryClient(
+function requeryAnswering(
 	missing: NixMissingPartition
-): Pick<Nix, 'queryMissing'> {
-	return { queryMissing: () => Promise.resolve(missing) };
+): () => Promise<UnknownRequeryOutcome> {
+	return () => Promise.resolve({ kind: 'answered', partition: missing });
 }
 
 function rejectingRootClient(): Pick<RootClient, 'ensure'> {
@@ -109,12 +118,8 @@ function recordingRootClient(
 	};
 }
 
-function neverOpened(): Pick<Nix, 'queryMissing'> {
-	return {
-		queryMissing() {
-			throw new Error('the re-query client must not be opened here');
-		}
-	};
+function neverAsked(): Promise<UnknownRequeryOutcome> {
+	throw new Error('the unknown paths must not be re-queried here');
 }
 
 function runOptions(
@@ -136,18 +141,13 @@ function runOptions(
 	};
 }
 
-function alwaysTrusted(): Promise<NixDaemonTrust> {
-	return Promise.resolve('trusted');
-}
-
 function dependencies(
 	overrides: Partial<PlanCohortDependencies> = {}
 ): PlanCohortDependencies {
 	return {
 		rootClient: rejectingRootClient(),
 		store: missingStore(emptyMissing()),
-		daemonTrust: alwaysTrusted,
-		openReQueryClient: neverOpened,
+		requeryUnknown: neverAsked,
 		confirmLeftUpstream: () => Promise.resolve({ kind: 'confirmed' }),
 		destinationServed: () => Promise.resolve(new Set()),
 		viewServed: () => Promise.resolve(new Set()),
@@ -223,6 +223,8 @@ describe('runPlanCohort', () => {
 				downloadSize: 0,
 				narSize: 0,
 				unknownCount: 0,
+				alreadyValid: [],
+				unreachableSubstituters: [],
 				ceiling: { value: 0, source: 'configured' }
 			};
 			const expectedCapacity = {
@@ -281,7 +283,7 @@ describe('runPlanCohort', () => {
 				reporter(payloads),
 				dependencies({
 					store: missingStore(missing),
-					openReQueryClient: () => requeryClient(requeryResult)
+					requeryUnknown: requeryAnswering(requeryResult)
 				})
 			);
 		} catch (error_: unknown) {
@@ -367,7 +369,8 @@ describe('runPlanCohort', () => {
 			store: {
 				queryMissing: () => Promise.resolve(emptyMissing()),
 				querySubstitutablePaths: () => Promise.resolve([appPath]),
-				queryValidPaths: () => Promise.resolve([appPath])
+				queryValidPaths: () => Promise.resolve([appPath]),
+				unreachableSubstituters: () => Promise.resolve([])
 			},
 			confirmLeftUpstream: () =>
 				Promise.resolve({ kind: 'closure-not-served', missing: otherPath })
@@ -392,6 +395,8 @@ describe('runPlanCohort', () => {
 				downloadSize: 0,
 				narSize: 0,
 				unknownCount: 0,
+				alreadyValid: [appPath],
+				unreachableSubstituters: [],
 				ceiling: { value: 0, source: 'configured' }
 			};
 
@@ -439,6 +444,8 @@ describe('runPlanCohort', () => {
 					downloadSize: 0,
 					narSize: 0,
 					unknownCount: 0,
+					alreadyValid: [],
+					unreachableSubstituters: [],
 					ceiling: { value: 0, source: 'configured' }
 				},
 				capacity: { skipped: 'remote-store' }
@@ -511,4 +518,84 @@ describe('plan cohort command', () => {
 
 		expect(error.value).toBe('ssh://builder');
 	});
+});
+
+// What the plan does about the paths its first pass left unknown. A daemon
+// caches what the substituters said and drops an untrusted client's settings;
+// a store this process drives asks the substituters as the question is put.
+describe('requeryUnknownWith', () => {
+	const requeried: NixMissingPartition = {
+		...emptyMissing(),
+		willSubstitute: [appPath]
+	};
+
+	function bypassAnswering(opened: string[]): () => Pick<Nix, 'queryMissing'> {
+		return () => {
+			opened.push('opened');
+
+			return { queryMissing: () => Promise.resolve(requeried) };
+		};
+	}
+
+	it('asks nothing again of a store whose answers were never cached', async () => {
+		const opened: string[] = [];
+
+		const outcome = await requeryUnknownWith(
+			{
+				cachesSubstituterAnswers: false,
+				honoursSubstituterSettings: () =>
+					Promise.reject(new Error('the settings must not be asked about'))
+			},
+			bypassAnswering(opened),
+			[appPath]
+		);
+
+		expect({ outcome, opened }).toStrictEqual({
+			outcome: { kind: 'already-fresh' },
+			opened: []
+		});
+	});
+
+	it('asks again through the bypass when the store honours its settings', async () => {
+		const opened: string[] = [];
+
+		const outcome = await requeryUnknownWith(
+			{
+				cachesSubstituterAnswers: true,
+				honoursSubstituterSettings: () => Promise.resolve({ isHonoured: true })
+			},
+			bypassAnswering(opened),
+			[appPath]
+		);
+
+		expect({ outcome, opened }).toStrictEqual({
+			outcome: { kind: 'answered', partition: requeried },
+			opened: ['opened']
+		});
+	});
+
+	it.each([
+		{ name: 'not-trusted', trust: 'not-trusted' as const },
+		{ name: 'unknown', trust: 'unknown' as const }
+	])(
+		'refuses, without opening a bypass, when the daemon is $name',
+		async ({ trust }) => {
+			const opened: string[] = [];
+
+			const outcome = await requeryUnknownWith(
+				{
+					cachesSubstituterAnswers: true,
+					honoursSubstituterSettings: () =>
+						Promise.resolve({ isHonoured: false, trust })
+				},
+				bypassAnswering(opened),
+				[appPath]
+			);
+
+			expect({ kind: outcome.kind, opened }).toStrictEqual({
+				kind: 'refused',
+				opened: []
+			});
+		}
+	);
 });

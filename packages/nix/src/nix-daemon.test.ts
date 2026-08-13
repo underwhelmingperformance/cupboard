@@ -496,6 +496,7 @@ describe('NixDaemonStoreClient', () => {
 			])
 		).resolves.toStrictEqual([
 			{
+				source: 'daemon',
 				storePath: appPath,
 				deriver: buildDrvPath,
 				references: [libraryPath],
@@ -503,6 +504,7 @@ describe('NixDaemonStoreClient', () => {
 				narSize: 2048
 			},
 			{
+				source: 'daemon',
 				storePath: runtimePath,
 				references: [],
 				downloadSize: 0,

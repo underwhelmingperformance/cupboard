@@ -2,6 +2,7 @@ import { createConnection, type Socket } from 'node:net';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import type { StorePathString } from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 import { narRegularFileContents } from './nar-file.ts';
@@ -9,12 +10,12 @@ import {
 	defaultClosureConcurrency,
 	type NixBuildOutcome,
 	type NixBuildResult,
+	type NixDaemonOffer,
 	type NixDaemonTrust,
 	type NixDerivedPathString,
 	type NixMissingPartition,
 	type NixStoreClient,
 	NixStorePathNotFoundError,
-	type NixSubstitutablePathInfo,
 	type NixValidPathInfo,
 	requireStorePath,
 	resolveClosureBy
@@ -134,7 +135,7 @@ export interface NixDaemonSession {
 	): Promise<readonly StorePathString[]>;
 	querySubstitutablePathInfos(
 		storePaths: readonly StorePathString[]
-	): Promise<readonly NixSubstitutablePathInfo[]>;
+	): Promise<readonly NixDaemonOffer[]>;
 	queryMissing(
 		targets: readonly NixDerivedPathString[]
 	): Promise<NixMissingPartition>;
@@ -377,7 +378,7 @@ export class NixDaemonStoreClient implements NixStoreClient {
 
 	async querySubstitutablePathInfos(
 		storePaths: readonly StorePathString[]
-	): Promise<readonly NixSubstitutablePathInfo[]> {
+	): Promise<readonly NixDaemonOffer[]> {
 		if (storePaths.length === 0) {
 			return [];
 		}
@@ -599,13 +600,13 @@ class NixDaemonConnectionSession implements NixDaemonSession {
 
 	async querySubstitutablePathInfos(
 		storePaths: readonly StorePathString[]
-	): Promise<readonly NixSubstitutablePathInfo[]> {
+	): Promise<readonly NixDaemonOffer[]> {
 		const infos = await this.connection.querySubstitutablePathInfos(
 			sortedUnique(storePaths)
 		);
 
 		return infos.toSorted((left, right) =>
-			left.storePath.localeCompare(right.storePath)
+			byCodeUnit(left.storePath, right.storePath)
 		);
 	}
 
@@ -1321,7 +1322,7 @@ class NixDaemonConnection {
 	 */
 	async querySubstitutablePathInfos(
 		storePaths: readonly StorePathString[]
-	): Promise<readonly NixSubstitutablePathInfo[]> {
+	): Promise<readonly NixDaemonOffer[]> {
 		if (this.version.minor < minimumSubstitutablePathInfosMinor) {
 			throw new UnsupportedNixDaemonOperationError(
 				'QuerySubstitutablePathInfos',
@@ -1346,7 +1347,7 @@ class NixDaemonConnection {
 		await this.processStderr();
 
 		const count = await this.readInteger();
-		const infos: NixSubstitutablePathInfo[] = [];
+		const infos: NixDaemonOffer[] = [];
 
 		for (let index = 0; index < count; index += 1) {
 			const storePath = requireStorePath(await this.readString());
@@ -1356,6 +1357,7 @@ class NixDaemonConnection {
 			const narSize = await this.readInteger();
 
 			infos.push({
+				source: 'daemon',
 				storePath,
 				references,
 				downloadSize,
@@ -1733,9 +1735,7 @@ function nixDaemonHash(base16Digest: string): NixSha256Hash {
 }
 
 function sortedUnique<T extends string>(values: readonly T[]): readonly T[] {
-	return [...new Set(values)].toSorted((left, right) =>
-		left.localeCompare(right)
-	);
+	return [...new Set(values)].toSorted(byCodeUnit);
 }
 
 // The wire spells a derived path in the legacy form, with `!` between the

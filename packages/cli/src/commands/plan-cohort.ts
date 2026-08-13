@@ -1,10 +1,12 @@
+import { readFileSync } from 'node:fs';
 import { readFile, statfs, writeFile } from 'node:fs/promises';
 
 import {
 	discoverNixStoreConfig,
 	Nix,
-	type NixDaemonTrust,
-	type NixStoreKind
+	type NixStoreKind,
+	offerAcceptance,
+	type ReadKeyFile
 } from '@cupboard/nix';
 import {
 	type RootName,
@@ -38,7 +40,8 @@ import {
 	type LeftUpstreamCandidate,
 	type LeftUpstreamVerdict,
 	partitionAvailability,
-	UnknownPathsCeilingError
+	UnknownPathsCeilingError,
+	type UnknownRequeryOutcome
 } from '../plan/availability-partition.ts';
 import {
 	type CapacityCheckResult,
@@ -77,6 +80,39 @@ const defaultUnknownCeiling = 0;
 const defaultUnknownCeilingUntrustedFallback = 5;
 
 const negativeNarinfoCacheBypass = { 'narinfo-cache-negative-ttl': '0' };
+
+/**
+ * Asks about the paths the first pass left unknown, past whatever cache stood
+ * in front of that answer.
+ *
+ * A store whose answers cannot be cached has nothing to look past. One whose
+ * answers can is asked again through a client carrying the negative-cache
+ * bypass, which reaches the substituters only when the store honours the
+ * settings it is sent.
+ */
+export async function requeryUnknownWith(
+	store: Pick<Nix, 'cachesSubstituterAnswers' | 'honoursSubstituterSettings'>,
+	openBypass: () => Pick<Nix, 'queryMissing'>,
+	storePaths: readonly StorePathString[]
+): Promise<UnknownRequeryOutcome> {
+	if (!store.cachesSubstituterAnswers) {
+		return { kind: 'already-fresh' };
+	}
+
+	const settings = await store.honoursSubstituterSettings();
+
+	if (!settings.isHonoured) {
+		return {
+			kind: 'refused',
+			reason: `the daemon connection is ${settings.trust}, so its narinfo-cache-negative-ttl override cannot be relied on to take effect`
+		};
+	}
+
+	return {
+		kind: 'answered',
+		partition: await openBypass().queryMissing(storePaths)
+	};
+}
 
 export interface PlanCohortOptions {
 	readonly targetsFile: string;
@@ -149,10 +185,14 @@ export interface PlanCohortDependencies {
 	readonly rootClient: Pick<RootClient, 'ensure'>;
 	readonly store: Pick<
 		Nix,
-		'queryMissing' | 'querySubstitutablePaths' | 'queryValidPaths'
+		| 'queryMissing'
+		| 'querySubstitutablePaths'
+		| 'queryValidPaths'
+		| 'unreachableSubstituters'
 	>;
-	readonly daemonTrust: () => Promise<NixDaemonTrust>;
-	readonly openReQueryClient: () => Pick<Nix, 'queryMissing'>;
+	readonly requeryUnknown: (
+		storePaths: readonly StorePathString[]
+	) => Promise<UnknownRequeryOutcome>;
 	readonly confirmLeftUpstream: (
 		candidate: LeftUpstreamCandidate
 	) => Promise<LeftUpstreamVerdict>;
@@ -177,6 +217,18 @@ export interface PlanCohortRunOptions {
 	readonly detected: DetectedCapacityOptions;
 	readonly headroom?: Partial<HeadroomConfig>;
 }
+
+/**
+ * Reads a configured secret key file. A file this process cannot read names no
+ * key, which is ordinary on a machine whose keys belong to another user.
+ */
+const readKeyFile: ReadKeyFile = (filePath) => {
+	try {
+		return readFileSync(filePath, 'utf8');
+	} catch {
+		return;
+	}
+};
 
 export function registerPlanCommands(
 	program: Command,
@@ -290,8 +342,14 @@ export function registerPlanCommands(
 				signal: programOptions.signal
 			});
 			const credentials = readCredentials(options);
-			const storeSelection =
-				options.store === undefined ? {} : { storeUri: options.store };
+			// Every store this plan opens carries the run's signal, so giving
+			// up on the plan gives up on the substituters it is waiting for.
+			const storeSelection = {
+				...(options.store !== undefined && { storeUri: options.store }),
+				...(programOptions.signal !== undefined && {
+					signal: programOptions.signal
+				})
+			};
 			const nix = Nix.openForAvailability(undefined, storeSelection);
 			const answers = destinationAnswersFor({
 				baseUrl: url,
@@ -299,12 +357,12 @@ export function registerPlanCommands(
 				...(options.reuseView !== undefined && { view: options.reuseView }),
 				...(credentials !== undefined && { credentials })
 			});
-			const { substitution } = discoverNixStoreConfig();
-			// A separate connection for the upstream confirmation: its
-			// substituter list holds only what a consumer elsewhere could
-			// also reach, so content the tenant alone holds never reads as
-			// available upstream, and it reads past the narinfo cache so the
-			// answers are the ones those substituters give now.
+			const { substitution, signatures } = discoverNixStoreConfig();
+			// A separate store for the upstream confirmation: its substituter
+			// list holds only what a consumer elsewhere could also reach, so
+			// content the tenant alone holds never reads as available
+			// upstream. It asks those substituters for each path's narinfo
+			// itself, so the answers are the ones they give now.
 			const permittedStore = Nix.openForAvailability(undefined, {
 				...storeSelection,
 				overrides: upstreamConfirmationOverrides(substitution, url)
@@ -346,15 +404,25 @@ export function registerPlanCommands(
 				{
 					rootClient: rpc.roots,
 					store: nix,
-					daemonTrust: () => nix.daemonTrust(),
-					openReQueryClient: () =>
-						Nix.openForAvailability(undefined, {
-							...storeSelection,
-							overrides: negativeNarinfoCacheBypass
-						}),
+					requeryUnknown: (storePaths) =>
+						requeryUnknownWith(
+							nix,
+							() =>
+								Nix.openForAvailability(undefined, {
+									...storeSelection,
+									overrides: negativeNarinfoCacheBypass
+								}),
+							storePaths
+						),
 					confirmLeftUpstream: confirmLeftUpstreamWith({
 						substitution,
 						store: permittedStore,
+						// A target is left upstream on the promise that a
+						// consumer can fetch it, and a consumer refuses a path
+						// whose signatures it cannot verify, so the same policy
+						// decides here, over the signatures each substituter
+						// published for the path.
+						accepts: offerAcceptance(signatures, readKeyFile),
 						closure:
 							programOptions.signal === undefined
 								? {}
@@ -418,8 +486,7 @@ export async function runPlanCohort(
 						viewServed: dependencies.viewServed
 					},
 					rootEnsureResults,
-					daemonTrust: dependencies.daemonTrust,
-					openReQueryClient: dependencies.openReQueryClient,
+					requeryUnknown: dependencies.requeryUnknown,
 					confirmLeftUpstream: dependencies.confirmLeftUpstream,
 					ceiling: options.ceiling
 				})
@@ -474,6 +541,19 @@ export async function runPlanCohort(
 			},
 			{ label: 'Left upstream', value: String(partition.leftUpstream.length) },
 			{ label: 'Build set', value: String(partition.buildSet.length) },
+			// Every availability answer above was given without these, so a
+			// reader can tell "nobody holds this" from "we never asked
+			// everybody".
+			...(partition.unreachableSubstituters.length === 0
+				? []
+				: [
+						{
+							label: 'Substituters not reached',
+							value: partition.unreachableSubstituters
+								.map(({ uri }) => uri)
+								.join(' ')
+						}
+					]),
 			{ label: 'Plan file', value: options.planFile }
 		]
 	});

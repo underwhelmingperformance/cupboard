@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import type { DatabaseSync } from 'node:sqlite';
@@ -10,18 +10,22 @@ import {
 	storeDirectorySchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 
+import { maxNarFileByteLength } from './nar-file.ts';
 import {
 	type NixBuildResult,
 	type NixDerivedPathString,
 	type NixMissingPartition,
 	type NixStoreClient,
 	NixStoreDatabaseError,
+	NixStoreError,
 	NixStorePathNotFoundError,
-	type NixSubstitutablePathInfo,
+	type NixSubstituterOffer,
 	type NixValidPathInfo,
 	requireStorePath,
 	resolveClosureBy,
+	type UnreachableSubstituter,
 	UnsupportedNixStoreOperationError
 } from './nix-store.ts';
 import { queryMissingOver } from './realisation-partition.ts';
@@ -48,8 +52,35 @@ export interface NixStoreDatabase {
 /** Reads a file the store holds, injected so the client is tested without one. */
 export type ReadStoreFile = (filePath: string) => Promise<string>;
 
-const defaultReadStoreFile: ReadStoreFile = (filePath) =>
-	readFile(filePath, 'utf8');
+const defaultReadStoreFile: ReadStoreFile = async (filePath) => {
+	const file = await open(filePath, 'r');
+
+	try {
+		const { size } = await file.stat();
+
+		if (size > maxNarFileByteLength) {
+			throw new StoreFileTooLargeError(filePath, size, maxNarFileByteLength);
+		}
+
+		return await file.readFile('utf8');
+	} finally {
+		await file.close();
+	}
+};
+
+/** A store file larger than a derivation can be. */
+export class StoreFileTooLargeError extends NixStoreError {
+	constructor(
+		public readonly filePath: string,
+		public readonly byteLength: number,
+		public readonly maxByteLength: number
+	) {
+		super(
+			`${filePath} holds ${String(byteLength)} bytes, more than the ${String(maxByteLength)} a derivation is read up to`
+		);
+		this.name = 'StoreFileTooLargeError';
+	}
+}
 
 const defaultStoreDirectory = storeDirectorySchema.parse('/nix/store');
 
@@ -75,6 +106,8 @@ export interface NixLocalStoreOptions {
 	 * them are unsupported.
 	 */
 	readonly substituters?: SubstituterClient;
+	/** Abandons a walk between levels, raising the signal's reason. */
+	readonly signal?: AbortSignal;
 	/** The `substitute` and `always-allow-substitutes` settings. */
 	readonly substitution?: {
 		readonly substitute: boolean;
@@ -95,6 +128,8 @@ export class NixLocalStoreClient implements NixStoreClient {
 
 	private readonly substituters?: SubstituterClient;
 
+	private readonly signal?: AbortSignal;
+
 	private readonly substitution: {
 		readonly substitute: boolean;
 		readonly alwaysAllowSubstitutes: boolean;
@@ -107,6 +142,7 @@ export class NixLocalStoreClient implements NixStoreClient {
 		this.storeDirectory = options.storeDirectory ?? defaultStoreDirectory;
 		this.readStoreFile = options.readStoreFile ?? defaultReadStoreFile;
 		this.substituters = options.substituters;
+		this.signal = options.signal;
 		this.substitution = options.substitution ?? {
 			substitute: true,
 			alwaysAllowSubstitutes: false
@@ -172,7 +208,7 @@ export class NixLocalStoreClient implements NixStoreClient {
 
 			return candidates
 				.filter((storePath) => valid.has(storePath))
-				.toSorted((left, right) => left.localeCompare(right));
+				.toSorted(byCodeUnit);
 		});
 	}
 
@@ -190,7 +226,7 @@ export class NixLocalStoreClient implements NixStoreClient {
 
 	querySubstitutablePathInfos(
 		storePaths: readonly StorePathString[]
-	): Promise<readonly NixSubstitutablePathInfo[]> {
+	): Promise<readonly NixSubstituterOffer[]> {
 		if (this.substituters === undefined) {
 			return Promise.reject(
 				new UnsupportedNixStoreOperationError('substitutable-path-info queries')
@@ -198,6 +234,10 @@ export class NixLocalStoreClient implements NixStoreClient {
 		}
 
 		return this.substituters.querySubstitutablePathInfos(storePaths);
+	}
+
+	async unreachableSubstituters(): Promise<readonly UnreachableSubstituter[]> {
+		return (await this.substituters?.unreachable()) ?? [];
 	}
 
 	queryDerivationOutputPaths(
@@ -223,6 +263,7 @@ export class NixLocalStoreClient implements NixStoreClient {
 
 		return queryMissingOver(targets, {
 			...this.substitution,
+			...(this.signal !== undefined && { signal: this.signal }),
 			validPaths: (storePaths) => this.queryValidPaths(storePaths),
 			readDerivation: async (drvPath) =>
 				Derivation.parse(await this.readDerivation(drvPath)),
@@ -237,6 +278,12 @@ export class NixLocalStoreClient implements NixStoreClient {
 				path.join(this.storeDirectory, path.basename(drvPath))
 			);
 		} catch (error) {
+			// A reader that already said what went wrong says it; anything else
+			// means the store does not hold the path.
+			if (error instanceof NixStoreError) {
+				throw error;
+			}
+
 			throw new NixStorePathNotFoundError(drvPath, { cause: error });
 		}
 	}
@@ -375,7 +422,7 @@ export function nixStoreDatabaseFromSqlite(
 				}
 			}
 
-			return [...outputs].toSorted((left, right) => left.localeCompare(right));
+			return [...outputs].toSorted(byCodeUnit);
 		},
 		validPaths(storePaths) {
 			const valid: string[] = [];

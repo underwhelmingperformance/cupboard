@@ -22,7 +22,8 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 const narInfoSuffix = '.narinfo';
 const cacheInfoPath = '/nix-cache-info';
 const priority = cachePrioritySchema.parse(41);
-const narSize = 4096;
+/** The size this cache advertises for every path it serves. */
+export const servedNarSize = 4096;
 
 /**
  * A binary cache over loopback whose contents a test moves in and out while a
@@ -121,13 +122,30 @@ export class FakeSubstituter {
 	 * come from this cache or from a client's memory of it.
 	 */
 	serve(name: string): StorePathString {
-		const digest = NixSha256Hash.fromDigest(randomBytes(32));
 		const hash = storePathHashSchema.parse(
 			toNixBase32(randomBytes(32)).slice(0, 32)
 		);
 		const storePath = storePathSchema.parse(
 			`${this.storeDirectory}/${hash}-${name}`
 		);
+
+		this.servePath(storePath);
+
+		return storePath;
+	}
+
+	/**
+	 * Serves a path that already exists elsewhere, such as the output a real
+	 * derivation names. The bytes are this cache's own unless the caller names
+	 * the NAR hash to advertise: what a client learns here is that the path is
+	 * available, at what size, and under which hash.
+	 */
+	servePath(
+		storePath: StorePathString,
+		narHash?: NixSha256Hash
+	): NixSha256Hash {
+		const digest = narHash ?? NixSha256Hash.fromDigest(randomBytes(32));
+		const hash = StorePath.hash(storePath);
 
 		this.served.set(
 			hash,
@@ -136,14 +154,14 @@ export class FakeSubstituter {
 				`nar/${hash}.nar`,
 				'zstd',
 				digest,
-				narSize,
+				servedNarSize,
 				digest,
-				narSize,
+				servedNarSize,
 				[]
 			)
 		);
 
-		return storePath;
+		return digest;
 	}
 
 	/** Stops serving a path, as an upstream dropping it does. */

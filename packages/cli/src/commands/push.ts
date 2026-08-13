@@ -56,6 +56,7 @@ interface PushOptions {
 	readonly cache?: string;
 	readonly store?: string;
 	readonly receiptFile?: string;
+	readonly alreadyHeld?: readonly string[];
 	readonly wait?: boolean;
 	readonly waitTimeout?: WaitTimeoutSeconds;
 	readonly attest?: boolean;
@@ -295,6 +296,12 @@ export function registerPushCommand(
 			'write a build receipt (JSON) for the published paths to this file, attributing each subject to the store --store names'
 		)
 		.option(
+			'--already-held <path>',
+			'a store path the build store held before this run built anything; a receipt claims none of them',
+			collect,
+			[]
+		)
+		.option(
 			'--attestation <bundle>',
 			'file a Sigstore DSSE bundle whose in-toto subject matches a pushed path',
 			collect,
@@ -410,7 +417,12 @@ export function registerPushCommand(
 					signal: programOptions.signal
 				}),
 				...(options.store !== undefined && {
-					nix: Nix.openForAvailability(undefined, { storeUri: options.store })
+					nix: Nix.openForAvailability(undefined, {
+						storeUri: options.store,
+						...(programOptions.signal !== undefined && {
+							signal: programOptions.signal
+						})
+					})
 				}),
 				...(options.closure !== undefined && { closure: options.closure }),
 				...(options.referenceSource !== undefined && {
@@ -438,7 +450,10 @@ export function registerPushCommand(
 					uploadConcurrency: options.uploadConcurrency
 				}),
 				...(options.dryRun !== undefined && { dryRun: options.dryRun }),
-				...(buildStore !== undefined && { buildStore })
+				...(buildStore !== undefined && { buildStore }),
+				...(options.alreadyHeld !== undefined && {
+					alreadyHeld: options.alreadyHeld
+				})
 			});
 
 			if (receipt === undefined || options.receiptFile === undefined) {

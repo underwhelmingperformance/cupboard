@@ -1,3 +1,8 @@
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	type StoreDirectory,
@@ -5,18 +10,31 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import { FakeDaemonTransport } from '../../../tests/support/fake-daemon-transport.ts';
 
 import { Nix, type NixDependencies } from './nix.ts';
 import {
 	InvalidNixStoreDirectoryError,
+	type NixDaemonOffer,
 	NixDaemonUnavailableError,
 	type NixStoreClient,
 	type NixValidPathInfo,
-	NotInNixStoreError
+	NotInNixStoreError,
+	UnsupportedNixStoreOperationError
 } from './nix-store.ts';
+import type { NixMachineProbes } from './store-config.ts';
+import type { QuerySubstitutablePathInfos } from './substitutable-closure.ts';
+
+/** A machine offering nothing a build can ask for beyond the portable names. */
+const bareMachine: NixMachineProbes = {
+	canReadWrite: () => false,
+	fileExists: () => false,
+	hasHardwareVirtualisation: () => false,
+	isWsl1: () => false,
+	microarchitectureLevels: () => []
+};
 
 const storeDirectory = storeDirectorySchema.parse('/nix/store');
 const divertedStoreDirectory = storeDirectorySchema.parse(
@@ -63,6 +81,11 @@ interface RecordingStoreOptions {
 		StorePathString,
 		readonly StorePathString[]
 	>;
+	/** The references this store records, which a closure walk follows. */
+	readonly localReferences?: ReadonlyMap<
+		StorePathString,
+		readonly StorePathString[]
+	>;
 	/** The bytes `narFromPath` streams for every path. */
 	readonly narBytes?: Uint8Array;
 	/** The text `readDerivation` answers for every derivation. */
@@ -72,6 +95,9 @@ interface RecordingStoreOptions {
 function recordingStore(options: RecordingStoreOptions = {}): RecordingStore {
 	const substitutableOffers =
 		options.substitutableOffers ??
+		new Map<StorePathString, readonly StorePathString[]>();
+	const localReferences =
+		options.localReferences ??
 		new Map<StorePathString, readonly StorePathString[]>();
 	const narBytes = options.narBytes ?? Buffer.from('nar');
 	const queried: string[] = [];
@@ -111,7 +137,11 @@ function recordingStore(options: RecordingStoreOptions = {}): RecordingStore {
 		queryValidPathsInfo: (storePaths) => {
 			infoBatches.push([...storePaths]);
 
-			return Promise.resolve(storePaths.map((storePath) => info(storePath)));
+			return Promise.resolve(
+				storePaths.map((storePath) =>
+					info(storePath, localReferences.get(storePath) ?? [])
+				)
+			);
 		},
 		queryValidPaths: (storePaths) => {
 			validBatches.push([...storePaths]);
@@ -127,12 +157,20 @@ function recordingStore(options: RecordingStoreOptions = {}): RecordingStore {
 			substitutableInfoBatches.push([...storePaths]);
 
 			return Promise.resolve(
-				storePaths.flatMap((storePath) => {
+				storePaths.flatMap((storePath): NixDaemonOffer[] => {
 					const references = substitutableOffers.get(storePath);
 
 					return references === undefined
 						? []
-						: [{ storePath, references, downloadSize: 1, narSize: 2 }];
+						: [
+								{
+									source: 'daemon',
+									storePath,
+									references,
+									downloadSize: 1,
+									narSize: 2
+								}
+							];
 				})
 			);
 		},
@@ -171,6 +209,38 @@ function recordingStore(options: RecordingStoreOptions = {}): RecordingStore {
 			closures.push([...storePaths]);
 
 			return Promise.resolve(storePaths.map((storePath) => info(storePath)));
+		}
+	};
+}
+
+interface RecordingSubstituters {
+	/** Each batch of paths the substituters were asked about. */
+	readonly batches: string[][];
+	readonly querySubstitutablePathInfos: QuerySubstitutablePathInfos;
+}
+
+// The substituters a client asks, each of them offering every path it is asked
+// about under the NAR hash this store holds.
+function recordingSubstituters(): RecordingSubstituters {
+	const batches: string[][] = [];
+
+	return {
+		batches,
+		querySubstitutablePathInfos: (storePaths) => {
+			batches.push([...storePaths]);
+
+			return Promise.resolve(
+				storePaths.map((storePath) => ({
+					source: 'substituter',
+					storePath,
+					references: [],
+					narHash: NixSha256Hash.fromDigest(new Uint8Array(32)),
+					signatures: [],
+					fromTrustedSubstituter: false,
+					downloadSize: 1,
+					narSize: 2
+				}))
+			);
 		}
 	};
 }
@@ -272,6 +342,10 @@ describe('Nix.open', () => {
 				readFile: (filePath) => noConfigurationFiles[filePath],
 				homeDirectory: () => '/home/u',
 				currentSystem: () => 'x86_64-linux',
+				directoryExists: () => true,
+				isSuperuser: () => false,
+				createDirectory: () => true,
+				probes: bareMachine,
 				canWriteStateDirectory: () => true,
 				socketExists: () => false,
 				realpath: (path) => path
@@ -288,6 +362,10 @@ function daemonDependencies(hasSocket: boolean): NixDependencies {
 		readFile: (filePath) => noFiles.get(filePath),
 		homeDirectory: () => noFiles.get('home'),
 		currentSystem: () => 'x86_64-linux',
+		directoryExists: () => true,
+		isSuperuser: () => false,
+		createDirectory: () => true,
+		probes: bareMachine,
 		canWriteStateDirectory: () => true,
 		socketExists: () => hasSocket,
 		realpath: (path) => path
@@ -295,6 +373,94 @@ function daemonDependencies(hasSocket: boolean): NixDependencies {
 }
 
 describe('Nix.openForAvailability', () => {
+	const directories: string[] = [];
+
+	afterEach(() => {
+		for (const directory of directories) {
+			rmSync(directory, { recursive: true, force: true });
+		}
+
+		directories.length = 0;
+	});
+
+	// A binary cache held in a directory, which answers a narinfo read without
+	// anything having to be reachable over the network.
+	function cacheDirectory(files: Readonly<Record<string, string>>): string {
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-nix-cache-'));
+		directories.push(directory);
+
+		for (const [name, contents] of Object.entries(files)) {
+			writeFileSync(path.join(directory, name), contents);
+		}
+
+		return directory;
+	}
+
+	// The daemon's batched answer names no NAR hash and no signature, so the
+	// walk that proves a closure is held upstream reads each path's narinfo
+	// from the substituter itself, whatever backend serves every other query.
+	it('asks the substituters itself while the daemon answers for this store', async () => {
+		const narHash = `sha256:${'11'.repeat(32)}`;
+		const directory = cacheDirectory({
+			'nix-cache-info':
+				'StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 30\n',
+			[`${'a'.repeat(32)}.narinfo`]: [
+				`StorePath: ${appPath}`,
+				'URL: nar/aaaa.nar.xz',
+				'Compression: xz',
+				`FileHash: sha256:${'22'.repeat(32)}`,
+				'FileSize: 400',
+				`NarHash: ${narHash}`,
+				'NarSize: 1000',
+				'References: ',
+				''
+			].join('\n')
+		});
+		const uri = pathToFileURL(directory).href;
+		const transports: FakeDaemonTransport[] = [];
+		const nix = Nix.openForAvailability(
+			{
+				...daemonDependencies(true),
+				env: { NIX_CONFIG: `substituters = ${uri}` }
+			},
+			{
+				connect: () => {
+					const transport = new FakeDaemonTransport(
+						{
+							[appPath]: {
+								hash: '11'.repeat(32),
+								narSize: 1000,
+								references: [],
+								signatures: []
+							}
+						},
+						{ expectedOverrides: { substituters: uri } }
+					);
+					transports.push(transport);
+
+					return Promise.resolve(transport);
+				}
+			}
+		);
+
+		const verdict = await nix.resolveSubstitutableClosure(appPath);
+
+		expect({
+			verdict,
+			daemonAsked: transports.flatMap(
+				(transport) => transport.substitutablePathInfoRequests
+			)
+		}).toStrictEqual({
+			verdict: {
+				kind: 'served',
+				pathCount: 1,
+				downloadSize: 400,
+				narSize: 1000
+			},
+			daemonAsked: []
+		});
+	});
+
 	it('reads through the daemon even when the state directory is writable', async () => {
 		const nix = Nix.openForAvailability(daemonDependencies(true), {
 			connect: () =>
@@ -329,12 +495,63 @@ describe('Nix.openForAvailability', () => {
 	});
 
 	// A daemonless install answers for itself, so the questions are asked of
-	// this process's own store.
-	it('opens this process own store when no daemon is running', () => {
+	// the store this process drives.
+	it('opens the store this process drives when no daemon is running', () => {
 		expect(Nix.openForAvailability(daemonDependencies(false)).storeKind).toBe(
 			'local-filesystem'
 		);
 	});
+
+	// The two facts a plan reads off the opened store. A daemon keeps a
+	// narinfo cache and applies an untrusted client's settings selectively; a
+	// store this process drives has neither, holding its settings itself and
+	// asking the substituters as the question is put.
+	it.each([
+		{
+			name: 'a daemon that trusts this client',
+			hasSocket: true,
+			trust: 1,
+			expected: { cachesSubstituterAnswers: true, isHonoured: true }
+		},
+		{
+			name: 'a daemon that does not trust this client',
+			hasSocket: true,
+			trust: 2,
+			expected: {
+				cachesSubstituterAnswers: true,
+				isHonoured: false,
+				trust: 'not-trusted'
+			}
+		},
+		{
+			name: 'a daemon that leaves the flag unset',
+			hasSocket: true,
+			trust: 0,
+			expected: {
+				cachesSubstituterAnswers: true,
+				isHonoured: false,
+				trust: 'unknown'
+			}
+		},
+		{
+			name: 'the store this process drives',
+			hasSocket: false,
+			trust: 0,
+			expected: { cachesSubstituterAnswers: false, isHonoured: true }
+		}
+	])(
+		'reports what it can answer for over $name',
+		async ({ hasSocket, trust, expected }) => {
+			const nix = Nix.openForAvailability(daemonDependencies(hasSocket), {
+				connect: () => Promise.resolve(new FakeDaemonTransport({}, { trust }))
+			});
+
+			expect({
+				cachesSubstituterAnswers: nix.cachesSubstituterAnswers,
+				...(await nix.honoursSubstituterSettings())
+			}).toStrictEqual(expected);
+		}
+	);
 
 	// A store URI naming the daemon asked for that daemon, so a missing socket
 	// answers the caller's question.
@@ -378,6 +595,10 @@ function openDependencies(overrides: {
 		readFile: (filePath) => noFiles.get(filePath),
 		homeDirectory: () => noFiles.get('home'),
 		currentSystem: () => 'x86_64-linux',
+		directoryExists: () => true,
+		isSuperuser: () => false,
+		createDirectory: () => true,
+		probes: bareMachine,
 		canWriteStateDirectory: () => overrides.canWrite ?? true,
 		socketExists: () => overrides.socket ?? false,
 		realpath: (path) => path
@@ -461,21 +682,29 @@ describe('Nix queries', () => {
 		expect(store.substitutableBatches).toStrictEqual([[appPath, libraryPath]]);
 	});
 
-	it('canonicalises the root of a substitutable-closure walk and follows it', async () => {
+	// The walk reads each path's narinfo from the substituters themselves, so
+	// the backend serving every other query is never asked what is available
+	// elsewhere, however much it would answer.
+	it('canonicalises the root of a substitutable-closure walk and asks the substituters', async () => {
 		const store = recordingStore({
+			localReferences: new Map([[appPath, [libraryPath]]]),
 			substitutableOffers: new Map([
 				[appPath, [libraryPath]],
 				[libraryPath, []]
 			])
 		});
+		const substituters = recordingSubstituters();
 
-		const verdict = await nixOver(store).resolveSubstitutableClosure(
-			`${appPath}/bin`
-		);
+		const verdict = await Nix.forStore(store, {
+			storeDirectory,
+			realpath: (path) => path,
+			offers: substituters.querySubstitutablePathInfos
+		}).resolveSubstitutableClosure(`${appPath}/bin`);
 
 		expect({
 			verdict,
-			batches: store.substitutableInfoBatches
+			asked: substituters.batches,
+			backendBatches: store.substitutableInfoBatches
 		}).toStrictEqual({
 			verdict: {
 				kind: 'served',
@@ -483,8 +712,17 @@ describe('Nix queries', () => {
 				downloadSize: 2,
 				narSize: 4
 			},
-			batches: [[appPath], [libraryPath]]
+			asked: [[appPath], [libraryPath]],
+			backendBatches: []
 		});
+	});
+
+	// A client built over a bare backend was given no substituters, so it has
+	// nobody to put the question to.
+	it('refuses a substitutable-closure walk with no substituters to ask', async () => {
+		await expect(
+			nixOver(recordingStore()).resolveSubstitutableClosure(appPath)
+		).rejects.toBeInstanceOf(UnsupportedNixStoreOperationError);
 	});
 
 	it.each([

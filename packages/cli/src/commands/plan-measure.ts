@@ -76,8 +76,14 @@ export function registerPlanMeasureCommand(
 		.action(async (options: PlanMeasureOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const targets = await readMeasureTargets(options.targetsFile);
-			const storeSelection =
-				options.store === undefined ? {} : { storeUri: options.store };
+			// The store carries the run's signal, so giving up gives up on
+			// the substituters it is waiting for.
+			const storeSelection = {
+				...(options.store !== undefined && { storeUri: options.store }),
+				...(programOptions.signal !== undefined && {
+					signal: programOptions.signal
+				})
+			};
 			const nix = Nix.openForAvailability(undefined, storeSelection);
 
 			await runPlanMeasure(

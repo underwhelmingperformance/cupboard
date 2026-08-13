@@ -1,4 +1,3 @@
-import { Nix } from '@cupboard/nix';
 import { formatCount, type Reporter } from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
@@ -14,7 +13,6 @@ import {
 import type { ParsedCohortTarget } from '../plan/cohort-target.ts';
 import { destinationAnswersFor } from '../plan/destination-probe.ts';
 import { parseReadUser } from '../read-user.ts';
-import { parseStoreUri } from '../store-uri.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 import { readCohortTargets, readCredentials } from './plan-cohort.ts';
@@ -25,7 +23,6 @@ export interface PlanReprobeOptions {
 	readonly reuseView?: string;
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;
-	readonly store?: string;
 }
 
 export interface PlanReprobeRunOptions {
@@ -35,12 +32,10 @@ export interface PlanReprobeRunOptions {
 
 /**
  * What {@link runPlanReprobe} needs from this run's environment, injectable so
- * a command test drives it with doubles: the store the build itself will run
- * against, and the destination-side answers for the same tenant and cache the
- * partition asked.
+ * a command test drives it with doubles: the destination-side answers for the
+ * same tenant and cache the partition asked.
  */
 export interface PlanReprobeDependencies {
-	readonly store: Pick<Nix, 'querySubstitutablePaths' | 'queryValidPaths'>;
 	readonly destinationAnswers: DestinationAnswers;
 }
 
@@ -72,20 +67,12 @@ export function registerPlanReprobeCommand(
 			parseReadUser
 		)
 		.option('--read-password <password>', 'password for private cache reads')
-		.option(
-			'--store <uri>',
-			'remote ssh-ng store the build runs against (default: the local daemon)',
-			parseStoreUri
-		)
 		.action(async (url: URL, options: PlanReprobeOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const targets = await readCohortTargets(options.targetsFile);
 			const credentials = readCredentials(options);
-			const storeSelection =
-				options.store === undefined ? {} : { storeUri: options.store };
 
 			await runPlanReprobe({ targets }, reporter, {
-				store: Nix.openForAvailability(undefined, storeSelection),
 				destinationAnswers: destinationAnswersFor({
 					baseUrl: url,
 					cache: storedCacheFor(options.cache),
@@ -119,7 +106,6 @@ export async function runPlanReprobe(
 					}),
 					root: target.root
 				})),
-				store: dependencies.store,
 				destinationAnswers: dependencies.destinationAnswers
 			});
 

@@ -3,7 +3,6 @@ import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import type { Nix } from '@cupboard/nix';
 import {
 	rootNameSchema,
 	storePathSchema,
@@ -15,7 +14,6 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	InvalidCohortTargetsFileError,
-	InvalidStoreUriError,
 	ReadCredentialPairError
 } from '../errors.ts';
 import type { DestinationAnswers } from '../plan/availability-partition.ts';
@@ -48,16 +46,6 @@ const otherTarget: ParsedCohortTarget = {
 	expectedPath: otherPath,
 	root: appRoot
 };
-
-function store(
-	valid: readonly StorePathString[] = [],
-	substitutable: readonly StorePathString[] = []
-): Pick<Nix, 'querySubstitutablePaths' | 'queryValidPaths'> {
-	return {
-		querySubstitutablePaths: () => Promise.resolve(substitutable),
-		queryValidPaths: () => Promise.resolve(valid)
-	};
-}
 
 function answers(served: readonly StorePathString[] = []): DestinationAnswers {
 	return {
@@ -128,7 +116,7 @@ describe('runPlanReprobe', () => {
 		const reprobe = await runPlanReprobe(
 			{ targets: [appTarget, otherTarget] },
 			reporter(payloads),
-			{ store: store(), destinationAnswers: answers(destination) }
+			{ destinationAnswers: answers(destination) }
 		);
 
 		expect(reprobe).toStrictEqual(expected);
@@ -171,18 +159,6 @@ async function runReprobeCommand(
 const tenantUrl = 'https://cache.example.workers.dev/t/acme';
 
 describe('plan reprobe command', () => {
-	it('rejects a --store URI that names no ssh-ng destination before reading targets', async () => {
-		const error = await runReprobeCommand([
-			tenantUrl,
-			'--targets-file',
-			'targets.json',
-			'--store',
-			'ssh://builder'
-		]);
-
-		expect(error).toBeInstanceOf(InvalidStoreUriError);
-	});
-
 	it.each([
 		['is not JSON', 'not json'],
 		[
@@ -198,7 +174,7 @@ describe('plan reprobe command', () => {
 			})
 		]
 	])(
-		'rejects a targets file that %s before opening the store',
+		'rejects a targets file that %s before asking the destination',
 		async (_name, contents) => {
 			const directory = mkdtempSync(
 				path.join(tmpdir(), 'cupboard-plan-reprobe-')
