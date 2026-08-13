@@ -99,6 +99,38 @@ describe('acquireCupboard', () => {
 		expect(installRelease).not.toHaveBeenCalled();
 	});
 
+	it('passes cancellation to canonical source acquisition', async () => {
+		const cupboard: ResolvedCupboard = {
+			kind: 'source',
+			repository: 'owner/cupboard',
+			sourceCommit: 'b'.repeat(40)
+		};
+		const installRelease = vi.fn();
+		const installSource = vi.fn(() =>
+			Promise.resolve({
+				binaryPath: '/nix/store/cupboard/bin/cupboard',
+				cupboard
+			})
+		);
+		const controller = new AbortController();
+
+		await acquireCupboard(
+			{ ...baseOptions, cupboard, signal: controller.signal },
+			reporter,
+			{ installRelease, installSource }
+		);
+
+		expect(installSource.mock.calls).toStrictEqual([
+			[
+				{
+					checkoutDirectory: '/workspace/.cupboard',
+					cupboard,
+					signal: controller.signal
+				}
+			]
+		]);
+	});
+
 	it('never falls back to source when release installation fails', async () => {
 		const failure = new Error('attestation missing');
 		const installSource = vi.fn();

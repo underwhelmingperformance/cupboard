@@ -53,6 +53,27 @@ describe('createOctokitClient', () => {
 		expect(await fetchCountFor(status)).toBe(1);
 	});
 
+	it('sends an explicitly selected REST API version', async () => {
+		let headers: Headers | undefined;
+		const octokit = createOctokitClient({
+			apiVersion: '2026-03-10',
+			request: {
+				fetch: (input: string | URL | Request, init?: RequestInit) => {
+					headers = new Request(input, init).headers;
+
+					return Promise.resolve(Response.json({}));
+				}
+			}
+		});
+
+		await octokit.request('GET /repos/{owner}/{repo}', {
+			owner: 'o',
+			repo: 'r'
+		});
+
+		expect(headers?.get('x-github-api-version')).toBe('2026-03-10');
+	});
+
 	it('retries a transient server error', async () => {
 		vi.useFakeTimers();
 

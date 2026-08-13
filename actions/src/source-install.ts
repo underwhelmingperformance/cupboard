@@ -1,11 +1,15 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { access, constants, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { promisify } from 'node:util';
 
 import { CodedError } from '@cupboard/shared/errors';
 
+import {
+	observeChildProcess,
+	waitForAbortableChildProcess
+} from './child-process.ts';
 import type { ResolvedCupboard } from './cupboard-resolution.ts';
+import { CommandFailedError } from './errors.ts';
 import { parseLines } from './inputs.ts';
 
 export type ResolvedSourceCupboard = Extract<
@@ -23,12 +27,14 @@ export interface AcquiredSourceCupboard {
 export interface AcquireSourceCupboardOptions {
 	readonly checkoutDirectory: string;
 	readonly cupboard: ResolvedSourceCupboard;
+	readonly signal?: AbortSignal;
 }
 
 /** The captured command contract needed to verify and build a source checkout. */
 export type SourceCommandRunner = (
 	command: string,
-	arguments_: readonly string[]
+	arguments_: readonly string[],
+	signal?: AbortSignal
 ) => Promise<{ readonly stdout: string }>;
 
 /** Filesystem seams used to validate the immutable Nix result. */
@@ -96,13 +102,60 @@ export class SourceInstallationVersionMismatchError extends CodedError {
 	}
 }
 
-const execFileAsync = promisify(execFile);
+const maximumCapturedOutputBytes = 16 * 1024 * 1024;
 
-const defaultSourceCommandRunner: SourceCommandRunner = (command, arguments_) =>
-	execFileAsync(command, [...arguments_], {
-		encoding: 'utf8',
-		maxBuffer: 16 * 1024 * 1024
+const defaultSourceCommandRunner: SourceCommandRunner = async (
+	command,
+	arguments_,
+	signal
+) => {
+	signal?.throwIfAborted();
+
+	const child = spawn(command, [...arguments_], {
+		stdio: ['ignore', 'pipe', 'inherit']
 	});
+	const outputLimit = new AbortController();
+	const lifecycleSignal =
+		signal === undefined
+			? outputLimit.signal
+			: AbortSignal.any([signal, outputLimit.signal]);
+	const chunks: Buffer[] = [];
+	let capturedBytes = 0;
+
+	child.stdout.on('data', (chunk: Buffer) => {
+		capturedBytes += chunk.byteLength;
+
+		if (capturedBytes > maximumCapturedOutputBytes) {
+			outputLimit.abort(
+				new Error(
+					`${command} stdout exceeded ${String(maximumCapturedOutputBytes)} bytes`
+				)
+			);
+			return;
+		}
+
+		chunks.push(chunk);
+	});
+
+	const result = await waitForAbortableChildProcess(
+		observeChildProcess(child),
+		lifecycleSignal
+	);
+
+	if (result.error !== undefined || result.status !== 0) {
+		throw new CommandFailedError(
+			command,
+			result.status,
+			result.error?.message,
+			{
+				...(result.error !== undefined && { cause: result.error }),
+				...(result.signal !== undefined && { signal: result.signal })
+			}
+		);
+	}
+
+	return { stdout: Buffer.concat(chunks).toString('utf8') };
+};
 
 async function isExecutableFile(candidate: string): Promise<boolean> {
 	try {
@@ -162,12 +215,11 @@ async function assertCheckout(
 	runCommand: SourceCommandRunner
 ): Promise<void> {
 	const gitPrefix = ['-C', options.checkoutDirectory];
-	const remoteResult = await runCommand('git', [
-		...gitPrefix,
-		'remote',
-		'get-url',
-		'origin'
-	]);
+	const remoteResult = await runCommand(
+		'git',
+		[...gitPrefix, 'remote', 'get-url', 'origin'],
+		options.signal
+	);
 	const remote = remoteResult.stdout.trim();
 	const actualRepository = repositoryFromRemote(remote);
 
@@ -181,11 +233,11 @@ async function assertCheckout(
 		);
 	}
 
-	const commitResult = await runCommand('git', [
-		...gitPrefix,
-		'rev-parse',
-		'HEAD'
-	]);
+	const commitResult = await runCommand(
+		'git',
+		[...gitPrefix, 'rev-parse', 'HEAD'],
+		options.signal
+	);
 	const actualCommit = commitResult.stdout.trim().toLowerCase();
 
 	if (actualCommit !== options.cupboard.sourceCommit) {
@@ -195,12 +247,11 @@ async function assertCheckout(
 		);
 	}
 
-	const statusResult = await runCommand('git', [
-		...gitPrefix,
-		'status',
-		'--porcelain',
-		'--untracked-files=no'
-	]);
+	const statusResult = await runCommand(
+		'git',
+		[...gitPrefix, 'status', '--porcelain', '--untracked-files=no'],
+		options.signal
+	);
 	const changes = parseLines(statusResult.stdout);
 
 	if (changes.length > 0) {
@@ -224,12 +275,16 @@ export async function acquireSourceCupboard(
 
 	await assertCheckout(resolvedOptions, runCommand);
 
-	const buildResult = await runCommand('nix', [
-		'build',
-		'--no-link',
-		'--print-out-paths',
-		`${checkoutDirectory}#cupboard`
-	]);
+	const buildResult = await runCommand(
+		'nix',
+		[
+			'build',
+			'--no-link',
+			'--print-out-paths',
+			`${checkoutDirectory}#cupboard`
+		],
+		options.signal
+	);
 	const outputs = parseLines(buildResult.stdout);
 	const [output] = outputs;
 
@@ -254,7 +309,11 @@ export async function acquireSourceCupboard(
 	}
 
 	const expectedVersion = options.cupboard.sourceCommit.slice(0, 7);
-	const versionResult = await runCommand(binaryPath, ['--version']);
+	const versionResult = await runCommand(
+		binaryPath,
+		['--version'],
+		options.signal
+	);
 	const actualVersion = versionResult.stdout.trim();
 
 	if (actualVersion !== expectedVersion) {

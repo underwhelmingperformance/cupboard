@@ -29,6 +29,8 @@ type OctokitClientConstructorOptions = NonNullable<
 
 export interface OctokitClientOptions {
 	readonly auth?: string;
+	/** Date-based GitHub REST API version sent on every REST request. */
+	readonly apiVersion?: string;
 	readonly baseUrl?: string;
 	readonly request?: OctokitClientConstructorOptions['request'];
 }
@@ -43,7 +45,7 @@ export interface OctokitClientOptions {
 export function createOctokitClient(
 	options: OctokitClientOptions = {}
 ): InstanceType<typeof OctokitClient> {
-	return new OctokitClient({
+	const octokit = new OctokitClient({
 		...(options.auth !== undefined && { auth: options.auth }),
 		...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
 		...(options.request !== undefined && { request: options.request }),
@@ -53,6 +55,14 @@ export function createOctokitClient(
 		},
 		retry: { doNotRetry: doNotRetryStatuses }
 	});
+
+	if (options.apiVersion !== undefined) {
+		octokit.hook.before('request', (request) => {
+			request.headers['x-github-api-version'] = options.apiVersion;
+		});
+	}
+
+	return octokit;
 }
 
 export { RequestError } from '@octokit/request-error';

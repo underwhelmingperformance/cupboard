@@ -5,7 +5,9 @@ description:
   optional remote builders.
 inputs:
   ssh-key:
-    description: SSH key for private flake inputs. Empty skips.
+    description:
+      SSH key for private flake inputs. Empty still installs an isolated Git SSH
+      policy that disables ambient identities.
     required: false
   input-known-hosts:
     description:
@@ -46,9 +48,10 @@ inputs:
   builder-ssh-config:
     description:
       ssh_config text for the remote builder connections, appended after the
-      action's mandatory transport policy. Scope directives under Host blocks;
-      connection-environment tokens may appear here, but identity-bearing
-      directives, Include and Match exec are rejected.
+      action's mandatory transport policy. A strict allowlist accepts Host
+      blocks containing endpoint, transport tuning, algorithm, liveness and
+      SetEnv directives. Commands, proxies, forwarding, identity sources,
+      verbose logging, Include and Match are rejected.
     required: false
   builder-known-hosts:
     description:
@@ -60,8 +63,10 @@ inputs:
   store-ssh-config:
     description:
       ssh_config text for the direct store connection, appended after the
-      action's mandatory transport policy. Scope directives under Host blocks;
-      identity-bearing directives, Include and Match exec are rejected.
+      action's mandatory transport policy. A strict allowlist accepts Host
+      blocks containing endpoint, transport tuning, algorithm, liveness and
+      SetEnv directives. Commands, proxies, forwarding, identity sources,
+      verbose logging, Include and Match are rejected.
     required: false
   store-known-hosts:
     description:

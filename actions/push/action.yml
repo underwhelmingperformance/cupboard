@@ -112,6 +112,9 @@ outputs:
   cupboard-path:
     description: Path to the installed cupboard binary.
     value: ${{ steps.push.outputs.cupboard-path }}
+  cupboard-version:
+    description: Inspected cupboard version.
+    value: ${{ steps.push.outputs.cupboard-version }}
   uploaded-paths:
     description: Number of store paths uploaded to the cache.
     value: ${{ steps.push.outputs.uploaded-paths }}

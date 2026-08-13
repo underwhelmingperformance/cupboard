@@ -62,8 +62,18 @@ describe('assertCanonicalVersion', () => {
 		expect(() => assertCanonicalVersion('')).toThrow(MissingInputError);
 	});
 
-	it('rejects a version without the v prefix', () => {
-		expect(() => assertCanonicalVersion('1.2.3')).toThrow(
+	it.each([
+		['1.2.3'],
+		['V1.2.3'],
+		['v01.2.3'],
+		['v1.02.3'],
+		['v1.2.03'],
+		['v1.2'],
+		['v1.2.3-rc.1'],
+		['v1.2.3+build'],
+		['vgarbage']
+	])('rejects the non-canonical version %s', (version) => {
+		expect(() => assertCanonicalVersion(version)).toThrow(
 			NonCanonicalVersionError
 		);
 	});

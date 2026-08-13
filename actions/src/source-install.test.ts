@@ -30,13 +30,18 @@ interface CommandResult {
 interface CommandInvocation {
 	readonly command: string;
 	readonly arguments_: readonly string[];
+	readonly signal?: AbortSignal;
 }
 
 class RecordingCommandRunner {
 	readonly invocations: CommandInvocation[] = [];
 
-	readonly run: SourceCommandRunner = (command, arguments_) => {
-		this.invocations.push({ command, arguments_ });
+	readonly run: SourceCommandRunner = (command, arguments_, signal) => {
+		this.invocations.push({
+			command,
+			arguments_,
+			...(signal !== undefined && { signal })
+		});
 		const result = this.results[this.invocations.length - 1];
 
 		if (result === undefined) {
@@ -154,6 +159,28 @@ describe('acquireSourceCupboard', () => {
 				command: path.join(output, 'bin', 'cupboard'),
 				arguments_: ['--version']
 			}
+		]);
+	});
+
+	it('passes one cancellation signal to every checkout and build subprocess', async () => {
+		const checkoutDirectory = await temporaryDirectory(
+			'cupboard-source-checkout-'
+		);
+		const output = await completeCupboardOutput();
+		const commands = new RecordingCommandRunner(successfulResults(output));
+		const controller = new AbortController();
+
+		await acquireSourceCupboard(
+			{ checkoutDirectory, cupboard, signal: controller.signal },
+			{ runCommand: commands.run }
+		);
+
+		expect(commands.invocations.map(({ signal }) => signal)).toStrictEqual([
+			controller.signal,
+			controller.signal,
+			controller.signal,
+			controller.signal,
+			controller.signal
 		]);
 	});
 

@@ -11,6 +11,7 @@ export interface AcquireCupboardOptions {
 	readonly checkoutDirectory: string;
 	readonly githubToken: string;
 	readonly environment: Environment;
+	readonly signal?: AbortSignal;
 }
 
 export interface AcquiredCupboard {
@@ -37,7 +38,8 @@ export async function acquireCupboard(
 	if (options.cupboard.kind === 'source') {
 		return dependencies.installSource({
 			checkoutDirectory: options.checkoutDirectory,
-			cupboard: options.cupboard
+			cupboard: options.cupboard,
+			...(options.signal !== undefined && { signal: options.signal })
 		});
 	}
 
@@ -49,7 +51,8 @@ export async function acquireCupboard(
 			includePrereleases: true,
 			githubToken: options.githubToken,
 			environment: options.environment,
-			expectedSourceCommit: options.cupboard.sourceCommit
+			expectedSourceCommit: options.cupboard.sourceCommit,
+			...(options.signal !== undefined && { signal: options.signal })
 		},
 		reporter
 	);

@@ -194,18 +194,21 @@ on:
         required: false
       builder_ssh_config:
         description:
-          ssh_config text for the remote builder connections, scoped under Host
-          blocks. Carries connection-environment secrets such as auth tokens;
-          identity-bearing directives, Include and Match exec are rejected.
+          ssh_config Host blocks for the remote builder connections. A strict
+          allowlist accepts endpoint, transport tuning, algorithm, liveness and
+          SetEnv directives. Commands, proxies, forwarding, identity sources,
+          verbose logging, Include and Match are rejected.
         required: false
       store_ssh_key:
         description: SSH private key authenticating to the direct ssh-ng store.
         required: false
       store_ssh_config:
         description:
-          ssh_config text for the direct store connection, scoped under Host
-          blocks. Identity-bearing directives, Include and Match exec are
-          rejected. Independent of classic builder scheduling.
+          ssh_config Host blocks for the direct store connection. A strict
+          allowlist accepts endpoint, transport tuning, algorithm, liveness and
+          SetEnv directives. Commands, proxies, forwarding, identity sources,
+          verbose logging, Include and Match are rejected. Independent of
+          builder scheduling.
         required: false
       input_ssh_key:
         description:
@@ -239,6 +242,15 @@ jobs:
       ttl: ${{ steps.resolve.outputs.ttl }}
       reuse-view: ${{ steps.resolve.outputs.reuse-view }}
     steps:
+      - name: Require GitHub Cloud workflow identity
+        env:
+          GITHUB_SERVER_URL: ${{ github.server_url }}
+        run: |
+          if [ "${GITHUB_SERVER_URL}" != https://github.com ]; then
+            echo '::error::The reusable cupboard workflows require GitHub Cloud because GitHub Enterprise Server does not provide job.workflow_repository, job.workflow_ref or job.workflow_sha'
+            exit 1
+          fi
+
       - name: Reserve the cupboard workflow checkout
         env:
           CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow

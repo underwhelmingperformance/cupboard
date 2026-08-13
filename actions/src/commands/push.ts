@@ -487,7 +487,7 @@ export async function pushAction(
 				}))
 			: [{ root: inputs.root, paths: resolveStorePaths(nix, inputs.paths) }];
 
-	await setOutput(environment, 'cupboard-path', installedCupboard.binaryPath);
+	await publishPushAcquisitionOutputs(environment, installedCupboard);
 
 	const argumentsPerPush = pushArgumentsForInvocations(inputs, pushes);
 	const summaries: ParsedPushSummary[] = [];
@@ -528,6 +528,14 @@ export async function pushAction(
 export interface PushCupboard {
 	readonly binaryPath: string;
 	readonly version: string;
+}
+
+export async function publishPushAcquisitionOutputs(
+	environment: Environment,
+	cupboard: PushCupboard
+): Promise<void> {
+	await setOutput(environment, 'cupboard-path', cupboard.binaryPath);
+	await setOutput(environment, 'cupboard-version', cupboard.version);
 }
 
 interface AcquirePushCupboardDependencies {
@@ -580,7 +588,8 @@ export async function acquirePushCupboard(
 			environment,
 			...(inputs.expectedSourceCommit !== '' && {
 				expectedSourceCommit: inputs.expectedSourceCommit
-			})
+			}),
+			...(signal !== undefined && { signal })
 		},
 		reporter
 	);

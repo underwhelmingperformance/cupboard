@@ -1,18 +1,28 @@
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { createReadStream } from 'node:fs';
 import {
 	access,
 	chmod,
 	constants,
+	link,
+	lstat,
+	mkdir,
 	mkdtemp,
+	open,
+	readdir,
 	readFile,
+	readlink,
 	rename,
 	rm,
 	stat,
+	symlink,
+	utimes,
 	writeFile
 } from 'node:fs/promises';
 import path from 'node:path';
-import { arch, platform } from 'node:process';
+import process, { arch, platform } from 'node:process';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import type { Reporter } from '@cupboard/reporter';
 import { createOctokitClient, RequestError } from '@cupboard/shared/octokit';
@@ -26,6 +36,7 @@ import {
 } from '@cupboard/shared/sigstore';
 import { slsaSourceCommit } from '@cupboard/shared/slsa';
 import { StatusCodes } from 'http-status-codes';
+import semverLt from 'semver/functions/lt.js';
 import semverValid from 'semver/functions/valid.js';
 import { z } from 'zod';
 
@@ -39,6 +50,7 @@ import {
 	AttestationVerificationFailedError,
 	ChecksumMismatchError,
 	CommandFailedError,
+	DownloadAssetTooLargeError,
 	GithubApiError,
 	InstalledReleaseVersionMismatchError,
 	InvalidChecksumLineError,
@@ -47,8 +59,15 @@ import {
 	MissingChecksumError,
 	NoReleaseFoundError,
 	ReleaseAssetNotFoundError,
+	ReleaseCompatibilityError,
 	ReleaseCoordinateMismatchError,
 	ReleaseInstallationIncompleteError,
+	ReleaseInstallationIntegrityError,
+	ReleaseInstallationLockLostError,
+	ReleaseInstallationLockOwnerAliveError,
+	ReleaseInstallationLockStateError,
+	ReleaseInstallationRollbackError,
+	ReleaseInstallationStateError,
 	UnsupportedPlatformError
 } from './errors.ts';
 import { type Environment, parseLines } from './inputs.ts';
@@ -81,6 +100,7 @@ export interface InstalledCupboard {
 }
 
 export const fallbackReleaseRepository = 'cupboard/cupboard';
+export const minimumCompatibleRelease = 'v0.0.19';
 
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
@@ -170,6 +190,17 @@ export function assertExpectedSourceCommit(
 	}
 }
 
+/** Reject known historical archive layouts before downloading their assets. */
+export function assertReleaseCompatible(tagName: string): void {
+	const version = semverValid(tagName);
+
+	if (version === null || !semverLt(version, minimumCompatibleRelease)) {
+		return;
+	}
+
+	throw new ReleaseCompatibilityError(tagName, minimumCompatibleRelease);
+}
+
 export function assetNameFor(
 	runtimePlatform: string = platform,
 	runtimeArchitecture: string = arch
@@ -240,21 +271,54 @@ const releaseWorkflowPath = '.github/workflows/release.yml';
 type Octokit = ReturnType<typeof createOctokitClient>;
 
 function buildOctokit(
-	options: Pick<InstallCupboardOptions, 'githubToken' | 'environment'>,
+	options: Pick<
+		InstallCupboardOptions,
+		'githubToken' | 'environment' | 'signal'
+	>,
 	fetcher?: typeof fetch
 ): Octokit {
+	const request = {
+		...(fetcher !== undefined && { fetch: fetcher }),
+		...(options.signal !== undefined && {
+			signal: options.signal,
+			// Octokit's retry plugin treats an aborted fetch as a retryable status
+			// 500. A cancellable action owns its retry policy so the exact signal
+			// reason can escape immediately instead of being retried and wrapped.
+			retries: 0
+		})
+	};
+
 	return createOctokitClient({
 		...(options.githubToken !== '' && { auth: options.githubToken }),
+		apiVersion: '2026-03-10',
 		...(options.environment.GITHUB_API_URL !== undefined && {
 			baseUrl: options.environment.GITHUB_API_URL
 		}),
-		...(fetcher !== undefined && { request: { fetch: fetcher } })
+		...(Object.keys(request).length > 0 && { request })
 	});
+}
+
+async function githubRequest<Result>(
+	signal: AbortSignal | undefined,
+	run: () => Promise<Result>
+): Promise<Result> {
+	try {
+		return await run();
+	} catch (error) {
+		signal?.throwIfAborted();
+		throw error;
+	}
 }
 
 interface VerifyReleaseDependencies {
 	readonly fetch?: typeof fetch;
 	readonly verify?: typeof verifyBundle;
+	readonly subjectDigest?: string;
+	readonly hashFile?: typeof sha256File;
+}
+
+interface InstallCupboardDependencies {
+	readonly fetch?: typeof fetch;
 }
 
 type RenameFile = typeof rename;
@@ -262,8 +326,32 @@ type RenameFile = typeof rename;
 interface PublishReleaseDependencies {
 	readonly rename?: RenameFile;
 	readonly runCommand?: ReleaseCommandRunner;
+	readonly syncDirectory?: (directoryPath: string) => Promise<void>;
 	readonly signal?: AbortSignal;
+	readonly publicationHook?: (stage: ReleasePublicationStage) => Promise<void>;
+	/** Already verified archive digest; direct callers may omit it to hash locally. */
+	readonly archiveSha256?: string;
 }
+
+export type ReleasePublicationStage =
+	'contended' | 'locked' | 'prepared' | 'activated';
+
+/** Fetch and cancellation seams used while downloading a release asset. */
+export interface DownloadAssetDependencies {
+	readonly fetch?: typeof fetch;
+	readonly signal?: AbortSignal;
+	readonly maximumBytes?: number;
+}
+
+export interface DownloadedAsset {
+	readonly bytes: number;
+	readonly sha256: string;
+}
+
+// A current SEA archive is tens of MiB. 256 MiB leaves ample room for runtime
+// and embedded-worker growth while bounding an unauthenticated response well
+// below a typical GitHub-hosted runner's memory and disk capacity.
+export const maximumReleaseAssetBytes = 256 * 1024 * 1024;
 
 type ReleaseCommandRunner = (
 	command: string,
@@ -327,7 +415,8 @@ export function releaseWorkflowIdentityRegex(
 
 export async function installCupboard(
 	options: InstallCupboardOptions,
-	reporter: Reporter
+	reporter: Reporter,
+	dependencies: InstallCupboardDependencies = {}
 ): Promise<InstalledCupboard> {
 	options.signal?.throwIfAborted();
 
@@ -338,69 +427,105 @@ export async function installCupboard(
 	const release = await reporter.phase(
 		'Resolve cupboard release',
 		async (phase) => {
-			const resolved = await fetchRelease(buildOctokit(options), options);
+			const resolved = await githubRequest(options.signal, () =>
+				fetchRelease(buildOctokit(options, dependencies.fetch), options)
+			);
 			phase.fact('Version', resolved.tagName);
 
 			return resolved;
 		}
 	);
+	assertReleaseCompatible(release.tagName);
 
 	const binaryPath = path.join(options.installDirectory, 'cupboard');
 	const asset = releaseAssetFor(release);
 	const assetName = asset.name;
 	const checksumAsset = findReleaseAsset(release, 'checksums.txt');
-	const archivePath = path.join(options.installDirectory, assetName);
-	const checksumsPath = path.join(options.installDirectory, 'checksums.txt');
+	const downloadDirectory = await mkdtemp(
+		path.join(options.installDirectory, '.cupboard-download-')
+	);
+	const archivePath = path.join(downloadDirectory, assetName);
+	const checksumsPath = path.join(downloadDirectory, 'checksums.txt');
 
-	await reporter.phase(`Download ${assetName}`, async () => {
-		await downloadAsset(asset, archivePath, options.githubToken);
-		await downloadAsset(checksumAsset, checksumsPath, options.githubToken);
-	});
+	try {
+		const downloaded = await reporter.phase(
+			`Download ${assetName}`,
+			async () => {
+				const downloadDependencies = {
+					...(dependencies.fetch !== undefined && {
+						fetch: dependencies.fetch
+					}),
+					...(options.signal !== undefined && { signal: options.signal })
+				};
 
-	await reporter.phase('Verify checksum', async () => {
-		const checksums = parseChecksums(await readFile(checksumsPath, 'utf8'));
-		const expectedChecksum = checksums.get(assetName);
+				const archive = await downloadAsset(
+					asset,
+					archivePath,
+					options.githubToken,
+					downloadDependencies
+				);
+				await downloadAsset(
+					checksumAsset,
+					checksumsPath,
+					options.githubToken,
+					downloadDependencies
+				);
 
-		if (expectedChecksum === undefined) {
-			throw new MissingChecksumError(assetName);
-		}
+				return archive;
+			}
+		);
 
-		await verifyChecksum(archivePath, expectedChecksum);
-	});
+		await reporter.phase('Verify checksum', async () => {
+			const checksums = parseChecksums(await readFile(checksumsPath, 'utf8'));
+			const expectedChecksum = checksums.get(assetName);
 
-	const sourceCommit = await reporter.phase(
-		'Verify release attestation',
-		async (phase) => {
-			const builtFrom = await verifyReleaseAttestation(
-				options,
+			if (expectedChecksum === undefined) {
+				throw new MissingChecksumError(assetName);
+			}
+
+			verifyChecksum(assetName, downloaded.sha256, expectedChecksum);
+		});
+
+		const sourceCommit = await reporter.phase(
+			'Verify release attestation',
+			async (phase) => {
+				const builtFrom = await verifyReleaseAttestation(
+					options,
+					archivePath,
+					release.tagName,
+					{ subjectDigest: downloaded.sha256 }
+				);
+				assertExpectedSourceCommit(
+					release.tagName,
+					builtFrom,
+					expectedSourceCommit
+				);
+				phase.fact('Built from', builtFrom);
+
+				return builtFrom;
+			}
+		);
+
+		await reporter.phase('Install cupboard binary', () =>
+			publishReleaseArchive(
 				archivePath,
-				release.tagName
-			);
-			assertExpectedSourceCommit(
+				options.installDirectory,
 				release.tagName,
-				builtFrom,
-				expectedSourceCommit
-			);
-			phase.fact('Built from', builtFrom);
+				{
+					archiveSha256: downloaded.sha256,
+					...(options.signal !== undefined && { signal: options.signal })
+				}
+			)
+		);
 
-			return builtFrom;
-		}
-	);
-
-	await reporter.phase('Install cupboard binary', () =>
-		publishReleaseArchive(
-			archivePath,
-			options.installDirectory,
-			release.tagName,
-			options.signal === undefined ? {} : { signal: options.signal }
-		)
-	);
-
-	return {
-		binaryPath,
-		version: release.tagName,
-		sourceCommit
-	};
+		return {
+			binaryPath,
+			version: release.tagName,
+			sourceCommit
+		};
+	} finally {
+		await rm(downloadDirectory, { recursive: true, force: true });
+	}
 }
 
 /** Validate a release in isolation before replacing the installed executables. */
@@ -414,83 +539,166 @@ export async function publishReleaseArchive(
 
 	const move = dependencies.rename ?? rename;
 	const runCommand = dependencies.runCommand ?? defaultReleaseCommandRunner;
-	const stagingDirectory = await mkdtemp(
-		path.join(installDirectory, '.cupboard-release-')
-	);
-	const stagedBinaryPath = path.join(stagingDirectory, 'cupboard');
-	const stagedHookHelperPath = path.join(
-		stagingDirectory,
-		'cupboard-hook-relay'
-	);
-	const destinations = [
-		{
-			staged: stagedBinaryPath,
-			destination: path.join(installDirectory, 'cupboard'),
-			backup: path.join(stagingDirectory, '.previous-cupboard')
-		},
-		{
-			staged: stagedHookHelperPath,
-			destination: path.join(installDirectory, 'cupboard-hook-relay'),
-			backup: path.join(stagingDirectory, '.previous-cupboard-hook-relay')
-		}
-	] as const;
-	const backedUp = new Set<string>();
-	const published = new Set<string>();
+	const syncInstallationDirectory = dependencies.syncDirectory ?? syncDirectory;
+	const paths = releaseInstallationPaths(installDirectory);
+	const archiveSha256 =
+		dependencies.archiveSha256 ??
+		(await sha256File(archivePath, dependencies.signal));
 
+	assertArchiveSha256(archiveSha256);
+
+	await mkdir(paths.generationsDirectory, { recursive: true });
+	const releaseLock = await acquireReleaseInstallationLock(
+		paths,
+		dependencies.signal,
+		() => dependencies.publicationHook?.('contended')
+	);
 	try {
-		await runCommand('tar', ['-xzf', archivePath, '-C', stagingDirectory], {
-			captureStdout: false,
-			...(dependencies.signal !== undefined && { signal: dependencies.signal })
-		});
-		await Promise.all([
-			prepareReleaseExecutable(stagedBinaryPath),
-			prepareReleaseExecutable(stagedHookHelperPath)
-		]);
-		assertInstalledReleaseVersion(
+		await releaseLock.assertOwned();
+		await cleanupOrphanReleaseReapers(paths);
+		await releaseLock.assertOwned();
+		await recoverReleaseInstallation(paths, move);
+		await releaseLock.assertOwned();
+		await cleanupIncompleteReleaseGenerations(paths);
+		await releaseLock.assertOwned();
+		await dependencies.publicationHook?.('locked');
+
+		const generationDirectory = path.join(
+			paths.generationsDirectory,
+			`sha256-${archiveSha256}`
+		);
+		const activeGeneration = await currentGenerationDirectory(paths);
+		const stagingDirectory = await prepareReleaseGenerationCandidate(
+			archivePath,
+			generationDirectory,
 			expectedVersion,
-			await readInstalledCupboardVersion(
-				stagedBinaryPath,
-				runCommand,
-				dependencies.signal
-			)
+			runCommand,
+			dependencies.signal
 		);
 
 		try {
-			for (const entry of destinations) {
-				if (await moveIfPresent(entry.destination, entry.backup, move)) {
-					backedUp.add(entry.destination);
+			if (await releaseGenerationExists(generationDirectory)) {
+				try {
+					await validateReleaseGenerationAgainstCandidate(
+						generationDirectory,
+						stagingDirectory,
+						dependencies.signal
+					);
+				} catch (error) {
+					if (
+						activeGeneration === path.resolve(generationDirectory) ||
+						(await releaseGenerationWasActivated(generationDirectory))
+					) {
+						throw error;
+					}
+
+					await rm(generationDirectory, { recursive: true, force: true });
 				}
 			}
 
-			for (const entry of destinations) {
-				await move(entry.staged, entry.destination);
-				published.add(entry.destination);
-			}
-		} catch (error) {
-			for (const entry of destinations.toReversed()) {
-				if (published.has(entry.destination)) {
-					await rm(entry.destination, { recursive: true, force: true });
-				}
-
-				if (backedUp.has(entry.destination)) {
-					await move(entry.backup, entry.destination);
-				}
+			if (!(await releaseGenerationExists(generationDirectory))) {
+				dependencies.signal?.throwIfAborted();
+				await installReleaseGenerationCandidate(
+					stagingDirectory,
+					generationDirectory,
+					syncInstallationDirectory
+				);
 			}
 
-			throw error;
+			if (activeGeneration === path.resolve(generationDirectory)) {
+				await ensureReleaseEntryLinks(paths, move);
+				await syncInstallationDirectory(paths.installDirectory);
+				return;
+			}
+
+			await publishReleaseGeneration(
+				paths,
+				generationDirectory,
+				move,
+				dependencies,
+				syncInstallationDirectory,
+				releaseLock
+			);
+		} finally {
+			await rm(stagingDirectory, { recursive: true, force: true });
 		}
 	} finally {
-		await rm(stagingDirectory, { recursive: true, force: true });
+		await releaseLock.release();
 	}
 }
 
-async function moveIfPresent(
-	source: string,
-	destination: string,
-	move: RenameFile
-): Promise<boolean> {
+const releaseStateDirectoryName = '.cupboard-releases';
+const releaseCurrentLinkName = '.cupboard-current';
+const releaseJournalName = 'transaction.json';
+const releaseLockName = 'install.lock';
+const releaseActivatedMarkerName = '.activated';
+const releaseExecutableNames = ['cupboard', 'cupboard-hook-relay'] as const;
+
+interface ReleaseInstallationPaths {
+	readonly installDirectory: string;
+	readonly stateDirectory: string;
+	readonly generationsDirectory: string;
+	readonly currentLink: string;
+	readonly journal: string;
+	readonly lock: string;
+}
+
+interface ReleaseInstallationJournal {
+	readonly version: 2;
+	readonly generationDirectory: string;
+	readonly previousGenerationDirectory?: string;
+}
+
+const releaseInstallationPathSchema = z.string().min(1);
+const releaseInstallationJournalSchema = z.strictObject({
+	version: z.literal(2),
+	generationDirectory: releaseInstallationPathSchema,
+	previousGenerationDirectory: releaseInstallationPathSchema.optional()
+});
+
+interface ReleaseLockOwner {
+	readonly pid: number;
+	readonly instanceId: string;
+	readonly leaseId: string;
+}
+
+const releaseLockOwnerSchema = z.strictObject({
+	pid: z.int().positive(),
+	instanceId: z.uuid(),
+	leaseId: z.uuid()
+});
+
+const releaseInstallerInstanceId = randomUUID();
+
+function releaseInstallationPaths(
+	installDirectory: string
+): ReleaseInstallationPaths {
+	const stateDirectory = path.join(installDirectory, releaseStateDirectoryName);
+
+	return {
+		installDirectory,
+		stateDirectory,
+		generationsDirectory: path.join(stateDirectory, 'generations'),
+		currentLink: path.join(installDirectory, releaseCurrentLinkName),
+		journal: path.join(stateDirectory, releaseJournalName),
+		lock: path.join(stateDirectory, releaseLockName)
+	};
+}
+
+function assertArchiveSha256(value: string): void {
+	if (/^[a-f\d]{64}$/u.test(value)) {
+		return;
+	}
+
+	throw new InvalidInputError(
+		'archive-sha256',
+		'archive-sha256 must be a lowercase SHA-256 digest'
+	);
+}
+
+async function releaseGenerationExists(candidate: string): Promise<boolean> {
 	try {
-		await move(source, destination);
+		await lstat(candidate);
 		return true;
 	} catch (error) {
 		if (isMissingPathError(error)) {
@@ -501,12 +709,723 @@ async function moveIfPresent(
 	}
 }
 
+async function releaseGenerationWasActivated(
+	generationDirectory: string
+): Promise<boolean> {
+	return releaseGenerationExists(
+		path.join(generationDirectory, releaseActivatedMarkerName)
+	);
+}
+
+async function validateReleaseGeneration(
+	generationDirectory: string,
+	expectedVersion: string,
+	runCommand: ReleaseCommandRunner,
+	signal?: AbortSignal
+): Promise<void> {
+	const directory = await lstat(generationDirectory);
+
+	if (!directory.isDirectory()) {
+		throw new ReleaseInstallationIncompleteError(generationDirectory);
+	}
+
+	const binaryPath = path.join(generationDirectory, 'cupboard');
+	await Promise.all(
+		releaseExecutableNames.map((name) =>
+			validateReleaseExecutable(path.join(generationDirectory, name))
+		)
+	);
+	assertInstalledReleaseVersion(
+		expectedVersion,
+		await readInstalledCupboardVersion(binaryPath, runCommand, signal)
+	);
+}
+
+async function validateReleaseGenerationAgainstCandidate(
+	generationDirectory: string,
+	verifiedCandidateDirectory: string,
+	signal?: AbortSignal
+): Promise<void> {
+	const generation = await lstat(generationDirectory);
+
+	if (!generation.isDirectory()) {
+		throw new ReleaseInstallationIncompleteError(generationDirectory);
+	}
+
+	for (const name of releaseExecutableNames) {
+		const installedPath = path.join(generationDirectory, name);
+		const verifiedPath = path.join(verifiedCandidateDirectory, name);
+
+		await validateReleaseExecutable(installedPath);
+		const [installedDigest, verifiedDigest] = await Promise.all([
+			sha256File(installedPath, signal),
+			sha256File(verifiedPath, signal)
+		]);
+
+		if (installedDigest !== verifiedDigest) {
+			throw new ReleaseInstallationIntegrityError(generationDirectory, name);
+		}
+	}
+}
+
+async function prepareReleaseGenerationCandidate(
+	archivePath: string,
+	generationDirectory: string,
+	expectedVersion: string,
+	runCommand: ReleaseCommandRunner,
+	signal?: AbortSignal
+): Promise<string> {
+	const stagingDirectory = await mkdtemp(
+		path.join(
+			path.dirname(generationDirectory),
+			`.staging-${path.basename(generationDirectory)}-`
+		)
+	);
+
+	try {
+		await extractReleaseGeneration(
+			archivePath,
+			stagingDirectory,
+			expectedVersion,
+			runCommand,
+			signal
+		);
+
+		return stagingDirectory;
+	} catch (error) {
+		await rm(stagingDirectory, { recursive: true, force: true });
+		throw error;
+	}
+}
+
+async function installReleaseGenerationCandidate(
+	stagingDirectory: string,
+	generationDirectory: string,
+	syncInstallationDirectory: (directoryPath: string) => Promise<void>
+): Promise<void> {
+	await syncReleaseGeneration(stagingDirectory, syncInstallationDirectory);
+	await rename(stagingDirectory, generationDirectory);
+	await syncInstallationDirectory(path.dirname(generationDirectory));
+}
+
+async function extractReleaseGeneration(
+	archivePath: string,
+	destinationDirectory: string,
+	expectedVersion: string,
+	runCommand: ReleaseCommandRunner,
+	signal?: AbortSignal
+): Promise<void> {
+	await runCommand('tar', ['-xzf', archivePath, '-C', destinationDirectory], {
+		captureStdout: false,
+		...(signal !== undefined && { signal })
+	});
+	await Promise.all(
+		releaseExecutableNames.map((name) =>
+			prepareReleaseExecutable(path.join(destinationDirectory, name))
+		)
+	);
+	await validateReleaseGeneration(
+		destinationDirectory,
+		expectedVersion,
+		runCommand,
+		signal
+	);
+}
+
+async function cleanupIncompleteReleaseGenerations(
+	paths: ReleaseInstallationPaths
+): Promise<void> {
+	const entries = await readdir(paths.generationsDirectory);
+
+	await Promise.all(
+		entries
+			.filter((entry) => entry.startsWith('.staging-sha256-'))
+			.map((entry) =>
+				rm(path.join(paths.generationsDirectory, entry), {
+					recursive: true,
+					force: true
+				})
+			)
+	);
+}
+
+interface ReleaseInstallationLock {
+	assertOwned(): Promise<void>;
+	release(): Promise<void>;
+}
+
+const releaseLockRetryDelayMs = 25;
+// Heartbeats are deliberately much more frequent than expiry so a normally
+// scheduled installer has several opportunities to renew its ownership on
+// both macOS and Linux before another process may reclaim the lock.
+const releaseLockHeartbeatIntervalMs = 2000;
+const releaseLockLeaseDurationMs = 30_000;
+
+async function acquireReleaseInstallationLock(
+	paths: ReleaseInstallationPaths,
+	signal?: AbortSignal,
+	onContention?: () => Promise<void> | undefined
+): Promise<ReleaseInstallationLock> {
+	const candidate = path.join(
+		paths.stateDirectory,
+		`.lock-${String(process.pid)}-${randomUUID()}`
+	);
+	const leaseId = randomUUID();
+	const leasePath = path.join(paths.stateDirectory, `.lease-${leaseId}`);
+	const owner: ReleaseLockOwner = {
+		pid: process.pid,
+		instanceId: releaseInstallerInstanceId,
+		leaseId
+	};
+
+	try {
+		await writeFile(candidate, `${JSON.stringify(owner)}\n`, { mode: 0o600 });
+		await writeFile(leasePath, '', { mode: 0o600 });
+
+		for (;;) {
+			signal?.throwIfAborted();
+
+			try {
+				await utimes(leasePath, new Date(), new Date());
+				await link(candidate, paths.lock);
+				let heartbeatError: unknown;
+				const heartbeat = setInterval(() => {
+					void utimes(leasePath, new Date(), new Date()).catch(
+						(error: unknown) => {
+							heartbeatError = error;
+						}
+					);
+				}, releaseLockHeartbeatIntervalMs);
+				heartbeat.unref();
+
+				return {
+					async assertOwned() {
+						if (heartbeatError !== undefined) {
+							throw new ReleaseInstallationLockLostError(paths.lock, {
+								cause: heartbeatError
+							});
+						}
+
+						if (!(await pathsShareInode(candidate, paths.lock))) {
+							throw new ReleaseInstallationLockLostError(paths.lock);
+						}
+					},
+					async release() {
+						clearInterval(heartbeat);
+						try {
+							await removeLockIfMatches(candidate, paths.lock);
+						} finally {
+							await Promise.all([
+								rm(candidate, { force: true }),
+								rm(leasePath, { force: true })
+							]);
+						}
+					}
+				};
+			} catch (error) {
+				if (!isPathError(error, 'EEXIST')) {
+					throw error;
+				}
+			}
+
+			if (await removeStaleReleaseLock(paths.lock)) {
+				continue;
+			}
+
+			await onContention?.();
+
+			try {
+				await delay(releaseLockRetryDelayMs, undefined, { signal });
+			} catch (error) {
+				signal?.throwIfAborted();
+				throw error;
+			}
+		}
+	} catch (error) {
+		await Promise.all([
+			rm(candidate, { force: true }),
+			rm(leasePath, { force: true })
+		]);
+		throw error;
+	}
+}
+
+async function removeStaleReleaseLock(lockPath: string): Promise<boolean> {
+	let contents: string;
+
+	try {
+		contents = await readFile(lockPath, 'utf8');
+	} catch (error) {
+		if (isMissingPathError(error)) {
+			return true;
+		}
+
+		throw error;
+	}
+
+	const parsedOwner = releaseLockOwnerSchema.safeParse(parseJson(contents));
+
+	if (!parsedOwner.success) {
+		throw new ReleaseInstallationLockStateError(lockPath);
+	}
+
+	const owner = parsedOwner.data;
+	const leasePath = path.join(
+		path.dirname(lockPath),
+		`.lease-${owner.leaseId}`
+	);
+	let lease;
+
+	try {
+		lease = await stat(leasePath);
+	} catch (error) {
+		if (!isMissingPathError(error)) {
+			throw error;
+		}
+	}
+
+	if (
+		lease !== undefined &&
+		Date.now() - lease.mtimeMs <= releaseLockLeaseDurationMs
+	) {
+		return false;
+	}
+
+	const reaperPath = `${lockPath}.reaper-${randomUUID()}`;
+
+	try {
+		await link(lockPath, reaperPath);
+	} catch (error) {
+		if (isMissingPathError(error)) {
+			return true;
+		}
+
+		if (isPathError(error, 'EEXIST')) {
+			return false;
+		}
+
+		throw error;
+	}
+
+	try {
+		if (!(await pathsShareInode(reaperPath, lockPath))) {
+			return false;
+		}
+
+		const reaperContents = await readFile(reaperPath, 'utf8');
+		const reaperOwner = releaseLockOwnerSchema.safeParse(
+			parseJson(reaperContents)
+		);
+
+		if (
+			!reaperOwner.success ||
+			reaperOwner.data.pid !== owner.pid ||
+			reaperOwner.data.instanceId !== owner.instanceId ||
+			reaperOwner.data.leaseId !== owner.leaseId ||
+			!(await releaseLeaseExpired(leasePath))
+		) {
+			return false;
+		}
+
+		assertReleaseLockOwnerAbsent(lockPath, owner.pid);
+
+		const wasRemoved = await removeLockIfMatches(reaperPath, lockPath);
+		if (wasRemoved) {
+			await rm(leasePath, { force: true });
+		}
+
+		return wasRemoved;
+	} finally {
+		await rm(reaperPath, { force: true });
+	}
+}
+
+function assertReleaseLockOwnerAbsent(lockPath: string, pid: number): void {
+	try {
+		process.kill(pid, 0);
+	} catch (error) {
+		if (isPathError(error, 'ESRCH')) {
+			return;
+		}
+
+		throw new ReleaseInstallationLockOwnerAliveError(lockPath, pid, {
+			cause: error
+		});
+	}
+
+	throw new ReleaseInstallationLockOwnerAliveError(lockPath, pid);
+}
+
+async function releaseLeaseExpired(leasePath: string): Promise<boolean> {
+	try {
+		const lease = await stat(leasePath);
+		return Date.now() - lease.mtimeMs > releaseLockLeaseDurationMs;
+	} catch (error) {
+		if (isMissingPathError(error)) {
+			return true;
+		}
+
+		throw error;
+	}
+}
+
+async function cleanupOrphanReleaseReapers(
+	paths: ReleaseInstallationPaths
+): Promise<void> {
+	const entries = await readdir(paths.stateDirectory);
+	await Promise.all(
+		entries
+			.filter(
+				(entry) =>
+					entry === `${releaseLockName}.reaper` ||
+					entry.startsWith(`${releaseLockName}.reaper-`)
+			)
+			.map((entry) =>
+				rm(path.join(paths.stateDirectory, entry), { force: true })
+			)
+	);
+}
+
+async function removeLockIfMatches(
+	referencePath: string,
+	lockPath: string
+): Promise<boolean> {
+	if (!(await pathsShareInode(referencePath, lockPath))) {
+		return false;
+	}
+
+	try {
+		await rm(lockPath);
+		return true;
+	} catch (error) {
+		return isMissingPathError(error);
+	}
+}
+
+async function pathsShareInode(
+	leftPath: string,
+	rightPath: string
+): Promise<boolean> {
+	try {
+		const [left, right] = await Promise.all([
+			lstat(leftPath, { bigint: true }),
+			lstat(rightPath, { bigint: true })
+		]);
+
+		return left.dev === right.dev && left.ino === right.ino;
+	} catch (error) {
+		if (isMissingPathError(error)) {
+			return false;
+		}
+
+		throw error;
+	}
+}
+
+function parseJson(value: string): unknown {
+	try {
+		return JSON.parse(value);
+	} catch {
+		return undefined;
+	}
+}
+
+async function publishReleaseGeneration(
+	paths: ReleaseInstallationPaths,
+	generationDirectory: string,
+	move: RenameFile,
+	dependencies: PublishReleaseDependencies,
+	syncInstallationDirectory: (directoryPath: string) => Promise<void>,
+	releaseLock: ReleaseInstallationLock
+): Promise<void> {
+	const previousGenerationDirectory = await currentGenerationDirectory(paths);
+	const journal: ReleaseInstallationJournal = {
+		version: 2,
+		generationDirectory,
+		...(previousGenerationDirectory !== undefined && {
+			previousGenerationDirectory
+		})
+	};
+
+	await releaseLock.assertOwned();
+	await writeDurableJournal(paths, journal);
+
+	await dependencies.publicationHook?.('prepared');
+
+	const nextLink = path.join(
+		paths.stateDirectory,
+		`.current-${path.basename(generationDirectory)}`
+	);
+
+	try {
+		const generationTarget = path.relative(
+			paths.installDirectory,
+			generationDirectory
+		);
+
+		await symlink(generationTarget, nextLink);
+		dependencies.signal?.throwIfAborted();
+		await releaseLock.assertOwned();
+		await move(nextLink, paths.currentLink);
+		await syncInstallationDirectory(paths.installDirectory);
+	} catch (publicationError) {
+		if (publicationError instanceof ReleaseInstallationLockLostError) {
+			throw publicationError;
+		}
+
+		await releaseLock.assertOwned();
+		await rollbackReleaseInstallation(paths, journal, move, publicationError);
+		throw publicationError;
+	} finally {
+		await rm(nextLink, { force: true });
+	}
+
+	await dependencies.publicationHook?.('activated');
+	await ensureReleaseEntryLinks(paths, move);
+	await syncInstallationDirectory(paths.installDirectory);
+	await finishActivatedReleaseInstallation(paths);
+}
+
+async function currentGenerationDirectory(
+	paths: ReleaseInstallationPaths
+): Promise<string | undefined> {
+	try {
+		return path.resolve(
+			path.dirname(paths.currentLink),
+			await readlink(paths.currentLink)
+		);
+	} catch (error) {
+		if (isMissingPathError(error) || isPathError(error, 'EINVAL')) {
+			return undefined;
+		}
+
+		throw error;
+	}
+}
+
+async function recoverReleaseInstallation(
+	paths: ReleaseInstallationPaths,
+	move: RenameFile
+): Promise<void> {
+	let journal: ReleaseInstallationJournal;
+
+	try {
+		journal = releaseInstallationJournalSchema.parse(
+			JSON.parse(await readFile(paths.journal, 'utf8'))
+		);
+	} catch (error) {
+		if (isMissingPathError(error)) {
+			return;
+		}
+
+		throw new ReleaseInstallationStateError(paths.journal, { cause: error });
+	}
+
+	assertReleaseInstallationJournalTopology(paths, journal);
+
+	const activeGeneration = await currentGenerationDirectory(paths);
+
+	if (activeGeneration === path.resolve(journal.generationDirectory)) {
+		await ensureReleaseEntryLinks(paths, move);
+		await finishActivatedReleaseInstallation(paths);
+		return;
+	}
+
+	await rollbackReleaseInstallation(paths, journal, move);
+}
+
+function assertReleaseInstallationJournalTopology(
+	paths: ReleaseInstallationPaths,
+	journal: ReleaseInstallationJournal
+): void {
+	const generationDirectory = path.resolve(journal.generationDirectory);
+	const previousGenerationDirectory =
+		journal.previousGenerationDirectory === undefined
+			? undefined
+			: path.resolve(journal.previousGenerationDirectory);
+
+	if (
+		!isReleaseGenerationDirectory(paths, generationDirectory) ||
+		(previousGenerationDirectory !== undefined &&
+			(previousGenerationDirectory === generationDirectory ||
+				!isReleaseGenerationDirectory(paths, previousGenerationDirectory)))
+	) {
+		throw new ReleaseInstallationStateError(paths.journal);
+	}
+}
+
+function isReleaseGenerationDirectory(
+	paths: ReleaseInstallationPaths,
+	candidate: string
+): boolean {
+	const name = path.basename(candidate);
+
+	return (
+		path.dirname(candidate) === path.resolve(paths.generationsDirectory) &&
+		(name.startsWith('generation-') || /^sha256-[a-f\d]{64}$/u.test(name))
+	);
+}
+
+async function ensureReleaseEntryLinks(
+	paths: ReleaseInstallationPaths,
+	move: RenameFile
+): Promise<void> {
+	for (const name of releaseExecutableNames) {
+		const destination = path.join(paths.installDirectory, name);
+		const expected = path.join(releaseCurrentLinkName, name);
+
+		try {
+			if ((await readlink(destination)) === expected) {
+				continue;
+			}
+		} catch (error) {
+			if (!isMissingPathError(error) && !isPathError(error, 'EINVAL')) {
+				throw error;
+			}
+		}
+
+		const replacement = path.join(
+			paths.stateDirectory,
+			`.entry-${name}-${randomUUID()}`
+		);
+
+		try {
+			await symlink(expected, replacement);
+			await move(replacement, destination);
+		} finally {
+			await rm(replacement, { force: true });
+		}
+	}
+}
+
+async function finishActivatedReleaseInstallation(
+	paths: ReleaseInstallationPaths
+): Promise<void> {
+	const activeGeneration = await currentGenerationDirectory(paths);
+
+	if (
+		activeGeneration === undefined ||
+		!isReleaseGenerationDirectory(paths, activeGeneration)
+	) {
+		throw new ReleaseInstallationStateError(paths.currentLink);
+	}
+
+	const marker = await open(
+		path.join(activeGeneration, releaseActivatedMarkerName),
+		'w',
+		0o600
+	);
+
+	try {
+		await marker.writeFile('activated\n');
+		await marker.sync();
+	} finally {
+		await marker.close();
+	}
+
+	await syncDirectory(activeGeneration);
+	await rm(paths.journal, { force: true });
+	await Promise.all([
+		syncDirectory(paths.stateDirectory),
+		syncDirectory(paths.generationsDirectory)
+	]);
+}
+
+async function rollbackReleaseInstallation(
+	paths: ReleaseInstallationPaths,
+	journal: ReleaseInstallationJournal,
+	move: RenameFile,
+	publicationError?: unknown
+): Promise<void> {
+	try {
+		if (journal.previousGenerationDirectory === undefined) {
+			await rm(paths.currentLink, { force: true });
+		} else {
+			const previousLink = path.join(paths.stateDirectory, '.previous-current');
+			const previousTarget = path.relative(
+				paths.installDirectory,
+				journal.previousGenerationDirectory
+			);
+
+			await rm(previousLink, { force: true });
+			await symlink(previousTarget, previousLink);
+			await move(previousLink, paths.currentLink);
+		}
+
+		await syncDirectory(paths.installDirectory);
+	} catch (error) {
+		const failures =
+			publicationError === undefined ? [error] : [publicationError, error];
+		throw new ReleaseInstallationRollbackError(paths.journal, {
+			cause: new AggregateError(
+				failures,
+				'Release publication and rollback both failed'
+			)
+		});
+	}
+
+	await rm(paths.journal, { force: true });
+	await Promise.all([
+		syncDirectory(paths.stateDirectory),
+		syncDirectory(paths.generationsDirectory)
+	]);
+}
+
+async function writeDurableJournal(
+	paths: ReleaseInstallationPaths,
+	journal: ReleaseInstallationJournal
+): Promise<void> {
+	const temporary = `${paths.journal}.new`;
+	const handle = await open(temporary, 'w', 0o600);
+
+	try {
+		await handle.writeFile(`${JSON.stringify(journal)}\n`);
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+
+	await rename(temporary, paths.journal);
+	await syncDirectory(paths.stateDirectory);
+}
+
+async function syncReleaseGeneration(
+	generationDirectory: string,
+	syncInstallationDirectory: (directoryPath: string) => Promise<void>
+): Promise<void> {
+	for (const name of releaseExecutableNames) {
+		const handle = await open(path.join(generationDirectory, name), 'r');
+
+		try {
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+	}
+
+	await syncInstallationDirectory(generationDirectory);
+}
+
+async function syncDirectory(directoryPath: string): Promise<void> {
+	const directory = await open(directoryPath, constants.O_RDONLY);
+
+	try {
+		await directory.sync();
+	} finally {
+		await directory.close();
+	}
+}
+
 function isMissingPathError(error: unknown): boolean {
+	return isPathError(error, 'ENOENT');
+}
+
+function isPathError(error: unknown, code: string): boolean {
 	return (
 		typeof error === 'object' &&
 		error !== null &&
 		'code' in error &&
-		error.code === 'ENOENT'
+		error.code === code
 	);
 }
 
@@ -515,13 +1434,31 @@ export async function prepareReleaseExecutable(
 	candidate: string
 ): Promise<void> {
 	try {
-		const metadata = await stat(candidate);
+		const metadata = await lstat(candidate);
 
 		if (!metadata.isFile()) {
 			throw new ReleaseInstallationIncompleteError(candidate);
 		}
 
 		await chmod(candidate, 0o755);
+		await access(candidate, constants.X_OK);
+	} catch (error) {
+		if (error instanceof ReleaseInstallationIncompleteError) {
+			throw error;
+		}
+
+		throw new ReleaseInstallationIncompleteError(candidate, { cause: error });
+	}
+}
+
+async function validateReleaseExecutable(candidate: string): Promise<void> {
+	try {
+		const metadata = await lstat(candidate);
+
+		if (!metadata.isFile()) {
+			throw new ReleaseInstallationIncompleteError(candidate);
+		}
+
 		await access(candidate, constants.X_OK);
 	} catch (error) {
 		if (error instanceof ReleaseInstallationIncompleteError) {
@@ -699,16 +1636,24 @@ function findFirstReleaseAsset(
 	throw new ReleaseAssetNotFoundError(release.tagName, names.join(' or '));
 }
 
-async function downloadAsset(
+/** Download one release asset while honouring the setup invocation's cancellation. */
+export async function downloadAsset(
 	asset: ReleaseAsset,
 	destination: string,
-	githubToken: string
-): Promise<void> {
-	const response = await retryingFetcher(fetch)(asset.url, {
-		headers: requestHeaders(githubToken, {
-			accept: 'application/octet-stream'
-		})
-	});
+	githubToken: string,
+	dependencies: DownloadAssetDependencies = {}
+): Promise<DownloadedAsset> {
+	dependencies.signal?.throwIfAborted();
+	const maximumBytes = dependencies.maximumBytes ?? maximumReleaseAssetBytes;
+	const response = await retryingFetcher(dependencies.fetch ?? fetch)(
+		asset.url,
+		{
+			headers: requestHeaders(githubToken, {
+				accept: 'application/octet-stream'
+			}),
+			...(dependencies.signal !== undefined && { signal: dependencies.signal })
+		}
+	);
 
 	if (!response.ok) {
 		throw new GithubApiError(`failed to download ${asset.name}`, {
@@ -716,21 +1661,94 @@ async function downloadAsset(
 		});
 	}
 
-	const bytes = Buffer.from(await response.arrayBuffer());
-	await writeFile(destination, bytes);
+	const contentLength = response.headers.get('content-length');
+	const declaredBytes =
+		contentLength === null ? undefined : Number(contentLength);
+
+	if (
+		declaredBytes !== undefined &&
+		Number.isFinite(declaredBytes) &&
+		declaredBytes > maximumBytes
+	) {
+		await response.body?.cancel();
+		throw new DownloadAssetTooLargeError(
+			asset.name,
+			maximumBytes,
+			declaredBytes
+		);
+	}
+
+	const body = response.body;
+	if (body === null) {
+		await writeFile(destination, '', { mode: 0o600 });
+		return { bytes: 0, sha256: createHash('sha256').digest('hex') };
+	}
+
+	const reader = body.getReader();
+	const handle = await open(destination, 'wx', 0o600);
+	const digest = createHash('sha256');
+	let bytes = 0;
+	let downloadError: unknown;
+	const abort = (): void => {
+		void reader.cancel(dependencies.signal?.reason);
+	};
+	dependencies.signal?.addEventListener('abort', abort, { once: true });
+
+	try {
+		for (;;) {
+			dependencies.signal?.throwIfAborted();
+			const chunk = await reader.read();
+			dependencies.signal?.throwIfAborted();
+
+			if (chunk.done) {
+				break;
+			}
+
+			bytes += chunk.value.byteLength;
+			if (bytes > maximumBytes) {
+				await reader.cancel();
+				throw new DownloadAssetTooLargeError(asset.name, maximumBytes, bytes);
+			}
+
+			digest.update(chunk.value);
+			let offset = 0;
+			while (offset < chunk.value.byteLength) {
+				const written = await handle.write(
+					chunk.value,
+					offset,
+					chunk.value.byteLength - offset
+				);
+				offset += written.bytesWritten;
+			}
+		}
+	} catch (error) {
+		downloadError = error;
+	} finally {
+		dependencies.signal?.removeEventListener('abort', abort);
+		await handle.close();
+	}
+
+	if (downloadError !== undefined) {
+		await rm(destination, { force: true });
+		dependencies.signal?.throwIfAborted();
+		throw downloadError instanceof Error
+			? downloadError
+			: new Error(`failed to download ${asset.name}`, {
+					cause: downloadError
+				});
+	}
+
+	return { bytes, sha256: digest.digest('hex') };
 }
 
-async function verifyChecksum(
-	checksumPath: string,
+function verifyChecksum(
+	assetName: string,
+	actualChecksum: string,
 	expectedChecksum: string
-): Promise<void> {
-	const actualChecksum = createHash('sha256')
-		.update(await readFile(checksumPath))
-		.digest('hex');
-
+): void {
 	if (actualChecksum !== expectedChecksum) {
 		throw new ChecksumMismatchError(
-			path.basename(checksumPath),
+			assetName,
 			expectedChecksum,
 			actualChecksum
 		);
@@ -749,25 +1767,30 @@ export async function verifyReleaseAttestation(
 	tagName: string,
 	dependencies: VerifyReleaseDependencies = {}
 ): Promise<string> {
+	options.signal?.throwIfAborted();
+
 	const octokit = buildOctokit(options, dependencies.fetch);
+	const unauthenticatedOctokit = buildOctokit(
+		{ ...options, githubToken: '' },
+		dependencies.fetch
+	);
 	const verify = dependencies.verify ?? verifyBundle;
 	const [owner, repo] = splitRepository(options.releaseRepository);
 	const archiveName = path.basename(archivePath);
-	const subjectDigest = createHash('sha256')
-		.update(await readFile(archivePath))
-		.digest('hex');
-	const bundles = await fetchAttestationBundles(
-		octokit,
-		owner,
-		repo,
-		subjectDigest
+	const subjectDigest =
+		dependencies.subjectDigest ??
+		(await (dependencies.hashFile ?? sha256File)(archivePath, options.signal));
+	const attestations = await githubRequest(options.signal, () =>
+		listAttestations(octokit, owner, repo, subjectDigest)
 	);
 
-	if (bundles.length === 0) {
+	if (attestations.length === 0) {
 		throw new AttestationNotFoundError(archiveName);
 	}
 
-	const tagCommit = await fetchTagCommit(octokit, owner, repo, tagName);
+	const tagCommit = await githubRequest(options.signal, () =>
+		fetchTagCommit(octokit, owner, repo, tagName)
+	);
 	const policy = identityPolicy({
 		certificateIdentityRegex: releaseWorkflowIdentityRegex(
 			options.releaseRepository
@@ -776,8 +1799,18 @@ export async function verifyReleaseAttestation(
 	});
 	let lastFailure: unknown;
 
-	for (const bundle of bundles) {
+	for (const attestation of attestations) {
+		options.signal?.throwIfAborted();
+
 		try {
+			const bundle = await fetchAttestationBundle(
+				octokit,
+				unauthenticatedOctokit,
+				githubApiOrigin(options.environment),
+				attestation
+			);
+			options.signal?.throwIfAborted();
+
 			await verifyOneReleaseBundle({
 				bundle,
 				policy,
@@ -786,18 +1819,43 @@ export async function verifyReleaseAttestation(
 				subjectDigest,
 				tagName,
 				tagCommit,
-				sourceRepository: options.releaseRepository
+				sourceRepository: options.releaseRepository,
+				...(options.signal !== undefined && { signal: options.signal })
 			});
 
 			return tagCommit;
 		} catch (error) {
+			options.signal?.throwIfAborted();
 			lastFailure = error;
 		}
 	}
 
-	throw new AttestationVerificationFailedError(archiveName, bundles.length, {
-		cause: lastFailure
-	});
+	throw new AttestationVerificationFailedError(
+		archiveName,
+		attestations.length,
+		{ cause: lastFailure }
+	);
+}
+
+async function sha256File(
+	filePath: string,
+	signal?: AbortSignal
+): Promise<string> {
+	signal?.throwIfAborted();
+	const digest = createHash('sha256');
+	const stream = createReadStream(filePath, { signal });
+
+	try {
+		for await (const chunk of stream) {
+			signal?.throwIfAborted();
+			digest.update(chunk as Buffer);
+		}
+	} catch (error) {
+		signal?.throwIfAborted();
+		throw error;
+	}
+
+	return digest.digest('hex');
 }
 
 interface ReleaseBundleVerification {
@@ -809,12 +1867,17 @@ interface ReleaseBundleVerification {
 	readonly tagName: string;
 	readonly tagCommit: string;
 	readonly sourceRepository: string;
+	readonly signal?: AbortSignal;
 }
 
 async function verifyOneReleaseBundle(
 	options: ReleaseBundleVerification
 ): Promise<void> {
+	options.signal?.throwIfAborted();
+
 	const verified = await options.verify(options.bundle, options.policy, {});
+	options.signal?.throwIfAborted();
+
 	if (
 		verified.subjectDigests.length !== 1 ||
 		verified.subjectDigests[0] !== options.subjectDigest
@@ -846,48 +1909,57 @@ async function verifyOneReleaseBundle(
 	}
 }
 
-async function fetchAttestationBundles(
-	octokit: Octokit,
-	owner: string,
-	repo: string,
-	subjectDigest: string
-): Promise<Uint8Array[]> {
-	const attestations = await listAttestations(
-		octokit,
-		owner,
-		repo,
-		subjectDigest
+const attestationSchema = z
+	.strictObject({
+		bundle: z.looseObject({}).optional(),
+		bundle_url: z.url().optional(),
+		initiator: z.string().optional(),
+		repository_id: z.number().int().optional()
+	})
+	.refine(
+		(attestation) =>
+			attestation.bundle !== undefined || attestation.bundle_url !== undefined,
+		{ message: 'must contain bundle or bundle_url' }
 	);
-	const encoder = new TextEncoder();
-	const bundles: Uint8Array[] = [];
 
-	for (const attestation of attestations) {
-		if (attestation.bundle !== undefined) {
-			bundles.push(encoder.encode(JSON.stringify(attestation.bundle)));
-		}
-	}
+const attestationPageSchema = z.strictObject({
+	attestations: z.array(attestationSchema).optional()
+});
 
-	return bundles;
-}
+type Attestation = z.infer<typeof attestationSchema>;
+
+const attestationBundleSchema = z.looseObject({});
 
 async function listAttestations(
 	octokit: Octokit,
 	owner: string,
 	repo: string,
 	subjectDigest: string
-): Promise<readonly { readonly bundle?: unknown }[]> {
+): Promise<readonly Attestation[]> {
 	try {
-		const { data } = await octokit.rest.repos.listAttestations({
-			owner,
-			repo,
-			subject_digest: `sha256:${subjectDigest}`,
-			predicate_type: provenancePredicateType
-		});
+		const attestations = await octokit.paginate(
+			octokit.rest.repos.listAttestations,
+			{
+				owner,
+				repo,
+				subject_digest: `sha256:${subjectDigest}`,
+				predicate_type: provenancePredicateType,
+				per_page: 100
+			},
+			(response) => {
+				const parsed = attestationPageSchema.parse(response.data);
 
-		return data.attestations ?? [];
+				return parsed.attestations ?? [];
+			}
+		);
+
+		return attestations;
 	} catch (error) {
 		if (error instanceof RequestError && error.status === notFoundStatus) {
 			return [];
+		}
+		if (error instanceof z.ZodError) {
+			throw new MalformedReleaseResponseError({ cause: error });
 		}
 
 		throw new GithubApiError('failed to fetch attestations', {
@@ -895,6 +1967,49 @@ async function listAttestations(
 			cause: error
 		});
 	}
+}
+
+async function fetchAttestationBundle(
+	octokit: Octokit,
+	unauthenticatedOctokit: Octokit,
+	githubApiOrigin: string,
+	attestation: Attestation
+): Promise<Uint8Array> {
+	const encoder = new TextEncoder();
+
+	if (attestation.bundle !== undefined) {
+		return encoder.encode(JSON.stringify(attestation.bundle));
+	}
+
+	const bundleUrl = attestation.bundle_url;
+	if (bundleUrl === undefined) {
+		throw new MalformedReleaseResponseError();
+	}
+
+	const url = new URL(bundleUrl);
+	if (
+		url.protocol !== 'https:' ||
+		url.username !== '' ||
+		url.password !== '' ||
+		url.hash !== ''
+	) {
+		throw new MalformedReleaseResponseError();
+	}
+
+	const bundleOctokit =
+		url.origin === githubApiOrigin ? octokit : unauthenticatedOctokit;
+	const response = await bundleOctokit.request(`GET ${url.href}`);
+	const parsed = attestationBundleSchema.safeParse(response.data);
+
+	if (!parsed.success) {
+		throw new MalformedReleaseResponseError({ cause: parsed.error });
+	}
+
+	return encoder.encode(JSON.stringify(parsed.data));
+}
+
+function githubApiOrigin(environment: Environment): string {
+	return new URL(environment.GITHUB_API_URL ?? 'https://api.github.com').origin;
 }
 
 export async function fetchTagCommit(
@@ -907,7 +2022,7 @@ export async function fetchTagCommit(
 		const { data } = await octokit.rest.repos.getCommit({
 			owner,
 			repo,
-			ref: tagName
+			ref: `tags/${tagName}`
 		});
 
 		return data.sha;

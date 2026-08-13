@@ -32,6 +32,7 @@ const githubActionsDocumentation = new URL(
 	'../docs/github-actions.md',
 	import.meta.url
 );
+const releasesDocumentation = new URL('../docs/releases.md', import.meta.url);
 const trustRulesDocumentation = new URL(
 	'../docs/trust-rules.md',
 	import.meta.url
@@ -155,6 +156,31 @@ describe('reusable workflow action checkout isolation', () => {
 });
 
 describe('cupboard flake publish release coordinates', () => {
+	it('refuses unsupported GitHub Enterprise Server execution before using workflow identity', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+		const cloudGuard = contents.indexOf(
+			'      - name: Require GitHub Cloud workflow identity'
+		);
+		const workflowCheckout = contents.indexOf(
+			'          repository: ${{ job.workflow_repository }}'
+		);
+
+		expect({
+			guardPresent: cloudGuard !== -1,
+			guardPrecedesIdentityUse:
+				cloudGuard !== -1 &&
+				workflowCheckout !== -1 &&
+				cloudGuard < workflowCheckout,
+			checksServerUrl: contents.includes(
+				'if [ "${GITHUB_SERVER_URL}" != https://github.com ]; then'
+			)
+		}).toStrictEqual({
+			guardPresent: true,
+			guardPrecedesIdentityUse: true,
+			checksServerUrl: true
+		});
+	});
+
 	it('resolves one canonical cupboard coordinate for every consuming job', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 		const lines = contents.split('\n');
@@ -424,6 +450,31 @@ describe('cupboard flake publish release coordinates', () => {
 });
 
 describe('cupboard publish release coordinates', () => {
+	it('refuses unsupported GitHub Enterprise Server execution before using workflow identity', async () => {
+		const contents = await readFile(publishWorkflow, 'utf8');
+		const cloudGuard = contents.indexOf(
+			'      - name: Require GitHub Cloud workflow identity'
+		);
+		const workflowCheckout = contents.indexOf(
+			'          repository: ${{ job.workflow_repository }}'
+		);
+
+		expect({
+			guardPresent: cloudGuard !== -1,
+			guardPrecedesIdentityUse:
+				cloudGuard !== -1 &&
+				workflowCheckout !== -1 &&
+				cloudGuard < workflowCheckout,
+			checksServerUrl: contents.includes(
+				'if [ "${GITHUB_SERVER_URL}" != https://github.com ]; then'
+			)
+		}).toStrictEqual({
+			guardPresent: true,
+			guardPrecedesIdentityUse: true,
+			checksServerUrl: true
+		});
+	});
+
 	it('documents SHA-pinned automatic resolution without duplicate coordinates', async () => {
 		const documentation = await readFile(githubActionsDocumentation, 'utf8');
 		const reusableWorkflowSection = documentation.slice(
@@ -443,6 +494,29 @@ describe('cupboard publish release coordinates', () => {
 			workflowCommit: '0123456789abcdef0123456789abcdef01234567',
 			versionOverride: false,
 			sourceCommit: false
+		});
+	});
+
+	it('documents literal-first legacy version fallback and the Cloud boundary', async () => {
+		const documentation = await readFile(githubActionsDocumentation, 'utf8');
+		const prose = documentation.replaceAll(/\s+/gu, ' ');
+
+		expect({
+			literalFirst: prose.includes(
+				'`1.2.3` first resolves the literal `1.2.3` tag.'
+			),
+			legacyFallback: prose.includes(
+				'the actions try the legacy `v1.2.3` spelling.'
+			),
+			cloudOnly: prose.includes('The reusable workflows require GitHub Cloud.'),
+			identityReason: prose.includes(
+				'GHES does not expose the `job.workflow_*` identity fields'
+			)
+		}).toStrictEqual({
+			literalFirst: true,
+			legacyFallback: true,
+			cloudOnly: true,
+			identityReason: true
 		});
 	});
 
@@ -532,6 +606,25 @@ describe('cupboard publish release coordinates', () => {
 			omitsSource: true,
 			automaticResolution: true
 		});
+	});
+});
+
+describe('cupboard release asset compatibility', () => {
+	it('documents stable new names and legacy installer lookup', async () => {
+		const documentation = await readFile(releasesDocumentation, 'utf8');
+		const prose = documentation.replaceAll(/\s+/gu, ' ');
+
+		expect({
+			stablePlatforms: [
+				'cupboard-linux-x64.tar.gz',
+				'cupboard-linux-arm64.tar.gz',
+				'cupboard-macos-x64.tar.gz',
+				'cupboard-macos-arm64.tar.gz'
+			].every((name) => documentation.includes(`\`${name}\``)),
+			legacyLookup: prose.includes(
+				'lookup support for the older `cupboard-vX.Y.Z-<platform>-<arch>.tar.gz` assets.'
+			)
+		}).toStrictEqual({ stablePlatforms: true, legacyLookup: true });
 	});
 });
 

@@ -1007,6 +1007,33 @@ describe('NixDaemonStoreClient', () => {
 		}
 	);
 
+	it('rejects a build status outside the Nix 2.34 worker protocol table', async () => {
+		const build = buildResultCases[0];
+
+		if (build === undefined) {
+			throw new Error('The build result fixture is missing');
+		}
+
+		const client = new NixDaemonStoreClient({
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport(
+						{},
+						{
+							builds: {
+								expectedTargets: build.expectedTargets,
+								results: [{ ...build.result, status: 15 }]
+							}
+						}
+					)
+				)
+		});
+
+		await expect(client.buildPathsWithResults(build.targets)).rejects.toThrow(
+			'unknown build status 15'
+		);
+	});
+
 	it('accepts an absolute realisation output inside the active store directory', async () => {
 		const build = buildResultCases[5];
 

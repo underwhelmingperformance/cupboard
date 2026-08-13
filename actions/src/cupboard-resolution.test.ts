@@ -157,7 +157,7 @@ describe('resolved cupboard JSON', () => {
 });
 
 describe('resolveCupboard', () => {
-	it('canonicalises an arbitrary explicit release tag', async () => {
+	it('canonicalises an arbitrary explicit release tag without resolving a colliding branch', async () => {
 		const requests: string[] = [];
 		const fetcher: typeof fetch = (input) => {
 			const url = requestUrl(input);
@@ -169,8 +169,12 @@ describe('resolveCupboard', () => {
 				);
 			}
 
-			if (url.endsWith('/repos/owner/cupboard/commits/production')) {
+			if (url.endsWith('/repos/owner/cupboard/commits/tags%2Fproduction')) {
 				return Promise.resolve(Response.json({ sha: otherSha }));
+			}
+
+			if (url.endsWith('/repos/owner/cupboard/commits/production')) {
+				return Promise.resolve(Response.json({ sha: workflowSha }));
 			}
 
 			return Promise.resolve(new Response('not found', { status: 404 }));
@@ -188,7 +192,7 @@ describe('resolveCupboard', () => {
 		});
 		expect(requests).toStrictEqual([
 			'https://api.github.com/repos/owner/cupboard/releases/tags/production',
-			'https://api.github.com/repos/owner/cupboard/commits/production'
+			'https://api.github.com/repos/owner/cupboard/commits/tags%2Fproduction'
 		]);
 	});
 
@@ -204,7 +208,7 @@ describe('resolveCupboard', () => {
 				);
 			}
 
-			if (url.endsWith('/repos/owner/cupboard/commits/1.2.3')) {
+			if (url.endsWith('/repos/owner/cupboard/commits/tags%2F1.2.3')) {
 				return Promise.resolve(Response.json({ sha: otherSha }));
 			}
 
@@ -229,7 +233,7 @@ describe('resolveCupboard', () => {
 		});
 		expect(requests.map(({ url }) => url)).toStrictEqual([
 			'https://github.example/api/v3/repos/owner/cupboard/releases/tags/1.2.3',
-			'https://github.example/api/v3/repos/owner/cupboard/commits/1.2.3'
+			'https://github.example/api/v3/repos/owner/cupboard/commits/tags%2F1.2.3'
 		]);
 	});
 
@@ -249,7 +253,7 @@ describe('resolveCupboard', () => {
 				);
 			}
 
-			if (url.endsWith('/repos/owner/cupboard/commits/v1.2.3')) {
+			if (url.endsWith('/repos/owner/cupboard/commits/tags%2Fv1.2.3')) {
 				return Promise.resolve(Response.json({ sha: otherSha }));
 			}
 
@@ -269,7 +273,7 @@ describe('resolveCupboard', () => {
 		expect(requests).toStrictEqual([
 			'https://api.github.com/repos/owner/cupboard/releases/tags/1.2.3',
 			'https://api.github.com/repos/owner/cupboard/releases/tags/v1.2.3',
-			'https://api.github.com/repos/owner/cupboard/commits/v1.2.3'
+			'https://api.github.com/repos/owner/cupboard/commits/tags%2Fv1.2.3'
 		]);
 	});
 
@@ -286,7 +290,7 @@ describe('resolveCupboard', () => {
 				);
 			}
 
-			if (url.endsWith('/repos/owner/cupboard/commits/v2.0.0-rc.1')) {
+			if (url.endsWith('/repos/owner/cupboard/commits/tags%2Fv2.0.0-rc.1')) {
 				return Promise.resolve(Response.json({ sha: otherSha }));
 			}
 
@@ -494,7 +498,7 @@ describe('resolveCupboard', () => {
 		);
 	});
 
-	it('uses the explicit GHES GraphQL endpoint', async () => {
+	it('uses an explicitly supplied GraphQL endpoint', async () => {
 		const urls: string[] = [];
 		const fetcher: typeof fetch = (input) => {
 			urls.push(requestUrl(input));

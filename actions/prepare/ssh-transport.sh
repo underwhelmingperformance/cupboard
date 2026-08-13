@@ -196,7 +196,7 @@ validate_builder_identities() {
 }
 
 validate_caller_ssh_config() {
-  local arguments input_name key_input keyword keyword_lower line normalised_arguments
+  local arguments has_host_block=false input_name key_input keyword keyword_lower line
   input_name="$1"
   key_input="$2"
 
@@ -216,6 +216,17 @@ validate_caller_ssh_config() {
     keyword_lower="$(printf '%s' "${keyword}" | tr '[:upper:]' '[:lower:]')"
 
     case "${keyword_lower}" in
+      host)
+        if [ -z "${arguments}" ]; then
+          error "${input_name} contains a Host block with no patterns"
+        fi
+        has_host_block=true
+        ;;
+      addressfamily|bindaddress|bindinterface|canonicaldomains|canonicalizefallbacklocal|canonicalizehostname|canonicalizemaxdots|casignaturealgorithms|ciphers|compression|connectionattempts|connecttimeout|fingerprinthash|hostkeyalgorithms|hostname|ipqos|kexalgorithms|macs|obscurekeystroketiming|preferredauthentications|pubkeyacceptedalgorithms|rekeylimit|requiredrsasize|serveralivecountmax|serveraliveinterval|setenv|tcpkeepalive|user|port)
+        if [ "${has_host_block}" != true ]; then
+          error "${input_name} must scope ${keyword} under a Host block"
+        fi
+        ;;
       identityfile)
         error "${input_name} must not use IdentityFile; pass the private key through ${key_input}"
         ;;
@@ -243,18 +254,32 @@ validate_caller_ssh_config() {
       controlpersist)
         error "${input_name} must not use ControlPersist; remove SSH multiplexing directives so Cupboard can close every authenticated connection when the action finishes"
         ;;
+      loglevel)
+        error "${input_name} must not use LogLevel because verbose SSH logging can disclose SetEnv secrets"
+        ;;
+      proxycommand)
+        error "${input_name} must not use ProxyCommand because it executes a local command"
+        ;;
+      proxyjump)
+        error "${input_name} must not use ProxyJump because the managed identity is scoped to the selected SSH service"
+        ;;
+      localcommand)
+        error "${input_name} must not use LocalCommand because it executes a local command"
+        ;;
+      permitlocalcommand)
+        error "${input_name} must not use PermitLocalCommand because it enables local command execution"
+        ;;
+      remotecommand)
+        error "${input_name} must not use RemoteCommand because Nix owns the remote daemon command"
+        ;;
       include)
         error "${input_name} must not use Include because included files can add authentication identities; put non-identity settings directly in ${input_name}"
         ;;
       match)
-        # OpenSSH removes quote characters anywhere within a Match criterion,
-        # so spellings such as "exec", 'exec' and e"x"e"c" all select the
-        # executable criterion. Apply the same normalisation before checking.
-        normalised_arguments="${arguments//\"/}"
-        normalised_arguments="${normalised_arguments//\'/}"
-        if [[ "${normalised_arguments}" =~ (^|[[:space:]])!?[Ee][Xx][Ee][Cc]([[:space:]=]|$) ]]; then
-          error "${input_name} must not use Match exec because it can select authentication identities dynamically; use Host or non-exec Match criteria"
-        fi
+        error "${input_name} must not use Match; scope connection settings under Host blocks"
+        ;;
+      *)
+        error "${input_name} does not support the ${keyword} directive; only Host blocks and connection-only directives are allowed"
         ;;
     esac
   done <<< "$3"
