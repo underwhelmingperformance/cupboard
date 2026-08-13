@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
+	AmbiguousReleaseForCommitError,
 	AttestationNotFoundError,
 	AttestationSourceMismatchError,
 	AttestationVerificationFailedError,
@@ -13,6 +14,7 @@ import {
 	ChecksumMismatchError,
 	CommandFailedError,
 	CupboardReportedError,
+	CupboardResolutionJsonError,
 	DerivationGraphShapeError,
 	DerivationNodeMissingError,
 	DerivationRootCountError,
@@ -22,6 +24,7 @@ import {
 	InvalidChecksumLineError,
 	InvalidInputError,
 	LegacyPushSummaryError,
+	MalformedReleaseDiscoveryResponseError,
 	MalformedReleaseResponseError,
 	MissingChecksumError,
 	MissingInputError,
@@ -60,6 +63,24 @@ describe('action errors', () => {
 			'MalformedReleaseResponseError',
 			new MalformedReleaseResponseError(),
 			genericExitCode
+		],
+		[
+			'MalformedReleaseDiscoveryResponseError',
+			new MalformedReleaseDiscoveryResponseError(),
+			genericExitCode
+		],
+		[
+			'AmbiguousReleaseForCommitError',
+			new AmbiguousReleaseForCommitError('owner/repo', 'a'.repeat(40), [
+				'one',
+				'two'
+			]),
+			genericExitCode
+		],
+		[
+			'CupboardResolutionJsonError',
+			new CupboardResolutionJsonError(new SyntaxError('bad JSON')),
+			usageExitCode
 		],
 		[
 			'NoReleaseFoundError',

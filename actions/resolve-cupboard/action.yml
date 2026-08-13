@@ -1,0 +1,95 @@
+name: Resolve cupboard
+description:
+  Resolve a reusable workflow revision to one canonical cupboard acquisition.
+inputs:
+  cupboard-version:
+    description:
+      Optional release override. Use latest or an exact version such as 1.2.3 or
+      v1.2.3. Empty resolves from workflow-sha.
+    required: false
+  workflow-repository:
+    description: Repository containing the called reusable workflow.
+    required: true
+  workflow-ref:
+    description: Full job.workflow_ref value for the called workflow.
+    required: true
+  workflow-sha:
+    description: Full job.workflow_sha value for the called workflow.
+    required: true
+  github-token:
+    description: GitHub token used for release API calls.
+    required: false
+  github-api-url:
+    description: GitHub REST API base URL.
+    required: false
+  github-graphql-url:
+    description: GitHub GraphQL API URL.
+    required: false
+outputs:
+  cupboard:
+    description: Canonical release or source acquisition as validated JSON.
+    value: ${{ steps.resolve.outputs.cupboard }}
+runs:
+  using: composite
+  steps:
+    - name: Resolve the pinned toolchain
+      id: toolchain
+      shell: bash
+      run: |
+        manifest="$GITHUB_ACTION_PATH/../../package.json"
+        node_version_file="$GITHUB_ACTION_PATH/../../.node-version"
+        version="$(sed -n 's/.*"packageManager": *"pnpm@\([^+"]*\).*/\1/p' "$manifest")"
+        if [ -z "$version" ]; then
+          echo "::error::package.json declares no pnpm packageManager pin"
+          exit 1
+        fi
+        if [ ! -r "$node_version_file" ]; then
+          echo "::error::.node-version is not readable"
+          exit 1
+        fi
+        node_version="$(tr -d '\r\n' < "$node_version_file")"
+        if [ -z "$node_version" ]; then
+          echo "::error::.node-version declares no Node version"
+          exit 1
+        fi
+        echo "pnpm-version=$version" | tee -a "$GITHUB_OUTPUT"
+        echo "node-version=$node_version" | tee -a "$GITHUB_OUTPUT"
+
+    - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      with:
+        version: ${{ steps.toolchain.outputs.pnpm-version }}
+        package_json_file: ${{ github.action_path }}/../../package.json
+
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      with:
+        node-version: ${{ steps.toolchain.outputs.node-version }}
+
+    - name: Install action dependencies
+      shell: bash
+      working-directory: ${{ github.action_path }}/../..
+      run: pnpm install --filter @cupboard/action... --prod --frozen-lockfile
+
+    - name: Resolve cupboard
+      id: resolve
+      shell: bash
+      env:
+        CUPBOARD_VERSION: ${{ inputs.cupboard-version }}
+        WORKFLOW_REPOSITORY: ${{ inputs.workflow-repository }}
+        WORKFLOW_REF: ${{ inputs.workflow-ref }}
+        WORKFLOW_SHA: ${{ inputs.workflow-sha }}
+        GH_TOKEN: ${{ inputs.github-token || github.token }}
+        GITHUB_API_URL_INPUT: ${{ inputs.github-api-url || github.api_url }}
+        GITHUB_GRAPHQL_URL_INPUT:
+          ${{ inputs.github-graphql-url || github.graphql_url }}
+      run: |
+        args=(resolve-cupboard
+          --cupboard-version "$CUPBOARD_VERSION"
+          --workflow-repository "$WORKFLOW_REPOSITORY"
+          --workflow-ref "$WORKFLOW_REF"
+          --workflow-sha "$WORKFLOW_SHA"
+          --github-token "$GH_TOKEN"
+          --github-api-url "$GITHUB_API_URL_INPUT"
+          --github-graphql-url "$GITHUB_GRAPHQL_URL_INPUT")
+        node --experimental-transform-types \
+          --disable-warning=ExperimentalWarning \
+          "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"

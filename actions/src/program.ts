@@ -16,6 +16,7 @@ import { registerBuildCommand } from './commands/build.ts';
 import { registerBuildCohortCommand } from './commands/build-cohort.ts';
 import { registerPlanCommand } from './commands/plan.ts';
 import { registerPushCommand } from './commands/push.ts';
+import { registerResolveCupboardCommand } from './commands/resolve-cupboard.ts';
 import { registerSetupCommand } from './commands/setup.ts';
 import { wasAlreadyReported } from './errors.ts';
 import type { Environment } from './inputs.ts';
@@ -64,6 +65,7 @@ export function buildProgram(
 
 	registerSetupCommand(program, environment);
 	registerPushCommand(program, environment);
+	registerResolveCupboardCommand(program, environment);
 	registerAttestCommand(program, environment);
 	registerAttestAttachCommand(program, environment);
 	registerBuildCommand(program, environment);
