@@ -1,16 +1,21 @@
 import type { NixValidPathInfo } from '@cupboard/nix';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
-import type { BuildSubject } from '@cupboard/protocol/build';
+import type {
+	BuildSubjectV3,
+	SubjectVerification
+} from '@cupboard/protocol/build';
 import { z } from 'zod';
 
 /**
- * One build activity a JSON activity log attributed: the derivation that ran
- * and the machine it ran on. An empty machine is a local build; a non-empty
- * one names the remote builder that produced the outputs.
+ * One build activity a JSON activity log attributed: the derivation that ran,
+ * the machine it ran on, and whether a local rebuild has since reproduced its
+ * outputs. An empty machine is a local build; a non-empty one names the remote
+ * builder that produced the outputs.
  */
 export interface BuildActivity {
 	readonly derivation: string;
 	readonly machine: string;
+	readonly verified: boolean;
 }
 
 /**
@@ -60,7 +65,7 @@ export function parseBuildActivities(log: string): readonly BuildActivity[] {
 		}
 
 		const [derivation, machine] = start.data.fields;
-		activities.set(derivation, { derivation, machine });
+		activities.set(derivation, { derivation, machine, verified: false });
 	}
 
 	return activities
@@ -103,9 +108,10 @@ export function derivationsRequiringVerification(
 
 /**
  * The successful attempt's attribution once a verification pass has rebuilt
- * the given derivations locally: each verified derivation's activity is
- * re-recorded as a local build, since the local rebuild is what the run
- * finally trusts.
+ * the given derivations locally: each verified derivation is marked as
+ * reproduced, keeping the machine its log named so the receipt still records
+ * where the outputs first came from. A derivation an earlier attempt built has
+ * no activity in this attempt, so it is recorded with no machine.
  */
 export function verifiedAttribution(
 	attempt: BuildAttempt,
@@ -116,29 +122,61 @@ export function verifiedAttribution(
 	);
 
 	for (const derivation of verified) {
-		activities.set(derivation, { derivation, machine: '' });
+		const activity = activities.get(derivation);
+
+		activities.set(derivation, {
+			derivation,
+			machine: activity?.machine ?? '',
+			verified: true
+		});
 	}
 
 	return { ...attempt, activities: activities.values().toArray() };
 }
 
+// How far a build activity establishes that its outputs are this run's. A local
+// rebuild is what the run finally trusts, so a reproduced activity reads as
+// verified whatever machine first ran it; an unreproduced remote build is
+// attributed to that machine and nothing more.
+function verificationOf(activity: BuildActivity): SubjectVerification {
+	if (activity.verified) {
+		return 'verified-rebuild';
+	}
+
+	return activity.machine === '' ? 'local' : 'unverified';
+}
+
+// One derivation's first build within a run: the attempt that ran it and the
+// activity that attempt recorded for it.
+interface FirstBuild {
+	readonly attempt: number;
+	readonly attemptId: string;
+	readonly activity: BuildActivity;
+}
+
 /**
  * The receipt subjects a run's attribution yields: one per final path whose
- * deriver some attempt built, carrying the earliest attempt that produced it.
- * A path that was already valid before the run, or whose deriver no attempt
+ * deriver some attempt built, carrying the earliest attempt that produced it,
+ * the store the run realised it in, and how far the build was established. A
+ * path that was already valid before the run, or whose deriver no attempt
  * touched, is not this run's subject.
  */
 export function receiptSubjects(
 	attempts: readonly BuildAttempt[],
 	finalInfos: readonly NixValidPathInfo[],
-	preExisting: ReadonlySet<string>
-): readonly BuildSubject[] {
-	const firstBuild = new Map<string, Omit<BuildAttempt, 'activities'>>();
+	preExisting: ReadonlySet<string>,
+	buildStore: string
+): readonly BuildSubjectV3[] {
+	const firstBuild = new Map<string, FirstBuild>();
 
 	for (const attempt of attempts) {
 		for (const activity of attempt.activities) {
 			if (!firstBuild.has(activity.derivation)) {
-				firstBuild.set(activity.derivation, attempt);
+				firstBuild.set(activity.derivation, {
+					attempt: attempt.attempt,
+					attemptId: attempt.attemptId,
+					activity
+				});
 			}
 		}
 	}
@@ -161,7 +199,12 @@ export function receiptSubjects(
 					narHash: info.narHash.digestHex(),
 					derivation: info.deriver,
 					attempt: built.attempt,
-					attemptId: built.attemptId
+					attemptId: built.attemptId,
+					buildStore,
+					...(built.activity.machine !== '' && {
+						machine: built.activity.machine
+					}),
+					verification: verificationOf(built.activity)
 				}
 			];
 		})

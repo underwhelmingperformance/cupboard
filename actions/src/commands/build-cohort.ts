@@ -534,7 +534,6 @@ export async function buildCohortAction(
 	// the build is over.
 	const isStreamed =
 		inputs.push && inputs.store === '' && buildInstallables.length > 0;
-	const receiptFile = isStreamed ? inputs.receiptFile : '';
 
 	if (isStreamed) {
 		await runBuildPushCohort(
@@ -596,6 +595,23 @@ export async function buildCohortAction(
 		)}\n`
 	);
 
+	// A remote-store cohort has no post-build hook to stream, so its receipt is
+	// reconciled from the store the build ran in: one push over exactly the
+	// paths the build produced publishes them and reads back each one's NAR hash
+	// and deriver, which is all a receipt subject needs. The per-root pushes
+	// that follow negotiate those paths as already-present skips, exactly as
+	// they do behind a streamed build.
+	const isReconciled = inputs.push && inputs.store !== '' && built.length > 0;
+
+	if (isReconciled) {
+		await runCupboard(
+			inputs.cupboardPath,
+			cohortReceiptPushArguments(inputs, built),
+			environment,
+			dependencies.cupboardRunDependencies
+		);
+	}
+
 	if (inputs.push) {
 		await publishCohort(
 			inputs,
@@ -606,6 +622,8 @@ export async function buildCohortAction(
 			dependencies.cupboardRunDependencies
 		);
 	}
+
+	const receiptFile = isStreamed || isReconciled ? inputs.receiptFile : '';
 
 	await setOutput(environment, 'target-paths-file', inputs.targetPathsFile);
 	await setOutput(
@@ -725,6 +743,58 @@ async function runBuildPushCohort(
 		environment,
 		cupboardRunDependencies
 	);
+}
+
+/**
+ * The `cupboard push` argv that publishes a remote-store cohort's built paths
+ * and writes its receipt. The paths are published unretained: the per-root
+ * pushes that follow declare each root over its full target list, so this one
+ * exists to publish what the build produced and to record what the selected
+ * store realised.
+ */
+export function cohortReceiptPushArguments(
+	inputs: Pick<
+		BuildCohortInputs,
+		| 'url'
+		| 'audience'
+		| 'cache'
+		| 'store'
+		| 'runRoot'
+		| 'runRootTtl'
+		| 'receiptFile'
+	>,
+	paths: readonly string[]
+): readonly string[] {
+	const arguments_ = [
+		'--no-colour',
+		'push',
+		canonicalHref(inputs.url),
+		...paths,
+		'--github-oidc',
+		'--no-retain',
+		'--store',
+		inputs.store,
+		'--receipt-file',
+		inputs.receiptFile
+	];
+
+	if (inputs.audience !== '') {
+		arguments_.push('--audience', inputs.audience);
+	}
+
+	if (inputs.cache !== '') {
+		arguments_.push('--cache', inputs.cache);
+	}
+
+	if (inputs.runRoot !== '') {
+		arguments_.push('--run-root', inputs.runRoot);
+	}
+
+	if (inputs.runRootTtl !== '') {
+		arguments_.push('--run-root-ttl', inputs.runRootTtl);
+	}
+
+	return arguments_;
 }
 
 /** One root group's own target paths, from a cohort declaring several roots. */

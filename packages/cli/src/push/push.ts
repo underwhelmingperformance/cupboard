@@ -17,6 +17,11 @@ import type {
 	AttestationNegotiateResponse
 } from '@cupboard/protocol/attestations';
 import {
+	buildReceiptV3Schema,
+	type BuildSubjectV3,
+	type ParsedBuildReceiptV3
+} from '@cupboard/protocol/build';
+import {
 	type PushSummaryPath,
 	pushSummaryResultKind,
 	pushSummarySchema
@@ -137,6 +142,13 @@ export interface PushDependencies {
 	readonly uploadConcurrency?: number;
 	/** Report what a push would do, without uploading or committing anything. */
 	readonly dryRun?: boolean;
+	/**
+	 * The build store that realised the pushed paths. Naming it asks the push
+	 * for a build receipt over what it publishes: the store answers each
+	 * target's NAR hash and deriver over the connection this push already
+	 * opened, which is everything a receipt subject needs.
+	 */
+	readonly buildStore?: string;
 }
 
 // Each upload streams one NAR's compression into its R2 PUT, a CPU-bound zstd
@@ -301,7 +313,7 @@ export async function runPush(
 	publication: PublicationCollection,
 	reporter: Reporter,
 	dependencies: PushDependencies
-): Promise<void> {
+): Promise<ParsedBuildReceiptV3 | undefined> {
 	// Validate the retention before any upload work: an invalid root name or
 	// target must fail fast, not after NARs are built and committed. Only the
 	// declared targets are retained; intermediates join no root or pin.
@@ -329,7 +341,7 @@ export async function runPush(
 			: createNarArchive;
 	const compressNar = dependencies.compressNar ?? compressNarToStream;
 
-	await runPushFlow(publication, reporter, {
+	return runPushFlow(publication, reporter, {
 		...dependencies,
 		retention,
 		nix,
@@ -359,6 +371,7 @@ interface PushRuntimeDependencies {
 	readonly readAttestationBundle?: ReadAttestationBundle;
 	readonly uploadConcurrency?: number;
 	readonly dryRun?: boolean;
+	readonly buildStore?: string;
 }
 
 // One publication path with its metadata resolved: a local entry carries the
@@ -512,11 +525,75 @@ async function resolveReferenceEntries(
 		.map((item) => item.path);
 }
 
+/**
+ * The build receipt a push writes for the build it published: the paths that
+ * ended servable, and one subject per published target the build store holds a
+ * deriver for. The store answered every subject's NAR hash and deriver over the
+ * connection the push already opened, so the subjects are what that store
+ * realised; no build was observed here, so each subject is classified as the
+ * coordinating store's. Reference and intermediate entries are nobody's build
+ * subject: a reference is republished from elsewhere and an intermediate is not
+ * a target of this push.
+ */
+function reconciledReceipt(
+	buildStore: string,
+	resolved: readonly ResolvedPushPath[],
+	summaryPaths: readonly PushSummaryPath[]
+): ParsedBuildReceiptV3 {
+	const servable = new Set<string>();
+	const published = new Set<string>();
+
+	for (const path of summaryPaths) {
+		if (path.storePath === undefined) {
+			continue;
+		}
+
+		if (path.outcome === 'committed') {
+			published.add(path.storePath);
+		}
+
+		if (path.outcome === 'committed' || path.outcome === 'already-present') {
+			servable.add(path.storePath);
+		}
+	}
+
+	const subjects = resolved
+		.flatMap((path): BuildSubjectV3[] => {
+			if (path.source !== 'local' || path.kind !== 'target') {
+				return [];
+			}
+
+			const { pathInfo } = path;
+
+			if (pathInfo.deriver === undefined || !servable.has(pathInfo.storePath)) {
+				return [];
+			}
+
+			return [
+				{
+					storePath: pathInfo.storePath,
+					narHash: pathInfo.narHash.digestHex(),
+					derivation: pathInfo.deriver,
+					buildStore,
+					verification: 'coordinating-store'
+				}
+			];
+		})
+		.toSorted((left, right) => byCodeUnit(left.storePath, right.storePath));
+
+	return buildReceiptV3Schema.parse({
+		version: 3,
+		paths: [...servable].toSorted(byCodeUnit),
+		subjects,
+		uploaded: [...published].toSorted(byCodeUnit)
+	});
+}
+
 async function runPushFlow(
 	publication: PublicationCollection,
 	reporter: Reporter,
 	dependencies: PushRuntimeDependencies
-): Promise<void> {
+): Promise<ParsedBuildReceiptV3 | undefined> {
 	const {
 		nix,
 		client,
@@ -608,7 +685,7 @@ async function runPushFlow(
 
 	if (dependencies.dryRun === true) {
 		await reportDryRun(reporter, client, resolved, retention);
-		return;
+		return undefined;
 	}
 
 	const { response: negotiation, hasGraceFacts } = await reporter.phase(
@@ -1031,6 +1108,10 @@ async function runPushFlow(
 				failures.map((failure) => StorePath.basename(failure.storePath))
 			);
 		}
+
+		return dependencies.buildStore === undefined
+			? undefined
+			: reconciledReceipt(dependencies.buildStore, resolved, summaryPaths);
 	} finally {
 		session?.close();
 	}

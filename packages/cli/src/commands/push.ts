@@ -1,5 +1,6 @@
 import { realpathSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 
 import { Nix } from '@cupboard/nix';
 import {
@@ -30,6 +31,7 @@ import {
 	InvalidUploadConcurrencyError,
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
+	ReceiptFileRequiresStoreError,
 	ReferenceSourcePairError,
 	RunRootTtlWithoutRunRootError
 } from '../errors.ts';
@@ -53,6 +55,7 @@ interface PushOptions {
 	readonly runRootTtl?: TtlSeconds;
 	readonly cache?: string;
 	readonly store?: string;
+	readonly receiptFile?: string;
 	readonly wait?: boolean;
 	readonly waitTimeout?: WaitTimeoutSeconds;
 	readonly attest?: boolean;
@@ -105,6 +108,26 @@ export function validateRetentionChoice(
 	) {
 		throw new OidcRetentionChoiceRequiredError();
 	}
+}
+
+/**
+ * The build store a push records a receipt against, or nothing when the push
+ * writes no receipt. A receipt attributes every subject to the store the run
+ * selected, so a push reading the store Nix itself would use has no selection
+ * to record and is refused.
+ */
+export function receiptBuildStore(
+	options: Pick<PushOptions, 'receiptFile' | 'store'>
+): string | undefined {
+	if (options.receiptFile === undefined) {
+		return undefined;
+	}
+
+	if (options.store === undefined) {
+		throw new ReceiptFileRequiresStoreError();
+	}
+
+	return options.store;
 }
 
 /**
@@ -268,6 +291,10 @@ export function registerPushCommand(
 			parseStoreUri
 		)
 		.option(
+			'--receipt-file <path>',
+			'write a build receipt (JSON) for the published paths to this file, attributing each subject to the store --store names'
+		)
+		.option(
 			'--attestation <bundle>',
 			'file a Sigstore DSSE bundle whose in-toto subject matches a pushed path',
 			collect,
@@ -328,6 +355,8 @@ export function registerPushCommand(
 
 			validateRetentionChoice(options);
 
+			const buildStore = receiptBuildStore(options);
+
 			if (
 				(options.referencePathsFile === undefined) !==
 				(options.referenceSource === undefined)
@@ -375,7 +404,7 @@ export function registerPushCommand(
 				)
 			});
 
-			await runPush(publication, reporter, {
+			const receipt = await runPush(publication, reporter, {
 				client: pushClientFor(url, token, {
 					cache: options.cache,
 					signal: programOptions.signal
@@ -408,7 +437,18 @@ export function registerPushCommand(
 				...(options.uploadConcurrency !== undefined && {
 					uploadConcurrency: options.uploadConcurrency
 				}),
-				...(options.dryRun !== undefined && { dryRun: options.dryRun })
+				...(options.dryRun !== undefined && { dryRun: options.dryRun }),
+				...(buildStore !== undefined && { buildStore })
 			});
+
+			if (receipt === undefined || options.receiptFile === undefined) {
+				return;
+			}
+
+			await mkdir(path.dirname(options.receiptFile), { recursive: true });
+			await writeFile(
+				options.receiptFile,
+				`${JSON.stringify(receipt, undefined, '\t')}\n`
+			);
 		});
 }

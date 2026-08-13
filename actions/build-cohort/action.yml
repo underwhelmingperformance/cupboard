@@ -61,8 +61,8 @@ inputs:
     required: false
   receipt-file:
     description: >-
-      Where to write the `cupboard build-push` receipt. Defaults to a
-      runner-local path under RUNNER_TEMP.
+      Where to write the cohort's build receipt. Defaults to a runner-local path
+      under RUNNER_TEMP.
     required: false
   target-paths-file:
     description: Where to write the cohort's target output paths.
@@ -100,9 +100,10 @@ outputs:
     value: ${{ steps.build-cohort.outputs.counts-file }}
   receipt-file:
     description: >-
-      File containing the `cupboard build-push` receipt, ready for
-      actions/attest. Empty when the cohort did not stream a build (push
-      disabled, a remote store, or nothing to build).
+      File containing the cohort's build receipt, ready for actions/attest. A
+      streamed cohort writes it from its supervised build; a remote-store cohort
+      reconciles it from the store the build ran in. Empty when the cohort
+      published nothing it built (push disabled, or nothing to build).
     value: ${{ steps.build-cohort.outputs.receipt-file }}
   out-link-directory:
     description: >-

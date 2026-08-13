@@ -42,14 +42,59 @@ export type ParsedBuildEvent = z.output<typeof buildEventSchema>;
 // One path this run built, attributed to the attempt whose activity produced
 // it. The attestation step verifies a subject's NAR hash and deriver against
 // the live store before it emits a checksum for it.
-export const buildSubjectSchema = z.strictObject({
+export const buildSubjectV2Schema = z.strictObject({
 	storePath: storePathSchema,
 	narHash: sha256HexDigestSchema,
 	derivation: derivationPathSchema,
 	attempt: positiveIntSchema,
 	attemptId: z.string().min(1)
 });
-export type ParsedBuildSubject = z.output<typeof buildSubjectSchema>;
+export type ParsedBuildSubjectV2 = z.output<typeof buildSubjectV2Schema>;
+
+// The store a run realised its paths in: the `--store` URI the run selected,
+// or `auto` for the store Nix itself would use. Opaque beyond being non-empty,
+// so the brand is its only constraint.
+export const buildStoreSchema = z.string().min(1).brand('BuildStore');
+export type BuildStore = z.output<typeof buildStoreSchema>;
+
+/** The store Nix itself would use, which a run selecting none builds in. */
+export const autoBuildStore = 'auto';
+
+// How far the coordinating machine established that a subject is what this run
+// produced.
+//
+// `local` is a build the coordinator ran itself. `verified-rebuild` is a build
+// some other machine ran whose outputs a local rebuild then reproduced.
+// `coordinating-store` is a path the selected build store realised: the
+// coordinator read its metadata back over the store connection and did not
+// watch the build, so the claim rests on the store the operator configured.
+// `unverified` is a build some other machine ran that nothing since has
+// checked, which is not a subject anything may attest.
+export const subjectVerificationSchema = z.enum([
+	'local',
+	'verified-rebuild',
+	'coordinating-store',
+	'unverified'
+]);
+export type SubjectVerification = z.output<typeof subjectVerificationSchema>;
+
+// One path this run built, with where it was built recorded alongside how it
+// was attributed. The attempt fields are present when a supervised attempt loop
+// produced the path; a run that reconciles its subjects from the store after
+// the build has no attempt loop to name. `machine` names the builder the
+// activity log recorded, absent when the run only knows the path was not built
+// on the machine that coordinated it.
+export const buildSubjectV3Schema = z.strictObject({
+	storePath: storePathSchema,
+	narHash: sha256HexDigestSchema,
+	derivation: derivationPathSchema,
+	attempt: positiveIntSchema.optional(),
+	attemptId: z.string().min(1).optional(),
+	buildStore: buildStoreSchema,
+	machine: z.string().min(1).optional(),
+	verification: subjectVerificationSchema
+});
+export type ParsedBuildSubjectV3 = z.output<typeof buildSubjectV3Schema>;
 
 // Why a failed target failed: the build itself, the upload of its NAR, the
 // destination's verification of the upload, the retention root that should
@@ -123,15 +168,13 @@ export type ParsedSubstitutableSizes = z.output<
 	typeof substitutableSizesSchema
 >;
 
-// The authoritative record one run writes: the realised paths, the subjects
-// this machine built, and, when the run planned and published, the per-target
-// outcomes, the planner's counts and sizes, the timings and child exit status,
-// and the publication path lists. A run that only builds writes the required
-// fields and omits the rest.
-export const buildReceiptSchema = z.strictObject({
-	version: z.literal(2),
+// What every receipt version records besides its subjects: the realised paths
+// and, when the run planned and published, the per-target outcomes, the
+// planner's counts and sizes, the timings and child exit status, and the
+// publication path lists. A run that only builds writes the required fields and
+// omits the rest.
+const buildReceiptFields = {
 	paths: z.array(storePathSchema),
-	subjects: z.array(buildSubjectSchema),
 	outcomes: z.array(targetOutcomeSchema).optional(),
 	planner: plannerPartitionSchema.optional(),
 	substitutable: substitutableSizesSchema.optional(),
@@ -140,15 +183,44 @@ export const buildReceiptSchema = z.strictObject({
 	uploaded: z.array(storePathSchema).optional(),
 	failed: z.array(storePathSchema).optional(),
 	collected: z.array(storePathSchema).optional()
+};
+
+// The authoritative record one run writes, in the form whose subjects carry the
+// attempt attribution alone.
+export const buildReceiptV2Schema = z.strictObject({
+	version: z.literal(2),
+	subjects: z.array(buildSubjectV2Schema),
+	...buildReceiptFields
 });
+export type ParsedBuildReceiptV2 = z.output<typeof buildReceiptV2Schema>;
+
+// The same record with each subject carrying where it was built and how far
+// that was established, so a reader can tell a path this machine built from one
+// a selected store realised, and refuse a path nothing verified.
+export const buildReceiptV3Schema = z.strictObject({
+	version: z.literal(3),
+	subjects: z.array(buildSubjectV3Schema),
+	...buildReceiptFields
+});
+export type ParsedBuildReceiptV3 = z.output<typeof buildReceiptV3Schema>;
+
+// Every receipt a reader accepts, discriminated by version, so a consumer
+// written against either form keeps reading the fields both carry.
+export const buildReceiptSchema = z.discriminatedUnion('version', [
+	buildReceiptV2Schema,
+	buildReceiptV3Schema
+]);
 export type ParsedBuildReceipt = z.output<typeof buildReceiptSchema>;
 
 // The shapes a builder assembles: a schema's input is unbranded, so the hook
 // constructs an event and the build command a receipt from these forms
 // directly.
 export type BuildEvent = z.input<typeof buildEventSchema>;
-export type BuildSubject = z.input<typeof buildSubjectSchema>;
+export type BuildSubjectV2 = z.input<typeof buildSubjectV2Schema>;
+export type BuildSubjectV3 = z.input<typeof buildSubjectV3Schema>;
 export type TargetOutcome = z.input<typeof targetOutcomeSchema>;
 export type PlannerPartition = z.input<typeof plannerPartitionSchema>;
 export type SubstitutableSizes = z.input<typeof substitutableSizesSchema>;
+export type BuildReceiptV2 = z.input<typeof buildReceiptV2Schema>;
+export type BuildReceiptV3 = z.input<typeof buildReceiptV3Schema>;
 export type BuildReceipt = z.input<typeof buildReceiptSchema>;

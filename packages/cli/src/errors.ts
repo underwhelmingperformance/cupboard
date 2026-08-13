@@ -538,6 +538,17 @@ export class RunRootTtlWithoutRunRootError extends CliUsageError {
 	}
 }
 
+export class ReceiptFileRequiresStoreError extends CliUsageError {
+	constructor() {
+		super(
+			'--receipt-file requires --store: a receipt attributes its subjects ' +
+				'to the build store the run selected, and a push against the store ' +
+				'Nix itself would use has no such selection to record'
+		);
+		this.name = 'ReceiptFileRequiresStoreError';
+	}
+}
+
 export class OidcRetentionChoiceRequiredError extends CliUsageError {
 	constructor() {
 		super(

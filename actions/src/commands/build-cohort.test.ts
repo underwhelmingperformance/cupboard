@@ -21,6 +21,7 @@ import type { Environment } from '../inputs.ts';
 import {
 	buildCohortAction,
 	type BuildCohortOptions,
+	cohortReceiptPushArguments,
 	nixBuildArguments,
 	planReprobeArguments,
 	resolveBuildCohortInputs,
@@ -974,6 +975,67 @@ describe('planReprobeArguments', () => {
 	});
 });
 
+describe('cohortReceiptPushArguments', () => {
+	const url = new URL('https://cache.example.test/t/acme');
+	const paths = [appPath, libraryBuiltPath];
+
+	it.each([
+		{
+			name: 'a public default cache asks for nothing more',
+			inputs: {
+				audience: '',
+				cache: '',
+				runRoot: '',
+				runRootTtl: ''
+			},
+			extra: []
+		},
+		{
+			name: 'the audience, cache and run root all travel',
+			inputs: {
+				audience: 'https://cache.example.test',
+				cache: 'builds',
+				runRoot: 'github:owner/repo/_cupboard-run/1',
+				runRootTtl: '2d'
+			},
+			extra: [
+				'--audience',
+				'https://cache.example.test',
+				'--cache',
+				'builds',
+				'--run-root',
+				'github:owner/repo/_cupboard-run/1',
+				'--run-root-ttl',
+				'2d'
+			]
+		}
+	])('$name', ({ inputs, extra }) => {
+		expect(
+			cohortReceiptPushArguments(
+				{
+					url,
+					store: 'ssh-ng://build@example.test',
+					receiptFile: '/tmp/receipt.json',
+					...inputs
+				},
+				paths
+			)
+		).toStrictEqual([
+			'--no-colour',
+			'push',
+			canonicalHref(url),
+			...paths,
+			'--github-oidc',
+			'--no-retain',
+			'--store',
+			'ssh-ng://build@example.test',
+			'--receipt-file',
+			'/tmp/receipt.json',
+			...extra
+		]);
+	});
+});
+
 describe('withdrawFromPartition', () => {
 	const partition = {
 		attachOnly: [appPath],
@@ -1112,7 +1174,8 @@ describe('buildCohortAction publication', () => {
 	}
 
 	async function runPublicationFlow(
-		options: BuildCohortOptions
+		options: BuildCohortOptions,
+		builtPaths: readonly string[] = [libraryBuiltPath, floatingBuiltPath]
 	): Promise<PublicationRun> {
 		const calls: (readonly string[])[] = [];
 		const runCupboardMock = vi.fn<typeof runCupboard>(
@@ -1122,9 +1185,7 @@ describe('buildCohortAction publication', () => {
 				return cupboardStub()(_binaryPath, arguments_, environment);
 			}
 		);
-		const runNixBuild = vi.fn(() =>
-			Promise.resolve([libraryBuiltPath, floatingBuiltPath])
-		);
+		const runNixBuild = vi.fn(() => Promise.resolve([...builtPaths]));
 
 		await buildCohortAction(options, environment, {
 			runCupboard: runCupboardMock,
@@ -1309,6 +1370,25 @@ describe('buildCohortAction publication', () => {
 		});
 	});
 
+	it('leaves a remote-store cohort whose build produced nothing without a receipt', async () => {
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				push: 'true',
+				store: 'ssh-ng://build@example.test'
+			},
+			[]
+		);
+
+		expect({
+			invocations: run.calls.map((call) => call[1]),
+			receiptLine: run.receiptLine
+		}).toStrictEqual({
+			invocations: ['plan', 'push'],
+			receiptLine: 'receipt-file='
+		});
+	});
+
 	it('publishes a single-root cohort with one push, no reference source without a reuse view', async () => {
 		const run = await runPublicationFlow({
 			...baseOptions(),
@@ -1351,7 +1431,7 @@ describe('buildCohortAction publication', () => {
 		]);
 	});
 
-	it('keeps a remote-store cohort on its plain build, publishing after it', async () => {
+	it('reconciles a remote-store cohort receipt from the store the build ran in', async () => {
 		const run = await runPublicationFlow({
 			...baseOptions(),
 			cohortJson: cohortJson({
@@ -1365,15 +1445,31 @@ describe('buildCohortAction publication', () => {
 			store: 'ssh-ng://build@example.test'
 		});
 
+		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
+
 		expect({
 			invocations: run.calls.map((call) => call[1]),
-			push: run.calls[1],
+			receiptPush: run.calls[1],
+			rootPush: run.calls[2],
 			cohortsFile: run.cohortsFile,
 			nixBuilds: run.nixBuilds,
 			receiptLine: run.receiptLine
 		}).toStrictEqual({
-			invocations: ['plan', 'push'],
-			push: [
+			invocations: ['plan', 'push', 'push'],
+			receiptPush: [
+				'--no-colour',
+				'push',
+				url,
+				libraryBuiltPath,
+				floatingBuiltPath,
+				'--github-oidc',
+				'--no-retain',
+				'--store',
+				'ssh-ng://build@example.test',
+				'--receipt-file',
+				receiptFile
+			],
+			rootPush: [
 				'--no-colour',
 				'push',
 				url,
@@ -1395,7 +1491,7 @@ describe('buildCohortAction publication', () => {
 					outLinkDirectory(directory)
 				]
 			],
-			receiptLine: 'receipt-file='
+			receiptLine: `receipt-file=${receiptFile}`
 		});
 	});
 });

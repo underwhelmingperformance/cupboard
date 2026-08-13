@@ -176,6 +176,47 @@ describe('buildReceiptSchema', () => {
 		expect(buildReceiptSchema.parse(receipt)).toStrictEqual(receipt);
 	});
 
+	const provenancedSubject = {
+		storePath,
+		narHash: 'aa'.repeat(32),
+		derivation,
+		buildStore: 'ssh-ng://builder.example',
+		verification: 'coordinating-store'
+	};
+
+	it('accepts a receipt whose subjects carry their provenance', () => {
+		const receipt = {
+			version: 3,
+			paths: [storePath, outputPath],
+			subjects: [
+				provenancedSubject,
+				{
+					...subject,
+					buildStore: 'auto',
+					machine: 'ssh://builder-1',
+					verification: 'verified-rebuild'
+				}
+			],
+			uploaded: [storePath]
+		};
+
+		expect(buildReceiptSchema.parse(receipt)).toStrictEqual(receipt);
+	});
+
+	it('accepts both receipt versions through the same parser', () => {
+		const version2 = { version: 2, paths: [storePath], subjects: [subject] };
+		const version3 = {
+			version: 3,
+			paths: [storePath],
+			subjects: [provenancedSubject]
+		};
+
+		expect([
+			buildReceiptSchema.parse(version2),
+			buildReceiptSchema.parse(version3)
+		]).toStrictEqual([version2, version3]);
+	});
+
 	it('refuses a version-1 receipt', () => {
 		const result = buildReceiptSchema.safeParse({
 			version: 1,
@@ -194,7 +235,7 @@ describe('buildReceiptSchema', () => {
 				code: issue.code,
 				path: issue.path
 			}))
-		).toStrictEqual([{ code: 'invalid_value', path: ['version'] }]);
+		).toStrictEqual([{ code: 'invalid_union', path: ['version'] }]);
 	});
 
 	it.each([
@@ -246,6 +287,42 @@ describe('buildReceiptSchema', () => {
 		{
 			name: 'an unknown field',
 			value: { version: 2, paths: [storePath], subjects: [], extra: true }
+		},
+		{
+			name: 'a version-2 subject in a version-3 receipt',
+			value: { version: 3, paths: [storePath], subjects: [subject] }
+		},
+		{
+			name: 'a version-3 subject in a version-2 receipt',
+			value: {
+				version: 2,
+				paths: [storePath],
+				subjects: [provenancedSubject]
+			}
+		},
+		{
+			name: 'a subject with no build store',
+			value: {
+				version: 3,
+				paths: [storePath],
+				subjects: [{ ...provenancedSubject, buildStore: '' }]
+			}
+		},
+		{
+			name: 'a subject with an unknown verification',
+			value: {
+				version: 3,
+				paths: [storePath],
+				subjects: [{ ...provenancedSubject, verification: 'trusted' }]
+			}
+		},
+		{
+			name: 'a subject naming an empty machine',
+			value: {
+				version: 3,
+				paths: [storePath],
+				subjects: [{ ...provenancedSubject, machine: '' }]
+			}
 		}
 	])('rejects $name', ({ value }) => {
 		expect(buildReceiptSchema.safeParse(value).success).toBe(false);
