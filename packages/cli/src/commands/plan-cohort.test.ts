@@ -263,6 +263,145 @@ describe('runPlanCohort', () => {
 		}
 	});
 
+	it('does not partially reconcile a root whose complete target set is unknown', async () => {
+		const ensureCalls: unknown[] = [];
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
+		const planFile = path.join(directory, 'plan.json');
+		const floatingTarget = target({
+			attr: 'packages.x86_64-linux.other',
+			installable: otherPath,
+			expectedPath: undefined
+		});
+		const rootResponse = buildRequired([]);
+		const rootClient = recordingRootClient(ensureCalls, rootResponse);
+		const planDependencies = dependencies({
+			rootClient,
+			store: missingStore({
+				willBuild: [otherPath],
+				willSubstitute: [],
+				unknown: [],
+				downloadSize: 0,
+				narSize: 0
+			}),
+			destinationServed: () => Promise.resolve(new Set([appPath]))
+		});
+
+		try {
+			await runPlanCohort(
+				runOptions({ targets: [target(), floatingTarget], planFile }),
+				reporter([]),
+				planDependencies
+			);
+			const plan: unknown = JSON.parse(await readFile(planFile, 'utf8'));
+
+			expect({
+				ensureCalls,
+				plan
+			}).toStrictEqual({
+				ensureCalls: [],
+				plan: {
+					partition: {
+						attachOnly: [appPath],
+						publishByReference: [],
+						leftUpstream: [],
+						leftUpstreamRejections: [],
+						buildSet: [otherPath],
+						counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
+						downloadSize: 0,
+						narSize: 0,
+						alreadyValid: [],
+						unknownCount: 0,
+						unreachableSubstituters: [],
+						ceiling: { value: 0, source: 'configured' }
+					},
+					capacity: {
+						available: 10_000_000_000,
+						capacity: 10_000_000_000,
+						headroom: defaultHeadroomAbsoluteMinimum
+					}
+				}
+			});
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('carries planned local derivations into remote availability accounting', async () => {
+		const derivation = storePathSchema.parse(
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
+		);
+		const installable = `${derivation}^out` as const;
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
+		const planFile = path.join(directory, 'plan.json');
+		const payloads: ResultPayload[] = [];
+		const rootClient = recordingRootClient([], buildRequired([appPath]));
+		const expectedResult = {
+			partition: {
+				attachOnly: [],
+				publishByReference: [],
+				leftUpstream: [],
+				leftUpstreamRejections: [],
+				buildSet: [installable],
+				counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
+				downloadSize: 0,
+				narSize: 0,
+				alreadyValid: [],
+				unknownCount: 0,
+				ceiling: { value: 0, source: 'configured' },
+				unreachableSubstituters: []
+			},
+			capacity: { skipped: 'remote-store' }
+		};
+
+		try {
+			await runPlanCohort(
+				runOptions({
+					targets: [
+						target({
+							installable,
+							plannedLocalDerivation: derivation
+						})
+					],
+					storeKind: 'ssh-ng',
+					planFile,
+					ceiling: { value: 0, untrustedFallback: 0 }
+				}),
+				reporter(payloads),
+				dependencies({
+					rootClient,
+					store: missingStore({
+						willBuild: [],
+						willSubstitute: [],
+						unknown: [derivation],
+						downloadSize: 0,
+						narSize: 0
+					})
+				})
+			);
+
+			const plan: unknown = JSON.parse(await readFile(planFile, 'utf8'));
+
+			expect({ plan, payloads }).toStrictEqual({
+				plan: expectedResult,
+				payloads: [
+					{
+						kind: 'plan-cohort',
+						data: expectedResult,
+						rows: [
+							{ label: 'Attach only', value: '0' },
+							{ label: 'Publish by reference', value: '0' },
+							{ label: 'Left upstream', value: '0' },
+							{ label: 'Build set', value: '1' },
+							{ label: 'Plan file', value: planFile }
+						]
+					}
+				]
+			});
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
 	it('reports and rethrows a typed refusal when unknown paths exceed the ceiling', async () => {
 		const payloads: ResultPayload[] = [];
 		const missing: NixMissingPartition = {

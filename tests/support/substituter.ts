@@ -26,14 +26,14 @@ const priority = cachePrioritySchema.parse(41);
 export const servedNarSize = 4096;
 
 /**
- * A binary cache over loopback whose contents a test moves in and out while a
- * real Nix daemon reads it. It answers `nix-cache-info` and the narinfo of
- * every path {@link FakeSubstituter.serve} registered, records the narinfo
- * requests that reach it, and answers 404 for anything else, so a test can
- * tell a request that crossed the wire from an answer Nix had already cached.
+ * A loopback binary cache for tests that exercise a real Nix daemon. It serves
+ * `nix-cache-info` and a narinfo for each path registered with
+ * {@link FakeSubstituter.serve}, records every narinfo request, and returns 404
+ * for all other paths. Tests can therefore distinguish a request that crossed
+ * the wire from a response Nix had already cached.
  *
- * The paths it serves exist nowhere: only their metadata is ever read, and the
- * NAR each narinfo names is never requested.
+ * The store paths exist only as metadata. Tests never request their NAR
+ * contents.
  */
 export class FakeSubstituter {
 	static async start(storeDirectory: StoreDirectory): Promise<FakeSubstituter> {
@@ -105,21 +105,20 @@ export class FakeSubstituter {
 		send(response, 200, narInfo.render());
 	}
 
-	/** The substituter URL a Nix `substituters` setting names. */
+	/** The URL to use in Nix's `substituters` setting. */
 	get url(): string {
 		return this.origin;
 	}
 
-	/** The hash part of every narinfo requested since the last forgetting. */
+	/** Narinfo hash parts requested since `forgetRequests` was last called. */
 	get narInfoRequests(): readonly string[] {
 		return [...this.requestedHashes];
 	}
 
 	/**
-	 * Registers a store path this cache serves, under a name of the caller's
-	 * choosing and a hash part fresh for this run, and returns it. Nothing
-	 * else on the machine holds the path, so an answer about it can only have
-	 * come from this cache or from a client's memory of it.
+	 * Creates a fresh store path, registers it with this cache, and returns the
+	 * path. Nothing else on the machine has that path, so an availability result
+	 * can come only from this cache or from a client's cached result.
 	 */
 	serve(name: string): StorePathString {
 		const hash = storePathHashSchema.parse(
@@ -135,10 +134,9 @@ export class FakeSubstituter {
 	}
 
 	/**
-	 * Serves a path that already exists elsewhere, such as the output a real
-	 * derivation names. The bytes are this cache's own unless the caller names
-	 * the NAR hash to advertise: what a client learns here is that the path is
-	 * available, at what size, and under which hash.
+	 * Serves a path that already exists elsewhere, such as an output path from a
+	 * real derivation. Unless the caller provides a NAR hash, the cache advertises
+	 * a hash of its own fixture bytes.
 	 */
 	servePath(
 		storePath: StorePathString,
@@ -164,7 +162,7 @@ export class FakeSubstituter {
 		return digest;
 	}
 
-	/** Stops serving a path, as an upstream dropping it does. */
+	/** Stops serving a path, which simulates an upstream removing it. */
 	withdraw(storePath: StorePathString): void {
 		this.served.delete(StorePath.hash(storePath));
 	}

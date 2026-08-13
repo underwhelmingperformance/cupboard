@@ -6,9 +6,25 @@ import type { FakeDaemonTransport } from './fake-daemon-transport.ts';
 export class FakeByteSource implements ByteStreamSource {
 	private dataListener: ((chunk: Buffer) => void) | undefined;
 
+	private readonly pendingData: Buffer[] = [];
+
+	private isPaused = false;
+
 	private endListener: ((error: Error) => void) | undefined;
 
 	private closeListener: ((error: Error) => void) | undefined;
+
+	private deliverPendingData(): void {
+		while (!this.isPaused) {
+			const chunk = this.pendingData.shift();
+
+			if (chunk === undefined) {
+				return;
+			}
+
+			this.dataListener?.(chunk);
+		}
+	}
 
 	on(_event: 'data', listener: (chunk: Buffer) => void): void {
 		this.dataListener = listener;
@@ -28,8 +44,18 @@ export class FakeByteSource implements ByteStreamSource {
 		}
 	}
 
+	pause(): void {
+		this.isPaused = true;
+	}
+
+	resume(): void {
+		this.isPaused = false;
+		this.deliverPendingData();
+	}
+
 	emitData(chunk: Buffer): void {
-		this.dataListener?.(chunk);
+		this.pendingData.push(chunk);
+		this.deliverPendingData();
 	}
 
 	emitClose(): void {

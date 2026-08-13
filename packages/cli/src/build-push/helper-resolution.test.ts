@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import {
+	mkdir,
+	mkdtemp,
+	realpath,
+	rm,
+	symlink,
+	writeFile
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -37,6 +44,23 @@ describe('resolveHookHelper', () => {
 				executablePath: path.join(base, 'cupboard')
 			})
 		).resolves.toBe(helperPath);
+	});
+
+	it('keeps a symlinked executable paired with its generation helper', async () => {
+		const base = await installation();
+		const generation = path.join(base, 'generation');
+		const executable = path.join(generation, 'cupboard');
+		const helper = path.join(generation, hookHelperName);
+		const publicExecutable = path.join(base, 'cupboard');
+		await mkdir(generation);
+		await writeFile(executable, '');
+		await writeFile(helper, 'generation helper');
+		await writeFile(path.join(base, hookHelperName), 'legacy helper');
+		await symlink(executable, publicExecutable);
+
+		await expect(
+			resolveHookHelper({ executablePath: publicExecutable })
+		).resolves.toBe(await realpath(helper));
 	});
 
 	it('resolves the helper under the sibling libexec directory', async () => {

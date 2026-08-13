@@ -225,6 +225,7 @@ export interface PlanOptions {
 	readonly enablePacking?: string;
 	readonly packCapacity?: string;
 	readonly store?: string;
+	readonly requireProvenance?: string;
 }
 
 export interface PlanInputs {
@@ -241,15 +242,14 @@ export interface PlanInputs {
 	readonly optimise: boolean;
 	readonly temporaryDirectory: string;
 	readonly enablePacking: boolean;
-	// Unused while packing is disabled; a positive number of bytes otherwise,
-	// checked at input resolution so a manifest cannot enable packing without
-	// naming the budget it prices candidate groupings against.
+	// When packing is enabled, input resolution requires a positive byte budget
+	// for pricing candidate groupings.
 	readonly packCapacity: number;
-	// The remote ssh-ng store this run's cohorts build against, empty when
-	// each cohort builds in its runner's own store. The packing measurement
-	// asks whichever store the cohorts will realise their results on, so a
-	// grouping is priced against the bytes that store is actually missing.
+	// The remote ssh-ng store used by cohort builds. Empty uses each runner's
+	// store. Packing measures missing bytes in the selected build store.
 	readonly store: string;
+	/** Keep cached targets runnable so their final derivations execute again. */
+	readonly requireProvenance: boolean;
 }
 
 /**
@@ -321,6 +321,10 @@ export function registerPlanCommand(
 		.option(
 			'--store <uri>',
 			'remote ssh-ng store the cohorts build against; selected output paths must be known during planning'
+		)
+		.option(
+			'--require-provenance <value>',
+			'keep cached targets on the build set for current-run provenance: true or false'
 		)
 		.action((options: PlanOptions) =>
 			planAction(options, environment, undefined, {
@@ -406,7 +410,12 @@ export function resolvePlanInputs(
 			path.join(temporaryDirectory, 'cupboard-publish-plan.json'),
 		enablePacking: isPackingEnabled,
 		packCapacity: resolvePackCapacity(isPackingEnabled, options.packCapacity),
-		store: provided(options.store) ?? ''
+		store: provided(options.store) ?? '',
+		requireProvenance: isEnabled(
+			'require-provenance',
+			options.requireProvenance,
+			false
+		)
 	};
 }
 
@@ -543,15 +552,16 @@ export async function planAction(
 	// The pre-filter needs the same evaluated graph the plan itself used, so
 	// it only runs when planning did: the unoptimised path never inspects the
 	// cache, and spawning every cohort's job unfiltered matches that.
-	const cohortDecisions = inputs.optimise
-		? await cohortPreFilter(
-				inputs,
-				plan,
-				evaluations,
-				dependencies.runner,
-				dependencies.signal
-			)
-		: plan.cohorts.map((cohort) => ({ key: cohort.key, pruned: false }));
+	const cohortDecisions =
+		inputs.optimise && !inputs.requireProvenance
+			? await cohortPreFilter(
+					inputs,
+					plan,
+					evaluations,
+					dependencies.runner,
+					dependencies.signal
+				)
+			: plan.cohorts.map((cohort) => ({ key: cohort.key, pruned: false }));
 
 	await writePlan(
 		environment,
@@ -613,13 +623,15 @@ async function optimisedPlan(
 		...fetcher
 	});
 
-	const retainedRoots = await ensureAvailableTargets(
-		inputs,
-		evaluations,
-		availablePaths,
-		dependencies.runner,
-		dependencies.signal
-	);
+	const retainedRoots = inputs.requireProvenance
+		? new Set<string>()
+		: await ensureAvailableTargets(
+				inputs,
+				evaluations,
+				availablePaths,
+				dependencies.runner,
+				dependencies.signal
+			);
 	const plan = planPublish({
 		evaluations,
 		retainedRoots,
@@ -860,11 +872,9 @@ function ensureResponse(
 	throw new RootEnsureResultMissingError(root);
 }
 
-// The store paths a root's last reconciliation wrote, freshly probed: the
-// pre-filter's whole reason to exist is that this is not the current
-// manifest's target list, so a content-addressed or upstream-left output the
-// manifest no longer names still refreshes here rather than churning the
-// job that would otherwise reconcile it away.
+// Refresh the complete reconciled root, including content-addressed and
+// upstream outputs that are absent from the current manifest. Refreshing only
+// manifest targets could reconcile those retained outputs away.
 async function readRootTargets(
 	inputs: PlanInputs,
 	root: string,
@@ -996,8 +1006,8 @@ async function targetCoverageOutcome(
 		};
 	}
 
-	// An empty reconciled list holds none of the target's outputs, so the
-	// target is uncovered and there is nothing to refresh.
+	// An empty reconciled target list cannot cover the target and requires no
+	// refresh.
 	if (reconciledPaths.size === 0) {
 		return { attr: target.attr, status: 'not-covered' };
 	}
@@ -1029,11 +1039,9 @@ async function targetCoverageOutcome(
 /**
  * The advisory destination pre-filter: for every cohort in the plan, decides
  * whether its job can be pruned because every member is already covered.
- * Machine-independent by construction, since it only reads and refreshes
- * retention roots; a spawned job's own partition against its own store stays
- * authoritative regardless of what this finds. A failure anywhere in a
- * cohort spawns that cohort's job and carries the reason, never composing a
- * build set and never failing the plan itself.
+ * The filter reads only retention roots, so each spawned job still computes
+ * its partition against the selected store. Any failed check keeps the cohort
+ * in the matrix and records the reason without failing the plan.
  */
 export async function cohortPreFilter(
 	inputs: PlanInputs,
@@ -1067,12 +1075,8 @@ export async function cohortPreFilter(
 	);
 }
 
-// Each target job's matrix entry carries the full root its push publishes
-// under, computed by the same construction the ensure calls use, so the two
-// paths a target can take to retention name one root. The `runs-on` value is
-// the manifest's `os` label: the manifest is the operator's flake, so where
-// its targets build is operator configuration, exactly like the labels in
-// any hand-written workflow.
+// Use the same root construction for cached-target ensures and build-job
+// publication. `runs-on` comes directly from the operator's manifest.
 function targetMatrix(
 	inputs: PlanInputs,
 	plan: PublishPlan
@@ -1090,19 +1094,12 @@ function targetMatrix(
 	}));
 }
 
-// A pruned cohort needs no job at all, so it never reaches this function;
-// the surviving cohorts it receives carry every member's attr, installable
-// and root, so a cohort job builds and publishes without asking the plan
-// anything further. `installables` names each member the way `nix build`
-// resolves it (a flake reference); `queryInstallables` names the same member
-// the way the Nix daemon's store protocol does (a derivation store path),
-// which is what the cohort job's own availability partition queries against,
-// so both travel side by side rather than one being derived from the other
-// at build time. Neither is known until the target evaluates, so an
-// unevaluated or still-floating member reports `undefined` in both and its
-// build-time availability check treats it as always needing to build, per
-// the design. `bestEffort` carries the cohort's own tolerance, which the
-// cohort job spends as its `continue-on-error`.
+// Each surviving cohort contains all data needed by its build job.
+// `installables` contains flake references. After evaluation,
+// `queryInstallables` contains the corresponding daemon derived paths, while
+// `expectedPaths` contains a value only for a target with one predictable
+// output. A target without either value stays on the build set. `bestEffort`
+// controls the job's `continue-on-error` value.
 function cohortMatrix(
 	inputs: PlanInputs,
 	cohorts: readonly Cohort[],

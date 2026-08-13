@@ -20,7 +20,7 @@ import { isolatedEnvironment } from '../support/nix.ts';
 
 const repositoryRoot = path.resolve(import.meta.dirname, '..', '..');
 
-/** The nix the record names, read once so a case can assert against it. */
+/** The recorded Nix version, loaded once for test assertions. */
 export const recordedOracle: OracleRecord = parseOracleRecord(
 	readFileSync(path.join(import.meta.dirname, oracleFileName), 'utf8')
 );
@@ -45,8 +45,8 @@ export class OracleVersionDriftError extends Error {
 
 /**
  * The `nix` a conformance case compares our client against. Every invocation
- * runs in an environment the caller supplies, which is how a case states the
- * configuration it is asking about.
+ * runs in an environment supplied by the caller to select the fixture
+ * configuration.
  */
 export class Oracle {
 	constructor(
@@ -63,8 +63,8 @@ export class Oracle {
 
 	/**
 	 * Runs one of the other tools this same `nix` ships, such as `nix-store`.
-	 * They sit beside it, so a case asking one of them asks the pinned oracle
-	 * rather than whatever the machine has on its `PATH`.
+	 * These tools sit beside the resolved binary, which avoids using another Nix
+	 * installation from `PATH`.
 	 */
 	runTool(
 		tool: string,
@@ -102,16 +102,16 @@ async function resolveOracle(): Promise<OracleResolution> {
 }
 
 // Resolving costs a flake build, so each test file does it once and every case
-// in the file shares the answer.
+// in the file shares the resolved binary.
 const resolution = await resolveOracle();
 
 /**
  * Declares a suite of cases that run against the pinned oracle.
  *
  * A machine that cannot build the oracle fails the suite, so a missing oracle
- * never reads as a pass. A machine that builds one the record does not name
+ * cannot produce a false pass. A machine that builds a version not in the record
  * reports a single failure instead: comparing our client against an unrecorded
- * `nix` would answer a question nobody asked.
+ * `nix` would invalidate the recorded comparison target.
  */
 export function describeConformance(
 	name: string,

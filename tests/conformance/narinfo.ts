@@ -27,8 +27,8 @@ import type { Oracle } from './oracle.ts';
  * case observes the document it just wrote. Reading it needs the `nix-command`
  * feature, which the isolated configuration does not enable.
  *
- * `--json-format 1` pins the shape the answer is read in, so a later format
- * cannot quietly change what a field means.
+ * `--json-format 1` pins the parsed response shape so a later format cannot
+ * silently change field semantics.
  */
 export function pathInfoArguments(
 	directory: string,
@@ -47,7 +47,7 @@ export function pathInfoArguments(
 	];
 }
 
-/** The store directory the fixture cache serves, which both sides are told. */
+/** The store directory served by the fixture cache and configured on both sides. */
 export const servedStoreDirectory: StoreDirectory =
 	storeDirectorySchema.parse('/nix/store');
 
@@ -61,7 +61,7 @@ export const fixtureNarinfoFile = '00000000000000000000000000000000.narinfo';
 
 // Nix writes a sha256 digest in its own base32 in a narinfo, and reports it
 // SRI-encoded in `path-info`. These two are the digests of the empty string
-// and of `abc`, so a fixture naming them names something a reader can decode.
+// and `abc`, giving the fixtures known, reproducible hash values.
 const narHashBase32 = '0mdqa9w1p6cmli6976v4wi0sw9r4p5prkj7lzfd1877wk11c9c73';
 const fileHashBase32 = '0nx24zsppsazlbvgwqkirpmf1gc6as2slq83sf5y78qxgd9hvf1b';
 
@@ -70,9 +70,8 @@ const fixtureSignature =
 	'cHVycG9zZXMtb25seS1wYWRkaW5nLXh4eHh4eHh4eHh4eHh4eHg=';
 
 /**
- * A narinfo Nix reads without complaint, which every fixture starts from. The
- * fields are in the order a cache writes them, and a fixture states only what
- * it changes.
+ * A valid narinfo used as the base for every fixture. Fields follow cache
+ * output order, and each fixture specifies only its changes.
  */
 const wellFormedFields: readonly (readonly [string, string])[] = [
 	['StorePath', fixtureStorePath],
@@ -87,7 +86,7 @@ const wellFormedFields: readonly (readonly [string, string])[] = [
 	['Sig', fixtureSignature]
 ];
 
-/** One narinfo for both sides to read, stated as what it changes. */
+/** Changes applied to the valid narinfo for one test case. */
 export interface NarinfoFixture {
 	/**
 	 * Values replacing the well-formed document's, keyed by field name.
@@ -98,7 +97,7 @@ export interface NarinfoFixture {
 	readonly extraLines?: readonly string[];
 	/** Whether the cache serves a document for the path at all. */
 	readonly served?: boolean;
-	/** Whether the document's last line ends the way Nix requires it to. */
+	/** Whether the document ends with a newline, which Nix requires. */
 	readonly endsWithNewline?: boolean;
 }
 
@@ -150,9 +149,8 @@ export interface NarinfoOutcome {
 	readonly clientError: unknown;
 }
 
-// A narinfo carrying no `FileSize` states no download size, and Nix leaves the
-// field out of the answer rather than reporting a zero. Our client reports the
-// zero, which is the same statement, so the answer is read as one here.
+// When `FileSize` is absent, Nix omits the download-size field while our client
+// reports zero. Normalise the two representations before comparison.
 const pathInfoEntrySchema = z.object({
 	narHash: z.string(),
 	narSize: z.number(),
@@ -185,10 +183,8 @@ export class InvalidPathInfoError extends Error {
 }
 
 /**
- * What `nix path-info` said about the path: the entry it printed, or nothing
- * when it printed a null one. Nix answers a path no substituter holds with a
- * null entry and a zero status, so an absence is an answer rather than a
- * failure.
+ * Parses the `nix path-info` result for the path. Nix prints a null entry and
+ * exits zero when no substituter has the path, so absence is a normal result.
  */
 export function oracleOffer(
 	output: string,
@@ -238,17 +234,17 @@ function sorted(values: readonly string[]): readonly string[] {
 	return values.toSorted(compareStrings);
 }
 
-/** What our client made of a cache directory it was asked about the path. */
+/** Our client's result for the fixture cache and path. */
 export interface ClientAnswer {
 	/** What the cache offered for the path, in the oracle's shapes. */
 	readonly offer: OfferFields | undefined;
-	/** The configured caches nothing could be asked of. */
+	/** The configured caches the client could not query. */
 	readonly unreachable: readonly UnreachableSubstituter[];
 }
 
 /**
- * Opens the directory as our client's only substituter and asks it, under any
- * store URI parameters the case is putting to both sides.
+ * Opens the directory as the client's only substituter and queries the fixture
+ * path using the store URI parameters configured for both sides.
  */
 export async function askClient(
 	directory: string,
@@ -261,8 +257,8 @@ export async function askClient(
 	const client = new SubstituterClient(substituters, {
 		storeDirectory: servedStoreDirectory,
 		substitute: true,
-		// A document our client cannot read has to surface as a refusal rather
-		// than as an absence, which is what carrying on past it would make it.
+		// A malformed document must remain an error. With fallback enabled,
+		// continuing past the error would incorrectly report an absence.
 		fallback: false
 	});
 	const offers = await client.querySubstitutablePathInfos([fixtureStorePath]);
@@ -311,7 +307,7 @@ async function readAsClient(directory: string): Promise<ClientOutcome> {
 	}
 }
 
-/** Serves one narinfo from a `file://` cache and asks both sides about it. */
+/** Serves one narinfo from a `file://` cache and queries it through both clients. */
 export async function readNarinfo(
 	oracle: Oracle,
 	fixture: NarinfoFixture
@@ -372,11 +368,10 @@ function oracleVerdictOf(
 }
 
 /**
- * How our client is looser than the oracle, which is the one direction that
- * fails. Our client targets the strictness of Nix master and the pinned oracle
- * is behind it, so a document our client refuses and Nix takes is conformant;
- * one our client takes and Nix refuses is a path we would count as available
- * that Nix would decline to fetch.
+ * Reports whether our client accepts a document rejected by the oracle. Our
+ * client targets the stricter behaviour of Nix master, so rejecting an extra
+ * document is allowed. Accepting a document rejected by the oracle is a
+ * conformance failure because Nix would decline to fetch that path.
  */
 export function looserThanOracle(outcome: NarinfoOutcome): readonly string[] {
 	return outcome.oracle === 'rejected' && outcome.client !== 'rejected'

@@ -87,7 +87,7 @@ describe('providedUrl', () => {
 		expect(() => providedUrl('cache-url', value)).toThrow(
 			new InvalidInputError(
 				'cache-url',
-				'cache-url must be an http(s) URL with nothing beyond origin and path'
+				'cache-url must be an http(s) URL without credentials, a query, or a fragment'
 			)
 		);
 	});

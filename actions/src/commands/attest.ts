@@ -81,17 +81,16 @@ interface AttestationSubjects {
 }
 
 /**
- * What a receipt lets this run attest: the subjects it may claim, the published
- * paths it did not build, and the subjects it refuses because they were
- * produced somewhere nothing verified.
+ * Attestation candidates from a receipt, divided into eligible subjects,
+ * published paths without build evidence, and unverified subjects.
  */
 export interface ResolvedAttestation extends AttestationSubjects {
 	readonly refused: readonly RefusedSubject[];
 }
 
 /**
- * One subject an attestation will not carry, with the machine that produced it
- * when the receipt named one.
+ * A subject excluded from the attestation, including its build machine when
+ * known.
  */
 export interface RefusedSubject {
 	readonly storePath: string;
@@ -128,22 +127,22 @@ export function attestationSubjects(
 }
 
 /**
- * What the destination cache has committed for each subject a receipt names,
- * keyed by store path. An uncommitted path has no entry.
+ * Committed destination metadata for receipt subjects, keyed by store path.
+ * An uncommitted path has no entry.
  */
 export type SelectedPathInfos = ReadonlyMap<string, CommittedPathInfo>;
 
 /**
- * What a receipt carrying provenance lets this run attest.
+ * Selects the receipt subjects this run can attest.
  *
  * A subject is signed under this repository's identity, so the destination
  * cache must serve every verified subject under the NAR hash and deriver the
  * receipt recorded. An absent path fails the run, as does one whose hash or
  * deriver has moved since the receipt was written.
  *
- * The build store may already have collected the path: its receipt selects no
- * trusted metadata source. A subject nothing verified is refused because it
- * was produced on a machine the run never established anything about.
+ * The build store may already have collected the path, so verification uses
+ * the committed destination metadata. A subject produced on an unverified
+ * machine is excluded.
  */
 export function provenancedSubjects(
 	receipt: BuildReceiptV3,
@@ -171,8 +170,8 @@ export function provenancedSubjects(
 	return { subjects, skipped, refused };
 }
 
-// What a subject's checksum rests on must be live in the committed destination;
-// the receipt alone is never a source of bytes to sign.
+// Verify each checksum against committed destination metadata. The receipt does
+// not provide the bytes to sign.
 function requireBacked(
 	subject: BuildSubjectV3,
 	info: CommittedPathInfo | undefined
@@ -184,8 +183,7 @@ function requireBacked(
 	requireUnmoved(info, subject.narHash, subject.derivation);
 }
 
-// A subject whose path the destination serves is one this run can check before
-// signing a checksum under the repository's identity.
+// Check the destination metadata before signing under the repository's identity.
 function requireUnmoved(
 	info: CommittedPathInfo,
 	narHash: string,

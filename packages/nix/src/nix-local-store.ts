@@ -49,7 +49,7 @@ export interface NixStoreDatabase {
 	close(): void;
 }
 
-/** Reads a file the store holds, injected so the client is tested without one. */
+/** Reads a store file, injected for tests. */
 export type ReadStoreFile = (filePath: string) => Promise<string>;
 
 const defaultReadStoreFile: ReadStoreFile = async (filePath) => {
@@ -100,17 +100,14 @@ export interface NixLocalStoreOptions {
 	/** The directory the store's paths are named under. */
 	readonly storeDirectory?: StoreDirectory;
 	/**
-	 * Where those paths sit on this machine, when that is somewhere other than
-	 * where they are named, which is where a derivation is read from. A store
-	 * under a root names its paths as any store does and holds them under the
-	 * root.
+	 * The physical store directory used to read derivations. A rooted store
+	 * retains its logical store paths while placing their contents below the root.
 	 */
 	readonly realStoreDirectory?: string;
 	readonly readStoreFile?: ReadStoreFile;
 	/**
-	 * Answers the questions about what is available elsewhere. Without one
-	 * this store has no substituters to ask, and the queries that depend on
-	 * them are unsupported.
+	 * Queries configured substituters. Without this dependency, operations that
+	 * require substituter availability are unsupported.
 	 */
 	readonly substituters?: SubstituterClient;
 	/** Abandons a walk between levels, raising the signal's reason. */
@@ -125,7 +122,7 @@ export interface NixLocalStoreOptions {
 /**
  * Reads path information straight from the local store database, the way Nix's
  * `LocalStore` does, so closures resolve on a daemonless store with no running
- * `nix-daemon` to talk to. Given substituters it answers for what is available
+ * `nix-daemon` to talk to. With substituter queries it also reports what is available
  * elsewhere too, the way libstore does when it runs in the client.
  */
 export class NixLocalStoreClient implements NixStoreClient {
@@ -325,8 +322,8 @@ function requirePathInfo(
 }
 
 /**
- * What the store's database holds for the path, or `undefined` for a path it
- * does not hold.
+ * Reads path metadata from the store database, or returns `undefined` when the
+ * path is not valid.
  */
 export function pathInfoIn(
 	database: NixStoreDatabase,

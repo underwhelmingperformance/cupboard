@@ -68,7 +68,7 @@ export function observeChildProcess(
 	};
 }
 
-/** Record a spawn error but do not settle until the child has fully closed. */
+/** Records a spawn error and waits for the child to close before resolving. */
 export function waitForChildProcess(
 	child: ChildProcessLifecycle
 ): Promise<ClosedChildProcess> {

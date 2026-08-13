@@ -7,6 +7,7 @@ import {
 	createProcessNixDaemonConnector,
 	type DaemonCommandRunner,
 	Nix,
+	type NixBuildMode,
 	type NixBuildResult,
 	type NixDaemonClientOptions,
 	type NixDaemonSession,
@@ -41,6 +42,7 @@ import { z } from 'zod';
 
 import {
 	type AbortableChildProcessLifecycle,
+	type ChildProcessEscalationScheduler,
 	observeChildProcess,
 	waitForAbortableChildProcess
 } from '../child-process.ts';
@@ -54,6 +56,7 @@ import {
 	CohortPlanResultInvalidError,
 	CohortPlanResultMissingError,
 	CommandFailedError,
+	CommandOutputTooLargeError,
 	CupboardReportedError,
 	InvalidInputError,
 	MissingInputError,
@@ -116,11 +119,9 @@ const nixDerivedPathSchema = z
 
 const maxNixBuildJobs = 4_294_967_295n;
 
-// The shape `cohortMatrix` (in plan.ts) emits for one surviving cohort: every
-// array is parallel, indexed the same as `attrs`. `queryInstallables` and
-// `expectedPaths` carry `null` for a member whose evaluation is unknown or
-// ambiguous, the way a value absent from a JS array survives a JSON round
-// trip.
+// The `cohortMatrix` output for one surviving cohort. All arrays use the same
+// indices as `attrs`. `queryInstallables` and `expectedPaths` use `null` when
+// evaluation did not produce one unambiguous value.
 const cohortMatrixEntrySchema = z
 	.object({
 		key: z.string().min(1),
@@ -207,10 +208,8 @@ const partitionSchema = z.object({
 
 type PartitionData = z.output<typeof partitionSchema>;
 
-// One target `cupboard plan reprobe` took out of the build set, in the
-// partition's own vocabulary for where it belongs instead. The confirmation
-// answers for the destination and the reuse view alone, so those are the two
-// buckets a withdrawal can name.
+// A target removed from the build set by `cupboard plan reprobe`, classified by
+// whether the destination or reuse view now serves it.
 const withdrawnTargetSchema = z.object({
 	installable: z.string().min(1),
 	storePath: storePathSchema,
@@ -307,6 +306,7 @@ export interface BuildCohortOptions {
 	readonly maxJobs?: string;
 	readonly store?: string;
 	readonly push?: string;
+	readonly requireProvenance?: string;
 	readonly bestEffort?: string;
 	readonly gcBetweenCohorts?: string;
 	readonly runRoot?: string;
@@ -332,6 +332,7 @@ export interface BuildCohortInputs {
 	readonly maxJobs: string;
 	readonly store: string;
 	readonly push: boolean;
+	readonly requireProvenance: boolean;
 	readonly allBestEffort: boolean;
 	readonly gcBetweenCohorts: boolean;
 	readonly runRoot: string;
@@ -342,9 +343,8 @@ export interface BuildCohortInputs {
 	readonly referencePathsFile: string;
 	readonly leftUpstreamFile: string;
 	readonly countsFile: string;
-	// Where a local build's out-links live. They root the targets' reference
-	// closures for as long as the directory stands; a remote publication uses
-	// daemon temporary roots instead and reports no out-link directory.
+	// Local-build out-links keep target closures alive while this directory
+	// exists. Remote publication uses daemon temporary roots instead.
 	readonly outLinkDirectory: string;
 }
 
@@ -448,6 +448,11 @@ export function resolveBuildCohortInputs(
 		maxJobs,
 		store: provided(options.store) ?? '',
 		push: isEnabled('push', options.push, false),
+		requireProvenance: isEnabled(
+			'require-provenance',
+			options.requireProvenance,
+			false
+		),
 		allBestEffort: isEnabled('best-effort', options.bestEffort, false),
 		gcBetweenCohorts: isEnabled(
 			'gc-between-cohorts',
@@ -517,6 +522,11 @@ export function registerBuildCohortCommand(
 		.option(
 			'--push <boolean>',
 			'publish the cohort: stream the build through cupboard build-push and set the target roots (true or false)',
+			'false'
+		)
+		.option(
+			'--require-provenance <boolean>',
+			'execute selected final derivations even when already valid (true or false)',
 			'false'
 		)
 		.option(
@@ -628,12 +638,10 @@ export async function buildCohortAction(
 					cupboardRunDependencies
 				);
 
-	// The partition settled when the cohort started; the destination and the
-	// reuse view are asked once more about the exact outputs still on the build
-	// set, so a target something has published in the meantime is withdrawn
-	// before Nix is asked to realise it.
+	// Recheck build-set outputs immediately before realisation. Remove any target
+	// that has become available in the destination or reuse view since planning.
 	const reprobe =
-		result === undefined
+		result === undefined || inputs.requireProvenance
 			? undefined
 			: await reprobeCohort(
 					inputs,
@@ -644,10 +652,24 @@ export async function buildCohortAction(
 					runCupboard,
 					cupboardRunDependencies
 				);
-	const partition =
+	const settledPartition =
 		result === undefined
 			? undefined
 			: withdrawFromPartition(result.partition, reprobe?.withdrawn ?? []);
+	const provenanceRebuilds = new Set(
+		settledPartition !== undefined && inputs.requireProvenance
+			? provenanceRebuildInstallables(settledPartition, queryable)
+			: []
+	);
+	if (inputs.requireProvenance) {
+		for (const member of unqueryable) {
+			provenanceRebuilds.add(member.installable);
+		}
+	}
+	const partition =
+		settledPartition === undefined || !inputs.requireProvenance
+			? settledPartition
+			: provenanceRequiredPartition(settledPartition, queryable);
 
 	const buildInstallables = [
 		...new Set([
@@ -680,6 +702,7 @@ export async function buildCohortAction(
 			await runBuildPushCohort(
 				inputs,
 				buildInstallables,
+				provenanceRebuilds,
 				environment,
 				runCupboard,
 				cupboardRunDependencies
@@ -710,6 +733,7 @@ export async function buildCohortAction(
 		partition,
 		result,
 		reprobe,
+		provenanceRebuilds,
 		isStreamed,
 		environment,
 		runCupboard,
@@ -751,7 +775,12 @@ export async function buildCohortAction(
 						remoteBindings.map((binding) => binding.target),
 						inputs.maxJobs,
 						inputs.store,
-						async (results, failures) => {
+						async (
+							results,
+							failures,
+							publicationPaths,
+							currentProvenanceRebuilds
+						) => {
 							const targetFailures = failures.filter(
 								(failure) => failure.kind === 'target'
 							);
@@ -776,18 +805,26 @@ export async function buildCohortAction(
 								}
 							}
 
-							await settleCohortBuild(context, {
-								built: buildResultOutputPaths(results),
-								resultBuilds: results,
-								incompleteRoots: incompleteRootsFor(members, failures),
-								...(terminalFailure !== undefined && {
-									terminalFailure
-								})
-							});
+							await settleCohortBuild(
+								{
+									...context,
+									provenanceRebuilds: currentProvenanceRebuilds
+								},
+								{
+									built: buildResultOutputPaths(results),
+									publicationPaths,
+									resultBuilds: results,
+									incompleteRoots: incompleteRootsFor(members, failures),
+									...(terminalFailure !== undefined && {
+										terminalFailure
+									})
+								}
+							);
 						},
 						dependencies.signal,
 						{
 							derivations: remoteBindings.map((binding) => binding.derivation),
+							...(inputs.requireProvenance && { requireProvenance: true }),
 							copy: () =>
 								runCopy(
 									remoteBindings.map((binding) => binding.derivation),
@@ -986,20 +1023,21 @@ interface SettleCohortBuildContext {
 	readonly partition: PartitionData | undefined;
 	readonly result: PlanCohortResultData | undefined;
 	readonly reprobe: PlanReprobeResultData | undefined;
+	readonly provenanceRebuilds: ReadonlySet<string>;
 	readonly isStreamed: boolean;
 	readonly environment: Environment;
 	readonly runCupboard: typeof defaultRunCupboard;
 	readonly cupboardRunDependencies: CupboardRunDependencies | undefined;
 }
 
-// Settles every artifact and publication that reads realised paths. A remote
-// caller runs this whole function inside the daemon session holding those
-// paths' temporary roots, so both the receipt push and every target-root push
-// finish before closing the connection releases them.
+// Complete every operation that reads realised paths before returning. Remote
+// callers keep the daemon session open throughout, so temporary roots remain
+// active until the receipt and target-root pushes finish.
 async function settleCohortBuild(
 	context: SettleCohortBuildContext,
 	build: {
 		readonly built: readonly string[];
+		readonly publicationPaths?: readonly string[];
 		readonly resultBuilds?: readonly NixBuildResult[];
 		readonly localBuilds?: readonly CohortOwnedBuild[];
 		readonly incompleteRoots?: ReadonlySet<string>;
@@ -1012,6 +1050,7 @@ async function settleCohortBuild(
 		partition,
 		result,
 		reprobe,
+		provenanceRebuilds,
 		isStreamed,
 		environment,
 		runCupboard,
@@ -1019,19 +1058,16 @@ async function settleCohortBuild(
 	} = context;
 	const {
 		built,
+		publicationPaths = built,
 		resultBuilds = [],
 		localBuilds = [],
 		incompleteRoots = new Set<string>(),
 		terminalFailure
 	} = build;
-	const claimable = claimableOutputPaths(resultBuilds);
+	const claimable = claimableOutputPaths(resultBuilds, provenanceRebuilds);
 
-	// Every path a plain, single-invocation `nix build` prints belongs to one
-	// of this cohort's own requested installables: there is nothing else it
-	// could have realised. The intermediate-paths file exists so a future
-	// increment that derives genuine shared-dependency intermediates from the
-	// build log has somewhere to report them without changing this
-	// interface; for now it is always empty.
+	// A plain `nix build` prints only results for the requested installables, so
+	// every output is a target path. The intermediate-paths file remains empty.
 	const targetPaths = [...(partition?.attachOnly ?? []), ...built].toSorted(
 		(left, right) => left.localeCompare(right)
 	);
@@ -1063,28 +1099,43 @@ async function settleCohortBuild(
 		)}\n`
 	);
 
-	// A remote-store cohort has no post-build hook to stream, so its receipt is
-	// reconciled from the store the build ran in: one push over exactly the
-	// paths the keyed daemon results report publishes them and reads back each
-	// one's NAR hash and deriver. Those results also prove which outputs this
-	// invocation built; substituted and already-valid results, including a path
-	// that appeared after planning, remain unclaimed. The per-root pushes that
-	// follow negotiate these paths as already-present skips, exactly as they do
-	// behind a streamed build.
-	const isReconciled = inputs.push && inputs.store !== '' && built.length > 0;
+	// Remote-store builds cannot use the local post-build hook. Publish their
+	// keyed daemon results once to read back NAR hashes and derivers for the
+	// receipt. Claim only outputs that the keyed results report as built; exclude
+	// substituted and already-valid paths. Per-root pushes then reuse these paths.
+	const isReconciled =
+		inputs.push && inputs.store !== '' && publicationPaths.length > 0;
 
 	if (isReconciled) {
 		await runCupboard(
 			inputs.cupboardPath,
 			cohortReceiptPushArguments(
 				inputs,
-				built,
+				publicationPaths,
 				partition?.alreadyValid ?? [],
 				claimable
 			),
 			environment,
 			cupboardRunDependencies
 		);
+
+		if (inputs.requireProvenance) {
+			const receipt = buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
+			);
+			const claimed = new Set<string>(
+				receipt.subjects.map((subject) => subject.storePath)
+			);
+			const missing = targetPaths.filter(
+				(storePath) => !claimed.has(storePath)
+			);
+
+			if (missing.length > 0) {
+				throw new Error(
+					`The remote build did not produce current-run provenance for: ${missing.join(', ')}`
+				);
+			}
+		}
 	}
 
 	if (terminalFailure !== undefined) {
@@ -1134,24 +1185,35 @@ async function settleCohortBuild(
 }
 
 /**
- * The cohorts file one supervised `cupboard build-push` run consumes: the
- * whole build set as one constructed nix invocation, so the build keeps
- * cross-target work sharing, with the attempt loop, local re-verification of
- * remotely built derivations, and `--keep-going` the way the fan-out's build
- * supervision ran.
+ * The cohorts file one supervised `cupboard build-push` run consumes. Strict
+ * builds retain cross-target work sharing, while best-effort builds keep one
+ * target per cohort so every failure remains attributable. Both modes retain
+ * the attempt loop and local re-verification of remotely built derivations.
  */
 export function buildPushCohortsFile(
 	installables: readonly string[],
 	maxJobs: string,
-	shouldSeparateTargets = false
+	shouldSeparateTargets = false,
+	rebuildInstallables: ReadonlySet<string> = new Set(),
+	requiresProvenance = false
 ): { readonly cohorts: readonly Record<string, unknown>[] } {
+	const unique = [...new Set(installables)];
 	const groups = shouldSeparateTargets
-		? [...new Set(installables)].map((installable) => [installable])
-		: [[...new Set(installables)]];
+		? unique.map((installable) => [installable])
+		: [
+				unique.filter((installable) => !rebuildInstallables.has(installable)),
+				unique.filter((installable) => rebuildInstallables.has(installable))
+			].filter((group) => group.length > 0);
 
 	return {
 		cohorts: groups.map((group) => ({
 			installables: group,
+			...(group.every((installable) =>
+				rebuildInstallables.has(installable)
+			) && {
+				rebuild: true
+			}),
+			...(requiresProvenance && { requireProvenance: true }),
 			verifyRebuilds: true,
 			keepGoing: !shouldSeparateTargets,
 			...(maxJobs !== '' && { maxJobs: Number(maxJobs) })
@@ -1222,6 +1284,7 @@ export function cohortBuildPushArguments(
 async function runBuildPushCohort(
 	inputs: BuildCohortInputs,
 	buildInstallables: readonly string[],
+	provenanceRebuilds: ReadonlySet<string>,
 	environment: Environment,
 	runCupboard: typeof defaultRunCupboard,
 	cupboardRunDependencies: CupboardRunDependencies | undefined
@@ -1234,7 +1297,17 @@ async function runBuildPushCohort(
 
 	await writeFile(
 		cohortsFile,
-		`${JSON.stringify(buildPushCohortsFile(buildInstallables, inputs.maxJobs, inputs.allBestEffort), undefined, 2)}\n`
+		`${JSON.stringify(
+			buildPushCohortsFile(
+				buildInstallables,
+				inputs.maxJobs,
+				inputs.allBestEffort,
+				provenanceRebuilds,
+				inputs.requireProvenance
+			),
+			undefined,
+			2
+		)}\n`
 	);
 	await rm(inputs.receiptFile, { force: true });
 
@@ -1247,13 +1320,11 @@ async function runBuildPushCohort(
 }
 
 /**
- * The `cupboard push` argv that publishes a remote-store cohort's result paths
- * and writes its receipt. The paths are published unretained: the per-root
- * pushes that follow declare each root over its full target list, so this one
- * exists to publish what Nix returned and record what the selected store
- * now holds. The keyed daemon results name which resolved outputs this
- * invocation built; substituted and already-valid outputs remain publishable
- * but unclaimed.
+ * Arguments for the unretained push that publishes remote-store results and
+ * writes their receipt. Later pushes apply each root to its complete target
+ * list. Keyed daemon results identify which outputs were built by this run;
+ * substituted and already-valid outputs are published without provenance
+ * claims.
  */
 export function cohortReceiptPushArguments(
 	inputs: Pick<
@@ -1330,10 +1401,9 @@ interface CohortRootGrouping {
 }
 
 /**
- * Groups a cohort's target paths by root. Remote keyed results retain the
- * owning derived path for floating and multi-output targets. Otherwise, an
- * evaluated expected path names its root; only a flat local build path with no
- * known owner joins the first root.
+ * Groups target paths by retention root. Remote keyed results retain ownership
+ * for floating and multi-output targets. Otherwise, predictable output paths
+ * determine the root. A local path without known ownership uses the first root.
  */
 export function rootGroups(
 	members: readonly CohortMember[],
@@ -1455,9 +1525,9 @@ interface CohortPushExtras {
 }
 
 /**
- * The `cupboard push` argv for one root group: the group's every target path,
- * built and attach-only alike, so the root's all-or-nothing replacement names
- * the full declared list. A streamed cohort's built paths negotiate as
+ * The `cupboard push` arguments for one root group, including built and
+ * attach-only targets so the atomic root replacement contains the complete
+ * declared list. A streamed cohort's built paths negotiate as
  * already-present skips, so this invocation is the root setting, not a second
  * upload.
  */
@@ -1743,11 +1813,76 @@ export function withdrawFromPartition(
 	};
 }
 
-// The confirmation `cupboard plan reprobe` answers, asked of the destination
-// this cohort publishes to and of the reuse view it may substitute from.
-// Best-effort by design: a failed confirmation leaves the partition exactly as
-// the plan settled it and names the cause, so the cohort builds its whole
-// build set rather than failing on a question it only asked to save work.
+/**
+ * Reclassifies every queryable final target as work for this invocation.
+ * Retention and destination availability cannot prove that a previous run
+ * completed provenance attachment, so a provenance-required rerun executes
+ * the final derivations and treats their prior outputs as rebuild inputs, not
+ * as already-held receipt exclusions.
+ */
+export function provenanceRequiredPartition(
+	partition: PartitionData,
+	queryable: readonly CohortMember[]
+): PartitionData {
+	const buildSet = queryable
+		.flatMap((member) =>
+			member.queryInstallable === undefined ? [] : [member.queryInstallable]
+		)
+		.map((installable) =>
+			canonicalNixDerivedPath(nixDerivedPathSchema.parse(installable))
+		)
+		.filter(
+			(installable, index, values) => values.indexOf(installable) === index
+		);
+	const rebuiltPaths = new Set(
+		queryable.flatMap((member) =>
+			member.expectedPath === undefined ? [] : [member.expectedPath]
+		)
+	);
+	const withoutRebuilt = (paths: readonly string[]): string[] =>
+		paths.filter((storePath) => !rebuiltPaths.has(storePath));
+
+	return {
+		...partition,
+		attachOnly: withoutRebuilt(partition.attachOnly),
+		publishByReference: withoutRebuilt(partition.publishByReference),
+		leftUpstream: withoutRebuilt(partition.leftUpstream),
+		alreadyValid: withoutRebuilt(partition.alreadyValid),
+		buildSet,
+		counts: { willBuild: buildSet.length, willSubstitute: 0, unknown: 0 }
+	};
+}
+
+/** Targets already obtainable before this run need explicit rebuild mode. */
+export function provenanceRebuildInstallables(
+	partition: PartitionData,
+	queryable: readonly CohortMember[]
+): readonly string[] {
+	const alreadyValid = new Set(partition.alreadyValid);
+
+	return queryable.flatMap((member) => {
+		if (member.queryInstallable === undefined) {
+			return [];
+		}
+
+		const installable = canonicalNixDerivedPath(
+			nixDerivedPathSchema.parse(member.queryInstallable)
+		);
+		// A target without one predictable output cannot participate in the
+		// planner's path-validity question. Prime it to resolve its selected
+		// outputs, then rebuild it under publication supervision so a rerun still
+		// establishes current-invocation provenance.
+		const wasAlreadyValid =
+			member.expectedPath === undefined ||
+			alreadyValid.has(member.expectedPath);
+
+		return wasAlreadyValid ? [installable] : [];
+	});
+}
+
+// Recheck the destination and reuse view through `cupboard plan reprobe`. This
+// optimisation is best-effort: a failed check preserves the original build set
+// and reports the reason.
 async function reprobeCohort(
 	inputs: BuildCohortInputs,
 	partition: PartitionData,
@@ -1797,7 +1932,7 @@ async function reprobeCohort(
 	return planReprobeResult(results, reporter);
 }
 
-/** One build-set member as the confirmation's targets file names it. */
+/** One build-set member in the confirmation targets file. */
 interface ReprobeTargetEntry {
 	readonly attr: string;
 	readonly installable: string;
@@ -1805,9 +1940,8 @@ interface ReprobeTargetEntry {
 	readonly root: string;
 }
 
-// The build-set members the confirmation can answer for: a member with no
-// predictable output has nothing to ask about, so it stays on the build set
-// without a question.
+// Reprobe only members with predictable output paths. Floating outputs remain
+// on the build set.
 function reprobeTargets(
 	partition: PartitionData,
 	queryable: readonly CohortMember[]
@@ -1838,11 +1972,9 @@ function reprobeTargets(
 }
 
 /**
- * The `cupboard plan reprobe` argv for one cohort. No token is exchanged and no
- * store is named: the confirmation reconciles no retention root and asks
- * nothing of a store, so it puts its questions to the cache's own read
- * endpoints with this run's read credentials, or with none at all for a public
- * cache.
+ * The `cupboard plan reprobe` arguments for one cohort. The command reads cache
+ * endpoints without exchanging a token or opening a Nix store. It uses the
+ * run's read credentials for a private cache.
  */
 export function planReprobeArguments(
 	inputs: Pick<
@@ -1934,6 +2066,12 @@ async function planCohort(
 				targets: queryable.map((member) => ({
 					attr: member.attr,
 					installable: member.queryInstallable,
+					...(inputs.push &&
+						inputs.store !== '' && {
+							plannedLocalDerivation: derivationPathOf(
+								nixDerivedPathSchema.parse(member.queryInstallable)
+							)
+						}),
 					...(member.expectedPath !== undefined && {
 						expectedPath: member.expectedPath
 					}),
@@ -2068,8 +2206,8 @@ function planCohortResult(
  * receives the argument, but its out-link exists only in the local filesystem
  * and is not treated as a remote GC root. A cohort with one failing
  * derivation still reports whatever `--print-out-paths` prints for the
- * survivors; only a catastrophic failure that printed nothing at all is
- * treated as this command's own failure. A configured remote store owns the
+ * survivors. A failure with no reported target results is treated as a command
+ * failure. A configured remote store owns the
  * build: `--store` sends the results there while `--eval-store auto` keeps
  * evaluation on the runner, so the built closure never enters the runner's
  * local store.
@@ -2256,12 +2394,19 @@ export interface CapturedNixProcessDependencies {
 		arguments_: readonly string[],
 		signal: AbortSignal | undefined
 	) => CapturedNixProcess;
+	readonly maximumStdoutBytes?: number;
+	readonly scheduler?: ChildProcessEscalationScheduler;
 }
 
 export interface NixDerivationShowDependencies {
 	readonly evalStore?: string;
 	readonly start?: CapturedNixProcessDependencies['start'];
+	readonly maximumStdoutBytes?: number;
+	readonly scheduler?: ChildProcessEscalationScheduler;
 }
+
+/** Maximum stdout retained from a Nix derivation or build subprocess. */
+const maximumCapturedNixStdoutBytes = 16 * 1024 * 1024;
 
 function startCapturedNixProcess(
 	arguments_: readonly string[],
@@ -2287,6 +2432,7 @@ const defaultCapturedNixProcessDependencies: CapturedNixProcessDependencies = {
 };
 
 async function runCapturedNixProcess(
+	command: string,
 	arguments_: readonly string[],
 	signal: AbortSignal | undefined,
 	dependencies: CapturedNixProcessDependencies
@@ -2296,13 +2442,43 @@ async function runCapturedNixProcess(
 	readonly stdout: string;
 }> {
 	const child = dependencies.start(arguments_, signal);
+	const outputLimit = new AbortController();
+	const lifecycleSignal =
+		signal === undefined
+			? outputLimit.signal
+			: AbortSignal.any([signal, outputLimit.signal]);
+	const maximumStdoutBytes =
+		dependencies.maximumStdoutBytes ?? maximumCapturedNixStdoutBytes;
 	let stdout = '';
+	let capturedBytes = 0;
 
 	child.onStdout((chunk) => {
+		if (outputLimit.signal.aborted) {
+			return;
+		}
+
+		const observedBytes = capturedBytes + Buffer.byteLength(chunk);
+
+		if (observedBytes > maximumStdoutBytes) {
+			outputLimit.abort(
+				new CommandOutputTooLargeError(
+					command,
+					maximumStdoutBytes,
+					observedBytes
+				)
+			);
+			return;
+		}
+
+		capturedBytes = observedBytes;
 		stdout += chunk;
 	});
 
-	const result = await waitForAbortableChildProcess(child, signal);
+	const result = await waitForAbortableChildProcess(
+		child,
+		lifecycleSignal,
+		dependencies.scheduler
+	);
 
 	if (result.error !== undefined) {
 		throw result.error;
@@ -2365,7 +2541,13 @@ export async function runNixDerivationShow(
 ): Promise<readonly (StorePathBasename | StorePathString)[]> {
 	signal?.throwIfAborted();
 	const processDependencies: CapturedNixProcessDependencies = {
-		start: dependencies.start ?? defaultCapturedNixProcessDependencies.start
+		start: dependencies.start ?? defaultCapturedNixProcessDependencies.start,
+		...(dependencies.maximumStdoutBytes !== undefined && {
+			maximumStdoutBytes: dependencies.maximumStdoutBytes
+		}),
+		...(dependencies.scheduler !== undefined && {
+			scheduler: dependencies.scheduler
+		})
 	};
 
 	const {
@@ -2373,6 +2555,7 @@ export async function runNixDerivationShow(
 		status,
 		stdout
 	} = await runCapturedNixProcess(
+		'nix derivation show',
 		nixDerivationShowArguments(
 			installables,
 			isRecursive,
@@ -2568,7 +2751,9 @@ export async function runNixBuildWithResults(
 	store: string,
 	publish: (
 		results: readonly NixBuildResult[],
-		failures: readonly RemoteCohortBuildFailure[]
+		failures: readonly RemoteCohortBuildFailure[],
+		publicationPaths: readonly StorePathString[],
+		provenanceRebuilds: ReadonlySet<NixDerivedPathString>
 	) => Promise<void>,
 	signal?: AbortSignal,
 	preparation?: RemoteDerivationPreparation
@@ -2600,18 +2785,26 @@ export interface RemoteDerivationPreparation {
 	readonly derivations: readonly StorePathString[];
 	/** Copies those derivation closures after their temporary roots exist. */
 	copy(): Promise<void>;
+	/** Require every successful target to have current-run build evidence. */
+	readonly requireProvenance?: boolean;
 }
 
 /** Root every predictable output, then build and publish on the same session. */
 export async function buildAndRootNixResults(
 	session: Pick<
 		NixDaemonSession,
-		'addTempRoot' | 'buildPathsWithResults' | 'readDerivation'
-	>,
+		| 'addTempRoot'
+		| 'buildPathsWithResults'
+		| 'readDerivation'
+		| 'resolveClosure'
+	> &
+		Partial<Pick<NixDaemonSession, 'queryValidPaths'>>,
 	installables: readonly NixDerivedPathString[],
 	publish: (
 		results: readonly NixBuildResult[],
-		failures: readonly RemoteCohortBuildFailure[]
+		failures: readonly RemoteCohortBuildFailure[],
+		publicationPaths: readonly StorePathString[],
+		provenanceRebuilds: ReadonlySet<NixDerivedPathString>
 	) => Promise<void>,
 	preparation?: RemoteDerivationPreparation
 ): Promise<void> {
@@ -2639,10 +2832,53 @@ export async function buildAndRootNixResults(
 
 	const results: NixBuildResult[] = [];
 	const failures: RemoteCohortBuildFailure[] = [];
+	const provenanceRebuilds = new Set<NixDerivedPathString>();
+	const queryCurrentValidity = session.queryValidPaths;
+
+	if (
+		queryCurrentValidity === undefined &&
+		preparation?.requireProvenance === true
+	) {
+		throw new Error(
+			'Provenance-required remote builds need selected-store validity queries'
+		);
+	}
 
 	for (const build of expectedBuilds) {
-		const returned = await session.buildPathsWithResults([build.installable]);
-		const reconciliation = reconcileBuildResults([build], returned);
+		const selectedOutputs = build.outputs.values().toArray();
+		const currentlyValid =
+			queryCurrentValidity !== undefined &&
+			preparation?.requireProvenance === true
+				? new Set(await queryCurrentValidity.call(session, selectedOutputs))
+				: new Set<StorePathString>();
+		let buildMode: NixBuildMode =
+			preparation?.requireProvenance === true &&
+			selectedOutputs.every((output) => currentlyValid.has(output))
+				? 'check'
+				: 'normal';
+		let returned = await session.buildPathsWithResults(
+			[build.installable],
+			buildMode
+		);
+		let reconciliation = reconcileBuildResults([build], returned);
+
+		if (
+			buildMode === 'normal' &&
+			preparation?.requireProvenance === true &&
+			reconciliation.failures.length === 0 &&
+			reconciliation.results.some((result) => result.outcome.kind !== 'built')
+		) {
+			buildMode = 'check';
+			returned = await session.buildPathsWithResults(
+				[build.installable],
+				buildMode
+			);
+			reconciliation = reconcileBuildResults([build], returned);
+		}
+
+		if (buildMode === 'check' && reconciliation.failures.length === 0) {
+			provenanceRebuilds.add(build.target);
+		}
 
 		for (const output of reconciliation.outputs) {
 			await session.addTempRoot(output);
@@ -2652,7 +2888,12 @@ export async function buildAndRootNixResults(
 		failures.push(...reconciliation.failures);
 	}
 
-	await publish(results, failures);
+	const outputPaths = buildResultOutputPaths(results);
+	const publicationInfos =
+		outputPaths.length === 0 ? [] : await session.resolveClosure(outputPaths);
+	const publicationPaths = publicationInfos.map((info) => info.storePath);
+
+	await publish(results, failures, publicationPaths, provenanceRebuilds);
 
 	if (failures.length > 0) {
 		const protocolFailures = failures.filter(
@@ -2889,7 +3130,7 @@ function formatRemoteOutputEntries(
 		.join(', ');
 }
 
-/** Every settled output path the keyed results report, once and sorted. */
+/** Every final output path in the keyed results, deduplicated and sorted. */
 export function buildResultOutputPaths(
 	results: readonly NixBuildResult[]
 ): readonly StorePathString[] {
@@ -3008,12 +3249,14 @@ async function resolveLocalBuildOwners(options: {
 
 /** Outputs this invocation's keyed daemon results say it actually built. */
 export function claimableOutputPaths(
-	results: readonly NixBuildResult[]
+	results: readonly NixBuildResult[],
+	provenanceRebuilds: ReadonlySet<string> = new Set()
 ): readonly string[] {
 	return [
 		...new Set(
 			results.flatMap((result) =>
-				result.outcome.kind === 'built'
+				result.outcome.kind === 'built' ||
+				(provenanceRebuilds.has(result.target) && 'outputs' in result.outcome)
 					? Object.values(result.outcome.outputs)
 					: []
 			)
@@ -3041,6 +3284,7 @@ export async function runNixBuild(
 	);
 
 	const { status, stdout } = await runCapturedNixProcess(
+		'nix build',
 		arguments_,
 		signal,
 		dependencies

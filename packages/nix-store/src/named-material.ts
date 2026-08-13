@@ -10,10 +10,9 @@ export interface NamedMaterialParts {
 }
 
 /**
- * The halves of a Nix `<name>:<base64>` value, or `undefined` when `value` is
- * not one. A caller that can carry on without the value (a narinfo listing
- * signatures from keys it does not know, say) reads the `undefined`; a caller
- * that cannot builds a value object and gets a typed error instead.
+ * Parses a Nix `<name>:<base64>` value, or returns `undefined` when the value is
+ * malformed. Callers that require a value construct the relevant domain type,
+ * which reports a typed error instead.
  */
 export function parseNamedMaterial(
 	value: string
@@ -41,9 +40,9 @@ export function parseNamedMaterial(
 }
 
 /**
- * A Nix `<name>:<base64>` value: a signing key's name and the bytes published
- * under it. Nix spells a public key and a narinfo signature the same way, which
- * is how a verifier picks the key a given signature claims to come from.
+ * A Nix `<name>:<base64>` value containing a signing key name and binary
+ * material. Public keys and narinfo signatures use this format so a verifier
+ * can select the key identified by a signature.
  */
 export abstract class NamedMaterial {
 	readonly value: string;
@@ -52,7 +51,7 @@ export abstract class NamedMaterial {
 	readonly bytes: Uint8Array;
 
 	// Valid by construction: both halves are parsed and the material is decoded
-	// up front, so an instance always carries a name alongside bytes that a
+	// up front, so an instance always contains a name alongside bytes that a
 	// verifier can use. Subclasses supply the error their own format raises.
 	protected constructor(
 		value: string,
@@ -77,7 +76,7 @@ export abstract class NamedMaterial {
 
 // `atob` throws on material that is not base64, so the decode is the check.
 // Anything it refuses could never verify anything. It reads past whitespace,
-// which a rendered value never carries and Nix's own decoder refuses, so the
+// which rendered values never contain and Nix's own decoder refuses, so the
 // material has to be whitespace-free to be material at all.
 function decodeMaterial(material: string): Uint8Array | undefined {
 	if (/\s/u.test(material)) {

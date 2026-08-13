@@ -13,10 +13,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
 	BuildEventMalformedError,
 	BuildEventOutsideStoreError,
-	type BuildEventRejectedError
+	type BuildEventRejectedError,
+	BuildEventTooLargeError
 } from '../errors.ts';
 
-import { BuildEventListener } from './listener.ts';
+import { BuildEventListener, maximumBuildEventBytes } from './listener.ts';
 
 const storeDirectory = storeDirectorySchema.parse('/nix/store');
 const outputPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
@@ -107,7 +108,7 @@ function runHelper(socketPath: string, payload: string): number | null {
 		.status;
 }
 
-function send(socketPath: string, payload: string): Promise<void> {
+function send(socketPath: string, payload: string | Uint8Array): Promise<void> {
 	return new Promise((resolve, reject) => {
 		const client = createConnection(socketPath, () => {
 			client.end(payload, () => {
@@ -208,6 +209,48 @@ describe('BuildEventListener', () => {
 			storeDirectory: '/nix/store'
 		});
 		expect(harness.events).toStrictEqual([]);
+	});
+
+	it('rejects a build event whose line exceeds the fixed byte limit', async () => {
+		const harness = await startListener();
+		const payload = Buffer.alloc(maximumBuildEventBytes + 1, 0x20);
+
+		await send(harness.socketPath, Buffer.concat([payload, Buffer.from('\n')]));
+		await harness.settledCount(1);
+
+		expect({
+			events: harness.events,
+			rejections: harness.rejections
+		}).toStrictEqual({
+			events: [],
+			rejections: [
+				new BuildEventTooLargeError(
+					maximumBuildEventBytes,
+					maximumBuildEventBytes + 1
+				)
+			]
+		});
+	});
+
+	it('accepts a build event exactly at the fixed byte limit', async () => {
+		const harness = await startListener();
+		const event = buildEvent();
+		const encoded = Buffer.from(JSON.stringify(event));
+		const padding = Buffer.alloc(
+			maximumBuildEventBytes - encoded.byteLength,
+			0x20
+		);
+
+		await send(
+			harness.socketPath,
+			Buffer.concat([encoded, padding, Buffer.from('\n')])
+		);
+		await harness.settledCount(1);
+
+		expect({
+			events: harness.events,
+			rejections: harness.rejections
+		}).toStrictEqual({ events: [event], rejections: [] });
 	});
 
 	it('delivers two whole messages over concurrent connections', async () => {

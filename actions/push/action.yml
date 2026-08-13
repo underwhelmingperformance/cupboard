@@ -106,7 +106,7 @@ inputs:
     description: >-
       JSON array of {root, paths} objects: one push per group, replacing the
       flat paths and root inputs. Use when a cohort declares more than one
-      target root; the all-or-nothing replacement rule holds per root.
+      target root. Each root is replaced atomically.
     required: false
 outputs:
   cupboard-path:
@@ -122,7 +122,7 @@ outputs:
     description: Number of paths already present in the cache and reused.
     value: ${{ steps.push.outputs.reused-blobs }}
   skipped-paths:
-    description: Number of paths skipped because nothing needed uploading.
+    description: Number of paths that required no upload.
     value: ${{ steps.push.outputs.skipped-paths }}
   uploaded-bytes:
     description: Total number of bytes uploaded to the cache.

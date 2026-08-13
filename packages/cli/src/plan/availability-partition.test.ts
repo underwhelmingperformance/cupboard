@@ -600,6 +600,75 @@ describe('partitionAvailability', () => {
 		});
 	});
 
+	it('accounts locally copyable derivations as build work instead of unknown availability', async () => {
+		const derivations = Array.from({ length: 6 }, (_, index) =>
+			path(`${String(index + 1).repeat(32)}-target-${String(index)}.drv`)
+		);
+		const targets = derivations.map((derivation, index) =>
+			target({
+				installable: `${derivation}^out`,
+				expectedPath: path(
+					`${String(index + 1).repeat(32)}-target-${String(index)}`
+				),
+				plannedLocalDerivation: derivation,
+				root: root(`github:owner/repo/main/target-${String(index)}`)
+			})
+		);
+		const store = new RecordingStore(missingWith({ unknown: derivations }));
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets,
+				store,
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+
+		expect({
+			buildSet: partition.buildSet,
+			counts: partition.counts,
+			unknownCount: partition.unknownCount,
+			ceiling: partition.ceiling
+		}).toStrictEqual({
+			buildSet: targets.map(({ installable }) => installable),
+			counts: { willBuild: 6, willSubstitute: 0, unknown: 0 },
+			unknownCount: 0,
+			ceiling: { value: 0, source: 'configured' }
+		});
+	});
+
+	it('keeps an unknown path without matching local-copy evidence under the ceiling', async () => {
+		const derivation = path('11111111111111111111111111111111-target.drv');
+		const unknown = path('22222222222222222222222222222222-source');
+		const store = new RecordingStore(
+			missingWith({ unknown: [derivation, unknown] })
+		);
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({
+						installable: `${derivation}^out`,
+						plannedLocalDerivation: derivation
+					})
+				],
+				store,
+				requeryUnknown: () => Promise.resolve({ kind: 'already-fresh' }),
+				ceiling: { value: 1, untrustedFallback: 1 }
+			})
+		);
+
+		expect({
+			counts: partition.counts,
+			unknownCount: partition.unknownCount,
+			ceiling: partition.ceiling
+		}).toStrictEqual({
+			counts: { willBuild: 1, willSubstitute: 0, unknown: 1 },
+			unknownCount: 1,
+			ceiling: { value: 1, source: 'configured' }
+		});
+	});
+
 	// A path counted as held nowhere is held nowhere among the substituters
 	// that answered, so which ones did not answer belongs beside the counts.
 	it('records the substituters nothing could be asked of', async () => {

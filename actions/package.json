@@ -14,10 +14,12 @@
 		"commander": "^15.0.0",
 		"http-status-codes": "^2.3.0",
 		"semver": "^7.8.5",
+		"snappyjs": "^0.7.0",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
-		"@types/semver": "^7.7.1"
+		"@types/semver": "^7.7.1",
+		"@types/snappyjs": "^0.7.1"
 	},
 	"license": "AGPL-3.0-or-later",
 	"private": true,

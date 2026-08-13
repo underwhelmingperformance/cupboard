@@ -73,23 +73,21 @@ import type { RootClient } from './root.ts';
 const maximumConcurrentRootEnsures = 8;
 const defaultStorePath = '/nix/store';
 
-// Provisional, per PLAN.md: unset until the rollout fixture's measurements
-// tune them. Zero suits a trusted connection that requires every path to
-// resolve; the untrusted fallback stays small but nonzero, since an
-// untrusted connection missing one narinfo answer is a routine transient.
+// These provisional values remain until rollout measurements replace them.
+// Trusted queries require every path to resolve. Untrusted queries permit a
+// small number of misses because one missing narinfo can be transient.
 const defaultUnknownCeiling = 0;
 const defaultUnknownCeilingUntrustedFallback = 5;
 
 const negativeNarinfoCacheBypass = { 'narinfo-cache-negative-ttl': '0' };
 
 /**
- * Asks about the paths the first pass left unknown, past whatever cache stood
- * in front of that answer.
+ * Re-queries paths whose availability remained unknown, bypassing the negative
+ * narinfo cache when the selected store accepts the override.
  *
- * A store whose answers cannot be cached has nothing to look past. One whose
- * answers can is asked again through a client carrying the negative-cache
- * bypass, which reaches the substituters only when the store honours the
- * settings it is sent.
+ * A store that does not cache substituter responses needs no second query. A
+ * caching store is queried through a client with a negative-cache bypass. The
+ * bypass reaches substituters only when the store honours client settings.
  */
 export async function requeryUnknownWith(
 	store: Pick<Nix, 'cachesSubstituterAnswers' | 'honoursSubstituterSettings'>,
@@ -114,10 +112,8 @@ export async function requeryUnknownWith(
 		};
 	}
 
-	// One bypass answers both questions: what the paths settle as, and what
-	// each of the substitutable ones would cost. The sizes are asked of the
-	// same client for the same reason the partition is, since the store's own
-	// answers about these paths are the ones being looked past.
+	// Use the bypass client for both the partition and per-path costs so neither
+	// result comes from the cached responses being bypassed.
 	const bypass = openBypass();
 	const partition = await bypass.queryMissing(storePaths);
 	const offers = await bypass.querySubstitutablePathInfos(
@@ -158,10 +154,9 @@ export interface PlanCohortOptions {
 }
 
 /**
- * The capacity entry a plan over a remote store records: ssh cannot statfs
- * the remote filesystem, and a remote store is itself the design's answer to
- * a runner whose local store is too small, so the local preflight does not
- * apply and its skip is recorded in the plan.
+ * Records that capacity checking was skipped for a remote store. SSH does not
+ * expose the remote filesystem to `statfs`, and local runner capacity does not
+ * constrain a build performed in the remote store.
  */
 export interface RemoteStoreCapacitySkip {
 	readonly skipped: 'remote-store';
@@ -174,10 +169,9 @@ export interface PlanCohortResult {
 }
 
 /**
- * A typed, non-zero-exit outcome of a cohort plan: either the unknown-path
- * count settled over the configured ceiling, or the measured substitutable
- * bytes would not fit this store. Reported over the result protocol with the
- * measured numbers before the underlying error propagates.
+ * A typed cohort-plan failure. The plan either exceeded the unknown-path
+ * ceiling or measured more substitutable data than the store can accommodate.
+ * The result protocol reports the measurements before the command exits.
  */
 export type PlanCohortRefusal =
 	| {
@@ -196,12 +190,11 @@ export type PlanCohortRefusal =
 	  };
 
 /**
- * What {@link runPlanCohort} needs from this run's environment, all
- * injectable so a command test can drive it with doubles: a root client for
- * the ensure calls, the selected store's own availability queries, the
- * daemon-trust and re-query facilities {@link partitionAvailability} settles
- * unknowns with, the destination/view HTTP probes, and the store capacity
- * probe.
+ * Dependencies that {@link runPlanCohort} obtains from the environment. Tests
+ * can inject each one: a root client for ensure calls, the selected store's
+ * availability queries, the daemon trust and re-query facilities used by
+ * {@link partitionAvailability}, the destination and view probes, and the
+ * store capacity probe.
  */
 export interface PlanCohortDependencies {
 	readonly rootClient: Pick<RootClient, 'ensure'>;
@@ -489,6 +482,9 @@ export async function runPlanCohort(
 	const availabilityTargets: AvailabilityTarget[] = options.targets.map(
 		(target) => ({
 			installable: target.installable,
+			...(target.plannedLocalDerivation !== undefined && {
+				plannedLocalDerivation: target.plannedLocalDerivation
+			}),
 			...(target.expectedPath !== undefined && {
 				expectedPath: target.expectedPath
 			}),
@@ -630,10 +626,10 @@ async function checkLocalCapacity(
 	}
 }
 
-// One `roots.ensure` call per root named by a known-output target, carrying
-// every target that root declares: the call reconciles the root's whole
-// target set, so a target sharing a root with another must not be checked in
-// isolation.
+// One `roots.ensure` call per completely known root, carrying every target the
+// root declares. The call reconciles the root's whole target set, so a root
+// containing a floating or multi-output target must remain untouched until
+// publication knows that target's complete outputs.
 async function ensureCohortRoots(
 	targets: readonly ParsedCohortTarget[],
 	cacheName: string,
@@ -641,9 +637,16 @@ async function ensureCohortRoots(
 	client: Pick<RootClient, 'ensure'>
 ): Promise<ReadonlyMap<RootName, ParsedRootEnsureResponse>> {
 	const targetsByRoot = new Map<RootName, StorePathString[]>();
+	const incompleteRoots = new Set<RootName>();
 
 	for (const target of targets) {
 		if (target.expectedPath === undefined) {
+			incompleteRoots.add(target.root);
+			targetsByRoot.delete(target.root);
+			continue;
+		}
+
+		if (incompleteRoots.has(target.root)) {
 			continue;
 		}
 

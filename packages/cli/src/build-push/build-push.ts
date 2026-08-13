@@ -37,6 +37,7 @@ import { isAbortError } from '../abort.ts';
 import type { WaitTimeoutSeconds } from '../duration.ts';
 import {
 	BuildCommandFailedError,
+	BuildProvenanceIncompleteError,
 	BuildPublicationFailedError,
 	CliAbortError,
 	type DaemonRequiredError,
@@ -108,6 +109,10 @@ export interface ConstructedBuild {
 	readonly installables: readonly string[];
 	/** Maximum build attempts; defaults to {@link defaultBuildAttempts}. */
 	readonly attempts?: number;
+	/** Execute every selected derivation even when its outputs are already valid. */
+	readonly rebuild?: boolean;
+	/** Fail unless the receipt claims every selected final output. */
+	readonly requireProvenance?: boolean;
 	/**
 	 * Locally rebuild remotely built or early-attempt-built derivations once
 	 * the build succeeds, refusing the run when a rebuild diverges.
@@ -168,13 +173,13 @@ export interface BuildPushDependencies {
 	readonly signalSource?: SignalSource;
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
 	readonly compressNar?: CompressNar;
-	/** Names a constructed invocation's attempts; injectable for tests. */
+	/** Generates identifiers for a constructed invocation's attempts. */
 	readonly nextAttemptId?: () => string;
 	/** Starts the cancellable wait between attempts; injectable for tests. */
 	readonly startDelay?: StartDelay;
 	/** Runs the verification rebuild child; injectable for tests. */
 	readonly runChild?: (options: RunChildOptions) => Promise<ChildExit>;
-	/** Receives the successfully settled targets before this run returns. */
+	/** Receives the successfully published targets before this run returns. */
 	readonly settledTargets?: (
 		targets: readonly StorePathString[]
 	) => Promise<void> | void;
@@ -197,9 +202,7 @@ export function childExitCode(exit: ChildExit): number {
 	return genericExitCode;
 }
 
-// The failure a child that did not succeed ends the run with, carrying its own
-// status or the signal that killed it. Every site that ends a run on a child
-// raises this one, so the numeric contract has a single statement.
+// Preserve the child's status or terminating signal in every build failure.
 function childFailure(exit: ChildExit): BuildCommandFailedError {
 	return new BuildCommandFailedError(
 		exit.status,
@@ -209,10 +212,10 @@ function childFailure(exit: ChildExit): BuildCommandFailedError {
 }
 
 /**
- * Runs one cohort to a settled receipt in the mode its machine supports:
- * streaming behind a daemon that admits this client's post-build hook, and a
- * reconciled local run behind a machine with no such daemon. The reporter
- * names the mode the run took before the build starts.
+ * Runs one cohort in the mode supported by its machine. A daemon that accepts
+ * this client's post-build hook uses streaming publication. Other local stores
+ * use a reconciled build followed by one push. The reporter records the mode
+ * before the build starts.
  */
 export async function runBuildPush(
 	options: BuildPushRunOptions,
@@ -236,16 +239,11 @@ export async function runBuildPush(
 }
 
 /**
- * Runs the supplied build command under streaming publication and settles the
- * run: the invocation runtime endpoint and hook script, the child with its
- * composed environment, the batcher consuming hook events while the build
- * runs, then the quiesced hook endpoint, the drained uploads, reconciliation,
- * the receipt, and the numeric exit contract. A failed build exits with the
- * child's own status; a successful build with failed publication or retention
- * exits with a classified sysexits code, never a bare 1, so a cache failure
- * can never present as a build failure or vice versa. A settled run resolves
- * to its reconciled receipt, so a cohort sequence can aggregate the receipts
- * it ran.
+ * Runs a build with streaming publication. The run creates the hook endpoint,
+ * supervises the child, consumes hook events, drains uploads, reconciles the
+ * results and writes a receipt. Build failures preserve the child's status.
+ * Publication and retention failures after a successful build use a classified
+ * sysexits code, so callers can distinguish them from build failures.
  */
 async function runStreamedBuildPush(
 	options: BuildPushRunOptions,
@@ -423,6 +421,7 @@ function constructedNixCommand(
 	return [
 		'nix',
 		'build',
+		...(build.rebuild === true ? ['--rebuild'] : []),
 		...(outLink === undefined ? ['--no-link'] : ['--out-link', outLink]),
 		'--option',
 		'json-log-path',
@@ -568,23 +567,19 @@ async function verifyRebuilds(
 	return derivations;
 }
 
-// The run's own directories: the attempts write their activity logs in one,
-// and the build leaves its out-links in the other. The links hold what the
-// build realised while the push reads it, in place of the temporary roots a
-// daemon would hold, so both go only once the run is over.
+// Keep the activity logs and out-links in separate run directories. The
+// out-links keep realised paths alive while the push reads them, replacing the
+// temporary roots that a daemon-backed run would use.
 const buildDirectoryName = 'build';
 const outLinkDirectoryName = 'out-links';
 const outLinkName = 'result';
 
 /**
- * Runs the cohort as a reconciled local build: the same constructed
- * invocation under the same attempt loop, with no post-build hook supervising
- * it, then one push over what the build left in the store. Nothing watched the
- * build, so the published paths and their metadata are read back from the
- * store the build populated, and the paths the store already held before it
- * ran are recorded so the receipt claims none of them. A user-supplied command
- * names nothing this run could publish, so for one the daemon condition stands
- * as the refusal it is.
+ * Runs a reconciled local build without a post-build hook, then publishes the
+ * realised outputs in one push. The run reads the output metadata from the
+ * store and excludes paths that were already valid before the build from its
+ * provenance claims. A user-supplied command does not declare outputs that can
+ * be reconciled, so this mode rejects it with the original daemon error.
  */
 async function runReconciledLocalBuildPush(
 	options: BuildPushRunOptions,
@@ -611,7 +606,7 @@ async function runReconciledLocalBuildPush(
 		await createRuntimeDirectory(outLinkDirectory);
 
 		const declared = await declaredOutputs(build, dependencies.store);
-		const alreadyHeld = await dependencies.store.queryValidPaths(declared);
+		const initiallyValid = await dependencies.store.queryValidPaths(declared);
 		const { exit, attempts } = await reporter.phase(buildPushPhases.build, () =>
 			superviseAttemptedBuild({
 				command: (logFile) =>
@@ -649,7 +644,10 @@ async function runReconciledLocalBuildPush(
 			{
 				realised,
 				declared,
-				alreadyHeld,
+				// `--rebuild` executes every selected final derivation even when
+				// its output was valid beforehand. Those paths are therefore
+				// current-run provenance candidates rather than exclusions.
+				alreadyHeld: build.rebuild === true ? [] : initiallyValid,
 				verified,
 				exit,
 				...(terminalFailure !== undefined && { terminalFailure })
@@ -658,6 +656,7 @@ async function runReconciledLocalBuildPush(
 			reporter,
 			dependencies
 		);
+		requireCompleteProvenance(invocation, realised, receipt.subjects);
 
 		try {
 			await writeReceiptFile(options.receiptFile, receipt);
@@ -696,11 +695,8 @@ async function runReconciledLocalBuildPush(
 	}
 }
 
-// The output paths the cohort names before anything is built: every
-// installable that names a derivation, resolved through the store to the
-// outputs that derivation registers. An installable that names something else,
-// a flake attribute say, states no derivation to resolve, so what it realises
-// is learnt from the build's own out-links instead.
+// Resolve predictable output paths from derivation installables before the
+// build. Outputs from other installable forms are discovered through out-links.
 async function declaredOutputs(
 	build: ConstructedBuild,
 	store: BuildPushStore
@@ -733,10 +729,9 @@ async function declaredOutputs(
 	return outputs.values().toArray();
 }
 
-// What the build left in the store: the paths its out-links name, together
-// with the declared outputs the store now holds. A build that failed part way
-// leaves no links, so the declared outputs are what a `--keep-going` run
-// publishes of what it did realise.
+// Combine the out-link targets with declared outputs that are now valid. The
+// declared outputs preserve successful results from a partial `--keep-going`
+// build even when Nix did not create out-links for them.
 async function realisedOutputs(
 	outLinkDirectory: string,
 	declared: readonly string[],
@@ -747,10 +742,8 @@ async function realisedOutputs(
 	return store.queryValidPaths([...new Set([...linked, ...declared])]);
 }
 
-// The store paths a build's out-links name. Each link is one realised output,
-// named `result`, `result-<n>` for a further installable and `result-<output>`
-// for an output other than `out`, so the links are read rather than their
-// names parsed.
+// Read each out-link target instead of parsing Nix's `result`, `result-<n>` and
+// `result-<output>` link names.
 async function outLinkTargets(
 	directory: string
 ): Promise<readonly StorePathString[]> {
@@ -768,10 +761,8 @@ async function outLinkTargets(
 	});
 }
 
-// The local re-verification of a reconciled run's realised paths: the
-// attempts' activity logs say which derivations the successful attempt did not
-// build locally, and those are rebuilt here. The derivations the rebuild
-// reproduced are what the receipt claims as verified.
+// Rebuild derivations that the successful attempt did not build locally. The
+// receipt marks only successfully reproduced derivations as verified.
 async function verifyRealised(
 	realised: readonly string[],
 	attempts: readonly SupervisedAttempt[],
@@ -793,9 +784,8 @@ async function verifyRealised(
 	return verifyRebuilds(observed, successful.attempt, infos, dependencies);
 }
 
-// What a reconciled run realised, and what it established about it: the paths
-// the build left, the outputs the run resolved before building, the paths the
-// store already held, and the derivations a local rebuild reproduced.
+// Evidence collected by a reconciled local build and used to construct its
+// receipt.
 interface RealisedBuild {
 	readonly realised: readonly string[];
 	readonly declared: readonly string[];
@@ -805,11 +795,9 @@ interface RealisedBuild {
 	readonly terminalFailure?: TerminalBuildFailure;
 }
 
-// The one push a reconciled run makes, under the run's numeric exit contract:
-// a lost publication behind a build that succeeded carries a classified
-// sysexits code, and behind a build that failed the child's own status. A run
-// with nothing to publish makes no push at all, so a root it declares keeps
-// the contents it already had.
+// Publish all reconciled outputs in one push. A publication failure after a
+// successful build uses a classified sysexits code; a failed build preserves
+// the child's status. An empty result skips the push and leaves the root intact.
 async function publishRealised(
 	built: RealisedBuild,
 	options: BuildPushRunOptions,
@@ -920,10 +908,29 @@ interface RunFacts {
 	readonly terminalFailure?: TerminalBuildFailure;
 }
 
-// The phases after the child exits: drain, reconcile, receipt, exit contract.
-// A failed build ends under its own status; behind a build that succeeded, an
-// escape carrying no classified code is a publication loss, re-raised under
-// the publication contract and never as a bare 1.
+function requireCompleteProvenance(
+	invocation: BuildInvocation,
+	targetPaths: readonly string[],
+	subjects: readonly BuildSubjectV3[]
+): void {
+	if (
+		invocation.kind !== 'constructed' ||
+		invocation.build.requireProvenance !== true
+	) {
+		return;
+	}
+
+	const claimed = new Set(subjects.map((subject) => subject.storePath));
+	const missing = targetPaths.filter((storePath) => !claimed.has(storePath));
+
+	if (missing.length > 0) {
+		throw new BuildProvenanceIncompleteError(missing);
+	}
+}
+
+// After the child exits, drain uploads, reconcile paths and write the receipt.
+// Preserve a failed build's status; classify any later failure as a publication
+// failure.
 async function settleRun(
 	options: BuildPushRunOptions,
 	reporter: Reporter,
@@ -962,6 +969,7 @@ async function settleRun(
 				...(options.root !== undefined && { root: options.root })
 			})
 		);
+		requireCompleteProvenance(options.invocation, targetPaths, facts.subjects);
 
 		const result = await reporter.phase(
 			buildPushPhases.reconcile,
@@ -1036,9 +1044,8 @@ async function settleRun(
 			throw error;
 		}
 
-		// The sysexits codes classify a publication failure behind a build that
-		// succeeded, so a failed build carries its own status out of a failed
-		// settlement.
+		// A build failure takes precedence over a later publication error because
+		// callers use the child's status to decide whether to retry the build.
 		if (exit.status !== 0) {
 			throw childFailure(exit);
 		}

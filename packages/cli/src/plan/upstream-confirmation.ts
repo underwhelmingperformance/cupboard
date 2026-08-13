@@ -131,14 +131,14 @@ export interface UpstreamConfirmationOverrideOptions {
  * The overrides a confirmation's store is opened with.
  *
  * The substituter list is assigned outright, so the substituters the
- * confirmation asks are exactly the permitted ones: the configured caches a
- * consumer elsewhere could also reach, less this tenant's own. Positive
- * narinfo cache entries expire at once, so an answer a daemon gives about one
- * of them is the answer that substituter gives now.
+ * confirmation queries are exactly the permitted ones: configured caches that
+ * another consumer could reach, excluding this tenant's own cache. Positive
+ * narinfo cache entries expire at once, so the daemon returns current results
+ * from those substituters.
  *
  * A daemon honours these for a trusted client only, so
- * {@link confirmLeftUpstreamWith} settles the connection's trust before any
- * answer over it decides a verdict.
+ * {@link confirmLeftUpstreamWith} checks the connection's trust before using
+ * any result to decide a verdict.
  */
 export function upstreamConfirmationOverrides(
 	substitution: NixSubstitutionSettings,
@@ -176,10 +176,9 @@ function isTenantEndpoint(substituter: string, tenantUrl: URL): boolean {
 	);
 }
 
-// `always-allow-substitutes` overrules whatever a derivation asks for, so with
-// it on there is nothing to read. An installable naming a plain store path
-// carries no derivation option either: Nix substitutes such a path without
-// consulting one.
+// `always-allow-substitutes` overrides a derivation's own setting, so no
+// derivation read is required. Plain store-path installables also have no
+// derivation option to inspect.
 async function derivationRefusal(
 	candidate: LeftUpstreamCandidate,
 	options: UpstreamConfirmationOptions

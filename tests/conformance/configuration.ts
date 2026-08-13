@@ -18,8 +18,8 @@ import { isolatedEnvironment } from '../support/nix.ts';
 import type { Oracle } from './oracle.ts';
 
 /**
- * `nix config show` reports every setting with the value the configuration
- * resolved it to, which is the same question `discoverNixStoreConfig` answers.
+ * `nix config show` reports each effective setting, which allows comparison
+ * with `discoverNixStoreConfig`.
  * Reading it needs the `nix-command` feature, which the isolated configuration
  * does not enable, so the invocation asks for it. That leaves
  * `experimental-features` assigned on the oracle's side alone, and no field
@@ -141,18 +141,18 @@ export class OracleSettings {
 /** A value either side resolves a configuration field to. */
 type FieldValue = string | number | boolean | readonly string[] | undefined;
 
-/** The resolved fields, keyed the way {@link fieldAdapters} names them. */
+/** Resolved fields keyed by the names in {@link fieldAdapters}. */
 export type FieldValues = Readonly<Record<string, FieldValue>>;
 
 /**
- * One field of the resolved configuration, and the settings each side answers
- * it from. The oracle reports Nix's own settings in Nix's own units, so each
+ * One resolved field and its corresponding Nix settings. The oracle reports
+ * Nix's native shapes and units, so each
  * adapter states the arithmetic and the shape that brings the two together.
  */
 interface FieldAdapter {
 	/** How the comparison names the field. */
 	readonly field: string;
-	/** The `nix config show` settings the oracle's answer is read from. */
+	/** The `nix config show` settings used to derive the oracle value. */
 	readonly settings: readonly string[];
 	readonly fromOracle: (settings: OracleSettings) => FieldValue;
 	readonly fromClient: (config: NixStoreConfig) => FieldValue;
@@ -274,7 +274,7 @@ const fieldAdapters: readonly FieldAdapter[] = [
 	}
 ];
 
-/** The settings the table above reads the oracle's answers from. */
+/** Settings consumed by the adapter table. */
 export const mappedSettings: readonly string[] = sorted([
 	...new Set(fieldAdapters.flatMap((adapter) => adapter.settings))
 ]);
@@ -287,7 +287,7 @@ export const mappedSettings: readonly string[] = sorted([
  * is one the groups leave unmodelled, and the suite reports it.
  *
  * The list is written out rather than derived, because `nix config show`
- * carries no statement of what a setting is for. A Nix that adds a setting to
+ * does not classify settings by purpose. When Nix adds a relevant setting,
  * one of these domains therefore joins the list when the oracle is bumped.
  */
 export const settingsInScope: readonly string[] = sorted([
@@ -337,12 +337,12 @@ export const settingsInScope: readonly string[] = sorted([
 ]);
 
 /**
- * Settings `NixFileTransferSettings` holds fields for that the pinned oracle
- * does not expose. Nix renamed its retry settings after this oracle was cut,
- * and the fields carry the later spellings, so the pinned Nix can confirm
+ * Settings represented by `NixFileTransferSettings` but absent from the pinned
+ * oracle. Nix renamed its retry settings after this oracle version, and the
+ * fields use the later names, so the pinned Nix can confirm
  * neither their defaults nor how they are read. The suite asserts they are
  * still absent, which turns the rename landing in a bumped oracle into a
- * failure that asks for the mapping.
+ * failure that requires an adapter update.
  */
 export const settingsAbsentFromTheOracle: readonly string[] = [
 	'filetransfer-retry-delay',
@@ -370,8 +370,7 @@ export function settingsMissingFromOracle(
 }
 
 /**
- * How many `@file` entries a builders value is followed through. A machines
- * file may name another, and one naming itself would expand without end.
+ * Maximum nesting depth for `@file` entries in a builders value.
  */
 const maxMachineFileDepth = 16;
 
@@ -383,12 +382,12 @@ export class BuildersTooDeeplyNestedError extends Error {
 }
 
 /**
- * The builders a `builders` setting names, with every `@file` entry replaced by
- * what that file holds.
+ * Expands a `builders` setting by replacing every `@file` entry with that
+ * file's builders.
  *
  * `nix config show` reports the setting as it was written, and Nix follows the
  * indirection where it dispatches a build, so the comparison follows it here: a
- * `#` ends its line, each line splits on `;`, and a file that names nothing
+ * `#` ends its line, each line splits on `;`, and an empty file
  * leaves no builders at all.
  */
 function expandedBuilders(setting: string): string | undefined {
@@ -441,14 +440,14 @@ export interface ConfigurationFixture {
 	/** Set as `NIX_CONFIG`, which both sides apply over the files. */
 	readonly inlineConfig?: string;
 	/**
-	 * A directory under the fixture's home to put the configuration in, which
-	 * `NIX_CONF_DIR` then names. The isolated environment's own directory keeps
+	 * A configuration directory below the fixture home, selected through
+	 * `NIX_CONF_DIR`. The isolated environment's default directory keeps
 	 * its empty `nix.conf`, so a side reading the wrong one resolves differently.
 	 */
 	readonly configDirectory?: string;
 }
 
-/** Both sides' answers for every field the table maps. */
+/** Every mapped field resolved by both clients. */
 export interface FieldComparison {
 	readonly oracle: FieldValues;
 	readonly client: FieldValues;
@@ -466,7 +465,7 @@ export interface ResolvedFixture {
 	/**
 	 * Both sides' fields, absent when either rejected the configuration. They
 	 * are read while the fixture is still on disk, since a `builders` setting
-	 * naming a machines file is only answerable there.
+	 * referencing a machines file can be resolved only while that file exists.
 	 */
 	readonly fields: FieldComparison | undefined;
 }
@@ -602,7 +601,7 @@ export function settingsOf(resolved: ResolvedFixture): OracleSettings {
 	return resolved.settings;
 }
 
-/** Both sides' answers for every field the table maps, ready to compare. */
+/** Normalised mapped fields from both clients, ready for comparison. */
 export function comparisonOf(resolved: ResolvedFixture): FieldComparison {
 	if (resolved.fields === undefined) {
 		throw new FixtureRejectedError(resolved, rejectedBy(resolved));

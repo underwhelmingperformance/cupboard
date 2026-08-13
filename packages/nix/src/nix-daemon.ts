@@ -13,6 +13,7 @@ import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { narRegularFileContents } from './nar-file.ts';
 import {
 	defaultClosureConcurrency,
+	type NixBuildMode,
 	type NixBuildOutcome,
 	type NixBuildResult,
 	type NixDaemonOffer,
@@ -51,6 +52,11 @@ const opQueryPathInfos = 50;
 const opBuildPathsWithResults = 46;
 
 const buildModeNormal = 0;
+const buildModeCheck = 2;
+
+function buildModeWireValue(mode: NixBuildMode): number {
+	return mode === 'check' ? buildModeCheck : buildModeNormal;
+}
 
 // The keyed results encoding exists from worker protocol 1.34; the handshake
 // already refuses daemons below 1.38, so this bound documents the operation's
@@ -87,6 +93,12 @@ const buildStatusKinds = [
 // structural token above that length is malformed.
 const maxNarWordLength = 'nix-archive-1'.length;
 const narChunkSize = 64 * 1024;
+const maximumDaemonScalarBytes = 1024 * 1024;
+const maximumDaemonCollectionEntries = 100_000;
+const maximumDaemonFeatures = 4096;
+const maximumDaemonLoggerFields = 4096;
+const maximumDaemonTraceEntries = 4096;
+const maximumDaemonDerivationOutputs = 65_536;
 
 // Offered during the handshake; a daemon that advertises it back accepts the
 // batched path-info operation. No released daemon does yet, so the batch is
@@ -154,10 +166,15 @@ export interface NixDaemonSession {
 	addTempRoot(storePath: StorePathString): Promise<void>;
 	/** Build targets on this session's connection, returning keyed outcomes. */
 	buildPathsWithResults(
-		targets: readonly NixDerivedPathString[]
+		targets: readonly NixDerivedPathString[],
+		mode?: NixBuildMode
 	): Promise<readonly NixBuildResult[]>;
 	/** Read one derivation through this session's selected store. */
 	readDerivation(drvPath: StorePathString): Promise<string>;
+	/** Resolve path metadata for a closure on this session's connection. */
+	resolveClosure(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixValidPathInfo[]>;
 	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo>;
 	queryValidPaths(
 		storePaths: readonly StorePathString[]
@@ -254,6 +271,32 @@ export class InvalidNixDaemonNarError extends NixDaemonError {
 	constructor(public readonly reason: string) {
 		super(`The daemon sent bytes that do not form a NAR: ${reason}`);
 		this.name = 'InvalidNixDaemonNarError';
+	}
+}
+
+export class NixDaemonFieldTooLargeError extends NixDaemonError {
+	constructor(
+		public readonly field: string,
+		public readonly maximumBytes: number,
+		public readonly observedBytes: number
+	) {
+		super(
+			`Nix daemon ${field} is too large: received ${String(observedBytes)} bytes, maximum ${String(maximumBytes)}`
+		);
+		this.name = 'NixDaemonFieldTooLargeError';
+	}
+}
+
+export class NixDaemonCollectionTooLargeError extends NixDaemonError {
+	constructor(
+		public readonly collection: string,
+		public readonly maximumEntries: number,
+		public readonly observedEntries: number
+	) {
+		super(
+			`Nix daemon ${collection} has too many entries: received ${String(observedEntries)}, maximum ${String(maximumEntries)}`
+		);
+		this.name = 'NixDaemonCollectionTooLargeError';
 	}
 }
 
@@ -551,7 +594,8 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	 * is what remote-store reconciliation reads after a build.
 	 */
 	async buildPathsWithResults(
-		targets: readonly NixDerivedPathString[]
+		targets: readonly NixDerivedPathString[],
+		mode: NixBuildMode = 'normal'
 	): Promise<readonly NixBuildResult[]> {
 		if (targets.length === 0) {
 			return [];
@@ -560,7 +604,10 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		const connection = await this.openConnection();
 
 		try {
-			return await connection.buildPathsWithResults(sortedUnique(targets));
+			return await connection.buildPathsWithResults(
+				sortedUnique(targets),
+				mode
+			);
 		} finally {
 			await connection.close();
 		}
@@ -698,73 +745,134 @@ const emptyMissingPartition: NixMissingPartition = {
 	narSize: 0
 };
 
+interface NixDaemonConnectionLease {
+	release(): void;
+}
+
 // The session over one connection: the semantic layer of the batched queries,
-// deduplicating and sorting what goes on the wire and what comes back.
+// deduplicating and sorting what goes on the wire and what comes back. The
+// worker protocol is a serial request/response stream, so public operations
+// queue for exclusive ownership of the connection.
 class NixDaemonConnectionSession implements NixDaemonSession {
+	private operationTail = Promise.resolve();
+
 	constructor(private readonly connection: NixDaemonConnection) {}
 
-	addTempRoot(storePath: StorePathString): Promise<void> {
-		return this.connection.addTempRoot(storePath);
-	}
+	private async acquireConnection(): Promise<NixDaemonConnectionLease> {
+		const preceding = this.operationTail;
+		const operation = Promise.withResolvers<undefined>();
+		this.operationTail = operation.promise;
 
-	buildPathsWithResults(
-		targets: readonly NixDerivedPathString[]
-	): Promise<readonly NixBuildResult[]> {
-		return this.connection.buildPathsWithResults(sortedUnique(targets));
-	}
-
-	readDerivation(drvPath: StorePathString): Promise<string> {
-		return this.connection.readDerivation(drvPath);
-	}
-
-	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo> {
-		return this.connection.queryPathInfo(storePath);
-	}
-
-	async queryValidPaths(
-		storePaths: readonly StorePathString[]
-	): Promise<readonly StorePathString[]> {
-		return sortedUnique(
-			await this.connection.queryValidPaths(sortedUnique(storePaths))
-		);
-	}
-
-	async querySubstitutablePaths(
-		storePaths: readonly StorePathString[]
-	): Promise<readonly StorePathString[]> {
-		return sortedUnique(
-			await this.connection.querySubstitutablePaths(sortedUnique(storePaths))
-		);
-	}
-
-	async querySubstitutablePathInfos(
-		storePaths: readonly StorePathString[]
-	): Promise<readonly NixDaemonOffer[]> {
-		const infos = await this.connection.querySubstitutablePathInfos(
-			sortedUnique(storePaths)
-		);
-
-		return infos.toSorted((left, right) =>
-			byCodeUnit(left.storePath, right.storePath)
-		);
-	}
-
-	async queryMissing(
-		targets: readonly NixDerivedPathString[]
-	): Promise<NixMissingPartition> {
-		const partition = await this.connection.queryMissing(sortedUnique(targets));
+		await preceding;
 
 		return {
-			willBuild: sortedUnique(partition.willBuild),
-			willSubstitute: sortedUnique(partition.willSubstitute),
-			unknown: sortedUnique(partition.unknown),
-			downloadSize: partition.downloadSize,
-			narSize: partition.narSize
+			release() {
+				operation.resolve(undefined);
+			}
 		};
 	}
 
-	narFromPath(storePath: StorePathString): AsyncIterable<Uint8Array> {
-		return this.connection.narFromPath(storePath);
+	private async run<T>(operation: () => Promise<T>): Promise<T> {
+		const release = await this.acquireConnection();
+
+		try {
+			return await operation();
+		} finally {
+			release.release();
+		}
+	}
+
+	addTempRoot(storePath: StorePathString): Promise<void> {
+		return this.run(() => this.connection.addTempRoot(storePath));
+	}
+
+	buildPathsWithResults(
+		targets: readonly NixDerivedPathString[],
+		mode: NixBuildMode = 'normal'
+	): Promise<readonly NixBuildResult[]> {
+		return this.run(() =>
+			this.connection.buildPathsWithResults(sortedUnique(targets), mode)
+		);
+	}
+
+	readDerivation(drvPath: StorePathString): Promise<string> {
+		return this.run(() => this.connection.readDerivation(drvPath));
+	}
+
+	resolveClosure(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixValidPathInfo[]> {
+		return this.run(() =>
+			resolveClosureBy(storePaths, (storePath) =>
+				this.connection.queryPathInfo(storePath)
+			)
+		);
+	}
+
+	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo> {
+		return this.run(() => this.connection.queryPathInfo(storePath));
+	}
+
+	queryValidPaths(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]> {
+		return this.run(async () =>
+			sortedUnique(
+				await this.connection.queryValidPaths(sortedUnique(storePaths))
+			)
+		);
+	}
+
+	querySubstitutablePaths(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly StorePathString[]> {
+		return this.run(async () =>
+			sortedUnique(
+				await this.connection.querySubstitutablePaths(sortedUnique(storePaths))
+			)
+		);
+	}
+
+	querySubstitutablePathInfos(
+		storePaths: readonly StorePathString[]
+	): Promise<readonly NixDaemonOffer[]> {
+		return this.run(async () => {
+			const infos = await this.connection.querySubstitutablePathInfos(
+				sortedUnique(storePaths)
+			);
+
+			return infos.toSorted((left, right) =>
+				byCodeUnit(left.storePath, right.storePath)
+			);
+		});
+	}
+
+	queryMissing(
+		targets: readonly NixDerivedPathString[]
+	): Promise<NixMissingPartition> {
+		return this.run(async () => {
+			const partition = await this.connection.queryMissing(
+				sortedUnique(targets)
+			);
+
+			return {
+				willBuild: sortedUnique(partition.willBuild),
+				willSubstitute: sortedUnique(partition.willSubstitute),
+				unknown: sortedUnique(partition.unknown),
+				downloadSize: partition.downloadSize,
+				narSize: partition.narSize
+			};
+		});
+	}
+
+	async *narFromPath(storePath: StorePathString): AsyncIterable<Uint8Array> {
+		const release = await this.acquireConnection();
+
+		try {
+			yield* this.connection.narFromPath(storePath);
+		} finally {
+			release.release();
+		}
 	}
 }
 
@@ -1280,7 +1388,10 @@ class NixDaemonConnection {
 		features.writeStringSet([featureQueryPathInfos]);
 
 		await this.transport.write(features.bytes());
-		const daemonFeatures = await this.readStringSet();
+		const daemonFeatures = await this.readStringSet(
+			'daemon features',
+			maximumDaemonFeatures
+		);
 
 		if (daemonFeatures.includes(featureQueryPathInfos)) {
 			this.features.add(featureQueryPathInfos);
@@ -1301,7 +1412,7 @@ class NixDaemonConnection {
 		await this.transport.write(request.bytes());
 
 		if (this.version.minor >= 33) {
-			await this.readString();
+			await this.readString('daemon version');
 		}
 
 		if (this.version.minor >= 35) {
@@ -1362,14 +1473,18 @@ class NixDaemonConnection {
 	}
 
 	private async readUnkeyedPathInfo(): Promise<UnkeyedDaemonPathInfo> {
-		const deriver = emptyStringToUndefined(await this.readString());
-		const narHash = nixDaemonHash(await this.readString());
-		const references = await this.readStringSet();
+		const deriver = emptyStringToUndefined(
+			await this.readString('path info deriver')
+		);
+		const narHash = nixDaemonHash(await this.readString('path info NAR hash'));
+		const references = await this.readStringSet('path info references');
 		await this.readInteger();
 		const narSize = await this.readInteger();
 		const isUltimate = await this.readBoolean();
-		const signatures = await this.readStringSet();
-		const ca = emptyStringToUndefined(await this.readString());
+		const signatures = await this.readStringSet('path info signatures');
+		const ca = emptyStringToUndefined(
+			await this.readString('path info content address')
+		);
 
 		return {
 			deriver,
@@ -1398,7 +1513,7 @@ class NixDaemonConnection {
 		}
 
 		if (messageType === stderrWrite || messageType === stderrNext) {
-			await this.readString();
+			await this.readString('daemon log message');
 			return true;
 		}
 
@@ -1414,7 +1529,7 @@ class NixDaemonConnection {
 			await this.readInteger();
 			await this.readInteger();
 			await this.readInteger();
-			await this.readString();
+			await this.readString('activity message');
 			await this.readLoggerFields();
 			await this.readInteger();
 			return true;
@@ -1436,23 +1551,29 @@ class NixDaemonConnection {
 	}
 
 	private async readErrorMessage(): Promise<string> {
-		await this.readString();
+		await this.readString('error type');
 		await this.readInteger();
-		await this.readString();
-		const message = await this.readString();
+		await this.readString('error name');
+		const message = await this.readString('error message');
 		await this.readInteger();
-		const traceCount = await this.readInteger();
+		const traceCount = await this.readCount(
+			'error traces',
+			maximumDaemonTraceEntries
+		);
 
 		for (let index = 0; index < traceCount; index += 1) {
 			await this.readInteger();
-			await this.readString();
+			await this.readString('error trace');
 		}
 
 		return message;
 	}
 
 	private async readLoggerFields(): Promise<void> {
-		const fieldCount = await this.readInteger();
+		const fieldCount = await this.readCount(
+			'logger fields',
+			maximumDaemonLoggerFields
+		);
 
 		for (let index = 0; index < fieldCount; index += 1) {
 			const fieldType = await this.readInteger();
@@ -1462,23 +1583,29 @@ class NixDaemonConnection {
 				continue;
 			}
 
-			await this.readString();
+			await this.readString('logger field');
 		}
 	}
 
-	private async readStringSet(): Promise<readonly string[]> {
-		const count = await this.readInteger();
+	private async readStringSet(
+		collection: string,
+		maximumEntries = maximumDaemonCollectionEntries
+	): Promise<readonly string[]> {
+		const count = await this.readCount(collection, maximumEntries);
 		const values: string[] = [];
 
 		for (let index = 0; index < count; index += 1) {
-			values.push(await this.readString());
+			values.push(await this.readString(`${collection} entry`));
 		}
 
 		return values;
 	}
 
-	private async readStorePathSet(): Promise<readonly StorePathString[]> {
-		const paths = await this.readStringSet();
+	private async readStorePathSet(
+		collection: string,
+		maximumEntries = maximumDaemonCollectionEntries
+	): Promise<readonly StorePathString[]> {
+		const paths = await this.readStringSet(collection, maximumEntries);
 
 		return paths.map((path) => requireStorePath(path));
 	}
@@ -1487,9 +1614,11 @@ class NixDaemonConnection {
 	// and message, the 1.29 timing fields, the 1.37 optional cpu times, and
 	// the built outputs map of realisations.
 	private async readKeyedBuildResult(): Promise<NixBuildResult> {
-		const target = modernDerivedPath(await this.readString());
+		const target = modernDerivedPath(
+			await this.readString('build result target')
+		);
 		const status = await this.readInteger();
-		const message = await this.readString();
+		const message = await this.readString('build result message');
 		const timesBuilt = await this.readInteger();
 		const isNonDeterministic = await this.readBoolean();
 		const startTime = await this.readInteger();
@@ -1518,13 +1647,18 @@ class NixDaemonConnection {
 	// (`<drvhash>!<name>`) to realisations serialised as JSON; the output
 	// name and the realised store path are what a build outcome carries.
 	private async readBuiltOutputs(): Promise<Record<string, StorePathString>> {
-		const count = await this.readInteger();
+		const count = await this.readCount(
+			'derivation outputs',
+			maximumDaemonDerivationOutputs
+		);
 		const outputs: [string, StorePathString][] = [];
 		const outputNames = new Set<string>();
 
 		for (let index = 0; index < count; index += 1) {
-			const id = await this.readString();
-			const realisation = await this.readString();
+			const id = await this.readString('derivation output id');
+			const realisation = await this.readString(
+				'derivation output realisation'
+			);
 			const outputName = outputNameFromDrvOutputId(id);
 
 			if (outputNames.has(outputName)) {
@@ -1545,8 +1679,34 @@ class NixDaemonConnection {
 		return Object.fromEntries(outputs);
 	}
 
-	private async readString(): Promise<string> {
+	private async readCount(
+		collection: string,
+		maximumEntries: number
+	): Promise<number> {
+		const observedEntries = await this.readInteger();
+
+		if (observedEntries > maximumEntries) {
+			throw new NixDaemonCollectionTooLargeError(
+				collection,
+				maximumEntries,
+				observedEntries
+			);
+		}
+
+		return observedEntries;
+	}
+
+	private async readString(field: string): Promise<string> {
 		const length = await this.readInteger();
+
+		if (length > maximumDaemonScalarBytes) {
+			throw new NixDaemonFieldTooLargeError(
+				field,
+				maximumDaemonScalarBytes,
+				length
+			);
+		}
+
 		const bytes =
 			length === 0 ? new Uint8Array() : await this.transport.read(length);
 		const padding = paddingLength(length);
@@ -1763,7 +1923,10 @@ class NixDaemonConnection {
 		await this.transport.write(request.bytes());
 		await this.processStderr();
 
-		const validPaths = await this.readStringSet();
+		const validPaths = await this.readStringSet(
+			'valid paths',
+			Math.min(maximumDaemonCollectionEntries, new Set(storePaths).size)
+		);
 
 		return validPaths.map((path) => requireStorePath(path));
 	}
@@ -1778,7 +1941,10 @@ class NixDaemonConnection {
 		await this.transport.write(request.bytes());
 		await this.processStderr();
 
-		const substitutablePaths = await this.readStringSet();
+		const substitutablePaths = await this.readStringSet(
+			'substitutable paths',
+			Math.min(maximumDaemonCollectionEntries, new Set(storePaths).size)
+		);
 
 		return substitutablePaths.map((path) => requireStorePath(path));
 	}
@@ -1820,13 +1986,22 @@ class NixDaemonConnection {
 		await this.transport.write(request.bytes());
 		await this.processStderr();
 
-		const count = await this.readInteger();
+		const count = await this.readCount(
+			'substitutable path infos',
+			Math.min(maximumDaemonCollectionEntries, new Set(storePaths).size)
+		);
 		const infos: NixDaemonOffer[] = [];
 
 		for (let index = 0; index < count; index += 1) {
-			const storePath = requireStorePath(await this.readString());
-			const deriver = emptyStringToUndefined(await this.readString());
-			const references = await this.readStorePathSet();
+			const storePath = requireStorePath(
+				await this.readString('substitutable path info path')
+			);
+			const deriver = emptyStringToUndefined(
+				await this.readString('substitutable path info deriver')
+			);
+			const references = await this.readStorePathSet(
+				'substitutable path info references'
+			);
 			const downloadSize = await this.readInteger();
 			const narSize = await this.readInteger();
 
@@ -1854,11 +2029,14 @@ class NixDaemonConnection {
 		await this.transport.write(request.bytes());
 		await this.processStderr();
 
-		const count = await this.readInteger();
+		const count = await this.readCount(
+			'path infos',
+			Math.min(maximumDaemonCollectionEntries, expected.size)
+		);
 		const infos: NixValidPathInfo[] = [];
 
 		for (let index = 0; index < count; index += 1) {
-			const reported = await this.readString();
+			const reported = await this.readString('path info path');
 
 			if (!expected.delete(reported)) {
 				throw new NixDaemonRemoteError(
@@ -1915,7 +2093,8 @@ class NixDaemonConnection {
 	}
 
 	async buildPathsWithResults(
-		targets: readonly NixDerivedPathString[]
+		targets: readonly NixDerivedPathString[],
+		mode: NixBuildMode = 'normal'
 	): Promise<readonly NixBuildResult[]> {
 		if (this.version.minor < minimumBuildResultsMinor) {
 			throw new UnsupportedNixDaemonOperationError(
@@ -1927,12 +2106,15 @@ class NixDaemonConnection {
 		const request = new NixDaemonWriter();
 		request.writeInteger(opBuildPathsWithResults);
 		request.writeStringSet(targets.map((target) => legacyDerivedPath(target)));
-		request.writeInteger(buildModeNormal);
+		request.writeInteger(buildModeWireValue(mode));
 
 		await this.transport.write(request.bytes());
 		await this.processStderr();
 
-		const count = await this.readInteger();
+		const count = await this.readCount(
+			'build results',
+			Math.min(maximumDaemonCollectionEntries, new Set(targets).size)
+		);
 		const results: NixBuildResult[] = [];
 
 		for (let index = 0; index < count; index += 1) {
@@ -1952,9 +2134,20 @@ class NixDaemonConnection {
 		await this.transport.write(request.bytes());
 		await this.processStderr();
 
-		const buildPaths = await this.readStorePathSet();
-		const substitutePaths = await this.readStorePathSet();
-		const unknownPaths = await this.readStorePathSet();
+		const buildPaths = await this.readStorePathSet(
+			'paths to build',
+			maximumDaemonCollectionEntries
+		);
+		const substitutePaths = await this.readStorePathSet(
+			'paths to substitute',
+			maximumDaemonCollectionEntries - buildPaths.length
+		);
+		const unknownPaths = await this.readStorePathSet(
+			'unknown paths',
+			maximumDaemonCollectionEntries -
+				buildPaths.length -
+				substitutePaths.length
+		);
 		const downloadSize = await this.readInteger();
 		const narSize = await this.readInteger();
 
@@ -1978,13 +2171,18 @@ class NixDaemonConnection {
 		await this.processStderr();
 
 		const outputPaths: StorePathString[] = [];
-		const count = await this.readInteger();
+		const count = await this.readCount(
+			'derivation outputs',
+			maximumDaemonDerivationOutputs
+		);
 
 		// One (output name, store path) pair per entry; an unbuilt output has an
 		// empty path.
 		for (let index = 0; index < count; index += 1) {
-			await this.readString();
-			const outputPath = emptyStringToUndefined(await this.readString());
+			await this.readString('derivation output name');
+			const outputPath = emptyStringToUndefined(
+				await this.readString('derivation output path')
+			);
 
 			if (outputPath !== undefined) {
 				outputPaths.push(requireStorePath(outputPath));
@@ -2088,6 +2286,8 @@ export interface ByteStreamSource {
 		event: 'end' | 'close' | 'error',
 		listener: (error: Error) => void
 	): unknown;
+	pause(): unknown;
+	resume(): unknown;
 }
 
 /**
@@ -2106,10 +2306,19 @@ export class ByteStreamReader {
 
 	private failure?: Error;
 
-	constructor(source: ByteStreamSource) {
+	constructor(private readonly source: ByteStreamSource) {
+		source.pause();
 		source.on('data', (chunk: Buffer) => {
 			this.chunks.push(chunk);
 			this.bufferedBytes += chunk.byteLength;
+
+			if (
+				this.pending === undefined ||
+				this.bufferedBytes >= this.pending.byteLength
+			) {
+				this.source.pause();
+			}
+
 			this.resolvePendingRead();
 		});
 		source.once('end', () => {
@@ -2180,6 +2389,7 @@ export class ByteStreamReader {
 
 	/** Settle reads on a failure the source's own error event cannot carry. */
 	fail(error: Error): void {
+		this.source.pause();
 		this.failure = error;
 		this.resolvePendingRead();
 	}
@@ -2199,6 +2409,7 @@ export class ByteStreamReader {
 
 		return new Promise((resolve, reject) => {
 			this.pending = { byteLength, resolve, reject };
+			this.source.resume();
 		});
 	}
 }

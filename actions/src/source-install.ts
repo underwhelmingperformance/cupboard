@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { access, constants, stat } from 'node:fs/promises';
+import { access, constants, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { CodedError } from '@cupboard/shared/errors';
@@ -26,6 +26,7 @@ export interface AcquiredSourceCupboard {
 /** A checked-out workflow source tree to acquire as a Nix-built Cupboard. */
 export interface AcquireSourceCupboardOptions {
 	readonly checkoutDirectory: string;
+	readonly installDirectory: string;
 	readonly cupboard: ResolvedSourceCupboard;
 	readonly signal?: AbortSignal;
 }
@@ -41,6 +42,8 @@ export type SourceCommandRunner = (
 export interface SourceInstallDependencies {
 	readonly runCommand?: SourceCommandRunner;
 	readonly isExecutableFile?: (candidate: string) => Promise<boolean>;
+	readonly createRootDirectory?: (installDirectory: string) => Promise<string>;
+	readonly removeRootDirectory?: (rootDirectory: string) => Promise<void>;
 }
 
 export class SourceCheckoutRepositoryMismatchError extends CodedError {
@@ -103,6 +106,16 @@ export class SourceInstallationVersionMismatchError extends CodedError {
 }
 
 const maximumCapturedOutputBytes = 16 * 1024 * 1024;
+
+async function createRootDirectory(installDirectory: string): Promise<string> {
+	await mkdir(installDirectory, { recursive: true });
+
+	return mkdtemp(path.join(installDirectory, '.cupboard-source-'));
+}
+
+async function removeRootDirectory(rootDirectory: string): Promise<void> {
+	await rm(rootDirectory, { recursive: true, force: true });
+}
 
 const defaultSourceCommandRunner: SourceCommandRunner = async (
 	command,
@@ -270,58 +283,73 @@ export async function acquireSourceCupboard(
 ): Promise<AcquiredSourceCupboard> {
 	const runCommand = dependencies.runCommand ?? defaultSourceCommandRunner;
 	const inspectExecutable = dependencies.isExecutableFile ?? isExecutableFile;
+	const createRoot = dependencies.createRootDirectory ?? createRootDirectory;
+	const removeRoot = dependencies.removeRootDirectory ?? removeRootDirectory;
 	const checkoutDirectory = path.resolve(options.checkoutDirectory);
+	const installDirectory = path.resolve(options.installDirectory);
 	const resolvedOptions = { ...options, checkoutDirectory };
 
 	await assertCheckout(resolvedOptions, runCommand);
 
-	const buildResult = await runCommand(
-		'nix',
-		[
-			'build',
-			'--no-link',
-			'--print-out-paths',
-			`${checkoutDirectory}#cupboard`
-		],
-		options.signal
-	);
-	const outputs = parseLines(buildResult.stdout);
-	const [output] = outputs;
+	const rootDirectory = await createRoot(installDirectory);
+	let isAcquired = false;
 
-	if (
-		output === undefined ||
-		outputs.length !== 1 ||
-		!path.isAbsolute(output)
-	) {
-		throw new SourceBuildOutputError(outputs);
-	}
+	try {
+		const buildResult = await runCommand(
+			'nix',
+			[
+				'build',
+				'--out-link',
+				path.join(rootDirectory, 'result'),
+				'--print-out-paths',
+				`${checkoutDirectory}#cupboard`
+			],
+			options.signal
+		);
+		const outputs = parseLines(buildResult.stdout);
+		const [output] = outputs;
 
-	const binaryPath = path.join(output, 'bin', 'cupboard');
-	const requiredExecutables = [
-		binaryPath,
-		path.join(output, 'libexec', 'cupboard', 'cupboard-hook-relay')
-	];
+		if (
+			output === undefined ||
+			outputs.length !== 1 ||
+			!path.isAbsolute(output)
+		) {
+			throw new SourceBuildOutputError(outputs);
+		}
 
-	for (const executable of requiredExecutables) {
-		if (!(await inspectExecutable(executable))) {
-			throw new SourceInstallationIncompleteError(executable);
+		const binaryPath = path.join(output, 'bin', 'cupboard');
+		const requiredExecutables = [
+			binaryPath,
+			path.join(output, 'libexec', 'cupboard', 'cupboard-hook-relay')
+		];
+
+		for (const executable of requiredExecutables) {
+			if (!(await inspectExecutable(executable))) {
+				throw new SourceInstallationIncompleteError(executable);
+			}
+		}
+
+		const expectedVersion = options.cupboard.sourceCommit.slice(0, 7);
+		const versionResult = await runCommand(
+			binaryPath,
+			['--version'],
+			options.signal
+		);
+		const actualVersion = versionResult.stdout.trim();
+
+		if (actualVersion !== expectedVersion) {
+			throw new SourceInstallationVersionMismatchError(
+				expectedVersion,
+				actualVersion
+			);
+		}
+
+		isAcquired = true;
+
+		return { binaryPath, cupboard: options.cupboard };
+	} finally {
+		if (!isAcquired) {
+			await removeRoot(rootDirectory);
 		}
 	}
-
-	const expectedVersion = options.cupboard.sourceCommit.slice(0, 7);
-	const versionResult = await runCommand(
-		binaryPath,
-		['--version'],
-		options.signal
-	);
-	const actualVersion = versionResult.stdout.trim();
-
-	if (actualVersion !== expectedVersion) {
-		throw new SourceInstallationVersionMismatchError(
-			expectedVersion,
-			actualVersion
-		);
-	}
-
-	return { binaryPath, cupboard: options.cupboard };
 }

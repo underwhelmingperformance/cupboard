@@ -7,6 +7,7 @@ import {
 } from './cohort-target.ts';
 
 const storePath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
+const derivation = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv';
 
 describe('cohortInstallableSchema', () => {
 	it('accepts a plain store path unchanged', () => {
@@ -14,7 +15,6 @@ describe('cohortInstallableSchema', () => {
 	});
 
 	it('accepts a derivation path with an output selector', () => {
-		const derivation = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv';
 		const installable = `${derivation}^out`;
 
 		expect(cohortInstallableSchema.parse(installable)).toBe(installable);
@@ -35,8 +35,9 @@ describe('cohortInstallableSchema', () => {
 describe('cohortTargetSchema', () => {
 	const validTarget = {
 		attr: 'packages.x86_64-linux.app',
-		installable: storePath,
+		installable: `${derivation}^out`,
 		expectedPath: storePath,
+		plannedLocalDerivation: derivation,
 		root: 'github:owner/repo/main'
 	};
 
@@ -50,6 +51,22 @@ describe('cohortTargetSchema', () => {
 		expect(cohortTargetSchema.parse(withoutExpectedPath)).toStrictEqual(
 			withoutExpectedPath
 		);
+	});
+
+	it.each([
+		{
+			name: 'a different derivation',
+			plannedLocalDerivation:
+				'/nix/store/1123456789abcdfghijklmnpqrsvwxyz-other.drv'
+		},
+		{ name: 'a non-derivation store path', plannedLocalDerivation: storePath }
+	])('rejects $name as local copy evidence', ({ plannedLocalDerivation }) => {
+		expect(
+			cohortTargetSchema.safeParse({
+				...validTarget,
+				plannedLocalDerivation
+			}).success
+		).toBe(false);
 	});
 
 	it('rejects an unknown field', () => {

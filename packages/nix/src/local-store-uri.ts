@@ -7,21 +7,19 @@ import {
 
 import { InvalidNixStoreParameterError } from './nix-store.ts';
 
-/** Where a local store's paths are named, and where they sit. */
+/** The logical and physical directories used by a local store. */
 export interface LocalStoreDirectories {
 	readonly stateDirectory: string;
-	/** The directory the store's paths are named under. */
+	/** The logical directory that prefixes store paths. */
 	readonly storeDirectory: StoreDirectory;
 	/**
-	 * Where those paths sit on this machine, when that is somewhere other than
-	 * where they are named. A store under a root keeps naming its paths
-	 * `/nix/store/...` while holding them under the root, so a reader names a
-	 * path one way and opens it the other.
+	 * The physical directory containing the store paths. A rooted store retains
+	 * logical `/nix/store/...` paths while storing their contents below the root.
 	 */
 	readonly realStoreDirectory?: string;
 }
 
-/** The directories a store URI naming none of its own is read with. */
+/** Default directories for a store URI that does not specify its own. */
 export interface ConfiguredStoreDirectories {
 	readonly storeDirectory: StoreDirectory;
 	readonly stateDirectory: string;
@@ -31,13 +29,11 @@ const localScheme = 'local';
 const localSchemePrefix = `${localScheme}://`;
 
 /**
- * The local store a URI names, or `undefined` for a URI naming another store.
- * Nix reads `local` with the directories the configuration settled, and reads
- * the parameters a URI carries over them: `root` puts the store and the state
- * under one directory, and `store`, `state` and `real` name one directory
- * each. A parameter naming something other than an absolute path refuses the
- * URI, and one Nix has no setting for is passed over, the way Nix passes over
- * a setting it does not know.
+ * Parses a local-store URI, or returns `undefined` for another store type. Nix
+ * applies URI parameters over the configured directories: `root` places the
+ * store and state below one directory, while `store`, `state` and `real`
+ * specify them individually. Invalid paths reject the URI; unknown parameters
+ * are ignored, matching Nix.
  */
 export function localStoreOfUri(
 	uri: string,
@@ -67,8 +63,8 @@ export function localStoreOfUri(
 }
 
 /**
- * The parameters a `local` store URI carries, or `undefined` when the URI
- * names another store. Nix reads `local` and `local://` alike, and takes the
+ * Parses parameters from a `local` store URI, or returns `undefined` for
+ * another store type. Nix accepts `local` and `local://` alike, and takes the
  * first assignment of a parameter named more than once.
  *
  * A `local://` URI can name a path. That path is the store's root. Nix opens
@@ -98,10 +94,9 @@ function localStoreParameters(
 }
 
 /**
- * The parameters a store URI's query carries, read the way Nix reads one:
- * every escape is undone and nothing else is, so a `+` stands for itself
- * rather than for a space. A segment stating no value at all is passed over,
- * and where a name is stated twice the first statement is the one that counts.
+ * Parses a store URI query using Nix's rules. Percent escapes are decoded, but
+ * `+` remains a literal plus. Segments without values are ignored, and the
+ * first assignment wins when a parameter is repeated.
  *
  * The query is taken without its leading `?`.
  */
@@ -132,9 +127,8 @@ export function storeUriQuery(uri: string): string {
 	return separator === -1 ? '' : uri.slice(separator + 1);
 }
 
-// The directory this store's paths are named under, which every path read
-// through it carries. It is a store directory as much as a configured one is,
-// so a value no store path could sit under refuses the URI.
+// Validate the logical store directory because it prefixes every path read
+// through this store.
 function namedStoreDirectory(
 	parameters: ReadonlyMap<string, string>
 ): StoreDirectory | undefined {
@@ -153,8 +147,7 @@ function namedStoreDirectory(
 	return parsed.data;
 }
 
-// A parameter naming a directory names it from the filesystem root. An empty
-// value names no directory at all, which is what Nix reads one as.
+// Store directory parameters must be non-empty absolute paths.
 function absoluteParameter(
 	parameters: ReadonlyMap<string, string>,
 	name: string

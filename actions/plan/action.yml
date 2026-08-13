@@ -54,12 +54,19 @@ inputs:
     required: false
   store:
     description: >-
-      Remote ssh-ng store URI the cohorts build against. The packing measurement
-      asks that store for the bytes it is missing, so a candidate grouping is
-      priced against the store the results land on. Empty prices against this
-      runner's own store. Every selected output path must be known during
-      planning; floating content-addressed outputs require a local build.
+      URI of the remote ssh-ng store used by cohort builds. The packing
+      measurement queries that store for its missing bytes, so each candidate
+      grouping uses the costs of the store where its results will be written.
+      When this input is empty, the measurement uses the runner's store. Every
+      selected output path must be known during planning; floating
+      content-addressed outputs require a local build.
     required: false
+  require-provenance:
+    description: >-
+      Keep cached targets on the build set so this invocation executes their
+      final derivations and can attest every published target.
+    required: false
+    default: 'false'
 outputs:
   plan-file:
     description: Detailed plan consumed by the cohort jobs.
@@ -148,6 +155,7 @@ runs:
         ENABLE_PACKING: ${{ inputs.enable-packing }}
         PACK_CAPACITY: ${{ inputs.pack-capacity }}
         STORE: ${{ inputs.store }}
+        REQUIRE_PROVENANCE: ${{ inputs.require-provenance }}
       run: |
         args=(plan
           --targets "$TARGETS"
@@ -163,6 +171,7 @@ runs:
           --optimise "$OPTIMISE"
           --enable-packing "$ENABLE_PACKING"
           --store "$STORE")
+        args+=(--require-provenance "$REQUIRE_PROVENANCE")
         if [ -n "$PACK_CAPACITY" ]; then
           args+=(--pack-capacity "$PACK_CAPACITY")
         fi

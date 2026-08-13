@@ -51,27 +51,24 @@ export const buildSubjectV2Schema = z.strictObject({
 });
 export type ParsedBuildSubjectV2 = z.output<typeof buildSubjectV2Schema>;
 
-// The store a run realised its paths in: the `--store` URI the run selected,
-// or `auto` for the store Nix itself would use. Opaque beyond being non-empty,
-// so the brand is its only constraint.
+// The store containing the realised paths: the selected `--store` value, or
+// `auto` when Nix selects the store. Store values are opaque here; the schema
+// requires only that they are non-empty.
 export const buildStoreSchema = z.string().min(1).brand('BuildStore');
 export type BuildStore = z.output<typeof buildStoreSchema>;
 
-/** The store Nix itself would use, which a run selecting none builds in. */
+/** The value recorded when Nix selects the store. */
 export const autoBuildStore = 'auto';
 
-// How far the machine running the push established that a subject is what this
-// run produced.
+// How the run verified a receipt subject.
 //
-// `local` is a build that machine ran itself. `verified-rebuild` is a build
-// some other machine ran whose outputs a local rebuild then reproduced.
-// `build-store` is a path the selected build store realised: its metadata was
-// read back over the store connection and the build itself was not watched, so
-// the claim rests on the store the operator configured. That store marks such a
-// path ultimately trusted, which it also does for a path added to it directly,
-// so the claim covers every path the store holds as its own. `unverified` is a
-// build some other machine ran that nothing since has checked, which is not a
-// subject anything may attest.
+// `local` means the coordinator built it. `verified-rebuild` means a local
+// rebuild reproduced a remote result. `build-store` means the selected store
+// reported the path as ultimately trusted. The store gives the same status to
+// paths added directly, so verification depends on the operator's trust in that
+// store rather than observation of the build. `unverified` means no local
+// rebuild or trusted store verified the remote result, so it is not eligible
+// for attestation.
 export const subjectVerificationSchema = z.enum([
 	'local',
 	'verified-rebuild',
@@ -80,12 +77,10 @@ export const subjectVerificationSchema = z.enum([
 ]);
 export type SubjectVerification = z.output<typeof subjectVerificationSchema>;
 
-// One path this run built, with where it was built recorded alongside how it
-// was attributed. The attempt fields are present when a supervised attempt loop
-// produced the path; a run that reconciles its subjects from the store after
-// the build has no attempt loop to name. `machine` names the builder the
-// activity log recorded, absent when the run only knows the path was not built
-// on the machine that ran the push.
+// One receipt subject and its verification details. Supervised attempts include
+// attempt fields. Reconciled builds omit them because they inspect the store
+// after the build. `machine` identifies the builder from the activity log and
+// is absent when only the remote build location is known.
 export const buildSubjectV3Schema = z.strictObject({
 	storePath: storePathSchema,
 	narHash: sha256HexDigestSchema,
@@ -170,10 +165,9 @@ export type ParsedSubstitutableSizes = z.output<
 	typeof substitutableSizesSchema
 >;
 
-// Why the supervised child ended unsuccessfully. A target-build failure is
-// safe for a best-effort caller to tolerate because the receipt also names the
-// exact requested installables that failed. A command failure carries no such
-// claim: the process may have failed before Nix settled any requested target.
+// Why the supervised child failed. A target-build failure identifies the
+// failed installables. A command failure does not, because Nix may have exited
+// before reporting a final result for every requested target.
 const failedBuildTargetsSchema = z.array(z.string().min(1)).min(1);
 
 export const terminalBuildFailureSchema = z.discriminatedUnion('kind', [
@@ -205,8 +199,7 @@ const buildReceiptFields = {
 	collected: z.array(storePathSchema).optional()
 };
 
-// The authoritative record one run writes, in the form whose subjects carry the
-// attempt attribution alone.
+// Version 2 records subjects attributed to supervised build attempts.
 export const buildReceiptV2Schema = z.strictObject({
 	version: z.literal(2),
 	subjects: z.array(buildSubjectV2Schema),
@@ -214,9 +207,7 @@ export const buildReceiptV2Schema = z.strictObject({
 });
 export type ParsedBuildReceiptV2 = z.output<typeof buildReceiptV2Schema>;
 
-// The same record with each subject carrying where it was built and how far
-// that was established, so a reader can tell a path this machine built from one
-// a selected store realised, and refuse a path nothing verified.
+// Version 3 also records each subject's build store and verification method.
 export const buildReceiptV3Schema = z.strictObject({
 	version: z.literal(3),
 	subjects: z.array(buildSubjectV3Schema),
@@ -224,8 +215,7 @@ export const buildReceiptV3Schema = z.strictObject({
 });
 export type ParsedBuildReceiptV3 = z.output<typeof buildReceiptV3Schema>;
 
-// Every receipt a reader accepts, discriminated by version, so a consumer
-// written against either form keeps reading the fields both carry.
+// All supported receipt versions, discriminated by `version`.
 export const buildReceiptSchema = z.discriminatedUnion('version', [
 	buildReceiptV2Schema,
 	buildReceiptV3Schema

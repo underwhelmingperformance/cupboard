@@ -26,13 +26,13 @@ interface DaemonlessStore {
 	readonly storeDirectory: string;
 	readonly stateDirectory: string;
 	readonly substituter: FakeSubstituter;
-	/** A path the store really holds, registered in its database. */
+	/** A path registered as valid in the store database. */
 	readonly heldPath: StorePathString;
-	/** A path only the substituter holds. */
+	/** A path available only from the substituter. */
 	readonly offeredPath: StorePathString;
-	/** A derivation the store holds, which this store has never built. */
+	/** A derivation present in the store whose output has not been built. */
 	readonly derivationPath: StorePathString;
-	/** The output that derivation names, served only by the substituter. */
+	/** The derivation output served only by the substituter. */
 	readonly offeredOutput: StorePathString;
 }
 
@@ -75,8 +75,8 @@ beforeAll(async () => {
 	await writeFile(heldSource, 'held by this store\n');
 	const { stdout: held } = await run('nix-store', ['--add', heldSource]);
 
-	// A derivation with no inputs, so instantiating it needs nothing this
-	// store does not already hold. It is never built here: its output is what
+	// This derivation has no inputs, so instantiation needs no additional store
+	// paths. It is never built here: its output is what
 	// the substituter offers.
 	const { stdout: derivation } = await run('nix-instantiate', [
 		'--expr',
@@ -116,8 +116,7 @@ afterAll(async () => {
 	}
 });
 
-// This store's configuration is the environment above and nothing else, so
-// whatever the machine running the test has in its own files stays out.
+// Isolate this store from configuration files on the host machine.
 function noConfigFile(): string | undefined {
 	return;
 }
@@ -184,8 +183,8 @@ describe('planning against a store with no daemon', () => {
 	});
 
 	// The substituter is a real HTTP cache advertising a real `nix-cache-info`,
-	// and nothing on this machine holds the path it offers, so an answer about
-	// it can only have come from asking that cache.
+	// and the path is absent from this machine. An availability result can come
+	// only from querying that cache.
 	it('reports which paths the substituter offers, by asking it', async () => {
 		const prepared = store();
 		const found = await openStore().querySubstitutablePaths([
@@ -244,7 +243,7 @@ describe('planning against a store with no daemon', () => {
 		});
 	});
 
-	// With nothing offering the output, the derivation is what produces it, so
+	// With no substituter offer, the derivation must produce the output, so
 	// the plan says it must run.
 	it('builds a derivation whose output nothing offers', async () => {
 		const prepared = store();
@@ -272,7 +271,7 @@ describe('planning against a store with no daemon', () => {
 	// A daemon reads an override through the configuration layer, which accepts
 	// three spellings for each of a setting's two values. An override reaching
 	// a store this process drives is read the same way, so `no` turns
-	// substitution off and no substituter is asked anything.
+	// substitution off and prevents substituter queries.
 	it.each([
 		{ name: 'no', value: 'no' },
 		{ name: '0', value: '0' },
@@ -294,9 +293,9 @@ describe('planning against a store with no daemon', () => {
 		}
 	);
 
-	// Leaving a target upstream says a consumer can fetch what this store has.
+	// Leaving a target upstream asserts that a consumer can fetch the local path.
 	// The substituter serves a path of that name under bytes of its own, so
-	// the walk that decides it compares the two hashes and refuses.
+	// the closure walk compares the hashes and rejects the offer.
 	it('refuses a closure a substituter offers under different bytes', async () => {
 		const prepared = store();
 		const offered = prepared.substituter.servePath(prepared.heldPath);

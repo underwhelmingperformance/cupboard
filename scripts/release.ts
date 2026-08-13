@@ -120,7 +120,7 @@ class MalformedRepositoryError extends UsageError {
 class MalformedCacheUrlError extends UsageError {
 	constructor() {
 		super(
-			'CACHE_URL must be an http(s) URL with nothing beyond origin and path'
+			'CACHE_URL must be an http(s) URL without credentials, a query, or a fragment'
 		);
 		this.name = 'MalformedCacheUrlError';
 	}

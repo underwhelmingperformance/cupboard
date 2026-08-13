@@ -18,6 +18,7 @@ export {
 export type { NixSshStoreSpec } from './nix-daemon-ssh.ts';
 export { parseSshNgStoreUri } from './nix-daemon-ssh.ts';
 export type {
+	NixBuildMode,
 	NixBuildOutcome,
 	NixBuildResult,
 	NixDaemonTrust,

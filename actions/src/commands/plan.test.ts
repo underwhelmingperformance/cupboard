@@ -451,7 +451,7 @@ describe('resolvePlanInputs', () => {
 		expect(failure).toStrictEqual(
 			new InvalidInputError(
 				'url',
-				'url must be an http(s) URL with nothing beyond origin and path'
+				'url must be an http(s) URL without credentials, a query, or a fragment'
 			)
 		);
 		expect((failure as Error).message).not.toContain(secret);
@@ -918,6 +918,7 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 		enablePacking: false,
 		packCapacity: 0,
 		store: '',
+		requireProvenance: false,
 		...overrides
 	};
 }
@@ -1388,6 +1389,69 @@ describe('cohortPreFilter', () => {
 });
 
 describe('cohort-matrix output', () => {
+	it('rebuilds a cached target whose root does not prove completed provenance', async () => {
+		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+		const appStorePath = `/nix/store/${'1'.repeat(32)}-app`;
+		const appNode = {
+			env: { out: appStorePath },
+			inputs: { drvs: {} },
+			outputs: { out: { path: `${'1'.repeat(32)}-app` } }
+		};
+		const evaluator: NixEvaluator = () =>
+			Promise.resolve({
+				stdout: JSON.stringify({
+					derivations: { [targetRootDrvPath]: appNode }
+				})
+			});
+		const recordedCalls: string[][] = [];
+		const runner: EnsureRunner = async (_command, arguments_) => {
+			recordedCalls.push([...arguments_]);
+
+			if (!arguments_.includes('targets')) {
+				throw new Error(
+					'an unattested cached target must not be rooted by planning'
+				);
+			}
+
+			await writeFile(
+				resultFileArgument(arguments_),
+				rootTargetsResultLine([])
+			);
+
+			return { stdout: '', stderr: '' };
+		};
+
+		await planAction(
+			{ ...baseOptions, optimise: 'true', requireProvenance: 'true' },
+			{
+				GITHUB_RUN_ID: '12345',
+				RUNNER_TEMP: planDirectory,
+				GITHUB_OUTPUT: path.join(planDirectory, 'output')
+			},
+			undefined,
+			{
+				evaluator,
+				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				fetcher: alwaysAvailableFetcher,
+				runner
+			}
+		);
+
+		const outputs = await readFile(path.join(planDirectory, 'output'), 'utf8');
+
+		expect({
+			rootCommands: recordedCalls.map((arguments_) =>
+				arguments_.includes('targets') ? 'targets' : 'ensure'
+			),
+			targetRetained: outputs.includes('target-matrix={"include":[]}'),
+			cohortCount: outputs.includes('cohort-count=1\n')
+		}).toStrictEqual({
+			rootCommands: [],
+			targetRetained: false,
+			cohortCount: true
+		});
+	});
+
 	it('excludes a pruned cohort from the emitted matrix and count, but not the target matrix', async () => {
 		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
 		const appStorePath = `/nix/store/${'1'.repeat(32)}-app`;

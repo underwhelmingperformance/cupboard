@@ -17,26 +17,27 @@ import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { CliError, transientExitCode } from '../errors.ts';
 
 /**
- * One manifest target from the availability partition's point of view: what
- * `nix build` would realise, the concrete output path when Nix can predict
- * it before building, and the retention root that target's own
- * `roots.ensure` call answers for. A target with no `expectedPath` is
- * content-addressed or otherwise floating: nothing in this module can check
- * whether the destination, a reuse view, or an upstream substituter already
- * holds a path that does not exist yet, so it always joins the build set.
+ * The information needed to classify one manifest target: what `nix build`
+ * would realise, the concrete output path when Nix can predict it before
+ * building, and the retention root for its `roots.ensure` call. A target with
+ * no `expectedPath` is content-addressed or otherwise floating.
+ * Its path does not exist yet, so the module cannot query it in the
+ * destination, a reuse view or an upstream substituter. It therefore always
+ * joins the build set.
  */
 export interface AvailabilityTarget {
 	readonly installable: NixDerivedPathString;
 	readonly expectedPath?: StorePathString;
+	/** A planned derivation closure the caller will copy before realisation. */
+	readonly plannedLocalDerivation?: StorePathString;
 	readonly root: RootName;
 }
 
 /**
- * The destination-side facts the planner cannot get from the local store: is
- * a path already served by the destination cache, and is it served by the
- * tenant's configured reuse view. Both answer over a batch of paths at once,
- * mirroring the existing HTTP probe (`availableCachePaths`) that already
- * answers the destination question for the interim actions planner.
+ * Destination availability that the planner cannot determine from the local
+ * store. One query checks the destination cache and the other checks the
+ * tenant's configured reuse view. Both accept a batch of paths, matching the
+ * existing `availableCachePaths` HTTP probe.
  */
 export interface DestinationAnswers {
 	readonly destinationServed: (
@@ -48,12 +49,10 @@ export interface DestinationAnswers {
 }
 
 /**
- * The unknown-count ceiling this partition enforces once a `queryMissing`
- * answer settles: the configured value applies whenever the unknowns are as
- * settled as the store can make them (and may be zero, for a fixture that
- * requires every path to resolve), and the nonzero fallback applies when a
- * re-query was refused, since unknowns left behind a cache the plan could
- * not read past cannot be told from unknowns that are really unknown.
+ * The maximum number of paths whose availability may remain unknown. The
+ * configured value applies after a successful re-query and may be zero. If the
+ * store refuses the re-query, the fallback applies because cached misses cannot
+ * be distinguished from current upstream misses.
  */
 export interface AvailabilityCeilingConfig {
 	readonly value: number;
@@ -72,16 +71,15 @@ export interface LeftUpstreamCandidate {
 }
 
 /**
- * What confirming a left-upstream candidate settled on. Only `confirmed`
- * leaves the target upstream; every other verdict says why the target is
- * built or published instead, so a plan records the reason rather than
- * silently reclassifying.
+ * The result of confirming a left-upstream candidate. Only `confirmed` leaves
+ * the target upstream. Every other result records why the target must be built
+ * or published instead.
  */
 export type LeftUpstreamVerdict =
 	| { readonly kind: 'confirmed' }
-	/** The `substitute` setting is off, so nothing would be fetched at all. */
+	/** The `substitute` setting is off, so Nix would not fetch the path. */
 	| { readonly kind: 'substitution-disabled' }
-	/** The derivation sets `allowSubstitutes = false` and nothing overrules it. */
+	/** The derivation disables substitutes and no setting overrides it. */
 	| { readonly kind: 'substitutes-not-allowed' }
 	/** The derivation could not be read, so its option is unknown. */
 	| { readonly kind: 'derivation-unreadable'; readonly errorName: string }
@@ -141,20 +139,17 @@ export interface SubstitutablePathSize {
 }
 
 /**
- * How a re-query of the unknown paths settled. `answered` carries what the
- * fresh look found; `already-fresh` says the first answer was uncached, so
- * there is nothing to look past; `refused` names why the store would not
- * give a fresh answer, which is what puts the plan on its fallback ceiling.
+ * The result of re-querying paths whose availability was unknown. `answered`
+ * contains a fresh partition. `already-fresh` means the first query bypassed
+ * caches. `refused` explains why the fallback ceiling applies.
  */
 export type UnknownRequeryOutcome =
 	| {
 			readonly kind: 'answered';
 			readonly partition: NixMissingPartition;
 			/**
-			 * What each path the fresh answer settled as substitutable would
-			 * cost. A partition states one total over the paths it settled, and
-			 * the first answer settled some of these already, so the bytes of a
-			 * path both settled are read from here and counted once.
+			 * Per-path costs for substitutable paths in the fresh partition. They
+			 * prevent paths included in both partitions from being counted twice.
 			 */
 			readonly sizes: ReadonlyMap<StorePathString, SubstitutablePathSize>;
 	  }
@@ -181,18 +176,17 @@ export interface AvailabilityPartitionOptions {
 	/** One `roots.ensure` result per target root, keyed by root name. */
 	readonly rootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse>;
 	/**
-	 * Asks the store about the paths the first pass left unknown, past
-	 * whatever cache stood in front of that answer. Reached only when there
-	 * are unknowns, since there is otherwise nothing to ask about.
+	 * Re-queries paths whose availability remained unknown, bypassing any cache
+	 * used by the first query. Called only when at least one path is unknown.
 	 */
 	readonly requeryUnknown: (
 		storePaths: readonly StorePathString[]
 	) => Promise<UnknownRequeryOutcome>;
 	/**
-	 * Proves that a candidate really is held by substituters a consumer
+	 * Verifies that a candidate is available from substituters a consumer
 	 * elsewhere could reach, and that Nix would fetch it rather than build it.
 	 * Asked only of the targets the classification would otherwise leave
-	 * upstream, since no other target's answer would be used.
+	 * upstream. Other targets do not require this verification.
 	 */
 	readonly confirmLeftUpstream: (
 		candidate: LeftUpstreamCandidate
@@ -202,7 +196,7 @@ export interface AvailabilityPartitionOptions {
 
 /**
  * The realisation and publication partition of a manifest's targets: which
- * need nothing but attaching to their already-servable root, which the
+ * require only attachment to an already-servable root, which the
  * tenant already holds elsewhere and can be published by reference, which an
  * upstream substituter already serves and are deliberately left there, and
  * which must actually be built. `nix build` realises every installable it is
@@ -235,10 +229,9 @@ export interface AvailabilityPartition {
 	readonly unknownCount: number;
 	readonly ceiling: AvailabilityCeiling;
 	/**
-	 * The configured substituters nothing could be asked of while this
-	 * partition was worked out. Every availability answer above was given
-	 * without them, so a path counted as held nowhere is held nowhere among
-	 * the substituters that answered.
+	 * Configured substituters that could not be queried. Availability results
+	 * exclude these substituters, so a reported miss is incomplete when this
+	 * list is non-empty.
 	 */
 	readonly unreachableSubstituters: readonly UnreachableSubstituter[];
 }
@@ -289,13 +282,14 @@ export async function partitionAvailability(
 		.filter((path): path is StorePathString => path !== undefined);
 	const installables = options.targets.map((target) => target.installable);
 
-	const [destinationServedPaths, viewServedPaths, validPaths, missing] =
+	const [destinationServedPaths, viewServedPaths, validPaths, queriedMissing] =
 		await Promise.all([
 			options.destinationAnswers.destinationServed(knownPaths),
 			options.destinationAnswers.viewServed(knownPaths),
 			options.store.queryValidPaths(knownPaths),
 			options.store.queryMissing(installables)
 		]);
+	const missing = accountForLocalDerivations(queriedMissing, options.targets);
 
 	// Only a path this store already holds valid is a "leave it upstream"
 	// candidate: asking whether a path Nix still needs to build or fetch is
@@ -369,6 +363,39 @@ export async function partitionAvailability(
 		unknownCount: settled.unknown.length,
 		ceiling,
 		unreachableSubstituters: await options.store.unreachableSubstituters()
+	};
+}
+
+// A remote store cannot inspect a derivation that is absent from that store,
+// so queryMissing reports the derivation itself as unknown and stops walking.
+// A caller that promises to materialise the complete planned derivation
+// closure locally and copy it before realisation has already settled that
+// uncertainty: after the copy, this is ordinary build work. Paths that carry
+// no such evidence remain unknown and retain the ceiling's fail-closed
+// behaviour.
+function accountForLocalDerivations(
+	missing: NixMissingPartition,
+	targets: readonly AvailabilityTarget[]
+): NixMissingPartition {
+	const localDerivations = new Set(
+		targets.flatMap(({ plannedLocalDerivation }) =>
+			plannedLocalDerivation === undefined ? [] : [plannedLocalDerivation]
+		)
+	);
+	const localMissing = missing.unknown.filter((storePath) =>
+		localDerivations.has(storePath)
+	);
+
+	if (localMissing.length === 0) {
+		return missing;
+	}
+
+	const accountedFor = new Set(localMissing);
+
+	return {
+		...missing,
+		willBuild: eachOnce(missing.willBuild, localMissing),
+		unknown: missing.unknown.filter((storePath) => !accountedFor.has(storePath))
 	};
 }
 

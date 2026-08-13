@@ -20,9 +20,8 @@ permissions:
 
 jobs:
   # The reusable workflow stays on @main for the tenant trust rule, while its
-  # action code and the selected released CLI coordinate are deliberately
-  # distinct. Pin the version here rather than resolving from `main` during a
-  # run.
+  # CLI is pinned to a specific release. This avoids resolving a release from
+  # the mutable ref during the run.
   # Each pull request publishes its flake build to a cache of its own, expiring
   # two weeks after the last push. The trust rule on the tenant routes it there
   # and nowhere else, keyed on the pull-request number in the token.

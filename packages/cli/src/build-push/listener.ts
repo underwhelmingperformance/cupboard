@@ -11,10 +11,15 @@ import {
 import {
 	BuildEventMalformedError,
 	BuildEventOutsideStoreError,
-	type BuildEventRejectedError
+	type BuildEventRejectedError,
+	BuildEventTooLargeError
 } from '../errors.ts';
 
 const newlineByte = 0x0a;
+
+// A post-build event is a compact JSON object. One MiB accommodates thousands
+// of ordinary store paths while bounding an unauthenticated local connection.
+export const maximumBuildEventBytes = 1024 * 1024;
 
 // The hook helper abandons a transfer after three seconds of inactivity, so a
 // connection still unsettled this long after the child exits has no writer
@@ -97,6 +102,7 @@ export class BuildEventListener {
 		this.unsettledSockets.add(socket);
 
 		const chunks: Buffer[] = [];
+		let bufferedBytes = 0;
 		let isSettled = false;
 		const settle = (): void => {
 			isSettled = true;
@@ -125,15 +131,32 @@ export class BuildEventListener {
 				return;
 			}
 
-			chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
-			const buffered = Buffer.concat(chunks);
-			const newline = buffered.indexOf(newlineByte);
+			const buffer = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+			const newline = buffer.indexOf(newlineByte);
+			const lineChunk = newline === -1 ? buffer : buffer.subarray(0, newline);
+			const observedBytes = bufferedBytes + lineChunk.byteLength;
 
-			if (newline === -1) {
+			if (observedBytes > maximumBuildEventBytes) {
+				this.options.onRejected(
+					new BuildEventTooLargeError(maximumBuildEventBytes, observedBytes)
+				);
+				socket.destroy();
+				settle();
 				return;
 			}
 
-			this.accept(buffered.subarray(0, newline).toString('utf8'));
+			if (newline === -1) {
+				chunks.push(buffer);
+				bufferedBytes = observedBytes;
+				return;
+			}
+
+			const line =
+				bufferedBytes === 0
+					? lineChunk
+					: Buffer.concat([...chunks, lineChunk], observedBytes);
+
+			this.accept(line.toString('utf8'));
 			socket.end();
 			settle();
 		});

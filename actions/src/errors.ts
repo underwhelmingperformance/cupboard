@@ -96,17 +96,20 @@ export class MalformedReleaseDiscoveryResponseError extends CodedError {
 	}
 }
 
-/** More than one published release names the workflow commit. */
-export class AmbiguousReleaseForCommitError extends CodedError {
+/** Release discovery exceeded the bounded response and pagination policy. */
+export class ReleaseDiscoverySearchTooLargeError extends CodedError {
 	constructor(
-		public readonly releaseRepository: string,
-		public readonly sourceCommit: string,
-		public readonly tags: readonly string[]
+		public readonly maximumPageEntries: number,
+		public readonly maximumCandidates: number,
+		public readonly maximumPages: number,
+		public readonly observedPageEntries: number,
+		public readonly observedCandidates: number,
+		public readonly observedPages: number
 	) {
 		super(
-			`releases ${tags.join(', ')} in ${releaseRepository} all point at ${sourceCommit}; set cupboard-version explicitly`
+			`release discovery exceeded its limits: page ${String(observedPages)} contained ${String(observedPageEntries)} entries and brought the total to ${String(observedCandidates)}; maximum ${String(maximumPageEntries)} entries per page, ${String(maximumCandidates)} candidates and ${String(maximumPages)} pages`
 		);
-		this.name = 'AmbiguousReleaseForCommitError';
+		this.name = 'ReleaseDiscoverySearchTooLargeError';
 	}
 }
 
@@ -117,6 +120,19 @@ export class ReleaseAssetNotFoundError extends CodedError {
 	) {
 		super(`release ${tag} has no ${assetName} asset`);
 		this.name = 'ReleaseAssetNotFoundError';
+	}
+}
+
+/** A release asset URL is unsafe for an authenticated GitHub API request. */
+export class InvalidReleaseAssetUrlError extends CodedError {
+	constructor(
+		public readonly assetName: string,
+		public readonly expectedOrigin: string
+	) {
+		super(
+			`release asset ${assetName} does not have a credential-safe HTTPS URL on ${expectedOrigin}`
+		);
+		this.name = 'InvalidReleaseAssetUrlError';
 	}
 }
 
@@ -131,6 +147,34 @@ export class DownloadAssetTooLargeError extends CodedError {
 			`release asset ${assetName} is ${String(observedBytes)} bytes, exceeding the ${String(maximumBytes)}-byte download limit`
 		);
 		this.name = 'DownloadAssetTooLargeError';
+	}
+}
+
+/** A release attestation bundle exceeded the action's bounded input size. */
+export class ReleaseAttestationBundleTooLargeError extends CodedError {
+	constructor(
+		public readonly maximumBytes: number,
+		public readonly observedBytes: number
+	) {
+		super(
+			`release attestation bundle is ${String(observedBytes)} bytes, exceeding the ${String(maximumBytes)}-byte input limit`
+		);
+		this.name = 'ReleaseAttestationBundleTooLargeError';
+	}
+}
+
+/** An attestation lookup exceeded the bounded candidate or page policy. */
+export class ReleaseAttestationSearchTooLargeError extends CodedError {
+	constructor(
+		public readonly maximumCandidates: number,
+		public readonly maximumPages: number,
+		public readonly observedCandidates: number,
+		public readonly observedPages: number
+	) {
+		super(
+			`release attestation search exceeded its ${String(maximumCandidates)}-candidate or ${String(maximumPages)}-page limit after ${String(observedCandidates)} candidate(s) across ${String(observedPages)} page(s)`
+		);
+		this.name = 'ReleaseAttestationSearchTooLargeError';
 	}
 }
 
@@ -211,6 +255,20 @@ export class ReleaseInstallationLockStateError extends CodedError {
 	}
 }
 
+/** The installer could not identify a process strongly enough to fence its lock. */
+export class ReleaseInstallationProcessIdentityError extends CodedError {
+	constructor(
+		public readonly pid: number,
+		options: { readonly cause?: unknown } = {}
+	) {
+		super(
+			`Could not establish the process identity for Cupboard release installation PID ${String(pid)}`,
+			withCause(options.cause)
+		);
+		this.name = 'ReleaseInstallationProcessIdentityError';
+	}
+}
+
 /** The installer was fenced out before it could commit its release. */
 export class ReleaseInstallationLockLostError extends CodedError {
 	constructor(
@@ -225,7 +283,7 @@ export class ReleaseInstallationLockLostError extends CodedError {
 	}
 }
 
-/** An expired lease still names a process that may own the installation lock. */
+/** An expired lease still names the same process that acquired the lock. */
 export class ReleaseInstallationLockOwnerAliveError extends CodedError {
 	constructor(
 		public readonly lockPath: string,
@@ -233,7 +291,7 @@ export class ReleaseInstallationLockOwnerAliveError extends CodedError {
 		options: { readonly cause?: unknown } = {}
 	) {
 		super(
-			`Cupboard release installation lock ${lockPath} has an expired lease, but PID ${String(pid)} still exists; stop that installer or confirm it has exited before removing the lock`,
+			`Cupboard release installation lock ${lockPath} has an expired lease, but its owning process at PID ${String(pid)} still exists; stop that installer or confirm it has exited before removing the lock`,
 			withCause(options.cause)
 		);
 		this.name = 'ReleaseInstallationLockOwnerAliveError';
@@ -298,7 +356,7 @@ export class AttestationNotFoundError extends CodedError {
 
 /**
  * Every published attestation candidate failed acquisition or verification.
- * `cause` carries the last candidate's failure; earlier attempts may have
+ * `cause` contains the last candidate's failure; earlier attempts may have
  * failed for other reasons.
  */
 export class AttestationVerificationFailedError extends CodedError {
@@ -399,7 +457,7 @@ export class ProvenanceSubjectsIncompleteError extends CodedError {
 	}
 }
 
-/** The installed CLI emitted no valid attachment settlement result. */
+/** The installed CLI emitted no valid attachment result. */
 export class AttestationAttachmentResultError extends CodedError {
 	constructor(message: string, options: { readonly cause?: unknown } = {}) {
 		super(message, withCause(options.cause));
@@ -407,10 +465,12 @@ export class AttestationAttachmentResultError extends CodedError {
 	}
 }
 
-/** Signed receipt subjects for which attachment did not settle. */
+/** Signed receipt subjects without a completed attachment. */
 export class AttestationAttachmentIncompleteError extends CodedError {
 	constructor(public readonly storePaths: readonly string[]) {
-		super(`Attestation attachment did not settle ${storePaths.join(', ')}`);
+		super(
+			`Attestation attachment was incomplete for: ${storePaths.join(', ')}`
+		);
 		this.name = 'AttestationAttachmentIncompleteError';
 	}
 }
@@ -857,6 +917,20 @@ export class CacheAvailabilityResponseUnexpectedHashError extends CodedError {
 	}
 }
 
+/** A captured command exceeded the memory budget for its standard output. */
+export class CommandOutputTooLargeError extends CodedError {
+	constructor(
+		public readonly command: string,
+		public readonly maximumBytes: number,
+		public readonly observedBytes: number
+	) {
+		super(
+			`${command} stdout exceeded the ${String(maximumBytes)}-byte capture limit after ${String(observedBytes)} bytes`
+		);
+		this.name = 'CommandOutputTooLargeError';
+	}
+}
+
 export class CommandFailedError extends CodedError {
 	readonly signal: NodeJS.Signals | undefined;
 
@@ -889,11 +963,11 @@ export interface RemoteCohortBuildFailure {
 	readonly message: string;
 }
 
-/** A remote keep-going build did not settle every requested target exactly once. */
+/** A remote keep-going build did not report one final result per target. */
 export class RemoteCohortBuildFailedError extends CodedError {
 	constructor(public readonly failures: readonly RemoteCohortBuildFailure[]) {
 		super(
-			`Remote Nix build did not settle every requested target exactly once. Valid survivors were published before reporting: ${failures.map((failure) => `${failure.target} (${failure.outcome}: ${failure.message})`).join('; ')}`
+			`Remote Nix did not report exactly one final result for every requested target. Valid outputs were published before the action failed: ${failures.map((failure) => `${failure.target} (${failure.outcome}: ${failure.message})`).join('; ')}`
 		);
 		this.name = 'RemoteCohortBuildFailedError';
 	}
@@ -915,7 +989,7 @@ export interface RemoteCohortEvaluationMismatch {
 	readonly evaluated: readonly string[];
 }
 
-/** A local installable no longer evaluates to the derivation its plan named. */
+/** A local installable no longer evaluates to its planned derivation. */
 export class RemoteCohortEvaluationDriftError extends CodedError {
 	public readonly missing: readonly string[];
 	public readonly evaluated: readonly string[];
@@ -924,7 +998,7 @@ export class RemoteCohortEvaluationDriftError extends CodedError {
 		public readonly mismatches: readonly RemoteCohortEvaluationMismatch[]
 	) {
 		super(
-			`Remote cohort installables no longer evaluate to their planned derivations: ${mismatches.map((mismatch) => `${mismatch.installable} planned ${mismatch.planned}, evaluated ${mismatch.evaluated.length === 0 ? 'nothing' : mismatch.evaluated.join(', ')}`).join('; ')}. Re-run planning against the current locked source before publishing.`
+			`Remote cohort installables no longer evaluate to their planned derivations: ${mismatches.map((mismatch) => `${mismatch.installable} planned ${mismatch.planned}, evaluated ${mismatch.evaluated.length === 0 ? 'no derivation' : mismatch.evaluated.join(', ')}`).join('; ')}. Re-run planning against the current locked source before publishing.`
 		);
 		this.name = 'RemoteCohortEvaluationDriftError';
 		this.missing = mismatches.map((mismatch) => mismatch.planned);
@@ -935,9 +1009,9 @@ export class RemoteCohortEvaluationDriftError extends CodedError {
 }
 
 /**
- * The cupboard binary exited non-zero. It reported the cause itself through its
- * own output, so this carries only the exit status (which the action adopts as
- * its own) and any result events the run recorded before failing.
+ * The cupboard binary exited non-zero. It reported the cause through its own
+ * output, so this error contains the exit status adopted by the action and any
+ * result events recorded before failure.
  */
 export class CupboardReportedError extends CodedError {
 	constructor(
@@ -1000,13 +1074,11 @@ export class CohortPlanResultInvalidError extends CodedError {
 }
 
 /**
- * The cohort's own availability partition, computed on this runner's store,
- * refused to build: either the unknown-availability count settled over the
- * configured ceiling, or the measured substitutable bytes would not fit this
- * store. The refusing `cupboard plan cohort` invocation already exited with
- * the distinguishing sysexit (a routine transient for a ceiling breach, an
- * unavailable resource for a capacity refusal), which this error adopts as
- * its own so the job fails with the same numeric meaning.
+ * The cohort's availability check failed because the unknown-path count
+ * exceeded its ceiling or the measured data would not fit in this store.
+ * `cupboard plan cohort` reports a transient exit code for the first case and
+ * an unavailable-resource exit code for the second. This error preserves that
+ * distinction.
  */
 export class CohortPlanRefusedError extends CodedError {
 	constructor(
@@ -1051,13 +1123,10 @@ export class LegacyPushSummaryError extends CodedError {
 }
 
 /**
- * One path a `require-grace` publication cannot account for: `not-present`
- * names a path the confirm no longer found committed at the destination, and
- * `pending` one whose fact carried only a captured `graceSeconds`, still
- * awaiting the deferred upload that would materialise its deadline. A path
- * with no grace fact at all is not a per-path condition: grace resolution is
- * cache-level, so an uncovered cache raises {@link GracePolicyMissingError}
- * instead.
+ * A path without a positive grace deadline. `not-present` means the confirm no
+ * longer found the path at the destination. `pending` means the upload has not
+ * yet produced a deadline. If the cache has no grace policy, the cache-level
+ * {@link GracePolicyMissingError} is used instead.
  */
 export interface MissingGracePath {
 	readonly storePathHash: string;
@@ -1066,9 +1135,8 @@ export interface MissingGracePath {
 }
 
 /**
- * Raised when `require-grace` is set and the push report names at least one
- * path with no positive grace deadline: the publication half of grace mode's
- * fail-closed rule (see PLAN.md, "Planning and destination adoption").
+ * Raised when `require-grace` is set and at least one path has no positive
+ * grace deadline.
  */
 // The remedy each missing-grace reason points the operator at, rendered
 // alongside the reason so the failure is actionable without reading cupboard
@@ -1076,7 +1144,8 @@ export interface MissingGracePath {
 const missingGraceRemedies: Record<MissingGracePath['reason'], string> = {
 	'not-present':
 		'no longer committed at the destination; rebuild or republish the path',
-	pending: 'its deferred upload has not settled; retry once the push completes'
+	pending:
+		'its deferred upload has not completed; retry once the push completes'
 };
 
 export class GraceDeadlineMissingError extends CodedError {
@@ -1095,11 +1164,10 @@ export class GraceDeadlineMissingError extends CodedError {
 }
 
 /**
- * The destination cache has no covering grace policy while the push publishes
- * with `require-grace`. Without a policy nothing keeps an unretained path
- * alive, so the publication fails closed; a fact-less path shows the policy
- * is absent or vanished mid-run, and since resolution is cache-level, one
- * such path implies every path.
+ * The destination cache has no grace policy while the push uses
+ * `require-grace`. The publication fails because an unretained path would have
+ * no retention deadline. Grace policies apply to the cache, so one missing
+ * grace fact indicates that every path is uncovered.
  */
 export class GracePolicyMissingError extends CodedError {
 	constructor(public readonly cache: string) {

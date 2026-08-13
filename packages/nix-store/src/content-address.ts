@@ -1,16 +1,16 @@
 import { decodeNixHash } from './hash.ts';
 
 // What a `fixed` address serialises before hashing it. Nix reads a `git:`
-// method here as well, behind the git-hashing experimental feature, so an
-// address naming it states a method a stock Nix has no reading of.
+// method here as well, behind the git-hashing experimental feature, so the
+// default build cannot read an address that specifies it.
 const nixArchivePrefix = 'r:';
 
 /**
- * Whether the value is a content address Nix reads: `text:<algorithm>:<digest>`
- * for a path addressed by its own contents, or `fixed:[r:]<algorithm>:<digest>`
- * for one addressed by the contents a fetch would produce. The digest is one
- * the algorithm writes. A narinfo carrying a `CA` field Nix cannot read is a
- * document Nix refuses entire, so a reader has to decide this the same way.
+ * Whether Nix can parse the value as a content address. Text-addressed paths
+ * use `text:<algorithm>:<digest>`. Paths addressed by the contents produced by
+ * a fetch use `fixed:[r:]<algorithm>:<digest>`. Nix rejects an entire narinfo
+ * when it cannot parse the `CA` field, so the narinfo reader uses this
+ * validation directly.
  */
 export function isContentAddress(value: string): boolean {
 	const separator = value.indexOf(':');

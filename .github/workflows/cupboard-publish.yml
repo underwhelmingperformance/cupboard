@@ -1,7 +1,7 @@
-# The reusable publish workflow: build a flake installable and push it to a
-# cupboard cache with GitHub OIDC authentication. Callers pin the workflow so a
-# trust rule can require that exact job_workflow_ref; cupboard resolves a
-# release built from that revision, or builds the revision itself.
+# Build a flake installable and publish it to a cupboard cache with GitHub OIDC
+# authentication. Callers pin this reusable workflow so a trust rule can require
+# its exact job_workflow_ref. The workflow installs a release for that revision
+# or builds the revision from source.
 name: cupboard publish
 
 on:
@@ -52,9 +52,9 @@ on:
         default: ''
       cupboard-version:
         description: >-
-          Exact published cupboard release tag to install, or 'latest'. Empty
-          uses a release for the called workflow revision when one exists,
-          otherwise source.
+          Exact published cupboard release tag to install, or 'latest'. When
+          omitted, install a release for the called workflow revision or build
+          its source if no release exists.
         required: false
         type: string
 
@@ -83,10 +83,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # The composite actions ship alongside this workflow, so fetch the called
-      # workflow's resolved revision into a reserved workspace path. A caller is
-      # allowed to own any path in its checkout, so fail before checkout rather
-      # than letting actions/checkout replace caller content at that path.
+      # The composite actions ship with this workflow. Reserve the checkout path
+      # before fetching the called revision so actions/checkout cannot replace
+      # caller-controlled content.
       - name: Reserve the cupboard workflow checkout
         env:
           CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
@@ -106,8 +105,8 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
-      # Collapse an explicit selector, or the called workflow revision, to one
-      # validated coordinate before setup or publication consumes it.
+      # Resolve either the explicit selector or this workflow revision to one
+      # validated acquisition coordinate.
       - uses: ./.cupboard-workflow/actions/resolve-cupboard
         id: resolve-cupboard
         with:
@@ -133,10 +132,9 @@ jobs:
         id: build
         with:
           installables: ${{ inputs.installable }}
-          # A cached output has no current-run build evidence. When provenance
-          # is required, build-paths rebuilds only such final derivations before
-          # writing its receipt, so a rerun cannot turn an earlier attach
-          # failure into a successful unattested publication.
+          # A cached output provides no evidence of a build in this run. Rebuild
+          # cached final derivations when provenance is required so a retry after
+          # an attachment failure produces a new receipt.
           require-provenance: ${{ inputs.attest }}
 
       # A retention root holds one closure and a push replaces it wholesale, so
@@ -161,9 +159,8 @@ jobs:
           ttl: ${{ inputs.ttl }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
 
-      # This compact workflow has always targeted public-read caches and
-      # exposes no read secrets. Private caches use the flake workflow, which
-      # threads both credential halves into attest and attach.
+      # This workflow exposes no read credentials and therefore supports only
+      # public-read caches. Use the flake workflow for a private cache.
       - name: Attest committed paths
         id: attest
         if: ${{ inputs.attest }}

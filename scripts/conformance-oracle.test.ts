@@ -391,9 +391,8 @@ describe('integerWidthOf', () => {
 		expect(integerWidthOf('a-setting', accepted)).toBe(expected);
 	});
 
-	// A nix declaring a width this script has no reading for asks for one rather
-	// than having the wrong bounds recorded for it.
-	it('refuses a combination naming no width it knows', () => {
+	// Reject an unrecognised probe result instead of recording incorrect bounds.
+	it('refuses a combination that matches no supported width', () => {
 		expect(() =>
 			integerWidthOf('a-setting', {
 				negative: true,
@@ -422,8 +421,7 @@ describe('updateConformanceOracle', () => {
 			record: { nixpkgsRevision: pinnedRevision, version: pinnedVersion }
 		});
 		expect(workspace.writes).toStrictEqual([]);
-		// The table is written from whichever nix the record names, so a record
-		// that was already current still leaves the table current.
+		// Refresh the table even when the oracle record is already current.
 		expect(workspace.tables).toStrictEqual([
 			renderSettingTypes(
 				{ nixpkgsRevision: pinnedRevision, version: pinnedVersion },

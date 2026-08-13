@@ -81,14 +81,14 @@ export type StoreBackend =
 	| { readonly backend: 'ssh-ng'; readonly remote: NixSshStoreSpec };
 
 /**
- * The kind of store a resolved backend reads through: the discriminant a
+ * The kind of store used by a resolved backend. Callers use this discriminant
  * caller selects behaviour on, such as where NAR bytes come from. A
  * `local-filesystem` store and a `daemon` store serve paths on this machine's
  * filesystem; an `ssh-ng` store's paths live on the remote machine.
  */
 export type NixStoreKind = 'local-filesystem' | 'daemon' | 'ssh-ng';
 
-/** The store kind a resolved backend answers as. */
+/** The store kind of a resolved backend. */
 export function storeKindOf(backend: StoreBackend): NixStoreKind {
 	return backend.backend === 'local' ? 'local-filesystem' : backend.backend;
 }
@@ -120,7 +120,7 @@ export function createNixStoreClient(
 	);
 }
 
-/** The named and state directories a resolved store reads with. */
+/** The logical store directory and state directory of a resolved store. */
 export function storeDirectoriesOf(
 	backend: StoreBackend,
 	configured: ConfiguredStoreDirectories
@@ -140,8 +140,7 @@ export function storeDirectoriesOf(
 }
 
 /**
- * The store client a resolved backend opens, asking `substituters` whatever it
- * answers for itself about what is available elsewhere.
+ * Opens the resolved store client and its configured substituter queries.
  */
 export function storeClientForBackend(
 	backend: StoreBackend,
@@ -173,12 +172,11 @@ export function storeClientForBackend(
 }
 
 /**
- * The client that asks a store's substituters what they hold, opening them
- * when it is first asked something. Every answer is read from the substituter
- * itself, narinfo and all, so an offer it reports names the NAR hash and the
- * signatures a consumer would check.
+ * Creates lazy substituter queries for a store. Each result comes directly
+ * from the substituter's narinfo and includes the NAR hash and signatures a
+ * consumer would verify.
  *
- * A private cache is asked with the credentials the configured netrc names for
+ * Private-cache requests use the credentials selected by the configured netrc for
  * its host, and every request takes whatever route the environment's proxy
  * variables put it on.
  *
@@ -215,10 +213,9 @@ export function substituterClientOver(
 }
 
 /**
- * The netrc the configuration names, or nothing when no file answers for it.
- * libcurl reads the file when it opens and carries on as though netrc support
- * were off when it cannot, so a path naming no file, and one this process may
- * not read, both leave a request carrying no credentials.
+ * Reads the configured netrc, or returns `undefined` when the file is absent or
+ * unreadable. libcurl treats either case as disabled netrc support, so requests
+ * proceed without credentials.
  */
 function netrcContents(
 	netrcFile: string,
@@ -231,7 +228,7 @@ function netrcContents(
 	}
 }
 
-/** A local store reading the given directories, asking the given substituters. */
+/** Opens a local store with the given directories and substituter queries. */
 function localStoreOver(
 	directories: LocalStoreDirectories,
 	substituters: SubstituterClient,
@@ -275,9 +272,9 @@ export interface NixDaemonClientOptions {
 }
 
 /**
- * Open the daemon-backed store whenever its socket is present, whatever the
- * automatic selection would pick. The substitutable and missing-path queries
- * exist only behind the daemon, so a caller that needs them selects the daemon
+ * Opens a daemon-backed store whenever its socket is present, regardless of
+ * what automatic selection would pick. The substitutable and missing-path
+ * queries exist only behind the daemon, so callers that need them select the daemon
  * here; an install with no daemon socket is refused with
  * {@link NixDaemonUnavailableError} naming the probed socket path.
  */
@@ -323,34 +320,32 @@ export function createNixDaemonStoreClient(
 	});
 }
 
-/** A store opened to answer what is available elsewhere. */
+/** A store opened with support for external availability queries. */
 export interface AvailabilityStore {
 	readonly client: NixStoreClient;
 	readonly kind: NixStoreKind;
 	readonly storeDirectory: ConfiguredStoreDirectories['storeDirectory'];
 	/**
-	 * The substituters the settings this store was opened with name, asked
-	 * directly whatever backend the store itself reads through.
+	 * Direct queries for the substituters configured when this store was opened.
 	 */
 	readonly substituters: SubstituterClient;
 }
 
 /**
- * A store that can answer what is available elsewhere: which paths the
+ * A store that can report external availability: which paths the
  * substituters offer, what they offer for one, and what realising a target
  * would require.
  *
- * Both backends answer. A daemon holds the substituter configuration and makes
- * those requests for its clients, so it answers whenever its socket is there.
- * Without one the store is this process's own, and the questions are answered
- * the way libstore answers them in a single-user install: reading the store
+ * Both backends support these operations. A daemon manages the substituter
+ * configuration and requests for its clients. Without a daemon, this process
+ * follows libstore's single-user behaviour by reading the store
  * database directly and asking the substituters over HTTP.
  *
- * The substituters come back alongside the store, opened over the settings the
- * overrides settle, so a caller needing a full offer (its NAR hash and its
- * signatures) asks them itself.
+ * The result also includes direct substituter queries configured with the
+ * effective overrides. Callers use them when they need full offers containing
+ * NAR hashes and signatures.
  *
- * An `ssh-ng` store names a remote daemon, which answers for the remote store.
+ * An `ssh-ng` store uses a remote daemon to serve the remote store.
  * A store URI naming a daemon that is not running is refused with
  * {@link NixDaemonUnavailableError}. A store URI this client cannot read is
  * refused with {@link UnsupportedNixStoreError}.
@@ -388,7 +383,7 @@ export function createAvailabilityStoreClient(
 	}
 
 	// Availability opens the daemon for an automatic store whenever it is
-	// present, because the daemon can answer substitutability and missing-path
+	// present, because the daemon supports substitutability and missing-path
 	// queries that the local reader cannot. An explicitly local URI still names
 	// the local store and must not be replaced by this availability preference.
 	if (
@@ -428,12 +423,11 @@ export function createAvailabilityStoreClient(
 }
 
 /**
- * The substitution settings an override settles, over the ones discovery
- * found. A daemon takes these from the frame its client sends it, and here the
- * client is the store, so the same overrides settle the same settings: a plain
+ * Applies substitution overrides to the discovered settings. A daemon reads
+ * these values from its client's SetOptions frame. A plain
  * `substituters` assignment replaces the discovered list, an
- * `extra-substituters` one appends to whatever it holds, and each boolean is
- * read the one way the configuration layer reads it.
+ * `extra-substituters` assignment appends to the current list. The configuration
+ * layer parses each boolean consistently.
  */
 export function overriddenSubstitution(
 	discovered: NixSubstitutionSettings,
@@ -467,8 +461,8 @@ export function overriddenSubstitution(
 	};
 }
 
-// A setting an override names is read the way the configuration layer reads
-// it; one it leaves alone keeps the value discovery settled.
+// Parse explicit overrides through the configuration layer and retain the
+// discovered value for omitted settings.
 function isSettingEnabled(
 	overrides: NixDaemonOverrides,
 	name: string,
@@ -511,7 +505,7 @@ export function resolveStoreBackend(
 	}
 
 	// Nix reads an empty store reference as the automatic store, the same as
-	// `auto`: a `store =` line naming nothing names no store in particular.
+	// `auto`: an empty `store =` assignment does not select a specific store.
 	if (uri === 'auto' || uri === '') {
 		return resolveAuto(config, environment);
 	}
@@ -558,13 +552,11 @@ function resolveAuto(
 
 /**
  * The store Nix sets up for a Linux machine with no `/nix` and no daemon: a
- * store of this user's own under the data directory. Nix offers it only when
- * nothing else could have been meant, so an ordinary user who has never
- * installed Nix gets a working store while an install that names its
- * directories keeps them.
+ * per-user store below the data directory. Nix uses it only when no existing
+ * installation or explicit store configuration applies.
  *
  * Absent on any other platform, and absent whenever the state directory
- * exists, this process is the superuser, or the environment names a store or
+ * exists, this process is the superuser, or the environment configures a store or
  * state directory of its own.
  */
 function chrootStore(
@@ -588,8 +580,8 @@ function chrootStore(
 	}
 
 	// Nix reaches this store the way it reaches any store under a root: the
-	// paths keep the names the configuration gives them, and the root is where
-	// they sit.
+	// paths retain their configured logical names while the root determines
+	// their physical location.
 	return {
 		backend: 'local',
 		stateDirectory: path.join(root, 'nix', 'var', 'nix'),

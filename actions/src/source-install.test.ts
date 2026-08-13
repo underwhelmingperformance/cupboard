@@ -1,4 +1,11 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import {
+	chmod,
+	mkdir,
+	mkdtemp,
+	readdir,
+	rm,
+	writeFile
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -117,49 +124,69 @@ describe('acquireSourceCupboard', () => {
 		);
 		const output = await completeCupboardOutput();
 		const commands = new RecordingCommandRunner(successfulResults(output));
+		const installDirectory = await temporaryDirectory(
+			'cupboard-source-install-'
+		);
+		const acquired = await acquireSourceCupboard(
+			{ checkoutDirectory, installDirectory, cupboard },
+			{ runCommand: commands.run }
+		);
+		const rootEntries = await readdir(installDirectory);
+		const [rootEntry] = rootEntries;
 
-		await expect(
-			acquireSourceCupboard(
-				{ checkoutDirectory, cupboard },
-				{ runCommand: commands.run }
-			)
-		).resolves.toStrictEqual({
-			binaryPath: path.join(output, 'bin', 'cupboard'),
-			cupboard
+		if (rootEntry === undefined) {
+			throw new Error(
+				'Source acquisition did not retain its GC root directory'
+			);
+		}
+
+		const rootDirectory = path.join(installDirectory, rootEntry);
+
+		expect({
+			acquired,
+			rootEntries,
+			invocations: commands.invocations
+		}).toStrictEqual({
+			acquired: {
+				binaryPath: path.join(output, 'bin', 'cupboard'),
+				cupboard
+			},
+			rootEntries: [rootEntry],
+			invocations: [
+				{
+					command: 'git',
+					arguments_: ['-C', checkoutDirectory, 'remote', 'get-url', 'origin']
+				},
+				{
+					command: 'git',
+					arguments_: ['-C', checkoutDirectory, 'rev-parse', 'HEAD']
+				},
+				{
+					command: 'git',
+					arguments_: [
+						'-C',
+						checkoutDirectory,
+						'status',
+						'--porcelain',
+						'--untracked-files=no'
+					]
+				},
+				{
+					command: 'nix',
+					arguments_: [
+						'build',
+						'--out-link',
+						path.join(rootDirectory, 'result'),
+						'--print-out-paths',
+						`${checkoutDirectory}#cupboard`
+					]
+				},
+				{
+					command: path.join(output, 'bin', 'cupboard'),
+					arguments_: ['--version']
+				}
+			]
 		});
-		expect(commands.invocations).toStrictEqual([
-			{
-				command: 'git',
-				arguments_: ['-C', checkoutDirectory, 'remote', 'get-url', 'origin']
-			},
-			{
-				command: 'git',
-				arguments_: ['-C', checkoutDirectory, 'rev-parse', 'HEAD']
-			},
-			{
-				command: 'git',
-				arguments_: [
-					'-C',
-					checkoutDirectory,
-					'status',
-					'--porcelain',
-					'--untracked-files=no'
-				]
-			},
-			{
-				command: 'nix',
-				arguments_: [
-					'build',
-					'--no-link',
-					'--print-out-paths',
-					`${checkoutDirectory}#cupboard`
-				]
-			},
-			{
-				command: path.join(output, 'bin', 'cupboard'),
-				arguments_: ['--version']
-			}
-		]);
 	});
 
 	it('passes one cancellation signal to every checkout and build subprocess', async () => {
@@ -171,7 +198,12 @@ describe('acquireSourceCupboard', () => {
 		const controller = new AbortController();
 
 		await acquireSourceCupboard(
-			{ checkoutDirectory, cupboard, signal: controller.signal },
+			{
+				checkoutDirectory,
+				installDirectory: checkoutDirectory,
+				cupboard,
+				signal: controller.signal
+			},
 			{ runCommand: commands.run }
 		);
 
@@ -200,7 +232,7 @@ describe('acquireSourceCupboard', () => {
 
 		await expect(
 			acquireSourceCupboard(
-				{ checkoutDirectory, cupboard },
+				{ checkoutDirectory, installDirectory: checkoutDirectory, cupboard },
 				{ runCommand: commands.run }
 			)
 		).resolves.toStrictEqual({
@@ -218,7 +250,7 @@ describe('acquireSourceCupboard', () => {
 		]);
 
 		const outcome = acquireSourceCupboard(
-			{ checkoutDirectory, cupboard },
+			{ checkoutDirectory, installDirectory: checkoutDirectory, cupboard },
 			{ runCommand: commands.run }
 		);
 
@@ -243,7 +275,7 @@ describe('acquireSourceCupboard', () => {
 		]);
 
 		const outcome = acquireSourceCupboard(
-			{ checkoutDirectory, cupboard },
+			{ checkoutDirectory, installDirectory: checkoutDirectory, cupboard },
 			{ runCommand: commands.run }
 		);
 
@@ -272,7 +304,7 @@ describe('acquireSourceCupboard', () => {
 		]);
 
 		const outcome = acquireSourceCupboard(
-			{ checkoutDirectory, cupboard },
+			{ checkoutDirectory, installDirectory: checkoutDirectory, cupboard },
 			{ runCommand: commands.run }
 		);
 
@@ -313,7 +345,7 @@ describe('acquireSourceCupboard', () => {
 
 		await expect(
 			acquireSourceCupboard(
-				{ checkoutDirectory, cupboard },
+				{ checkoutDirectory, installDirectory: checkoutDirectory, cupboard },
 				{ runCommand: commands.run }
 			)
 		).rejects.toBeInstanceOf(SourceBuildOutputError);
@@ -337,7 +369,7 @@ describe('acquireSourceCupboard', () => {
 
 			await expect(
 				acquireSourceCupboard(
-					{ checkoutDirectory, cupboard },
+					{ checkoutDirectory, installDirectory: checkoutDirectory, cupboard },
 					{ runCommand: commands.run }
 				)
 			).rejects.toBeInstanceOf(SourceInstallationIncompleteError);
@@ -355,7 +387,7 @@ describe('acquireSourceCupboard', () => {
 		]);
 
 		const outcome = acquireSourceCupboard(
-			{ checkoutDirectory, cupboard },
+			{ checkoutDirectory, installDirectory: checkoutDirectory, cupboard },
 			{ runCommand: commands.run }
 		);
 
@@ -365,5 +397,34 @@ describe('acquireSourceCupboard', () => {
 				'deadbee'
 			)
 		);
+	});
+
+	it('removes only its owned GC root when source validation fails', async () => {
+		const checkoutDirectory = await temporaryDirectory(
+			'cupboard-source-checkout-'
+		);
+		const installDirectory = await temporaryDirectory(
+			'cupboard-source-install-'
+		);
+		const output = await completeCupboardOutput();
+		const commands = new RecordingCommandRunner([
+			...successfulResults(output).slice(0, -1),
+			{ stdout: 'deadbee\n' }
+		]);
+
+		await writeFile(
+			path.join(installDirectory, 'owned-by-another-step'),
+			'keep'
+		);
+
+		await expect(
+			acquireSourceCupboard(
+				{ checkoutDirectory, installDirectory, cupboard },
+				{ runCommand: commands.run }
+			)
+		).rejects.toBeInstanceOf(SourceInstallationVersionMismatchError);
+		await expect(readdir(installDirectory)).resolves.toStrictEqual([
+			'owned-by-another-step'
+		]);
 	});
 });

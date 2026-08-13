@@ -42,8 +42,8 @@ export function provided(value: string | undefined): string | undefined {
 /**
  * The cache a `cache` input addresses: the named cache after trimming, or the
  * default cache when the input is absent or blank. A value that is not a legal
- * cache name refuses the input with {@link InvalidInputError}, naming the field
- * rather than letting the run fail later against a URL no cache answers.
+ * cache name causes an {@link InvalidInputError} for that field, before the run
+ * constructs an endpoint for it.
  */
 export function providedCache(value: string | undefined): StoredCache {
 	const parsed = storedCacheSchema.safeParse(provided(value) ?? DEFAULT_CACHE);
@@ -56,13 +56,11 @@ export function providedCache(value: string | undefined): StoredCache {
 }
 
 /**
- * The base URL a URL-valued input names, or `undefined` when the input is
- * absent or blank. Every endpoint the run builds derives from this URL's origin
- * and path alone, so a value carrying anything else is a copy mistake: refusing
- * it here names the offending field before any request is made, and the checked
- * URL is what the rest of the run carries. The diagnostic names the field only,
- * never the value, which may hold a credential the workflow meant to keep out
- * of the log.
+ * The base URL specified by a URL-valued input, or `undefined` when the input is
+ * absent or blank. Every endpoint derives from this URL's origin and path. A
+ * query, fragment, or embedded credential therefore causes an
+ * {@link InvalidInputError} before any request is made. The diagnostic includes
+ * only the field name because the value may contain a credential.
  */
 export function providedUrl(
 	name: string,
@@ -79,7 +77,7 @@ export function providedUrl(
 	} catch {
 		throw new InvalidInputError(
 			name,
-			`${name} must be an http(s) URL with nothing beyond origin and path`
+			`${name} must be an http(s) URL without credentials, a query, or a fragment`
 		);
 	}
 }

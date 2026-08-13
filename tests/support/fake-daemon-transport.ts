@@ -183,6 +183,7 @@ export interface FakeNar {
 
 export interface FakeBuilds {
 	readonly expectedTargets: readonly string[];
+	readonly expectedMode?: 'normal' | 'check';
 	readonly results: readonly FakeBuildResult[];
 }
 
@@ -359,7 +360,9 @@ function buildPathsWithResultsResponse(
 	expect(readRequestStringSet(request)).toStrictEqual(builds.expectedTargets);
 
 	const buildModeOffset = request.byteLength - 8;
-	expect(Number(request.readBigUInt64LE(buildModeOffset))).toBe(0);
+	expect(Number(request.readBigUInt64LE(buildModeOffset))).toBe(
+		builds.expectedMode === 'check' ? 2 : 0
+	);
 
 	const response = new ProtocolWriter();
 	response.writeInteger(0x61_6c_74_73);

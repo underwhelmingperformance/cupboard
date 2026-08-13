@@ -671,9 +671,8 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 				environment: process.env
 			});
 
-			// A child failure here is the platform refusing to build the
-			// trivial derivation at all (macOS sandbox and store policies
-			// vary); the exit contract itself is covered above.
+			// Some macOS sandbox and store policies cannot build this fixture.
+			// The preceding test covers the child-process exit contract.
 			if (outcome.error instanceof BuildCommandFailedError) {
 				context.skip();
 			}

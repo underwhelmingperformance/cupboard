@@ -1,14 +1,14 @@
-# GitHub documents `job.workflow_repository`, `job.workflow_ref` and
-# `job.workflow_sha`, including this checkout pattern for a reusable workflow's
-# own source:
+# GitHub documents `job.workflow_repository`, `job.workflow_ref`, and
+# `job.workflow_sha` and shows how a reusable workflow can check out its own
+# source:
 # https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#job-context
 # actionlint support is tracked upstream in issue #647 and pull request #696:
 # https://github.com/rhysd/actionlint/issues/647
 # https://github.com/rhysd/actionlint/pull/696
 #
-# The reusable publish workflows check out and resolve their own action code
-# with those values, so the unknown-property report is ignored for exactly
-# those messages and files.
+# The reusable publish workflows use these properties to check out and resolve
+# their action code. Ignore only the corresponding unknown-property messages in
+# those workflow files.
 # Remove the entry once the pinned actionlint release models the properties.
 paths:
   .github/workflows/cupboard-publish.yml:

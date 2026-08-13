@@ -1,13 +1,14 @@
 import { NixNetrcSyntaxError } from './nix-store.ts';
 
-/** What a netrc names for a host, as HTTP Basic credentials. */
+/** HTTP Basic credentials selected from a netrc entry. */
 export interface NetrcCredential {
 	readonly login: string;
 	readonly password: string;
 }
 
 /**
- * The credentials a netrc names for a host, or nothing when it names none.
+ * Selects credentials for a host from a netrc, or returns `undefined` when no
+ * entry matches.
  *
  * Nix hands the file to libcurl rather than reading it itself, so what a netrc
  * means is what libcurl makes of it: whitespace-separated tokens, a line whose
@@ -15,10 +16,9 @@ export interface NetrcCredential {
  * `login`, `password` and `macdef` recognised whatever their case. Tokens run
  * on across lines, so an entry is a run of tokens rather than a run of lines.
  *
- * The first entry naming this host answers, and a `default` entry answers for
- * any host, so a `default` written before the machine entries answers ahead of
- * all of them. An entry naming a login and no password is read as that login
- * with an empty password, and one naming a password and no login as that
+ * The first matching `machine` or `default` entry wins, so an early `default`
+ * shadows later machine entries. An entry with a login but no password uses an
+ * empty password, and one with a password but no login uses that
  * password under an empty login.
  */
 export function netrcCredentialFor(
@@ -80,8 +80,8 @@ export function netrcCredentialFor(
 		} else if (isKeyword(text, 'password')) {
 			keyword = 'password';
 		} else if (isKeyword(text, 'machine')) {
-			// An entry that named a password answers, and one that named no
-			// password is left behind for whatever the rest of the file names.
+			// A password completes the matching entry. Otherwise continue scanning
+			// for a later entry with credentials.
 			if (entry.password !== undefined) {
 				return finish(entry);
 			}
@@ -100,13 +100,13 @@ export function netrcCredentialFor(
 	}
 }
 
-/** What an entry named so far, before the defaults fill the rest in. */
+/** Credentials parsed from the current entry before defaults are applied. */
 interface PartialCredential {
 	readonly login?: string;
 	readonly password?: string;
 }
 
-// A matched entry answers as long as it named either half of a credential.
+// A matched entry is usable when it specifies either credential field.
 function finish(entry: PartialCredential): NetrcCredential | undefined {
 	if (entry.login === undefined && entry.password === undefined) {
 		return;
@@ -127,8 +127,8 @@ function isKeyword(token: string, keyword: string): boolean {
 }
 
 /**
- * The host as a netrc names one. A URL states an IPv6 address inside brackets
- * and a netrc entry names it without them.
+ * The host format used by netrc. URLs enclose IPv6 addresses in brackets;
+ * netrc entries do not.
  */
 function withoutBrackets(host: string): string {
 	return host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
@@ -170,8 +170,8 @@ class NetrcReader {
 
 	/**
 	 * A token that runs to the next character no token may hold. Every character
-	 * above a space belongs to it, so a carriage return ends it as a newline
-	 * does and a line ending in one names nothing where a token was expected.
+	 * above a space belongs to it. A carriage return terminates the token and is
+	 * also treated as a line ending.
 	 */
 	private plainToken(): string {
 		const start = this.at;
@@ -227,7 +227,7 @@ class NetrcReader {
 		}
 	}
 
-	/** The next token, or nothing once the file is read out. */
+	/** The next token, or `undefined` at the end of the file. */
 	next(): NetrcToken | undefined {
 		this.passBlanks();
 

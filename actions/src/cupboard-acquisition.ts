@@ -38,6 +38,7 @@ export async function acquireCupboard(
 	if (options.cupboard.kind === 'source') {
 		return dependencies.installSource({
 			checkoutDirectory: options.checkoutDirectory,
+			installDirectory: options.installDirectory,
 			cupboard: options.cupboard,
 			...(options.signal !== undefined && { signal: options.signal })
 		});

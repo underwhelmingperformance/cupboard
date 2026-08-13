@@ -10,8 +10,8 @@ export class MalformedNarInfoLineError extends ProtocolError {
 }
 
 /**
- * A narinfo missing what Nix requires of one. Nix reads such a document as a
- * corrupt answer, so nothing here is read out of it either.
+ * A narinfo that is missing a field required by Nix. The reader rejects the
+ * entire document as corrupt.
  */
 export class CorruptNarInfoError extends ProtocolError {
 	constructor(public readonly storePath: StorePathString) {
@@ -20,7 +20,7 @@ export class CorruptNarInfoError extends ProtocolError {
 	}
 }
 
-/** A narinfo that describes a path other than the one it was asked for. */
+/** A narinfo that describes a path other than the requested path. */
 export class MismatchedNarInfoPathError extends ProtocolError {
 	constructor(public readonly storePath: StorePathString) {
 		super(`The narinfo served does not describe ${storePath}`);
@@ -59,19 +59,19 @@ export class InvalidCacheUrlSegmentError extends ProtocolError {
 	}
 }
 
-// A base URL carrying credentials, a query or a fragment: the builders derive
-// their results from origin and path alone, so honouring such a base would
-// silently drop or missend what it carries.
+// A base URL with credentials, a query or a fragment. The URL builders use only
+// the origin and path, so accepting these components would silently discard or
+// misdirect them.
 export class InvalidCacheUrlBaseError extends ProtocolError {
 	constructor() {
-		super('Cache base URL must carry nothing beyond origin and path');
+		super('Cache base URL must contain only an origin and path');
 		this.name = 'InvalidCacheUrlBaseError';
 	}
 }
 
 // A rendered Nix public key that is not `<name>:<base64>`. Both halves are
-// required: without the name there is nothing to attribute a signature to, and
-// without material that decodes there is nothing to verify it with.
+// required: the name identifies the signer, and the decoded material contains
+// the public key used for verification.
 export class InvalidNixPublicKeyError extends ProtocolError {
 	constructor(public readonly value: string) {
 		super(`Invalid Nix public key: ${value}`);

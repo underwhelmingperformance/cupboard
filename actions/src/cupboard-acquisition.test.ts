@@ -91,6 +91,7 @@ describe('acquireCupboard', () => {
 				[
 					{
 						checkoutDirectory: '/workspace/.cupboard',
+						installDirectory: '/runner/temp/cupboard-bin',
 						cupboard
 					}
 				]
@@ -124,6 +125,7 @@ describe('acquireCupboard', () => {
 			[
 				{
 					checkoutDirectory: '/workspace/.cupboard',
+					installDirectory: '/runner/temp/cupboard-bin',
 					cupboard,
 					signal: controller.signal
 				}

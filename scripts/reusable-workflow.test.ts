@@ -129,9 +129,7 @@ describe('reusable workflow action checkout isolation', () => {
 					symlinkGuard: stepText(step).includes(
 						'[ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]'
 					),
-					failClosed: stepText(step).includes(
-						'refusing to replace caller content'
-					)
+					failClosed: stepText(step).includes('refusing to replace')
 				})),
 				legacyCheckoutDestination: contents.includes('path: .cupboard\n'),
 				legacyActionReference: contents.includes('./.cupboard/actions/')
@@ -156,6 +154,32 @@ describe('reusable workflow action checkout isolation', () => {
 });
 
 describe('cupboard flake publish release coordinates', () => {
+	it('lets configure refresh only its own prior workflow checkout', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+		const lines = contents.split('\n');
+		const [configureReservation] = actionSteps(
+			lines,
+			/^ {6}- name: Reserve the cupboard workflow checkout$/u
+		);
+		const text = stepText(configureReservation);
+
+		expect({
+			identity: text.includes(
+				'WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}'
+			),
+			origin: text.includes('remote get-url origin'),
+			acceptsExact: text.includes('[ "${origin}" != "${expected}" ]'),
+			acceptsGitSuffix: text.includes('[ "${origin}" != "${expected}.git" ]'),
+			rejectsSymlink: text.includes('[ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]')
+		}).toStrictEqual({
+			identity: true,
+			origin: true,
+			acceptsExact: true,
+			acceptsGitSuffix: true,
+			rejectsSymlink: true
+		});
+	});
+
 	it('refuses unsupported GitHub Enterprise Server execution before using workflow identity', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 		const cloudGuard = contents.indexOf(
@@ -475,23 +499,21 @@ describe('cupboard publish release coordinates', () => {
 		});
 	});
 
-	it('documents SHA-pinned automatic resolution without duplicate coordinates', async () => {
+	it('documents tag-pinned resolution without duplicate coordinates', async () => {
 		const documentation = await readFile(githubActionsDocumentation, 'utf8');
 		const reusableWorkflowSection = documentation.slice(
 			documentation.indexOf('## The reusable workflow\n'),
 			documentation.indexOf('### Publishing a target manifest\n')
 		);
-		const example =
-			/uses: underwhelmingperformance\/cupboard\/\.github\/workflows\/cupboard-publish\.yml@(?<workflowCommit>[0-9a-f]{40}) # vX\.Y\.Z/u.exec(
-				reusableWorkflowSection
-			);
 
 		expect({
-			workflowCommit: example?.groups?.workflowCommit,
+			tagPinned: reusableWorkflowSection.includes(
+				'uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@vX.Y.Z'
+			),
 			versionOverride: reusableWorkflowSection.includes('cupboard-version:'),
 			sourceCommit: reusableWorkflowSection.includes('cupboard-source-commit:')
 		}).toStrictEqual({
-			workflowCommit: '0123456789abcdef0123456789abcdef01234567',
+			tagPinned: true,
 			versionOverride: false,
 			sourceCommit: false
 		});
@@ -694,7 +716,7 @@ describe('cupboard repository cache publishing', () => {
 	});
 });
 
-describe('SHA-pinned reusable-workflow documentation', () => {
+describe('tag-pinned reusable-workflow documentation', () => {
 	it.each([
 		['trust rules', trustRulesDocumentation],
 		['reuse views', reuseViewsDocumentation]
@@ -702,19 +724,19 @@ describe('SHA-pinned reusable-workflow documentation', () => {
 		const contents = await readFile(documentation, 'utf8');
 		const prose = contents.replaceAll(/\s+/gu, ' ');
 		const examples = contents.match(
-			/```yaml\n[\s\S]*?uses: underwhelmingperformance\/cupboard\/\.github\/workflows\/cupboard-flake-publish\.yml@[0-9a-f]{40} # vX\.Y\.Z[\s\S]*?```/gu
+			/```yaml\n[\s\S]*?uses: underwhelmingperformance\/cupboard\/\.github\/workflows\/cupboard-flake-publish\.yml@vX\.Y\.Z[\s\S]*?```/gu
 		);
 
 		expect({
 			examples: examples?.map((example) => ({
-				shaPinned: /@[0-9a-f]{40} # vX\.Y\.Z/u.test(example),
+				tagPinned: example.includes('@vX.Y.Z'),
 				versionOverride: example.includes('cupboard-version:')
 			})),
 			explainsOverride: prose.includes(
 				'An explicit `cupboard-version` is only needed to intentionally run a different release from the workflow pin.'
 			)
 		}).toStrictEqual({
-			examples: [{ shaPinned: true, versionOverride: false }],
+			examples: [{ tagPinned: true, versionOverride: false }],
 			explainsOverride: true
 		});
 	});
@@ -1153,22 +1175,46 @@ describe('cupboard cohort collection boundary', () => {
 });
 
 describe('cupboard build provenance', () => {
-	it('documents the exact-rule migration required by SHA-pinned callers', async () => {
-		const contents = await readFile(githubActionsDocumentation, 'utf8');
-		const prose = contents.replaceAll('\n', ' ');
+	it('keeps rooted cohort targets rebuildable until this run attaches provenance', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+		const lines = contents.split('\n');
+		const [planStep] = actionSteps(
+			lines,
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/plan$/u
+		);
+		const [buildStep] = actionSteps(
+			lines,
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/build-cohort$/u
+		);
 
 		expect({
-			staleTagPatternClaim: contents.includes('stored tag pattern'),
-			legacyRuleWarning: prose.includes(
-				'A legacy rule ending in `@refs/tags/v*` does not match a SHA-pinned `job_workflow_ref`.'
+			plan: stepText(planStep).includes(
+				'require-provenance: ${{ inputs.push }}'
 			),
-			setupBeforeCaller: prose.includes(
-				'Run setup with the full SHA before changing the caller'
+			build: stepText(buildStep).includes(
+				'require-provenance: ${{ inputs.push }}'
+			)
+		}).toStrictEqual({ plan: true, build: true });
+	});
+
+	it('documents release updates without routine tenant administration', async () => {
+		const contents = await readFile(githubActionsDocumentation, 'utf8');
+		const prose = contents.replaceAll(/\s+/gu, ' ');
+
+		expect({
+			tagPatternDefault: prose.includes(
+				'When the tenant trusts the workflow at `refs/tags/v*`, check the new immutable release before updating the caller'
+			),
+			noTenantWrite: prose.includes(
+				'the release update requires no tenant write or administrator credential'
+			),
+			exactTrustRequiresSetup: prose.includes(
+				'A tenant that deliberately trusts one exact tag or commit instead must run `github setup` for each release before updating its caller.'
 			)
 		}).toStrictEqual({
-			staleTagPatternClaim: false,
-			legacyRuleWarning: true,
-			setupBeforeCaller: true
+			tagPatternDefault: true,
+			noTenantWrite: true,
+			exactTrustRequiresSetup: true
 		});
 	});
 

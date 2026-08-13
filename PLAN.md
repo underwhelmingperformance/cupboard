@@ -5645,13 +5645,12 @@ remaining work.
    failure, and that the socket path fits `sun_path` with the documented
    fallback.
 10. Implement `cupboard build-push` for daemon-backed local stores:
-    - preflight: the daemon trust flag read in-process from the handshake, a
-      daemon-backed store (selected in preference to the local backend whenever
-      the daemon socket exists; a daemonless install or an untrusting daemon
-      selects the reconciled local mode, which builds without the hook and
-      publishes once from the store the build populated), no conflicting
-      operator `post-build-hook`, and a token carrying `root:attach` for the run
-      root and `root:set` for the target roots;
+    - preflight: the daemon trust flag read in-process from the handshake, no
+      conflicting operator `post-build-hook`, and a token carrying `root:attach`
+      for the run root and `root:set` for the target roots; when a trusted
+      daemon socket exists, the build uses the daemon-backed store; otherwise,
+      reconciled local mode builds without the hook and publishes once from the
+      store populated by the build;
     - invocation-scoped Nix configuration through `NIX_CONFIG` in the child
       environment;
     - child process and signal supervision;
@@ -5883,14 +5882,13 @@ Real-Nix tests cover the foreground supervisor:
   reported as uploaded, never as failed.
 - Two concurrent invocations sharing one store each receive hook events only for
   their own builds and each publish and root their own targets.
-- A daemonless store or an untrusted daemon connection selects the reconciled
-  local mode: the same cohort builds under the attempt loop with no hook, one
-  push publishes what the build left, and the receipt claims only the paths the
-  run resolved and queried before building, with a local rebuild claimed as a
-  verified rebuild. Preflight still refuses, with distinct actionable errors, a
-  conflicting operator `post-build-hook`, a socket path that cannot be made to
-  fit `sun_path`, an unresolvable hook helper, and a token without `root:attach`
-  for the run root.
+- A daemonless store or an untrusted daemon connection selects reconciled local
+  mode. The same cohort builds under the attempt loop without a hook, then one
+  push publishes the build results. The receipt includes only paths that the run
+  resolved and queried before building; it records a local rebuild as verified.
+  Preflight still refuses a conflicting operator `post-build-hook`, a socket
+  path that cannot fit `sun_path`, an unresolvable hook helper, or a token
+  without `root:attach` for the run root. Each error is distinct and actionable.
 - A token carrying `upload:commit` without `root:attach` cannot attach, and one
   whose `root:attach` grant names a different root or prefix is refused on the
   root it does not cover.

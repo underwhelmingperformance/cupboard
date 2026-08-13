@@ -311,7 +311,7 @@ describe('resolvePushInputs', () => {
 		expect(failure).toStrictEqual(
 			new InvalidInputError(
 				'url',
-				'url must be an http(s) URL with nothing beyond origin and path'
+				'url must be an http(s) URL without credentials, a query, or a fragment'
 			)
 		);
 		expect((failure as Error).message).not.toContain(secret);

@@ -84,7 +84,7 @@ cupboard reuse-view set https://cupboard.example.workers.dev/t/acme pull-request
 ```yaml
 jobs:
   publish:
-    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@vX.Y.Z
     permissions:
       attestations: write
       contents: read
@@ -95,9 +95,9 @@ jobs:
       reuse-view: pull-requests
 ```
 
-The SHA pin automatically selects a release published for that commit, or the
-pinned source when no release exists. An explicit `cupboard-version` is only
-needed to intentionally run a different release from the workflow pin.
+The tag pin selects that immutable published release. An explicit
+`cupboard-version` is only needed to intentionally run a different release from
+the workflow pin.
 
 If the merged commit's outputs already sit in the PR's cache from CI, the cohort
 job publishes them by reference through the view, and the destination adopts and

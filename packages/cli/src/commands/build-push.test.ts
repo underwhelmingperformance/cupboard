@@ -354,6 +354,8 @@ describe('parseCohortsFile', () => {
 				{
 					installables: ['.#lib'],
 					attempts: 2,
+					rebuild: true,
+					requireProvenance: true,
 					verifyRebuilds: true,
 					keepGoing: true,
 					maxJobs: 4
@@ -369,6 +371,8 @@ describe('parseCohortsFile', () => {
 				build: {
 					installables: ['.#lib'],
 					attempts: 2,
+					rebuild: true,
+					requireProvenance: true,
 					verifyRebuilds: true,
 					keepGoing: true,
 					maxJobs: 4
