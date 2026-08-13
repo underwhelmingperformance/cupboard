@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
 	access,
@@ -18,6 +18,7 @@ import type { Reporter } from '@cupboard/reporter';
 import { createOctokitClient, RequestError } from '@cupboard/shared/octokit';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import {
+	AttestationSubjectMismatchError,
 	identityPolicy,
 	resultFor,
 	type VerifiedIdentityPolicy,
@@ -28,6 +29,10 @@ import { StatusCodes } from 'http-status-codes';
 import semverValid from 'semver/functions/valid.js';
 import { z } from 'zod';
 
+import {
+	observeChildProcess,
+	waitForAbortableChildProcess
+} from './child-process.ts';
 import {
 	AttestationNotFoundError,
 	AttestationSourceMismatchError,
@@ -48,7 +53,7 @@ import {
 } from './errors.ts';
 import { type Environment, parseLines } from './inputs.ts';
 
-interface ReleaseAsset {
+export interface ReleaseAsset {
 	readonly name: string;
 	readonly url: string;
 }
@@ -66,6 +71,7 @@ export interface InstallCupboardOptions {
 	readonly githubToken: string;
 	readonly environment: Environment;
 	readonly expectedSourceCommit?: string;
+	readonly signal?: AbortSignal;
 }
 
 export interface InstalledCupboard {
@@ -165,7 +171,6 @@ export function assertExpectedSourceCommit(
 }
 
 export function assetNameFor(
-	tagName: string,
 	runtimePlatform: string = platform,
 	runtimeArchitecture: string = arch
 ): string {
@@ -176,7 +181,31 @@ export function assetNameFor(
 		throw new UnsupportedPlatformError(runtimePlatform, runtimeArchitecture);
 	}
 
-	return `cupboard-${tagName}-${releasePlatform}-${releaseArchitecture}.tar.gz`;
+	return `cupboard-${releasePlatform}-${releaseArchitecture}.tar.gz`;
+}
+
+/** Prefer release-scoped names while retaining compatibility with old releases. */
+export function assetNamesFor(
+	tagName: string,
+	runtimePlatform: string = platform,
+	runtimeArchitecture: string = arch
+): readonly string[] {
+	const stableName = assetNameFor(runtimePlatform, runtimeArchitecture);
+	const suffix = stableName.slice('cupboard-'.length);
+
+	return [stableName, `cupboard-${tagName}-${suffix}`];
+}
+
+/** Select the stable platform asset, falling back to a legacy tag-named asset. */
+export function releaseAssetFor(
+	release: Release,
+	runtimePlatform: string = platform,
+	runtimeArchitecture: string = arch
+): ReleaseAsset {
+	return findFirstReleaseAsset(
+		release,
+		assetNamesFor(release.tagName, runtimePlatform, runtimeArchitecture)
+	);
 }
 
 export function parseChecksums(value: string): Map<string, string> {
@@ -228,6 +257,60 @@ interface VerifyReleaseDependencies {
 	readonly verify?: typeof verifyBundle;
 }
 
+type RenameFile = typeof rename;
+
+interface PublishReleaseDependencies {
+	readonly rename?: RenameFile;
+	readonly runCommand?: ReleaseCommandRunner;
+	readonly signal?: AbortSignal;
+}
+
+type ReleaseCommandRunner = (
+	command: string,
+	arguments_: readonly string[],
+	options: { readonly captureStdout: boolean; readonly signal?: AbortSignal }
+) => Promise<{ readonly stdout: string }>;
+
+const defaultReleaseCommandRunner: ReleaseCommandRunner = async (
+	command,
+	arguments_,
+	options
+) => {
+	options.signal?.throwIfAborted();
+
+	const child = spawn(command, [...arguments_], {
+		stdio: options.captureStdout
+			? ['ignore', 'pipe', 'inherit']
+			: ['inherit', 'inherit', 'inherit']
+	});
+	const chunks: Buffer[] = [];
+
+	if (options.captureStdout) {
+		child.stdout?.on('data', (chunk: Buffer) => {
+			chunks.push(chunk);
+		});
+	}
+
+	const result = await waitForAbortableChildProcess(
+		observeChildProcess(child),
+		options.signal
+	);
+
+	if (result.error !== undefined || result.status !== 0) {
+		throw new CommandFailedError(
+			command,
+			result.status,
+			result.error?.message,
+			{
+				...(result.error !== undefined && { cause: result.error }),
+				...(result.signal !== undefined && { signal: result.signal })
+			}
+		);
+	}
+
+	return { stdout: Buffer.concat(chunks).toString('utf8') };
+};
+
 /**
  * The Fulcio SAN a release attestation is signed under: the release workflow's
  * path in the release repository. A regex (anchored, with a trailing `@`) so it
@@ -246,6 +329,8 @@ export async function installCupboard(
 	options: InstallCupboardOptions,
 	reporter: Reporter
 ): Promise<InstalledCupboard> {
+	options.signal?.throwIfAborted();
+
 	const expectedSourceCommit = expectedSourceCommitFor(
 		options.version,
 		options.expectedSourceCommit
@@ -260,9 +345,9 @@ export async function installCupboard(
 		}
 	);
 
-	const assetName = assetNameFor(release.tagName);
 	const binaryPath = path.join(options.installDirectory, 'cupboard');
-	const asset = findReleaseAsset(release, assetName);
+	const asset = releaseAssetFor(release);
+	const assetName = asset.name;
 	const checksumAsset = findReleaseAsset(release, 'checksums.txt');
 	const archivePath = path.join(options.installDirectory, assetName);
 	const checksumsPath = path.join(options.installDirectory, 'checksums.txt');
@@ -306,7 +391,8 @@ export async function installCupboard(
 		publishReleaseArchive(
 			archivePath,
 			options.installDirectory,
-			release.tagName
+			release.tagName,
+			options.signal === undefined ? {} : { signal: options.signal }
 		)
 	);
 
@@ -321,8 +407,13 @@ export async function installCupboard(
 export async function publishReleaseArchive(
 	archivePath: string,
 	installDirectory: string,
-	expectedVersion: string
+	expectedVersion: string,
+	dependencies: PublishReleaseDependencies = {}
 ): Promise<void> {
+	dependencies.signal?.throwIfAborted();
+
+	const move = dependencies.rename ?? rename;
+	const runCommand = dependencies.runCommand ?? defaultReleaseCommandRunner;
 	const stagingDirectory = await mkdtemp(
 		path.join(installDirectory, '.cupboard-release-')
 	);
@@ -331,26 +422,92 @@ export async function publishReleaseArchive(
 		stagingDirectory,
 		'cupboard-hook-relay'
 	);
+	const destinations = [
+		{
+			staged: stagedBinaryPath,
+			destination: path.join(installDirectory, 'cupboard'),
+			backup: path.join(stagingDirectory, '.previous-cupboard')
+		},
+		{
+			staged: stagedHookHelperPath,
+			destination: path.join(installDirectory, 'cupboard-hook-relay'),
+			backup: path.join(stagingDirectory, '.previous-cupboard-hook-relay')
+		}
+	] as const;
+	const backedUp = new Set<string>();
+	const published = new Set<string>();
 
 	try {
-		run('tar', ['-xzf', archivePath, '-C', stagingDirectory]);
+		await runCommand('tar', ['-xzf', archivePath, '-C', stagingDirectory], {
+			captureStdout: false,
+			...(dependencies.signal !== undefined && { signal: dependencies.signal })
+		});
 		await Promise.all([
 			prepareReleaseExecutable(stagedBinaryPath),
 			prepareReleaseExecutable(stagedHookHelperPath)
 		]);
 		assertInstalledReleaseVersion(
 			expectedVersion,
-			readInstalledCupboardVersion(stagedBinaryPath)
+			await readInstalledCupboardVersion(
+				stagedBinaryPath,
+				runCommand,
+				dependencies.signal
+			)
 		);
 
-		await rename(stagedBinaryPath, path.join(installDirectory, 'cupboard'));
-		await rename(
-			stagedHookHelperPath,
-			path.join(installDirectory, 'cupboard-hook-relay')
-		);
+		try {
+			for (const entry of destinations) {
+				if (await moveIfPresent(entry.destination, entry.backup, move)) {
+					backedUp.add(entry.destination);
+				}
+			}
+
+			for (const entry of destinations) {
+				await move(entry.staged, entry.destination);
+				published.add(entry.destination);
+			}
+		} catch (error) {
+			for (const entry of destinations.toReversed()) {
+				if (published.has(entry.destination)) {
+					await rm(entry.destination, { recursive: true, force: true });
+				}
+
+				if (backedUp.has(entry.destination)) {
+					await move(entry.backup, entry.destination);
+				}
+			}
+
+			throw error;
+		}
 	} finally {
 		await rm(stagingDirectory, { recursive: true, force: true });
 	}
+}
+
+async function moveIfPresent(
+	source: string,
+	destination: string,
+	move: RenameFile
+): Promise<boolean> {
+	try {
+		await move(source, destination);
+		return true;
+	} catch (error) {
+		if (isMissingPathError(error)) {
+			return false;
+		}
+
+		throw error;
+	}
+}
+
+function isMissingPathError(error: unknown): boolean {
+	return (
+		typeof error === 'object' &&
+		error !== null &&
+		'code' in error &&
+		error.code === 'ENOENT'
+	);
 }
 
 /** Require a release archive member to be a runnable regular file. */
@@ -387,20 +544,15 @@ export function assertInstalledReleaseVersion(
 	throw new InstalledReleaseVersionMismatchError(expected, actual);
 }
 
-function readInstalledCupboardVersion(binaryPath: string): string {
-	const result = spawnSync(binaryPath, ['--version'], { encoding: 'utf8' });
-
-	if (result.error !== undefined) {
-		throw new CommandFailedError(
-			binaryPath,
-			result.status,
-			result.error.message
-		);
-	}
-
-	if (result.status !== 0) {
-		throw new CommandFailedError(binaryPath, result.status);
-	}
+async function readInstalledCupboardVersion(
+	binaryPath: string,
+	runCommand: ReleaseCommandRunner,
+	signal?: AbortSignal
+): Promise<string> {
+	const result = await runCommand(binaryPath, ['--version'], {
+		captureStdout: true,
+		...(signal !== undefined && { signal })
+	});
 
 	return result.stdout.trim();
 }
@@ -532,6 +684,21 @@ function findReleaseAsset(release: Release, name: string): ReleaseAsset {
 	return asset;
 }
 
+function findFirstReleaseAsset(
+	release: Release,
+	names: readonly string[]
+): ReleaseAsset {
+	for (const name of names) {
+		const asset = release.assets.find((candidate) => candidate.name === name);
+
+		if (asset !== undefined) {
+			return asset;
+		}
+	}
+
+	throw new ReleaseAssetNotFoundError(release.tagName, names.join(' or '));
+}
+
 async function downloadAsset(
 	asset: ReleaseAsset,
 	destination: string,
@@ -648,6 +815,15 @@ async function verifyOneReleaseBundle(
 	options: ReleaseBundleVerification
 ): Promise<void> {
 	const verified = await options.verify(options.bundle, options.policy, {});
+	if (
+		verified.subjectDigests.length !== 1 ||
+		verified.subjectDigests[0] !== options.subjectDigest
+	) {
+		throw new AttestationSubjectMismatchError(
+			options.subjectDigest,
+			verified.subjectDigests
+		);
+	}
 
 	resultFor(
 		options.archiveName,
@@ -776,20 +952,4 @@ function requestHeaders(
 	}
 
 	return headers;
-}
-
-function run(command: string, arguments_: readonly string[]): void {
-	const result = spawnSync(command, [...arguments_], { stdio: 'inherit' });
-
-	if (result.error !== undefined) {
-		throw new CommandFailedError(command, result.status, result.error.message, {
-			cause: result.error
-		});
-	}
-
-	if (result.status === 0) {
-		return;
-	}
-
-	throw new CommandFailedError(command, result.status);
 }

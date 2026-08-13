@@ -5,7 +5,8 @@ import {
 	hookHelperBinaryName,
 	hookHelperSourcePath,
 	normaliseBuildVersion,
-	releaseArchiveArguments
+	releaseArchiveArguments,
+	releaseAssetNameFor
 } from './build-cupboard-binary.ts';
 
 interface Invocation {
@@ -60,6 +61,22 @@ describe('normaliseBuildVersion', () => {
 	])('preserves the build identity in %s', (version, expected) => {
 		expect(normaliseBuildVersion(version)).toBe(expected);
 	});
+});
+
+describe('releaseAssetNameFor', () => {
+	it.each([
+		['linux', 'x64', 'cupboard-linux-x64.tar.gz'],
+		['linux', 'arm64', 'cupboard-linux-arm64.tar.gz'],
+		['darwin', 'x64', 'cupboard-macos-x64.tar.gz'],
+		['darwin', 'arm64', 'cupboard-macos-arm64.tar.gz']
+	])(
+		'names the %s %s release asset independently of its tag',
+		(runtimePlatform, runtimeArchitecture, expected) => {
+			expect(releaseAssetNameFor(runtimePlatform, runtimeArchitecture)).toBe(
+				expected
+			);
+		}
+	);
 });
 
 describe('releaseArchiveArguments', () => {

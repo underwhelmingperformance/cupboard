@@ -191,7 +191,7 @@ describe('updateDraftBody', () => {
 
 describe('assetContentType', () => {
 	it.each([
-		['cupboard-v1.2.3-linux-x64.tar.gz', 'application/gzip'],
+		['cupboard-linux-x64.tar.gz', 'application/gzip'],
 		['checksums.txt', 'text/plain; charset=utf-8'],
 		['cupboard', 'application/octet-stream']
 	])('types %s', (assetName, expected) => {
@@ -204,12 +204,12 @@ describe('checksumTargets', () => {
 		expect(
 			checksumTargets([
 				'checksums.txt',
-				'cupboard-v1.2.3-linux-x64.tar.gz',
-				'cupboard-v1.2.3-linux-arm64.tar.gz'
+				'cupboard-linux-x64.tar.gz',
+				'cupboard-linux-arm64.tar.gz'
 			])
 		).toStrictEqual([
-			'cupboard-v1.2.3-linux-arm64.tar.gz',
-			'cupboard-v1.2.3-linux-x64.tar.gz'
+			'cupboard-linux-arm64.tar.gz',
+			'cupboard-linux-x64.tar.gz'
 		]);
 	});
 });
@@ -219,19 +219,19 @@ describe('renderChecksums', () => {
 		expect(
 			renderChecksums([
 				{
-					name: 'cupboard-v1.2.3-linux-x64.tar.gz',
+					name: 'cupboard-linux-x64.tar.gz',
 					sha256:
 						'1111111111111111111111111111111111111111111111111111111111111111'
 				},
 				{
-					name: 'cupboard-v1.2.3-linux-arm64.tar.gz',
+					name: 'cupboard-linux-arm64.tar.gz',
 					sha256:
 						'2222222222222222222222222222222222222222222222222222222222222222'
 				}
 			])
 		).toBe(
-			'1111111111111111111111111111111111111111111111111111111111111111  cupboard-v1.2.3-linux-x64.tar.gz\n' +
-				'2222222222222222222222222222222222222222222222222222222222222222  cupboard-v1.2.3-linux-arm64.tar.gz\n'
+			'1111111111111111111111111111111111111111111111111111111111111111  cupboard-linux-x64.tar.gz\n' +
+				'2222222222222222222222222222222222222222222222222222222222222222  cupboard-linux-arm64.tar.gz\n'
 		);
 	});
 });
