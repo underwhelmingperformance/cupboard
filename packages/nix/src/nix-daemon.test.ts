@@ -774,6 +774,43 @@ describe('NixDaemonStoreClient', () => {
 		expect(transport?.closed).toBe(true);
 	});
 
+	it('reads a derivation out of the single regular file its NAR holds', async () => {
+		const aterm = 'Derive([],[],[],"aarch64-linux","builder",[],[])';
+		let transport: FakeDaemonTransport | undefined;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				transport = new FakeDaemonTransport(
+					{},
+					{
+						nar: {
+							expectedPath: appPath,
+							frames: [
+								narFrame(
+									'nix-archive-1',
+									'(',
+									'type',
+									'regular',
+									'contents',
+									aterm,
+									')'
+								)
+							]
+						}
+					}
+				);
+
+				return Promise.resolve(transport);
+			}
+		});
+
+		const contents = await client.readDerivation(appPath);
+
+		expect({ contents, closed: transport?.closed }).toStrictEqual({
+			contents: aterm,
+			closed: true
+		});
+	});
+
 	it('surfaces a typed error for bytes that do not form a NAR', async () => {
 		let transport: FakeDaemonTransport | undefined;
 		const client = new NixDaemonStoreClient({

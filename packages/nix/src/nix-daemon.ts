@@ -4,6 +4,7 @@ import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import type { StorePathString } from '@cupboard/nix-store/scalars';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
+import { narRegularFileContents } from './nar-file.ts';
 import {
 	defaultClosureConcurrency,
 	type NixBuildOutcome,
@@ -394,6 +395,17 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		}
 
 		return this.withConnection((session) => session.queryMissing(targets));
+	}
+
+	/**
+	 * The derivation's text, extracted from the single regular file its NAR
+	 * serialises. The worker protocol reaches store contents only as NARs, so
+	 * the derivation arrives wrapped in one.
+	 */
+	async readDerivation(drvPath: StorePathString): Promise<string> {
+		return new TextDecoder().decode(
+			await narRegularFileContents(this.narFromPath(drvPath))
+		);
 	}
 
 	/**

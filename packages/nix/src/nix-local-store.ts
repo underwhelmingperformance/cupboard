@@ -1,9 +1,14 @@
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
-import type { StorePathString } from '@cupboard/nix-store/scalars';
+import {
+	type StoreDirectory,
+	storeDirectorySchema,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
 
 import {
 	type NixBuildResult,
@@ -37,6 +42,14 @@ export interface NixStoreDatabase {
 	close(): void;
 }
 
+/** Reads a file the store holds, injected so the client is tested without one. */
+export type ReadStoreFile = (filePath: string) => Promise<string>;
+
+const defaultReadStoreFile: ReadStoreFile = (filePath) =>
+	readFile(filePath, 'utf8');
+
+const defaultStoreDirectory = storeDirectorySchema.parse('/nix/store');
+
 export interface NixStoreRow {
 	readonly id: number;
 	/** The NAR hash as stored: `sha256:` followed by a base16 digest. */
@@ -54,7 +67,11 @@ export interface NixStoreRow {
  * `nix-daemon` to talk to.
  */
 export class NixLocalStoreClient implements NixStoreClient {
-	constructor(private readonly open: () => NixStoreDatabase) {}
+	constructor(
+		private readonly open: () => NixStoreDatabase,
+		private readonly storeDirectory: StoreDirectory = defaultStoreDirectory,
+		private readonly readStoreFile: ReadStoreFile = defaultReadStoreFile
+	) {}
 
 	private async withDatabase<T>(
 		use: (database: NixStoreDatabase) => T
@@ -151,6 +168,16 @@ export class NixLocalStoreClient implements NixStoreClient {
 		return Promise.reject(
 			new UnsupportedNixStoreOperationError('missing-path queries')
 		);
+	}
+
+	async readDerivation(drvPath: StorePathString): Promise<string> {
+		try {
+			return await this.readStoreFile(
+				path.join(this.storeDirectory, path.basename(drvPath))
+			);
+		} catch (error) {
+			throw new NixStorePathNotFoundError(drvPath, { cause: error });
+		}
 	}
 
 	narFromPath(_storePath: StorePathString): AsyncIterable<Uint8Array> {

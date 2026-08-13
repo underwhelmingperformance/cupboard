@@ -147,6 +147,65 @@ describe('narRegularFileContents', () => {
 		});
 	});
 
+	// A producer holding a resource for the stream's lifetime, such as a
+	// dedicated daemon connection, releases it in the generator's `finally`,
+	// which runs only once the consumer says it is finished.
+	it.each([
+		{
+			name: 'a NAR it read to the end',
+			bytes: regularFileNar('contents'),
+			settles: 'read'
+		},
+		{
+			name: 'a NAR that ended early',
+			bytes: narString('nix-archive-1'),
+			settles: 'refused'
+		},
+		{
+			name: 'a NAR of the wrong shape',
+			bytes: Buffer.concat(
+				['nix-archive-1', '(', 'type', 'symlink'].map((word) => narString(word))
+			),
+			settles: 'refused'
+		}
+	])('releases the stream after $name', async ({ bytes, settles }) => {
+		let wasReleased = false;
+		let isDelivered = false;
+		const stream: AsyncIterable<Uint8Array> = {
+			[Symbol.asyncIterator]: () => ({
+				next: () => {
+					if (isDelivered) {
+						return Promise.resolve({ done: true as const, value: undefined });
+					}
+
+					isDelivered = true;
+
+					return Promise.resolve({ done: false as const, value: bytes });
+				},
+				return: () => {
+					wasReleased = true;
+
+					return Promise.resolve({ done: true as const, value: undefined });
+				}
+			})
+		};
+
+		let outcome: string;
+
+		try {
+			await narRegularFileContents(stream);
+			outcome = 'read';
+		} catch (error) {
+			outcome =
+				error instanceof UnexpectedNarShapeError ? 'refused' : 'unexpected';
+		}
+
+		expect({ outcome, wasReleased }).toStrictEqual({
+			outcome: settles,
+			wasReleased: true
+		});
+	});
+
 	it('refuses a file over the byte bound rather than buffering it', async () => {
 		let thrown: unknown;
 

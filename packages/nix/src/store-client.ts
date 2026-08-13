@@ -1,5 +1,7 @@
 import { accessSync, constants, existsSync } from 'node:fs';
 
+import type { StoreDirectory } from '@cupboard/nix-store/scalars';
+
 import { type NixDaemonConnector, NixDaemonStoreClient } from './nix-daemon.ts';
 import {
 	createSshNixDaemonConnector,
@@ -47,7 +49,11 @@ export const defaultStoreClientEnvironment: StoreClientEnvironment = {
 
 export type StoreBackend =
 	| { readonly backend: 'daemon'; readonly socketPath: string }
-	| { readonly backend: 'local'; readonly stateDirectory: string }
+	| {
+			readonly backend: 'local';
+			readonly stateDirectory: string;
+			readonly storeDirectory: StoreDirectory;
+	  }
 	| { readonly backend: 'ssh-ng'; readonly remote: NixSshStoreSpec };
 
 /**
@@ -102,8 +108,9 @@ export function storeClientForBackend(
 		});
 	}
 
-	return new NixLocalStoreClient(() =>
-		openLocalStoreDatabase(backend.stateDirectory)
+	return new NixLocalStoreClient(
+		() => openLocalStoreDatabase(backend.stateDirectory),
+		backend.storeDirectory
 	);
 }
 
@@ -186,7 +193,11 @@ export function resolveStoreBackend(
 	}
 
 	if (uri === 'local' || uri === '') {
-		return { backend: 'local', stateDirectory: config.stateDirectory };
+		return {
+			backend: 'local',
+			stateDirectory: config.stateDirectory,
+			storeDirectory: config.storeDirectory
+		};
 	}
 
 	if (uri === 'auto') {
@@ -217,14 +228,22 @@ function resolveAuto(
 	probes: StoreBackendProbes
 ): StoreBackend {
 	if (probes.canWriteStateDirectory(config.stateDirectory)) {
-		return { backend: 'local', stateDirectory: config.stateDirectory };
+		return {
+			backend: 'local',
+			stateDirectory: config.stateDirectory,
+			storeDirectory: config.storeDirectory
+		};
 	}
 
 	if (probes.socketExists(config.daemonSocketPath)) {
 		return { backend: 'daemon', socketPath: config.daemonSocketPath };
 	}
 
-	return { backend: 'local', stateDirectory: config.stateDirectory };
+	return {
+		backend: 'local',
+		stateDirectory: config.stateDirectory,
+		storeDirectory: config.storeDirectory
+	};
 }
 
 function unixSocketPath(uri: string): string | undefined {

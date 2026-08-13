@@ -164,6 +164,13 @@ export interface NixStoreClient {
 		targets: readonly NixDerivedPathString[]
 	): Promise<NixMissingPartition>;
 	/**
+	 * The serialised text of the derivation at the given path. A derivation is
+	 * one regular file in the store, so a backend that reaches those files
+	 * reads it directly and one that reaches the store only over the worker
+	 * protocol extracts it from the path's NAR.
+	 */
+	readDerivation(drvPath: StorePathString): Promise<string>;
+	/**
 	 * The NAR serialisation of the given path, streamed as the store reads
 	 * it.
 	 */
@@ -273,8 +280,11 @@ export function claimUnseen(
 export abstract class NixStoreError extends Error {}
 
 export class NixStorePathNotFoundError extends NixStoreError {
-	constructor(public readonly storePath: string) {
-		super(`Nix store path is not registered locally: ${storePath}`);
+	constructor(
+		public readonly storePath: string,
+		options?: ErrorOptions
+	) {
+		super(`Nix store path is not registered locally: ${storePath}`, options);
 		this.name = 'NixStorePathNotFoundError';
 	}
 }

@@ -39,6 +39,7 @@ export {
 export type { NixDaemonClientOptions, NixStoreKind } from './store-client.ts';
 export { createNixDaemonStoreClient } from './store-client.ts';
 export type {
+	NixBuildSettings,
 	NixDaemonOverrides,
 	NixDaemonSetOptions,
 	NixStoreConfig,
