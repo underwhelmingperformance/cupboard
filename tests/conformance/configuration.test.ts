@@ -287,6 +287,12 @@ describeConformance('the resolved Nix configuration', (oracle) => {
 			fixture: { nixConf: 'keep-outputs = maybe\n' }
 		},
 		{
+			name: 'an enabled experimental boolean given a value spelling neither',
+			fixture: {
+				nixConf: 'experimental-features = flakes\naccept-flake-config = maybe\n'
+			}
+		},
+		{
 			name: 'a numeric setting it reads for nothing given a word',
 			fixture: { nixConf: 'log-lines = many\n' }
 		},

@@ -15,6 +15,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	BuildStoreRequiresAlreadyHeldError,
+	BuildStoreRequiresClaimableError,
 	InvalidStoreUriError,
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
@@ -170,7 +171,8 @@ describe('receiptBuildStore', () => {
 			options: {
 				receiptFile: '/runner/temp/receipt.json',
 				store: 'ssh-ng://builder.example',
-				alreadyHeld: false as const
+				alreadyHeld: false as const,
+				claimable: false as const
 			},
 			expected: 'ssh-ng://builder.example'
 		},
@@ -179,7 +181,8 @@ describe('receiptBuildStore', () => {
 			options: {
 				receiptFile: '/runner/temp/receipt.json',
 				store: 'ssh-ng://builder.example',
-				alreadyHeld: ['/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-app']
+				alreadyHeld: ['/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-app'],
+				claimable: ['/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-lib']
 			},
 			expected: 'ssh-ng://builder.example'
 		}
@@ -200,6 +203,16 @@ describe('receiptBuildStore', () => {
 				store: 'ssh-ng://builder.example'
 			})
 		).toThrow(BuildStoreRequiresAlreadyHeldError);
+	});
+
+	it('refuses a selected build store that names no current-invocation evidence', () => {
+		expect(() =>
+			receiptBuildStore({
+				receiptFile: '/runner/temp/receipt.json',
+				store: 'ssh-ng://builder.example',
+				alreadyHeld: false
+			})
+		).toThrow(BuildStoreRequiresClaimableError);
 	});
 });
 

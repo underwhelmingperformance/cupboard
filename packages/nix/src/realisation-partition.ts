@@ -36,6 +36,14 @@ export class RealisationWalkOverCapError extends NixStoreError {
 	}
 }
 
+/** A target whose `^` is followed by no output names at all. */
+export class EmptyOutputSelectionError extends NixStoreError {
+	constructor(public readonly drvPath: StorePathString) {
+		super(`${drvPath} names no outputs to realise`);
+		this.name = 'EmptyOutputSelectionError';
+	}
+}
+
 /** A target naming an output its derivation does not produce. */
 export class UndeclaredOutputError extends NixStoreError {
 	constructor(
@@ -411,7 +419,7 @@ function parseDerivedPath(target: NixDerivedPathString): DerivedPath {
 	// A target naming no outputs asks for nothing, which a walk cannot answer
 	// by reporting that nothing is needed.
 	if (named.size === 0) {
-		throw new UndeclaredOutputError(drvPath, outputs);
+		throw new EmptyOutputSelectionError(drvPath);
 	}
 
 	return built(drvPath, named);

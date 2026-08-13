@@ -10,6 +10,7 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 
+import { type NixDaemonSession, NixDaemonStoreClient } from './nix-daemon.ts';
 import {
 	type NixBuildResult,
 	type NixDaemonTrust,
@@ -30,6 +31,7 @@ import {
 	resolveStoreBackend,
 	type StoreClientEnvironment,
 	storeClientForBackend,
+	storeDirectoriesOf,
 	storeKindOf,
 	substituterClientOver
 } from './store-client.ts';
@@ -77,8 +79,9 @@ export class Nix {
 	): Nix {
 		const config = discoverNixStoreConfig(dependencies);
 		const backend = resolveStoreBackend(config, dependencies);
+		const directories = storeDirectoriesOf(backend, config);
 		const substituters = substituterClientOver(
-			config,
+			directories,
 			config.substitution,
 			config.fileTransfer,
 			dependencies
@@ -87,7 +90,7 @@ export class Nix {
 		return new Nix(
 			storeClientForBackend(backend, config, substituters),
 			(storePaths) => substituters.querySubstitutablePathInfos(storePaths),
-			config.storeDirectory,
+			directories.storeDirectory,
 			dependencies.realpath ?? defaultRealPath,
 			storeKindOf(backend),
 			config.unknownSettings
@@ -111,16 +114,13 @@ export class Nix {
 		options: NixDaemonClientOptions = {}
 	): Nix {
 		const config = discoverNixStoreConfig(dependencies);
-		const { client, kind, substituters } = createAvailabilityStoreClient(
-			dependencies,
-			config,
-			options
-		);
+		const { client, kind, storeDirectory, substituters } =
+			createAvailabilityStoreClient(dependencies, config, options);
 
 		return new Nix(
 			client,
 			(storePaths) => substituters.querySubstitutablePathInfos(storePaths),
-			config.storeDirectory,
+			storeDirectory,
 			dependencies.realpath ?? defaultRealPath,
 			kind,
 			config.unknownSettings
@@ -350,6 +350,23 @@ export class Nix {
 		targets: readonly NixDerivedPathString[]
 	): Promise<readonly NixBuildResult[]> {
 		return this.store.buildPathsWithResults(targets);
+	}
+
+	/**
+	 * Run operations on one daemon connection. Temporary roots added through
+	 * the session remain live until the callback settles and the connection is
+	 * closed. A backend without a daemon connection cannot provide a session.
+	 */
+	async withConnection<T>(
+		use: (session: NixDaemonSession) => Promise<T>
+	): Promise<T> {
+		if (!(this.store instanceof NixDaemonStoreClient)) {
+			throw new UnsupportedNixStoreOperationError(
+				'connection-scoped operations'
+			);
+		}
+
+		return this.store.withConnection(use);
 	}
 
 	/**

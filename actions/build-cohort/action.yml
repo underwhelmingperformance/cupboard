@@ -102,8 +102,9 @@ outputs:
     description: >-
       File containing the cohort's build receipt, ready for actions/attest. A
       streamed cohort writes it from its supervised build; a remote-store cohort
-      reconciles it from the store the build ran in. Empty when the cohort
-      published nothing it built (push disabled, or nothing to build).
+      reconciles its published paths from the selected store without claiming
+      provenance that Nix did not report. Empty when publication is disabled or
+      the cohort has no result paths to publish.
     value: ${{ steps.build-cohort.outputs.receipt-file }}
   out-link-directory:
     description: >-

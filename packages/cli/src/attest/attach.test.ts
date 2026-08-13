@@ -1,9 +1,8 @@
 import { createHash } from 'node:crypto';
 
-import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
-	storeDirectorySchema,
+	storedCacheSchema,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
@@ -14,13 +13,20 @@ import {
 	type ResultPayload,
 	type ResultRow
 } from '@cupboard/reporter';
+import { readUserInputSchema } from '@cupboard/shared/http';
 import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 
-import { AttestationUploadUnavailableError } from '../errors.ts';
+import {
+	AttestationUploadUnavailableError,
+	NarInfoUnavailableError,
+	ReferencePathMismatchError
+} from '../errors.ts';
 
 import {
 	type AttestationAttachClient,
+	type AttestationPathInfo,
+	readCommittedAttestationPathInfos,
 	requireAttestationAttachClient,
 	runAttestAttach
 } from './attach.ts';
@@ -34,19 +40,111 @@ const runtimePath = storePathSchema.parse(
 const appHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 1));
 const runtimeHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 2));
 
+function committedNarInfo(
+	storePath: StorePathString,
+	narHash: NixSha256Hash
+): string {
+	return [
+		`StorePath: ${storePath}`,
+		`URL: nar/${StorePath.basename(storePath)}.nar.zst`,
+		'Compression: zstd',
+		`FileHash: ${narHash.toString()}`,
+		'FileSize: 1',
+		`NarHash: ${narHash.toString()}`,
+		'NarSize: 1',
+		'References: ',
+		''
+	].join('\n');
+}
+
+function requestUrl(input: Parameters<typeof fetch>[0]): string {
+	if (input instanceof URL) {
+		return input.href;
+	}
+
+	return typeof input === 'string' ? input : input.url;
+}
+
 function pathInfo(
 	storePath: StorePathString,
 	narHash: NixSha256Hash
-): NixValidPathInfo {
+): AttestationPathInfo {
 	return {
 		storePath,
-		narHash,
-		narSize: 123,
-		references: [],
-		signatures: [],
-		ultimate: true
+		narHash
 	};
 }
+
+describe('readCommittedAttestationPathInfos', () => {
+	it('reads a private named cache after the build store is unavailable', async () => {
+		const requests: { url: string; authorization?: string }[] = [];
+		const infos = await readCommittedAttestationPathInfos(
+			[appPath],
+			{
+				url: new URL('https://cache.example.test/t/acme'),
+				cache: storedCacheSchema.parse('builds'),
+				readUser: readUserInputSchema.parse('reader'),
+				readPassword: 'secret'
+			},
+			{
+				fetch: (input, init) => {
+					requests.push({
+						url: requestUrl(input),
+						authorization:
+							new Headers(init?.headers).get('authorization') ?? undefined
+					});
+
+					return Promise.resolve(
+						new Response(committedNarInfo(appPath, appHash))
+					);
+				}
+			}
+		);
+
+		expect({ infos, requests }).toStrictEqual({
+			infos: [pathInfo(appPath, appHash)],
+			requests: [
+				{
+					url: 'https://cache.example.test/t/acme/cache/builds/0123456789abcdfghijklmnpqrsvwxyz.narinfo',
+					authorization: `Basic ${Buffer.from('reader:secret').toString('base64')}`
+				}
+			]
+		});
+	});
+
+	it('refuses a destination that no longer serves the path', async () => {
+		await expect(
+			readCommittedAttestationPathInfos(
+				[appPath],
+				{
+					url: new URL('https://cache.example.test/t/acme'),
+					cache: ''
+				},
+				{
+					fetch: () => Promise.resolve(new Response(undefined, { status: 404 }))
+				}
+			)
+		).rejects.toBeInstanceOf(NarInfoUnavailableError);
+	});
+
+	it('refuses a narinfo that names a different path', async () => {
+		await expect(
+			readCommittedAttestationPathInfos(
+				[appPath],
+				{
+					url: new URL('https://cache.example.test/t/acme'),
+					cache: ''
+				},
+				{
+					fetch: () =>
+						Promise.resolve(
+							new Response(committedNarInfo(runtimePath, runtimeHash))
+						)
+				}
+			)
+		).rejects.toBeInstanceOf(ReferencePathMismatchError);
+	});
+});
 
 function narDigestHex(hash: NixSha256Hash): string {
 	return [...hash.digestBytes()]
@@ -84,59 +182,6 @@ function sigstoreBundleBytes(
 
 	const encoder = new TextEncoder();
 	return encoder.encode(JSON.stringify(bundle));
-}
-
-function nixStore(paths: Record<string, NixValidPathInfo>): Nix {
-	const known = (storePath: StorePathString): NixValidPathInfo => {
-		const info = paths[storePath];
-
-		if (info === undefined) {
-			throw new Error(`No path info is modelled for ${storePath}`);
-		}
-
-		return info;
-	};
-	const store = {
-		resolveClosure: (storePaths: readonly StorePathString[]) =>
-			Promise.resolve(storePaths.map((storePath) => known(storePath))),
-		queryPathInfo: (storePath: StorePathString) =>
-			Promise.resolve(known(storePath)),
-		queryPathsInfo: (storePaths: readonly StorePathString[]) =>
-			Promise.resolve(storePaths.map((storePath) => known(storePath))),
-		queryValidPathsInfo: (storePaths: readonly StorePathString[]) =>
-			Promise.resolve(
-				storePaths
-					.filter((storePath) => paths[storePath] !== undefined)
-					.map((storePath) => known(storePath))
-			),
-		queryValidPaths: (storePaths: readonly StorePathString[]) =>
-			Promise.resolve(
-				storePaths.filter((storePath) => paths[storePath] !== undefined)
-			),
-		querySubstitutablePaths: () => Promise.resolve([]),
-		querySubstitutablePathInfos: () => Promise.resolve([]),
-		queryDerivationOutputPaths: () => Promise.resolve([]),
-		queryMissing: () =>
-			Promise.resolve({
-				willBuild: [],
-				willSubstitute: [],
-				unknown: [],
-				downloadSize: 0,
-				narSize: 0
-			}),
-		readDerivation: (drvPath: StorePathString): Promise<string> => {
-			throw new Error(`No derivation is modelled for ${drvPath}`);
-		},
-		narFromPath: (storePath: StorePathString): AsyncIterable<Uint8Array> => {
-			throw new Error(`No NAR stream is modelled for ${storePath}`);
-		},
-		buildPathsWithResults: () => Promise.resolve([])
-	};
-
-	return Nix.forStore(store, {
-		storeDirectory: storeDirectorySchema.parse('/nix/store'),
-		realpath: (path) => path
-	});
 }
 
 function reporter(
@@ -299,10 +344,10 @@ describe('runAttestAttach', () => {
 					decide: (bundle) =>
 						bundle.storePathHash === StorePath.hash(appPath) ? 'upload' : 'skip'
 				}),
-				nix: nixStore({
-					[appPath]: pathInfo(appPath, appHash),
-					[runtimePath]: pathInfo(runtimePath, runtimeHash)
-				}),
+				pathInfos: [
+					pathInfo(appPath, appHash),
+					pathInfo(runtimePath, runtimeHash)
+				],
 				attestations: [
 					{ path: 'app.sigstore.json' },
 					{ path: 'runtime.sigstore.json' }
@@ -409,10 +454,10 @@ describe('runAttestAttach', () => {
 							? Promise.reject(new ORPCError('NOT_FOUND', { status: 404 }))
 							: Promise.resolve()
 				}),
-				nix: nixStore({
-					[appPath]: pathInfo(appPath, appHash),
-					[runtimePath]: pathInfo(runtimePath, runtimeHash)
-				}),
+				pathInfos: [
+					pathInfo(appPath, appHash),
+					pathInfo(runtimePath, runtimeHash)
+				],
 				attestations: [
 					{ path: 'app.sigstore.json' },
 					{ path: 'runtime.sigstore.json' }
@@ -462,7 +507,6 @@ describe('runAttestAttach', () => {
 		};
 		const appBundle = sigstoreBundleBytes(narDigestHex(appHash));
 		const failure = new ORPCError('INTERNAL_SERVER_ERROR', { status: 500 });
-		const nix = nixStore({ [appPath]: pathInfo(appPath, appHash) });
 		const client = recordedClient(record, {
 			decide: () => 'upload',
 			attach: () => Promise.reject(failure)
@@ -471,7 +515,7 @@ describe('runAttestAttach', () => {
 		await expect(
 			runAttestAttach([appPath], reporter([]), {
 				client,
-				nix,
+				pathInfos: [pathInfo(appPath, appHash)],
 				attestations: [{ path: 'app.sigstore.json' }],
 				readAttestationBundle: () => Promise.resolve(appBundle)
 			})

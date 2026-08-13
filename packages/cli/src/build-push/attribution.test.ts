@@ -157,33 +157,41 @@ describe('derivationsRequiringVerification', () => {
 });
 
 describe('verifiedAttribution', () => {
-	it('marks the verified derivations, keeping the machine that built them', () => {
+	it('marks the first attributed build, keeping its attempt and machine', () => {
 		const verified = verifiedAttribution(
-			attempt(2, [
-				{ derivation: appDrv, machine: 'ssh://b1' },
-				{ derivation: libraryDrv, machine: '' }
-			]),
+			[
+				attempt(1, [{ derivation: appDrv, machine: 'ssh://b1' }]),
+				attempt(2, [
+					{ derivation: appDrv, machine: '' },
+					{ derivation: libraryDrv, machine: '' }
+				])
+			],
 			[appDrv]
 		);
 
-		expect(verified).toStrictEqual({
-			attempt: 2,
-			attemptId: 'attempt-2',
-			activities: [
-				{ derivation: appDrv, machine: 'ssh://b1', verified: true },
-				{ derivation: libraryDrv, machine: '', verified: false }
-			]
-		});
+		expect(verified).toStrictEqual([
+			{
+				attempt: 1,
+				attemptId: 'attempt-1',
+				activities: [
+					{ derivation: appDrv, machine: 'ssh://b1', verified: true }
+				]
+			},
+			{
+				attempt: 2,
+				attemptId: 'attempt-2',
+				activities: [
+					{ derivation: appDrv, machine: '', verified: false },
+					{ derivation: libraryDrv, machine: '', verified: false }
+				]
+			}
+		]);
 	});
 
-	it('records a derivation this attempt did not run with no machine', () => {
-		const verified = verifiedAttribution(attempt(2, []), [libraryDrv]);
+	it('does not invent attribution for a derivation no attempt ran', () => {
+		const verified = verifiedAttribution([attempt(2, [])], [libraryDrv]);
 
-		expect(verified).toStrictEqual({
-			attempt: 2,
-			attemptId: 'attempt-2',
-			activities: [{ derivation: libraryDrv, machine: '', verified: true }]
-		});
+		expect(verified).toStrictEqual([attempt(2, [])]);
 	});
 });
 

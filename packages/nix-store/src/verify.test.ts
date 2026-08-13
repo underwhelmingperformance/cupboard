@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import { generateSigningPair } from '../../../tests/support/signing.ts';
+
 import { bytesToBase64 } from './encoding.ts';
 import { NixPublicKey } from './public-key.ts';
 import {
@@ -25,22 +27,6 @@ interface SigningKey {
 
 // `generateKey` is typed as producing either a single key or a pair, and
 // Ed25519 always produces a pair, which this narrows to once.
-async function generateSigningPair(): Promise<{
-	readonly privateKey: CryptoKey;
-	readonly publicKey: CryptoKey;
-}> {
-	const generated = await crypto.subtle.generateKey('Ed25519', true, [
-		'sign',
-		'verify'
-	]);
-
-	if (!('privateKey' in generated)) {
-		throw new Error('Ed25519 produced a single key rather than a pair');
-	}
-
-	return generated;
-}
-
 async function signingKey(name: string): Promise<SigningKey> {
 	const keyName = nixKeyNameSchema.parse(name);
 	const pair = await generateSigningPair();

@@ -79,8 +79,9 @@ export async function readCachedSession(
  * Persists the session for a target, readable only by the current user. It is
  * written to a fresh `0600` temporary file (exclusive create, so a pre-planted
  * symlink is not followed) and renamed over the target atomically; the directory
- * is created and its mode reasserted to `0700`. This avoids the window an
- * in-place write leaves between creating the file and tightening its mode.
+ * is created and its mode reasserted to `0700`. The file is therefore never
+ * readable by anyone else, not even for the moment between its creation and
+ * its mode being set.
  */
 export async function writeCachedSession(
 	session: CachedSession,

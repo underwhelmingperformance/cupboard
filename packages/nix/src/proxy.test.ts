@@ -1,4 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+
+const mocked = vi.hoisted(() => ({ agentOptions: [] as unknown[] }));
+
+vi.mock('undici', () => ({
+	EnvHttpProxyAgent: function MockEnvHttpProxyAgent(options: unknown) {
+		mocked.agentOptions.push(options);
+	}
+}));
 
 import { type NamedProxies, proxiedFetch, proxiesNamedBy } from './proxy.ts';
 
@@ -72,6 +80,10 @@ describe('proxiesNamedBy', () => {
 });
 
 describe('proxiedFetch', () => {
+	beforeEach(() => {
+		mocked.agentOptions.length = 0;
+	});
+
 	// Nothing stands between the request and the network when no variable names
 	// a proxy, so the request takes the route every other one takes.
 	it.each([
@@ -93,5 +105,13 @@ describe('proxiedFetch', () => {
 		}
 	])('routes $name through a proxy: $routed', ({ env, routed }) => {
 		expect(proxiedFetch(env) !== undefined).toBe(routed);
+	});
+
+	it('overrides an excluded upper-case HTTP proxy with no proxy', () => {
+		proxiedFetch({ HTTP_PROXY: proxy, https_proxy: other });
+
+		expect(mocked.agentOptions).toStrictEqual([
+			{ httpProxy: '', httpsProxy: other, noProxy: '' }
+		]);
 	});
 });

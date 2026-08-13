@@ -12,6 +12,8 @@ import { NixSignature } from '@cupboard/nix-store/signature';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { describe, expect, it } from 'vitest';
 
+import { generateSigningPair } from '../../../tests/support/signing.ts';
+
 import type { NixSubstituterOffer } from './nix-store.ts';
 import { offerAcceptance, type ReadKeyFile } from './offer-acceptance.ts';
 import {
@@ -53,22 +55,6 @@ interface SigningKey {
 
 // `generateKey` is typed as producing either a single key or a pair, and
 // Ed25519 always produces a pair, which this narrows to once.
-async function generateSigningPair(): Promise<{
-	readonly privateKey: CryptoKey;
-	readonly publicKey: CryptoKey;
-}> {
-	const generated = await crypto.subtle.generateKey('Ed25519', true, [
-		'sign',
-		'verify'
-	]);
-
-	if (!('privateKey' in generated)) {
-		throw new Error('Ed25519 produced a single key rather than a pair');
-	}
-
-	return generated;
-}
-
 async function signingKey(name: string): Promise<SigningKey> {
 	const keyName: NixKeyName = nixKeyNameSchema.parse(name);
 	const pair = await generateSigningPair();

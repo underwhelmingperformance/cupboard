@@ -61,10 +61,12 @@ export type SubstitutableClosureVerdict =
 			readonly offered: string;
 	  }
 	/**
-	 * A substituter offers the path with no signature a consumer's own
-	 * configuration would accept, so it would refuse to fetch it.
+	 * The check a consumer applies before fetching turns the offer down, so a
+	 * consumer would not take the path however well the substituter serves it.
+	 * What the check tests is the caller's to state; this says only that it
+	 * said no.
 	 */
-	| { readonly kind: 'unsigned'; readonly storePath: StorePathString }
+	| { readonly kind: 'refused'; readonly storePath: StorePathString }
 	| { readonly kind: 'over-cap'; readonly maxPaths: number };
 
 /**
@@ -158,7 +160,7 @@ export async function resolveSubstitutableClosure(
 			}
 
 			if (!(await (options.accepts ?? acceptsEveryOffer)(offer))) {
-				return { kind: 'unsigned', storePath };
+				return { kind: 'refused', storePath };
 			}
 
 			downloadSize += offer.downloadSize;

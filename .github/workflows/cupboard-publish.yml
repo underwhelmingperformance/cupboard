@@ -116,20 +116,34 @@ jobs:
           echo "root=${ROOT}/$(nix config show system)" | tee -a
           "${GITHUB_OUTPUT}"
 
-      - name: Attest
-        id: attest
-        if: ${{ inputs.attest }}
-        uses: ./.cupboard/actions/attest
-        with:
-          receipt-file: ${{ steps.build.outputs.receipt-file }}
-
       - uses: ./.cupboard/actions/push
+        id: push
         with:
           url: ${{ inputs.url }}
           paths: ${{ steps.build.outputs.paths }}
           cache: ${{ inputs.cache }}
           root: ${{ steps.root.outputs.root || '' }}
           ttl: ${{ inputs.ttl }}
-          attestations: ${{ steps.attest.outputs.bundle-path || '' }}
           cupboard-version: ${{ inputs.cupboard-version }}
           release-repository: underwhelmingperformance/cupboard
+
+      # This compact workflow has always targeted public-read caches and
+      # exposes no read secrets. Private caches use the flake workflow, which
+      # threads both credential halves into attest and attach.
+      - name: Attest committed paths
+        id: attest
+        if: ${{ inputs.attest }}
+        uses: ./.cupboard/actions/attest
+        with:
+          receipt-file: ${{ steps.build.outputs.receipt-file }}
+          url: ${{ inputs.url }}
+          cache: ${{ inputs.cache }}
+
+      - uses: ./.cupboard/actions/attest-attach
+        if: ${{ inputs.attest && steps.attest.outputs.bundle-path != '' }}
+        with:
+          url: ${{ inputs.url }}
+          cupboard-path: ${{ steps.push.outputs.cupboard-path }}
+          cache: ${{ inputs.cache }}
+          receipt-file: ${{ steps.build.outputs.receipt-file }}
+          bundle: ${{ steps.attest.outputs.bundle-path }}

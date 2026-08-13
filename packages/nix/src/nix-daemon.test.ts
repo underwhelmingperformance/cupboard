@@ -256,6 +256,34 @@ describe('connectToNixDaemon', () => {
 });
 
 describe('NixDaemonStoreClient', () => {
+	it('closes an in-flight connection and raises the abort reason', async () => {
+		const controller = new AbortController();
+		const reason = new Error('stop querying the daemon');
+		let closes = 0;
+		const client = new NixDaemonStoreClient({
+			signal: controller.signal,
+			connect: () =>
+				Promise.resolve({
+					write: () => Promise.resolve(),
+					read: () =>
+						new Promise<Uint8Array>((resolve) => {
+							void resolve;
+						}),
+					close: () => {
+						closes += 1;
+						return Promise.resolve();
+					}
+				})
+		});
+
+		const query = client.queryValidPaths([appPath]);
+		await Promise.resolve();
+		controller.abort(reason);
+
+		await expect(query).rejects.toBe(reason);
+		expect(closes).toBe(1);
+	});
+
 	it('reads path info through the Nix daemon protocol', async () => {
 		let transport: FakeDaemonTransport | undefined;
 		const client = new NixDaemonStoreClient({
@@ -948,18 +976,32 @@ describe('NixDaemonStoreClient', () => {
 		expect(transport?.closed).toBe(true);
 	});
 
-	it('holds temporary roots and queries on one session connection', async () => {
+	it('builds, holds temporary roots and queries on one session connection', async () => {
+		const build = buildResultCases[0];
+
+		if (build === undefined) {
+			throw new Error('The build result fixture is missing');
+		}
+
 		const transports: FakeDaemonTransport[] = [];
 		const client = new NixDaemonStoreClient({
 			connect: () => {
-				const transport = new FakeDaemonTransport({
-					[appPath]: {
-						hash: appHash,
-						narSize: 123,
-						references: [],
-						signatures: []
+				const transport = new FakeDaemonTransport(
+					{
+						[appPath]: {
+							hash: appHash,
+							narSize: 123,
+							references: [],
+							signatures: []
+						}
+					},
+					{
+						builds: {
+							expectedTargets: build.expectedTargets,
+							results: [build.result]
+						}
 					}
-				});
+				);
 				transports.push(transport);
 
 				return Promise.resolve(transport);
@@ -967,16 +1009,19 @@ describe('NixDaemonStoreClient', () => {
 		});
 
 		const outcome = await client.withConnection(async (session) => {
+			const builds = await session.buildPathsWithResults(build.targets);
 			await session.addTempRoot(appPath);
 			await session.addTempRoot(libraryPath);
 
 			return {
+				builds,
 				valid: await session.queryValidPaths([libraryPath, appPath]),
 				info: await session.queryPathInfo(appPath)
 			};
 		});
 
 		expect(outcome).toStrictEqual({
+			builds: [build.expected],
 			valid: [appPath],
 			info: pathInfo(appPath, appHash, 123, [])
 		});

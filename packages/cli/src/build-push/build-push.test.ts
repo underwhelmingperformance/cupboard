@@ -1035,10 +1035,10 @@ describe('runBuildPush', () => {
 		});
 	});
 
-	it('verifies remotely built derivations locally before attributing them', async () => {
+	it('preserves first remote attribution when verification follows a retry', async () => {
 		const run = await runFlow({
 			constructed: {
-				succeedOn: 1,
+				succeedOn: 2,
 				verifyRebuilds: true,
 				machine: 'ssh://builder-1'
 			},
@@ -1050,10 +1050,12 @@ describe('runBuildPush', () => {
 
 		expect({
 			error: run.error,
+			sleeps: run.sleeps,
 			verifications: run.verifications,
 			receipt
 		}).toStrictEqual({
 			error: undefined,
+			sleeps: [15_000],
 			verifications: [
 				[
 					'nix',

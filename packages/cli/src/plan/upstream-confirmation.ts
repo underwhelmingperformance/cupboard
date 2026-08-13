@@ -100,14 +100,14 @@ export function confirmLeftUpstreamWith(
 		if (closure.kind === 'divergent') {
 			return {
 				kind: 'closure-divergent',
-				missing: closure.storePath,
+				storePath: closure.storePath,
 				held: closure.held,
 				offered: closure.offered
 			};
 		}
 
-		if (closure.kind === 'unsigned') {
-			return { kind: 'closure-unsigned', missing: closure.storePath };
+		if (closure.kind === 'refused') {
+			return { kind: 'closure-unsigned', storePath: closure.storePath };
 		}
 
 		if (closure.kind === 'over-cap') {

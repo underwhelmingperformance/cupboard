@@ -29,6 +29,7 @@ import {
 import {
 	AttestationsDisabledError,
 	BuildStoreRequiresAlreadyHeldError,
+	BuildStoreRequiresClaimableError,
 	InvalidUploadConcurrencyError,
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
@@ -58,6 +59,7 @@ interface PushOptions {
 	readonly store?: string;
 	readonly receiptFile?: string;
 	readonly alreadyHeld?: readonly string[] | false;
+	readonly claimable?: readonly string[] | false;
 	readonly wait?: boolean;
 	readonly waitTimeout?: WaitTimeoutSeconds;
 	readonly attest?: boolean;
@@ -118,11 +120,17 @@ export function validateRetentionChoice(
  * selected, so a push reading the store Nix itself would use has no selection
  * to record and is refused. Naming a build store also commits the caller to
  * stating what it already held, `--already-held` zero or more times or
- * `--no-already-held` for none, so a receipt never claims a path the store
- * realised on an earlier run.
+ * `--no-already-held` for none. It must separately name the paths for which it
+ * has current-invocation realisation evidence, `--claimable` zero or more
+ * times or `--no-claimable` for none. The two explicit sets keep a receipt
+ * from claiming either an earlier output or one that appeared after planning
+ * but before the build asked for it.
  */
 export function receiptBuildStore(
-	options: Pick<PushOptions, 'receiptFile' | 'store' | 'alreadyHeld'>
+	options: Pick<
+		PushOptions,
+		'receiptFile' | 'store' | 'alreadyHeld' | 'claimable'
+	>
 ): string | undefined {
 	if (options.receiptFile === undefined) {
 		return undefined;
@@ -134,6 +142,10 @@ export function receiptBuildStore(
 
 	if (options.alreadyHeld === undefined) {
 		throw new BuildStoreRequiresAlreadyHeldError();
+	}
+
+	if (options.claimable === undefined) {
+		throw new BuildStoreRequiresClaimableError();
 	}
 
 	return options.store;
@@ -316,6 +328,15 @@ export function registerPushCommand(
 			'state that the build store held nothing before this run built anything'
 		)
 		.option(
+			'--claimable <path>',
+			'a store path whose realisation this build invocation observed; only these paths may become receipt subjects',
+			collect
+		)
+		.option(
+			'--no-claimable',
+			'state that this invocation observed no realisation evidence, so the receipt has no subjects'
+		)
+		.option(
 			'--attestation <bundle>',
 			'file a Sigstore DSSE bundle whose in-toto subject matches a pushed path',
 			collect,
@@ -467,6 +488,9 @@ export function registerPushCommand(
 				...(buildStore !== undefined && { buildStore }),
 				...(options.alreadyHeld !== undefined && {
 					alreadyHeld: options.alreadyHeld === false ? [] : options.alreadyHeld
+				}),
+				...(options.claimable !== undefined && {
+					claimable: options.claimable === false ? [] : options.claimable
 				})
 			});
 

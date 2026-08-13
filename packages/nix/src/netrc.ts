@@ -41,7 +41,7 @@ export function netrcCredentialFor(
 		if (state === 'macdef') {
 			// Every token of a macro's body is passed over, up to the blank line
 			// that ends the definition.
-			state = token.endsLine ? 'nothing' : 'macdef';
+			state = token.endsLine && token.isBlank ? 'nothing' : 'macdef';
 			continue;
 		}
 
@@ -148,7 +148,7 @@ function withoutCommentLines(source: string): string {
 
 /** One token, or the end of a line with no token on it. */
 type NetrcToken =
-	| { readonly endsLine: true }
+	| { readonly endsLine: true; readonly isBlank: boolean }
 	| { readonly endsLine: false; readonly text: string };
 
 // The characters that separate one token from the next, which are the only two
@@ -158,6 +158,7 @@ const blanks = new Set([' ', '\t']);
 /** Reads a netrc's tokens in order, raising over a line it cannot read. */
 class NetrcReader {
 	private at = 0;
+	private lineHasToken = false;
 
 	constructor(private readonly source: string) {}
 
@@ -238,9 +239,13 @@ class NetrcReader {
 
 		if (character === '\n') {
 			this.at += 1;
+			const isBlank = !this.lineHasToken;
+			this.lineHasToken = false;
 
-			return { endsLine: true };
+			return { endsLine: true, isBlank };
 		}
+
+		this.lineHasToken = true;
 
 		return {
 			endsLine: false,

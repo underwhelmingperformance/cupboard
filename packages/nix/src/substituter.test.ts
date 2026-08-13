@@ -375,6 +375,9 @@ describe('a substituter held in a directory', () => {
 		{ value: '5K', priority: 5120 },
 		{ value: '5k', priority: 5120 },
 		{ value: '2M', priority: 2_097_152 },
+		{ value: '2097152K', priority: -2_147_483_648 },
+		{ value: '2147483647K', priority: -1024 },
+		{ value: '1T', priority: 0 },
 		{ value: '%2D10', priority: -10 },
 		{ value: '2147483647', priority: 2_147_483_647 }
 	])(
@@ -929,7 +932,17 @@ describe('openSubstituters', () => {
 	it.each([
 		{ name: 'trailing text', value: '30 boxes', expected: 30 },
 		{ name: 'leading space', value: ' 25', expected: 25 },
-		{ name: 'nothing numeric', value: 'soon', expected: 0 }
+		{ name: 'an explicit plus sign', value: '+20', expected: 20 },
+		{
+			name: 'the minimum integer',
+			value: '-2147483648',
+			expected: -2_147_483_648
+		},
+		{
+			name: 'the maximum integer',
+			value: '2147483647',
+			expected: 2_147_483_647
+		}
 	])('reads a priority stated with $name', async ({ value, expected }) => {
 		const { fetch: fetcher } = caches({
 			'https://cache.example': {
@@ -942,6 +955,26 @@ describe('openSubstituters', () => {
 		});
 
 		expect(substituters[0]?.priority).toBe(expected);
+	});
+
+	it.each([
+		{ name: 'nothing numeric', value: 'soon' },
+		{ name: 'an integer below the declared width', value: '-2147483649' },
+		{ name: 'an integer above the declared width', value: '2147483648' }
+	])('refuses a priority stated with $name', async ({ value }) => {
+		const uri = 'https://cache.example';
+		const { fetch: fetcher } = caches({
+			[uri]: {
+				cacheInfo: `StoreDir: /nix/store\nPriority: ${value}\n`
+			}
+		});
+
+		await expect(
+			openSubstituters([uri], { fetch: fetcher })
+		).resolves.toStrictEqual({
+			substituters: [],
+			unreachable: [{ uri, reason: 'no-cache-info' }]
+		});
 	});
 
 	// A cache that does not name a store directory serves the one being asked
@@ -2266,7 +2299,7 @@ describe('SubstituterClient.querySubstitutablePaths', () => {
 		).rejects.toThrow(SubstituterUnreachableError);
 	});
 
-	it('carries on past a failing substituter when fallback is on', async () => {
+	it('refuses a failed mass query even when fallback is on', async () => {
 		const { fetch: fetcher } = caches({
 			'https://broken.example': { status: 503 },
 			'https://holder.example': {
@@ -2274,21 +2307,21 @@ describe('SubstituterClient.querySubstitutablePaths', () => {
 			}
 		});
 
-		const found = await clientOver(
-			[
-				substituter('https://broken.example'),
-				substituter('https://holder.example')
-			],
-			fetcher,
-			{ fallback: true }
-		).querySubstitutablePaths([appPath]);
-
-		expect(found).toStrictEqual([appPath]);
+		await expect(
+			clientOver(
+				[
+					substituter('https://broken.example'),
+					substituter('https://holder.example')
+				],
+				fetcher,
+				{ fallback: true }
+			).querySubstitutablePaths([appPath])
+		).rejects.toThrow(SubstituterUnreachableError);
 	});
 
-	// A later substituter answering for the path settles the question the
-	// failing one could have answered, so nothing is left in doubt.
-	it('says nothing of a failure a later substituter answered past', async () => {
+	// The mass-query operation calls one substituter's query as a whole. Its
+	// failure escapes that operation before another substituter is considered.
+	it('does not answer a failed mass query from a later substituter', async () => {
 		const { fetch: fetcher } = caches({
 			'https://broken.example': { status: 503 },
 			'https://holder.example': {
@@ -2296,14 +2329,14 @@ describe('SubstituterClient.querySubstitutablePaths', () => {
 			}
 		});
 
-		const found = await clientOver(
-			[
-				substituter('https://broken.example'),
-				substituter('https://holder.example')
-			],
-			fetcher
-		).querySubstitutablePaths([appPath]);
-
-		expect(found).toStrictEqual([appPath]);
+		await expect(
+			clientOver(
+				[
+					substituter('https://broken.example'),
+					substituter('https://holder.example')
+				],
+				fetcher
+			).querySubstitutablePaths([appPath])
+		).rejects.toThrow(SubstituterUnreachableError);
 	});
 });

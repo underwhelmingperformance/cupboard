@@ -119,10 +119,12 @@ class NarInfoReader {
 			return;
 		}
 
-		this.readMeasuredField(name, value);
+		this.readArchiveField(name, value);
 	}
 
-	private readMeasuredField(name: string, value: string): void {
+	// The fields describing the archive itself: how it is compressed, what it
+	// hashes to and how large it is.
+	private readArchiveField(name: string, value: string): void {
 		if (name === 'Compression') {
 			// An empty value is the one Nix reads as its own default.
 			if (value !== '' && !compressionAlgorithms.has(value)) {
@@ -144,10 +146,13 @@ class NarInfoReader {
 			return;
 		}
 
-		this.readNamedField(name, value);
+		this.readReferenceField(name, value);
 	}
 
-	private readNamedField(name: string, value: string): void {
+	// The fields naming what else the path stands in relation to: the paths it
+	// references, the derivation that built it, who signed it and how it is
+	// addressed.
+	private readReferenceField(name: string, value: string): void {
 		if (name === 'References') {
 			// Nix separates them with single spaces, so anything else lands
 			// inside a name and stops it being one.

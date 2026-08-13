@@ -1,11 +1,18 @@
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import { createGithubReporter } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
 import {
+	CommittedSubjectInvalidError,
+	CommittedSubjectUnavailableError,
 	InvalidInputError,
 	SubjectDeriverMovedError,
 	SubjectNarHashMovedError,
@@ -14,11 +21,12 @@ import {
 import { parseChecksums } from '../release-install.ts';
 
 import {
+	attestAction,
 	attestationSubjects,
-	type LocalPathInfos,
 	provenancedSubjects,
 	renderChecksums,
-	resolveAttestInputs
+	resolveAttestInputs,
+	type SelectedPathInfos
 } from './attest.ts';
 
 describe('renderChecksums', () => {
@@ -59,6 +67,37 @@ function attestPathInfo(storePath: StorePathString, digestByte: number) {
 		signatures: [],
 		ultimate: false
 	};
+}
+
+function committedNarInfo(
+	storePath: StorePathString,
+	digestByte: number,
+	deriver = path.basename(`${storePath}.drv`)
+): string {
+	const hash = NixSha256Hash.fromDigest(
+		Buffer.alloc(32, digestByte)
+	).toString();
+
+	return [
+		`StorePath: ${storePath}`,
+		`URL: nar/${path.basename(storePath)}.nar.zst`,
+		'Compression: zstd',
+		`FileHash: ${hash}`,
+		'FileSize: 1',
+		`NarHash: ${hash}`,
+		'NarSize: 1',
+		'References: ',
+		`Deriver: ${deriver}`,
+		''
+	].join('\n');
+}
+
+function requestUrl(input: Parameters<typeof fetch>[0]): string {
+	if (input instanceof URL) {
+		return input.href;
+	}
+
+	return typeof input === 'string' ? input : input.url;
 }
 
 describe('attestationSubjects', () => {
@@ -130,7 +169,7 @@ function provenancedSubject(
 
 // A machine holding none of the receipt's subjects, which is what a run
 // attesting a remote store's work looks like.
-const heldNowhere: LocalPathInfos = new Map();
+const heldNowhere: SelectedPathInfos = new Map();
 
 describe('provenancedSubjects', () => {
 	const builtPath = storePathSchema.parse(
@@ -153,7 +192,7 @@ describe('provenancedSubjects', () => {
 
 	// The store of a machine that still holds what it built, under the NAR hash
 	// and deriver its receipt recorded.
-	const holdsBuiltPath: LocalPathInfos = new Map([
+	const holdsBuiltPath: SelectedPathInfos = new Map([
 		[builtPath, attestPathInfo(builtPath, 0xaa)]
 	]);
 
@@ -224,7 +263,7 @@ describe('provenancedSubjects', () => {
 	])(
 		'refuses to attest a held subject with $name',
 		({ digestByte, deriver, expected }) => {
-			const held: LocalPathInfos = new Map([
+			const held: SelectedPathInfos = new Map([
 				[
 					builtPath,
 					{
@@ -252,10 +291,8 @@ describe('provenancedSubjects', () => {
 		}
 	);
 
-	// A subject the selected build store realised is not on this machine, so
-	// the receipt is what the run established about it.
-	it('attests a build-store subject this machine does not hold from the receipt', () => {
-		expect(
+	it('refuses a build-store subject absent from the explicitly selected store', () => {
+		expect(() =>
 			provenancedSubjects(
 				{
 					version: 3,
@@ -263,6 +300,23 @@ describe('provenancedSubjects', () => {
 					subjects: [provenancedSubject(remotePath, 'bb', 'build-store')]
 				},
 				heldNowhere
+			)
+		).toThrow(SubjectNotHeldError);
+	});
+
+	it('attests a build-store subject verified live in the selected store', () => {
+		const heldRemotely: SelectedPathInfos = new Map([
+			[remotePath, attestPathInfo(remotePath, 0xbb)]
+		]);
+
+		expect(
+			provenancedSubjects(
+				{
+					version: 3,
+					paths: [remotePath],
+					subjects: [provenancedSubject(remotePath, 'bb', 'build-store')]
+				},
+				heldRemotely
 			)
 		).toStrictEqual({
 			subjects: [{ storePath: remotePath, sha256: 'bb'.repeat(32) }],
@@ -329,40 +383,278 @@ describe('resolveAttestInputs', () => {
 
 	it('defaults the checksums file under RUNNER_TEMP when none is given', () => {
 		const inputs = resolveAttestInputs(
-			{ receiptFile },
+			{
+				receiptFile,
+				url: 'https://cache.example.test/t/acme',
+				cache: 'builds',
+				readUser: 'reader',
+				readPassword: 'secret'
+			},
 			{ RUNNER_TEMP: '/runner/temp' }
 		);
 
 		expect(inputs).toStrictEqual({
 			receiptFile,
+			url: new URL('https://cache.example.test/t/acme'),
+			cache: 'builds',
+			readUser: 'reader',
+			readPassword: 'secret',
 			checksumsFile: '/runner/temp/cupboard-attestations/subjects.txt'
 		});
 	});
 
 	it('honours an explicit checksums file', () => {
 		const inputs = resolveAttestInputs(
-			{ receiptFile, checksumsFile: '/somewhere/subjects.txt' },
+			{
+				receiptFile,
+				url: 'https://cache.example.test/t/acme',
+				checksumsFile: '/somewhere/subjects.txt'
+			},
 			{ RUNNER_TEMP: '/runner/temp' }
 		);
 
 		expect(inputs).toStrictEqual({
 			receiptFile,
+			url: new URL('https://cache.example.test/t/acme'),
+			cache: '',
+			readUser: '',
+			readPassword: '',
 			checksumsFile: '/somewhere/subjects.txt'
 		});
 	});
 
 	it('requires a build receipt', () => {
 		expect(() =>
-			resolveAttestInputs({}, { RUNNER_TEMP: '/runner/temp' })
+			resolveAttestInputs(
+				{ url: 'https://cache.example.test/t/acme' },
+				{ RUNNER_TEMP: '/runner/temp' }
+			)
+		).toThrow(InvalidInputError);
+	});
+
+	it('requires the destination URL', () => {
+		expect(() =>
+			resolveAttestInputs({ receiptFile }, { RUNNER_TEMP: '/runner/temp' })
+		).toThrow(InvalidInputError);
+	});
+
+	it.each([
+		{ name: 'read-user alone', readUser: 'reader' },
+		{ name: 'read-password alone', readPassword: 'secret' }
+	])('refuses $name', ({ readUser, readPassword }) => {
+		expect(() =>
+			resolveAttestInputs(
+				{
+					receiptFile,
+					url: 'https://cache.example.test/t/acme',
+					readUser,
+					readPassword
+				},
+				{ RUNNER_TEMP: '/runner/temp' }
+			)
 		).toThrow(InvalidInputError);
 	});
 
 	it('does not require RUNNER_TEMP when the checksums file is explicit', () => {
 		const inputs = resolveAttestInputs(
-			{ receiptFile, checksumsFile: '/explicit/subjects.txt' },
+			{
+				receiptFile,
+				url: 'https://cache.example.test/t/acme',
+				checksumsFile: '/explicit/subjects.txt'
+			},
 			{}
 		);
 
 		expect(inputs.checksumsFile).toBe('/explicit/subjects.txt');
+	});
+});
+
+describe('attestAction committed cache verification', () => {
+	const remotePath = storePathSchema.parse(
+		'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib'
+	);
+
+	async function receiptFileIn(directory: string): Promise<string> {
+		const receiptFile = path.join(directory, 'receipt.json');
+		await writeFile(
+			receiptFile,
+			JSON.stringify({
+				version: 3,
+				paths: [remotePath],
+				subjects: [provenancedSubject(remotePath, 'bb', 'build-store')]
+			})
+		);
+
+		return receiptFile;
+	}
+
+	it('attests from the committed destination after the remote build store has gone', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
+		const receiptFile = await receiptFileIn(directory);
+		const checksumsFile = path.join(directory, 'subjects.txt');
+		const requests: { url: string; authorization?: string }[] = [];
+
+		try {
+			await attestAction(
+				{
+					receiptFile,
+					checksumsFile,
+					url: 'https://cache.example.test/t/acme',
+					cache: 'builds',
+					readUser: 'reader',
+					readPassword: 'secret'
+				},
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_OUTPUT: path.join(directory, 'output')
+				},
+				createGithubReporter(),
+				{
+					fetch: (input, init) => {
+						requests.push({
+							url: requestUrl(input),
+							authorization:
+								new Headers(init?.headers).get('authorization') ?? undefined
+						});
+
+						return Promise.resolve(
+							new Response(committedNarInfo(remotePath, 0xbb))
+						);
+					}
+				}
+			);
+
+			expect({
+				requests,
+				checksums: await readFile(checksumsFile, 'utf8')
+			}).toStrictEqual({
+				requests: [
+					{
+						url: 'https://cache.example.test/t/acme/cache/builds/3123456789abcdfghijklmnpqrsvwxyz.narinfo',
+						authorization: `Basic ${Buffer.from('reader:secret').toString('base64')}`
+					}
+				],
+				checksums: `${'bb'.repeat(32)}  ${path.basename(remotePath)}\n`
+			});
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('refuses a subject absent from the committed destination', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
+		const receiptFile = await receiptFileIn(directory);
+
+		try {
+			await expect(
+				attestAction(
+					{
+						receiptFile,
+						checksumsFile: path.join(directory, 'subjects.txt'),
+						url: 'https://cache.example.test/t/acme'
+					},
+					{ RUNNER_TEMP: directory },
+					createGithubReporter(),
+					{
+						fetch: () =>
+							Promise.resolve(new Response(undefined, { status: 404 }))
+					}
+				)
+			).rejects.toBeInstanceOf(CommittedSubjectUnavailableError);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('reports a private-cache authentication refusal', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
+		const receiptFile = await receiptFileIn(directory);
+
+		try {
+			let failure: unknown;
+
+			try {
+				await attestAction(
+					{
+						receiptFile,
+						checksumsFile: path.join(directory, 'subjects.txt'),
+						url: 'https://cache.example.test/t/acme',
+						readUser: 'reader',
+						readPassword: 'wrong'
+					},
+					{ RUNNER_TEMP: directory },
+					createGithubReporter(),
+					{
+						fetch: () =>
+							Promise.resolve(new Response(undefined, { status: 401 }))
+					}
+				);
+			} catch (error) {
+				failure = error;
+			}
+
+			expect(failure).toBeInstanceOf(CommittedSubjectUnavailableError);
+
+			if (failure instanceof CommittedSubjectUnavailableError) {
+				expect({
+					storePath: failure.storePath,
+					status: failure.status
+				}).toStrictEqual({ storePath: remotePath, status: 401 });
+			}
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		{
+			name: 'malformed metadata',
+			body: 'not a narinfo',
+			expected: CommittedSubjectInvalidError
+		},
+		{
+			name: 'metadata for another path',
+			body: committedNarInfo(
+				storePathSchema.parse(
+					'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-other'
+				),
+				0xbb
+			),
+			expected: CommittedSubjectInvalidError
+		},
+		{
+			name: 'a moved NAR hash',
+			body: committedNarInfo(remotePath, 0xaa),
+			expected: SubjectNarHashMovedError
+		},
+		{
+			name: 'a moved deriver',
+			body: committedNarInfo(
+				remotePath,
+				0xbb,
+				'4123456789abcdfghijklmnpqrsvwxyz-other.drv'
+			),
+			expected: SubjectDeriverMovedError
+		}
+	])('refuses $name from the destination cache', async ({ body, expected }) => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
+		const receiptFile = await receiptFileIn(directory);
+
+		try {
+			await expect(
+				attestAction(
+					{
+						receiptFile,
+						checksumsFile: path.join(directory, 'subjects.txt'),
+						url: 'https://cache.example.test/t/acme'
+					},
+					{ RUNNER_TEMP: directory },
+					createGithubReporter(),
+					{ fetch: () => Promise.resolve(new Response(body)) }
+				)
+			).rejects.toBeInstanceOf(expected);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
 	});
 });

@@ -141,7 +141,7 @@ describeConformance('what a store can obtain', (oracle) => {
 		{
 			name: 'a key nothing in the cache is signed with',
 			keys: (current) => [current.untrustedPublicKey],
-			expected: { realised: false, verdict: 'unsigned' }
+			expected: { realised: false, verdict: 'refused' }
 		}
 	])(
 		'settles the closure the way a realisation does, trusting $name',

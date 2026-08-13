@@ -41,11 +41,12 @@ export const spawnDaemonProcess: DaemonCommandRunner = (
 export function createProcessNixDaemonConnector(
 	command: string,
 	commandArguments: readonly string[],
-	run: DaemonCommandRunner = spawnDaemonProcess
+	run: DaemonCommandRunner = spawnDaemonProcess,
+	afterExit?: () => void
 ): NixDaemonConnector {
 	return () =>
 		Promise.resolve(
-			new ProcessNixDaemonTransport(run(command, commandArguments))
+			new ProcessNixDaemonTransport(run(command, commandArguments), afterExit)
 		);
 }
 
@@ -56,11 +57,25 @@ class ProcessNixDaemonTransport implements NixDaemonTransport {
 
 	private closePromise?: Promise<void>;
 
-	constructor(private readonly child: DaemonChildProcess) {
+	constructor(
+		private readonly child: DaemonChildProcess,
+		afterExit?: () => void
+	) {
 		this.reader = new ByteStreamReader(child.stdout);
 		this.exited = new Promise((resolve) => {
-			child.once('exit', () => {
+			let isFinished = false;
+			const finish = (): void => {
+				if (isFinished) {
+					return;
+				}
+
+				isFinished = true;
+				afterExit?.();
 				resolve();
+			};
+
+			child.once('exit', () => {
+				finish();
 			});
 			// A spawn failure surfaces on the child, never on its stdout, and a
 			// child that never spawned emits no exit. The error therefore
@@ -68,7 +83,7 @@ class ProcessNixDaemonTransport implements NixDaemonTransport {
 			// awaits.
 			child.once('error', (error) => {
 				this.reader.fail(error);
-				resolve();
+				finish();
 			});
 		});
 	}
