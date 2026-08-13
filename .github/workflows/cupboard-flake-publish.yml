@@ -73,18 +73,17 @@ on:
         type: string
       cupboard-version:
         description: >-
-          Exact published cupboard release tag to install, or 'latest'. Empty
-          uses a release for the called workflow revision when one exists,
-          otherwise source.
+          Exact published cupboard release tag to install, or 'latest'. When
+          omitted, install a release for the called workflow revision or build
+          its source if no release exists.
         required: false
         type: string
       maximise-space:
         description:
           Reclaim runner disk space before building by deleting preinstalled
-          software (language toolchains, Android/.NET SDKs, docker images) from
-          the runner image. Destructive and not undone by the run, so it is an
-          explicit opt-in; enable it only on ephemeral GitHub-hosted runners,
-          whose images it is safe to strip.
+          software such as language toolchains, Android and .NET SDKs, and
+          Docker images. The run does not restore this software. Enable the
+          option only on ephemeral GitHub-hosted runners.
         required: false
         default: false
         type: boolean
@@ -119,11 +118,11 @@ on:
         type: string
       builders:
         description:
-          One-line nix.conf builders specification used by remote target groups;
-          use semicolons for multiple entries. Classic builder delegation is
-          mutually exclusive with store. The machine SSH-key column must be -
-          and builder store URIs must not set a non-empty ssh-key; pass a
-          private key through the builder_ssh_key secret.
+          One-line nix.conf builders specification for remote target groups.
+          Separate multiple entries with semicolons. This is mutually exclusive
+          with store. Set the machine SSH-key column to '-' and do not set a
+          non-empty ssh-key in a builder store URI. Supply the private key
+          through builder_ssh_key.
         required: false
         default: ''
         type: string
@@ -135,9 +134,9 @@ on:
         type: string
       store-known-hosts:
         description:
-          known_hosts lines pinning the direct ssh-ng store. Required unless
+          known_hosts lines that pin the direct ssh-ng store. Required unless
           store uses the default SSH port and supplies
-          base64-ssh-public-host-key; independent of classic builder delegation.
+          base64-ssh-public-host-key. Independent of classic builder delegation.
         required: false
         default: ''
         type: string
@@ -152,14 +151,13 @@ on:
         type: boolean
       store:
         description: >-
-          Remote ssh-ng store URI every cohort job runs against: the cohort's
-          plan partitions availability with the remote store's own answers, the
-          build realises its results there, and the push reads path metadata and
-          streams NAR bytes from the same store, so the built closure never
-          enters the runner's local store. Measured cohort packing prices its
-          candidate groupings against the same store's answers. Empty plans and
-          builds in each runner's own store. Must not set a non-empty ssh-key;
-          pass a private key through the store_ssh_key secret.
+          Remote ssh-ng store URI for every cohort job. Planning queries this
+          store for path availability, building realises outputs there, and
+          publication reads metadata and NAR bytes from it. The realised closure
+          therefore does not enter the runner's local store. Measured packing
+          also queries this store. When omitted, each runner uses its own store.
+          Do not set a non-empty ssh-key in the URI; supply the private key
+          through store_ssh_key.
         required: false
         default: ''
         type: string
@@ -194,21 +192,21 @@ on:
         required: false
       builder_ssh_config:
         description:
-          ssh_config Host blocks for the remote builder connections. A strict
-          allowlist accepts endpoint, transport tuning, algorithm, liveness and
-          SetEnv directives. Commands, proxies, forwarding, identity sources,
-          verbose logging, Include and Match are rejected.
+          ssh_config Host blocks for remote builder connections. The allowlist
+          accepts endpoint, transport tuning, algorithm, liveness, and SetEnv
+          directives. It rejects commands, proxies, forwarding, identity
+          sources, verbose logging, Include, and Match.
         required: false
       store_ssh_key:
         description: SSH private key authenticating to the direct ssh-ng store.
         required: false
       store_ssh_config:
         description:
-          ssh_config Host blocks for the direct store connection. A strict
-          allowlist accepts endpoint, transport tuning, algorithm, liveness and
-          SetEnv directives. Commands, proxies, forwarding, identity sources,
-          verbose logging, Include and Match are rejected. Independent of
-          builder scheduling.
+          ssh_config Host blocks for the direct store connection. The allowlist
+          accepts endpoint, transport tuning, algorithm, liveness, and SetEnv
+          directives. It rejects commands, proxies, forwarding, identity
+          sources, verbose logging, Include, and Match. Independent of builder
+          scheduling.
         required: false
       input_ssh_key:
         description:
@@ -225,9 +223,9 @@ on:
 permissions: {}
 
 jobs:
-  # Resolves cupboard and the effective cache, root prefix, TTL and reuse view
-  # once, so every later job consumes the same validated values. The only code
-  # executed here is this reusable workflow's own immutable checkout.
+  # Resolve cupboard, the cache, root prefix, TTL, and reuse view once. Every
+  # later job uses these validated values. This job executes code only from the
+  # reusable workflow's immutable checkout.
   configure:
     name: Resolve the publication inputs
     runs-on: ${{ inputs.plan-runner }}
@@ -254,11 +252,20 @@ jobs:
       - name: Reserve the cupboard workflow checkout
         env:
           CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
+          WORKFLOW_REPOSITORY: ${{ job.workflow_repository }}
         run: |
           set -euo pipefail
-          if [ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ] || [ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
-            echo '::error::The caller checkout already contains .cupboard-workflow; refusing to replace caller content'
+          if [ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
+            echo '::error::.cupboard-workflow is a symlink; refusing to replace it'
             exit 1
+          fi
+          if [ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
+            origin="$(git -C "${CUPBOARD_WORKFLOW_CHECKOUT}" remote get-url origin 2>/dev/null || true)"
+            expected="https://github.com/${WORKFLOW_REPOSITORY}"
+            if [ "${origin}" != "${expected}" ] && [ "${origin}" != "${expected}.git" ]; then
+              echo '::error::.cupboard-workflow is not a prior checkout of the called workflow; refusing to replace it'
+              exit 1
+            fi
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -522,6 +529,9 @@ jobs:
           enable-packing: ${{ inputs.enable-packing }}
           pack-capacity: ${{ inputs.pack-capacity }}
           store: ${{ inputs.store }}
+          # A retention root does not prove that provenance was attached.
+          # Re-run cached targets so a previous attachment failure is retried.
+          require-provenance: ${{ inputs.push }}
 
       - name: Summarise plan
         env:
@@ -609,18 +619,16 @@ jobs:
           read-password: ${{ secrets.read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
 
-      # One build-cohort run is the whole cohort: the availability partition,
-      # the supervised `cupboard build-push` build with streamed uploads,
-      # retry attempts, remote attribution and the receipt, and one push per
-      # root group to set each target root over its full declared list.
+      # build-cohort partitions availability, supervises the build and retries,
+      # records attribution, publishes the results, and sets each target root to
+      # its complete declared path list.
       - uses: ./.cupboard-workflow/actions/build-cohort
         id: build-cohort
         with:
           cohort-json: ${{ toJSON(matrix) }}
-          # The planner rejects mixed tolerance, so this is every member's
-          # declared severity. The action applies it only to attributable target
-          # failures; infrastructure and unbounded publication failures remain
-          # fatal instead of being hidden by workflow-level continue-on-error.
+          # The planner requires every member of a cohort to use the same value.
+          # The action applies it only to attributable target failures;
+          # infrastructure and unbounded publication failures remain fatal.
           best-effort: ${{ matrix.bestEffort }}
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
@@ -632,6 +640,7 @@ jobs:
           max-jobs: ${{ matrix.remote && inputs.store == '' && '0' || '' }}
           store: ${{ inputs.store }}
           push: ${{ inputs.push }}
+          require-provenance: ${{ inputs.push }}
           gc-between-cohorts:
             ${{ inputs.gc-between-cohorts && runner.environment ==
             'github-hosted' && inputs.store == '' }}
@@ -643,13 +652,10 @@ jobs:
             needs.configure.outputs.root-prefix, github.run_id) }}
           run-root-ttl: ${{ inputs.run-root-ttl }}
 
-      # The build receipt carries the per-path NAR hashes, derivers and any
-      # current-invocation evidence the provenance subjects need. A streamed
-      # cohort writes it from its supervised build. A remote-store cohort uses
-      # Nix's keyed build results to claim only queryable outputs this invocation
-      # built, then reconciles every returned path without treating substitution,
-      # already-valid paths or floating targets as build evidence. A cohort that
-      # publishes nothing has no receipt.
+      # A streamed cohort derives its receipt from the supervised build. A
+      # remote-store cohort includes only queryable outputs that Nix reports as
+      # results of this invocation. Substituted, already-valid, and floating
+      # paths do not count as build evidence. No publication means no receipt.
       - uses: ./.cupboard-workflow/actions/attest
         id: attest
         if: ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' }}
@@ -660,10 +666,8 @@ jobs:
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
 
-      # The provenance bundle is signed after publication, since it needs the
-      # receipt's subjects, so a dedicated step files it against the paths the
-      # cache already serves. Gated as the attest step is, plus the bundle
-      # itself: a receipt with no established subjects signs nothing.
+      # Attestation verifies the receipt against committed narinfos, so attach
+      # the bundle only after publication and only when signing produced one.
       - uses: ./.cupboard-workflow/actions/attest-attach
         if:
           ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' &&
@@ -678,17 +682,11 @@ jobs:
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
           bundle: ${{ steps.attest.outputs.bundle-path }}
 
-      # The cohort job is where a run of one cohort per job crosses a
-      # collection boundary. Every root has been set on the destination, and
-      # attestation reads the destination's committed narinfos rather than the
-      # build store, so the build's out-links have done their work. Removing
-      # the directory that holds them makes the cohort's own outputs collectable
-      # here, and a later cohort job sharing the runner substitutes them from
-      # the cache.
-      # `nix store gc` then sweeps dead paths alone, leaving a user's own gc
-      # roots standing, and a sweep that fails is reported without failing the
-      # job. The boundary runs after a failed cohort too, where the disk it
-      # reclaims is worth most.
+      # At this point, every retention root has been set on the destination and
+      # attestation has read the committed narinfos. Remove this build's
+      # out-links before collection so a later cohort can substitute these
+      # outputs from the cache. `nix store gc` leaves other GC roots intact.
+      # Collection also runs after a failed cohort and does not fail the job.
       - name: Explain skipped local store collection
         if:
           ${{ !cancelled() && inputs.gc-between-cohorts && (runner.environment

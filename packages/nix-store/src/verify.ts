@@ -3,15 +3,13 @@ import { type NixFingerprint, type NixKeyName } from './scalars.ts';
 import { NixSignature } from './signature.ts';
 
 /**
- * The keys a verifier trusts, by the name a signature is attributed to. Nix
- * keeps the first key it reads under a given name, so a list naming one twice
- * verifies against the first of them.
+ * Trusted keys indexed by signing key name. Nix keeps the first key for each
+ * name, so duplicate entries do not replace it.
  */
 export class NixTrustedKeys {
 	/**
-	 * The keys the given `<name>:<base64>` values name. A value that is not one
-	 * names no key and verifies nothing, so it is left out: the remaining keys
-	 * still decide whether a path is trusted.
+	 * Parses the valid `<name>:<base64>` keys and ignores malformed values. The
+	 * remaining keys determine whether a path is trusted.
 	 */
 	static of(values: readonly string[]): NixTrustedKeys {
 		const keys = new Map<NixKeyName, NixPublicKey>();
@@ -38,8 +36,7 @@ export class NixTrustedKeys {
 	/**
 	 * Whether any of the signatures verifies against a trusted key over this
 	 * fingerprint. Nix counts the signatures it can verify and accepts a path
-	 * with at least one, so a document carrying signatures from keys this
-	 * verifier does not know is decided by the ones it does.
+	 * with at least one. Signatures from unknown keys do not affect the result.
 	 */
 	async verifies(
 		fingerprint: NixFingerprint,
@@ -60,9 +57,9 @@ export class NixTrustedKeys {
 }
 
 /**
- * The public half of a Nix secret key file, which holds the name and the
+ * Reads the public half of a Nix secret key file. The file contains a name and a
  * 64-byte Ed25519 secret whose last 32 bytes are the public key. A file that
- * is not one names no key.
+ * does not match this format returns `undefined`.
  */
 export function publicKeyOfSecret(contents: string): NixPublicKey | undefined {
 	const parsed = parseKey(contents.trim());
@@ -125,8 +122,8 @@ async function verifies(
 			ownBuffer(signed)
 		);
 	} catch {
-		// A key or a signature the runtime will not read verifies nothing,
-		// which is the same answer as one that does not match.
+		// Web Crypto reports malformed key or signature material by throwing. Such
+		// material cannot verify the fingerprint.
 		return false;
 	}
 }

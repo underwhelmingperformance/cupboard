@@ -6,25 +6,23 @@ import {
 } from './setting-types.generated.ts';
 
 /**
- * The kind of value a Nix setting holds, as `nix config show --json` reports
- * it. The generated table pairs every setting nix reads with one of these.
+ * The value type reported for a Nix setting by `nix config show --json`. The
+ * generated table maps every known setting to one of these types.
  */
 export type NixSettingValueType =
 	'boolean' | 'integer' | 'list' | 'map' | 'string';
 
 /**
- * The kind of value a setting holds, or `undefined` for a name the pinned nix
- * has no setting for. Nix warns about such a name and carries on, so a caller
- * reading `undefined` here has read a name nothing can be settled from.
+ * Returns the value type for a setting, or `undefined` when the pinned Nix does
+ * not recognise its name. Nix warns about unknown settings and ignores them.
  */
 export function nixSettingType(name: string): NixSettingValueType | undefined {
 	return nixSettingTypes[name];
 }
 
 /**
- * Whether a setting takes an `extra-` prefixed assignment appending to what it
- * holds. Nix appends to a setting holding many values, which is every list and
- * every map, and knows no `extra-` name for any other.
+ * Whether a setting supports an `extra-` assignment. Nix permits these
+ * assignments for list and map settings only.
  */
 export function isAppendableSetting(name: string): boolean {
 	const type = nixSettingType(name);
@@ -37,19 +35,16 @@ export function isAppendableSetting(name: string): boolean {
 const booleanValues = new Set(['true', 'yes', '1', 'false', 'no', '0']);
 
 /**
- * The width Nix declared an integer setting with. Nix reads the digits into
- * that width and refuses a number it could not hold, so the width is what
- * bounds the setting.
+ * The integer width declared for a Nix setting. Values outside this width are
+ * rejected before a binary unit is applied.
  */
 export type NixIntegerWidth = 'int32' | 'uint32' | 'int64' | 'uint64';
 
 // Nix reads an integer as a sign, then digits, then an optional binary unit.
-// Nothing else states one, so a fraction, another base, and digits with
-// anything but a unit after them are all refused.
+// Fractions, other bases and suffixes other than a unit are rejected.
 const integerPattern = /^(?<digits>[+-]?\d+)(?<unit>[KMGTkmgt]?)$/u;
 
-// The unit a number may carry, which multiplies it. Nix reads the letter in
-// either case, and knows these four.
+// Optional binary units accepted by Nix, in either letter case.
 const binaryUnits: ReadonlyMap<string, bigint> = new Map([
 	['k', 1024n],
 	['m', 1024n ** 2n],
@@ -70,18 +65,17 @@ const integerBounds: Readonly<Record<NixIntegerWidth, IntegerBounds>> = {
 };
 
 /**
- * The number the value states, or `undefined` when it states none the setting
- * could hold.
+ * Parses an integer setting, or returns `undefined` when the value is invalid
+ * for the setting's width.
  *
  * Nix reads the digits into the width it declared the setting with, so a
- * number that width could not hold is refused. A unit then multiplies what was
- * read, and the product is held in that same width, which wraps: `cores = 1T`
+ * out-of-range input is rejected. A unit then multiplies the parsed value, and
+ * the product wraps within that same width: `cores = 1T`
  * reads as zero, since a tebibyte is a whole number of times the width holding
  * it.
  *
- * A setting the generated table has no width for is read in the widest of
- * them: nix knows a width for every integer setting it has, so a name missing
- * from the table is a name nix has no setting for.
+ * A setting absent from the generated width table uses the widest width. The
+ * table includes every integer setting known to the pinned Nix.
  */
 export function nixInteger(name: string, value: string): bigint | undefined {
 	return nixIntegerOfWidth(value, nixIntegerWidths[name] ?? 'uint64');
@@ -109,8 +103,7 @@ export function nixIntegerOfWidth(
 	return heldIn(read * (binaryUnits.get(unit.toLowerCase()) ?? 1n), bounds);
 }
 
-// The value as the width holds it, wrapping the way the C++ width Nix declared
-// the setting with wraps.
+// Wrap a value using the C++ integer width declared for the setting.
 function heldIn(value: bigint, bounds: IntegerBounds): bigint {
 	const span = bounds.greatest - bounds.least + 1n;
 
@@ -118,24 +111,22 @@ function heldIn(value: bigint, bounds: IntegerBounds): bigint {
 }
 
 /**
- * The values a setting takes beyond what its kind describes. Nix reads
+ * Values accepted by specific settings beyond their general type. Nix reads
  * `max-jobs` through a setting of its own, which takes the number of jobs or
- * the word naming this machine's parallelism.
+ * the word `auto` for this machine's parallelism.
  */
 const wordValues = new Map([['max-jobs', new Set(['auto'])]]);
 
 /**
  * Settings Nix reads as a path from the filesystem root, refusing one written
- * any other way or left empty. Asking the pinned Nix about every setting it
- * states as a string, these are the ones that refuse a relative value; the
- * reported kind says only that they hold a string.
+ * any other way or left empty. The pinned Nix reports only their general
+ * string type, so this set records the stricter path requirement.
  */
 const absolutePathSettings = new Set(['netrc-file', 'ssl-cert-file']);
 
 /**
- * Settings holding store references, every entry of which Nix parses as it
- * reads the setting. Asking the pinned Nix about every setting it states as a
- * list, these are the ones that refuse an entry naming no store.
+ * List settings whose entries must parse as store references. The pinned Nix
+ * reports only their general list type.
  */
 const storeReferenceSettings = new Set([
 	'substituters',
@@ -143,13 +134,11 @@ const storeReferenceSettings = new Set([
 ]);
 
 /**
- * Whether Nix would read the value as the setting's own. A configuration
- * carrying one Nix would refuse is a configuration Nix refuses entire, so a
- * client reading it has to refuse it too.
+ * Whether Nix would accept a value for the setting. This client rejects any
+ * configuration value that Nix would reject.
  *
- * A kind alone settles a boolean and an integer. The rest Nix reads by shapes
- * the kind does not carry, so a string, a list and a map stand as they are
- * written unless the setting is one of the few that states a shape of its own.
+ * The general type fully validates booleans and integers. Strings, lists and
+ * maps are accepted as written unless a setting has an additional constraint.
  */
 export function isSettingValue(
 	name: string,
@@ -188,11 +177,9 @@ export function listOf(value: string): readonly string[] {
 const namedStores = new Set(['', 'auto', 'daemon', 'local']);
 
 /**
- * Whether the value names a store Nix could open. Nix reads a store reference
- * as a URI, as one of the names it has for a store, or as a path to one, and
- * refuses a configuration naming a store it cannot read as any of those. A
- * scheme it has no store for is read here all the same: what refuses that is
- * opening the store, not reading the setting.
+ * Whether the value has the syntax of a Nix store reference: a URI, a known
+ * store type or a path. Unsupported URI schemes remain syntactically valid and
+ * are rejected later when the store is opened.
  */
 function isStoreReference(value: string): boolean {
 	// Nix takes the parameters off before reading what is left.
@@ -214,7 +201,7 @@ const schemePattern = /^[A-Za-z][\d+.A-Za-z-]*:/u;
 /**
  * The store reference in the form Nix uses.
  *
- * A path names a local store rooted at that path. Nix resolves the path
+ * A path refers to a local store rooted at that path. Nix resolves the path
  * against the working directory, then writes it as a `local://` URI. A URI is
  * left as it is. So is every word that Nix has a store for.
  *
@@ -248,7 +235,7 @@ function isPathReference(reference: string): boolean {
 	);
 }
 
-/** What a setting of this kind would have to hold, as an error names it. */
+/** A human-readable description of the values accepted by a setting. */
 export function settingValueExpectation(
 	name: string,
 	type: NixSettingValueType

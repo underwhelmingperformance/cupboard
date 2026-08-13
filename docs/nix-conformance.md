@@ -1,16 +1,15 @@
 # The Nix conformance suite
 
-`packages/nix` re-implements a slice of Nix's own libstore client in TypeScript:
-it discovers `nix.conf` the way Nix does, resolves which store backend to open,
-queries binary caches, parses narinfo files, and partitions a closure into what
-is already present, what can be substituted, and what has to be built. Every one
-of those answers has to match what the real client would have said, and the way
-we know is by asking a real `nix` the same question.
+`packages/nix` re-implements part of Nix's libstore client in TypeScript. It
+discovers `nix.conf`, resolves the selected store backend, queries binary
+caches, parses narinfo files, and partitions a closure into paths that are
+present, substitutable, or need building. The conformance suite checks these
+operations against a real `nix` client.
 
-That is what this suite is. Each case sets up one fixture, puts a question to
-our client and to a `nix` binary, and compares the two answers. No expected
-value is written down by hand, so a divergence fails whether it arrived in a
-change of ours or in a new version of Nix.
+Each test creates one fixture, runs the same operation through our client and a
+`nix` binary, and compares the results. The expected values therefore come from
+Nix rather than from hand-written fixtures. A behavioural difference fails
+whether it comes from our code or from a new Nix version.
 
 ## Running the suite
 
@@ -18,295 +17,275 @@ change of ours or in a new version of Nix.
 pnpm test:conformance
 ```
 
-It needs a working Nix on the machine. CI runs it in the `e2e` job, which
-already installs one.
+The suite requires a working Nix installation. CI runs it in the `e2e` job,
+which already installs Nix.
 
 ## The oracle
 
-The `nix` a case compares against is the one this repository's flake pins, not
-whatever the machine happens to have on its `PATH`. The flake exposes it as the
-`conformanceNix` output, built from the pinned nixpkgs, and the suite resolves
-it with:
+The repository's flake pins the `nix` binary that the suite uses as its oracle.
+The suite does not use an arbitrary binary from `PATH`. The flake exposes the
+binary as the `conformanceNix` output, which the suite resolves with:
 
 ```sh
 nix build .#conformanceNix --no-link --print-out-paths
 ```
 
-Each test file resolves it once and shares the result across its cases. A
-machine that cannot build it fails the suite, so an absent oracle never reads as
-a pass.
+Each test file resolves the output once and shares it across its cases. If the
+machine cannot build the output, the suite fails instead of skipping the
+comparison.
 
-Which `nix` that is comes from [`tests/conformance/oracle.json`], which pairs
-the version string the output resolves to with the nixpkgs revision it was built
-from. That file is canonical: it is the one place the version is written down,
-and the suite fails rather than running a case if the flake builds something the
-record does not name.
+[`tests/conformance/oracle.json`] records the expected Nix version and the
+nixpkgs revision that provides it. This is the canonical version record. The
+suite refuses to run a case when the flake produces a version that differs from
+the record.
 
-Two guards keep the record honest:
+Two checks keep the record consistent:
 
-- `pnpm check:conformance-oracle` compares the recorded nixpkgs revision against
-  `flake.lock`. It reads two files and needs no Nix, so it runs as part of
-  `pnpm check` on every machine and in CI.
-- The suite itself compares the resolved binary's `nix --version` against the
-  recorded version, which catches the same nixpkgs revision building a different
-  `nix`.
+- `pnpm check:conformance-oracle` compares the recorded nixpkgs revision with
+  `flake.lock`. It reads only those two files and runs without Nix, so it is
+  part of `pnpm check` on every machine and in CI.
+- The conformance suite compares the resolved binary's `nix --version` output
+  with the recorded version. This catches a change in the Nix version from the
+  same nixpkgs revision.
 
 ### The generated settings table
 
 `pnpm update:conformance-oracle` also writes
-[`packages/nix/src/setting-types.generated.ts`], which the client reads to
-decide whether Nix would accept a value. It holds two things the pinned Nix is
-asked for.
+[`packages/nix/src/setting-types.generated.ts`]. The client uses this table to
+decide whether Nix would accept a setting value. The update command derives two
+kinds of metadata from the pinned Nix binary.
 
-The first is the kind of value each setting holds, read from
-`nix config show --json`.
+First, it reads the value type for each setting from `nix config show --json`.
 
-The second is the width Nix declared each integer setting with. Nix reads an
-integer setting into a fixed C++ width and refuses a number that width could not
-hold, and it reports none of this, so the width is settled by asking: the update
-puts four values to each integer setting, one at the edge of each candidate
-width, and records the width the accepted set names. That is four
-`nix config show` runs per integer setting, around twenty-five seconds for the
-whole table, and it happens only when the pin moves.
+Second, it determines the fixed C++ width of each integer setting. Nix rejects
+values outside that width but does not report the width directly. The update
+command tries four boundary values for each integer setting and records the
+width indicated by the accepted values. This requires four `nix config show`
+runs per integer setting and takes about 25 seconds for the whole table. It runs
+only when the pin changes.
 
-A combination of accepted values that names no width the script knows fails the
-update rather than guessing, so a Nix that adds a width asks for a reader rather
-than silently recording the wrong bounds.
+If the accepted values do not match a known width, the update fails. This forces
+the table reader to be updated when Nix adds another integer width.
 
 ### Bumping the oracle
 
-Moving the pin is a reviewed change, in two steps:
+Update the pin and its generated records together:
 
 ```sh
 nix flake update
 pnpm update:conformance-oracle
 ```
 
-Commit `flake.lock` and `tests/conformance/oracle.json` together. Bumping one
-without the other fails `pnpm check`.
+Commit `flake.lock` and `tests/conformance/oracle.json` together. `pnpm check`
+fails if only one changes.
 
-Cases that start failing after a bump are the point of the exercise: each one is
-a place where the new Nix answers differently from the old, and it wants reading
-before it is made to pass.
+After a pin update, inspect every conformance failure before changing the test
+or client. A failure may indicate that the new Nix version behaves differently
+from the old one.
 
 ## What a case asserts
 
-Every case states which of two shapes it uses, because they mean different
-things.
+Each case declares one of two comparison modes.
 
-**Directional** cases compare acceptance against rejection: whatever the oracle
-rejects, our client must reject too. Rejecting more than the oracle does is
-conformant and passes; rejecting less fails. Our client targets the strictness
-of Nix master, and the pinned oracle is behind it, so the oracle sets the
-minimum rather than the exact answer.
+**Directional** cases compare acceptance and rejection. Our client must reject
+anything the oracle rejects, but it may reject additional inputs. The project
+targets the strictness of Nix master while the pinned oracle may be older, so
+the oracle provides a minimum level of validation rather than an exact result.
 
-**Exact** cases compare values: the fields both sides parsed out of an input
-they both accepted, and the settings both sides resolved from one configuration.
-These are equalities, asserted on whole objects.
+**Exact** cases compare complete values. They cover fields parsed from an input
+that both clients accept and settings resolved from the same configuration.
 
 ## The resolved configuration
 
-`discoverNixStoreConfig` reads `nix.conf`, `NIX_CONFIG` and the environment and
-resolves the settings that decide what may be substituted and from where, where
-a derivation is built, how a transfer is attempted, and whose signature is
-accepted. `nix config show --json` answers the same question, so a case writes
-one fixture, puts it to both sides in one environment, and compares.
+`discoverNixStoreConfig` reads `nix.conf`, `NIX_CONFIG`, and the environment. It
+resolves settings for substitution sources, build locations, transfer policy,
+and trusted signatures. The suite compares these results with
+`nix config show --json` under the same environment and fixture configuration.
 
-Nix reports its own settings in its own names, units and shapes, so the two
-sides meet through an adapter table in `tests/conformance/configuration.ts`.
-Each entry names one field of the resolved configuration, the settings the
-oracle answers it from, and the arithmetic between them. Most are direct, and
-the ones that are not carry their reason:
+Nix reports settings with its own names, units, and data shapes. The adapter
+table in `tests/conformance/configuration.ts` maps them to fields in our
+resolved configuration. Each entry specifies the client field, its source Nix
+settings, and any required conversion. Most mappings are direct. The exceptions
+are:
 
-- `stalledTransferTimeoutMs` holds milliseconds where `stalled-download-timeout`
-  counts seconds.
-- `building.systems` is the set of every system a build could be taken by, which
-  Nix keeps as `system` and `extra-platforms` separately.
-- `builders` holds the entries themselves, where the setting may name a machines
-  file with `@`. The adapter follows that indirection the way Nix does when it
-  dispatches a build.
-- Settings Nix keeps as sets are reported sorted, so both sides are sorted
-  before the comparison and it is the members that are compared. `substituters`
-  is the exception: it is tried in order, so it is compared as written.
+- `stalledTransferTimeoutMs` is measured in milliseconds, while
+  `stalled-download-timeout` is measured in seconds.
+- `building.systems` combines `system` and `extra-platforms` because a build may
+  run on any system in either setting.
+- `builders` contains parsed entries. When the setting refers to a machines file
+  with `@`, the adapter follows the indirection as Nix does when dispatching a
+  build.
+- Nix reports set-valued settings in sorted order, so the comparison sorts both
+  sides before comparing their members. `substituters` remains ordered because
+  Nix tries each substituter in that order.
 
 ### The unmodelled report
 
-The four groups do not model every setting in their own domains. A case lists
-the ones they leave out, annotates them into the test output, and asserts the
-list, so a setting cannot become modelled, or be dropped by Nix, without the
-record moving with it. A second case asserts that every setting the table claims
-is one the oracle really reports, which is what catches a rename.
+The four configuration groups do not model every Nix setting in their domains.
+One case records the omitted settings in the test output and compares the whole
+list. The test therefore fails when a setting becomes modelled or disappears
+from Nix without a corresponding update. Another case verifies that every
+setting in the generated table still exists in the oracle, which detects renamed
+settings.
 
-Our client also carries fields for Nix's renamed transfer retry settings, which
-the pinned oracle predates. A third case asserts those settings are still absent
-from the oracle, so the rename arriving in a bumped oracle fails and asks for
-the mapping rather than passing quietly.
+Our client also supports the renamed transfer retry settings introduced after
+the pinned oracle. A third case verifies that the oracle still omits those
+settings. When a future oracle includes the rename, the test fails until the
+adapter is updated.
 
 ## Narinfo read from a substituter
 
-Our substituter client reads a narinfo the way libstore does, and a value it
-lets through is one Nix would refuse the whole document over: a path counted as
-available on the strength of one is a path Nix would then decline to fetch. A
-case writes one narinfo and a `nix-cache-info` into a directory, serves it as a
-`file://` cache, and asks both sides about the path it describes.
+Our substituter client must reject any narinfo document that libstore rejects.
+Otherwise it could report a path as available even though Nix later refuses to
+fetch it. Each case writes a narinfo and `nix-cache-info` to a directory,
+exposes the directory as a `file://` cache, and queries the described path
+through both clients.
 
-The cache is served from a directory rather than over HTTP for a reason. Nix
-keeps a disk cache of the narinfos it has read from a substituter and answers
-from it for as long as the narinfo TTL settings allow, so an HTTP fixture would
-be answered from a previous case. A `file://` store bypasses that cache, so each
-case observes the document it just wrote.
+The fixture uses a directory instead of HTTP because Nix caches narinfos from
+HTTP substituters on disk. An HTTP fixture could therefore return data from a
+previous case until the narinfo TTL expires. A `file://` store bypasses that
+cache, so each case reads the document it created.
 
 ```sh
 nix path-info --store file://<dir> --json --json-format 1 <path>
 ```
 
-`--json-format 1` is pinned so a later format cannot quietly change what a field
-means. The three answers the comparison rests on are Nix's own: a document it
-reads gives a JSON object and a zero status, a path the cache holds nothing for
-gives a null entry and a zero status, and a document it refuses gives a non-zero
-status with its reason on stderr. Our client answers the same three ways, with a
-refusal arriving as `SubstituterAnswerUnreadableError` because the query runs
-with `fallback` off.
+The command pins `--json-format 1` so a later format cannot silently change a
+field's meaning. Nix produces three relevant outcomes:
 
-Acceptance is **directional**: whatever Nix refuses, our client has to refuse
-too, and refusing more is conformant. A case that fails prints the reason Nix
-gave as a test annotation, so the exit status is what is asserted and the
-message is only reported.
+- An accepted document produces a JSON object and exits zero.
+- A path that is absent from the cache produces a null entry and exits zero.
+- A rejected document exits non-zero and writes the reason to stderr.
 
-For a document both sides took, the offer is compared **exactly**: the NAR hash,
-the NAR size, the download size, the references, the deriver and the signatures.
-Two of those need normalising, and the adapter says so where it does it. Nix
-reports a NAR hash SRI-encoded, which our own hash renders from the digest it
-holds. A narinfo carrying no `FileSize` states no download size, which Nix
-reports by leaving the field out and our client reports as a zero.
+Our client reports the same three outcomes. A rejected document produces
+`SubstituterAnswerUnreadableError` because the query disables `fallback`.
+
+Acceptance is **directional**: our client must reject every document that Nix
+rejects, but it may reject additional documents. A failing case adds Nix's
+reason as a test annotation. The assertion uses the exit status rather than the
+message text.
+
+When both clients accept a document, the suite compares the complete offer: the
+NAR hash, NAR size, download size, references, deriver, and signatures. The
+adapter normalises two differences. Nix reports NAR hashes in SRI form, so our
+hash object renders SRI from its digest. When a narinfo omits `FileSize`, Nix
+omits the download-size field while our client reports zero.
 
 ## What a store can obtain
 
-Three questions decide what a plan does with a path: which paths the
-substituters offer, how realising a target splits into work to build and work to
-fetch, and whether a consumer would actually obtain a closure from a cache. Nix
-answers all three, so the cases put each one to both sides.
+Planning depends on three operations: listing paths offered by substituters,
+partitioning a target into paths to build and fetch, and determining whether a
+consumer can realise a closure from a cache. The suite compares our client with
+Nix for each operation.
 
-The fixture builds a small closure in the host store, signs a `file://` cache
-holding it with a key it generates, and realises into a fresh `local?root=`
-store per case, so no case is answered by what an earlier one fetched.
-Substitution into such a store needs no daemon, which is why the suite can drive
-it directly.
+The fixture builds a small closure in the host store, creates a signing key, and
+copies the signed closure to a `file://` cache. Each case realises the closure
+into a fresh `local?root=` store, so it cannot reuse paths fetched by an earlier
+case. These stores support substitution without a daemon.
 
-The closure's root is a built output rather than a file written by evaluation,
-and that matters. Nix takes a content-addressed path from a cache whatever
-signed it, because the path name commits to the contents, so a fixture made only
-of `builtins.toFile` paths would be fetched even under a key that signed
-nothing. The root is input-addressed, so the signature check bites on both
-sides.
+The closure root is a built, input-addressed output rather than a path produced
+by `builtins.toFile`. Nix accepts a content-addressed path regardless of its
+signature because the store-path name commits to the contents. A fixture made
+only from content-addressed paths would therefore succeed with an unrelated
+signing key. The input-addressed root ensures that both clients enforce the
+signature check.
 
-Each question has its own oracle:
+Each operation has a separate oracle:
 
-- The offered paths are compared against `nix path-info --store file://<dir>`.
-  The fixture cache advertises `WantMassQuery`, as a published cache does,
-  because a cache that does not invite a batch is never given one and the
-  comparison would then be about the flag rather than about what the cache
-  holds.
-- The partition is compared against `nix-store --realise --dry-run`, over the
-  same targets in the same store.
-- The closure verdict is compared against whether `nix-store --realise` with
-  `require-sigs` on actually succeeds. The oracle is the fetch itself, so the
-  verdict answers to what happened rather than to a prediction.
+- Offered paths are compared with `nix path-info --store file://<dir>`. The
+  cache advertises `WantMassQuery`, as a published cache does, so Nix sends the
+  batch query being tested.
+- The build and fetch partition is compared with `nix-store --realise --dry-run`
+  for the same targets and store.
+- The closure verdict is compared with an actual `nix-store --realise` while
+  `require-sigs` is enabled. The real substitution result is the oracle rather
+  than a separate prediction.
 
-### The one message the suite reads
+### The dry-run message
 
-A dry run writes its plan to stderr and exits zero whichever way it goes, and
-nothing structured reports the same thing. This is the suite's only dependency
-on the text of a Nix message, and the parse is written to survive Nix rewording
-around it: it finds each of the three headings by the words that distinguish it,
-taking the singular and plural forms alike, and reads the paths indented
-underneath. The download and unpacked figures a heading carries are never read.
+A dry run writes its plan to stderr and exits zero for every plan. Nix provides
+no structured form of this result, so this is the only part of the suite that
+parses a Nix message. The parser identifies the three headings from their
+distinguishing words, accepts singular and plural forms, and reads the indented
+paths below them. It ignores the download and unpacked sizes in the headings.
 
 ## The store a configuration selects
 
-`nix config show` reports the `store` setting as it was written;
-`nix store info` reports the store the configuration resolved to. That
-resolution is what `resolveStoreBackend` answers, so `store info` is its oracle.
-A case puts one environment to both sides and compares which store each
-selected.
+`nix config show` reports the `store` setting as written, while `nix store info`
+reports the resolved store. `resolveStoreBackend` performs the same resolution,
+so the suite compares its result with `nix store info` under the same
+environment.
 
-Nix prints the resolved URL before it connects, so a configuration naming a
-daemon socket nothing is listening on still says which store was selected. The
-cases read the URL and not the exit status, because selecting a store and
-reaching it are separate questions and only the first is being asked.
+Nix prints the resolved URL before attempting a connection. A configuration can
+therefore reveal its selected store even when no daemon is listening at the
+configured socket. These cases compare the URL and ignore the exit status
+because they test store selection rather than connectivity.
 
-What the two sides can both state is the backend. Nix writes the store's
-directories into the URL only when they came from the URI's own parameters, so
-directories the environment names leave a plain `local`, and the daemon at its
-usual socket is written `daemon` where one at any other socket is written as the
-`unix://` URL naming it. Both of those are the daemon store.
+Both clients expose the selected backend, but Nix includes store directories in
+the URL only when the URI specifies them. Directories provided through the
+environment still produce a plain `local` URL. Nix reports the usual daemon
+socket as `daemon` and any other daemon socket as its `unix://` URL. Both forms
+map to the daemon-store backend.
 
-One case gives no overrides at all, so the machine's own filesystem decides:
-whether its state directory can be written, and whether a daemon is listening.
-Neither side is told the answer, which makes it a real comparison of the
-automatic selection wherever the suite runs.
+One case supplies no overrides and lets the machine select the backend from its
+filesystem and daemon state. This compares automatic selection under the actual
+environment in which the suite runs.
 
-### The store Nix falls back to
+### The user fallback store
 
-Nix sets up a store of the user's own for a Linux machine that has no Nix
-directories, and offers it only when nothing else could have been meant: a
-machine holding a Nix state directory has an install that names its own
-directories, so the fallback is off. Every machine with Nix installed holds one,
-which is every machine this suite runs on. The case therefore reports itself as
-skipped, naming which condition ruled it out, rather than passing on a
-comparison it never made.
+On Linux, Nix can create a per-user store when the machine has no Nix
+directories and no other store is implied. A machine with a Nix state directory
+already has an installation whose own directories take precedence, so Nix
+disables this fallback. Every machine that can run the suite has such an
+installation. The fallback case therefore reports itself as skipped, including
+the condition that prevented it from running. Unit tests cover this code path.
 
 ## Isolation
 
-A case must observe its own fixture and nothing else, so every Nix invocation
-runs under `isolatedEnvironment` from `tests/support/nix.ts`: an empty system
-`nix.conf` under a temporary `NIX_CONF_DIR`, and `NIX_USER_CONF_FILES` pointed
-at `/dev/null` so no user configuration is read at all. Fixtures live in
-temporary directories from `tests/support/filesystem.ts`, which are removed when
-the case finishes.
+Each case must see only its own fixture. Every Nix invocation runs under
+`isolatedEnvironment` from `tests/support/nix.ts`, which supplies an empty
+system `nix.conf` through a temporary `NIX_CONF_DIR` and points
+`NIX_USER_CONF_FILES` at `/dev/null`. Fixtures use temporary directories from
+`tests/support/filesystem.ts`, which removes them when the case finishes.
 
-The one invocation that runs with the machine's own environment is the flake
-build that resolves the oracle, which needs the machine's substituters to fetch
-it.
+The flake build that resolves the oracle is the only invocation that uses the
+machine's normal environment. It needs the machine's substituters to fetch the
+oracle.
 
-## Known fragilities
+## Known limitations
 
-- CI runs the suite on ubuntu only. Configuration behaviour that differs on
-  darwin is therefore checked on developer machines rather than on every pull
-  request.
-- Resolving the oracle evaluates the flake from the working tree. An uncommitted
-  change makes Nix warn about a dirty tree, which is harmless here, and it does
-  mean the resolution is not free on the first run of a session.
-- Which settings count as being in the four groups' domains is written out in
-  `tests/conformance/configuration.ts`, because `nix config show` carries no
-  statement of what a setting is for. A Nix that adds a setting to one of those
-  domains therefore joins the list by review when the oracle is bumped, rather
-  than announcing itself.
-- The adapter follows a `builders` setting's `@file` indirection with its own
-  reading of the machines-file rules, which is the same reading our client
-  makes. A case comparing the two would agree on a rule both got wrong.
-- Reading `nix config show` needs the `nix-command` experimental feature, which
-  the isolated configuration does not enable, so the invocation asks for it on
-  the command line. That leaves `experimental-features` assigned on the oracle's
-  side alone; no mapped field reads it.
-- `nix path-info` refuses a narinfo whose signature cannot be decoded, which the
-  narinfo parser on its own would take. The narinfo cases therefore describe the
-  acceptance of the whole read rather than of the parser alone, which is the
-  acceptance our client's own query has to match.
-- Reading a dry run's plan means reading the text Nix wrote, as described above.
-  A Nix that renames a heading fails those cases, which is the intended outcome,
-  but it fails them as a parse returning nothing rather than as a clear
-  mismatch.
-- The availability fixture builds into the host store, the only store that
-  builds on every platform, so it leaves a handful of paths there. They are
-  ordinary garbage-collectable paths, and the end-to-end suite does the same.
-- Our client asks for a trusted signature on a content-addressed path where Nix
-  waives one. That difference is deliberate and `offer-acceptance.ts` states
-  why, so the closure cases use an input-addressed root rather than asserting
-  over the waiver.
-- The store Nix falls back to cannot be exercised on a machine that has Nix
-  installed, which is every machine the suite runs on. Its case is always
-  reported as skipped, so that code path is covered by the unit tests alone.
+- CI runs the suite only on Ubuntu. Developers must run the Darwin-specific
+  configuration cases locally.
+- Resolving the oracle evaluates the flake from the working tree. Uncommitted
+  changes produce a harmless dirty-tree warning, and the first resolution in a
+  session may take some time.
+- `tests/conformance/configuration.ts` explicitly classifies settings into the
+  four configuration domains because `nix config show` does not describe each
+  setting's purpose. When Nix adds a relevant setting, the oracle update must
+  classify it during review.
+- The adapter parses a `builders` setting's `@file` indirection using the same
+  machines-file rules as our client. Both sides could therefore agree on an
+  incorrect interpretation.
+- `nix config show` requires the `nix-command` experimental feature. The
+  isolated configuration does not enable it, so the oracle command enables it
+  explicitly. This assigns `experimental-features` only on the oracle side, but
+  no mapped field reads the setting.
+- `nix path-info` rejects a narinfo with an undecodable signature even though
+  the narinfo parser alone would accept it. The cases compare the complete
+  narinfo read because that is the operation our substituter client performs.
+- The dry-run cases parse Nix's human-readable plan. If Nix renames a heading,
+  the parser returns no paths and the test fails without a direct mismatch
+  report.
+- The availability fixture builds in the host store because it is the only store
+  that can build on every platform. It leaves a few ordinary,
+  garbage-collectable paths there, as the end-to-end suite does.
+- Our client requires a trusted signature for a content-addressed path for which
+  Nix waives the requirement. `offer-acceptance.ts` documents this deliberate
+  difference. The closure cases use an input-addressed root so they do not rely
+  on the waiver.
+- The user fallback store cannot be exercised on a machine with Nix installed,
+  which includes every machine that runs the suite. Its case is always skipped,
+  and unit tests provide the only coverage for that path.
 
 [`packages/nix/src/setting-types.generated.ts`]:
   ../packages/nix/src/setting-types.generated.ts

@@ -1,13 +1,14 @@
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { createOctokitClient, RequestError } from '@cupboard/shared/octokit';
 import { z } from 'zod';
 
 import {
-	AmbiguousReleaseForCommitError,
 	CupboardResolutionJsonError,
 	GithubApiError,
 	InvalidInputError,
 	MalformedReleaseDiscoveryResponseError,
-	MalformedReleaseResponseError
+	MalformedReleaseResponseError,
+	ReleaseDiscoverySearchTooLargeError
 } from './errors.ts';
 import {
 	fetchRelease,
@@ -67,6 +68,8 @@ export interface ResolveCupboardOptions {
 
 export interface ResolveCupboardDependencies {
 	readonly fetch?: typeof fetch;
+	/** Raw release pages supplied by tests without Octokit's request scheduler. */
+	readonly releaseDiscoveryPage?: (cursor: string | null) => Promise<unknown>;
 }
 
 interface ReleaseAtCommit {
@@ -93,13 +96,13 @@ const releasePageInfoSchema = z.strictObject({
 });
 
 const releaseConnectionSchema = z.strictObject({
-	nodes: z
-		.array(releaseNodeSchema.nullable().transform((node) => node ?? undefined))
-		.transform((nodes) =>
-			nodes.flatMap((node) => (node === undefined ? [] : [node]))
-		),
+	nodes: z.unknown(),
 	pageInfo: releasePageInfoSchema
 });
+
+const releaseNodesSchema = z.array(
+	releaseNodeSchema.nullable().transform((node) => node ?? undefined)
+);
 
 const releaseRepositorySchema = z.strictObject({
 	releases: releaseConnectionSchema
@@ -138,7 +141,80 @@ query CupboardReleases($owner: String!, $name: String!, $cursor: String) {
   }
 }`;
 
+const publicRestApiUrl = 'https://api.github.com';
 const publicGraphqlUrl = 'https://api.github.com/graphql';
+
+// The query requests 100 releases at a time. One thousand candidates cover
+// roughly two decades of weekly releases, while twenty pages leave equal room
+// for sparse or nullable histories without permitting an open-ended cursor
+// chain.
+export const maximumReleaseDiscoveryPageEntries = 100;
+export const maximumReleaseDiscoveryCandidates = 1000;
+export const maximumReleaseDiscoveryPages = 20;
+
+interface GithubApiEndpoints {
+	readonly rest: string;
+	readonly graphql: string;
+}
+
+function credentialSafeEndpoint(input: string, value: string): URL {
+	let endpoint: URL;
+
+	try {
+		endpoint = new URL(value);
+	} catch {
+		throw new InvalidInputError(
+			input,
+			`${input} must be a credential-safe HTTPS URL`
+		);
+	}
+
+	if (
+		endpoint.protocol !== 'https:' ||
+		endpoint.username !== '' ||
+		endpoint.password !== '' ||
+		endpoint.hash !== ''
+	) {
+		throw new InvalidInputError(
+			input,
+			`${input} must be a credential-safe HTTPS URL`
+		);
+	}
+
+	return endpoint;
+}
+
+function defaultGraphqlEndpoint(rest: URL): string {
+	const pathname = rest.pathname.replace(/\/$/u, '');
+
+	if (pathname === '/api/v3') {
+		return new URL('/api/graphql', rest.origin).href;
+	}
+
+	if (rest.origin === new URL(publicRestApiUrl).origin) {
+		return publicGraphqlUrl;
+	}
+
+	return new URL('/graphql', rest.origin).href;
+}
+
+function githubApiEndpoints(
+	options: ResolveCupboardOptions
+): GithubApiEndpoints {
+	const restValue = options.githubApiUrl ?? publicRestApiUrl;
+	const rest = credentialSafeEndpoint('github-api-url', restValue);
+	const graphqlValue = options.githubGraphqlUrl ?? defaultGraphqlEndpoint(rest);
+	const graphql = credentialSafeEndpoint('github-graphql-url', graphqlValue);
+
+	if (graphql.origin !== rest.origin) {
+		throw new InvalidInputError(
+			'github-graphql-url',
+			'github-graphql-url must have the same origin as github-api-url'
+		);
+	}
+
+	return { rest: restValue, graphql: graphqlValue };
+}
 
 /** Encode a validated canonical coordinate for transport through a job output. */
 export function serialiseResolvedCupboard(resolved: ResolvedCupboard): string {
@@ -163,13 +239,12 @@ export async function resolveCupboard(
 	options: ResolveCupboardOptions,
 	dependencies: ResolveCupboardDependencies = {}
 ): Promise<ResolvedCupboard> {
+	const endpoints = githubApiEndpoints(options);
 	const [owner, name] = splitRepository(options.releaseRepository);
 	const providedVersion = nonBlank(options.cupboardVersion);
 	const client = createOctokitClient({
 		...(options.githubToken !== '' && { auth: options.githubToken }),
-		...(options.githubApiUrl !== undefined && {
-			baseUrl: options.githubApiUrl
-		}),
+		baseUrl: endpoints.rest,
 		...(dependencies.fetch !== undefined && {
 			request: { fetch: dependencies.fetch }
 		})
@@ -213,14 +288,18 @@ export async function resolveCupboard(
 	}
 
 	const workflowSha = canonicalWorkflowSha(options.workflowSha);
-	const releases = await releasesAtCommit(client, {
-		owner,
-		name,
-		repository: options.releaseRepository,
-		workflowSha,
-		workflowReference: options.workflowRef,
-		graphqlUrl: options.githubGraphqlUrl ?? publicGraphqlUrl
-	});
+	const releases = await releasesAtCommit(
+		client,
+		{
+			owner,
+			name,
+			repository: options.releaseRepository,
+			workflowSha,
+			workflowReference: options.workflowRef,
+			graphqlUrl: endpoints.graphql
+		},
+		dependencies.releaseDiscoveryPage
+	);
 
 	if (releases.length === 0) {
 		return {
@@ -276,22 +355,53 @@ type Octokit = ReturnType<typeof createOctokitClient>;
 
 async function releasesAtCommit(
 	client: Octokit,
-	options: ReleaseDiscoveryOptions
+	options: ReleaseDiscoveryOptions,
+	releaseDiscoveryPage?: (cursor: string | null) => Promise<unknown>
 ): Promise<readonly ReleaseAtCommit[]> {
 	let cursor = new URLSearchParams().get('cursor');
 	const visitedCursors = new Set<string>();
 	const matches = new Map<string, ReleaseAtCommit>();
+	let observedCandidates = 0;
+	let observedPages = 0;
 
 	for (;;) {
-		const page = await fetchReleasePage(client, options, cursor);
-
-		collectMatchingReleases(
-			matches,
-			page.data.repository.releases.nodes,
-			options.workflowSha
-		);
-
+		const page =
+			releaseDiscoveryPage === undefined
+				? await fetchReleasePage(client, options, cursor)
+				: parseReleasePage(await releaseDiscoveryPage(cursor));
+		const rawNodes = page.data.repository.releases.nodes;
 		const { hasNextPage, endCursor } = page.data.repository.releases.pageInfo;
+
+		if (!Array.isArray(rawNodes)) {
+			throw new MalformedReleaseDiscoveryResponseError();
+		}
+
+		observedCandidates += rawNodes.length;
+		observedPages += 1;
+
+		if (
+			rawNodes.length > maximumReleaseDiscoveryPageEntries ||
+			observedCandidates > maximumReleaseDiscoveryCandidates ||
+			observedPages > maximumReleaseDiscoveryPages ||
+			(hasNextPage && observedPages >= maximumReleaseDiscoveryPages)
+		) {
+			throw new ReleaseDiscoverySearchTooLargeError(
+				maximumReleaseDiscoveryPageEntries,
+				maximumReleaseDiscoveryCandidates,
+				maximumReleaseDiscoveryPages,
+				rawNodes.length,
+				observedCandidates,
+				observedPages
+			);
+		}
+
+		const nodes = releaseNodesSchema.safeParse(rawNodes);
+
+		if (!nodes.success) {
+			throw new MalformedReleaseDiscoveryResponseError({ cause: nodes.error });
+		}
+
+		collectMatchingReleases(matches, nodes.data, options.workflowSha);
 
 		if (!hasNextPage) {
 			break;
@@ -308,7 +418,7 @@ async function releasesAtCommit(
 	const releases = matches
 		.values()
 		.toArray()
-		.toSorted((left, right) => left.tag.localeCompare(right.tag));
+		.toSorted((left, right) => byCodeUnit(left.tag, right.tag));
 
 	if (releases.length <= 1) {
 		return releases;
@@ -324,20 +434,20 @@ async function releasesAtCommit(
 		return [selected];
 	}
 
-	throw new AmbiguousReleaseForCommitError(
-		options.repository,
-		options.workflowSha,
-		releases.map((release) => release.tag)
-	);
+	return releases.slice(0, 1);
 }
 
 function collectMatchingReleases(
 	matches: Map<string, ReleaseAtCommit>,
-	releases: readonly z.infer<typeof releaseNodeSchema>[],
+	releases: readonly (z.infer<typeof releaseNodeSchema> | undefined)[],
 	workflowSha: string
 ): void {
 	for (const release of releases) {
-		if (release.isDraft || release.tagCommit?.oid !== workflowSha) {
+		if (
+			release === undefined ||
+			release.isDraft ||
+			release.tagCommit?.oid !== workflowSha
+		) {
 			continue;
 		}
 
@@ -397,7 +507,11 @@ async function fetchReleasePage(
 		});
 	}
 
-	const parsed = releasePageSchema.safeParse(response.data);
+	return parseReleasePage(response.data);
+}
+
+function parseReleasePage(value: unknown): z.infer<typeof releasePageSchema> {
+	const parsed = releasePageSchema.safeParse(value);
 
 	if (!parsed.success) {
 		throw new MalformedReleaseDiscoveryResponseError({ cause: parsed.error });

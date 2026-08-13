@@ -36,22 +36,28 @@ archive includes the `cupboard-hook-relay` runtime helper. Older semver releases
 are rejected before their assets are downloaded. Arbitrary non-semver tags
 remain supported and are validated from their downloaded archive contents.
 
-The reusable workflows make `cupboard-version` optional. When it is omitted,
-they resolve the called workflow's full commit SHA to a published release. Any
-published tag qualifies; if no release exists for that commit, the workflow
-builds cupboard from the same immutable checkout. If several releases point to
-one commit, an exact tag-pinned `uses` reference selects that tag; a SHA or
-branch reference is ambiguous and the workflow asks for an explicit version.
+The reusable workflows make `cupboard-version` optional. Call them through an
+immutable published release tag such as `v1.2.3`, and they select the release at
+that tag. They verify that the release points to the workflow's commit before
+installing it.
+
+A workflow pinned by commit SHA can also omit `cupboard-version`. It selects a
+release published for that commit, or builds cupboard from the immutable
+workflow checkout if no release exists. When several releases point to the same
+commit, the resolver selects the lexicographically first tag.
 
 Pass an exact tag or `latest` only when deliberately selecting a released CLI
 independently of the workflow code. Once a release is selected, checksum,
 attestation, tag and source-commit verification are fail-closed; a broken
 release never falls back to source.
 
-Pin both reusable workflows to a full commit SHA and retain the release as a
-comment on the `uses` line. The comment is for update tools and human review;
-the workflow resolves the SHA itself. Release API calls use the workflow token,
-which also avoids unnecessary rate-limit failures for public repositories.
+For routine release updates, pin the caller to an immutable release tag and
+configure its tenant trust rule once with `refs/tags/v*`. Updating the tag in
+the caller then upgrades the workflow code and CLI together without another
+tenant change. A tenant can instead trust one full commit SHA at a time when an
+administrator must approve every workflow revision. Release API calls use the
+workflow token, which also avoids unnecessary rate-limit failures for public
+repositories.
 
 The reusable workflows require GitHub Cloud. They fail before checkout on GitHub
 Enterprise Server because GHES does not expose the `job.workflow_*` identity
@@ -88,13 +94,11 @@ repeating them.
 tenant=https://cupboard.example.workers.dev/t/acme
 repo=acme/app
 cupboard_version=vX.Y.Z
-cupboard_sha=0123456789abcdef0123456789abcdef01234567
+workflow=underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml
 ```
 
-Replace `vX.Y.Z` with a real cupboard release tag from the [releases page][] and
-replace the example digest with that release's full commit SHA before
-continuing. The version remains beside the SHA in workflow comments for update
-tools and human review.
+Choose an immutable cupboard release from the [releases page][] and replace
+`vX.Y.Z` with its tag before continuing.
 
 [releases page]: https://github.com/underwhelmingperformance/cupboard/releases
 
@@ -106,22 +110,19 @@ caches, and trust rules for this repository's PR and `main` runs:
 
 ```bash
 cupboard github setup "$tenant" --repo "$repo" \
-  --workflow-ref "underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@$cupboard_sha"
+  --workflow-ref "$workflow@refs/tags/v*"
 ```
 
-The `--workflow-ref` pins the trust rules to the exact commit SHA in the
-caller's `uses` line. Setup verifies through GitHub that the workflow file
-exists at that immutable commit, so the workflow code and the claims the tenant
-trusts name the same revision. When that commit has a release, the workflow
-installs its verified binary; otherwise it builds the checked-out revision.
+The `--workflow-ref` pattern allows this workflow at any `v*` release tag. The
+caller still selects one immutable release, and the workflow verifies that its
+release and source commit agree before installation. The pattern makes
+cupboard's release publishers part of the tenant's trust boundary, but it needs
+to be configured only once.
 
 Re-running converges state that already matches. A different grace policy or
-reuse view is reported as drift and never replaced. Trust-rule differences are
-handled separately: a rule pinned to a different exact workflow reference can
-safely remain even when its other claims or grants differ, while removing the
-rules that can also match the new token must be confirmed. This lets setup add
-the new release beside the old one without an authority gap. What each piece of
-this configuration is, and the commands to write it by hand, are under
+reuse view is reported as drift and never replaced. The tag-pattern trust rules
+already cover later matching releases. What each piece of this configuration is,
+and the commands to write it by hand, are under
 [Manual configuration](#manual-configuration).
 
 One consequence deserves calling out before running it: the grace policy changes
@@ -132,9 +133,9 @@ by collection, which a cache without the marker never is.
 
 ### 3. Declare the targets
 
-Expose a `cupboardOutputs` attribute from the flake. Each entry names an
-installable and carries its derivation path, Nix system, permitted GitHub runner
-label and the suffix used beneath the workflow's retention-root prefix:
+Expose a `cupboardOutputs` attribute from the flake. Each entry identifies an
+installable and includes its derivation path, Nix system, permitted GitHub
+runner label, and the suffix for the workflow's retention-root prefix:
 
 ```nix
 cupboardOutputs = let
@@ -184,9 +185,7 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    # Replace the example digest with the release commit. Keep the version
-    # comment for Dependabot/Renovate and human review.
-    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@vX.Y.Z
     with:
       # The tenant URL is an ordinary value in this file; edit it here.
       url: https://cupboard.example.workers.dev/t/acme
@@ -195,22 +194,22 @@ jobs:
       reuse-view: pull-requests
 ```
 
-The preset derives the cache, root prefix and TTL from the triggering event: a
-`pull_request` run gets its own `pr-<number>` cache with a 14-day TTL, exactly
-the name and root the PR trust rule routes. A run whose ref is the configured
-`branch` gets the default cache, permanent retention under
-`github:<repository>/<branch>`, and the reuse view. `branch` defaults to `main`
-and must match the value passed to `cupboard github setup --branch`; another ref
-is refused in the configure job before planning or building. Under the preset,
-`reuse-view` therefore applies to trusted branch runs only, so `main` adopts PR
-builds while each PR stays destination-only. A repository whose caches or roots
-follow a different layout passes `cache`, `root-prefix` and `ttl` explicitly
-instead; the preset and those inputs are mutually exclusive, so the two never
-mix. The workflow reference is pinned to one release commit, so the action code
-and the CLI it invokes upgrade together and a cupboard change never silently
-alters a repository's CI.
+The preset derives the cache, root prefix, and TTL from the triggering event. A
+`pull_request` run uses a `pr-<number>` cache with a 14-day TTL. The PR trust
+rule grants access to that cache and its retention root. A run whose ref matches
+the configured `branch` uses the default cache, permanent retention under
+`github:<repository>/<branch>`, and the reuse view.
+
+`branch` defaults to `main` and must match the value passed to
+`cupboard github setup --branch`. The configure job rejects another ref before
+planning or building. The preset therefore applies `reuse-view` only to trusted
+branch runs: `main` can adopt PR builds, while each PR reads only from its own
+destination. A repository with another cache or root layout can pass `cache`,
+`root-prefix`, and `ttl` explicitly. These inputs are mutually exclusive with
+the preset. Pinning the workflow to one release tag upgrades its action code and
+CLI together and prevents an unreviewed cupboard change from altering CI.
 [Move to a new cupboard release](#move-to-a-new-cupboard-release) describes the
-overlap needed to change that tag without interrupting publishing.
+update.
 
 ### 5. Verify the setup
 
@@ -219,28 +218,24 @@ Check the invariants the first run depends on before opening a pull request:
 ```bash
 cupboard github check "$tenant" --repo "$repo" \
   --root-prefix "github:$repo/main" \
-  --workflow-ref "underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@$cupboard_sha"
+  --workflow-ref "$workflow@refs/tags/$cupboard_version"
 ```
 
-The check requires the full commit currently used by the caller. It verifies
-through GitHub that this names a real workflow at that immutable commit, then
-evaluates the stored trust rules against claims assembled from the supplied
-repository, branch and exact workflow reference. This catches a misspelt
-workflow path or release before the first run, proves that a stored exact
-workflow rule admits the concrete release, and verifies that each matched rule's
-stored grants cover the caches and roots the run requests. A workflow that
-instead matches an interactive administrator rule fails the check, even when
-that rule's wildcard grant would allow the requested operations. It does not
-inspect the caller workflow, so the supplied reference must still match its
-`uses` line. The check also verifies the grace policy's coverage and duration,
-the view's priority against the destination's as actually served, and that the
-root prefix nests under the granted root. An invariant it cannot verify with
-what it was given (no `--root-prefix`, say) is reported by name and the exit is
-distinct from success.
+The check requires the exact release tag used by the caller. It uses GitHub to
+verify that the tag belongs to an immutable published release and contains the
+workflow. It then constructs the expected claims from the repository, branch,
+and workflow reference and evaluates the stored trust rules against them. This
+detects a misspelt workflow path or release before the first run. It also checks
+that the tag-pattern rule accepts the reference and that every matched rule
+grants access to the requested caches and roots.
 
-A legacy rule ending in `@refs/tags/v*` does not match a SHA-pinned
-`job_workflow_ref`. Run setup with the full SHA before changing the caller;
-retain the old rule until runs using it have finished.
+The check fails if only an interactive administrator rule matches, even when
+that rule's wildcard grant would allow the operations. It does not inspect the
+caller workflow, so the supplied reference must still match the caller's `uses`
+line. The check also verifies grace-policy coverage and duration, the reuse
+view's effective priority over the destination, and whether the root prefix is
+within the grant. If an input is missing for a check, such as `--root-prefix`,
+the command reports the unchecked invariant and returns a non-success status.
 
 Listing the configuration by hand remains available (`cupboard policy list`,
 `cupboard reuse-view list`, `cupboard oidc-trust list`), but a listing shows
@@ -260,16 +255,13 @@ is for doing that, or for understanding exactly what the command wrote. Set one
 more variable first, the reusable workflow reference the trust rules pin:
 
 ```bash
-workflow=underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@$cupboard_sha
+trusted_workflow="$workflow@refs/tags/v*"
 ```
 
-The `workflow` value is matched, character for character, against the
-`job_workflow_ref` claim in the OIDC token of every CI push, so its exact shape
-matters: it names cupboard's repository, where the reusable workflow file lives,
-not your own, and carries the same full SHA as the caller. Changing either part,
-or pinning a different commit from the caller's, produces a trust rule that can
-never match, and every push is then refused. See
-[docs/trust-rules.md](./trust-rules.md) for how the claim works.
+The `trusted_workflow` value produces an anchored pattern for the
+`job_workflow_ref` claim in every CI push's OIDC token. It refers to cupboard's
+repository, where the reusable workflow file lives, and admits only `v*` release
+tags. See [docs/trust-rules.md](./trust-rules.md) for how the claim works.
 
 On the tenant, give every cache a retention grace period, define a view over the
 PR caches, and trust this repository's PR and `main` runs when they use
@@ -283,11 +275,11 @@ cupboard reuse-view set "$tenant" pull-requests \
 
 cupboard oidc-trust add-github-pr "$tenant" \
   --repo "$repo" \
-  --job-workflow-ref "$workflow"
+  --job-workflow-ref "$trusted_workflow"
 
 cupboard oidc-trust add-github-branch "$tenant" \
   --repo "$repo" --branch main \
-  --job-workflow-ref "$workflow"
+  --job-workflow-ref "$trusted_workflow"
 ```
 
 The empty grace prefix covers the default cache and every named cache, including
@@ -329,11 +321,10 @@ steps:
       trusted-public-key: cupboard-1:...
 ```
 
-The action outputs `cupboard-path`, its canonical `cupboard` coordinate, the
-resolved release tag as `cupboard-version`, and, when Nix config is generated,
-`nix-config-file`. `cupboard-version` is empty when the canonical coordinate
-selects source rather than a release; `cupboard` remains the authoritative
-acquisition identity in both modes.
+The action outputs `cupboard-path`, the canonical `cupboard` coordinate, and the
+resolved release tag as `cupboard-version`. When it generates Nix configuration,
+it also outputs `nix-config-file`. `cupboard-version` is empty for a source
+build; `cupboard` identifies the acquisition in both source and release modes.
 
 Reusable workflows pass a canonical release-or-source JSON coordinate through
 the `cupboard` input. Direct action callers normally leave that internal
@@ -379,8 +370,10 @@ steps:
         ./result
 ```
 
-The action outputs `cupboard-path`. Pass that path to another cupboard action to
-reuse the already-installed executable.
+The action outputs `cupboard-path` and the inspected `cupboard-version`. Pass
+the path to another cupboard action to reuse the already-installed executable.
+It also reports `uploaded-paths`, `reused-blobs`, `skipped-paths`, and
+`uploaded-bytes` from the completed push.
 
 `paths` is newline-delimited. Use block scalar YAML for paths so spaces and
 other shell-sensitive characters are not reinterpreted. The helper validates and
@@ -465,9 +458,10 @@ empty, which `actions/push` accepts as no attestations.
 
 Set `require-provenance` when publication must not succeed without provenance
 for every final output. If a final output came from a cache or was already
-present, the action rebuilds that final derivation locally before adding it to
-the receipt; its dependencies may still be substituted. This is useful when a
-failed signing or attachment step will be retried after the path was pushed.
+present, the action rebuilds that final derivation on the selected build store
+before adding it to the receipt; its dependencies may still be substituted. This
+is useful when a failed signing or attachment step will be retried after the
+path was pushed.
 
 The action outputs `bundle-path`, the signed bundle covering every qualifying
 path, alongside `checksums-file` and `subject-count`. `id-token: write` lets the
@@ -543,7 +537,7 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@vX.Y.Z
     with:
       url: https://cupboard.example.workers.dev/t/acme
       cache: pr-${{ github.event.pull_request.number }}
@@ -558,10 +552,10 @@ first time something is pushed to it, so per-PR and per-release caches need no
 setup step.
 
 The workflow appends the builder's Nix system to `root`, so this example retains
-under `github:acme/app/pr-7/x86_64-linux`. A root holds a single build: pushing
-to it again replaces what it retains. Appending the system keeps platforms out
-of each other's way, so a Linux build and a macOS build of the same pull request
-each stay retained under their own root.
+under `github:acme/app/pr-7/x86_64-linux`. A root retains a single build; a
+later push replaces its paths. Appending the system keeps platforms out of each
+other's way, so a Linux build and a macOS build of the same pull request each
+stay retained under their own root.
 
 The remaining inputs: `installable` picks what to build (the default is `.`, the
 flake at the repository root), `attest` turns provenance signing off for tenants
@@ -574,11 +568,10 @@ while dependencies may still substitute. This makes a rerun after a failed
 signing or attachment step retry the missing provenance instead of succeeding
 with an empty receipt.
 
-Pin this workflow to a full release commit SHA. It fetches its local action code
-from that same commit, and a trust rule that pins its `job_workflow_ref` names
-the same SHA. Keep the release version as the `uses` comment. With no explicit
-`cupboard-version`, the workflow finds the release for that SHA and verifies its
-provenance before installation.
+Pin this workflow to an immutable published release tag. With no explicit
+`cupboard-version`, the workflow selects that release and verifies its source
+commit and provenance before installation. A `refs/tags/v*` tenant rule can
+trust this workflow across routine release updates.
 
 ### Publishing a target manifest
 
@@ -662,7 +655,7 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@vX.Y.Z
     with:
       url: https://cupboard.example.workers.dev/t/acme
       targets: .#cupboardOutputs
@@ -680,20 +673,20 @@ jobs:
       input_ssh_key: ${{ secrets.FLAKE_INPUT_SSH_KEY }}
 ```
 
-Any builder Nix can reach directly over SSH works. `builder_ssh_config` carries
-per-host connection settings as ssh_config `Host` blocks, and it is a secret so
-an allowlisted `SetEnv` token may appear in it. The allowlist covers endpoint,
-transport tuning, algorithm and liveness settings. Commands, proxies,
-forwarding, identity sources, multiplexing, verbose logging, `Include` and
-`Match` are rejected; pass the private key only through `builder_ssh_key`.
-nixbuild.net's auth tokens, for example, travel in the SSH connection
-environment:
+Any builder that Nix can reach directly over SSH works. `builder_ssh_config`
+provides per-host connection settings as ssh_config `Host` blocks. It is a
+secret because an allowlisted `SetEnv` directive may contain a token. The
+allowlist covers endpoints, transport tuning, algorithms, liveness settings, and
+`SetEnv`. It rejects commands, proxies, forwarding, identity sources,
+multiplexing, verbose logging, `Include`, and `Match`. Supply the private key
+only through `builder_ssh_key`. For example, nixbuild.net passes authentication
+tokens in the SSH connection environment:
 
-Keep the builders specification inline and on one line, separating multiple
-builders with semicolons. Put `-` in its third (SSH-key) column, and do not put
-a non-empty `ssh-key` in a builder store URI. Pass the one managed private key
-through `builder_ssh_key`; this keeps builder selection from adding another
-identity or selecting the private-flake identity by its runner path.
+Keep the builders specification on one line and separate multiple builders with
+semicolons. Put `-` in the third, SSH-key column, and do not set a non-empty
+`ssh-key` parameter in a builder store URI. Pass the managed private key through
+`builder_ssh_key`. This prevents a builder entry from adding another identity or
+selecting the private-flake key by its runner path.
 
 Host-key verification is mandatory for every enabled builder. Put each builder's
 public host key in `builder-known-hosts`; use OpenSSH's `[host]:port` form when
@@ -722,36 +715,35 @@ passed through separately: `actions/plan` accepts them as
 `read-user`/`read-password` and sends them as an HTTP `Authorization: Basic`
 header on every narinfo probe.
 
-The plan first asks cupboard to retain each target whose output paths are
-already servable, then prunes what it can through an advisory pre-filter against
-the destination: a cohort whose targets are all already covered spawns no job at
-all. Every surviving cohort gets its own job in the cohort matrix. A cohort is
-one target by default; the manifest opts a group of targets into one cohort with
-a shared `cohort` label, so a multi-target cohort shares one job and one
-`nix build` invocation rather than fanning out further.
+The plan first retains targets whose output paths are already available from
+cupboard. It then applies an advisory destination pre-filter. When that filter
+covers every target in a cohort, the workflow omits the cohort job. Every
+remaining cohort receives one matrix job. A cohort contains one target by
+default. Assign the same `cohort` label to several targets to build them in one
+job with one `nix build` invocation.
 
-Each cohort job computes its own availability partition and capacity check
-against its own store, independently of the plan's advisory pre-filter: which
-targets are already served and only need attaching, which the tenant already
-holds elsewhere and can be published by reference through the reuse view, which
-an upstream substituter already serves and are deliberately left there, and
-which must actually build. Only the last group reaches `nix build --keep-going`,
-and the job keeps its out-links until the push completes, so nothing collects
-the built closure out from under it in the meantime. The push that follows
-publishes the targets (built or attached) and any further built outputs that are
-not a target's own output, references the publish-by-reference paths from the
-reuse view, and establishes each target's own retention root; the left-upstream
-paths are not pushed at all; they stay served from the reuse view or the
-upstream substituter, and the cohort's own counts and left-upstream files record
-that choice. A target that shares a dependency with another cohort simply builds
-it again; Nix substitutes it from the destination cache once a prior cohort's
-push has made it available there, or from the per-run root described below
-sooner than that.
+Each cohort job repeats the availability partition and capacity check against
+its selected store. This result is authoritative even if the advisory pre-filter
+is stale. The partition separates targets into four groups:
 
-Every cohort job's push also joins one retention root shared for the whole run,
-with a TTL set by `run-root-ttl` (default `24h`), so a cohort's shared output
-stays reachable for the rest of the run even before its own target root is
-established: a later cohort can substitute it there instead of rebuilding it.
+- already in the destination and needing only retention;
+- present elsewhere in the tenant and publishable by reference through the reuse
+  view;
+- available from an upstream substituter and deliberately left there;
+- requiring a build.
+
+Only the final group reaches `nix build --keep-going`. The job keeps its
+out-links until publication finishes so the store cannot collect the built
+closure. It publishes built targets, retained targets, and any additional built
+outputs. It publishes reuse-view paths by reference and sets each target's
+retention root. Upstream paths are not copied into cupboard; the cohort records
+them in its counts and left-upstream files.
+
+When cohorts share a dependency, each cohort still requests it. Nix substitutes
+the dependency after an earlier cohort publishes it to the destination or
+retains it under the per-run root. Every cohort contributes to this shared root,
+whose TTL is set by `run-root-ttl` and defaults to `24h`. This keeps shared
+outputs available throughout the run, even before their target roots are set.
 Cohort jobs write a build receipt, verify its subjects against the committed
 destination, sign those accepted subjects, and attach the resulting provenance
 bundle after publication. A substituted or already-valid path may be published
@@ -774,16 +766,16 @@ targets directly without publishing them.
 
 ### Building against a remote store
 
-A `store` input naming an `ssh-ng://` store URI hands the whole cohort to that
-store. The plan partitions availability with the remote store's own answers. For
-each missing target, the cohort evaluates and materialises the root derivation
-locally, verifies it still matches the planned derivation, and copies its
-derivation closure to the selected store. It then builds through Nix's worker
-protocol, holds temporary roots over the keyed result outputs, and streams their
-metadata and NAR bytes into cupboard before setting each declared root. The
-built output closure never enters the runner's local store, so the runner's disk
-is bounded by evaluation and the derivation closure rather than by the realised
-closure.
+A `store` input containing an `ssh-ng://` URI sends the whole cohort to that
+store. The plan queries the remote store when it partitions path availability.
+For each missing target, the cohort evaluates and materialises the root
+derivation locally, verifies that it still matches the planned derivation, and
+copies its derivation closure to the selected store. It then builds through
+Nix's worker protocol and adds temporary roots for the keyed result outputs.
+Before setting the declared retention roots, the workflow streams the outputs'
+metadata and NAR bytes into cupboard. The realised closure never enters the
+runner's local store, so local disk use is bounded by evaluation and the
+derivation closure.
 
 Every selected remote output path must be known during planning. Floating
 content-addressed outputs are rejected by the plan and must be built and
@@ -819,7 +811,7 @@ jobs:
       attestations: write
       contents: read
       id-token: write
-    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@vX.Y.Z
     with:
       url: https://cupboard.example.workers.dev/t/acme
       targets: .#cupboardOutputs
@@ -831,21 +823,22 @@ jobs:
       store_ssh_key: ${{ secrets.NIX_STORE_SSH_KEY }}
 ```
 
-The host-key line is not secret. Its hostname must use OpenSSH's `[host]:port`
-form when the URI selects a nonstandard port. On the default SSH port, the
-`store` URI may instead carry Nix's `base64-ssh-public-host-key` parameter. A
-nonstandard port always requires `store-known-hosts`: native Nix operations do
-not key that URI-only fixture by `[host]:port`. When the URI-only mechanism is
-selected, the generated SSH policy also fixes the port at 22 so a later
-`store-ssh-config` block cannot move the connection away from the key's scope.
-One supported pinning mechanism is required; the workflow never accepts a direct
-store on first use. Do not put a non-empty `ssh-key` in the store URI: pass the
-managed private key through `store_ssh_key`, so the store cannot select another
-job identity by its runner path. As with builder configuration,
+The host-key line is not secret. When the URI selects a nonstandard port, use
+OpenSSH's `[host]:port` form. On port 22, the `store` URI may instead use Nix's
+`base64-ssh-public-host-key` parameter. A nonstandard port always requires
+`store-known-hosts` because native Nix operations do not scope the URI parameter
+to `[host]:port`. When the URI supplies the host key, the generated SSH policy
+also fixes the port at 22. A later `store-ssh-config` block therefore cannot
+redirect the connection outside the key's scope.
+
+The workflow requires one of these host-key pinning mechanisms and never uses
+trust on first use. Do not set a non-empty `ssh-key` parameter in the store URI.
+Pass the managed private key through `store_ssh_key` so the URI cannot select
+another job identity by its runner path. As with builder configuration,
 `store_ssh_config` accepts only allowlisted endpoint, transport tuning,
-algorithm, liveness and `SetEnv` settings scoped under `Host` blocks. Commands,
-proxies, forwarding, identity sources, multiplexing, `Include` and `Match` are
-rejected.
+algorithm, liveness, and `SetEnv` settings under `Host` blocks. It rejects
+commands, proxies, forwarding, identity sources, multiplexing, `Include`, and
+`Match`.
 
 Host-key pinning and client authentication are independent. Without a
 `store_ssh_key`, the generated transport fails closed by disabling the runner's
@@ -899,53 +892,30 @@ Routine changes to a working setup, and where each one's state lives.
 
 ### Move to a new cupboard release
 
-Resolve the release tag to its full commit SHA, then establish trust for that
-exact revision before updating the caller's `uses:` reference:
+When the tenant trusts the workflow at `refs/tags/v*`, check the new immutable
+release before updating the caller:
 
 ```bash
 new_cupboard_version=vA.B.C
-new_cupboard_sha=0123456789abcdef0123456789abcdef01234567
 workflow=underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml
 
-cupboard github setup "$tenant" --repo "$repo" \
-  --workflow-ref "$workflow@$new_cupboard_sha"
 cupboard github check "$tenant" --repo "$repo" \
   --root-prefix "github:$repo/main" \
-  --workflow-ref "$workflow@$new_cupboard_sha"
+  --workflow-ref "$workflow@refs/tags/$new_cupboard_version"
 ```
 
 Check models GitHub's default `sub` claim forms. Workflows using an environment
 or an organisation or repository custom subject template are not currently
 supported by this check.
 
-Setup recognises rules pinned to a different exact workflow reference as
-superseded and safe to retain, even when an older release used different claims
-or grants. It verifies that each retained release reference still resolves on
-GitHub, installs the new rules, then offers the superseded rules for optional
-removal. A superseded rule whose reference is not pinned to a release is
-retained too, flagged in the report because it trusts future edits to the
-workflow. Leave superseded rules unselected while runs using the old reference
-can still be active. Check then proves that a run carrying the new reference can
-obtain every grant it needs while the old caller still works.
+Update the caller's `uses:` reference to `$new_cupboard_version`. The existing
+tag-pattern trust rule accepts the new workflow token, so the release update
+requires no tenant write or administrator credential.
 
-Update the caller workflow's `uses:` reference to `$new_cupboard_sha` and retain
-`# $new_cupboard_version` on that line. The workflow resolves the SHA to that
-release automatically. Once runs using the old reference have finished, run
-setup again and select the superseded rules for removal:
-
-```bash
-cupboard github setup "$tenant" --repo "$repo" \
-  --workflow-ref "$workflow@$new_cupboard_sha"
-```
-
-Rules that can also match the new workflow token are conflicts, not superseded
-rules. Setup asks for one confirmation covering every conflict before it changes
-anything; declining leaves the tenant unchanged, and `--yes` confirms an
-unattended run. A rule pinning claims setup cannot check (an `environment` pin,
-say) might not match the new token, so it is never removed unattended: setup
-retains it, reports it as possibly conflicting, and offers it for removal only
-interactively. Repeat any non-default `--branch` or `--grace` values on both
-setup calls.
+A tenant that deliberately trusts one exact tag or commit instead must run
+`github setup` for each release before updating its caller. Keep the previous
+rule until runs using that reference have finished, then run setup again to
+remove the superseded rule.
 
 ### Add a target or a platform
 
@@ -974,6 +944,6 @@ Check, in order: the run passed `reuse-view` (the quickstart's caller sets it
 for `push` events only); the PR's cache still exists and still matches the
 view's `pr-` prefix; the PR actually published the path (its own run's target
 jobs succeeded); and the grace or TTL window has not lapsed. If several PR
-caches hold semantically different results for the same path, the view answers
-with a miss on purpose and the run builds locally;
-[docs/reuse-views.md](./reuse-views.md) explains that conflict rule.
+caches hold semantically different results for the same path, the view returns a
+miss and the run builds locally; [docs/reuse-views.md](./reuse-views.md)
+explains that conflict rule.

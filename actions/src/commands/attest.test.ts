@@ -151,8 +151,8 @@ describe('attestationSubjects', () => {
 	});
 });
 
-// One version-3 receipt subject: its NAR hash is the digest byte repeated, so a
-// rendered checksum is readable against the byte the case names.
+// Creates a version 3 subject whose repeated digest byte is easy to recognise
+// in rendered checksums.
 function provenancedSubject(
 	storePath: StorePathString,
 	digestByte: string,
@@ -167,8 +167,7 @@ function provenancedSubject(
 	};
 }
 
-// A machine holding none of the receipt's subjects, which is what a run
-// attesting a remote store's work looks like.
+// Represents a coordinator that does not hold any receipt subjects locally.
 const heldNowhere: SelectedPathInfos = new Map();
 
 describe('provenancedSubjects', () => {
@@ -190,8 +189,7 @@ describe('provenancedSubjects', () => {
 		}
 	];
 
-	// The store of a machine that still holds what it built, under the NAR hash
-	// and deriver its receipt recorded.
+	// A local store entry matching the receipt's NAR hash and deriver.
 	const holdsBuiltPath: SelectedPathInfos = new Map([
 		[builtPath, attestPathInfo(builtPath, 0xaa)]
 	]);

@@ -4,10 +4,9 @@ import { NamedMaterial, parseNamedMaterial } from './named-material.ts';
 import { type NixKeyName } from './scalars.ts';
 
 /**
- * A narinfo `Sig` entry, rendered as `<name>:<base64>`: the detached signature
- * over a path's fingerprint, labelled with the name of the key that produced
- * it. A verifier trusts a set of named keys, so the name decides which key a
- * signature is checked against.
+ * A narinfo `Sig` entry containing a key name and a base64-encoded detached
+ * signature over the path fingerprint. The key name selects the trusted key
+ * used for verification.
  */
 export class NixSignature extends NamedMaterial {
 	/** The signature a named key produced over a fingerprint. */
@@ -17,9 +16,8 @@ export class NixSignature extends NamedMaterial {
 
 	/**
 	 * The well-formed signatures among a narinfo's `Sig` lines. A narinfo is
-	 * signed by whoever served it, so an entry that is not `<name>:<base64>` is
-	 * dropped: it names no key and verifies nothing, and the remaining entries
-	 * still decide whether the path is trusted.
+	 * signed by whoever served it, so malformed entries are ignored. The
+	 * remaining signatures still determine whether the path is trusted.
 	 */
 	static parseAll(values: readonly string[]): readonly NixSignature[] {
 		return values
@@ -33,10 +31,9 @@ export class NixSignature extends NamedMaterial {
 }
 
 /**
- * Whether the value is a signature Nix reads: a key name, a colon, and base64
- * material that decodes. Nix refuses a whole narinfo over a `Sig` line it
- * cannot read, so a reader deciding what a substituter holds reads a line the
- * same way a verifier does.
+ * Whether Nix can parse the value as a key name, a colon and base64 signature
+ * material. The narinfo reader and verifier use the same validation because
+ * Nix rejects an entire narinfo when a `Sig` line is malformed.
  */
 export function isNixSignature(value: string): boolean {
 	return parseNamedMaterial(value) !== undefined;

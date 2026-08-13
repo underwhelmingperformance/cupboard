@@ -19,7 +19,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { createGithubReporter } from '@cupboard/reporter';
-import { createOctokitClient, RequestError } from '@cupboard/shared/octokit';
+import { createOctokitClient } from '@cupboard/shared/octokit';
 import {
 	AttestationPredicateTypeMismatchError,
 	AttestationSubjectMismatchError,
@@ -31,11 +31,15 @@ import {
 	AttestationNotFoundError,
 	AttestationSourceMismatchError,
 	AttestationVerificationFailedError,
+	ChecksumMismatchError,
 	DownloadAssetTooLargeError,
+	GithubApiError,
 	InstalledReleaseVersionMismatchError,
 	InvalidInputError,
+	InvalidReleaseAssetUrlError,
 	MalformedReleaseResponseError,
 	NoReleaseFoundError,
+	ReleaseAttestationBundleTooLargeError,
 	ReleaseCompatibilityError,
 	ReleaseCoordinateMismatchError,
 	ReleaseInstallationIncompleteError,
@@ -43,6 +47,7 @@ import {
 	ReleaseInstallationLockLostError,
 	ReleaseInstallationLockOwnerAliveError,
 	ReleaseInstallationLockStateError,
+	ReleaseInstallationProcessIdentityError,
 	ReleaseInstallationStateError,
 	UnsupportedPlatformError
 } from './errors.ts';
@@ -57,6 +62,8 @@ import {
 	fetchRelease,
 	installCupboard,
 	maximumReleaseAssetBytes,
+	maximumReleaseAttestationCandidates,
+	maximumReleaseAttestationPages,
 	normaliseVersion,
 	parseChecksums,
 	prepareReleaseExecutable,
@@ -176,6 +183,67 @@ describe('installCupboard compatibility', () => {
 
 		expect(requests).toStrictEqual([
 			expect.stringContaining('/repos/owner/repo/releases/tags/v0.0.18')
+		]);
+	});
+
+	it('authenticates asset downloads against the configured GHES API origin', async () => {
+		const installDirectory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-release-install-')
+		);
+		const archiveName = assetNameFor();
+		const apiUrl = 'https://github.example.test/api/v3';
+		const archiveUrl = `${apiUrl}/repos/owner/repo/releases/assets/1`;
+		const checksumsUrl = `${apiUrl}/repos/owner/repo/releases/assets/2`;
+		const assetRequests: {
+			readonly url: string;
+			readonly authorization: string | null;
+		}[] = [];
+		const fetcher: typeof fetch = (input, init) => {
+			const request = new Request(input, init);
+
+			if (request.url.endsWith('/releases/tags/v0.0.19')) {
+				return Promise.resolve(
+					Response.json({
+						tag_name: 'v0.0.19',
+						assets: [
+							{ name: archiveName, url: archiveUrl },
+							{ name: 'checksums.txt', url: checksumsUrl }
+						]
+					})
+				);
+			}
+
+			assetRequests.push({
+				url: request.url,
+				authorization: request.headers.get('authorization')
+			});
+
+			return Promise.resolve(
+				new Response(
+					request.url === archiveUrl
+						? 'archive'
+						: `${'0'.repeat(64)}  ${archiveName}\n`
+				)
+			);
+		};
+
+		await expect(
+			installCupboard(
+				{
+					installDirectory,
+					releaseRepository: 'owner/repo',
+					version: 'v0.0.19',
+					includePrereleases: false,
+					githubToken: 'secret-token',
+					environment: { GITHUB_API_URL: apiUrl }
+				},
+				createGithubReporter(),
+				{ fetch: fetcher }
+			)
+		).rejects.toBeInstanceOf(ChecksumMismatchError);
+		expect(assetRequests).toStrictEqual([
+			{ url: archiveUrl, authorization: 'Bearer secret-token' },
+			{ url: checksumsUrl, authorization: 'Bearer secret-token' }
 		]);
 	});
 });
@@ -848,7 +916,7 @@ describe('publishReleaseArchive', () => {
 		});
 	});
 
-	it('refuses to reclaim an expired lease whose PID is still live', async () => {
+	it('reclaims an expired lease whose PID belongs to a replacement process', async () => {
 		const installDirectory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-release-install-')
 		);
@@ -863,7 +931,91 @@ describe('publishReleaseArchive', () => {
 			`${JSON.stringify({
 				pid: process.pid,
 				instanceId: '00000000-0000-4000-8000-000000000000',
-				leaseId
+				leaseId,
+				processStartedAt: 'former process start'
+			})}\n`
+		);
+		const archive = await releaseArchive({
+			cupboard: "#!/bin/sh\nprintf 'v1.0.0\\n'\n",
+			'cupboard-hook-relay': 'helper'
+		});
+
+		await publishReleaseArchive(archive, installDirectory, 'v1.0.0', {
+			processIdentity: () => Promise.resolve('replacement process start')
+		});
+
+		const stateEntries = await readdir(stateDirectory);
+		expect({
+			helper: await readFile(
+				path.join(installDirectory, 'cupboard-hook-relay'),
+				'utf8'
+			),
+			lockState: stateEntries.filter(
+				(entry) => entry.includes('lock') || entry.startsWith('.lease-')
+			)
+		}).toStrictEqual({ helper: 'helper', lockState: [] });
+	});
+
+	it('refuses to acquire a lock without a process identity', async () => {
+		const installDirectory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-release-install-')
+		);
+		const archive = await releaseArchive({
+			cupboard: "#!/bin/sh\nprintf 'v1.0.0\\n'\n",
+			'cupboard-hook-relay': 'helper'
+		});
+
+		await expect(
+			publishReleaseArchive(archive, installDirectory, 'v1.0.0', {
+				processIdentity: () => Promise.resolve(undefined)
+			})
+		).rejects.toBeInstanceOf(ReleaseInstallationProcessIdentityError);
+		await expect(
+			readdir(path.join(installDirectory, '.cupboard-releases'))
+		).resolves.toStrictEqual(['generations']);
+	});
+
+	it('reads macOS process identity in a canonical environment', async () => {
+		const installDirectory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-release-install-')
+		);
+		const archive = await releaseArchive({
+			cupboard: "#!/bin/sh\nprintf 'v1.0.0\\n'\n",
+			'cupboard-hook-relay': 'helper'
+		});
+		const processEnvironments: (NodeJS.ProcessEnv | undefined)[] = [];
+
+		await publishReleaseArchive(archive, installDirectory, 'v1.0.0', {
+			processPlatform: 'darwin',
+			processCommandRunner: (_command, _arguments, options) => {
+				processEnvironments.push(options.environment);
+
+				return Promise.resolve({ stdout: 'Tue Aug 12 16:00:00 2026\n' });
+			}
+		});
+
+		expect(processEnvironments).toStrictEqual([
+			expect.objectContaining({ LC_ALL: 'C', TZ: 'UTC0' })
+		]);
+	});
+
+	it('does not reclaim an expired lease from the same process identity', async () => {
+		const installDirectory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-release-install-')
+		);
+		const stateDirectory = path.join(installDirectory, '.cupboard-releases');
+		const leaseId = '00000000-0000-4000-8000-000000000001';
+		const leasePath = path.join(stateDirectory, `.lease-${leaseId}`);
+		await mkdir(stateDirectory);
+		await writeFile(leasePath, 'lease\n');
+		await utimes(leasePath, 0, 0);
+		await writeFile(
+			path.join(stateDirectory, 'install.lock'),
+			`${JSON.stringify({
+				pid: process.pid,
+				instanceId: '00000000-0000-4000-8000-000000000000',
+				leaseId,
+				processStartedAt: 'current process start'
 			})}\n`
 		);
 		const archive = await releaseArchive({
@@ -872,11 +1024,13 @@ describe('publishReleaseArchive', () => {
 		});
 
 		await expect(
-			publishReleaseArchive(archive, installDirectory, 'v1.0.0')
+			publishReleaseArchive(archive, installDirectory, 'v1.0.0', {
+				processIdentity: () => Promise.resolve('current process start')
+			})
 		).rejects.toBeInstanceOf(ReleaseInstallationLockOwnerAliveError);
 		await expect(
 			readFile(path.join(stateDirectory, 'install.lock'), 'utf8')
-		).resolves.toContain(`"pid":${String(process.pid)}`);
+		).resolves.toContain('"processStartedAt":"current process start"');
 	});
 
 	it('reclaims an expired lease once its PID is provably absent', async () => {
@@ -894,7 +1048,8 @@ describe('publishReleaseArchive', () => {
 			`${JSON.stringify({
 				pid: 999_999_999,
 				instanceId: '00000000-0000-4000-8000-000000000000',
-				leaseId
+				leaseId,
+				processStartedAt: 'former process start'
 			})}\n`
 		);
 		const archive = await releaseArchive({
@@ -981,7 +1136,8 @@ describe('publishReleaseArchive', () => {
 			`${JSON.stringify({
 				pid: 999_999_999,
 				instanceId: '00000000-0000-4000-8000-000000000000',
-				leaseId
+				leaseId,
+				processStartedAt: 'former process start'
 			})}\n`
 		);
 		await link(lockPath, `${lockPath}.reaper`);
@@ -1040,6 +1196,14 @@ describe('publishReleaseArchive', () => {
 			`${JSON.stringify({
 				pid: 1,
 				instanceId: '00000000-0000-4000-8000-000000000001'
+			})}\n`
+		],
+		[
+			'lease without a process identity',
+			`${JSON.stringify({
+				pid: 1,
+				instanceId: '00000000-0000-4000-8000-000000000001',
+				leaseId: '00000000-0000-4000-8000-000000000002'
 			})}\n`
 		]
 	])('rejects a %s release lock without waiting', async (_kind, contents) => {
@@ -1537,6 +1701,117 @@ describe('publishReleaseArchive', () => {
 });
 
 describe('downloadAsset', () => {
+	it.each([
+		['an off-origin URL', 'https://objects.example.test/cupboard'],
+		['an HTTP URL', 'http://api.github.com/cupboard'],
+		['an embedded username', 'https://user@api.github.com/cupboard'],
+		['an embedded password', 'https://user:secret@api.github.com/cupboard'],
+		['a fragment', 'https://api.github.com/cupboard#archive'],
+		['a malformed URL', 'not a URL']
+	])(
+		'rejects %s before making an authenticated request',
+		async (_name, url) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-download-')
+			);
+			const destination = path.join(directory, 'cupboard.tar.gz');
+			let wasFetched = false;
+			const error = await rejectionOf(
+				downloadAsset(
+					{ name: 'cupboard.tar.gz', url },
+					destination,
+					'secret-token',
+					{
+						fetch: () => {
+							wasFetched = true;
+							return Promise.resolve(new Response());
+						}
+					}
+				)
+			);
+
+			expect(error).toMatchObject({
+				name: 'InvalidReleaseAssetUrlError',
+				assetName: 'cupboard.tar.gz'
+			});
+			expect(error).toBeInstanceOf(InvalidReleaseAssetUrlError);
+			expect(wasFetched).toBe(false);
+			await expect(stat(destination)).rejects.toMatchObject({ code: 'ENOENT' });
+		}
+	);
+
+	it.each([
+		{
+			name: 'GitHub.com',
+			assetUrl: 'https://api.github.com/repos/owner/repo/releases/assets/1',
+			githubApiOrigin: 'https://api.github.com'
+		},
+		{
+			name: 'GitHub Enterprise Server',
+			assetUrl:
+				'https://github.example.test/api/v3/repos/owner/repo/releases/assets/1',
+			githubApiOrigin: 'https://github.example.test'
+		}
+	])(
+		'authenticates a release asset on $name',
+		async ({ assetUrl, githubApiOrigin }) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-download-')
+			);
+			const destination = path.join(directory, 'cupboard.tar.gz');
+			let request: Request | undefined;
+
+			await downloadAsset(
+				{ name: 'cupboard.tar.gz', url: assetUrl },
+				destination,
+				'secret-token',
+				{
+					fetch: (input, init) => {
+						request = new Request(input, init);
+						return Promise.resolve(new Response('archive'));
+					},
+					githubApiOrigin
+				}
+			);
+
+			expect({
+				url: request?.url,
+				authorization: request?.headers.get('authorization')
+			}).toStrictEqual({
+				url: assetUrl,
+				authorization: 'Bearer secret-token'
+			});
+		}
+	);
+
+	it('cancels a non-success response body before reporting the failure', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-download-'));
+		const destination = path.join(directory, 'cupboard.tar.gz');
+		let wasCancelled = false;
+		const response = new Response(
+			new ReadableStream<Uint8Array>({
+				pull(controller) {
+					controller.enqueue(Uint8Array.of(1));
+				},
+				cancel() {
+					wasCancelled = true;
+				}
+			}),
+			{ status: 404 }
+		);
+
+		await expect(
+			downloadAsset(
+				{ name: 'cupboard.tar.gz', url: 'https://api.github.com/cupboard' },
+				destination,
+				'',
+				{ fetch: () => Promise.resolve(response) }
+			)
+		).rejects.toBeInstanceOf(GithubApiError);
+		expect(wasCancelled).toBe(true);
+		await expect(stat(destination)).rejects.toMatchObject({ code: 'ENOENT' });
+	});
+
 	it('streams the response to disk while hashing it', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-download-'));
 		const destination = path.join(directory, 'cupboard.tar.gz');
@@ -1553,7 +1828,7 @@ describe('downloadAsset', () => {
 		);
 
 		const result = await downloadAsset(
-			{ name: 'cupboard.tar.gz', url: 'https://example.test/cupboard' },
+			{ name: 'cupboard.tar.gz', url: 'https://api.github.com/cupboard' },
 			destination,
 			'',
 			{ fetch: () => Promise.resolve(response) }
@@ -1580,7 +1855,7 @@ describe('downloadAsset', () => {
 
 		await expect(
 			downloadAsset(
-				{ name: 'cupboard.tar.gz', url: 'https://example.test/cupboard' },
+				{ name: 'cupboard.tar.gz', url: 'https://api.github.com/cupboard' },
 				destination,
 				'',
 				{ fetch: () => Promise.resolve(response) }
@@ -1604,7 +1879,7 @@ describe('downloadAsset', () => {
 
 		await expect(
 			downloadAsset(
-				{ name: 'cupboard.tar.gz', url: 'https://example.test/cupboard' },
+				{ name: 'cupboard.tar.gz', url: 'https://api.github.com/cupboard' },
 				destination,
 				'',
 				{ fetch: () => Promise.resolve(response), maximumBytes: 8 }
@@ -1628,7 +1903,7 @@ describe('downloadAsset', () => {
 			})
 		);
 		const pending = downloadAsset(
-			{ name: 'cupboard.tar.gz', url: 'https://example.test/cupboard' },
+			{ name: 'cupboard.tar.gz', url: 'https://api.github.com/cupboard' },
 			destination,
 			'',
 			{
@@ -1662,7 +1937,7 @@ describe('downloadAsset', () => {
 				);
 			});
 		const download = downloadAsset(
-			{ name: 'cupboard.tar.gz', url: 'https://example.test/cupboard' },
+			{ name: 'cupboard.tar.gz', url: 'https://api.github.com/cupboard' },
 			destination,
 			'',
 			{ fetch: fetcher, signal: controller.signal }
@@ -1865,6 +2140,16 @@ function stubAttestationFetch(attestations: unknown[]): typeof fetch {
 
 		return Promise.resolve(new Response('not found', { status: 404 }));
 	};
+}
+
+function snappyLiteral(value: unknown): ArrayBuffer {
+	const json = new TextEncoder().encode(JSON.stringify(value));
+
+	if (json.length >= 60) {
+		throw new Error('test Snappy literal must use the one-byte length form');
+	}
+
+	return Uint8Array.of(json.length, (json.length - 1) << 2, ...json).buffer;
 }
 
 function verifiedAs(digest: string, commit: string): VerifiedBundle {
@@ -2130,6 +2415,7 @@ describe('verifyReleaseAttestation', () => {
 		const secondBundleUrl =
 			'https://api.github.com/repos/owner/repo/attestations/second';
 		const bundleRequests: string[] = [];
+		const cancelledBundleRequests: string[] = [];
 		let verificationCalls = 0;
 		const fetcher: typeof fetch = (input, init) => {
 			const url = attestationInputUrl(input);
@@ -2137,7 +2423,19 @@ describe('verifyReleaseAttestation', () => {
 			if (url === firstBundleUrl) {
 				bundleRequests.push(url);
 
-				return Promise.resolve(new Response('gone', { status: 404 }));
+				return Promise.resolve(
+					new Response(
+						new ReadableStream<Uint8Array>({
+							pull(controller) {
+								controller.enqueue(Uint8Array.of(1));
+							},
+							cancel() {
+								cancelledBundleRequests.push(url);
+							}
+						}),
+						{ status: 404 }
+					)
+				);
 			}
 
 			if (url === secondBundleUrl) {
@@ -2165,6 +2463,7 @@ describe('verifyReleaseAttestation', () => {
 			})
 		).resolves.toBe(attestationTagCommit);
 		expect(bundleRequests).toStrictEqual([firstBundleUrl, secondBundleUrl]);
+		expect(cancelledBundleRequests).toStrictEqual([firstBundleUrl]);
 		expect(verificationCalls).toBe(1);
 	});
 
@@ -2203,8 +2502,8 @@ describe('verifyReleaseAttestation', () => {
 		}
 
 		expect(error.attempts).toBe(2);
-		expect(error.cause).toBeInstanceOf(RequestError);
-		expect((error.cause as RequestError).status).toBe(410);
+		expect(error.cause).toBeInstanceOf(GithubApiError);
+		expect((error.cause as GithubApiError).status).toBe(410);
 	});
 
 	it('preserves cancellation while fetching an attestation candidate', async () => {
@@ -2311,6 +2610,66 @@ describe('verifyReleaseAttestation', () => {
 		]);
 	});
 
+	it('rejects an attestation page that exceeds the candidate bound', async () => {
+		const archive = await writeArchive();
+		const attestations = Array.from(
+			{ length: maximumReleaseAttestationCandidates + 1 },
+			(_value, index) => ({ bundle: { index } })
+		);
+		const error = await rejectionOf(
+			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
+				fetch: stubAttestationFetch(attestations),
+				verify: () =>
+					Promise.resolve(verifiedAs(archive.digest, attestationTagCommit))
+			})
+		);
+
+		expect(error).toMatchObject({
+			name: 'ReleaseAttestationSearchTooLargeError',
+			maximumCandidates: maximumReleaseAttestationCandidates,
+			maximumPages: maximumReleaseAttestationPages,
+			observedCandidates: maximumReleaseAttestationCandidates + 1,
+			observedPages: 1
+		});
+	});
+
+	it('rejects an attestation search with another page beyond the page bound', async () => {
+		const archive = await writeArchive();
+		const attestationRequests: string[] = [];
+		const fetcher: typeof fetch = (input) => {
+			const url = new URL(attestationInputUrl(input));
+
+			if (!url.pathname.includes('/attestations/')) {
+				return Promise.resolve(Response.json({ sha: attestationTagCommit }));
+			}
+
+			attestationRequests.push(url.href);
+			const page = attestationRequests.length;
+			const headers =
+				page <= maximumReleaseAttestationPages
+					? {
+							link: `<${url.origin}${url.pathname}?after=${String(page + 1)}>; rel="next"`
+						}
+					: undefined;
+
+			return Promise.resolve(Response.json({ attestations: [] }, { headers }));
+		};
+		const error = await rejectionOf(
+			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
+				fetch: fetcher
+			})
+		);
+
+		expect(error).toMatchObject({
+			name: 'ReleaseAttestationSearchTooLargeError',
+			maximumCandidates: maximumReleaseAttestationCandidates,
+			maximumPages: maximumReleaseAttestationPages,
+			observedCandidates: 0,
+			observedPages: maximumReleaseAttestationPages
+		});
+		expect(attestationRequests).toHaveLength(maximumReleaseAttestationPages);
+	});
+
 	it('fetches a same-origin bundle URL with authentication', async () => {
 		const archive = await writeArchive();
 		const bundleUrl = 'https://api.github.com/repos/owner/repo/attestations/1';
@@ -2353,6 +2712,167 @@ describe('verifyReleaseAttestation', () => {
 		expect(
 			requests.find((request) => request.url === bundleUrl)?.authorization
 		).toBe('token release-token');
+	});
+
+	it('decompresses the Snappy bundle returned by the GitHub API', async () => {
+		const archive = await writeArchive();
+		const bundleUrl = 'https://api.github.com/repos/owner/repo/attestations/1';
+		const bundle = { fetched: true };
+		const fetchedBundles: unknown[] = [];
+		const fetcher: typeof fetch = (input, init) => {
+			const request = new Request(input, init);
+
+			if (request.url === bundleUrl) {
+				return Promise.resolve(
+					new Response(snappyLiteral(bundle), {
+						headers: { 'content-type': 'application/x-snappy' }
+					})
+				);
+			}
+
+			return stubAttestationFetch([{ bundle_url: bundleUrl }])(input, init);
+		};
+
+		await expect(
+			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
+				fetch: fetcher,
+				verify: (bytes) => {
+					fetchedBundles.push(JSON.parse(new TextDecoder().decode(bytes)));
+
+					return Promise.resolve(
+						verifiedAs(archive.digest, attestationTagCommit)
+					);
+				}
+			})
+		).resolves.toBe(attestationTagCommit);
+		expect(fetchedBundles).toStrictEqual([bundle]);
+	});
+
+	it('rejects an oversized Snappy bundle before reading its body', async () => {
+		const archive = await writeArchive();
+		const bundleUrl = 'https://api.github.com/repos/owner/repo/attestations/1';
+		let wasCancelled = false;
+		const fetcher: typeof fetch = (input, init) => {
+			const request = new Request(input, init);
+
+			if (request.url === bundleUrl) {
+				return Promise.resolve(
+					new Response(
+						new ReadableStream<Uint8Array>({
+							pull(controller) {
+								controller.enqueue(Uint8Array.of(0));
+							},
+							cancel() {
+								wasCancelled = true;
+							}
+						}),
+						{
+							headers: {
+								'content-length': '9',
+								'content-type': 'application/x-snappy'
+							}
+						}
+					)
+				);
+			}
+
+			return stubAttestationFetch([{ bundle_url: bundleUrl }])(input, init);
+		};
+		const error = await rejectionOf(
+			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
+				fetch: fetcher,
+				maximumBundleBytes: 8
+			})
+		);
+
+		expect(error).toBeInstanceOf(AttestationVerificationFailedError);
+
+		if (!(error instanceof AttestationVerificationFailedError)) {
+			throw error;
+		}
+
+		expect(error.cause).toBeInstanceOf(ReleaseAttestationBundleTooLargeError);
+		expect(wasCancelled).toBe(true);
+	});
+
+	it('bounds a streamed JSON bundle before parsing it', async () => {
+		const archive = await writeArchive();
+		const bundleUrl = 'https://api.github.com/repos/owner/repo/attestations/1';
+		const fetcher: typeof fetch = (input, init) => {
+			const request = new Request(input, init);
+
+			if (request.url === bundleUrl) {
+				return Promise.resolve(
+					new Response(
+						new ReadableStream<Uint8Array>({
+							start(controller) {
+								const bytes = new TextEncoder().encode('{"a":1234}');
+								controller.enqueue(bytes.slice(0, 5));
+								controller.enqueue(bytes.slice(5));
+								controller.close();
+							}
+						}),
+						{ headers: { 'content-type': 'application/json' } }
+					)
+				);
+			}
+
+			return stubAttestationFetch([{ bundle_url: bundleUrl }])(input, init);
+		};
+		const error = await rejectionOf(
+			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
+				fetch: fetcher,
+				maximumBundleBytes: 8
+			})
+		);
+
+		expect(error).toBeInstanceOf(AttestationVerificationFailedError);
+
+		if (!(error instanceof AttestationVerificationFailedError)) {
+			throw error;
+		}
+
+		expect(error.cause).toBeInstanceOf(ReleaseAttestationBundleTooLargeError);
+	});
+
+	it('rejects a malformed Snappy bundle before verification', async () => {
+		const archive = await writeArchive();
+		const bundleUrl = 'https://api.github.com/repos/owner/repo/attestations/1';
+		let verificationCalls = 0;
+		const fetcher: typeof fetch = (input, init) => {
+			const request = new Request(input, init);
+
+			if (request.url === bundleUrl) {
+				return Promise.resolve(
+					new Response(Uint8Array.of(0xff).buffer, {
+						headers: { 'content-type': 'application/x-snappy' }
+					})
+				);
+			}
+
+			return stubAttestationFetch([{ bundle_url: bundleUrl }])(input, init);
+		};
+		const error = await rejectionOf(
+			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
+				fetch: fetcher,
+				verify: () => {
+					verificationCalls += 1;
+
+					return Promise.resolve(
+						verifiedAs(archive.digest, attestationTagCommit)
+					);
+				}
+			})
+		);
+
+		expect(error).toBeInstanceOf(AttestationVerificationFailedError);
+
+		if (!(error instanceof AttestationVerificationFailedError)) {
+			throw error;
+		}
+
+		expect(error.cause).toBeInstanceOf(MalformedReleaseResponseError);
+		expect(verificationCalls).toBe(0);
 	});
 
 	it('does not send authentication to an off-origin bundle URL', async () => {

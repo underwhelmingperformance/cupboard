@@ -354,7 +354,7 @@ export class UnexpectedUploadDecisionError extends CliError {
 
 export type UploadNegotiationMismatch = 'missing' | 'duplicate' | 'unexpected';
 
-/** A negotiate or preview response that is not an exact answer to its request. */
+/** A negotiate or preview response that does not match its request. */
 export class UploadNegotiationMismatchError extends CliError {
 	constructor(
 		public readonly mismatch: UploadNegotiationMismatch,
@@ -362,7 +362,7 @@ export class UploadNegotiationMismatchError extends CliError {
 		public readonly narHash: string
 	) {
 		super(
-			`Upload negotiation response carried a ${mismatch} decision: ${storePathHash} ${narHash}`
+			`Upload negotiation response mismatch (${mismatch} decision): ${storePathHash} ${narHash}`
 		);
 		this.name = 'UploadNegotiationMismatchError';
 	}
@@ -410,8 +410,8 @@ export class UploadGraceFactsUnsupportedError extends CliError {
 export class PushIncompleteError extends CliError {
 	constructor(public readonly failedPaths: readonly string[]) {
 		super(
-			`${String(failedPaths.length)} path(s) did not finish; the cache holds ` +
-				`only what committed. Re-run cupboard push to retry: ${failedPaths.join(', ')}`
+			`${String(failedPaths.length)} path(s) did not finish. The cache contains ` +
+				`only committed paths. Re-run cupboard push to retry: ${failedPaths.join(', ')}`
 		);
 		this.name = 'PushIncompleteError';
 	}
@@ -429,8 +429,8 @@ export class PathsNotConfirmedError extends CliError {
 
 /**
  * A confirm closure larger than one request splits into sequential batches,
- * and a later batch's request failed. The batches that answered have already
- * extended their deadlines server-side; the counts say how far the run got.
+ * and a later request failed. Successful batches have already extended their
+ * deadlines on the server. The counts show how many batches completed.
  */
 export class ConfirmIncompleteError extends CliError {
 	constructor(
@@ -595,9 +595,9 @@ export class RunRootTtlWithoutRunRootError extends CliUsageError {
 export class ReceiptFileRequiresStoreError extends CliUsageError {
 	constructor() {
 		super(
-			'--receipt-file requires --store: a receipt attributes its subjects ' +
-				'to the build store the run selected, and a push against the store ' +
-				'Nix itself would use has no such selection to record'
+			'--receipt-file requires --store because the receipt must identify ' +
+				"the selected build store. A push using Nix's default store has no " +
+				'explicit store selection to record.'
 		);
 		this.name = 'ReceiptFileRequiresStoreError';
 	}
@@ -607,10 +607,9 @@ export class BuildStoreRequiresAlreadyHeldError extends CliUsageError {
 	constructor() {
 		super(
 			'--store with --receipt-file requires --already-held (repeated for ' +
-				'each path, or --no-already-held for none): a receipt attributes a ' +
-				'subject to this run only when the build store did not already ' +
-				'hold it, and a push that never names what it held cannot tell one ' +
-				'from the other'
+				'each path, or --no-already-held for none). Without the pre-build ' +
+				'path set, cupboard cannot distinguish outputs built by this run ' +
+				'from paths already present in the store.'
 		);
 		this.name = 'BuildStoreRequiresAlreadyHeldError';
 	}
@@ -621,10 +620,9 @@ export class BuildStoreRequiresClaimableError extends CliUsageError {
 		super(
 			'--store with --receipt-file requires --claimable (repeated for ' +
 				'each path whose realisation this invocation observed, or ' +
-				'--no-claimable for none): a receipt attributes a subject to this ' +
-				'run only with current-invocation evidence, and a push that never ' +
-				'names that evidence cannot distinguish a build from an output that ' +
-				'appeared before or during the run'
+				'--no-claimable for none). Without evidence from this invocation, cupboard ' +
+				'cannot distinguish a build from an output that appeared before or ' +
+				'during the run.'
 		);
 		this.name = 'BuildStoreRequiresClaimableError';
 	}
@@ -995,6 +993,19 @@ export class BuildEventMalformedError extends BuildEventRejectedError {
 	}
 }
 
+/** A hook connection exceeded the fixed build-event wire-size bound. */
+export class BuildEventTooLargeError extends BuildEventRejectedError {
+	constructor(
+		public readonly maximumBytes: number,
+		public readonly observedBytes: number
+	) {
+		super(
+			`Rejected a build event after ${String(observedBytes)} bytes; the limit is ${String(maximumBytes)} bytes`
+		);
+		this.name = 'BuildEventTooLargeError';
+	}
+}
+
 /**
  * Streaming publication needs the daemon: temporary roots exist only behind
  * it, and the daemonless local backend has no connection to hold one on. The
@@ -1193,6 +1204,16 @@ export class CohortsFileInvalidError extends CliUsageError {
 			options
 		);
 		this.name = 'CohortsFileInvalidError';
+	}
+}
+
+/** A provenance-required build did not claim every selected final output. */
+export class BuildProvenanceIncompleteError extends Error {
+	constructor(public readonly missingPaths: readonly string[]) {
+		super(
+			`The build did not produce current-run provenance for: ${missingPaths.join(', ')}`
+		);
+		this.name = 'BuildProvenanceIncompleteError';
 	}
 }
 

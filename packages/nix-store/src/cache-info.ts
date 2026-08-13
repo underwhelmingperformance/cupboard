@@ -8,7 +8,7 @@ import {
 
 /**
  * The store directory a cupboard cache serves. A binary cache serves exactly
- * one, which is why `nix-cache-info` carries `StoreDir`: a client substituting
+ * one, which is why `nix-cache-info` contains `StoreDir`: a client substituting
  * from the cache must be running the same store. This is the single statement
  * of that fact, so what the cache advertises and what it accepts agree.
  */
@@ -22,11 +22,10 @@ export class CacheInfo {
 	);
 
 	/**
-	/**
 	 * Parses a `nix-cache-info` document. `StoreDir` and `Priority` are
 	 * required and refused with {@link CacheInfoParseError} when absent or
 	 * malformed, so a consumer comparing priorities reads the cache's real
-	 * value, never a guessed default. An absent `WantMassQuery` reads as
+	 * value instead of a guessed default. An absent `WantMassQuery` is
 	 * disabled and unknown lines are ignored.
 	 */
 	static parse(source: string): CacheInfo {

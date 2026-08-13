@@ -72,7 +72,7 @@ describe('Derivation.parse', () => {
 		{
 			name: 'an output that does not hold every field',
 			aterm: 'Derive([("out","","")],[],[],"aarch64-darwin","/bin/sh",[],[])',
-			reason: 'an output holds 3 fields where one has 4'
+			reason: 'an output has 3 fields instead of 4'
 		},
 		{
 			name: 'an input derivation that does not name its outputs',
@@ -177,6 +177,45 @@ describe('Derivation.inputDerivations', () => {
 			'"aarch64-darwin","/bin/sh",[],[])';
 
 		expect(() => Derivation.parse(aterm).inputDerivations).toThrow(
+			MalformedDerivationError
+		);
+	});
+});
+
+describe('Derivation.inputSources', () => {
+	const source = '/nix/store/5z8pqx1kd9cr4hm2j7f6n0wvg3sbyala-source';
+	const patch = '/nix/store/7x1bh9j5q3n6d8a0fkmr2cvwsp4yzlgc-fix.patch';
+
+	it.each([
+		{
+			name: 'no sources at all',
+			sources: '',
+			expected: []
+		},
+		{
+			name: 'one source',
+			sources: `"${source}"`,
+			expected: [source]
+		},
+		{
+			name: 'several sources in derivation order',
+			sources: `"${source}","${patch}"`,
+			expected: [source, patch]
+		}
+	])('reads $name', ({ sources, expected }) => {
+		const aterm =
+			`Derive([("out","${outputPath}","","")],[],[${sources}],` +
+			'"aarch64-darwin","/bin/sh",[],[])';
+
+		expect(Derivation.parse(aterm).inputSources).toStrictEqual(expected);
+	});
+
+	it('refuses an input source that is not a store path', () => {
+		const aterm =
+			`Derive([("out","${outputPath}","","")],[],[["${source}"]],` +
+			'"aarch64-darwin","/bin/sh",[],[])';
+
+		expect(() => Derivation.parse(aterm).inputSources).toThrow(
 			MalformedDerivationError
 		);
 	});

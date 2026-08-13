@@ -16,7 +16,7 @@ import { describeConformance } from './oracle.ts';
 
 /**
  * The in-scope settings these four groups do not model. The suite reports them
- * rather than passing over them, and asserting the list keeps a setting from
+ * rather than ignoring them. Asserting the list prevents a setting from
  * being modelled, or dropped by Nix, without the record moving with it.
  */
 const recordedUnmodelledSettings: readonly string[] = [
@@ -135,8 +135,7 @@ describeConformance('the resolved Nix configuration', (oracle) => {
 			}
 		},
 		{
-			// Nix holds these as lists rather than sets, so an entry stated
-			// twice is held twice and the resolved value says so.
+			// Nix preserves duplicate entries in these list settings.
 			name: 'a substituter and a trusted key each stated twice',
 			fixture: {
 				nixConf:
@@ -152,8 +151,7 @@ describeConformance('the resolved Nix configuration', (oracle) => {
 			}
 		},
 		{
-			// The platforms and the features Nix does hold as sets, so the same
-			// document states one of each however often it names them.
+			// Nix stores platforms and features as sets, so duplicates collapse.
 			name: 'a platform and a feature each stated twice',
 			fixture: {
 				nixConf:
@@ -162,10 +160,10 @@ describeConformance('the resolved Nix configuration', (oracle) => {
 			}
 		},
 		{
-			// A store reference is a URI, a name nix has for a store, or a path
+			// A store reference is a URI, a recognised store type, or a path
 			// to one. A scheme nix has no store for is read all the same: what
-			// refuses that is opening the store, not reading the setting. A path
-			// names a local store rooted there, and both sides resolve it to
+			// rejects that scheme only when opening the store. A path refers to a
+			// local store rooted there, and both sides resolve it to
 			// that store's `local://` URI.
 			name: 'substituters named every way a store URI can be named',
 			fixture: {
@@ -198,7 +196,7 @@ describeConformance('the resolved Nix configuration', (oracle) => {
 			}
 		},
 		{
-			// The comparison reads the oracle's answer from JSON, which carries no
+			// The comparison reads the oracle result from JSON, which cannot represent a
 			// count past the range a number states exactly, so the widths compared
 			// here are the ones that fit.
 			name: 'the widest counts the compared settings hold',
@@ -297,7 +295,7 @@ describeConformance('the resolved Nix configuration', (oracle) => {
 			fixture: { nixConf: 'log-lines = many\n' }
 		},
 		// Nix reads a few settings by a shape their kind of value does not
-		// carry, and refuses a configuration stating one any other way.
+		// express, and refuses configurations that use another shape.
 		{
 			name: 'a netrc file that is not an absolute path',
 			fixture: { nixConf: 'netrc-file = netrc\n' }
@@ -357,8 +355,8 @@ describeConformance('the resolved Nix configuration', (oracle) => {
 
 	// Exact: nix joins a relative include onto the directory of the file the
 	// line was written in and then requires an absolute path. NIX_CONFIG is a
-	// value rather than a file, so the refusal is about the path itself and
-	// stands whatever the working directory happens to hold.
+	// value rather than a file, so it has no directory for resolving a relative
+	// include.
 	it('refuses a relative include written in NIX_CONFIG over the path itself', async () => {
 		const resolved = await resolveFixture(oracle, {
 			nixConf: '',
@@ -403,9 +401,9 @@ describeConformance('the resolved Nix configuration', (oracle) => {
 	// The microarchitecture levels come from this machine's own CPU, so only an
 	// x86-64 Linux machine states any and only there does comparing the
 	// platforms police how they are derived. Elsewhere the case reports what
-	// ruled it out rather than passing on a comparison it never made. Nix
-	// states levels only when it was built against libcpuid, so a run naming
-	// none on such a machine says how this oracle was built.
+	// ruled it out instead of passing without a comparison. Nix reports levels
+	// only when built against libcpuid, so an empty result on such a machine
+	// describes the oracle build.
 	it('states the microarchitecture levels nix states', async (context) => {
 		if (process.platform !== 'linux' || process.arch !== 'x64') {
 			context.skip(`${process.platform}/${process.arch} states no levels`);

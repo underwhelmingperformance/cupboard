@@ -17,9 +17,8 @@ import {
 import { describeConformance } from './oracle.ts';
 
 /**
- * Building the closure and signing a cache holding it costs a build, so the
- * whole file shares one fixture. Each case that realises anything makes its own
- * store, so no case is answered by what an earlier one fetched.
+ * The file shares one built and signed cache fixture. Cases that realise paths
+ * use separate target stores so earlier fetches cannot affect later results.
  */
 const prepared: { fixture?: AvailabilityFixture } = {};
 
@@ -72,8 +71,8 @@ describeConformance('what a store can obtain', (oracle) => {
 		expect(answers.client).toStrictEqual(answers.oracle);
 	});
 
-	// Exact: a substituter written as a path names the store rooted there, and
-	// both sides read that store's own answer for the path. A store publishes
+	// Exact: a substituter written as a path refers to the store rooted there,
+	// and both sides read path metadata from its database. A store publishes
 	// no narinfo, so neither side states a transfer size.
 	it('reports what a store-rooted substituter offers, as nix does', async () => {
 		const current = fixture();
@@ -90,7 +89,7 @@ describeConformance('what a store can obtain', (oracle) => {
 		}).toStrictEqual({ client: answers.oracle, downloadSize: 0 });
 	});
 
-	// Exact: what realising the targets would take, partitioned into what a
+	// Exact: the work required to realise the targets, partitioned into what a
 	// build has to make, what a fetch can supply, and what nobody can produce.
 	it.each<{
 		name: string;

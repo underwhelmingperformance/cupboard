@@ -169,7 +169,7 @@ describe('receiptBuildStore', () => {
 			expected: undefined
 		},
 		{
-			name: 'a receipt file alongside a selected store, nothing already held',
+			name: 'a receipt file with a selected store and no existing paths',
 			options: {
 				receiptFile: '/runner/temp/receipt.json',
 				store: 'ssh-ng://builder.example',
@@ -179,7 +179,7 @@ describe('receiptBuildStore', () => {
 			expected: 'ssh-ng://builder.example'
 		},
 		{
-			name: 'a receipt file alongside a selected store, paths already held',
+			name: 'a receipt file with a selected store and existing paths',
 			options: {
 				receiptFile: '/runner/temp/receipt.json',
 				store: 'ssh-ng://builder.example',
@@ -192,13 +192,13 @@ describe('receiptBuildStore', () => {
 		expect(receiptBuildStore(options)).toBe(expected);
 	});
 
-	it('refuses a receipt file with no selected store', () => {
+	it('requires a selected store when writing a receipt file', () => {
 		expect(() =>
 			receiptBuildStore({ receiptFile: '/runner/temp/receipt.json' })
 		).toThrow(ReceiptFileRequiresStoreError);
 	});
 
-	it('refuses a selected build store that never states what it already held', () => {
+	it('requires the caller to state which paths the build store already held', () => {
 		expect(() =>
 			receiptBuildStore({
 				receiptFile: '/runner/temp/receipt.json',
@@ -207,7 +207,7 @@ describe('receiptBuildStore', () => {
 		).toThrow(BuildStoreRequiresAlreadyHeldError);
 	});
 
-	it('refuses a selected build store that names no current-invocation evidence', () => {
+	it('requires claimable paths when recording a selected build store', () => {
 		expect(() =>
 			receiptBuildStore({
 				receiptFile: '/runner/temp/receipt.json',

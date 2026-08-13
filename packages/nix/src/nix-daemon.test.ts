@@ -21,6 +21,7 @@ import {
 import { ProtocolWriter } from '../../../tests/support/protocol-writer.ts';
 
 import {
+	ByteStreamReader,
 	connectToNixDaemon,
 	InvalidNixDaemonNarError,
 	NixDaemonRemoteError,
@@ -54,6 +55,55 @@ const buildDrvPath = storePathSchema.parse(
 const appBasename = storePathBasenameSchema.parse(appPath.slice(11));
 const libraryBasename = storePathBasenameSchema.parse(libraryPath.slice(11));
 
+class PausableByteSource {
+	private dataListener: ((chunk: Buffer) => void) | undefined;
+
+	private readonly queued: Buffer[] = [];
+
+	private isPaused = false;
+
+	readonly delivered: Buffer[] = [];
+
+	private deliverQueued(): void {
+		while (!this.isPaused) {
+			const chunk = this.queued.shift();
+
+			if (chunk === undefined) {
+				return;
+			}
+
+			this.delivered.push(chunk);
+			this.dataListener?.(chunk);
+		}
+	}
+
+	on(_event: 'data', listener: (chunk: Buffer) => void): void {
+		this.dataListener = listener;
+	}
+
+	once(
+		_event: 'end' | 'close' | 'error',
+		_listener: (error: Error) => void
+	): void {
+		void _event;
+		void _listener;
+	}
+
+	pause(): void {
+		this.isPaused = true;
+	}
+
+	resume(): void {
+		this.isPaused = false;
+		this.deliverQueued();
+	}
+
+	offer(chunk: Buffer): void {
+		this.queued.push(chunk);
+		this.deliverQueued();
+	}
+}
+
 class CloseCancellableTransport implements NixDaemonTransport {
 	constructor(
 		private readonly transport: NixDaemonTransport,
@@ -72,6 +122,145 @@ class CloseCancellableTransport implements NixDaemonTransport {
 		this.cancelOperation();
 		await this.transport.close();
 	}
+}
+
+const testMaximumDaemonScalarBytes = 1024 * 1024;
+const testMaximumDaemonCollectionEntries = 100_000;
+const testMaximumDaemonStructuredEntries = 4096;
+const testMaximumDaemonDerivationOutputs = 65_536;
+const stderrLast = 0x61_6c_74_73;
+const stderrError = 0x63_78_74_70;
+const stderrStartActivity = 0x53_54_52_54;
+
+interface ScriptedDaemonResponses {
+	readonly features?: Buffer;
+	readonly postHandshake?: Buffer;
+	readonly operation: Buffer;
+}
+
+class ScriptedDaemonTransport implements NixDaemonTransport {
+	private readonly pending: Buffer[] = [];
+	private writeCount = 0;
+
+	readonly readsByWrite = new Map<number, number[]>();
+	closed = false;
+
+	constructor(private readonly responses: ScriptedDaemonResponses) {}
+
+	private responseForWrite(): Buffer | undefined {
+		if (this.writeCount === 1) {
+			const response = new ProtocolWriter();
+			response.writeInteger(0x64_78_69_6f);
+			response.writeInteger((1 << 8) | 38);
+			return response.bytes();
+		}
+
+		if (this.writeCount === 2) {
+			return this.responses.features ?? stringSetFrame([]);
+		}
+
+		if (this.writeCount === 3) {
+			return this.responses.postHandshake ?? postHandshakeFrame('2.33.3');
+		}
+
+		if (this.writeCount === 4) {
+			return integerFrame(stderrLast);
+		}
+
+		return this.responses.operation;
+	}
+
+	write(): Promise<void> {
+		this.writeCount += 1;
+		const response = this.responseForWrite();
+
+		if (response !== undefined) {
+			this.pending.push(response);
+		}
+
+		return Promise.resolve();
+	}
+
+	read(byteLength: number): Promise<Uint8Array> {
+		const reads = this.readsByWrite.get(this.writeCount) ?? [];
+		reads.push(byteLength);
+		this.readsByWrite.set(this.writeCount, reads);
+		const available = this.pending.reduce(
+			(total, chunk) => total + chunk.byteLength,
+			0
+		);
+
+		if (available < byteLength) {
+			throw new FakeDaemonReadUnderflowError(byteLength);
+		}
+
+		const result = Buffer.alloc(byteLength);
+		let offset = 0;
+
+		while (offset < byteLength) {
+			const chunk = this.pending[0];
+
+			if (chunk === undefined) {
+				throw new FakeDaemonReadUnderflowError(byteLength);
+			}
+
+			const take = Math.min(chunk.byteLength, byteLength - offset);
+			chunk.copy(result, offset, 0, take);
+			offset += take;
+
+			if (take === chunk.byteLength) {
+				this.pending.shift();
+				continue;
+			}
+
+			this.pending[0] = chunk.subarray(take);
+		}
+
+		return Promise.resolve(result);
+	}
+
+	close(): Promise<void> {
+		this.closed = true;
+		return Promise.resolve();
+	}
+}
+
+function integerFrame(...values: number[]): Buffer {
+	const response = new ProtocolWriter();
+
+	for (const value of values) {
+		response.writeInteger(value);
+	}
+
+	return response.bytes();
+}
+
+function stringSetFrame(values: readonly string[]): Buffer {
+	const response = new ProtocolWriter();
+	response.writeStringSet(values);
+
+	return response.bytes();
+}
+
+function postHandshakeFrame(version: string): Buffer {
+	const response = new ProtocolWriter();
+	response.writeString(version);
+	response.writeInteger(0);
+	response.writeInteger(stderrLast);
+
+	return response.bytes();
+}
+
+function missingResponse(buildPaths: readonly string[]): Buffer {
+	const response = new ProtocolWriter();
+	response.writeInteger(stderrLast);
+	response.writeStringSet(buildPaths);
+	response.writeStringSet([]);
+	response.writeStringSet([]);
+	response.writeInteger(0);
+	response.writeInteger(0);
+
+	return response.bytes();
 }
 
 interface BuildResultCase {
@@ -282,6 +471,29 @@ const buildResultCases: readonly BuildResultCase[] = [
 	}
 ];
 
+describe('ByteStreamReader', () => {
+	it('pauses the producer while the consumer holds its next read', async () => {
+		const source = new PausableByteSource();
+		const reader = new ByteStreamReader(source);
+		const firstRead = reader.read(2);
+
+		source.offer(Buffer.from([1, 2]));
+		source.offer(Buffer.from([3, 4]));
+		source.offer(Buffer.from([5, 6]));
+
+		await expect(firstRead).resolves.toStrictEqual(Buffer.from([1, 2]));
+		expect(source.delivered).toStrictEqual([Buffer.from([1, 2])]);
+
+		await expect(reader.read(2)).resolves.toStrictEqual(Buffer.from([3, 4]));
+		expect(source.delivered).toStrictEqual([
+			Buffer.from([1, 2]),
+			Buffer.from([3, 4])
+		]);
+
+		await expect(reader.read(2)).resolves.toStrictEqual(Buffer.from([5, 6]));
+	});
+});
+
 describe('connectToNixDaemon', () => {
 	// The fakes elsewhere bypass the socket transport entirely, so this is the
 	// one place its write/read path meets a real socket (where Node calls the
@@ -309,6 +521,195 @@ describe('connectToNixDaemon', () => {
 			server.close();
 			await rm(directory, { recursive: true, force: true });
 		}
+	});
+});
+
+describe('Nix daemon response bounds', () => {
+	it('rejects an oversized scalar before reading its body', async () => {
+		const transport = new ScriptedDaemonTransport({
+			postHandshake: integerFrame(testMaximumDaemonScalarBytes + 1),
+			operation: Buffer.alloc(0)
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		await expect(client.queryPathInfo(appPath)).rejects.toMatchObject({
+			name: 'NixDaemonFieldTooLargeError',
+			field: 'daemon version',
+			maximumBytes: testMaximumDaemonScalarBytes,
+			observedBytes: testMaximumDaemonScalarBytes + 1
+		});
+		expect(transport.readsByWrite.get(3)).toStrictEqual([8]);
+	});
+
+	it('rejects too many daemon features before reading an entry', async () => {
+		const transport = new ScriptedDaemonTransport({
+			features: integerFrame(testMaximumDaemonStructuredEntries + 1),
+			operation: Buffer.alloc(0)
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		await expect(client.queryPathInfo(appPath)).rejects.toMatchObject({
+			name: 'NixDaemonCollectionTooLargeError',
+			collection: 'daemon features',
+			maximumEntries: testMaximumDaemonStructuredEntries,
+			observedEntries: testMaximumDaemonStructuredEntries + 1
+		});
+		expect(transport.readsByWrite.get(2)).toStrictEqual([8]);
+	});
+
+	it('rejects a general collection before reading its first entry', async () => {
+		const transport = new ScriptedDaemonTransport({
+			operation: integerFrame(
+				stderrLast,
+				testMaximumDaemonCollectionEntries + 1
+			)
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		await expect(client.queryMissing([appPath])).rejects.toMatchObject({
+			name: 'NixDaemonCollectionTooLargeError',
+			collection: 'paths to build',
+			maximumEntries: testMaximumDaemonCollectionEntries,
+			observedEntries: testMaximumDaemonCollectionEntries + 1
+		});
+		expect(transport.readsByWrite.get(5)).toStrictEqual([8, 8]);
+	});
+
+	it('rejects too many logger fields before reading a field', async () => {
+		const response = new ProtocolWriter();
+		response.writeInteger(stderrStartActivity);
+		response.writeInteger(1);
+		response.writeInteger(2);
+		response.writeInteger(3);
+		response.writeString('activity');
+		response.writeInteger(testMaximumDaemonStructuredEntries + 1);
+		const transport = new ScriptedDaemonTransport({
+			operation: response.bytes()
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		await expect(client.queryPathInfo(appPath)).rejects.toMatchObject({
+			name: 'NixDaemonCollectionTooLargeError',
+			collection: 'logger fields',
+			maximumEntries: testMaximumDaemonStructuredEntries,
+			observedEntries: testMaximumDaemonStructuredEntries + 1
+		});
+		expect(transport.readsByWrite.get(5)).toStrictEqual([8, 8, 8, 8, 8, 8, 8]);
+	});
+
+	it('rejects too many error traces before reading a trace', async () => {
+		const response = new ProtocolWriter();
+		response.writeInteger(stderrError);
+		response.writeString('');
+		response.writeInteger(0);
+		response.writeString('');
+		response.writeString('');
+		response.writeInteger(0);
+		response.writeInteger(testMaximumDaemonStructuredEntries + 1);
+		const transport = new ScriptedDaemonTransport({
+			operation: response.bytes()
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		await expect(client.queryPathInfo(appPath)).rejects.toMatchObject({
+			name: 'NixDaemonCollectionTooLargeError',
+			collection: 'error traces',
+			maximumEntries: testMaximumDaemonStructuredEntries,
+			observedEntries: testMaximumDaemonStructuredEntries + 1
+		});
+		expect(transport.readsByWrite.get(5)).toStrictEqual([8, 8, 8, 8, 8, 8, 8]);
+	});
+
+	it('rejects too many derivation outputs before reading an output', async () => {
+		const transport = new ScriptedDaemonTransport({
+			operation: integerFrame(
+				stderrLast,
+				testMaximumDaemonDerivationOutputs + 1
+			)
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		await expect(
+			client.queryDerivationOutputPaths([buildDrvPath])
+		).rejects.toMatchObject({
+			name: 'NixDaemonCollectionTooLargeError',
+			collection: 'derivation outputs',
+			maximumEntries: testMaximumDaemonDerivationOutputs,
+			observedEntries: testMaximumDaemonDerivationOutputs + 1
+		});
+		expect(transport.readsByWrite.get(5)).toStrictEqual([8, 8]);
+	});
+
+	it('uses the requested paths as the tighter path-info response bound', async () => {
+		const transport = new ScriptedDaemonTransport({
+			features: stringSetFrame(['queryPathInfos']),
+			operation: integerFrame(stderrLast, 2)
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		await expect(client.queryPathsInfo([appPath])).rejects.toMatchObject({
+			name: 'NixDaemonCollectionTooLargeError',
+			collection: 'path infos',
+			maximumEntries: 1,
+			observedEntries: 2
+		});
+		expect(transport.readsByWrite.get(5)).toStrictEqual([8, 8]);
+	});
+
+	it('accepts scalar and feature collections exactly at their limits', async () => {
+		const transport = new ScriptedDaemonTransport({
+			features: stringSetFrame(
+				Array.from({ length: testMaximumDaemonStructuredEntries }, () => '')
+			),
+			postHandshake: postHandshakeFrame(
+				'x'.repeat(testMaximumDaemonScalarBytes)
+			),
+			operation: integerFrame(stderrLast, 0)
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		await expect(client.queryPathInfo(appPath)).rejects.toBeInstanceOf(
+			NixStorePathNotFoundError
+		);
+		expect(transport.closed).toBe(true);
+	});
+
+	it('accepts a general collection exactly at its shared limit', async () => {
+		const transport = new ScriptedDaemonTransport({
+			operation: missingResponse(
+				Array.from(
+					{ length: testMaximumDaemonCollectionEntries },
+					() => appPath
+				)
+			)
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		await expect(client.queryMissing([appPath])).resolves.toStrictEqual({
+			willBuild: [appPath],
+			willSubstitute: [],
+			unknown: [],
+			downloadSize: 0,
+			narSize: 0
+		});
 	});
 });
 
@@ -1007,6 +1408,34 @@ describe('NixDaemonStoreClient', () => {
 		}
 	);
 
+	it('encodes a provenance rebuild as daemon check mode', async () => {
+		const build = buildResultCases[0];
+
+		if (build === undefined) {
+			throw new Error('The build result fixture is missing');
+		}
+
+		const client = new NixDaemonStoreClient({
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport(
+						{},
+						{
+							builds: {
+								expectedTargets: build.expectedTargets,
+								expectedMode: 'check',
+								results: [build.result]
+							}
+						}
+					)
+				)
+		});
+
+		await expect(
+			client.buildPathsWithResults(build.targets, 'check')
+		).resolves.toStrictEqual([build.expected]);
+	});
+
 	it('rejects a build status outside the Nix 2.34 worker protocol table', async () => {
 		const build = buildResultCases[0];
 
@@ -1511,6 +1940,105 @@ describe('NixDaemonStoreClient', () => {
 				temporaryRoots: transport.temporaryRoots
 			}))
 		).toStrictEqual([{ closed: true, temporaryRoots: [appPath, libraryPath] }]);
+	});
+
+	it('serialises concurrent operations on one session connection', async () => {
+		let activeOperations = 0;
+		let maximumActiveOperations = 0;
+		const transport = new FakeDaemonTransport(
+			{
+				[appPath]: {
+					hash: appHash,
+					narSize: 123,
+					references: [],
+					signatures: []
+				}
+			},
+			{
+				beforeOperation: async () => {
+					activeOperations += 1;
+					maximumActiveOperations = Math.max(
+						maximumActiveOperations,
+						activeOperations
+					);
+
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					activeOperations -= 1;
+				}
+			}
+		);
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		const result = await client.withConnection(async (session) => {
+			const [valid, info] = await Promise.all([
+				session.queryValidPaths([appPath]),
+				session.queryPathInfo(appPath)
+			]);
+
+			return { valid, info };
+		});
+
+		expect({ maximumActiveOperations, result }).toStrictEqual({
+			maximumActiveOperations: 1,
+			result: {
+				valid: [appPath],
+				info: pathInfo(appPath, appHash, 123, [])
+			}
+		});
+	});
+
+	it('holds session exclusivity until a concurrent NAR stream is drained', async () => {
+		const frames = [
+			narFrame('nix-archive-1'),
+			narFrame('(', 'type', 'regular', 'contents', 'session nar', ')')
+		];
+		let activeOperations = 0;
+		let maximumActiveOperations = 0;
+		const transport = new FakeDaemonTransport(
+			{
+				[appPath]: {
+					hash: appHash,
+					narSize: 123,
+					references: [],
+					signatures: []
+				}
+			},
+			{
+				nar: { expectedPath: appPath, frames },
+				beforeOperation: async () => {
+					activeOperations += 1;
+					maximumActiveOperations = Math.max(
+						maximumActiveOperations,
+						activeOperations
+					);
+
+					await new Promise<void>((resolve) => setImmediate(resolve));
+					activeOperations -= 1;
+				}
+			}
+		);
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		const result = await client.withConnection(async (session) => {
+			const [archive, info] = await Promise.all([
+				Array.fromAsync(session.narFromPath(appPath)),
+				session.queryPathInfo(appPath)
+			]);
+
+			return { archive: Buffer.concat(archive), info };
+		});
+
+		expect({ maximumActiveOperations, result }).toStrictEqual({
+			maximumActiveOperations: 1,
+			result: {
+				archive: Buffer.concat(frames),
+				info: pathInfo(appPath, appHash, 123, [])
+			}
+		});
 	});
 
 	it.each([

@@ -174,16 +174,13 @@ export type ParsedAttestationAttachSummary = z.output<
 // this name.
 export const buildSummaryResultKind = 'build-summary';
 
-// The build-push summary result data: how the run published, the store the run
-// built against, how many target and intermediate paths the run selected, the
-// deepest the upload queue reached, how many paths were uploaded or skipped,
-// the child build command's exit status, and the paths whose publication the
-// run could not confirm before it ended. Secrets, presigned URLs and raw
-// credentials never enter the summary.
+// The build-push summary records the publication mode and store, path and queue
+// counts, child exit status, and paths whose publication did not complete.
+// It never includes secrets, presigned URLs, or raw credentials.
 //
 // `streamed` published each completed output through the daemon's post-build
 // hook while the build ran; `reconciled-local` built without the hook and
-// published once from the store the build populated.
+// published after reading the build's store.
 export const buildSummarySchema = z.strictObject({
 	mode: z.enum(['streamed', 'reconciled-local']),
 	store: z.string().min(1),

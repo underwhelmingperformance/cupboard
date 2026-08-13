@@ -1,4 +1,4 @@
-import { stat } from 'node:fs/promises';
+import { realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 
@@ -31,8 +31,9 @@ async function isFile(candidate: string): Promise<boolean> {
 export async function resolveHookHelper(
 	options: HelperResolutionOptions = {}
 ): Promise<string> {
+	const executablePath = options.executablePath ?? process.execPath;
 	const executableDirectory = path.dirname(
-		options.executablePath ?? process.execPath
+		await canonicalExecutablePath(executablePath)
 	);
 	const candidates = [
 		path.join(executableDirectory, hookHelperName),
@@ -46,4 +47,15 @@ export async function resolveHookHelper(
 	}
 
 	throw new HookHelperMissingError(candidates);
+}
+
+async function canonicalExecutablePath(
+	executablePath: string
+): Promise<string> {
+	try {
+		return await realpath(executablePath);
+	} catch {
+		// Preserve the complete candidate diagnostic for an absent executable.
+		return executablePath;
+	}
 }

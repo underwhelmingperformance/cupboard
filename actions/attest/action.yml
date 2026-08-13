@@ -34,7 +34,7 @@ outputs:
   bundle-path:
     description:
       Path to the generated Sigstore attestation bundle. Empty when the receipt
-      establishes no provenance subjects, in which case nothing is signed.
+      contains no eligible provenance subjects and the action skips signing.
     value: ${{ steps.attest.outputs.bundle-path }}
   checksums-file:
     description: Path to the generated subject checksums file.
@@ -111,8 +111,6 @@ runs:
           --read-user "$READ_USER" \
           --read-password "$READ_PASSWORD"
 
-    # A receipt with no established provenance subject has nothing this run can
-    # truthfully attest, and the provenance action rejects an empty subject list.
     - name: Attest subjects
       id: attest
       if: ${{ steps.subjects.outputs.subject-count != '0' }}

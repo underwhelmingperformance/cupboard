@@ -19,13 +19,12 @@ import type { Oracle } from './oracle.ts';
 /**
  * `nix store info` reports the store a configuration resolved to, where
  * `nix config show` reports the `store` setting as written. That resolution is
- * what `resolveStoreBackend` answers, so it is the oracle for it.
+ * the result of `resolveStoreBackend`, so it provides the oracle value.
  *
  * Nix prints the resolved URL before it connects to the store, so a
  * configuration naming a daemon socket that is not there still says which
- * store was selected. The status is not read for that reason: selecting a
- * store and reaching it are separate questions, and only the first is asked
- * here.
+ * store was selected. Ignore the status because selection does not require a
+ * successful connection.
  */
 const storeInfoArguments = [
 	'--extra-experimental-features',
@@ -47,18 +46,17 @@ export class StoreNotResolvedError extends Error {
 	}
 }
 
-/** The store a configuration selected, in the terms both sides can state. */
+/** The selected store in the common representation used by both clients. */
 export interface ResolvedStore {
 	readonly kind: 'daemon' | 'local' | 'ssh-ng' | 'other';
 }
 
 /**
- * The store a `nix store info` URL names.
+ * Parses the store type from a `nix store info` URL.
  *
- * Nix states the store's directories in the URL only when they came from the
- * URI's own parameters; directories the environment names leave a plain
- * `local`. What both sides can always state is which backend was selected,
- * which is the whole of what `resolveStoreBackend` decides.
+ * Nix includes store directories in the URL only when they came from URI
+ * parameters. Environment-configured directories leave a plain `local` URL.
+ * The comparison therefore uses only the selected backend.
  */
 function resolvedStoreOfUrl(url: string): ResolvedStore {
 	// Nix writes the daemon at its usual socket as `daemon` and one at any
@@ -78,12 +76,12 @@ function resolvedStoreOfBackend(backend: StoreBackend): ResolvedStore {
 	return { kind: backend.backend };
 }
 
-/** Where a fixture's own directories sit, for a case that names them. */
+/** Filesystem paths reserved for one fixture. */
 export interface FixtureDirectories {
 	readonly home: string;
 	readonly storeDirectory: string;
 	readonly stateDirectory: string;
-	/** A socket path for a `unix://` store, which nothing listens on. */
+	/** An unused socket path for a `unix://` store. */
 	readonly socketPath: string;
 	/** A data home for the store Nix falls back to where one is called for. */
 	readonly dataHome: string;
@@ -161,14 +159,13 @@ function storeInfoUrl(stdout: string): string | undefined {
 }
 
 /**
- * Why the store Nix falls back to cannot be exercised here, or nothing when it
- * can.
+ * Returns why the per-user fallback store cannot be exercised, or `undefined`
+ * when it can.
  *
- * Nix compiles that fallback in for Linux alone, and offers it only when
- * nothing else could have been meant: a machine holding a Nix state directory
- * has an install that names its own directories, so the fallback is off. Every
- * machine with Nix installed holds one, which is every machine this suite runs
- * on, so the case reports itself as skipped rather than passing.
+ * Nix compiles this fallback for Linux only and selects it only when no state
+ * directory or explicit store configuration exists. Test machines have Nix
+ * installed and therefore normally have a state directory, so the case reports
+ * why it was skipped.
  */
 export function chrootFallbackUnavailable(): string | undefined {
 	if (process.platform !== 'linux') {

@@ -19,12 +19,12 @@ import { isolatedEnvironment } from '../support/nix.ts';
 import { type OfferFields, oracleOffer } from './narinfo.ts';
 import type { Oracle } from './oracle.ts';
 
-/** The store directory the host store serves, which the fixture's paths sit in. */
+/** The host store directory containing the fixture paths. */
 const hostStoreDirectory: StoreDirectory =
 	storeDirectorySchema.parse('/nix/store');
 
 /**
- * A closure to ask both sides about, and a signed cache offering it.
+ * A closure queried through both clients and a signed cache that offers it.
  *
  * The paths are built in the host store, the only one that builds on every
  * platform. Both of them are needed: `built` is input-addressed, so a consumer
@@ -37,7 +37,7 @@ export interface AvailabilityFixture {
 	/** The cache offering the closure, as a substituter URI. */
 	readonly cacheUri: string;
 	/**
-	 * A local store holding the same closure, named as a path. Nix reads a
+	 * A local store containing the same closure, referenced by path. Nix reads a
 	 * path-shaped substituter as the store rooted there, which serves what its
 	 * database holds rather than documents.
 	 */
@@ -45,13 +45,13 @@ export interface AvailabilityFixture {
 	/** An input-addressed path, referencing {@link dependencyPath}. */
 	readonly builtPath: StorePathString;
 	readonly dependencyPath: StorePathString;
-	/** A derivation the host store holds, whose output nothing offers. */
+	/** A derivation in the host store whose output has no substituter offer. */
 	readonly derivationPath: StorePathString;
-	/** A path nothing holds and nothing offers. */
+	/** A path absent from every store and substituter. */
 	readonly absentPath: StorePathString;
 	/** The key the cache's narinfos are signed with. */
 	readonly trustedPublicKey: string;
-	/** A key nothing in the cache is signed with. */
+	/** A key that did not sign any path in the cache. */
 	readonly untrustedPublicKey: string;
 }
 
@@ -81,8 +81,8 @@ const fixtureExpression = [
 	'}'
 ].join('\n');
 
-// A derivation whose output nothing offers and nothing holds, so realising it
-// is work that has to be done here.
+// This derivation's output has no existing copy or substituter offer, so it
+// must be built.
 const unbuiltExpression = [
 	'derivation {',
 	'  name = "cupboard-conformance-unbuilt";',
@@ -93,9 +93,8 @@ const unbuiltExpression = [
 ].join('\n');
 
 /**
- * A store path in the host store's directory that nothing has ever held. The
- * digest is written out rather than derived, since nothing is meant to produce
- * it.
+ * A syntactically valid path that has never existed in the host store. Its
+ * digest is a fixture constant because no build produces it.
  */
 const absentPath: StorePathString = storePathSchema.parse(
 	'/nix/store/00000000000000000000000000000000-cupboard-conformance-absent'
@@ -120,7 +119,7 @@ async function run(
 	return result.stdout.trim();
 }
 
-/** Builds the closure and signs a cache holding it. */
+/** Builds the closure and signs a cache containing it. */
 export async function createAvailabilityFixture(
 	oracle: Oracle
 ): Promise<AvailabilityFixture> {
@@ -256,10 +255,9 @@ async function prepareFixture(
 }
 
 /**
- * Says the cache invites being asked about many paths at once, the way a
- * published cache says it. `nix copy` writes only the store directory, and a
- * cache that does not invite a batch is never given one, so without this the
- * comparison would be about the flag rather than about what the cache holds.
+ * Enables mass queries for the fixture cache. `nix copy` writes only the store
+ * directory, and clients do not send batch queries unless the cache advertises
+ * support. Setting the flag keeps this test focused on cache contents.
  */
 async function inviteMassQuery(cacheInfoFile: string): Promise<void> {
 	const published = await readFile(cacheInfoFile, 'utf8');
@@ -290,14 +288,12 @@ async function readPublicKey(filePath: string): Promise<string> {
 	return published.trim();
 }
 
-// This store's configuration is the environment the fixture builds and nothing
-// else, so no file on the machine running the suite is read for it.
+// Isolate the fixture store from configuration files on the host machine.
 function noConfigFile(): string | undefined {
 	return;
 }
 
-// A key nothing in the cache is signed with, for the case that asks what a
-// consumer trusting only it would do.
+// A key unused by the cache, for the untrusted-signature case.
 async function generateUntrustedPublicKey(
 	oracle: Oracle,
 	root: string,
@@ -322,8 +318,8 @@ async function generateUntrustedPublicKey(
 }
 
 /**
- * A store of the fixture's own to realise into, rooted where nothing has been
- * fetched before. Its database is created up front so our client can read it
+ * A fresh store used as the realisation target. Its database is created before
+ * the test so our client can read it
  * before Nix has opened the store itself.
  */
 export async function createTargetStore(
@@ -372,9 +368,8 @@ function signingOptions(policy: SigningPolicy): readonly string[] {
 }
 
 /**
- * What both sides offer for the path through a substituter naming a local
- * store. Nix answers from the store's database, which publishes no narinfo, so
- * neither side states a transfer size.
+ * Reads offers from a substituter that references a local store. The store
+ * database has no narinfo transfer size, so neither client reports one.
  */
 export async function offeredThroughStore(
 	oracle: Oracle,
@@ -427,7 +422,7 @@ export async function offeredThroughStore(
 	};
 }
 
-/** Opens our client over a store, with the named substituter behind it. */
+/** Opens our client over a store with the specified substituter. */
 function openClient(
 	fixture: AvailabilityFixture,
 	stateDirectory: string,
@@ -481,8 +476,8 @@ export class UnreadablePathInfoError extends Error {
 }
 
 /**
- * Which of the paths the cache offers, according to each side. Nix answers a
- * path a cache does not hold with a null entry, so an absence is an answer.
+ * The subset of paths offered by the cache according to each client. Nix
+ * returns a null entry for an absent path.
  */
 export async function offeredPaths(
 	oracle: Oracle,
@@ -536,8 +531,8 @@ export interface RealisationPlan {
 /**
  * The headings `nix-store --realise --dry-run` prints, recognised by the words
  * that distinguish them. Nix writes each in a singular and a plural form and
- * carries the download and unpacked figures in the fetch heading, so the
- * patterns take either number and read none of the figures.
+ * includes download and unpacked figures in the fetch heading. The patterns
+ * accept either number without parsing those figures.
  */
 const planHeadings: readonly {
 	section: keyof RealisationPlan;
@@ -549,13 +544,13 @@ const planHeadings: readonly {
 ];
 
 /**
- * The plan a dry run reported, read from what it wrote to stderr.
+ * Parses the plan that a dry run wrote to stderr.
  *
  * This is the suite's one dependency on the text of a Nix message. The dry run
- * has no structured output and no other interface answers what it answers, so
+ * has no structured output or equivalent API, so
  * the parse is written to be tolerant: it finds a heading by the words that
  * distinguish it and takes the paths indented under it, which leaves it
- * unbothered by the figures a heading carries or by anything else Nix writes
+ * unaffected by figures in the heading or by other messages Nix writes
  * around them.
  */
 export function parseRealisationPlan(stderr: string): RealisationPlan {
@@ -632,8 +627,8 @@ export async function realisationPlans(
 }
 
 /**
- * Whether a consumer under this policy would obtain the closure: whether Nix
- * realises it from the cache, and what our own walk makes of the same question.
+ * Whether a consumer under this policy obtains the closure, as measured by a
+ * real Nix realisation and by our closure walk.
  */
 export async function closureOutcome(
 	oracle: Oracle,

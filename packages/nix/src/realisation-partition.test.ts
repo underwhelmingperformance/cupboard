@@ -27,11 +27,16 @@ const libraryDrv = path('d', 'library.drv');
 const compilerPath = path('f', 'compiler');
 const compilerDrv = path('g', 'compiler.drv');
 const developmentPath = path('h', 'app-dev');
+const sourcePath = path('j', 'source');
+const sourceReferencePath = path('k', 'source-reference');
+const unavailableSourcePath = path('l', 'unavailable-source');
+const heldSourcePath = path('m', 'held-source');
 
 /** A derivation naming the outputs it produces and the ones it builds from. */
 function derivation(options: {
 	readonly outputs: readonly (readonly [string, StorePathString | ''])[];
 	readonly inputs?: readonly (readonly [StorePathString, readonly string[]])[];
+	readonly inputSources?: readonly StorePathString[];
 	readonly allowSubstitutes?: boolean;
 }): Derivation {
 	const outputs = options.outputs
@@ -40,11 +45,12 @@ function derivation(options: {
 	const inputs = (options.inputs ?? [])
 		.map(([drvPath, names]) => `("${drvPath}",[${quoted(names)}])`)
 		.join(',');
+	const inputSources = quoted(options.inputSources ?? []);
 	const environment =
 		options.allowSubstitutes === false ? '[("allowSubstitutes","")]' : '[]';
 
 	return Derivation.parse(
-		`Derive([${outputs}],[${inputs}],[],"aarch64-linux","/bin/sh",[],${environment})`
+		`Derive([${outputs}],[${inputs}],[${inputSources}],"aarch64-linux","/bin/sh",[],${environment})`
 	);
 }
 
@@ -288,6 +294,31 @@ describe('queryMissingOver', () => {
 			unknown: [],
 			downloadSize: 10,
 			narSize: 100
+		});
+	});
+
+	it('accounts for every source needed by a derivation it must build', async () => {
+		const built = derivation({
+			outputs: [['out', appPath]],
+			inputSources: [heldSourcePath, sourcePath, unavailableSourcePath]
+		});
+		const partial = source({
+			valid: [appDrv, heldSourcePath],
+			derivations: stored([appDrv, built]),
+			offered: offers(
+				[sourcePath, [sourceReferencePath]],
+				[sourceReferencePath, []]
+			)
+		});
+
+		await expect(
+			queryMissingOver([`${appDrv}^out`], partial)
+		).resolves.toStrictEqual({
+			willBuild: [appDrv],
+			willSubstitute: [sourcePath, sourceReferencePath],
+			unknown: [unavailableSourcePath],
+			downloadSize: 20,
+			narSize: 200
 		});
 	});
 

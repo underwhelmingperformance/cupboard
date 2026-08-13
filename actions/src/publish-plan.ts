@@ -55,21 +55,16 @@ const defaultNixEvaluator: NixEvaluator = (arguments_) =>
 		maxBuffer: 256 * 1024 * 1024
 	});
 
-// A root suffix names its target's root under the run's prefix, and
-// equivalent spellings must name one root: the canonical form drops the
-// leading and trailing slashes that a join would otherwise absorb or
-// duplicate. The server accepts any slashes inside a root name, so interior
-// ones are meaningful and stay.
+// Remove leading and trailing slashes so equivalent suffixes produce the same
+// root. Interior slashes remain significant to the server.
 export function canonicalRootSuffix(suffix: string): string {
 	return suffix.replace(/^\/+/u, '').replace(/\/+$/u, '');
 }
 
 /**
- * The one construction of a target's full root name: the prefix, its own
- * trailing slashes dropped, joined to the canonical root suffix. Every
- * consumer of a target root goes through this, so the root a run ensures for
- * a cached target and the root its build job publishes under can never be
- * spelt two different ways.
+ * Joins a root prefix and suffix in the canonical form used by every target
+ * root consumer. Cached-target checks and build jobs therefore use identical
+ * root names.
  */
 export function joinRoot(prefix: string, suffix: string): string {
 	return `${prefix.replace(/\/+$/u, '')}/${canonicalRootSuffix(suffix)}`;
@@ -91,10 +86,7 @@ const derivationPathSchema = storePathSchema.refine(
 	{ message: 'rootDrvPath must name a derivation in /nix/store' }
 );
 
-// A cohort label composes into a cohort's key (see cohortKey), which is
-// destined for the same role a matrix job's key plays today, so it is bounded
-// like any other job-identifying string rather than left to grow without
-// limit.
+// Bound cohort labels because they become part of matrix job keys.
 export const cohortLabelMaxLength = 100;
 
 const publishOutputsSchema = z
@@ -109,10 +101,10 @@ const publishOutputsSchema = z
 	.transform((outputs) => [...new Set(outputs)]);
 
 /**
- * One member of a component-publication target: its own attr and, once
- * evaluated, its own derivation path. Everything else a component needs
- * (execution context, retention root, best-effort and cohort membership) it
- * takes from the aggregate target that declares it; see {@link expandComponents}.
+ * One member of a component-publication target. The component supplies its
+ * attribute and optional derivation path. It inherits its execution context,
+ * retention root, failure policy and cohort from the aggregate target; see
+ * {@link expandComponents}.
  */
 export const publishComponentSchema = z.strictObject({
 	attr: z.string().min(1).refine(isNixPositionalArgument, {
@@ -157,13 +149,9 @@ export const publishTargetSchema = z.strictObject({
 	components: z.array(publishComponentSchema).min(1).optional()
 });
 
-// Retention treats every target sharing a root as retained once one of them
-// is ensured (see planPublish's retainedRoots.has lookup), so two targets
-// whose suffixes name the same root would race each other's root, or leave a
-// missing one unbuilt while its cached sibling stands in for it. Equivalent
-// spellings (`app`, `/app`, `app/`) join to one root, so uniqueness runs on
-// the canonical form and the parsed plan carries only canonical suffixes.
-// Reject the manifest outright rather than let either happen at runtime.
+// Retention treats all targets sharing a root as retained after one successful
+// ensure. Duplicate roots could therefore race or cause an uncached target to
+// be skipped. Check canonical suffixes so `app`, `/app` and `app/` conflict.
 export const publishTargetsSchema = z
 	.array(publishTargetSchema)
 	.min(1)
@@ -202,17 +190,13 @@ export const publishTargetsSchema = z
 export type PublishTarget = z.output<typeof publishTargetSchema>;
 
 /**
- * Expands every component-publication target into one synthetic target per
- * component, each carrying the aggregate's execution context (system, os,
- * remote), best-effort flag and cohort label, and its own rootSuffix, so
- * every component publishes under the one retention root the aggregate
- * declares (the component-root shape: the root's target list is the
- * component list, capped by the caller against `rootSetMaxTargets`). A
- * target with no components passes through unchanged. The aggregate's own
- * attr and rootDrvPath never appear in the result: an aggregate is never
- * evaluated, queried for realisation, or built here, only substituted by the
- * machine that activates it from the components this expansion publishes in
- * its place.
+ * Replaces each aggregate target with one synthetic target per component.
+ * Components inherit the aggregate's execution context, failure policy, cohort
+ * and root suffix, so they publish under one retention root. Targets without
+ * components pass through unchanged. The aggregate itself is not evaluated or
+ * built; the activating machine assembles it from the published components.
+ * Input validation limits the component list to the number of targets a root
+ * can accept in one update.
  */
 export function expandComponents(
 	targets: readonly PublishTarget[]
@@ -885,14 +869,9 @@ export function isBestEffortCohort(members: readonly PublishTarget[]): boolean {
 }
 
 /**
- * Partitions targets into cohorts: the manifest's own statement of which
- * targets run together in one job. A target's cohort is its explicit
- * `cohort` label when it has one, and its own identity (`attr`) otherwise, so
- * per-target cohorts are the default and a shared label is the only way two
- * targets join one cohort; nothing here groups or splits a manifest on its
- * own initiative. Partitions the whole manifest, not only what still needs
- * building, because cohort identity is a property of the manifest, not of
- * what the destination happens to hold this run.
+ * Partitions the complete manifest into cohorts. An explicit `cohort` label
+ * groups targets in one job; otherwise each target forms its own cohort.
+ * Destination availability does not change cohort membership.
  */
 export function cohortsFor(targets: readonly PublishTarget[]): Cohort[] {
 	const byLabel = new Map<string, PublishTarget[]>();
@@ -948,13 +927,11 @@ function cohortFor(label: string, members: readonly PublishTarget[]): Cohort {
 	};
 }
 
-// A cohort's key: the readable context parts, hyphen-joined, plus a 64-bit
-// hash of the unambiguous tuple, so look-alike contexts (('a-b', 'c') and
-// ('a', 'b-c') read alike) never collide. The label joins the
-// digest rather than the readable prefix, because per-target cohorts are the
-// default and every target in one execution context needs a key distinct
-// from its siblings there; assertDistinctGroupKeys backstops any residual
-// collision the digest cannot rule out.
+// Combine readable context fields with a 64-bit hash of the complete tuple.
+// The label is part of the hash so per-target cohorts remain distinct within
+// one execution context. Hashing also prevents ambiguous joined fields such as
+// (`a-b`, `c`) and (`a`, `b-c`) from colliding. `assertDistinctGroupKeys`
+// rejects any remaining collision.
 function cohortKey(label: string, target: PublishTarget): string {
 	const os = canonicalRunnerLabel(target.os);
 	const mode = target.remote ? 'remote' : 'local';
@@ -967,12 +944,11 @@ function cohortKey(label: string, target: PublishTarget): string {
 }
 
 /**
- * Inverts each evaluated target's recursive graph into a map from a
- * derivation to the target identities (attrs) whose graph contains it. Built
- * once from evaluation, ahead of any build, so a streamed build's post-build
- * hook can resolve a `DRV_PATH` to its owning target without asking Nix
- * again; the recursive graph already holds evidence about the dependency
- * graph, not an instruction to build every node it names.
+ * Maps each derivation in the evaluated dependency graphs to its owning target
+ * attributes. The post-build hook uses this map to attribute a `DRV_PATH`
+ * without querying Nix during the build. The graph records attribution
+ * evidence; it does not instruct the build to realise every derivation in the
+ * graph.
  */
 export function derivationToTargetsFor(
 	evaluations: readonly TargetEvaluation[]
@@ -1004,12 +980,10 @@ export type TargetCoverageStatus =
 	'covered' | 'not-covered' | 'unknown-output' | 'failed';
 
 /**
- * Whether the advisory pre-filter found one target already covered: its
- * root's last reconciled list carries every one of its current outputs. A
- * target whose output paths are not all known before building never reaches
- * `covered`, and a failed read or ensure call never reaches `not-covered`
- * silently: both carry their own status so a cohort decision can tell "does
- * not need building" from "could not tell".
+ * The advisory pre-filter result for one target. `covered` requires the root's
+ * last reconciled list to contain every current output. Unknown output paths
+ * and failed reads use distinct statuses so callers do not treat them as cache
+ * misses.
  */
 export interface TargetCoverage {
 	readonly attr: string;
@@ -1018,11 +992,9 @@ export interface TargetCoverage {
 }
 
 /**
- * Decides one known-output target's coverage from facts already gathered:
- * whether its root's reconciled list, freshly re-ensured, is still valid, and
- * whether that list names every one of its current outputs. Callers assemble
- * `unknown-output` and `failed` directly, since both are facts about
- * reaching the check at all, not about what it found.
+ * Determines whether a known-output target remains retained and whether its
+ * reconciled root contains every current output. Callers produce
+ * `unknown-output` and `failed` before reaching this check.
  */
 export function evaluateTargetCoverage(
 	target: PublishTarget,

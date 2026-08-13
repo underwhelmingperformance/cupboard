@@ -148,11 +148,11 @@ runs:
         nix_version: 2.34.7
 
     # Extra settings and the builders below accumulate in a job-scoped file
-    # under RUNNER_TEMP, threaded to Nix through NIX_USER_CONF_FILES: the
-    # runner's own configuration is listed after it and stays untouched, so a
-    # persistent self-hosted runner carries nothing over into later jobs.
-    # The environment write carries only runner-owned paths, which is the
-    # false-positive shape the github-env audit documents
+    # under RUNNER_TEMP and reach Nix through NIX_USER_CONF_FILES. The runner's
+    # configuration is listed after it and remains unchanged. This prevents a
+    # persistent self-hosted runner from retaining these settings for later jobs.
+    # The value written to GITHUB_ENV contains only runner-owned paths, which is
+    # the false-positive shape the github-env audit documents
     # (https://docs.zizmor.sh/audits/#github-env).
     - name: Configure extra Nix settings
       if: ${{ inputs.nix-config != '' }}
@@ -170,15 +170,16 @@ runs:
         echo "NIX_USER_CONF_FILES=${RUNNER_TEMP}/cupboard-prepare-nix.conf:${HOME}/.config/nix/nix.conf" >> "${GITHUB_ENV}"
 
     # Nix reaches both ssh:// builders and ssh-ng:// stores through options in
-    # NIX_SSHOPTS. Exactly one mode's caller inputs enter this job-scoped
-    # configuration under RUNNER_TEMP, so neither identity can be offered to
-    # the other service and a persistent self-hosted runner carries no settings
-    # into later jobs. ssh uses the first value it obtains for an option, so the
-    # action's host-key policy and managed identity restrictions live in the
-    # first `Host *` block. Caller Host blocks follow it and can add connection
-    # settings without weakening that policy. The environment writes carry only
-    # runner-owned paths, which is the false-positive shape the github-env audit
-    # documents (https://docs.zizmor.sh/audits/#github-env).
+    # NIX_SSHOPTS. Only the caller inputs for the selected mode enter this
+    # job-scoped configuration under RUNNER_TEMP. This prevents either identity
+    # from being offered to the other service and prevents the settings from
+    # persisting across jobs on a self-hosted runner. ssh uses the first value it
+    # obtains for an option, so the action's host-key policy and managed identity
+    # restrictions live in the first `Host *` block. Caller Host blocks follow
+    # it and can add connection settings without weakening that policy. The
+    # values written to GITHUB_ENV contain only runner-owned paths, which is the
+    # false-positive shape the github-env audit documents
+    # (https://docs.zizmor.sh/audits/#github-env).
     - name: Configure Nix SSH transport
       if: >-
         ${{ inputs.store != '' || (inputs.remote == 'true' && inputs.builders !=

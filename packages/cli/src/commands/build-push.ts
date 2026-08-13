@@ -98,6 +98,8 @@ const commandCohortSchema = z.strictObject({
 const constructedCohortSchema = z.strictObject({
 	installables: z.array(z.string().min(1)).min(1),
 	attempts: z.number().int().positive().optional(),
+	rebuild: z.boolean().optional(),
+	requireProvenance: z.boolean().optional(),
 	verifyRebuilds: z.boolean().optional(),
 	keepGoing: z.boolean().optional(),
 	// Zero is Nix's remote-builders-only setting: no local build slots.
@@ -205,6 +207,10 @@ export function parseCohortsFile(contents: string): readonly BuildInvocation[] {
 			build: {
 				installables: cohort.installables,
 				...(cohort.attempts !== undefined && { attempts: cohort.attempts }),
+				...(cohort.rebuild !== undefined && { rebuild: cohort.rebuild }),
+				...(cohort.requireProvenance !== undefined && {
+					requireProvenance: cohort.requireProvenance
+				}),
 				...(cohort.verifyRebuilds !== undefined && {
 					verifyRebuilds: cohort.verifyRebuilds
 				}),

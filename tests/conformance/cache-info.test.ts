@@ -5,7 +5,7 @@ import { describeConformance } from './oracle.ts';
 
 describeConformance('a cache directory opened as a substituter', (oracle) => {
 	// Exact: nix opens a cache serving no `nix-cache-info` with the compiled-in
-	// defaults, so the path it holds is one both sides offer, field for field.
+	// defaults, so both sides report the fixture path with the same fields.
 	it('offers what nix offers from a cache serving no cache info', async () => {
 		const outcome = await openCache(oracle, { kind: 'directory' });
 
@@ -21,8 +21,7 @@ describeConformance('a cache directory opened as a substituter', (oracle) => {
 	});
 
 	// Exact: nix refuses to open a cache advertising another store's prefix, and
-	// our client has to say the same rather than answer the query one cache
-	// short without saying so.
+	// our client must also report that cache as unreachable.
 	it('names a cache serving another store, as nix refuses to open one', async () => {
 		const outcome = await openCache(oracle, {
 			kind: 'directory',
@@ -48,8 +47,7 @@ describeConformance('a cache directory opened as a substituter', (oracle) => {
 	});
 
 	// Exact: a store URI's parameters are settings, and nix reads an integer
-	// setting's value whole, so a priority with anything after the digits names
-	// none and the URI names no cache this run can open.
+	// setting's entire value, so a suffix after the digits makes the URI invalid.
 	it('names a store URI stating a priority nix cannot read', async () => {
 		const outcome = await openCache(oracle, {
 			kind: 'directory',
@@ -68,7 +66,7 @@ describeConformance('a cache directory opened as a substituter', (oracle) => {
 	});
 
 	// Exact: a binary unit multiplies the number before it, so a priority nix
-	// takes is one this client takes too, and the cache answers as it would
+	// accepts must also be accepted by this client, and the cache behaves as it would
 	// have without the parameter.
 	it('offers what nix offers under a priority stated in binary units', async () => {
 		const outcome = await openCache(oracle, {
@@ -87,8 +85,8 @@ describeConformance('a cache directory opened as a substituter', (oracle) => {
 		});
 	});
 
-	// Exact: only the filesystem's answer for a file nobody wrote reads as a
-	// cache holding nothing. A store URI naming a regular file has no cache
+	// Exact: only ENOENT represents an absent cache document. A store URI that
+	// points to a regular file has no cache directory
 	// under it, and nix refuses to open one.
 	it('names a store URI holding a regular file, as nix refuses to open one', async () => {
 		const outcome = await openCache(oracle, { kind: 'file' });

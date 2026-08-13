@@ -14,15 +14,14 @@ import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 export type NixDaemonTrust = 'trusted' | 'not-trusted' | 'unknown';
 
 /**
- * A configured substituter nothing could be asked of. Its answers are missing
- * from every query made without it, so a caller reading those answers as
- * "nobody holds this" is reading them one substituter short.
+ * A configured substituter that the client could not query. Availability
+ * results are incomplete while any substituter is unreachable.
  */
 export type UnreachableSubstituter = {
 	readonly uri: string;
 } & UnreachableSubstituterCause;
 
-/** Why nothing could be asked of a substituter. */
+/** Why a substituter could not be queried. */
 export type UnreachableSubstituterCause =
 	| { readonly reason: 'unreadable-uri' }
 	/** A store this reader does not open, such as `s3://` or `ssh://`. */
@@ -30,19 +29,18 @@ export type UnreachableSubstituterCause =
 	| { readonly reason: 'no-cache-info' }
 	/**
 	 * The substituter, or a proxy standing in front of it, asked for a
-	 * credential this run does not hold. It may well hold the paths asked
-	 * about; nothing here could ask it.
+	 * credential unavailable to this run. The client cannot determine which
+	 * paths it has.
 	 */
 	| { readonly reason: 'needs-credentials' }
 	| {
 			/**
-			 * The substituter serves another store's paths, so nothing it holds
-			 * answers a question about this one.
+			 * The substituter serves paths for a different store directory.
 			 */
 			readonly reason: 'store-directory-mismatch';
 			/** The store directory the substituter serves paths for. */
 			readonly servesStoreDirectory: StoreDirectory;
-			/** The store directory the answers are for. */
+			/** The requested store directory. */
 			readonly queriedStoreDirectory: StoreDirectory;
 	  };
 
@@ -63,27 +61,24 @@ export interface NixValidPathInfo {
 }
 
 /**
- * What every offer states about one store path, whichever answer carried it:
- * enough metadata to walk the path's closure without fetching any of its
- * bytes.
+ * Metadata common to every store-path offer. It is sufficient to walk the
+ * closure without fetching NAR contents.
  */
 interface NixOfferedPath {
 	readonly storePath: StorePathString;
 	readonly deriver?: string;
 	readonly references: readonly StorePathString[];
 	/**
-	 * The bytes the path would occupy, as the answer states them, which the
-	 * fingerprint a signature is made over commits to.
+	 * The uncompressed NAR size included in the signed fingerprint.
 	 */
 	readonly narSize: number;
-	/** Bytes the fetch would transfer; 0 when the answer does not say. */
+	/** Bytes the fetch would transfer; zero when unavailable. */
 	readonly downloadSize: number;
 }
 
 /**
- * An offer as the daemon's batched answer carries one. That answer names the
- * sizes and the references and nothing else, so it says how much work a fetch
- * would be and nothing about what the fetch would produce.
+ * An offer from the daemon's batched response. It includes sizes and
+ * references but omits the NAR hash and signatures.
  */
 export interface NixDaemonOffer extends NixOfferedPath {
 	readonly source: 'daemon';
@@ -108,15 +103,13 @@ export interface NixSubstituterOffer extends NixOfferedPath {
 }
 
 /**
- * What a substituter offers for one store path, as the answer that carried it
- * can state. A store answers with an entry only for a path one of its
- * permitted substituters serves, whatever this machine's own store already
- * holds.
+ * An offer from a configured substituter for one store path. Local validity
+ * does not affect whether an offer is returned.
  */
 export type NixSubstitutablePathInfo = NixDaemonOffer | NixSubstituterOffer;
 
 /**
- * A realisation target the way an installable names one: a plain store path,
+ * A realisation target in installable form: a plain store path,
  * or a derivation path followed by `^` and the outputs it should produce
  * (`^*` for all of them).
  */
@@ -124,8 +117,8 @@ export type NixDerivedPathString =
 	StorePathString | `${StorePathString}^${string}`;
 
 /**
- * What realising a set of targets would require, partitioned the way
- * `Store::queryMissing` answers it. An already-valid target appears in no
+ * The work required to realise a set of targets, partitioned like
+ * `Store::queryMissing`. An already-valid target appears in no
  * set. `downloadSize` and `narSize` describe the substitutable set: the bytes
  * substitution would download and the NAR bytes it would materialise.
  */
@@ -138,8 +131,8 @@ export interface NixMissingPartition {
 }
 
 /**
- * How a build request settled for one derived path. A settled target carries
- * the realised outputs the daemon reported by name; a failed one carries the
+ * The result of building one derived path. A successful target contains the
+ * realised outputs reported by the daemon; a failed target contains the
  * daemon's message.
  */
 export type NixBuildOutcome =
@@ -164,7 +157,7 @@ export type NixBuildOutcome =
 			readonly message: string;
 	  };
 
-/** One target's build result, keyed by the derived path that named it. */
+/** One build result keyed by its derived path. */
 export interface NixBuildResult {
 	readonly target: NixDerivedPathString;
 	readonly outcome: NixBuildOutcome;
@@ -173,6 +166,9 @@ export interface NixBuildResult {
 	readonly startTime: number;
 	readonly stopTime: number;
 }
+
+/** How the daemon should realise a requested derivation. */
+export type NixBuildMode = 'normal' | 'check';
 
 /** Operations provided by a selected Nix store backend. */
 export interface NixStoreClient {
@@ -192,13 +188,13 @@ export interface NixStoreClient {
 	): Promise<readonly NixValidPathInfo[]>;
 	/**
 	 * Path information for the given paths the store holds, in argument
-	 * order; a path it does not hold is left out.
+	 * order; absent paths are omitted.
 	 */
 	queryValidPathsInfo(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly NixValidPathInfo[]>;
 	/**
-	 * The subset of the given paths this store holds as valid, deduplicated
+	 * The subset of the given paths valid in this store, deduplicated
 	 * and sorted by store path.
 	 */
 	queryValidPaths(
@@ -213,9 +209,8 @@ export interface NixStoreClient {
 	): Promise<readonly StorePathString[]>;
 	/**
 	 * What the store's permitted substituters offer for each of the given
-	 * paths, sorted by store path. A path no substituter serves has no entry,
-	 * and a path this machine already holds is answered no differently from
-	 * one it does not: the question is what is available elsewhere.
+	 * paths, sorted by store path. Paths without offers are omitted. Local path
+	 * validity does not affect external availability.
 	 */
 	querySubstitutablePathInfos(
 		storePaths: readonly StorePathString[]
@@ -229,7 +224,7 @@ export interface NixStoreClient {
 		drvPaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]>;
 	/**
-	 * What realising the given targets would require, answered against this
+	 * The work required to realise the targets against this
 	 * store's validity and its configured substituters. Every set comes back
 	 * deduplicated and sorted by store path.
 	 */
@@ -249,12 +244,13 @@ export interface NixStoreClient {
 	 */
 	narFromPath(storePath: StorePathString): AsyncIterable<Uint8Array>;
 	/**
-	 * Build the given targets and report how each one settled: exact
+	 * Build the given targets and report each result: exact
 	 * per-target outcomes, with the realised outputs where the store reports
 	 * them.
 	 */
 	buildPathsWithResults(
-		targets: readonly NixDerivedPathString[]
+		targets: readonly NixDerivedPathString[],
+		mode?: NixBuildMode
 	): Promise<readonly NixBuildResult[]>;
 	/**
 	 * Whether the daemon connection this client uses is trusted, so a caller
@@ -264,19 +260,18 @@ export interface NixStoreClient {
 	 */
 	daemonTrust?(): Promise<NixDaemonTrust>;
 	/**
-	 * The store's configured substituters that nothing could be asked of, so a
-	 * caller can tell an answer of "nobody holds this" from one given without
-	 * asking everybody. Only a store this process drives knows; a daemon keeps
+	 * Configured substituters that could not be queried. This distinguishes a
+	 * confirmed absence from an incomplete query. Only a store this process
+	 * drives exposes this information; a daemon keeps
 	 * its own substituters and reports what it reached to its own log.
 	 */
 	unreachableSubstituters?(): Promise<readonly UnreachableSubstituter[]>;
 }
 
 /**
- * The store path a backend reported, refusing a value that cannot name one. A
- * store path a reader hands on is the key every later stage indexes, hashes and
- * uploads by, so a value the schema cannot accept is refused here, naming the
- * store that reported it, and never reaches those stages.
+ * Validates a store path reported by a backend. Later stages use this path as
+ * an index, hash input and upload key, so invalid values are rejected before
+ * reaching them.
  */
 export function requireStorePath(reported: string): StorePathString {
 	const storePath = storePathSchema.safeParse(reported);
@@ -383,8 +378,8 @@ export type NixConfigIncludeFailure =
 	| 'too-many-nested-includes'
 	| 'file-does-not-exist'
 	/**
-	 * A relative target written where nothing names a directory for it to sit
-	 * under, which is every line of an inline `NIX_CONFIG`.
+	 * A relative target from a source with no containing directory, such as
+	 * inline `NIX_CONFIG`.
 	 */
 	| 'not-an-absolute-path';
 
@@ -411,9 +406,8 @@ export class NixConfigIncludeError extends NixStoreError {
 /**
  * A configuration line Nix cannot read as one. Nix takes a line's
  * whitespace-separated tokens and requires `<name> = <value…>`, refusing the
- * whole configuration over anything else, so a client reading that
- * configuration refuses it too: carrying on would run under settings Nix
- * itself would not start with.
+ * whole configuration over anything else. This client also rejects malformed
+ * lines so it cannot proceed under a configuration Nix would refuse.
  */
 export class NixConfigSyntaxError extends NixStoreError {
 	constructor(
@@ -426,9 +420,8 @@ export class NixConfigSyntaxError extends NixStoreError {
 }
 
 /**
- * A netrc nothing can be read out of. Nix hands the file to libcurl, which
- * fails the transfer over a line it cannot read rather than carrying on
- * without the credentials the file was there to supply.
+ * A malformed netrc. Nix delegates parsing to libcurl, which fails the
+ * transfer instead of proceeding without the expected credentials.
  */
 export class NixNetrcSyntaxError extends NixStoreError {
 	constructor(public readonly found: string) {

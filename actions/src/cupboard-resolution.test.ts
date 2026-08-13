@@ -1,15 +1,18 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	maximumReleaseDiscoveryCandidates,
+	maximumReleaseDiscoveryPageEntries,
+	maximumReleaseDiscoveryPages,
 	parseResolvedCupboard,
 	resolveCupboard,
 	type ResolvedCupboard,
 	serialiseResolvedCupboard
 } from './cupboard-resolution.ts';
 import {
-	AmbiguousReleaseForCommitError,
 	CupboardResolutionJsonError,
 	GithubApiError,
+	InvalidInputError,
 	MalformedReleaseDiscoveryResponseError
 } from './errors.ts';
 
@@ -365,6 +368,137 @@ describe('resolveCupboard', () => {
 		]);
 	});
 
+	it('rejects an oversized release page before processing its entries', async () => {
+		let requests = 0;
+		const nodes = Array.from(
+			{ length: maximumReleaseDiscoveryPageEntries + 1 },
+			(_, index) =>
+				index === maximumReleaseDiscoveryPageEntries
+					? { malformed: true }
+					: releaseNode(`release-${String(index)}`, otherSha)
+		);
+		const releaseDiscoveryPage = (): Promise<unknown> => {
+			requests += 1;
+
+			return Promise.resolve(releasePage({ nodes }));
+		};
+
+		await expect(
+			resolveCupboard(options(), { releaseDiscoveryPage })
+		).rejects.toMatchObject({
+			name: 'ReleaseDiscoverySearchTooLargeError',
+			maximumPageEntries: maximumReleaseDiscoveryPageEntries,
+			maximumCandidates: maximumReleaseDiscoveryCandidates,
+			maximumPages: maximumReleaseDiscoveryPages,
+			observedPageEntries: maximumReleaseDiscoveryPageEntries + 1,
+			observedCandidates: maximumReleaseDiscoveryPageEntries + 1,
+			observedPages: 1
+		});
+		expect(requests).toBe(1);
+	});
+
+	it('rejects too many release candidates before processing the excess page', async () => {
+		let requests = 0;
+		const releaseDiscoveryPage = (): Promise<unknown> => {
+			requests += 1;
+			const isExcessPage = requests === 11;
+			const nodes = Array.from(
+				{
+					length: isExcessPage ? 1 : maximumReleaseDiscoveryPageEntries
+				},
+				(_, index) =>
+					releaseNode(`release-${String(requests)}-${String(index)}`, otherSha)
+			);
+
+			return Promise.resolve(
+				releasePage({
+					nodes,
+					hasNextPage: !isExcessPage,
+					...(!isExcessPage && { endCursor: `page-${String(requests)}` })
+				})
+			);
+		};
+
+		await expect(
+			resolveCupboard(options(), { releaseDiscoveryPage })
+		).rejects.toMatchObject({
+			name: 'ReleaseDiscoverySearchTooLargeError',
+			maximumPageEntries: maximumReleaseDiscoveryPageEntries,
+			maximumCandidates: maximumReleaseDiscoveryCandidates,
+			maximumPages: maximumReleaseDiscoveryPages,
+			observedPageEntries: 1,
+			observedCandidates: maximumReleaseDiscoveryCandidates + 1,
+			observedPages: 11
+		});
+		expect(requests).toBe(11);
+	});
+
+	it('rejects a continuing sparse cursor chain at the page ceiling', async () => {
+		let requests = 0;
+		const releaseDiscoveryPage = (): Promise<unknown> => {
+			requests += 1;
+
+			if (requests > maximumReleaseDiscoveryPages) {
+				throw new Error('test page budget exceeded');
+			}
+
+			return Promise.resolve(
+				releasePage({
+					nodes: [],
+					hasNextPage: true,
+					endCursor: `page-${String(requests)}`
+				})
+			);
+		};
+
+		await expect(
+			resolveCupboard(options(), { releaseDiscoveryPage })
+		).rejects.toMatchObject({
+			name: 'ReleaseDiscoverySearchTooLargeError',
+			maximumPageEntries: maximumReleaseDiscoveryPageEntries,
+			maximumCandidates: maximumReleaseDiscoveryCandidates,
+			maximumPages: maximumReleaseDiscoveryPages,
+			observedPageEntries: 0,
+			observedCandidates: 0,
+			observedPages: maximumReleaseDiscoveryPages
+		});
+		expect(requests).toBe(maximumReleaseDiscoveryPages);
+	});
+
+	it('accepts a release history exactly at the candidate limit', async () => {
+		let requests = 0;
+		const releaseDiscoveryPage = (): Promise<unknown> => {
+			requests += 1;
+			const isLastPage = requests === 10;
+			const nodes = Array.from(
+				{ length: maximumReleaseDiscoveryPageEntries },
+				(_, index) =>
+					releaseNode(
+						`release-${String(requests)}-${String(index)}`,
+						isLastPage && index === 0 ? workflowSha : otherSha
+					)
+			);
+
+			return Promise.resolve(
+				releasePage({
+					nodes,
+					hasNextPage: !isLastPage,
+					...(!isLastPage && { endCursor: `page-${String(requests)}` })
+				})
+			);
+		};
+
+		await expect(
+			resolveCupboard(options(), { releaseDiscoveryPage })
+		).resolves.toStrictEqual({
+			kind: 'release',
+			repository: 'owner/cupboard',
+			tag: 'release-10-0',
+			sourceCommit: workflowSha
+		});
+		expect(requests).toBe(10);
+	});
+
 	it('ignores a release whose tag no longer resolves to a commit', async () => {
 		const nodes = [
 			{
@@ -435,15 +569,21 @@ describe('resolveCupboard', () => {
 		});
 	});
 
-	it('fails closed when several releases at the SHA remain ambiguous', async () => {
+	it('orders fallback release tags by UTF-16 code unit', async () => {
 		const nodes = [
-			releaseNode('one', workflowSha),
-			releaseNode('two', workflowSha)
+			releaseNode('a-release', workflowSha),
+			releaseNode('_release', workflowSha),
+			releaseNode('A-release', workflowSha)
 		];
 
 		await expect(
 			resolveCupboard(options(), { fetch: fetchingGraphql(nodes) })
-		).rejects.toThrow(AmbiguousReleaseForCommitError);
+		).resolves.toStrictEqual({
+			kind: 'release',
+			repository: 'owner/cupboard',
+			tag: 'A-release',
+			sourceCommit: workflowSha
+		});
 	});
 
 	it('fails closed on an unexpected GraphQL response', async () => {
@@ -516,4 +656,91 @@ describe('resolveCupboard', () => {
 
 		expect(urls).toStrictEqual(['https://github.example/api/graphql']);
 	});
+
+	it('derives the GHES GraphQL endpoint from its REST API base', async () => {
+		const urls: string[] = [];
+		const fetcher: typeof fetch = (input) => {
+			urls.push(requestUrl(input));
+
+			return Promise.resolve(Response.json(releasePage({ nodes: [] })));
+		};
+
+		await resolveCupboard(
+			options({ githubApiUrl: 'https://github.example/api/v3' }),
+			{
+				fetch: fetcher
+			}
+		);
+
+		expect(urls).toStrictEqual(['https://github.example/api/graphql']);
+	});
+
+	it.each([
+		{
+			name: 'cross-origin GraphQL',
+			githubApiUrl: 'https://github.example/api/v3',
+			githubGraphqlUrl: 'https://attacker.example/api/graphql',
+			input: 'github-graphql-url'
+		},
+		{
+			name: 'insecure REST',
+			githubApiUrl: 'http://github.example/api/v3',
+			githubGraphqlUrl: 'http://github.example/api/graphql',
+			input: 'github-api-url'
+		},
+		{
+			name: 'credential-bearing REST',
+			githubApiUrl: 'https://token@github.example/api/v3',
+			githubGraphqlUrl: 'https://github.example/api/graphql',
+			input: 'github-api-url'
+		},
+		{
+			name: 'fragment-bearing REST',
+			githubApiUrl: 'https://github.example/api/v3#unsafe',
+			githubGraphqlUrl: 'https://github.example/api/graphql',
+			input: 'github-api-url'
+		},
+		{
+			name: 'insecure GraphQL',
+			githubApiUrl: 'https://github.example/api/v3',
+			githubGraphqlUrl: 'http://github.example/api/graphql',
+			input: 'github-graphql-url'
+		},
+		{
+			name: 'credential-bearing GraphQL',
+			githubApiUrl: 'https://github.example/api/v3',
+			githubGraphqlUrl: 'https://token@github.example/api/graphql',
+			input: 'github-graphql-url'
+		},
+		{
+			name: 'fragment-bearing GraphQL',
+			githubApiUrl: 'https://github.example/api/v3',
+			githubGraphqlUrl: 'https://github.example/api/graphql#unsafe',
+			input: 'github-graphql-url'
+		}
+	])(
+		'rejects a $name endpoint before sending credentials',
+		async (testCase) => {
+			let requests = 0;
+			const fetcher: typeof fetch = () => {
+				requests += 1;
+
+				return Promise.resolve(responseFor([]));
+			};
+			const resolution = resolveCupboard(
+				options({
+					githubApiUrl: testCase.githubApiUrl,
+					githubGraphqlUrl: testCase.githubGraphqlUrl
+				}),
+				{ fetch: fetcher }
+			);
+
+			await expect(resolution).rejects.toBeInstanceOf(InvalidInputError);
+			await expect(resolution).rejects.toMatchObject({
+				name: 'InvalidInputError',
+				input: testCase.input
+			});
+			expect(requests).toBe(0);
+		}
+	);
 });

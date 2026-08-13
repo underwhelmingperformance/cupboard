@@ -29,6 +29,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
 	BuildCommandFailedError,
+	BuildProvenanceIncompleteError,
 	BuildPublicationFailedError,
 	CliAbortError,
 	CupboardHttpError,
@@ -251,6 +252,10 @@ interface ConstructedFlowConfig {
 	/** What the cohort declares; a flake attribute unless set. */
 	readonly installables?: readonly string[];
 	readonly attempts?: number;
+	readonly rebuild?: boolean;
+	readonly requireProvenance?: boolean;
+	/** Simulates a helper delivery failure after Nix completed the build. */
+	readonly suppressEvent?: boolean;
 	readonly verifyRebuilds?: boolean;
 	/** The machine the stub's activity log attributes; empty is local. */
 	readonly machine?: string;
@@ -314,6 +319,7 @@ const stubNixScript = [
 	"const fs = require('node:fs');",
 	"const net = require('node:net');",
 	'const args = process.argv.slice(2);',
+	"if (process.env.STUB_REQUIRE_REBUILD === 'true' && !args.includes('--rebuild')) process.exit(2);",
 	"const logFile = args[args.indexOf('json-log-path') + 1];",
 	String.raw`fs.writeFileSync(logFile, process.env.STUB_LOG_LINE + '\n');`,
 	'let runs = 0;',
@@ -360,13 +366,14 @@ async function stubNixEnvironment(
 		STUB_LOG_LINE: activityLine(constructed.machine ?? ''),
 		STUB_COUNT_FILE: stubCountFile(workspace),
 		STUB_SUCCEED_ON: String(constructed.succeedOn),
-		STUB_SOCKET: socketPath,
+		STUB_REQUIRE_REBUILD: String(constructed.rebuild === true),
+		STUB_SOCKET: constructed.suppressEvent === true ? '' : socketPath,
 		STUB_OUT_PATHS: outPaths.join(' '),
 		STUB_EVENT: JSON.stringify({
 			version: 1,
 			invocationId,
 			derivation: drvA,
-			outputPaths: [pathA]
+			outputPaths: outPaths
 		})
 	};
 }
@@ -600,6 +607,10 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 						installables: config.constructed.installables ?? ['.#app'],
 						...(config.constructed.attempts !== undefined && {
 							attempts: config.constructed.attempts
+						}),
+						...(config.constructed.rebuild === true && { rebuild: true }),
+						...(config.constructed.requireProvenance === true && {
+							requireProvenance: true
 						}),
 						...(config.constructed.verifyRebuilds === true && {
 							verifyRebuilds: true
@@ -1259,6 +1270,114 @@ describe('runBuildPush', () => {
 				failed: [],
 				collected: []
 			}
+		});
+	});
+
+	it.each([
+		{
+			name: 'streamed',
+			preflightFailure: undefined,
+			receipt: {
+				version: 3,
+				paths: [pathA, pathB],
+				subjects: [pathA, pathB].map((storePath) => ({
+					storePath,
+					narHash: narHash.digestHex(),
+					derivation: drvA,
+					attempt: 1,
+					attemptId: 'attempt-1',
+					buildStore: 'auto',
+					verification: 'local'
+				})),
+				outcomes: [pathA, pathB].map((storePath) => ({
+					outcome: 'destination-served',
+					storePath
+				})),
+				childExitStatus: 0,
+				uploaded: [],
+				failed: [],
+				collected: []
+			}
+		},
+		{
+			name: 'reconciled local',
+			preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+			receipt: {
+				version: 3,
+				paths: [pathA, pathB],
+				subjects: [pathA, pathB].map((storePath) => ({
+					storePath,
+					narHash: narHash.digestHex(),
+					derivation: drvA,
+					buildStore: 'auto',
+					verification: 'build-store'
+				})),
+				childExitStatus: 0,
+				uploaded: []
+			}
+		}
+	])(
+		'rebuilds and claims every output of an already-valid multi-output derivation in $name mode',
+		async ({ preflightFailure, receipt: expectedReceipt }) => {
+			const run = await runFlow({
+				...(preflightFailure !== undefined && { preflightFailure }),
+				constructed: {
+					succeedOn: 1,
+					rebuild: true,
+					requireProvenance: true,
+					installables: [`${drvA}^*`]
+				},
+				valid: [pathA, pathB],
+				alreadyValid: [pathA, pathB],
+				declaredOutputs: [pathA, pathB],
+				outPaths: [pathA, pathB],
+				ultimatePaths: [pathA, pathB]
+			});
+			const receipt: unknown = JSON.parse(
+				await readFile(run.receiptFile, 'utf8')
+			);
+
+			expect({
+				error: run.error,
+				attemptIdsIssued: run.attemptIdsIssued,
+				receipt
+			}).toStrictEqual({
+				error: undefined,
+				attemptIdsIssued: 1,
+				receipt: expectedReceipt
+			});
+		}
+	);
+
+	it('fails closed when a provenance-required final build event is lost', async () => {
+		const run = await runFlow({
+			constructed: {
+				succeedOn: 1,
+				requireProvenance: true,
+				suppressEvent: true
+			},
+			valid: [pathA]
+		});
+
+		expect({
+			error:
+				run.error instanceof BuildPublicationFailedError
+					? {
+							name: run.error.name,
+							exitCode: run.error.exitCode,
+							cause: run.error.cause
+						}
+					: run.error,
+			receiptExists: existsSync(run.receiptFile),
+			rootSets: run.rootSets
+		}).toStrictEqual({
+			error: {
+				name: 'BuildPublicationFailedError',
+				exitCode: 74,
+				cause: new BuildProvenanceIncompleteError([pathA])
+			},
+			receiptExists: false,
+			rootSets: []
 		});
 	});
 

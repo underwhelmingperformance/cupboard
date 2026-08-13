@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
-	AmbiguousReleaseForCommitError,
 	AttestationNotFoundError,
 	AttestationSourceMismatchError,
 	AttestationVerificationFailedError,
@@ -13,6 +12,7 @@ import {
 	CachePublicKeyRequestFailedError,
 	ChecksumMismatchError,
 	CommandFailedError,
+	CommandOutputTooLargeError,
 	CupboardReportedError,
 	CupboardResolutionJsonError,
 	DerivationGraphShapeError,
@@ -23,6 +23,7 @@ import {
 	GracePolicyMissingError,
 	InvalidChecksumLineError,
 	InvalidInputError,
+	InvalidReleaseAssetUrlError,
 	LegacyPushSummaryError,
 	MalformedReleaseDiscoveryResponseError,
 	MalformedReleaseResponseError,
@@ -35,6 +36,8 @@ import {
 	PublishTargetsSchemaError,
 	PushSummaryMissingError,
 	ReleaseAssetNotFoundError,
+	ReleaseAttestationSearchTooLargeError,
+	ReleaseDiscoverySearchTooLargeError,
 	ReuseViewPriorityError,
 	RootEnsureCommandError,
 	RootEnsureResultInvalidError,
@@ -70,11 +73,8 @@ describe('action errors', () => {
 			genericExitCode
 		],
 		[
-			'AmbiguousReleaseForCommitError',
-			new AmbiguousReleaseForCommitError('owner/repo', 'a'.repeat(40), [
-				'one',
-				'two'
-			]),
+			'ReleaseDiscoverySearchTooLargeError',
+			new ReleaseDiscoverySearchTooLargeError(100, 1000, 20, 101, 101, 1),
 			genericExitCode
 		],
 		[
@@ -90,6 +90,19 @@ describe('action errors', () => {
 		[
 			'ReleaseAssetNotFoundError',
 			new ReleaseAssetNotFoundError('v1.2.3', 'cupboard.tar.gz'),
+			genericExitCode
+		],
+		[
+			'InvalidReleaseAssetUrlError',
+			new InvalidReleaseAssetUrlError(
+				'cupboard.tar.gz',
+				'https://api.github.com'
+			),
+			genericExitCode
+		],
+		[
+			'ReleaseAttestationSearchTooLargeError',
+			new ReleaseAttestationSearchTooLargeError(100, 10, 101, 1),
 			genericExitCode
 		],
 		[
@@ -228,6 +241,11 @@ describe('action errors', () => {
 			genericExitCode
 		],
 		[
+			'CommandOutputTooLargeError',
+			new CommandOutputTooLargeError('nix build', 16, 17),
+			genericExitCode
+		],
+		[
 			'CommandFailedError',
 			new CommandFailedError('cupboard', 1),
 			genericExitCode
@@ -329,6 +347,68 @@ describe('AttestationNotFoundError', () => {
 		expect(new AttestationNotFoundError('cupboard.tar.gz').archiveName).toBe(
 			'cupboard.tar.gz'
 		);
+	});
+});
+
+describe('InvalidReleaseAssetUrlError', () => {
+	it('carries the asset and expected API origin without echoing the unsafe URL', () => {
+		const error = new InvalidReleaseAssetUrlError(
+			'cupboard.tar.gz',
+			'https://api.github.com'
+		);
+
+		expect({
+			assetName: error.assetName,
+			expectedOrigin: error.expectedOrigin,
+			message: error.message
+		}).toStrictEqual({
+			assetName: 'cupboard.tar.gz',
+			expectedOrigin: 'https://api.github.com',
+			message:
+				'release asset cupboard.tar.gz does not have a credential-safe HTTPS URL on https://api.github.com'
+		});
+	});
+});
+
+describe('ReleaseAttestationSearchTooLargeError', () => {
+	it('carries both policy limits and observed totals', () => {
+		const error = new ReleaseAttestationSearchTooLargeError(100, 10, 101, 1);
+
+		expect({
+			maximumCandidates: error.maximumCandidates,
+			maximumPages: error.maximumPages,
+			observedCandidates: error.observedCandidates,
+			observedPages: error.observedPages
+		}).toStrictEqual({
+			maximumCandidates: 100,
+			maximumPages: 10,
+			observedCandidates: 101,
+			observedPages: 1
+		});
+	});
+});
+
+describe('ReleaseDiscoverySearchTooLargeError', () => {
+	it('carries every release discovery policy limit and observed total', () => {
+		const error = new ReleaseDiscoverySearchTooLargeError(
+			100,
+			1000,
+			20,
+			1,
+			1001,
+			11
+		);
+
+		expect(error).toMatchObject({
+			maximumPageEntries: 100,
+			maximumCandidates: 1000,
+			maximumPages: 20,
+			observedPageEntries: 1,
+			observedCandidates: 1001,
+			observedPages: 11,
+			message:
+				'release discovery exceeded its limits: page 11 contained 1 entries and brought the total to 1001; maximum 100 entries per page, 1000 candidates and 20 pages'
+		});
 	});
 });
 

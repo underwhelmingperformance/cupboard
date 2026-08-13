@@ -14,8 +14,7 @@ interface NarinfoCase {
 }
 
 /**
- * Documents Nix reads without complaint, so both sides state what the path
- * offers and the fields can be compared.
+ * Documents accepted by Nix, allowing exact field comparison between clients.
  */
 const agreedCases: readonly NarinfoCase[] = [
 	{ name: 'a well-formed narinfo', fixture: {} },
@@ -49,7 +48,7 @@ const agreedCases: readonly NarinfoCase[] = [
 	}))
 ];
 
-/** Documents Nix refuses, which our client has to refuse as well. */
+/** Documents that both Nix and our client must reject. */
 const refusedCases: readonly NarinfoCase[] = [
 	...['StorePath', 'URL', 'NarHash', 'NarSize'].map((field) => ({
 		name: `a narinfo carrying no ${field}`,
@@ -68,8 +67,7 @@ const refusedCases: readonly NarinfoCase[] = [
 		fixture: { fields: { CA: `fixed:md4:${'a'.repeat(32)}` } }
 	},
 	{
-		// Six bits are no whole byte, so the line names a key and states
-		// nothing signed under it.
+		// Six bits do not form a complete byte, so the signature material is invalid.
 		name: 'a signature whose material decodes to nothing',
 		fixture: { fields: { Sig: 'cache.example.org-1:A' } }
 	},
@@ -107,8 +105,7 @@ const refusedCases: readonly NarinfoCase[] = [
 ];
 
 /**
- * Documents our client refuses and Nix takes. Refusing more than Nix does is
- * conformant, so these ride the same directional case as the rest.
+ * Documents accepted by the pinned Nix but rejected by our stricter client.
  */
 const stricterCases: readonly NarinfoCase[] = [
 	{
@@ -145,9 +142,8 @@ describeConformance('a narinfo read from a substituter', (oracle) => {
 		}
 	);
 
-	// A path the cache holds no document for is an answer both sides give,
-	// rather than a failure either reports. Every case above rests on the
-	// difference between that and a refusal.
+	// A missing narinfo is a normal absence for both clients, not a malformed
+	// document error.
 	it('reads a path the cache holds nothing for as an absence', async () => {
 		const outcome = await readNarinfo(oracle, { served: false });
 

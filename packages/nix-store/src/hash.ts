@@ -18,10 +18,10 @@ import {
 const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 const sha256DigestBytes = 32;
 
-/** An algorithm a Nix hash names, whichever value states the hash. */
+/** A hash algorithm supported by Nix. */
 export type NixHashAlgorithm = 'md5' | 'sha1' | 'sha256' | 'sha512';
 
-/** A hash as a Nix value states it: the algorithm named, and the digest read. */
+/** A hash parsed from a Nix value. */
 export interface NixHash {
 	readonly algorithm: NixHashAlgorithm;
 	readonly bytes: Uint8Array;
@@ -32,9 +32,9 @@ interface NixHashSize {
 	readonly digestBytes: number;
 }
 
-// The algorithms a hash may name, with the digest size each writes. Nix reads
-// `blake3` as well, behind the blake3-hashes experimental feature, so a value
-// naming it states a hash a stock Nix has no reading of.
+// The supported hash algorithms and their digest sizes. Nix also supports
+// `blake3` behind the blake3-hashes experimental feature, so the default build
+// cannot read a value that specifies it.
 function hashAlgorithm(name: string): NixHashSize | undefined {
 	switch (name) {
 		case 'md5': {
@@ -71,8 +71,8 @@ function decodeBase16(digest: string): Uint8Array | undefined {
 	}
 }
 
-// Base64 states its own length, so a digest of the encoded length can still
-// decode to more bytes than the algorithm holds.
+// A base64 string of the expected encoded length can still decode to more
+// bytes than the algorithm's digest size.
 function decodeBase64(
 	digest: string,
 	digestBytes: number
@@ -89,9 +89,9 @@ function decodeBase64(
 }
 
 /**
- * The digest a value states, read by the encoding its length names: base16,
- * Nix's own base32, or base64, which is how Nix decides between them for a
- * digest written without one.
+ * Decodes a digest by inferring its encoding from its length. Nix uses the
+ * same rule to distinguish base16, Nix base32 and base64 when the value does
+ * not specify an encoding.
  */
 function decodeDigest(
 	digest: string,
@@ -113,10 +113,9 @@ function decodeDigest(
 }
 
 /**
- * The hash an `<algorithm>:<digest>` value states, or `undefined` for a value
- * that states none. Nix takes the algorithm from before the colon and reads
- * the digest by its length, so a digest of any other length, or one outside
- * the alphabet its length names, is one Nix cannot read.
+ * Decodes an `<algorithm>:<digest>` value, or returns `undefined` if Nix would
+ * not recognise it. The algorithm precedes the colon, and the digest encoding
+ * is inferred from its length.
  */
 export function decodeNixHash(value: string): NixHash | undefined {
 	const separator = value.indexOf(':');
@@ -132,7 +131,7 @@ export function decodeNixHash(value: string): NixHash | undefined {
 }
 
 /**
- * The hash a narinfo hash field states, in either spelling Nix writes one in:
+ * Decodes a narinfo hash field in either format written by Nix:
  * `<algorithm>:<digest>`, or the subresource integrity `<algorithm>-<base64>`.
  * An integrity value is always base64 and is read by the bytes it decodes to.
  */
@@ -285,10 +284,8 @@ export function fromNixBase32(value: string): Uint8Array {
 }
 
 /**
- * The digest a Nix base32 value states, or `undefined` when it states none for
- * an algorithm of this size. A digest is exactly as long as the size demands,
- * so a short input cannot decode to a zeroed digest nor a long one silently
- * drop its leading bits.
+ * Decodes a Nix base32 digest of the specified size. Returns `undefined` if the
+ * input has the wrong length or contains bits outside that digest size.
  */
 function decodeNixBase32(
 	value: string,
@@ -314,9 +311,8 @@ function decodeNixBase32(
 			const bitValue = (digit >> bit) & 1;
 
 			if (sourceBit >= bytes.byteLength * 8) {
-				// The most-significant base32 digit spans more bits than the digest
-				// holds. A canonical encoding leaves those overflow bits zero, so a
-				// value that sets them states no digest of this size.
+				// The most-significant base32 digit spans beyond the digest. Canonical
+				// encodings leave these overflow bits unset.
 				if (bitValue === 1) {
 					return undefined;
 				}

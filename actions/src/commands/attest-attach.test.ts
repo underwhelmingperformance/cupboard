@@ -473,7 +473,7 @@ describe('attestAttachAction', () => {
 		});
 	});
 
-	it('fails when the CLI does not settle every signed receipt subject', async () => {
+	it('fails when the CLI does not attach every signed subject', async () => {
 		const fixture = await writeReceipt([appPath, runtimePath]);
 
 		await expect(
@@ -503,10 +503,12 @@ describe('attestAttachAction', () => {
 						}
 					])
 			})
-		).rejects.toThrow(`Attestation attachment did not settle ${runtimePath}`);
+		).rejects.toThrow(
+			`Attestation attachment was incomplete for: ${runtimePath}`
+		);
 	});
 
-	it('fails when the CLI records no attachment settlement result', async () => {
+	it('fails when the CLI records no attachment result', async () => {
 		const fixture = await writeReceipt([appPath]);
 
 		await expect(

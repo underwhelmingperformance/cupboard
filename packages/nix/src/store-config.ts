@@ -37,9 +37,9 @@ export interface NixStoreConfig {
 	/** The `store` setting: a URI, `auto`, `daemon`, `local`, or a store path. */
 	readonly storeUri: string;
 	/**
-	 * The directory every store path sits under, which `NIX_STORE_DIR` names
-	 * and `NIX_STORE` names after it. No configuration file states it: a store
-	 * that serves another directory says so in its own URI.
+	 * The directory that prefixes every store path. `NIX_STORE_DIR` configures
+	 * it directly, while `NIX_STORE` is a deprecated alias. Stores serving a
+	 * different directory specify it in their URI.
 	 */
 	readonly storeDirectory: StoreDirectory;
 	readonly stateDirectory: string;
@@ -57,15 +57,14 @@ export interface NixStoreConfig {
 	/** The discovered settings that decide whose signature Nix accepts. */
 	readonly signatures: NixSignatureSettings;
 	/**
-	 * The setting names the configuration states that no Nix this client knows
-	 * has. Nix warns about such a name and reads nothing out of it, so these
-	 * settled nothing here either and a caller reports them as they are.
+	 * Configuration setting names unknown to this client. Nix warns about
+	 * unknown settings and ignores their values; callers can report them here.
 	 */
 	readonly unknownSettings: readonly string[];
 	/**
 	 * The effective `post-build-hook` setting from the merged configuration.
 	 * Nix supports exactly one post-build hook, so a caller about to apply its
-	 * own reads this first to refuse over an operator's existing hook.
+	 * own checks this field first and rejects an existing operator hook.
 	 */
 	readonly postBuildHook?: string;
 }
@@ -87,7 +86,7 @@ export type NixDaemonOverrides = Readonly<Record<string, string>>;
 /**
  * The effective settings deciding whether Nix would substitute a path rather
  * than build it, and which stores it would try. Nix applies them in this
- * order: nothing is substituted at all when `substitute` is off, and a
+ * order: no paths are substituted when `substitute` is off, and a
  * derivation's own `allowSubstitutes = false` is honoured unless
  * `alwaysAllowSubstitutes` overrules it.
  */
@@ -100,8 +99,8 @@ export interface NixSubstitutionSettings {
 	 */
 	readonly alwaysAllowSubstitutes: boolean;
 	/**
-	 * The `fallback` setting: whether a substituter that fails to answer is
-	 * carried on past.
+	 * The `fallback` setting: whether queries continue after a substituter
+	 * failure.
 	 */
 	readonly fallback: boolean;
 	/**
@@ -115,13 +114,12 @@ export interface NixSubstitutionSettings {
  * The effective settings deciding where Nix would build a derivation. Nix
  * builds one on this machine when its system is among `systems` and every
  * feature it requires is among `features`; anything else it hands to a remote
- * builder, and with none configured it has nowhere to hand it.
+ * builder. If no suitable builder is configured, the derivation cannot build.
  */
 export interface NixBuildSettings {
 	/**
 	 * The systems this machine builds itself: the `system` setting followed by
-	 * every `extra-platforms` entry. Empty when nothing names this machine's
-	 * system.
+	 * every `extra-platforms` entry. Empty when the host system is unknown.
 	 */
 	readonly systems: readonly string[];
 	/** The `system-features` setting: what a derivation may require here. */
@@ -134,8 +132,8 @@ export interface NixBuildSettings {
  * The effective settings deciding how Nix attempts an HTTP transfer and how it
  * waits before attempting one again. Nix retries a transient failure, doubling
  * the wait each time up to a ceiling and never coming back sooner than a
- * server asked, and spreads each wait so that clients answered alike do not
- * all return at the same moment.
+ * server requested. It applies jitter so that clients receiving the same
+ * response do not all return at the same moment.
  */
 export interface NixFileTransferSettings {
 	/** The `filetransfer-retry-attempts` setting: tries before giving up. */
@@ -154,26 +152,24 @@ export interface NixFileTransferSettings {
 	readonly retryJitter: boolean;
 	/**
 	 * The `stalled-download-timeout` setting, in milliseconds: how long a
-	 * server that has answered nothing is given before the transfer is
-	 * abandoned.
+	 * server may remain stalled before the transfer is abandoned.
 	 *
 	 * Nix states this to libcurl as a rate: a transfer whose average falls under
 	 * a byte a second for this long is abandoned, however long it has been
 	 * running. This client states it as a deadline on the whole request
-	 * instead, which answers alike at the sizes it reads. A narinfo and a
-	 * `nix-cache-info` are a few hundred bytes, so a transfer still running
-	 * when the deadline passes has been delivering a byte or two a second,
-	 * which is the rate Nix names. The two would part company only for an
-	 * answer approaching the megabyte this client will read at all, which no
-	 * such document comes near.
+	 * instead. These approaches behave alike for the small documents it reads. A
+	 * narinfo and a `nix-cache-info` are a few hundred bytes. A transfer still
+	 * running when the deadline passes has been delivering a byte or two a second,
+	 * which is the rate Nix configures. The approaches differ only for a
+	 * response approaching the megabyte limit. These documents are much smaller.
 	 */
 	readonly stalledTransferTimeoutMs: number;
 	/** The `http-connections` setting: requests in flight at once, 0 for no limit. */
 	readonly httpConnections: number;
 	/**
-	 * The `netrc-file` setting: where the credentials a private cache asks for
-	 * are named. Nix states it as an absolute path and defaults it to `netrc`
-	 * beside the system configuration, whether or not a file sits there.
+	 * The `netrc-file` setting: the file containing private-cache credentials.
+	 * Nix requires an absolute path and defaults to `netrc` beside the system
+	 * configuration, whether or not the file exists.
 	 */
 	readonly netrcFile: string;
 }
@@ -233,10 +229,9 @@ function netrcFileIn(configDirectory: string): string {
 }
 
 /**
- * What Nix asks of the machine before claiming it can build something. Each
+ * Host capabilities that Nix probes before claiming it can build a derivation. Each
  * default below is a capability Nix probes for at startup, so a machine
- * without it does not claim it. Injected so a test states the machine it is
- * describing.
+ * unavailable capability is omitted. The probe is injected for deterministic tests.
  */
 export interface NixMachineProbes {
 	/** Whether the path is readable and writable, as the `access` check is. */
@@ -310,7 +305,7 @@ function kernelOf(system: string | undefined): string | undefined {
 }
 
 // The `system-features` Nix computes for a machine whose configuration assigns
-// none: three names Nixpkgs routes builds by without asking anything of the
+// none: three names Nixpkgs uses to route builds without requiring host capabilities,
 // machine, plus a Linux machine's user namespaces, plus the two Nix probes the
 // machine for.
 const portableSystemFeatures = ['nixos-test', 'benchmark', 'big-parallel'];
@@ -340,8 +335,8 @@ function defaultSystemFeatures(
 }
 
 // Nix names a machine's system `<cpu>-<kernel>`. These are the halves Nix
-// spells differently from Node, and a machine Node names anything else has no
-// system double here: nothing then claims to know what this machine builds.
+// spells differently from Node. Other Node platform names do not map to a Nix
+// system here.
 const nixCpuNames: ReadonlyMap<string, string> = new Map([
 	['arm64', 'aarch64'],
 	['ia32', 'i686'],
@@ -381,7 +376,7 @@ export interface NixConfigEnvironment {
 	readonly workingDirectory: () => string;
 	/**
 	 * This machine's Nix system, which the `system` setting defaults to, or
-	 * `undefined` when nothing names it.
+	 * `undefined` when it cannot be determined.
 	 */
 	readonly currentSystem: () => string | undefined;
 	/** What this machine offers a build, which Nix probes for. */
@@ -446,13 +441,11 @@ export const defaultMachineProbes: NixMachineProbes = {
 
 /**
  * The x86-64 psABI levels a set of CPU feature flags satisfies. Each level
- * subsumes the one below it, so the first level a CPU falls short of ends the
- * list, and a CPU short of `v1` satisfies none: libcpuid reports such a CPU as
- * an architecture it has no name for, which leaves Nix naming no level at all.
+ * subsumes the one below it, so the first unsupported level ends the list. A
+ * CPU below `v1` satisfies no level.
  *
- * Nix names these only when it was built against libcpuid. One built without
- * it names no level whatever the CPU offers, so an oracle answering with none
- * is describing how it was built rather than the machine it runs on.
+ * Nix reports these levels only when built against libcpuid. A build without
+ * libcpuid reports none regardless of the host CPU.
  */
 export function microarchitectureLevelsOf(
 	flags: ReadonlySet<string>
@@ -474,7 +467,7 @@ export function microarchitectureLevelsOf(
  * The features each psABI level asks of a CPU, as libcpuid's
  * `architecture_x86_64_v1` to `_v4` arrays state them, spelled the way Linux
  * spells each one in `/proc/cpuinfo`. Nix reads its levels from that library,
- * so these are the arrays its answer comes from rather than the psABI
+ * so these arrays match its result rather than the psABI
  * document's own wording.
  *
  * Three names differ between the two spellings. `PNI` is SSE3 under the name
@@ -602,9 +595,8 @@ export function discoverNixStoreConfig(
 	const storeDirectory = resolveStoreDirectory(dependencies);
 	const stateDirectory =
 		nonEmpty(dependencies.env.NIX_STATE_DIR) ?? defaultStateDirectory;
-	// A configured `store` wins over `NIX_REMOTE`, which is only the default
-	// the setting starts at. Either one naming nothing names the automatic
-	// store, which is how Nix reads an empty store reference.
+	// A configured `store` overrides `NIX_REMOTE`, which only supplies the
+	// initial value. Nix interprets an empty store reference as `auto`.
 	const configuredStore = settings.get('store');
 	const storeUri = canonicalStoreReference(
 		configuredStore === undefined
@@ -654,8 +646,8 @@ function resolveStoreDirectory(
 	return defaultStoreDirectory;
 }
 
-// Nix canonicalises the directory before it uses it, so a value naming the
-// same directory a different way names the same store: a trailing slash, a
+// Nix canonicalises the directory before use, so equivalent spellings refer to
+// the same store: a trailing slash, a
 // doubled one, or a `.` or `..` component.
 function parseStoreDirectory(
 	value: string,
@@ -704,10 +696,9 @@ function mergedSettings(dependencies: NixConfigEnvironment): {
 		'nix.conf'
 	);
 
-	// The system file settles what the settings hold and is forwarded to no
-	// daemon: Nix clears every setting's overridden mark once it has read that
-	// file, so what a connection carries is what a user's own configuration
-	// and `NIX_CONFIG` said.
+	// The daemon reads the system file itself. Nix clears each setting's
+	// overridden marker after that file, so SetOptions forwards only user
+	// configuration and `NIX_CONFIG` overrides.
 	loadConfigFile(
 		systemConfigPath,
 		dependencies.readFile,
@@ -819,7 +810,7 @@ function loadConfigFile(
 	);
 }
 
-// A file's contents, or nothing when it is not there or cannot be read.
+// A file's contents, or `undefined` when it is absent or unreadable.
 function readOrSkip(read: ReadFile, filePath: string): string | undefined {
 	try {
 		return read(filePath);
@@ -933,8 +924,8 @@ function applyInclude(
 /**
  * Where an include's target is read from. Nix joins a relative target onto the
  * directory of the file the line was written in and then requires an absolute
- * path, so a relative target written in `NIX_CONFIG` has nothing to be joined
- * onto and is refused.
+ * path. `NIX_CONFIG` has no containing directory, so a relative include there
+ * is invalid.
  */
 function includePath(target: string, source: ConfigSource): string {
 	if (path.isAbsolute(target)) {
@@ -1024,10 +1015,8 @@ class EffectiveSettings {
 	}
 
 	/**
-	 * Whether the setting is one to read at all, refusing the configuration
-	 * over a value Nix would refuse. Nix knows a setting by name, warns about a
-	 * name it has none for and carries on, and refuses the whole configuration
-	 * over a value the setting it does know cannot hold.
+	 * Applies a known setting and rejects values that Nix would reject. Unknown
+	 * setting names produce a warning but do not invalidate the configuration.
 	 */
 	private readable(name: string, value: string): boolean {
 		const named = namedSetting(name);
@@ -1049,9 +1038,9 @@ class EffectiveSettings {
 
 	// The list settings whose resolved value this client states. Nix forwards
 	// what a setting resolved to across every source it read, which for these
-	// is what the merge already settled: a system-wide assignment a user
+	// is the merged value: a system-wide assignment a user
 	// configuration appends to is part of the value, and the compiled-in
-	// default is where a setting nothing assigned starts.
+	// default is the initial value when no source assigns the setting.
 	private settledLists(): ReadonlyMap<string, readonly string[]> {
 		const substitution = this.substituting.values();
 		const signatures = this.signing.values();
@@ -1117,7 +1106,7 @@ class EffectiveSettings {
 }
 
 // The signature settings as the merge proceeds. Both key lists take an
-// `extra-` assignment appending to whatever they hold, the way every
+// `extra-` assignment appending to the current value, the way every
 // appendable list setting does.
 class EffectiveSignatureSettings {
 	private requireSignatures = true;
@@ -1158,10 +1147,10 @@ class EffectiveSignatureSettings {
 	}
 }
 
-// A list setting as the merge proceeds. An assignment replaces whatever the
-// setting holds, including the values appended so far; an `extra-` assignment
+// A list setting as the merge proceeds. An assignment replaces the current
+// value, including values appended so far; an `extra-` assignment
 // appends to it. A setting never assigned resolves to the default it is given.
-// A value named twice is held twice, as Nix holds a list setting: the settings
+// Duplicate values remain duplicated, as in Nix list settings. Settings
 // Nix keeps as a set say so where they are resolved.
 export class EffectiveList {
 	private assigned: readonly string[] | undefined;
@@ -1193,9 +1182,9 @@ export class EffectiveList {
 	}
 
 	/**
-	 * The value the list states without being told a default: an assignment
-	 * with every later append after it. A list only appended to states none,
-	 * since what it appends to is the default it was never given.
+	 * The explicitly assigned value followed by later appends. Returns
+	 * `undefined` when the configuration only appends because the base default
+	 * has not been supplied here.
 	 */
 	assignedValue(): readonly string[] | undefined {
 		return this.assigned === undefined
@@ -1270,8 +1259,7 @@ class EffectiveBuildSettings {
 		const { probes } = this.dependencies;
 		const builders = resolvedBuilders(this.builders, this.dependencies);
 
-		// Nix holds the platforms and the features as sets, so a name stated
-		// twice names one platform and one feature.
+		// Nix stores platforms and features as sets, so remove duplicates.
 		return {
 			systems:
 				system === undefined
@@ -1297,8 +1285,8 @@ class EffectiveBuildSettings {
 // The compiled-in `builders` value is the machines file in the configuration
 // directory, so a machine that declares its builders there and never mentions
 // the setting still has them. `NIX_REMOTE_SYSTEMS` names files instead,
-// colon-separated; set but empty, it names none, and the machines file is not
-// consulted either.
+// colon-separated. When set to an empty value it selects no files, and the
+// machines file is not consulted either.
 function defaultBuilders(
 	dependencies: NixConfigEnvironment
 ): string | undefined {
@@ -1324,10 +1312,8 @@ function systemConfigDirectory(dependencies: NixConfigEnvironment): string {
 }
 
 /**
- * The builders a setting names, with every `@file` entry replaced by what that
- * file holds. Nix reads those files where it dispatches a build, so a file
- * that is missing or holds nothing names no builders, and a setting naming
- * only such files leaves this machine with none.
+ * Expands the builders configured by a setting, replacing every `@file` entry
+ * with that file's entries. Missing or empty files contribute no builders.
  */
 function resolvedBuilders(
 	setting: string | undefined,
@@ -1343,9 +1329,8 @@ function resolvedBuilders(
 }
 
 /**
- * How many `@file` entries a builder list follows before it gives up. A
- * machines file may name another, and a file naming itself would otherwise
- * expand without end.
+ * Maximum nesting depth for `@file` entries. Machines files may include one
+ * another, so a cycle would otherwise recurse indefinitely.
  */
 const maxMachineFileDepth = 16;
 
@@ -1382,10 +1367,9 @@ function expandBuilderLines(
 }
 
 /**
- * The lines a `@file` entry stands for. Nix passes over a machines file that is
+ * Reads the lines represented by an `@file` entry. Nix ignores a machines file that is
  * not there and raises whatever else the filesystem said, so a file this
- * process may not read is a configuration that cannot be resolved rather than a
- * machine list with no builders in it.
+ * process may not read makes the configuration unresolvable rather than empty.
  */
 function machineFileText(
 	filePath: string,

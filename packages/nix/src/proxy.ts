@@ -4,8 +4,8 @@
 import { type Dispatcher, EnvHttpProxyAgent } from 'undici';
 
 /**
- * The proxies an environment names, in the spellings and the order libcurl
- * reads them. A field is absent when nothing names a proxy for it.
+ * Proxy values from the environment, using libcurl's names and precedence. A
+ * field is absent when no variable configures that proxy.
  */
 export interface NamedProxies {
 	readonly httpProxy?: string;
@@ -18,7 +18,7 @@ export type ProxyEnvironment = Readonly<Record<string, string | undefined>>;
 
 /**
  * The proxies the environment names. libcurl reads `<scheme>_proxy` first and
- * falls back to `all_proxy`, taking the first of them that names anything.
+ * falls back to `all_proxy`, taking the first non-empty value.
  *
  * `http_proxy` is read in lower case alone. A CGI script runs with the request
  * headers in its environment, so a request carrying a `Proxy:` header would
@@ -41,7 +41,7 @@ export function proxiesNamedBy(env: ProxyEnvironment): NamedProxies {
 	};
 }
 
-// An empty value names nothing, which is how a variable is unset for one
+// An empty value disables the proxy, which is how a variable is unset for one
 // command without being unset for the shell that ran it.
 function firstNamed(
 	env: ProxyEnvironment,
@@ -59,15 +59,14 @@ function firstNamed(
 }
 
 /**
- * A request's route through a proxy, which the runtime takes from the request
- * rather than from the URL. Only Node names one, so the option is stated where
- * it is passed rather than read off the shape a request is made from.
+ * A request's proxy dispatcher. Node accepts this as a request option rather
+ * than deriving it from the URL.
  */
 type RoutedRequest = RequestInit & { readonly dispatcher?: Dispatcher };
 
 /**
- * How a request is made when the environment names a proxy, or nothing when it
- * names none and requests take the plain route.
+ * Creates a proxy dispatcher from the environment, or returns `undefined` for
+ * direct requests.
  *
  * The hosts `no_proxy` names go direct. That list is read by the agent, which
  * accepts a leading dot, a bare domain matched on its label boundaries, an
@@ -80,8 +79,7 @@ export function proxiedFetch(env: ProxyEnvironment): typeof fetch | undefined {
 		return;
 	}
 
-	// One agent holds the connections to the proxy, so every request this run
-	// makes through it shares them.
+	// Reuse one agent and its proxy connections across requests.
 	// The agent otherwise falls back to `process.env` for every absent option.
 	// State each absence explicitly so an upper-case HTTP_PROXY deliberately
 	// excluded above cannot come back when the agent constructs its routes.

@@ -17,24 +17,21 @@ export interface SubstitutableClosureOptions {
 	/** Paths the walk may visit (default: {@link defaultSubstitutableClosureCap}). */
 	readonly maxPaths?: number;
 	/**
-	 * Abandons the walk between rounds, raising the signal's reason. A round
-	 * is one question to each side, so a walk under way settles as soon as the
-	 * answers it is waiting on arrive.
+	 * Abandons the walk between rounds using the signal's reason. In-flight
+	 * store and substituter queries finish before the current round stops.
 	 */
 	readonly signal?: AbortSignal;
 	/**
-	 * Whether a consumer would take what a substituter offers (default: every
-	 * offer). The store holds no signing policy of its own, so the caller
-	 * that has one supplies it.
+	 * Whether a consumer would accept a substituter offer. The caller supplies
+	 * any signing policy because the store has none of its own.
 	 */
 	readonly accepts?: AcceptsOffer;
 }
 
 /**
- * How a substitutable-closure walk settled. `served` means the substituters
- * the walk asked offer every path in the local closure, byte for byte where
- * they say so. Every other verdict names the path that settled the question,
- * and only `served` says the closure is held elsewhere.
+ * The result of checking a substitutable closure. `served` means the
+ * substituters offer every path in the local closure with matching NAR hashes.
+ * Every other verdict identifies the first path that prevents that result.
  */
 export type SubstitutableClosureVerdict =
 	| {
@@ -45,9 +42,8 @@ export type SubstitutableClosureVerdict =
 	  }
 	| { readonly kind: 'not-served'; readonly storePath: StorePathString }
 	/**
-	 * A path reachable from the root that this store does not hold, so there
-	 * is no local closure to walk past it and nothing to compare an offer
-	 * against.
+	 * A reachable path that is absent from the local store. The walk cannot
+	 * continue through its references or compare an offer with local metadata.
 	 */
 	| { readonly kind: 'not-held-locally'; readonly storePath: StorePathString }
 	/**
@@ -61,23 +57,21 @@ export type SubstitutableClosureVerdict =
 			readonly offered: string;
 	  }
 	/**
-	 * The check a consumer applies before fetching turns the offer down, so a
+	 * The consumer's pre-fetch check rejects the offer, so a
 	 * consumer would not take the path however well the substituter serves it.
-	 * What the check tests is the caller's to state; this says only that it
-	 * said no.
+	 * The caller defines the policy checked here.
 	 */
 	| { readonly kind: 'refused'; readonly storePath: StorePathString }
 	| { readonly kind: 'over-cap'; readonly maxPaths: number };
 
 /**
- * Asks a set of substituters what they offer for a batch of paths, reading
- * each answer from the substituter that made it.
+ * Queries a set of substituters for offers on a batch of paths.
  */
 export type QuerySubstitutablePathInfos = (
 	storePaths: readonly StorePathString[]
 ) => Promise<readonly NixSubstituterOffer[]>;
 
-/** Asks this store which of a batch of paths it holds, and what it holds. */
+/** Reads validity and metadata for a batch of local store paths. */
 export type QueryHeldPathInfos = (
 	storePaths: readonly StorePathString[]
 ) => Promise<readonly NixValidPathInfo[]>;
@@ -92,14 +86,13 @@ export interface SubstitutableClosureQueries {
 
 /**
  * Proves, or fails to prove, that everything reachable from `root` is offered
- * by the substituters `queries.offered` asks. The closure walked is the one
- * this store holds, so the reachable set is the store's own record rather than
+ * by the substituters queried through `queries.offered`. The walk uses the
+ * local store's closure rather than
  * the substituters' account of it, and a substituter advertising fewer
- * references than the path really has cannot shrink what it has to answer for.
- * The walk stops at the first path that settles the question, so the rest of
- * the closure is never asked about.
+ * references than the path really has cannot shrink the required set. The walk
+ * stops at the first path that disproves full coverage.
  *
- * The NAR hash a substituter names must be the one this store holds: a path
+ * The NAR hash advertised by a substituter must match the local store's hash: a path
  * offered under a different hash is a different path by the same name.
  *
  * Every offer must also be one a consumer would accept, which `accepts`
@@ -109,10 +102,9 @@ export interface SubstitutableClosureQueries {
  *
  * Only metadata crosses the wire. The walk reads what the substituters
  * advertise and never fetches a NAR, so proving a large closure costs one
- * round of questions per level of it.
+ * query per level.
  *
- * Which substituters answer is the caller's choice, made when it builds
- * `queries.offered`.
+ * The caller selects the substituters when constructing `queries.offered`.
  */
 export async function resolveSubstitutableClosure(
 	root: StorePathString,

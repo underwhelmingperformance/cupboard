@@ -76,10 +76,9 @@ jobs:
 
       - run: nix run . -- --version
 
-      # Exercise the reusable workflows' no-release path through the real
-      # composite action. The canonical coordinate names this checkout, so
-      # setup must build the flake package and return its complete executable
-      # layout rather than contacting the release asset API.
+      # Exercise source installation through the same composite action used by
+      # the reusable workflows. This coordinate refers to the current checkout,
+      # so setup must build the flake package without querying release assets.
       - name: Describe this source revision
         id: source
         env:
@@ -114,7 +113,7 @@ jobs:
           persist-credentials: false
 
       # The end-to-end suite drives real Nix store operations against an
-      # in-process Worker, so exercise the same Nix client and installer as the
+      # in-process Worker. Exercise the same Nix client and installer as the
       # reusable publication action.
       - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
         with:
@@ -133,10 +132,9 @@ jobs:
 
       - run: pnpm --config.verify-deps-before-run=false check:e2e-remote-store
 
-      # The conformance suite compares our Nix client against the `nix` the
-      # flake pins, so it needs the same working Nix the suite above does. It
-      # runs on ubuntu only, which leaves the darwin-only configuration cases to
-      # developer machines.
+      # The conformance suite compares our client with the Nix binary pinned by
+      # the flake. It runs only on Ubuntu in CI; developers run the
+      # Darwin-specific configuration cases locally.
       - run: pnpm --config.verify-deps-before-run=false check:conformance
 
   action-e2e:

@@ -17,34 +17,31 @@ import { Command } from 'commander';
 import { z } from 'zod';
 
 /**
- * The conformance suite compares our Nix client against a real `nix`, so which
- * `nix` that is has to be the same everywhere: the flake's `conformanceNix`
- * output, built from the pinned nixpkgs. `oracle.json` pairs the version that
- * output resolves to with the nixpkgs revision it was resolved from, which
- * makes moving the oracle a reviewed `flake.lock` change. `check` compares the
- * recorded revision against the lockfile, which needs no Nix at all; `update`
- * rebuilds the output and records what it resolves to.
+ * The conformance suite compares our client with the flake's `conformanceNix`
+ * output from pinned nixpkgs. `oracle.json` records its version and nixpkgs
+ * revision, so changing the oracle requires a reviewed `flake.lock` update.
+ * `check` compares the recorded revision with the lockfile without running Nix;
+ * `update` rebuilds the output and records the result.
  */
 export const oracleFileName = 'oracle.json';
 
-/** The record's path from the repository root, as an error names it. */
+/** The record's path relative to the repository root. */
 export const oracleFilePath = `tests/conformance/${oracleFileName}`;
 
 /**
- * The settings table the same `nix` is read for, which the client validates a
- * configuration against. It is generated rather than written because it names
- * every setting that `nix` reads, and it moves with the oracle: an update
- * rewrites both, and `check` refuses a table generated from another nixpkgs.
+ * The generated settings table used to validate client configuration. It is
+ * derived from the same Nix as the oracle. An update rewrites both files, and
+ * `check` rejects a table generated from another nixpkgs revision.
  */
 export const settingTypesFileName = 'setting-types.generated.ts';
 
-/** The table's path from the repository root, as an error names it. */
+/** The table's path relative to the repository root. */
 export const settingTypesFilePath = `packages/nix/src/${settingTypesFileName}`;
 
-/** The flake output holding the `nix` the suite runs. */
+/** The flake output containing the `nix` binary used by the suite. */
 export const conformanceNixOutput = '.#conformanceNix';
 
-/** The command that rebuilds the record, as an error names it. */
+/** The command that regenerates the record and settings table. */
 const updateCommand = 'pnpm update:conformance-oracle';
 
 const nixVersionSchema = z.string().regex(/^nix \(Nix\) \S+$/u);
@@ -74,33 +71,29 @@ export interface OracleWorkspace {
 	writeSettingTypesFile(text: string): void;
 }
 
-/** The kind of value a setting holds, as `nix config show --json` reports it. */
+/** A setting value type reported by `nix config show --json`. */
 export type NixSettingValueType =
 	'boolean' | 'integer' | 'list' | 'map' | 'string';
 
-/** Every setting the pinned `nix` reads, with the kind of value it holds. */
+/** Every setting recognised by the pinned `nix`, with its value type. */
 export type NixSettingTypes = Readonly<Record<string, NixSettingValueType>>;
 
 /**
- * The C++ width nix declared an integer setting with, as the values it accepts
- * show. Nix reads an integer into the declared width and refuses a value the
- * width could not hold, and `nix config show` states none of this, so each
- * width is settled by asking the pinned nix what it takes.
+ * The C++ integer width inferred from values accepted by the pinned Nix. The
+ * JSON configuration output does not report this width.
  */
 export type NixIntegerWidth = 'uint32' | 'int64' | 'uint64';
 
 export type NixIntegerWidths = Readonly<Record<string, NixIntegerWidth>>;
 
-/** What the pinned nix reads, as the generated table states it. */
+/** The generated setting types and integer widths for the pinned Nix. */
 export interface NixSettingTable {
 	readonly types: NixSettingTypes;
 	readonly integerWidths: NixIntegerWidths;
 }
 
 /**
- * The values a width probe asks about. Each is the edge of one candidate
- * width, and which of them a setting takes names the width it was declared
- * with.
+ * Boundary values used to infer an integer setting's declared width.
  */
 export const integerWidthProbes = {
 	negative: '-1',
@@ -109,7 +102,7 @@ export const integerWidthProbes = {
 	unsignedSixtyFour: '18446744073709551615'
 } as const;
 
-/** Which probes a setting accepted, in the order {@link integerWidthProbes} names them. */
+/** Which {@link integerWidthProbes} values a setting accepted. */
 export interface AcceptedWidthProbes {
 	readonly negative: boolean;
 	readonly unsignedThirtyTwo: boolean;
@@ -124,16 +117,17 @@ export class UnknownIntegerWidthError extends CodedError {
 	) {
 		super(
 			`the pinned nix accepts a combination of values for '${setting}' that ` +
-				'names no width this script knows'
+				'does not match a supported integer width'
 		);
 		this.name = 'UnknownIntegerWidthError';
 	}
 }
 
 /**
- * The width the accepted values name. An unsigned 32-bit setting stops short
- * of the 64-bit edges, an unsigned 64-bit one reaches the highest of them, and
- * a signed 64-bit one takes a negative and stops below the unsigned edge.
+ * Infers the declared width from accepted boundary values. An unsigned 32-bit
+ * setting stops short of the 64-bit edges. An unsigned 64-bit setting reaches
+ * the highest edge, while a signed 64-bit setting accepts a negative and stops
+ * below the unsigned edge.
  */
 export function integerWidthOf(
 	setting: string,
@@ -169,7 +163,7 @@ export function integerWidthOf(
 	throw new UnknownIntegerWidthError(setting, accepted);
 }
 
-/** What the generated table records about the `nix` it was read from. */
+/** The Nix build from which the settings table was generated. */
 export interface GeneratedSettingTypes {
 	readonly nixpkgsRevision: string;
 	readonly version: string;
@@ -395,9 +389,7 @@ export async function updateConformanceOracle(
 	const record: OracleRecord = { nixpkgsRevision, version };
 	const current = recordedOrNothing(workspace);
 
-	// The table is written from whichever nix the record names, so a record
-	// that is already current is refreshed alongside it rather than left to a
-	// reader to wonder about.
+	// Always refresh the table from the same Nix build as the record.
 	workspace.writeSettingTypesFile(
 		renderSettingTypes(record, await nix.readSettingTable())
 	);
@@ -443,7 +435,7 @@ function settingValueType(value: unknown): NixSettingValueType | undefined {
 
 /**
  * The settings a `nix config show --json` document reports, by the kind of
- * value each holds. The table includes settings gated by experimental features:
+ * value type of each. The table includes settings gated by experimental features:
  * their reported defaults still state the value kind Nix validates once the
  * corresponding feature is enabled.
  */
@@ -478,8 +470,7 @@ export function parseSettingTypes(document: string): NixSettingTypes {
 	return types;
 }
 
-// An update writes the record from what the flake resolves to, so a file that
-// is absent or holds something unreadable is what it repairs.
+// An update repairs an absent or unreadable record from the resolved flake.
 function recordedOrNothing(
 	workspace: OracleWorkspace
 ): OracleRecord | undefined {
@@ -503,9 +494,9 @@ export interface NixOptions {
 }
 
 /**
- * Runs a `nix` command to completion and reports its exit status alongside what
- * it wrote. A conformance case compares our client's acceptance against the
- * oracle's, so a non-zero status is an answer rather than a failure.
+ * Runs a `nix` command to completion and returns its status and output. A
+ * conformance case compares acceptance with the oracle, so non-zero exit
+ * statuses are returned to the caller.
  */
 export function runNix(
 	binary: string,
@@ -545,8 +536,7 @@ export function runNix(
  * Builds the pinned flake output with the ambient environment, which is what
  * carries the substituters this machine fetches the output from.
  *
- * A machine with no `nix` at all leaves the suite without an oracle in the same
- * way a failing build does, so both arrive as the one error.
+ * A missing `nix` binary and a failed build both make the oracle unavailable.
  */
 async function buildConformanceNix(root: string): Promise<NixResult> {
 	try {
@@ -566,7 +556,7 @@ async function buildConformanceNix(root: string): Promise<NixResult> {
 
 /**
  * Builds the pinned flake output and returns the `nix` inside it. The output
- * names one store path, so the build prints exactly one line to read it from.
+ * produces one store path, so the build must print exactly one line.
  */
 export async function resolveConformanceNixBinary(
 	root: string
@@ -590,7 +580,7 @@ export async function resolveConformanceNixBinary(
 	return path.join(output, 'bin', 'nix');
 }
 
-/** The version string a `nix` binary reports, as the record holds it. */
+/** The version string reported by a `nix` binary. */
 export async function readNixVersion(
 	binary: string,
 	environment?: NodeJS.ProcessEnv
@@ -605,10 +595,9 @@ export async function readNixVersion(
 }
 
 /**
- * An environment in which the pinned nix reads no configuration at all: an
- * empty system file it is pointed at, and no user files. What a setting holds
- * is a property of nix rather than of a configuration, but a machine whose own
- * file nix refuses would otherwise report nothing.
+ * An environment that isolates the pinned Nix from host configuration. It uses
+ * an empty system file and disables user files so invalid host configuration
+ * cannot affect the reported settings.
  */
 function settingsEnvironment(home: string): NodeJS.ProcessEnv {
 	const configDirectory = path.join(home, 'nix-conf');
@@ -625,8 +614,7 @@ function settingsEnvironment(home: string): NodeJS.ProcessEnv {
 }
 
 /**
- * What the pinned nix reads: the kind of value each setting holds, and the
- * width it declared each integer setting with.
+ * Reads every setting type and integer width from the pinned Nix.
  */
 export async function readNixSettingTable(
 	binary: string
@@ -644,7 +632,7 @@ export async function readNixSettingTable(
 	return { types, integerWidths };
 }
 
-// Each probe is one `nix config show`, which settles in well under a second,
+// Each probe runs one `nix config show`, which completes in well under a second,
 // so a table of a few dozen integer settings is read in a few dozen seconds.
 async function readIntegerWidth(
 	binary: string,
@@ -670,8 +658,7 @@ async function readIntegerWidth(
 	}
 }
 
-// Whether the pinned nix reads the value as the setting's own. It refuses the
-// whole configuration over one it cannot, which is the answer being read.
+// Whether the pinned Nix accepts a value for the setting.
 async function acceptsSettingValue(
 	binary: string,
 	home: string,
@@ -689,7 +676,7 @@ async function acceptsSettingValue(
 	return printed.status === 0;
 }
 
-/** The settings the pinned nix reads, with the kind of value each holds. */
+/** Reads every setting recognised by the pinned Nix and its value type. */
 async function readNixSettingTypes(binary: string): Promise<NixSettingTypes> {
 	const home = mkdtempSync(path.join(tmpdir(), 'cupboard-oracle-settings-'));
 
@@ -740,8 +727,7 @@ function repositoryWorkspace(root: string): OracleWorkspace {
 	};
 }
 
-// The binary is built once and both answers are read from it, so an update
-// never records a version from one build and a table from another.
+// Build the binary once so the version and settings come from the same build.
 function flakeNix(root: string, reporter: Reporter): OracleNix {
 	const built = reporter.phase(
 		'Building the nix the flake pins',

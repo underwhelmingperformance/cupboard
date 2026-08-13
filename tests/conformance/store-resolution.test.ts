@@ -15,8 +15,8 @@ describeConformance('the store a configuration selects', (oracle) => {
 		{
 			// The machine's own filesystem decides this one: whether its state
 			// directory can be written and whether a daemon is listening. Neither
-			// side is told the answer, so whatever this machine implies, both have
-			// to reach it.
+			// side is told which result to expect, so both must derive it from the
+			// same host state.
 			name: 'the store this machine implies',
 			environment: () => ({})
 		},
@@ -69,7 +69,7 @@ describeConformance('the store a configuration selects', (oracle) => {
 			})
 		},
 		{
-			// A local store names its own directories: this one puts the store
+			// A local store configures its own directories: this one puts the store
 			// and the state under a root of its own.
 			name: 'a local store under a root of its own',
 			environment: ({ home }) => ({
@@ -83,7 +83,7 @@ describeConformance('the store a configuration selects', (oracle) => {
 			})
 		},
 		{
-			// A path names a local store rooted at that path.
+			// A path refers to a local store rooted at that path.
 			name: 'a store setting naming a path',
 			environment: ({ home }) => ({
 				NIX_CONFIG: `store = ${path.join(home, 'rooted')}`

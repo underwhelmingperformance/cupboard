@@ -7,9 +7,9 @@ const structuredAttributesSchema = z.looseObject({});
 const featureListSchema = z.array(z.string());
 
 /**
- * A derivation as its store file serialises it, parsed once. A graph walk
- * reads several of these facts about the same derivation, so the term is
- * parsed on construction and every property is answered from that.
+ * A derivation parsed from its serialised store file. Graph walks read several
+ * properties from the same derivation, so the constructor parses the term
+ * once.
  */
 export class Derivation {
 	/**
@@ -27,31 +27,37 @@ export class Derivation {
 	private readonly structured: Readonly<Record<string, unknown>> | undefined;
 
 	/**
-	 * Each output this derivation declares, by name, and the store path it
-	 * produces. The path is `undefined` for a floating content-addressed
-	 * output, whose path its build settles.
+	 * The derivation's declared outputs, keyed by output name. The path is
+	 * `undefined` for a floating content-addressed output because the build
+	 * determines its path.
 	 */
 	readonly outputs: ReadonlyMap<string, StorePathString | undefined>;
 
 	/**
-	 * Each derivation this one builds from, and the outputs of it that this
-	 * derivation uses. Building any of these outputs is what building this
-	 * derivation first requires.
+	 * The input derivations, with the output names used from each one. These
+	 * outputs must be available before this derivation can be built.
 	 */
 	readonly inputDerivations: ReadonlyMap<StorePathString, readonly string[]>;
+
+	/**
+	 * Store paths this derivation reads directly rather than through another
+	 * derivation's output.
+	 */
+	readonly inputSources: readonly StorePathString[];
 
 	private constructor(elements: readonly ATermValue[]) {
 		this.outputs = derivationOutputs(elements);
 		this.inputDerivations = derivationInputs(elements);
+		this.inputSources = derivationSources(elements);
 		this.system = derivationPlatform(elements);
 		this.environment = derivationEnvironment(elements);
 		this.structured = structuredAttributes(this.environment);
 	}
 
 	/**
-	 * What this derivation asks of the machine that builds it: the system it
-	 * builds for and the system features it requires. Nix builds a derivation
-	 * locally only on a machine whose `system` (or `extra-platforms`) covers
+	 * The system and system features required to build this derivation. Nix
+	 * builds a derivation locally only on a machine whose `system` (or
+	 * `extra-platforms`) covers
 	 * the platform and whose `system-features` cover every required feature;
 	 * anything else needs a builder that does.
 	 */
@@ -70,9 +76,9 @@ export class Derivation {
 	 * its outputs rather than build them. A derivation that never sets the
 	 * option allows substitution, which is Nix's default.
 	 *
-	 * This is only the derivation's half of the answer. Nix will not
-	 * substitute anything when the `substitute` setting is off, and it ignores
-	 * a `false` here when `always-allow-substitutes` is on.
+	 * The derivation option is only one part of the substitution policy. Nix
+	 * does not substitute anything when the `substitute` setting is off. It
+	 * ignores a `false` value here when `always-allow-substitutes` is on.
 	 */
 	get allowsSubstitutes(): boolean {
 		return canSubstitute(this.environment, this.structured);
@@ -112,7 +118,7 @@ function canSubstituteStructured(
 	return value;
 }
 
-/** What a derivation asks of the machine that builds it. */
+/** The machine requirements for building a derivation. */
 export interface DerivationBuildRequirements {
 	/** The derivation's platform: the system its builder runs on. */
 	readonly system: string;
@@ -139,7 +145,7 @@ function derivationOutputs(
 	for (const output of outputs) {
 		if (!isSequence(output) || output.length !== outputFieldCount) {
 			throw new MalformedDerivationError(
-				`an output holds ${isSequence(output) ? String(output.length) : 'no'} fields where one has ${String(outputFieldCount)}`
+				`an output has ${isSequence(output) ? String(output.length) : 'no'} fields instead of ${String(outputFieldCount)}`
 			);
 		}
 
@@ -147,7 +153,7 @@ function derivationOutputs(
 
 		if (typeof name !== 'string' || typeof path !== 'string') {
 			throw new MalformedDerivationError(
-				'an output names something other than strings'
+				'an output name or path is not a string'
 			);
 		}
 
@@ -186,7 +192,7 @@ function derivationInputs(
 			!isSequence(outputNames)
 		) {
 			throw new MalformedDerivationError(
-				'an input derivation names something other than a path and a list'
+				'an input derivation path is not a string or its outputs are not a list'
 			);
 		}
 
@@ -205,6 +211,26 @@ function derivationInputs(
 	}
 
 	return required;
+}
+
+// `[storePath, ...]`. These are opaque store paths the builder reads directly,
+// distinct from the selected outputs of the input derivations above.
+function derivationSources(
+	elements: readonly ATermValue[]
+): readonly StorePathString[] {
+	const sources = elements[inputSourceIndex];
+
+	if (sources === undefined || !isSequence(sources)) {
+		throw new MalformedDerivationError('the input sources are not a list');
+	}
+
+	return sources.map((source) => {
+		if (isSequence(source)) {
+			throw new MalformedDerivationError('an input source is not a path');
+		}
+
+		return storePathSchema.parse(source);
+	});
 }
 
 // `"<system>"`. The platform the derivation's builder runs on.
@@ -251,11 +277,9 @@ function orderedUnique(values: readonly string[]): readonly string[] {
 const derivationSuffix = '.drv';
 
 /**
- * The derivation an installable names, or `undefined` for one that names
- * something else. A derived path is a derivation followed by `^` and the
- * outputs it should produce, so the outputs are dropped; an installable that
- * is not a store path at all, or names a store path that is not a derivation,
- * has no derivation to read here.
+ * The derivation path referenced by an installable, or `undefined` if it does
+ * not reference a derivation. A derived path appends `^` and its expected
+ * outputs to the derivation path, so this function removes that suffix.
  */
 export function derivationPathOf(
 	installable: string
@@ -301,8 +325,8 @@ function structuredAttributes(
 
 /**
  * A derivation ATerm as far as this module reads it: a nested value is either
- * a string or a sequence, and a list and a tuple both parse as a sequence,
- * since nothing here distinguishes them.
+ * a string or a sequence. Lists and tuples both parse as sequences because
+ * this module does not distinguish between them.
  */
 type ATermValue = string | readonly ATermValue[];
 
@@ -317,6 +341,7 @@ const derivePrefix = 'Derive(';
 const deriveElementCount = 7;
 const outputIndex = 0;
 const inputDerivationIndex = 1;
+const inputSourceIndex = 2;
 const platformIndex = 3;
 const environmentIndex = 6;
 

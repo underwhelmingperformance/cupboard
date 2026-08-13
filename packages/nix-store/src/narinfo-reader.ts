@@ -26,10 +26,9 @@ export interface NarInfoOffer {
 	readonly narSize: number;
 }
 
-// A served narinfo names the deriver and every reference by basename, while a
-// substitutable-path answer names them the way the store does. A narinfo is
-// read whatever compression it names, and a document missing what Nix
-// requires of one is refused as corrupt, the way Nix refuses it.
+// A narinfo identifies the deriver and references by basename, while a
+// substitutable-path response uses full store paths. Accept every compression
+// supported by Nix and reject documents that omit fields required by Nix.
 export function offerFromNarInfo(
 	source: string,
 	storePath: StorePathString,
@@ -41,11 +40,9 @@ export function offerFromNarInfo(
 }
 
 /**
- * Reads a narinfo the way Nix reads one from a substituter. Nix accepts a
- * document only when every field it carries is one Nix can read, so each is
- * decoded here rather than matched: a value let through that Nix would refuse
- * the whole document over is a path counted as available that Nix would then
- * decline to fetch.
+ * Parses a narinfo using Nix's substituter rules. Every recognised field is
+ * decoded so this client does not report a path as available when Nix would
+ * reject its narinfo.
  *
  * A field's value starts two characters past its colon, and every line ends
  * with a newline, both of which Nix requires exactly.
@@ -102,8 +99,7 @@ class NarInfoReader {
 
 	private readField(name: string, value: string): void {
 		if (name === 'StorePath') {
-			// The answer stands for the path it was asked about. A substituter
-			// naming another describes something the caller did not ask for.
+			// The response must describe the path that the caller requested.
 			if (value !== this.storePath) {
 				throw new MismatchedNarInfoPathError(this.storePath);
 			}
@@ -126,7 +122,7 @@ class NarInfoReader {
 	// hashes to and how large it is.
 	private readArchiveField(name: string, value: string): void {
 		if (name === 'Compression') {
-			// An empty value is the one Nix reads as its own default.
+			// Nix interprets an empty value as its default compression.
 			if (value !== '' && !compressionAlgorithms.has(value)) {
 				throw new CorruptNarInfoError(this.storePath);
 			}
@@ -149,13 +145,11 @@ class NarInfoReader {
 		this.readReferenceField(name, value);
 	}
 
-	// The fields naming what else the path stands in relation to: the paths it
-	// references, the derivation that built it, who signed it and how it is
-	// addressed.
+	// The path's references, deriver, signatures and content address.
 	private readReferenceField(name: string, value: string): void {
 		if (name === 'References') {
-			// Nix separates them with single spaces, so anything else lands
-			// inside a name and stops it being one.
+			// Nix separates references with single spaces. Other whitespace becomes
+			// part of a basename, which makes the store path invalid.
 			if (this.references !== undefined) {
 				throw new CorruptNarInfoError(this.storePath);
 			}
@@ -198,9 +192,7 @@ class NarInfoReader {
 		}
 	}
 
-	// A path is addressed one way, so a document stating a second address
-	// states two answers to the same question. An empty value states none at
-	// all, leaving the address the document has yet to state.
+	// A narinfo may specify at most one non-empty content address.
 	private readContentAddress(value: string): void {
 		if (this.contentAddress !== undefined) {
 			throw new CorruptNarInfoError(this.storePath);
@@ -220,9 +212,7 @@ class NarInfoReader {
 	// Nix reads a hash field as an algorithm and a digest, in any of the
 	// spellings it writes them in, and refuses the document when it cannot.
 	// A NAR hash is kept when it is sha256, the algorithm a store path's own
-	// hash uses and so the only one an offer can be compared under; a document
-	// naming any other algorithm states a hash this reader has no offer to
-	// make from.
+	// hash uses and therefore the only algorithm available for comparing offers.
 	private readHash(name: string, value: string): void {
 		const hash = decodeNixHashField(value);
 
@@ -291,7 +281,7 @@ class NarInfoReader {
 	}
 }
 
-// The compression a narinfo may name, which Nix reads by the same list.
+// Compression algorithms accepted by Nix for narinfos.
 const compressionAlgorithms = new Set([
 	'none',
 	'br',

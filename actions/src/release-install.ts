@@ -38,6 +38,7 @@ import { slsaSourceCommit } from '@cupboard/shared/slsa';
 import { StatusCodes } from 'http-status-codes';
 import semverLt from 'semver/functions/lt.js';
 import semverValid from 'semver/functions/valid.js';
+import { uncompress as uncompressSnappy } from 'snappyjs';
 import { z } from 'zod';
 
 import {
@@ -55,10 +56,13 @@ import {
 	InstalledReleaseVersionMismatchError,
 	InvalidChecksumLineError,
 	InvalidInputError,
+	InvalidReleaseAssetUrlError,
 	MalformedReleaseResponseError,
 	MissingChecksumError,
 	NoReleaseFoundError,
 	ReleaseAssetNotFoundError,
+	ReleaseAttestationBundleTooLargeError,
+	ReleaseAttestationSearchTooLargeError,
 	ReleaseCompatibilityError,
 	ReleaseCoordinateMismatchError,
 	ReleaseInstallationIncompleteError,
@@ -66,6 +70,7 @@ import {
 	ReleaseInstallationLockLostError,
 	ReleaseInstallationLockOwnerAliveError,
 	ReleaseInstallationLockStateError,
+	ReleaseInstallationProcessIdentityError,
 	ReleaseInstallationRollbackError,
 	ReleaseInstallationStateError,
 	UnsupportedPlatformError
@@ -315,6 +320,7 @@ interface VerifyReleaseDependencies {
 	readonly verify?: typeof verifyBundle;
 	readonly subjectDigest?: string;
 	readonly hashFile?: typeof sha256File;
+	readonly maximumBundleBytes?: number;
 }
 
 interface InstallCupboardDependencies {
@@ -326,7 +332,10 @@ type RenameFile = typeof rename;
 interface PublishReleaseDependencies {
 	readonly rename?: RenameFile;
 	readonly runCommand?: ReleaseCommandRunner;
+	readonly processCommandRunner?: ReleaseCommandRunner;
+	readonly processPlatform?: NodeJS.Platform;
 	readonly syncDirectory?: (directoryPath: string) => Promise<void>;
+	readonly processIdentity?: ReleaseProcessIdentity;
 	readonly signal?: AbortSignal;
 	readonly publicationHook?: (stage: ReleasePublicationStage) => Promise<void>;
 	/** Already verified archive digest; direct callers may omit it to hash locally. */
@@ -339,6 +348,7 @@ export type ReleasePublicationStage =
 /** Fetch and cancellation seams used while downloading a release asset. */
 export interface DownloadAssetDependencies {
 	readonly fetch?: typeof fetch;
+	readonly githubApiOrigin?: string;
 	readonly signal?: AbortSignal;
 	readonly maximumBytes?: number;
 }
@@ -352,11 +362,23 @@ export interface DownloadedAsset {
 // and embedded-worker growth while bounding an unauthenticated response well
 // below a typical GitHub-hosted runner's memory and disk capacity.
 export const maximumReleaseAssetBytes = 256 * 1024 * 1024;
+const maximumAttestationBundleBytes = 16 * 1024 * 1024;
+
+// Small pages bound the list response Octokit buffers before this code sees it;
+// the total limits bound both retained candidates and a sparse cursor chain.
+export const maximumReleaseAttestationCandidates = 100;
+export const maximumReleaseAttestationPages = 10;
+const releaseAttestationsPerPage = 10;
 
 type ReleaseCommandRunner = (
 	command: string,
 	arguments_: readonly string[],
-	options: { readonly captureStdout: boolean; readonly signal?: AbortSignal }
+	options: {
+		readonly captureStdout: boolean;
+		readonly environment?: NodeJS.ProcessEnv;
+		readonly quietStderr?: boolean;
+		readonly signal?: AbortSignal;
+	}
 ) => Promise<{ readonly stdout: string }>;
 
 const defaultReleaseCommandRunner: ReleaseCommandRunner = async (
@@ -367,9 +389,14 @@ const defaultReleaseCommandRunner: ReleaseCommandRunner = async (
 	options.signal?.throwIfAborted();
 
 	const child = spawn(command, [...arguments_], {
+		...(options.environment !== undefined && { env: options.environment }),
 		stdio: options.captureStdout
-			? ['ignore', 'pipe', 'inherit']
-			: ['inherit', 'inherit', 'inherit']
+			? ['ignore', 'pipe', options.quietStderr === true ? 'ignore' : 'inherit']
+			: [
+					'inherit',
+					'inherit',
+					options.quietStderr === true ? 'ignore' : 'inherit'
+				]
 	});
 	const chunks: Buffer[] = [];
 
@@ -452,6 +479,7 @@ export async function installCupboard(
 			`Download ${assetName}`,
 			async () => {
 				const downloadDependencies = {
+					githubApiOrigin: githubApiOrigin(options.environment),
 					...(dependencies.fetch !== undefined && {
 						fetch: dependencies.fetch
 					}),
@@ -551,7 +579,15 @@ export async function publishReleaseArchive(
 	const releaseLock = await acquireReleaseInstallationLock(
 		paths,
 		dependencies.signal,
-		() => dependencies.publicationHook?.('contended')
+		() => dependencies.publicationHook?.('contended'),
+		dependencies.processIdentity ??
+			((pid, signal) =>
+				releaseProcessIdentity(
+					pid,
+					signal,
+					dependencies.processCommandRunner ?? defaultReleaseCommandRunner,
+					dependencies.processPlatform ?? platform
+				))
 	);
 	try {
 		await releaseLock.assertOwned();
@@ -660,12 +696,14 @@ interface ReleaseLockOwner {
 	readonly pid: number;
 	readonly instanceId: string;
 	readonly leaseId: string;
+	readonly processStartedAt: string;
 }
 
 const releaseLockOwnerSchema = z.strictObject({
 	pid: z.int().positive(),
 	instanceId: z.uuid(),
-	leaseId: z.uuid()
+	leaseId: z.uuid(),
+	processStartedAt: z.string().min(1)
 });
 
 const releaseInstallerInstanceId = randomUUID();
@@ -854,6 +892,102 @@ interface ReleaseInstallationLock {
 	release(): Promise<void>;
 }
 
+type ReleaseProcessIdentity = (
+	pid: number,
+	signal?: AbortSignal
+) => Promise<string | undefined>;
+
+async function releaseProcessIdentity(
+	pid: number,
+	signal?: AbortSignal,
+	runCommand: ReleaseCommandRunner = defaultReleaseCommandRunner,
+	runtimePlatform: NodeJS.Platform = platform
+): Promise<string | undefined> {
+	signal?.throwIfAborted();
+
+	if (runtimePlatform === 'linux') {
+		try {
+			const statContents = await readFile(`/proc/${String(pid)}/stat`, 'utf8');
+			const commandEnd = statContents.lastIndexOf(')');
+			const fields = statContents
+				.slice(commandEnd + 1)
+				.trim()
+				.split(/\s+/u);
+			// The tail starts at field 3 (state); process start time is field 22.
+			const startedAt = fields[19];
+
+			if (commandEnd === -1 || startedAt === undefined || startedAt === '') {
+				throw new ReleaseInstallationProcessIdentityError(pid);
+			}
+
+			return `linux-start-ticks:${startedAt}`;
+		} catch (error) {
+			if (isMissingPathError(error)) {
+				return undefined;
+			}
+
+			if (error instanceof ReleaseInstallationProcessIdentityError) {
+				throw error;
+			}
+
+			throw new ReleaseInstallationProcessIdentityError(pid, { cause: error });
+		}
+	}
+
+	for (let attempt = 0; attempt < 2; attempt += 1) {
+		try {
+			const result = await runCommand(
+				'/bin/ps',
+				['-o', 'lstart=', '-p', String(pid)],
+				{
+					captureStdout: true,
+					environment: {
+						...process.env,
+						LC_ALL: 'C',
+						TZ: 'UTC0'
+					},
+					quietStderr: true,
+					...(signal !== undefined && { signal })
+				}
+			);
+			const startedAt = Date.parse(`${result.stdout.trim()} UTC`);
+
+			if (!Number.isNaN(startedAt)) {
+				return `unix-start-milliseconds:${String(startedAt)}`;
+			}
+		} catch (error) {
+			signal?.throwIfAborted();
+
+			if (!isReleaseProcessAlive(pid)) {
+				return undefined;
+			}
+
+			if (attempt === 1) {
+				throw new ReleaseInstallationProcessIdentityError(pid, {
+					cause: error
+				});
+			}
+
+			continue;
+		}
+
+		if (!isReleaseProcessAlive(pid)) {
+			return undefined;
+		}
+	}
+
+	throw new ReleaseInstallationProcessIdentityError(pid);
+}
+
+function isReleaseProcessAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return !isPathError(error, 'ESRCH');
+	}
+}
+
 const releaseLockRetryDelayMs = 25;
 // Heartbeats are deliberately much more frequent than expiry so a normally
 // scheduled installer has several opportunities to renew its ownership on
@@ -864,8 +998,15 @@ const releaseLockLeaseDurationMs = 30_000;
 async function acquireReleaseInstallationLock(
 	paths: ReleaseInstallationPaths,
 	signal?: AbortSignal,
-	onContention?: () => Promise<void> | undefined
+	onContention?: () => Promise<void> | undefined,
+	processIdentity: ReleaseProcessIdentity = releaseProcessIdentity
 ): Promise<ReleaseInstallationLock> {
+	const processStartedAt = await processIdentity(process.pid, signal);
+
+	if (processStartedAt === undefined) {
+		throw new ReleaseInstallationProcessIdentityError(process.pid);
+	}
+
 	const candidate = path.join(
 		paths.stateDirectory,
 		`.lock-${String(process.pid)}-${randomUUID()}`
@@ -875,7 +1016,8 @@ async function acquireReleaseInstallationLock(
 	const owner: ReleaseLockOwner = {
 		pid: process.pid,
 		instanceId: releaseInstallerInstanceId,
-		leaseId
+		leaseId,
+		processStartedAt
 	};
 
 	try {
@@ -928,7 +1070,7 @@ async function acquireReleaseInstallationLock(
 				}
 			}
 
-			if (await removeStaleReleaseLock(paths.lock)) {
+			if (await removeStaleReleaseLock(paths.lock, processIdentity, signal)) {
 				continue;
 			}
 
@@ -950,7 +1092,11 @@ async function acquireReleaseInstallationLock(
 	}
 }
 
-async function removeStaleReleaseLock(lockPath: string): Promise<boolean> {
+async function removeStaleReleaseLock(
+	lockPath: string,
+	processIdentity: ReleaseProcessIdentity,
+	signal?: AbortSignal
+): Promise<boolean> {
 	let contents: string;
 
 	try {
@@ -1027,7 +1173,11 @@ async function removeStaleReleaseLock(lockPath: string): Promise<boolean> {
 			return false;
 		}
 
-		assertReleaseLockOwnerAbsent(lockPath, owner.pid);
+		const currentProcessStartedAt = await processIdentity(owner.pid, signal);
+
+		if (currentProcessStartedAt === owner.processStartedAt) {
+			throw new ReleaseInstallationLockOwnerAliveError(lockPath, owner.pid);
+		}
 
 		const wasRemoved = await removeLockIfMatches(reaperPath, lockPath);
 		if (wasRemoved) {
@@ -1038,22 +1188,6 @@ async function removeStaleReleaseLock(lockPath: string): Promise<boolean> {
 	} finally {
 		await rm(reaperPath, { force: true });
 	}
-}
-
-function assertReleaseLockOwnerAbsent(lockPath: string, pid: number): void {
-	try {
-		process.kill(pid, 0);
-	} catch (error) {
-		if (isPathError(error, 'ESRCH')) {
-			return;
-		}
-
-		throw new ReleaseInstallationLockOwnerAliveError(lockPath, pid, {
-			cause: error
-		});
-	}
-
-	throw new ReleaseInstallationLockOwnerAliveError(lockPath, pid);
 }
 
 async function releaseLeaseExpired(leasePath: string): Promise<boolean> {
@@ -1645,17 +1779,17 @@ export async function downloadAsset(
 ): Promise<DownloadedAsset> {
 	dependencies.signal?.throwIfAborted();
 	const maximumBytes = dependencies.maximumBytes ?? maximumReleaseAssetBytes;
-	const response = await retryingFetcher(dependencies.fetch ?? fetch)(
-		asset.url,
-		{
-			headers: requestHeaders(githubToken, {
-				accept: 'application/octet-stream'
-			}),
-			...(dependencies.signal !== undefined && { signal: dependencies.signal })
-		}
-	);
+	const expectedOrigin = dependencies.githubApiOrigin ?? githubApiOrigin({});
+	const url = authenticatedReleaseAssetUrl(asset, expectedOrigin);
+	const response = await retryingFetcher(dependencies.fetch ?? fetch)(url, {
+		headers: requestHeaders(url.origin === expectedOrigin ? githubToken : '', {
+			accept: 'application/octet-stream'
+		}),
+		...(dependencies.signal !== undefined && { signal: dependencies.signal })
+	});
 
 	if (!response.ok) {
+		await response.body?.cancel();
 		throw new GithubApiError(`failed to download ${asset.name}`, {
 			status: response.status
 		});
@@ -1741,6 +1875,31 @@ export async function downloadAsset(
 	return { bytes, sha256: digest.digest('hex') };
 }
 
+function authenticatedReleaseAssetUrl(
+	asset: ReleaseAsset,
+	expectedOrigin: string
+): URL {
+	let url: URL;
+
+	try {
+		url = new URL(asset.url);
+	} catch {
+		throw new InvalidReleaseAssetUrlError(asset.name, expectedOrigin);
+	}
+
+	if (
+		url.protocol !== 'https:' ||
+		url.origin !== expectedOrigin ||
+		url.username !== '' ||
+		url.password !== '' ||
+		url.hash !== ''
+	) {
+		throw new InvalidReleaseAssetUrlError(asset.name, expectedOrigin);
+	}
+
+	return url;
+}
+
 function verifyChecksum(
 	assetName: string,
 	actualChecksum: string,
@@ -1770,11 +1929,9 @@ export async function verifyReleaseAttestation(
 	options.signal?.throwIfAborted();
 
 	const octokit = buildOctokit(options, dependencies.fetch);
-	const unauthenticatedOctokit = buildOctokit(
-		{ ...options, githubToken: '' },
-		dependencies.fetch
-	);
 	const verify = dependencies.verify ?? verifyBundle;
+	const maximumBundleBytes =
+		dependencies.maximumBundleBytes ?? maximumAttestationBundleBytes;
 	const [owner, repo] = splitRepository(options.releaseRepository);
 	const archiveName = path.basename(archivePath);
 	const subjectDigest =
@@ -1804,10 +1961,12 @@ export async function verifyReleaseAttestation(
 
 		try {
 			const bundle = await fetchAttestationBundle(
-				octokit,
-				unauthenticatedOctokit,
+				dependencies.fetch ?? fetch,
 				githubApiOrigin(options.environment),
-				attestation
+				options.githubToken,
+				attestation,
+				maximumBundleBytes,
+				options.signal
 			);
 			options.signal?.throwIfAborted();
 
@@ -1930,12 +2089,160 @@ type Attestation = z.infer<typeof attestationSchema>;
 
 const attestationBundleSchema = z.looseObject({});
 
+function attestationBundleBytes(value: unknown): Uint8Array | undefined {
+	if (value instanceof ArrayBuffer) {
+		return new Uint8Array(value);
+	}
+
+	if (ArrayBuffer.isView(value)) {
+		return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+	}
+
+	return undefined;
+}
+
+function encodeAttestationBundle(
+	value: unknown,
+	maximumBytes: number
+): Uint8Array {
+	const parsed = attestationBundleSchema.safeParse(value);
+
+	if (!parsed.success) {
+		throw new MalformedReleaseResponseError({ cause: parsed.error });
+	}
+
+	const encoded = new TextEncoder().encode(JSON.stringify(parsed.data));
+
+	if (encoded.byteLength > maximumBytes) {
+		throw new ReleaseAttestationBundleTooLargeError(
+			maximumBytes,
+			encoded.byteLength
+		);
+	}
+
+	return encoded;
+}
+
+function decodeSnappyAttestationBundle(
+	value: unknown,
+	maximumBytes: number
+): Uint8Array {
+	const compressed = attestationBundleBytes(value);
+
+	if (compressed === undefined) {
+		throw new MalformedReleaseResponseError();
+	}
+
+	try {
+		const uncompressed = uncompressSnappy(compressed, maximumBytes);
+		const json = new TextDecoder('utf-8', { fatal: true }).decode(uncompressed);
+
+		return encodeAttestationBundle(JSON.parse(json), maximumBytes);
+	} catch (error) {
+		if (error instanceof ReleaseAttestationBundleTooLargeError) {
+			throw error;
+		}
+
+		throw new MalformedReleaseResponseError({ cause: error });
+	}
+}
+
+function decodeJsonAttestationBundle(
+	bytes: Uint8Array,
+	maximumBytes: number
+): Uint8Array {
+	try {
+		const json = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+
+		return encodeAttestationBundle(JSON.parse(json), maximumBytes);
+	} catch (error) {
+		if (error instanceof ReleaseAttestationBundleTooLargeError) {
+			throw error;
+		}
+
+		throw new MalformedReleaseResponseError({ cause: error });
+	}
+}
+
+async function readBoundedAttestationBundle(
+	response: Response,
+	maximumBytes: number,
+	signal?: AbortSignal
+): Promise<Uint8Array> {
+	const contentLength = response.headers.get('content-length');
+	const declaredBytes =
+		contentLength === null ? undefined : Number(contentLength);
+
+	if (
+		declaredBytes !== undefined &&
+		Number.isFinite(declaredBytes) &&
+		declaredBytes > maximumBytes
+	) {
+		await response.body?.cancel();
+		throw new ReleaseAttestationBundleTooLargeError(
+			maximumBytes,
+			declaredBytes
+		);
+	}
+
+	const body = response.body;
+	if (body === null) {
+		return new Uint8Array();
+	}
+
+	const reader = body.getReader();
+	const chunks: Uint8Array[] = [];
+	let byteLength = 0;
+	const abort = (): void => {
+		void reader.cancel(signal?.reason);
+	};
+	signal?.addEventListener('abort', abort, { once: true });
+
+	try {
+		for (;;) {
+			signal?.throwIfAborted();
+			const chunk = await reader.read();
+			signal?.throwIfAborted();
+
+			if (chunk.done) {
+				break;
+			}
+
+			byteLength += chunk.value.byteLength;
+			if (byteLength > maximumBytes) {
+				await reader.cancel();
+				throw new ReleaseAttestationBundleTooLargeError(
+					maximumBytes,
+					byteLength
+				);
+			}
+
+			chunks.push(chunk.value);
+		}
+	} finally {
+		signal?.removeEventListener('abort', abort);
+	}
+
+	const bytes = new Uint8Array(byteLength);
+	let offset = 0;
+
+	for (const chunk of chunks) {
+		bytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+
+	return bytes;
+}
+
 async function listAttestations(
 	octokit: Octokit,
 	owner: string,
 	repo: string,
 	subjectDigest: string
 ): Promise<readonly Attestation[]> {
+	let observedCandidates = 0;
+	let observedPages = 0;
+
 	try {
 		const attestations = await octokit.paginate(
 			octokit.rest.repos.listAttestations,
@@ -1944,17 +2251,39 @@ async function listAttestations(
 				repo,
 				subject_digest: `sha256:${subjectDigest}`,
 				predicate_type: provenancePredicateType,
-				per_page: 100
+				per_page: releaseAttestationsPerPage
 			},
 			(response) => {
 				const parsed = attestationPageSchema.parse(response.data);
+				const page = parsed.attestations ?? [];
+				observedCandidates += page.length;
+				observedPages += 1;
+				const hasNextPage = /(?:^|,)\s*<[^>]+>;[^,]*\brel="next"/u.test(
+					response.headers.link ?? ''
+				);
 
-				return parsed.attestations ?? [];
+				if (
+					observedCandidates > maximumReleaseAttestationCandidates ||
+					observedPages > maximumReleaseAttestationPages ||
+					(hasNextPage && observedPages >= maximumReleaseAttestationPages)
+				) {
+					throw new ReleaseAttestationSearchTooLargeError(
+						maximumReleaseAttestationCandidates,
+						maximumReleaseAttestationPages,
+						observedCandidates,
+						observedPages
+					);
+				}
+
+				return page;
 			}
 		);
 
 		return attestations;
 	} catch (error) {
+		if (error instanceof ReleaseAttestationSearchTooLargeError) {
+			throw error;
+		}
 		if (error instanceof RequestError && error.status === notFoundStatus) {
 			return [];
 		}
@@ -1970,15 +2299,15 @@ async function listAttestations(
 }
 
 async function fetchAttestationBundle(
-	octokit: Octokit,
-	unauthenticatedOctokit: Octokit,
+	fetcher: typeof fetch,
 	githubApiOrigin: string,
-	attestation: Attestation
+	githubToken: string,
+	attestation: Attestation,
+	maximumBytes: number,
+	signal?: AbortSignal
 ): Promise<Uint8Array> {
-	const encoder = new TextEncoder();
-
 	if (attestation.bundle !== undefined) {
-		return encoder.encode(JSON.stringify(attestation.bundle));
+		return encodeAttestationBundle(attestation.bundle, maximumBytes);
 	}
 
 	const bundleUrl = attestation.bundle_url;
@@ -1996,16 +2325,39 @@ async function fetchAttestationBundle(
 		throw new MalformedReleaseResponseError();
 	}
 
-	const bundleOctokit =
-		url.origin === githubApiOrigin ? octokit : unauthenticatedOctokit;
-	const response = await bundleOctokit.request(`GET ${url.href}`);
-	const parsed = attestationBundleSchema.safeParse(response.data);
-
-	if (!parsed.success) {
-		throw new MalformedReleaseResponseError({ cause: parsed.error });
+	const headers: Record<string, string> = { ...githubHeaders };
+	if (githubToken !== '' && url.origin === githubApiOrigin) {
+		headers.authorization = `token ${githubToken}`;
 	}
 
-	return encoder.encode(JSON.stringify(parsed.data));
+	const response = await retryingFetcher(fetcher)(url, {
+		headers,
+		...(signal !== undefined && { signal })
+	});
+
+	if (!response.ok) {
+		await response.body?.cancel();
+		throw new GithubApiError('failed to fetch release attestation bundle', {
+			status: response.status
+		});
+	}
+
+	const contentType = response.headers
+		.get('content-type')
+		?.split(';', 1)[0]
+		?.trim()
+		.toLowerCase();
+	const bytes = await readBoundedAttestationBundle(
+		response,
+		maximumBytes,
+		signal
+	);
+
+	if (contentType === 'application/x-snappy') {
+		return decodeSnappyAttestationBundle(bytes, maximumBytes);
+	}
+
+	return decodeJsonAttestationBundle(bytes, maximumBytes);
 }
 
 function githubApiOrigin(environment: Environment): string {

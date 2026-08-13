@@ -41,12 +41,39 @@ export const cohortInstallableSchema = z
 // from a plan job's cohort-matrix entry, so it stays a plain, file-portable
 // shape rather than the branded `AvailabilityTarget` the partition itself
 // consumes.
-export const cohortTargetSchema = z.strictObject({
-	attr: z.string().min(1),
-	installable: cohortInstallableSchema,
-	expectedPath: storePathSchema.optional(),
-	root: rootNameSchema
-});
+export const cohortTargetSchema = z
+	.strictObject({
+		attr: z.string().min(1),
+		installable: cohortInstallableSchema,
+		expectedPath: storePathSchema.optional(),
+		// The action will materialise and copy this planned derivation closure
+		// before asking the selected remote store to realise the installable.
+		plannedLocalDerivation: storePathSchema.optional(),
+		root: rootNameSchema
+	})
+	.superRefine((target, ctx) => {
+		if (target.plannedLocalDerivation === undefined) {
+			return;
+		}
+
+		const selector = target.installable.indexOf('^');
+		const derivation =
+			selector === -1
+				? target.installable
+				: target.installable.slice(0, selector);
+
+		if (
+			!target.plannedLocalDerivation.endsWith('.drv') ||
+			target.plannedLocalDerivation !== derivation
+		) {
+			ctx.addIssue({
+				code: 'custom',
+				path: ['plannedLocalDerivation'],
+				message:
+					'local derivation must be the derivation path named by installable'
+			});
+		}
+	});
 export type ParsedCohortTarget = z.output<typeof cohortTargetSchema>;
 
 export const cohortPlanInputSchema = z.strictObject({
