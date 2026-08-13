@@ -8,7 +8,6 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
-import type { ParsedBuildReceipt } from '@cupboard/protocol/build';
 import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import type { Reporter } from '@cupboard/reporter';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1032,7 +1031,6 @@ describe('cohortPreFilter', () => {
 			planInputs({ temporaryDirectory: directory }),
 			{ cohorts: [singleCohort([first])] },
 			[first],
-			undefined,
 			runner
 		);
 
@@ -1049,7 +1047,6 @@ describe('cohortPreFilter', () => {
 			planInputs({ temporaryDirectory: directory }),
 			{ cohorts: [singleCohort([first])] },
 			[first],
-			undefined,
 			preFilterRunner({
 				targetsByRoot: new Map([[firstRoot, [outPath]]]),
 				ensureRetainedRoots: new Set()
@@ -1066,7 +1063,6 @@ describe('cohortPreFilter', () => {
 			planInputs({ temporaryDirectory: directory }),
 			{ cohorts: [singleCohort([first])] },
 			[first],
-			undefined,
 			preFilterRunner({
 				targetsByRoot: new Map([[firstRoot, [outPath]]]),
 				failEnsureForRoot: firstRoot
@@ -1090,7 +1086,6 @@ describe('cohortPreFilter', () => {
 			planInputs({ temporaryDirectory: directory }),
 			{ cohorts: [singleCohort([first])] },
 			[first],
-			undefined,
 			preFilterRunner({ failTargetsForRoot: firstRoot })
 		);
 
@@ -1104,61 +1099,13 @@ describe('cohortPreFilter', () => {
 		]);
 	});
 
-	it('prunes when an absent output is covered by the previous receipt as left upstream for an unchanged manifest', async () => {
-		const multiOutputTarget = {
-			attr: '.#multi',
-			rootDrvPath: targetRootDrvPath,
-			system: 'x86_64-linux',
-			os: 'ubuntu-latest',
-			remote: true,
-			bestEffort: false,
-			rootSuffix: 'multi',
-			outputs: ['out', 'dev']
-		};
-		const multiOutputEvaluation: TargetEvaluation = {
-			target: multiOutputTarget,
-			rootDrvPath: '/nix/store/multi.drv',
-			nodes: new Map(),
-			targetPaths: [outPath, developmentPath]
-		};
-		const previousReceipt: ParsedBuildReceipt = {
-			version: 2,
-			paths: [],
-			subjects: [],
-			outcomes: [{ outcome: 'left-upstream', storePath: developmentPath }]
-		};
-		const multiRoot = 'github:owner/repo/main/multi';
-
-		const decisions = await cohortPreFilter(
-			planInputs({ temporaryDirectory: directory }),
-			{ cohorts: [singleCohort([multiOutputEvaluation])] },
-			[multiOutputEvaluation],
-			previousReceipt,
-			preFilterRunner({
-				targetsByRoot: new Map([[multiRoot, [outPath]]]),
-				ensureRetainedRoots: new Set([multiRoot])
-			})
-		);
-
-		expect(decisions).toStrictEqual([{ key: 'cohort-first', pruned: true }]);
-	});
-
-	it('does not prune when the current output is a changed manifest neither the reconciled list nor the receipt covers', async () => {
+	it('does not prune a target whose current output the reconciled list misses', async () => {
 		const first = evaluation('first', changedPath);
-		// The receipt covers a stale path from before the manifest changed, not
-		// the target's current output.
-		const previousReceipt: ParsedBuildReceipt = {
-			version: 2,
-			paths: [],
-			subjects: [],
-			outcomes: [{ outcome: 'left-upstream', storePath: outPath }]
-		};
 
 		const decisions = await cohortPreFilter(
 			planInputs({ temporaryDirectory: directory }),
 			{ cohorts: [singleCohort([first])] },
 			[first],
-			previousReceipt,
 			preFilterRunner({
 				targetsByRoot: new Map([[firstRoot, [outPath]]]),
 				ensureRetainedRoots: new Set([firstRoot])
@@ -1166,6 +1113,36 @@ describe('cohortPreFilter', () => {
 		);
 
 		expect(decisions).toStrictEqual([{ key: 'cohort-first', pruned: false }]);
+	});
+
+	it('does not prune, and never ensures, a root with an empty reconciled list', async () => {
+		const ensuredRoots: string[] = [];
+		const first = evaluation('first', outPath);
+		const runner: EnsureRunner = async (_command, arguments_) => {
+			if (!arguments_.includes('targets')) {
+				ensuredRoots.push(rootCommandTarget(arguments_));
+				return { stdout: '', stderr: '' };
+			}
+
+			await writeFile(
+				resultFileArgument(arguments_),
+				rootTargetsResultLine([])
+			);
+
+			return { stdout: '', stderr: '' };
+		};
+
+		const decisions = await cohortPreFilter(
+			planInputs({ temporaryDirectory: directory }),
+			{ cohorts: [singleCohort([first])] },
+			[first],
+			runner
+		);
+
+		expect({ decisions, ensuredRoots }).toStrictEqual({
+			decisions: [{ key: 'cohort-first', pruned: false }],
+			ensuredRoots: []
+		});
 	});
 
 	it('never reads or ensures a target whose outputs are not all known, and always spawns it', async () => {
@@ -1195,7 +1172,6 @@ describe('cohortPreFilter', () => {
 			planInputs({ temporaryDirectory: directory }),
 			{ cohorts: [singleCohort([partiallyResolvedEvaluation])] },
 			[partiallyResolvedEvaluation],
-			undefined,
 			runner
 		);
 
@@ -1228,7 +1204,6 @@ describe('cohortPreFilter', () => {
 			planInputs({ temporaryDirectory: directory }),
 			{ cohorts: [cohort] },
 			[],
-			undefined,
 			() => Promise.reject(new Error('should not be called'))
 		);
 
@@ -1268,7 +1243,6 @@ describe('cohortPreFilter', () => {
 			planInputs({ temporaryDirectory: directory }),
 			{ cohorts: [cohort] },
 			[componentA, componentB],
-			undefined,
 			preFilterRunner({
 				targetsByRoot: new Map([[systemRoot, [outPath]]]),
 				ensureRetainedRoots: new Set([systemRoot])
@@ -1283,7 +1257,6 @@ describe('cohortPreFilter', () => {
 			planInputs({ temporaryDirectory: directory }),
 			{ cohorts: [cohort] },
 			[componentA, componentB],
-			undefined,
 			preFilterRunner({
 				targetsByRoot: new Map([[systemRoot, [outPath, developmentPath]]]),
 				ensureRetainedRoots: new Set([systemRoot])

@@ -15,10 +15,6 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
-	buildReceiptSchema,
-	type ParsedBuildReceipt
-} from '@cupboard/protocol/build';
-import {
 	type ParsedRootEnsureResponse,
 	type ParsedRootTarget,
 	rootEnsureResponseSchema,
@@ -142,7 +138,6 @@ export interface PlanOptions {
 	readonly cupboardPath?: string;
 	readonly planFile?: string;
 	readonly optimise?: string;
-	readonly previousReceiptFile?: string;
 	readonly enablePacking?: string;
 	readonly packCapacity?: string;
 	readonly store?: string;
@@ -161,10 +156,6 @@ export interface PlanInputs {
 	readonly planFile: string;
 	readonly optimise: boolean;
 	readonly temporaryDirectory: string;
-	// Absent when the caller has no receipt to pass, such as a repository's
-	// first run: the cohort pre-filter then finds no target left upstream,
-	// never a reason to treat every target's absence as unexplained.
-	readonly previousReceiptFile?: string;
 	readonly enablePacking: boolean;
 	// Unused while packing is disabled; a positive number of bytes otherwise,
 	// checked at input resolution so a manifest cannot enable packing without
@@ -232,12 +223,6 @@ export function registerPlanCommand(
 		.option(
 			'--optimise <value>',
 			'inspect the cache and derivation graph: true or false'
-		)
-		.option(
-			'--previous-receipt-file <path>',
-			"path to the previous run's build receipt, when the workflow has one, " +
-				'so the cohort pre-filter can recognise a target left upstream by an ' +
-				'unchanged manifest'
 		)
 		.option(
 			'--enable-packing <value>',
@@ -331,10 +316,7 @@ export function resolvePlanInputs(
 			path.join(temporaryDirectory, 'cupboard-publish-plan.json'),
 		enablePacking: isPackingEnabled,
 		packCapacity: resolvePackCapacity(isPackingEnabled, options.packCapacity),
-		store: provided(options.store) ?? '',
-		...(provided(options.previousReceiptFile) !== undefined && {
-			previousReceiptFile: provided(options.previousReceiptFile)
-		})
+		store: provided(options.store) ?? ''
 	};
 }
 
@@ -470,13 +452,7 @@ export async function planAction(
 	// it only runs when planning did: the unoptimised path never inspects the
 	// cache, and spawning every cohort's job unfiltered matches that.
 	const cohortDecisions = inputs.optimise
-		? await cohortPreFilter(
-				inputs,
-				plan,
-				evaluations,
-				await readPreviousReceipt(inputs.previousReceiptFile, reporter),
-				dependencies.runner
-			)
+		? await cohortPreFilter(inputs, plan, evaluations, dependencies.runner)
 		: plan.cohorts.map((cohort) => ({ key: cohort.key, pruned: false }));
 
 	await writePlan(
@@ -740,55 +716,6 @@ function ensureResponse(
 	throw new RootEnsureResultMissingError(root);
 }
 
-// A target the previous run recorded as left upstream is still fine to leave
-// there: the store path is the same path that would be left upstream again,
-// so an unchanged one names an unchanged manifest without comparing the
-// manifest itself. A receipt with no outcomes section (a run that only
-// built) covers nothing.
-function leftUpstreamPathsFrom(
-	receipt: ParsedBuildReceipt | undefined
-): ReadonlySet<StorePathString> {
-	const outcomes = receipt?.outcomes ?? [];
-
-	return new Set(
-		outcomes
-			.filter((outcome) => outcome.outcome === 'left-upstream')
-			.map((outcome) => outcome.storePath)
-	);
-}
-
-// A missing or unusable receipt is not a plan failure: it simply leaves the
-// pre-filter with no left-upstream coverage, exactly as a repository's first
-// run has none.
-async function readPreviousReceipt(
-	filePath: string | undefined,
-	reporter: Reporter
-): Promise<ParsedBuildReceipt | undefined> {
-	if (filePath === undefined) {
-		return undefined;
-	}
-
-	try {
-		const parsed = buildReceiptSchema.safeParse(
-			JSON.parse(await readFile(filePath, 'utf8'))
-		);
-
-		if (!parsed.success) {
-			reporter.warn(
-				`Ignoring the previous receipt at ${filePath}: it does not match the build receipt schema`
-			);
-			return undefined;
-		}
-
-		return parsed.data;
-	} catch (error) {
-		reporter.warn(
-			`Ignoring the previous receipt at ${filePath}: ${error instanceof Error ? error.message : String(error)}`
-		);
-		return undefined;
-	}
-}
-
 // The store paths a root's last reconciliation wrote, freshly probed: the
 // pre-filter's whole reason to exist is that this is not the current
 // manifest's target list, so a content-addressed or upstream-left output the
@@ -897,7 +824,6 @@ function rootTargetsResponse(
 async function targetCoverageOutcome(
 	target: PublishTarget,
 	evaluationByAttribute: ReadonlyMap<string, TargetEvaluation>,
-	leftUpstreamPaths: ReadonlySet<StorePathString>,
 	inputs: PlanInputs,
 	runner: EnsureRunner
 ): Promise<TargetCoverage> {
@@ -920,17 +846,10 @@ async function targetCoverageOutcome(
 		};
 	}
 
-	// An empty reconciled list means the root has nothing to refresh yet
-	// (a target left entirely upstream may never have one): there is
-	// nothing to ensure, so the check proceeds vacuously retained and the
-	// receipt's left-upstream coverage decides the rest.
+	// An empty reconciled list holds none of the target's outputs, so the
+	// target is uncovered and there is nothing to refresh.
 	if (reconciledPaths.size === 0) {
-		return evaluateTargetCoverage(
-			target,
-			evaluation.targetPaths,
-			{ retained: true, reconciledPaths },
-			leftUpstreamPaths
-		);
+		return { attr: target.attr, status: 'not-covered' };
 	}
 
 	try {
@@ -941,12 +860,10 @@ async function targetCoverageOutcome(
 			runner
 		);
 
-		return evaluateTargetCoverage(
-			target,
-			evaluation.targetPaths,
-			{ retained: response.status === 'retained', reconciledPaths },
-			leftUpstreamPaths
-		);
+		return evaluateTargetCoverage(target, evaluation.targetPaths, {
+			retained: response.status === 'retained',
+			reconciledPaths
+		});
 	} catch (error) {
 		return {
 			attr: target.attr,
@@ -969,25 +886,17 @@ export async function cohortPreFilter(
 	inputs: PlanInputs,
 	plan: Pick<PublishPlan, 'cohorts'>,
 	evaluations: readonly TargetEvaluation[],
-	previousReceipt: ParsedBuildReceipt | undefined,
 	runner: EnsureRunner = defaultEnsureRunner
 ): Promise<readonly CohortPreFilterDecision[]> {
 	const evaluationByAttribute = new Map(
 		evaluations.map((evaluation) => [evaluation.target.attr, evaluation])
 	);
-	const leftUpstreamPaths = leftUpstreamPathsFrom(previousReceipt);
 	const targets = plan.cohorts.flatMap((cohort) => cohort.targets);
 	const coverageEntries = await mapWithConcurrency(
 		targets,
 		maximumConcurrentRootEnsures,
 		(target) =>
-			targetCoverageOutcome(
-				target,
-				evaluationByAttribute,
-				leftUpstreamPaths,
-				inputs,
-				runner
-			)
+			targetCoverageOutcome(target, evaluationByAttribute, inputs, runner)
 	);
 	const coverageByAttribute = new Map(
 		coverageEntries.map((entry) => [entry.attr, entry])
