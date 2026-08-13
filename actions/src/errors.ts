@@ -74,6 +74,39 @@ export class NoReleaseFoundError extends CodedError {
 	}
 }
 
+/** A canonical cupboard coordinate could not be decoded from the job output. */
+export class CupboardResolutionJsonError extends UsageError {
+	constructor(public override readonly cause: unknown) {
+		super('resolved-cupboard is not valid canonical JSON', { cause });
+		this.name = 'CupboardResolutionJsonError';
+	}
+}
+
+/** GitHub returned a release-discovery page outside its declared schema. */
+export class MalformedReleaseDiscoveryResponseError extends CodedError {
+	constructor(options: { readonly cause?: unknown } = {}) {
+		super(
+			'the GitHub GraphQL API returned an unexpected release response',
+			withCause(options.cause)
+		);
+		this.name = 'MalformedReleaseDiscoveryResponseError';
+	}
+}
+
+/** More than one published release names the workflow commit. */
+export class AmbiguousReleaseForCommitError extends CodedError {
+	constructor(
+		public readonly releaseRepository: string,
+		public readonly sourceCommit: string,
+		public readonly tags: readonly string[]
+	) {
+		super(
+			`releases ${tags.join(', ')} in ${releaseRepository} all point at ${sourceCommit}; set cupboard-version explicitly`
+		);
+		this.name = 'AmbiguousReleaseForCommitError';
+	}
+}
+
 export class ReleaseAssetNotFoundError extends CodedError {
 	constructor(
 		public readonly tag: string,

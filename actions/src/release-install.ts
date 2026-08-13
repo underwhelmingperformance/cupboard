@@ -556,7 +556,7 @@ async function listAttestations(
 	}
 }
 
-async function fetchTagCommit(
+export async function fetchTagCommit(
 	octokit: Octokit,
 	owner: string,
 	repo: string,
