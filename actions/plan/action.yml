@@ -57,7 +57,8 @@ inputs:
       Remote ssh-ng store URI the cohorts build against. The packing measurement
       asks that store for the bytes it is missing, so a candidate grouping is
       priced against the store the results land on. Empty prices against this
-      runner's own store.
+      runner's own store. Every selected output path must be known during
+      planning; floating content-addressed outputs require a local build.
     required: false
 outputs:
   plan-file:

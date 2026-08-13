@@ -4,7 +4,6 @@ import path from 'node:path';
 import { describe, it } from 'vitest';
 
 import {
-	ConformanceNixUnavailableError,
 	type NixOptions,
 	type NixResult,
 	oracleFileName,
@@ -13,7 +12,6 @@ import {
 	parseFlakeLockRevision,
 	parseOracleRecord,
 	readNixVersion,
-	requiresConformanceOracle,
 	resolveConformanceNixBinary,
 	runNix
 } from '../../scripts/conformance-oracle.ts';
@@ -83,25 +81,10 @@ export class Oracle {
 
 type OracleResolution =
 	| { readonly kind: 'available'; readonly oracle: Oracle }
-	| { readonly kind: 'unavailable'; readonly reason: string }
 	| { readonly kind: 'drifted'; readonly error: OracleVersionDriftError };
 
 async function resolveOracle(): Promise<OracleResolution> {
-	let binary: string;
-
-	try {
-		binary = await resolveConformanceNixBinary(repositoryRoot);
-	} catch (error) {
-		if (error instanceof ConformanceNixUnavailableError) {
-			if (requiresConformanceOracle()) {
-				throw error;
-			}
-
-			return { kind: 'unavailable', reason: error.reason };
-		}
-
-		throw error;
-	}
+	const binary = await resolveConformanceNixBinary(repositoryRoot);
 
 	const version = await withTemporaryDirectory(
 		'cupboard-conformance-version-',
@@ -125,27 +108,15 @@ const resolution = await resolveOracle();
 /**
  * Declares a suite of cases that run against the pinned oracle.
  *
- * A machine that cannot build the oracle reports the suite as skipped, naming
- * why, so a missing oracle never reads as a pass. A machine that builds one the
- * record does not name reports a single failure instead: comparing our client
- * against an unrecorded `nix` would answer a question nobody asked.
+ * A machine that cannot build the oracle fails the suite, so a missing oracle
+ * never reads as a pass. A machine that builds one the record does not name
+ * reports a single failure instead: comparing our client against an unrecorded
+ * `nix` would answer a question nobody asked.
  */
 export function describeConformance(
 	name: string,
 	body: (oracle: Oracle) => void
 ): void {
-	if (resolution.kind === 'unavailable') {
-		const { reason } = resolution;
-
-		describe(name, () => {
-			it('compares our client against the nix the flake pins', (context) => {
-				context.skip(reason);
-			});
-		});
-
-		return;
-	}
-
 	if (resolution.kind === 'drifted') {
 		const { error } = resolution;
 

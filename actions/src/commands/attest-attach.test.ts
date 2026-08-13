@@ -2,6 +2,7 @@ import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { StorePath } from '@cupboard/nix-store/store-path';
 import type { Reporter } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
@@ -24,14 +25,21 @@ function options(
 		url: 'https://cache.example.workers.dev/t/acme',
 		cupboardPath: '/opt/cupboard/cupboard',
 		receiptFile: '/tmp/receipt.json',
+		checksumsFile: '/tmp/subjects.txt',
 		bundle: ['/tmp/bundle.sigstore.json'],
 		...overrides
 	};
 }
 
-async function writeReceipt(paths: readonly string[]): Promise<string> {
+interface ReceiptFixture {
+	readonly receiptFile: string;
+	readonly checksumsFile: string;
+}
+
+async function writeReceipt(paths: readonly string[]): Promise<ReceiptFixture> {
 	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attach-'));
 	const receiptFile = path.join(directory, 'receipt.json');
+	const checksumsFile = path.join(directory, 'subjects.txt');
 	await writeFile(
 		receiptFile,
 		JSON.stringify({
@@ -46,8 +54,18 @@ async function writeReceipt(paths: readonly string[]): Promise<string> {
 			}))
 		})
 	);
+	await writeFile(
+		checksumsFile,
+		paths
+			.map(
+				(storePath, index) =>
+					`${String(index + 1).repeat(64)}  ${path.basename(storePath)}`
+			)
+			.join('\n')
+			.concat(paths.length === 0 ? '' : '\n')
+	);
 
-	return receiptFile;
+	return { receiptFile, checksumsFile };
 }
 
 function recordingReporter(warnings: string[]): Reporter {
@@ -119,6 +137,25 @@ function recordingReporter(warnings: string[]): Reporter {
 	};
 }
 
+function attachedResults(paths: readonly string[]) {
+	return [
+		{
+			kind: 'attestation-attach-summary',
+			data: {
+				attached: paths.length,
+				reused: 0,
+				unservable: 0,
+				uploadedBytes: 1,
+				paths: paths.map((storePath) => ({
+					storePathHash: StorePath.hash(storePath),
+					storePath,
+					outcome: 'attached' as const
+				}))
+			}
+		}
+	];
+}
+
 describe('resolveAttestAttachInputs', () => {
 	it('resolves the provided inputs', () => {
 		expect(
@@ -138,6 +175,7 @@ describe('resolveAttestAttachInputs', () => {
 			readUser: 'reader',
 			readPassword: 'secret',
 			receiptFile: '/tmp/receipt.json',
+			checksumsFile: '/tmp/subjects.txt',
 			bundles: ['/tmp/bundle.sigstore.json']
 		});
 	});
@@ -156,6 +194,11 @@ describe('resolveAttestAttachInputs', () => {
 		{
 			name: 'receipt-file',
 			overrides: { receiptFile: '' },
+			expected: MissingInputError
+		},
+		{
+			name: 'checksums-file',
+			overrides: { checksumsFile: '' },
 			expected: MissingInputError
 		},
 		{
@@ -237,21 +280,25 @@ describe('attestAttachArguments', () => {
 
 describe('attestAttachAction', () => {
 	it('shells the installed cupboard with the receipt paths and bundle', async () => {
-		const receiptFile = await writeReceipt([appPath, runtimePath]);
+		const fixture = await writeReceipt([appPath, runtimePath]);
 		const invocations: {
 			binaryPath: string;
 			arguments: readonly string[];
 		}[] = [];
 
 		await attestAttachAction(
-			options({ receiptFile, readUser: 'reader', readPassword: 'secret' }),
+			options({
+				...fixture,
+				readUser: 'reader',
+				readPassword: 'secret'
+			}),
 			{},
 			recordingReporter([]),
 			{
 				runCupboard: (binaryPath, arguments_) => {
 					invocations.push({ binaryPath, arguments: arguments_ });
 
-					return Promise.resolve([]);
+					return Promise.resolve(attachedResults([appPath, runtimePath]));
 				}
 			}
 		);
@@ -278,13 +325,75 @@ describe('attestAttachAction', () => {
 		]);
 	});
 
+	it('passes only the receipt subjects that were actually signed', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attach-'));
+		const receiptFile = path.join(directory, 'receipt.json');
+		const checksumsFile = path.join(directory, 'subjects.txt');
+		const sharedHash = 'a'.repeat(64);
+		await writeFile(
+			receiptFile,
+			JSON.stringify({
+				version: 3,
+				paths: [appPath, runtimePath],
+				subjects: [
+					{
+						storePath: appPath,
+						narHash: sharedHash,
+						derivation: `${appPath}.drv`,
+						buildStore: 'auto',
+						verification: 'local'
+					},
+					{
+						storePath: runtimePath,
+						narHash: sharedHash,
+						derivation: `${runtimePath}.drv`,
+						buildStore: 'auto',
+						machine: 'ssh://builder.example',
+						verification: 'unverified'
+					}
+				]
+			})
+		);
+		await writeFile(
+			checksumsFile,
+			`${sharedHash}  ${path.basename(appPath)}\n`
+		);
+		const invocations: string[][] = [];
+
+		await attestAttachAction(
+			options({ receiptFile, checksumsFile }),
+			{},
+			recordingReporter([]),
+			{
+				runCupboard: (_binaryPath, arguments_) => {
+					invocations.push([...arguments_]);
+
+					return Promise.resolve(attachedResults([appPath]));
+				}
+			}
+		);
+
+		expect(invocations).toStrictEqual([
+			[
+				'--no-colour',
+				'attest',
+				'attach',
+				'https://cache.example.workers.dev/t/acme',
+				appPath,
+				'--github-oidc',
+				'--attestation',
+				'/tmp/bundle.sigstore.json'
+			]
+		]);
+	});
+
 	it('warns and runs nothing for a receipt with no paths', async () => {
-		const receiptFile = await writeReceipt([]);
+		const fixture = await writeReceipt([]);
 		const warnings: string[] = [];
 		const invocations: unknown[] = [];
 
 		await attestAttachAction(
-			options({ receiptFile }),
+			options(fixture),
 			{},
 			recordingReporter(warnings),
 			{
@@ -300,5 +409,50 @@ describe('attestAttachAction', () => {
 			invocations: [],
 			warningCount: 1
 		});
+	});
+
+	it('fails when the CLI does not settle every signed receipt subject', async () => {
+		const fixture = await writeReceipt([appPath, runtimePath]);
+
+		await expect(
+			attestAttachAction(options(fixture), {}, recordingReporter([]), {
+				runCupboard: () =>
+					Promise.resolve([
+						{
+							kind: 'attestation-attach-summary',
+							data: {
+								attached: 1,
+								reused: 0,
+								unservable: 1,
+								uploadedBytes: 1,
+								paths: [
+									{
+										storePathHash: StorePath.hash(appPath),
+										storePath: appPath,
+										outcome: 'attached'
+									},
+									{
+										storePathHash: StorePath.hash(runtimePath),
+										storePath: runtimePath,
+										outcome: 'unservable'
+									}
+								]
+							}
+						}
+					])
+			})
+		).rejects.toThrow(`Attestation attachment did not settle ${runtimePath}`);
+	});
+
+	it('fails when the CLI records no attachment settlement result', async () => {
+		const fixture = await writeReceipt([appPath]);
+
+		await expect(
+			attestAttachAction(options(fixture), {}, recordingReporter([]), {
+				runCupboard: () => Promise.resolve([])
+			})
+		).rejects.toThrow(
+			'The installed cupboard recorded no attestation attachment result'
+		);
 	});
 });

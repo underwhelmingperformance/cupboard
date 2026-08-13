@@ -210,6 +210,32 @@ export class CommittedSubjectInvalidError extends CodedError {
 	}
 }
 
+/** Realised outputs for which a current-run provenance receipt cannot be made. */
+export class ProvenanceSubjectsIncompleteError extends CodedError {
+	constructor(public readonly storePaths: readonly string[]) {
+		super(
+			`Could not establish current-run build provenance for: ${storePaths.join(', ')}`
+		);
+		this.name = 'ProvenanceSubjectsIncompleteError';
+	}
+}
+
+/** The installed CLI emitted no valid attachment settlement result. */
+export class AttestationAttachmentResultError extends CodedError {
+	constructor(message: string, options: { readonly cause?: unknown } = {}) {
+		super(message, withCause(options.cause));
+		this.name = 'AttestationAttachmentResultError';
+	}
+}
+
+/** Signed receipt subjects for which attachment did not settle. */
+export class AttestationAttachmentIncompleteError extends CodedError {
+	constructor(public readonly storePaths: readonly string[]) {
+		super(`Attestation attachment did not settle ${storePaths.join(', ')}`);
+		this.name = 'AttestationAttachmentIncompleteError';
+	}
+}
+
 export class AttestationSourceMismatchError extends CodedError {
 	constructor(
 		public readonly tagName: string,
@@ -485,6 +511,24 @@ export class CohortExecutionContextError extends UsageError {
 	}
 }
 
+/**
+ * One cohort groups a best-effort target with a required target. A cohort runs
+ * as one job, so its members must agree whether failure is tolerated rather
+ * than silently overriding one target's declaration.
+ */
+export class CohortFailureToleranceError extends UsageError {
+	constructor(
+		public readonly cohort: string,
+		public readonly bestEffortAttribute: string,
+		public readonly requiredAttribute: string
+	) {
+		super(
+			`cohort '${cohort}' groups best-effort target '${bestEffortAttribute}' with required target '${requiredAttribute}'; give them different cohort labels or make bestEffort consistent`
+		);
+		this.name = 'CohortFailureToleranceError';
+	}
+}
+
 export class MeasureResultMissingError extends CodedError {
 	constructor() {
 		super('Cupboard recorded no result while measuring the target sizes');
@@ -617,48 +661,79 @@ export class CacheAvailabilityResponseUnexpectedHashError extends CodedError {
 }
 
 export class CommandFailedError extends CodedError {
+	readonly signal: NodeJS.Signals | undefined;
+
 	constructor(
 		public readonly command: string,
 		public readonly status: number | null,
 		detail?: string,
-		options: { readonly cause?: unknown } = {}
+		options: {
+			readonly cause?: unknown;
+			readonly signal?: NodeJS.Signals;
+		} = {}
 	) {
 		super(
 			detail === undefined
-				? `${command} failed with status ${String(status)}`
+				? options.signal === undefined
+					? `${command} failed with status ${String(status)}`
+					: `${command} terminated by ${options.signal}`
 				: `${command} could not run: ${detail}`,
 			withCause(options.cause)
 		);
 		this.name = 'CommandFailedError';
+		this.signal = options.signal;
 	}
 }
 
 export interface RemoteCohortBuildFailure {
 	readonly target: string;
+	readonly kind: 'target' | 'protocol';
 	readonly outcome: string;
 	readonly message: string;
 }
 
-/** A remote keep-going build settled without producing any publishable output. */
+/** A remote keep-going build did not settle every requested target exactly once. */
 export class RemoteCohortBuildFailedError extends CodedError {
 	constructor(public readonly failures: readonly RemoteCohortBuildFailure[]) {
 		super(
-			`Remote Nix build produced no outputs. Fix the failed targets before publishing this cohort: ${failures.map((failure) => `${failure.target} (${failure.outcome}: ${failure.message})`).join('; ')}`
+			`Remote Nix build did not settle every requested target exactly once. Valid survivors were published before reporting: ${failures.map((failure) => `${failure.target} (${failure.outcome}: ${failure.message})`).join('; ')}`
 		);
 		this.name = 'RemoteCohortBuildFailedError';
 	}
 }
 
-/** Locally evaluating a cohort no longer produced the derivations its plan named. */
+/** A remote daemon returned a malformed keyed result batch. */
+export class RemoteCohortProtocolError extends CodedError {
+	constructor(public readonly failures: readonly RemoteCohortBuildFailure[]) {
+		super(
+			`Remote Nix daemon returned an invalid keyed result batch: ${failures.map((failure) => `${failure.target} (${failure.outcome}: ${failure.message})`).join('; ')}`
+		);
+		this.name = 'RemoteCohortProtocolError';
+	}
+}
+
+export interface RemoteCohortEvaluationMismatch {
+	readonly installable: string;
+	readonly planned: string;
+	readonly evaluated: readonly string[];
+}
+
+/** A local installable no longer evaluates to the derivation its plan named. */
 export class RemoteCohortEvaluationDriftError extends CodedError {
+	public readonly missing: readonly string[];
+	public readonly evaluated: readonly string[];
+
 	constructor(
-		public readonly missing: readonly string[],
-		public readonly evaluated: readonly string[]
+		public readonly mismatches: readonly RemoteCohortEvaluationMismatch[]
 	) {
 		super(
-			`Remote cohort evaluation no longer contains its planned derivations: ${missing.join(', ')}. Re-run planning against the current locked source before publishing.`
+			`Remote cohort installables no longer evaluate to their planned derivations: ${mismatches.map((mismatch) => `${mismatch.installable} planned ${mismatch.planned}, evaluated ${mismatch.evaluated.length === 0 ? 'nothing' : mismatch.evaluated.join(', ')}`).join('; ')}. Re-run planning against the current locked source before publishing.`
 		);
 		this.name = 'RemoteCohortEvaluationDriftError';
+		this.missing = mismatches.map((mismatch) => mismatch.planned);
+		this.evaluated = [
+			...new Set(mismatches.flatMap((mismatch) => mismatch.evaluated))
+		];
 	}
 }
 

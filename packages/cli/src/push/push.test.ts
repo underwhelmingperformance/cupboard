@@ -51,6 +51,7 @@ import {
 	PushNarMetadataMismatchError,
 	ReferenceUploadRequiredError,
 	UploadGraceFactsUnsupportedError,
+	UploadNegotiationMismatchError,
 	UploadVerificationFailedError
 } from '../errors.ts';
 import { byteStream } from '../io/byte-stream.ts';
@@ -153,6 +154,108 @@ function unexpectedSetRootCall(): Promise<never> {
 }
 
 describe('runPush', () => {
+	it.each([
+		{
+			name: 'empty',
+			targets: [appPath],
+			response: () => [],
+			expectedMismatch: 'missing'
+		},
+		{
+			name: 'partial',
+			targets: [appPath, runtimePath],
+			response: (body: Omit<UploadNegotiateRequest, 'pushId'>) => [
+				{
+					action: 'skip' as const,
+					storePathHash: body.paths[0]?.storePathHash,
+					narHash: body.paths[0]?.narHash
+				}
+			],
+			expectedMismatch: 'missing'
+		},
+		{
+			name: 'duplicate',
+			targets: [appPath],
+			response: (body: Omit<UploadNegotiateRequest, 'pushId'>) => [
+				{
+					action: 'skip' as const,
+					storePathHash: body.paths[0]?.storePathHash,
+					narHash: body.paths[0]?.narHash
+				},
+				{
+					action: 'skip' as const,
+					storePathHash: body.paths[0]?.storePathHash,
+					narHash: body.paths[0]?.narHash
+				}
+			],
+			expectedMismatch: 'duplicate'
+		},
+		{
+			name: 'unexpected',
+			targets: [appPath],
+			response: () => [
+				{
+					action: 'skip' as const,
+					storePathHash: StorePath.hash(runtimePath),
+					narHash: runtimeDigest.narHash.toString()
+				}
+			],
+			expectedMismatch: 'unexpected'
+		}
+	])(
+		'rejects an $name negotiation response before reporting publication success',
+		async ({ targets, response, expectedMismatch }) => {
+			const infos = {
+				[appPath]: pathInfo(appPath, appDigest, []),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			};
+
+			await expect(
+				runPush(publication(targets), reporter([]), {
+					retain: false,
+					nix: nixStore(infos),
+					client: {
+						preview: unexpectedPreviewCall,
+						negotiate: (body) =>
+							Promise.resolve(
+								uploadNegotiateResponseSchema.parse({
+									uploads: response(body)
+								})
+							),
+						uploadNar: unexpectedUploadNarCall,
+						commit: unexpectedCommitCall,
+						setRoot: unexpectedSetRootCall
+					}
+				})
+			).rejects.toMatchObject({
+				name: UploadNegotiationMismatchError.name,
+				mismatch: expectedMismatch
+			});
+		}
+	);
+
+	it('rejects an incomplete preview response', async () => {
+		const info = pathInfo(appPath, appDigest, []);
+
+		await expect(
+			runPush(publication([appPath]), reporter([]), {
+				dryRun: true,
+				retain: false,
+				nix: nixStore({ [appPath]: info }),
+				client: {
+					preview: () => Promise.resolve({ uploads: [] }),
+					negotiate: unexpectedNegotiateCall,
+					uploadNar: unexpectedUploadNarCall,
+					commit: unexpectedCommitCall,
+					setRoot: unexpectedSetRootCall
+				}
+			})
+		).rejects.toMatchObject({
+			name: UploadNegotiationMismatchError.name,
+			mismatch: 'missing'
+		});
+	});
+
 	it('refuses an oversized named root before resolving or uploading paths', async () => {
 		const paths = Array.from(
 			{ length: rootSetMaxTargets + 1 },
@@ -1024,7 +1127,9 @@ describe('runPush', () => {
 		const readBundles: string[] = [];
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
-		const bundle = sigstoreBundleBytes(narDigestHex(appDigest.narHash));
+		const bundle = sigstoreBundleBytes(
+			bundleSubject(appPath, appDigest.narHash)
+		);
 		const bundleDigest = sha256Hex(bundle);
 
 		await runPush(publication([appPath]), reporter(results), {
@@ -1133,7 +1238,9 @@ describe('runPush', () => {
 		// run after retention and the wait, not before: assert it follows `setRoot`.
 		const events: string[] = [];
 		const appHash = StorePath.hash(appPath);
-		const bundle = sigstoreBundleBytes(narDigestHex(appDigest.narHash));
+		const bundle = sigstoreBundleBytes(
+			bundleSubject(appPath, appDigest.narHash)
+		);
 		const bundleDigest = sha256Hex(bundle);
 
 		await runPush(publication([appPath]), reporter([]), {
@@ -1198,10 +1305,10 @@ describe('runPush', () => {
 		const attached: string[] = [];
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
-		const bundle = sigstoreBundleBytes([
-			narDigestHex(appDigest.narHash),
-			narDigestHex(runtimeDigest.narHash)
-		]);
+		const bundle = sigstoreBundleBytes(
+			bundleSubject(appPath, appDigest.narHash),
+			bundleSubject(runtimePath, runtimeDigest.narHash)
+		);
 		const bundleDigest = sha256Hex(bundle);
 
 		await runPush(publication([appPath]), reporter(results), {
@@ -1237,9 +1344,13 @@ describe('runPush', () => {
 				},
 				attachAttestation(uploadId) {
 					attached.push(uploadId);
+					const storePathHash =
+						uploadId === 'attestation-app'
+							? StorePath.hash(appPath)
+							: StorePath.hash(runtimePath);
 
 					return Promise.resolve({
-						storePathHash: StorePath.hash(appPath),
+						storePathHash,
 						digest: bundleDigest,
 						predicateType: 'https://slsa.dev/provenance/v1',
 						status: 'attached'
@@ -1331,7 +1442,10 @@ describe('runPush', () => {
 
 	it('rejects an attestation bundle whose subject is outside the closure', async () => {
 		const otherDigest = digest(9, 999);
-		const bundle = sigstoreBundleBytes(narDigestHex(otherDigest.narHash));
+		const bundle = sigstoreBundleBytes({
+			name: 'outside-closure',
+			digest: narDigestHex(otherDigest.narHash)
+		});
 		const clientCalls: unknown[] = [];
 		const readBundles: string[] = [];
 
@@ -1427,7 +1541,9 @@ describe('runPush', () => {
 
 	it('rejects attaching an attestation for a path whose cached NAR differs', async () => {
 		const cacheDigest = digest(9, 999);
-		const bundle = sigstoreBundleBytes(narDigestHex(appDigest.narHash));
+		const bundle = sigstoreBundleBytes(
+			bundleSubject(appPath, appDigest.narHash)
+		);
 		const clientCalls: unknown[] = [];
 		const attestationNegotiations: unknown[] = [];
 
@@ -1658,6 +1774,24 @@ describe('runPush', () => {
 					{ label: 'Root expiry', value: 'permanent' }
 				]
 			]
+		});
+	});
+
+	it('replaces a named root with an empty target list', async () => {
+		const roots: SetRootCall[] = [];
+		const clientCalls: unknown[] = [];
+
+		await runPush(publication([]), reporter([]), {
+			client: skipClient(roots, clientCalls),
+			root: rootName('main')
+		});
+
+		expect({ clientCalls, roots }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [] },
+				{ method: 'setRoot', fields: { name: 'main', targets: [] } }
+			],
+			roots: [{ fields: { name: 'main', targets: [] } }]
 		});
 	});
 
@@ -4083,14 +4217,30 @@ function digest(byte: number, narSize: number): NarDigest {
 	};
 }
 
+interface BundleSubject {
+	readonly name: string;
+	readonly digest: string;
+}
+
+function bundleSubject(
+	storePath: StorePathString,
+	narHash: NixSha256Hash
+): BundleSubject {
+	return {
+		name: StorePath.basename(storePath),
+		digest: narDigestHex(narHash)
+	};
+}
+
 function sigstoreBundleBytes(
-	subjectDigest: string | readonly string[]
+	...subjects: readonly BundleSubject[]
 ): Uint8Array {
-	const digests =
-		typeof subjectDigest === 'string' ? [subjectDigest] : subjectDigest;
 	const statement = {
 		_type: 'https://in-toto.io/Statement/v1',
-		subject: digests.map((sha256) => ({ name: 'nar', digest: { sha256 } })),
+		subject: subjects.map(({ name, digest }) => ({
+			name,
+			digest: { sha256: digest }
+		})),
 		predicateType: 'https://slsa.dev/provenance/v1',
 		predicate: { buildDefinition: {}, runDetails: {} }
 	};

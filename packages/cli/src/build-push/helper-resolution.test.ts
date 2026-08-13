@@ -34,7 +34,6 @@ describe('resolveHookHelper', () => {
 
 		await expect(
 			resolveHookHelper({
-				environment: {},
 				executablePath: path.join(base, 'cupboard')
 			})
 		).resolves.toBe(helperPath);
@@ -51,7 +50,6 @@ describe('resolveHookHelper', () => {
 
 		await expect(
 			resolveHookHelper({
-				environment: {},
 				executablePath: path.join(binDirectory, 'cupboard')
 			})
 		).resolves.toBe(
@@ -59,44 +57,12 @@ describe('resolveHookHelper', () => {
 		);
 	});
 
-	it('prefers the environment override to the installation layout', async () => {
-		const base = await installation();
-		const besideExecutable = path.join(base, hookHelperName);
-		const overridePath = path.join(base, 'override-relay');
-		await writeFile(besideExecutable, '');
-		await writeFile(overridePath, '');
-
-		await expect(
-			resolveHookHelper({
-				environment: { CUPBOARD_HOOK_HELPER: overridePath },
-				executablePath: path.join(base, 'cupboard')
-			})
-		).resolves.toBe(overridePath);
-	});
-
-	it.each([
-		{
-			name: 'an override naming a missing file',
-			environment: (base: string) => ({
-				CUPBOARD_HOOK_HELPER: path.join(base, 'gone-relay')
-			}),
-			expectedCandidates: (base: string) => [path.join(base, 'gone-relay')]
-		},
-		{
-			name: 'an installation with no helper anywhere',
-			environment: () => ({}),
-			expectedCandidates: (base: string) => [
-				path.join(base, hookHelperName),
-				path.join(base, '..', 'libexec', 'cupboard', hookHelperName)
-			]
-		}
-	])('refuses $name', async ({ environment, expectedCandidates }) => {
+	it('refuses an installation with no helper in either layout', async () => {
 		const base = await installation();
 		let caught: unknown;
 
 		try {
 			await resolveHookHelper({
-				environment: environment(base),
 				executablePath: path.join(base, 'cupboard')
 			});
 		} catch (error) {
@@ -106,6 +72,9 @@ describe('resolveHookHelper', () => {
 		expect(caught).toBeInstanceOf(HookHelperMissingError);
 		expect(
 			caught instanceof HookHelperMissingError ? caught.candidates : undefined
-		).toStrictEqual(expectedCandidates(base));
+		).toStrictEqual([
+			path.join(base, hookHelperName),
+			path.join(base, '..', 'libexec', 'cupboard', hookHelperName)
+		]);
 	});
 });

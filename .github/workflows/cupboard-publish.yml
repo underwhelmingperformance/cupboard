@@ -1,7 +1,7 @@
 # The reusable publish workflow: build a flake installable and push it to a
-# cupboard cache with GitHub OIDC authentication. Callers reference it at main
-# so a trust rule can pin the job_workflow_ref claim to this file at
-# refs/heads/main, and route by cache and retention root per trigger.
+# cupboard cache with GitHub OIDC authentication. New callers pin a release
+# commit so a trust rule can require that exact job_workflow_ref; the immutable
+# compatibility defaults also keep an existing moving-ref caller working.
 name: cupboard publish
 
 on:
@@ -51,10 +51,17 @@ on:
         type: string
         default: ''
       cupboard-version:
-        description: cupboard release to install.
+        description: Exact cupboard release tag to install.
         required: false
         type: string
-        default: latest
+        default: v0.0.19
+      cupboard-source-commit:
+        description: >-
+          Full source commit the cupboard release must have been built from.
+          Defaults to the source commit of the compatibility release above.
+        required: false
+        type: string
+        default: 8830186db0d666c0962a5f5fb34cc97b2f4fbbbf
 
 # The caller grants the job permissions; nothing runs at workflow scope.
 permissions: {}
@@ -72,15 +79,15 @@ jobs:
         with:
           persist-credentials: false
 
-      # The composite actions ship alongside this workflow, which callers
-      # reference at main, so fetch the same ref's copy of them into the
-      # workspace. Running them from a local path keeps a repository's
-      # SHA-pinning policy for remote actions intact; the directory is
-      # untracked, so the flake source and its revision are unaffected.
+      # The composite actions ship alongside this workflow, so fetch the called
+      # workflow's resolved revision into the workspace. Running them from a
+      # local path keeps a repository's SHA-pinning policy for remote actions
+      # intact; the directory is untracked, so the flake source and its revision
+      # are unaffected.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: underwhelmingperformance/cupboard
-          ref: main
+          ref: ${{ job.workflow_sha }}
           path: .cupboard
           persist-credentials: false
 
@@ -97,12 +104,19 @@ jobs:
           cache: ${{ inputs.cache }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
           cupboard-version: ${{ inputs.cupboard-version }}
+          expected-source-commit:
+            ${{ inputs.cupboard-source-commit || job.workflow_sha }}
           release-repository: underwhelmingperformance/cupboard
 
       - uses: ./.cupboard/actions/build-paths
         id: build
         with:
           installables: ${{ inputs.installable }}
+          # A cached output has no current-run build evidence. When provenance
+          # is required, build-paths rebuilds only such final derivations before
+          # writing its receipt, so a rerun cannot turn an earlier attach
+          # failure into a successful unattested publication.
+          require-provenance: ${{ inputs.attest }}
 
       # A retention root holds one closure and a push replaces it wholesale, so
       # builds for different systems must retain under sibling roots. Append
@@ -125,6 +139,8 @@ jobs:
           root: ${{ steps.root.outputs.root || '' }}
           ttl: ${{ inputs.ttl }}
           cupboard-version: ${{ inputs.cupboard-version }}
+          expected-source-commit:
+            ${{ inputs.cupboard-source-commit || job.workflow_sha }}
           release-repository: underwhelmingperformance/cupboard
 
       # This compact workflow has always targeted public-read caches and
@@ -146,4 +162,5 @@ jobs:
           cupboard-path: ${{ steps.push.outputs.cupboard-path }}
           cache: ${{ inputs.cache }}
           receipt-file: ${{ steps.build.outputs.receipt-file }}
+          checksums-file: ${{ steps.attest.outputs.checksums-file }}
           bundle: ${{ steps.attest.outputs.bundle-path }}

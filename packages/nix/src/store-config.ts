@@ -480,9 +480,10 @@ export function microarchitectureLevelsOf(
  * Three names differ between the two spellings. `PNI` is SSE3 under the name
  * Linux prints it by; `FMA3` is the three-operand FMA that Linux prints as
  * `fma`; and `ABM` is the bit that carries LZCNT, which Intel and AMD both
- * report and Linux prints under AMD's name for it. `OSXSAVE` is the operating
- * system's own enabling of XSAVE, which Linux prints beside the `xsave` the
- * CPU offers.
+ * report and Linux prints under AMD's name for it. Libcpuid separately asks
+ * for `OSXSAVE`, but Linux only publishes `avx` here when the operating system
+ * has enabled the XSAVE state AVX needs. Requiring another `/proc/cpuinfo`
+ * flag would therefore reject an otherwise complete third-level feature set.
  */
 const microarchitectureLevelFlags: readonly [string, readonly string[]][] = [
 	['x86_64-v1', ['cmov', 'cx8', 'fpu', 'fxsr', 'mmx', 'sse', 'sse2']],
@@ -490,10 +491,7 @@ const microarchitectureLevelFlags: readonly [string, readonly string[]][] = [
 		'x86_64-v2',
 		['cx16', 'lahf_lm', 'popcnt', 'pni', 'sse4_1', 'sse4_2', 'ssse3']
 	],
-	[
-		'x86_64-v3',
-		['avx', 'avx2', 'bmi1', 'bmi2', 'f16c', 'fma', 'abm', 'movbe', 'osxsave']
-	],
+	['x86_64-v3', ['avx', 'avx2', 'bmi1', 'bmi2', 'f16c', 'fma', 'abm', 'movbe']],
 	['x86_64-v4', ['avx512f', 'avx512bw', 'avx512cd', 'avx512dq', 'avx512vl']]
 ];
 

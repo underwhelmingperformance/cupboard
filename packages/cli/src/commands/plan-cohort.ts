@@ -103,9 +103,14 @@ export async function requeryUnknownWith(
 	const settings = await store.honoursSubstituterSettings();
 
 	if (!settings.isHonoured) {
+		const reason =
+			settings.reason === 'daemon-options-preserved'
+				? 'the transport preserves the remote daemon options, so it does not send the narinfo-cache-negative-ttl override'
+				: `the daemon connection is ${settings.trust}, so its narinfo-cache-negative-ttl override cannot be relied on to take effect`;
+
 		return {
 			kind: 'refused',
-			reason: `the daemon connection is ${settings.trust}, so its narinfo-cache-negative-ttl override cannot be relied on to take effect`
+			reason
 		};
 	}
 

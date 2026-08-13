@@ -20,11 +20,11 @@ export async function mapWithConcurrency<T, Result>(
 
 	const results: Result[] = [];
 	const iterator = values.entries();
-	let hasFailed = false;
+	let firstFailure: { readonly error: unknown } | undefined;
 
 	const worker = async (): Promise<void> => {
 		for (;;) {
-			if (hasFailed) {
+			if (firstFailure !== undefined) {
 				return;
 			}
 
@@ -39,8 +39,8 @@ export async function mapWithConcurrency<T, Result>(
 			try {
 				results[index] = await map(value, index);
 			} catch (error) {
-				hasFailed = true;
-				throw error;
+				firstFailure ??= { error };
+				return;
 			}
 		}
 	};
@@ -48,6 +48,10 @@ export async function mapWithConcurrency<T, Result>(
 	const workerCount = Math.min(Math.max(concurrency, 1), values.length);
 
 	await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+	if (firstFailure !== undefined) {
+		throw firstFailure.error;
+	}
 
 	return results;
 }

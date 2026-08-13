@@ -1,7 +1,21 @@
-import { Command } from 'commander';
-import { describe, expect, it } from 'vitest';
-
 import {
+	defaultFileTransferSettings,
+	defaultSignatureSettings,
+	type NixStoreConfig
+} from '@cupboard/nix';
+import {
+	rootNameSchema,
+	storeDirectorySchema,
+	storePathSchema,
+	ttlSecondsSchema
+} from '@cupboard/nix-store/scalars';
+import { Command } from 'commander';
+import { describe, expect, it, vi } from 'vitest';
+
+import { runCohortSequence } from '../build-push/cohorts.ts';
+import {
+	BuildCommandFailedError,
+	CliAbortError,
 	CohortInputError,
 	CohortsFileInvalidError,
 	InvalidUploadConcurrencyError,
@@ -11,12 +25,214 @@ import {
 } from '../errors.ts';
 
 import {
+	aggregateBuildReceipts,
+	aggregateCohortTargets,
 	betweenCohortCollector,
+	createBuildPushDaemon,
+	multiCohortReceiptDocument,
 	parseCohortsFile,
-	registerBuildPushCommand
+	registerBuildPushCommand,
+	updateAggregateCohortRoot
 } from './build-push.ts';
 
 const tenantUrl = 'https://cupboard.example.workers.dev/t/acme';
+const pathA = storePathSchema.parse(
+	'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
+);
+const pathB = storePathSchema.parse(
+	'/nix/store/1123456789abcdfghijklmnpqrsvwxyz-lib'
+);
+const pathC = storePathSchema.parse(
+	'/nix/store/2123456789abcdfghijklmnpqrsvwxyz-docs'
+);
+const root = rootNameSchema.parse('main');
+const ttl = ttlSecondsSchema.parse(60);
+const nixConfig: NixStoreConfig = {
+	storeUri: 'ssh-ng://builder@example.test',
+	storeDirectory: storeDirectorySchema.parse('/nix/store'),
+	stateDirectory: '/nix/var/nix',
+	daemonSocketPath: '/nix/var/nix/daemon-socket/socket',
+	daemonSetOptions: {},
+	daemonOverrides: {},
+	substitution: {
+		substitute: true,
+		alwaysAllowSubstitutes: false,
+		fallback: false,
+		substituters: []
+	},
+	building: { systems: ['x86_64-linux'], features: [] },
+	fileTransfer: defaultFileTransferSettings,
+	signatures: defaultSignatureSettings,
+	unknownSettings: []
+};
+
+describe('createBuildPushDaemon', () => {
+	it('cancels and closes a pending store operation with the command signal', async () => {
+		const controller = new AbortController();
+		const reason = new Error('stop build-push');
+		let closes = 0;
+		const daemon = createBuildPushDaemon(nixConfig, {
+			signal: controller.signal,
+			connect: () =>
+				Promise.resolve({
+					write: () => Promise.resolve(),
+					read: () =>
+						new Promise<Uint8Array>((resolve) => {
+							void resolve;
+						}),
+					close: () => {
+						closes += 1;
+
+						return Promise.resolve();
+					}
+				})
+		});
+
+		const query = daemon.queryValidPaths([pathA]);
+		await Promise.resolve();
+		controller.abort(reason);
+
+		await expect(query).rejects.toBe(reason);
+		expect(closes).toBe(1);
+	});
+});
+
+describe('aggregateCohortTargets', () => {
+	it('unions successful cohort targets in stable order', () => {
+		expect(
+			aggregateCohortTargets([
+				[pathB, pathA],
+				[pathC, pathA]
+			])
+		).toStrictEqual([pathA, pathB, pathC]);
+	});
+
+	it('replaces the root once with the union after every cohort succeeds', async () => {
+		const setRoot = vi.fn(() => Promise.resolve());
+
+		await updateAggregateCohortRoot(
+			{
+				cohortCount: 2,
+				failed: false,
+				root,
+				settledTargets: new Map([
+					[1, [pathA]],
+					[2, [pathB]]
+				]),
+				ttlSeconds: ttl
+			},
+			setRoot
+		);
+
+		expect(setRoot.mock.calls).toStrictEqual([
+			[root, { targets: [pathA, pathB], ttlSeconds: ttl }]
+		]);
+	});
+
+	it('replaces the root with no targets when every cohort settles empty', async () => {
+		const setRoot = vi.fn(() => Promise.resolve());
+
+		await updateAggregateCohortRoot(
+			{
+				cohortCount: 2,
+				failed: false,
+				root,
+				settledTargets: new Map()
+			},
+			setRoot
+		);
+
+		expect(setRoot.mock.calls).toStrictEqual([[root, { targets: [] }]]);
+	});
+
+	it('does not replace the root when any cohort failed', async () => {
+		const setRoot = vi.fn(() => Promise.resolve());
+
+		await updateAggregateCohortRoot(
+			{
+				cohortCount: 2,
+				failed: true,
+				root,
+				settledTargets: new Map([
+					[1, [pathA]],
+					[2, [pathB]]
+				])
+			},
+			setRoot
+		);
+
+		expect(setRoot.mock.calls).toStrictEqual([]);
+	});
+});
+
+describe('aggregateBuildReceipts', () => {
+	it('preserves successful paths and exact failed targets across a sequence', () => {
+		expect(
+			aggregateBuildReceipts([
+				{
+					version: 3,
+					paths: [pathA],
+					subjects: [],
+					childExitStatus: 0
+				},
+				{
+					version: 3,
+					paths: [pathB],
+					subjects: [],
+					childExitStatus: 1,
+					terminalFailure: {
+						kind: 'target-build',
+						failedTargets: ['.#optional']
+					}
+				}
+			])
+		).toStrictEqual({
+			version: 3,
+			paths: [pathA, pathB],
+			subjects: [],
+			childExitStatus: 1,
+			terminalFailure: {
+				kind: 'target-build',
+				failedTargets: ['.#optional']
+			},
+			uploaded: [],
+			failed: [],
+			collected: []
+		});
+	});
+
+	it('keeps the public envelope unless the V3 aggregate is explicit', () => {
+		const receipts = [
+			{
+				version: 3 as const,
+				paths: [pathA],
+				subjects: [],
+				childExitStatus: 0
+			},
+			{
+				version: 3 as const,
+				paths: [pathB],
+				subjects: [],
+				childExitStatus: 0
+			}
+		];
+
+		expect({
+			publicDocument: multiCohortReceiptDocument(receipts, false),
+			aggregateDocument: multiCohortReceiptDocument(receipts, true)
+		}).toStrictEqual({
+			publicDocument: { receipts },
+			aggregateDocument: {
+				version: 3,
+				paths: [pathA, pathB],
+				subjects: [],
+				uploaded: [],
+				failed: [],
+				collected: []
+			}
+		});
+	});
+});
 
 function silentProgram(): Command {
 	const program = new Command();
@@ -214,10 +430,12 @@ describe('betweenCohortCollector', () => {
 					warnings.push({ label, value });
 				}
 			},
-			(options) => {
-				commands.push(options.command);
+			{
+				runCollector: (options) => {
+					commands.push(options.command);
 
-				return Promise.resolve({ status: exitStatus, signal: undefined });
+					return Promise.resolve({ status: exitStatus, signal: undefined });
+				}
 			}
 		);
 
@@ -244,5 +462,198 @@ describe('betweenCohortCollector', () => {
 				}
 			]
 		});
+	});
+
+	it('continues the sequence after an ordinary failed sweep', async () => {
+		const events: string[] = [];
+		const warnings: string[] = [];
+		const collect = betweenCohortCollector(
+			{
+				warn(label) {
+					warnings.push(label);
+				}
+			},
+			{
+				runCollector: () => {
+					events.push('collect');
+
+					return Promise.resolve({ status: 5, signal: undefined });
+				}
+			}
+		);
+		const receipt = aggregateBuildReceipts([]);
+
+		await runCohortSequence(
+			{
+				cohorts: [
+					{ kind: 'command', command: ['true'] },
+					{ kind: 'command', command: ['true'] }
+				],
+				collectBetweenCohorts: true
+			},
+			{
+				runCohort: (_invocation, cohort) => {
+					events.push(`cohort:${String(cohort)}`);
+
+					return Promise.resolve(receipt);
+				},
+				collect
+			}
+		);
+
+		expect({ events, warnings }).toStrictEqual({
+			events: ['cohort:1', 'collect', 'cohort:2'],
+			warnings: ['collection failed']
+		});
+	});
+
+	it.each([
+		{ signal: 'SIGINT' as const, exitCode: 130 },
+		{ signal: 'SIGTERM' as const, exitCode: 143 }
+	])(
+		'surfaces a sweep killed by $signal as typed cancellation',
+		async ({ signal, exitCode }) => {
+			const collect = betweenCohortCollector(
+				{ warn: vi.fn() },
+				{
+					runCollector: () => Promise.resolve({ status: undefined, signal })
+				}
+			);
+			let error: unknown;
+
+			try {
+				await collect();
+			} catch (error_: unknown) {
+				error = error_;
+			}
+
+			expect({
+				isTyped: error instanceof BuildCommandFailedError,
+				status:
+					error instanceof BuildCommandFailedError ? error.status : undefined,
+				signal:
+					error instanceof BuildCommandFailedError ? error.signal : undefined,
+				exitCode:
+					error instanceof BuildCommandFailedError ? error.exitCode : undefined
+			}).toStrictEqual({
+				isTyped: true,
+				status: undefined,
+				signal,
+				exitCode
+			});
+		}
+	);
+
+	it.each([
+		{ signal: 'SIGINT' as const, exitCode: 130 },
+		{ signal: 'SIGTERM' as const, exitCode: 143 }
+	])(
+		'surfaces a sweep that translates $signal to status $exitCode as typed cancellation',
+		async ({ signal, exitCode }) => {
+			const warnings: string[] = [];
+			const collect = betweenCohortCollector(
+				{
+					warn: (label) => {
+						warnings.push(label);
+					}
+				},
+				{
+					runCollector: () =>
+						Promise.resolve({ status: exitCode, signal: undefined })
+				}
+			);
+			let error: unknown;
+
+			try {
+				await collect();
+			} catch (error_: unknown) {
+				error = error_;
+			}
+
+			expect({ error, warnings }).toStrictEqual({
+				error: new BuildCommandFailedError(exitCode, signal, exitCode),
+				warnings: []
+			});
+		}
+	);
+
+	it.each(['before', 'after'] as const)(
+		'stops on an abort $phase the collector without warning or further work',
+		async (phase) => {
+			const controller = new AbortController();
+			const reason = new CliAbortError();
+			const events: string[] = [];
+			const warnings: string[] = [];
+
+			if (phase === 'before') {
+				controller.abort(reason);
+			}
+
+			const collect = betweenCohortCollector(
+				{
+					warn: (label) => {
+						warnings.push(label);
+					}
+				},
+				{
+					signal: controller.signal,
+					runCollector: () => {
+						events.push('collect');
+
+						if (phase === 'after') {
+							controller.abort(reason);
+						}
+
+						return Promise.resolve({ status: 0, signal: undefined });
+					}
+				}
+			);
+
+			await expect(collect()).rejects.toBe(reason);
+			expect({ events, warnings }).toStrictEqual({
+				events: phase === 'before' ? [] : ['collect'],
+				warnings: []
+			});
+		}
+	);
+
+	it('forwards an in-flight abort to the collector child', async () => {
+		const controller = new AbortController();
+		const reason = new CliAbortError();
+		const started = Promise.withResolvers<undefined>();
+		let receivedSignal: AbortSignal | undefined;
+		const collect = betweenCohortCollector(
+			{ warn: vi.fn() },
+			{
+				signal: controller.signal,
+				runCollector: (options) => {
+					const signal = options.signal;
+
+					receivedSignal = signal;
+					started.resolve(undefined);
+
+					if (signal === undefined) {
+						return Promise.resolve({ status: 0, signal: undefined });
+					}
+
+					return new Promise((resolve) => {
+						signal.addEventListener(
+							'abort',
+							() => {
+								resolve({ status: undefined, signal: 'SIGTERM' });
+							},
+							{ once: true }
+						);
+					});
+				}
+			}
+		);
+		const collecting = collect();
+
+		await started.promise;
+		expect(receivedSignal).toBe(controller.signal);
+		controller.abort(reason);
+
+		await expect(collecting).rejects.toBe(reason);
 	});
 });

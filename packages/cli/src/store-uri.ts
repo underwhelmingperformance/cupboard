@@ -9,7 +9,15 @@ import { InvalidStoreUriError } from './errors.ts';
  * error at the command boundary.
  */
 export function parseStoreUri(value: string): string {
-	if (parseSshNgStoreUri(value) === undefined) {
+	let parsed: ReturnType<typeof parseSshNgStoreUri>;
+
+	try {
+		parsed = parseSshNgStoreUri(value);
+	} catch (error) {
+		throw new InvalidStoreUriError(value, { cause: error });
+	}
+
+	if (parsed === undefined) {
 		throw new InvalidStoreUriError(value);
 	}
 

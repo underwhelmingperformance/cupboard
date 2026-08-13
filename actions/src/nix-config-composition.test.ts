@@ -3,14 +3,21 @@ import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
 
 const prepareAction = new URL('../prepare/action.yml', import.meta.url);
+const prepareSshTransport = new URL(
+	'../prepare/ssh-transport.sh',
+	import.meta.url
+);
 const setupCommand = new URL('commands/setup.ts', import.meta.url);
 
 describe('prepare and setup Nix configuration', () => {
 	it('keeps caller and builder settings separate from setup cache settings', async () => {
-		const [prepare, setup] = await Promise.all([
-			readFile(prepareAction, 'utf8'),
-			readFile(setupCommand, 'utf8')
-		]);
+		const [prepareActionContents, prepareSshTransportContents, setup] =
+			await Promise.all([
+				readFile(prepareAction, 'utf8'),
+				readFile(prepareSshTransport, 'utf8'),
+				readFile(setupCommand, 'utf8')
+			]);
+		const prepare = `${prepareActionContents}\n${prepareSshTransportContents}`;
 
 		expect({
 			prepareConfigReferences: prepare.match(/cupboard-prepare-nix\.conf/gu)

@@ -3,8 +3,11 @@ packages:
   - 'actions'
 
 allowBuilds:
+  cpu-features: false
   esbuild: true
+  protobufjs: false
   sharp: false
+  ssh2: false
   workerd: true
 
 minimumReleaseAge: 1440

@@ -531,7 +531,11 @@ describe('Nix.openForAvailability', () => {
 			name: 'a daemon that trusts this client',
 			hasSocket: true,
 			trust: 1,
-			expected: { cachesSubstituterAnswers: true, isHonoured: true }
+			expected: {
+				cachesSubstituterAnswers: true,
+				preservesDaemonOptions: false,
+				isHonoured: true
+			}
 		},
 		{
 			name: 'a daemon that does not trust this client',
@@ -539,7 +543,9 @@ describe('Nix.openForAvailability', () => {
 			trust: 2,
 			expected: {
 				cachesSubstituterAnswers: true,
+				preservesDaemonOptions: false,
 				isHonoured: false,
+				reason: 'daemon-trust',
 				trust: 'not-trusted'
 			}
 		},
@@ -549,7 +555,22 @@ describe('Nix.openForAvailability', () => {
 			trust: 0,
 			expected: {
 				cachesSubstituterAnswers: true,
+				preservesDaemonOptions: false,
 				isHonoured: false,
+				reason: 'daemon-trust',
+				trust: 'unknown'
+			}
+		},
+		{
+			name: 'an SSH store that preserves its remote daemon policy',
+			hasSocket: false,
+			storeUri: 'ssh-ng://build@example.test',
+			trust: 1,
+			expected: {
+				cachesSubstituterAnswers: true,
+				preservesDaemonOptions: true,
+				isHonoured: false,
+				reason: 'daemon-options-preserved',
 				trust: 'unknown'
 			}
 		},
@@ -557,17 +578,23 @@ describe('Nix.openForAvailability', () => {
 			name: 'the store this process drives',
 			hasSocket: false,
 			trust: 0,
-			expected: { cachesSubstituterAnswers: false, isHonoured: true }
+			expected: {
+				cachesSubstituterAnswers: false,
+				preservesDaemonOptions: false,
+				isHonoured: true
+			}
 		}
 	])(
 		'reports what it can answer for over $name',
-		async ({ hasSocket, trust, expected }) => {
+		async ({ hasSocket, storeUri, trust, expected }) => {
 			const nix = Nix.openForAvailability(daemonDependencies(hasSocket), {
+				...(storeUri !== undefined && { storeUri }),
 				connect: () => Promise.resolve(new FakeDaemonTransport({}, { trust }))
 			});
 
 			expect({
 				cachesSubstituterAnswers: nix.cachesSubstituterAnswers,
+				preservesDaemonOptions: nix.preservesDaemonOptions,
 				...(await nix.honoursSubstituterSettings())
 			}).toStrictEqual(expected);
 		}

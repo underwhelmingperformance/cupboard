@@ -60,7 +60,7 @@ describe('Nix substitution from a named cache', () => {
 						path.join(directory, 'target-home')
 					);
 					await target.realise(storePath, {
-						substituter: `${server.tenantUrl.toString()}/cache/builds`,
+						substituter: `${server.tenantUrl.href}/cache/builds`,
 						trustedPublicKeys: [publicKey],
 						requireSigs: true
 					});

@@ -28,6 +28,7 @@ import {
 	CacheAvailabilityResponseSchemaError,
 	CacheAvailabilityResponseUnexpectedHashError,
 	CohortExecutionContextError,
+	CohortFailureToleranceError,
 	DerivationGraphShapeError,
 	DerivationNodeMissingError,
 	DerivationRootCountError,
@@ -875,10 +876,9 @@ function executionContextKey(target: PublishTarget): string {
 }
 
 /**
- * Whether a cohort's failure is one the manifest tolerates: true only when
- * every member is a best-effort target. A cohort holding one required target
- * is required, because its members build in one job and a required target's
- * failure is the run's failure whoever it shares that job with.
+ * Whether a cohort's failure is one the manifest tolerates. {@link cohortsFor}
+ * rejects a labelled cohort whose members disagree, so every member has the
+ * same value here. Cohorts themselves are never empty.
  */
 export function isBestEffortCohort(members: readonly PublishTarget[]): boolean {
 	return members.every((member) => member.bestEffort);
@@ -922,6 +922,17 @@ function cohortFor(label: string, members: readonly PublishTarget[]): Cohort {
 	for (const member of members) {
 		if (executionContextKey(member) !== context) {
 			throw new CohortExecutionContextError(label, first.attr, member.attr);
+		}
+
+		if (member.bestEffort !== first.bestEffort) {
+			const bestEffortAttribute = first.bestEffort ? first.attr : member.attr;
+			const requiredAttribute = first.bestEffort ? member.attr : first.attr;
+
+			throw new CohortFailureToleranceError(
+				label,
+				bestEffortAttribute,
+				requiredAttribute
+			);
 		}
 	}
 

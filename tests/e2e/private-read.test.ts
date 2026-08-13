@@ -64,7 +64,7 @@ describe('Nix substitution from a private-read cache', () => {
 					);
 
 					const base: RealiseOptions = {
-						substituter: server.tenantUrl.toString(),
+						substituter: server.tenantUrl.href,
 						trustedPublicKeys: [publicKey],
 						requireSigs: true
 					};
@@ -154,7 +154,7 @@ describe('Nix substitution from a private-read cache', () => {
 							offered: [],
 							unreachable: [
 								{
-									uri: server.tenantUrl.toString(),
+									uri: server.tenantUrl.href,
 									reason: 'needs-credentials'
 								}
 							]
@@ -186,7 +186,7 @@ async function askAsClient(
 			substitute: true,
 			alwaysAllowSubstitutes: false,
 			fallback: false,
-			substituters: [server.tenantUrl.toString()]
+			substituters: [server.tenantUrl.href]
 		},
 		{ ...defaultFileTransferSettings, attempts: 1, netrcFile },
 		{ ...defaultNixConfigEnvironment, env: {} }

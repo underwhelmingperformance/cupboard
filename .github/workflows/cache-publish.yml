@@ -19,6 +19,10 @@ permissions:
   contents: read
 
 jobs:
+  # The reusable workflow stays on @main for the tenant trust rule, while its
+  # action code and the last released CLI coordinate are deliberately distinct.
+  # Its compatibility default binds this release to its attested source commit;
+  # pin the version here rather than resolving `latest` during a run.
   # Each pull request publishes its flake build to a cache of its own, expiring
   # two weeks after the last push. The trust rule on the tenant routes it there
   # and nowhere else, keyed on the pull-request number in the token.
@@ -39,6 +43,7 @@ jobs:
         github:${{ github.repository }}/pr-${{ github.event.pull_request.number
         }}
       ttl: 14d
+      cupboard-version: v0.0.19
 
   # Pushes to main publish to the tenant's default cache, which is what
   # consumers of the flake substitute from.
@@ -55,3 +60,4 @@ jobs:
     with:
       url: https://cupboard.supply/t/cupboard
       root: github:${{ github.repository }}/main
+      cupboard-version: v0.0.19

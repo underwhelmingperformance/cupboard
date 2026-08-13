@@ -7,6 +7,7 @@ import {
 	NixStorePathNotFoundError,
 	type NixValidPathInfo
 } from '@cupboard/nix';
+import { Derivation } from '@cupboard/nix-store/derivation';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	rootNameSchema,
@@ -15,7 +16,10 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
-import { invocationIdSchema } from '@cupboard/protocol/build';
+import {
+	buildReceiptV3Schema,
+	invocationIdSchema
+} from '@cupboard/protocol/build';
 import {
 	type UploadDecision,
 	uploadDecisionSchema
@@ -50,6 +54,9 @@ import type { ChildCommand } from './supervisor.ts';
 const storeDirectory = storeDirectorySchema.parse('/nix/store');
 const pathA = storePathSchema.parse(
 	'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
+);
+const pathB = storePathSchema.parse(
+	'/nix/store/1123456789abcdfghijklmnpqrsvwxyz-app-dev'
 );
 const drvA = '/nix/store/8123456789abcdfghijklmnpqrsvwxyz-app.drv';
 const invocationId = invocationIdSchema.parse('invocation-under-test');
@@ -281,6 +288,9 @@ interface FlowRun extends RecordedRun {
 	readonly sleeps: readonly number[];
 	readonly attemptIdsIssued: number;
 	readonly verifications: readonly ChildCommand[];
+	readonly negotiatedPaths: readonly (readonly StorePathString[])[];
+	readonly rootSets: readonly string[];
+	readonly settledTargets: readonly StorePathString[];
 }
 
 function activityLine(machine: string): string {
@@ -400,6 +410,9 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	};
 	const sleeps: number[] = [];
 	const verifications: ChildCommand[] = [];
+	const negotiatedPaths: StorePathString[][] = [];
+	const rootSets: string[] = [];
+	let settledTargets: readonly StorePathString[] = [];
 	let attemptIdsIssued = 0;
 	const isStreamed = config.preflightFailure === undefined;
 	const environment =
@@ -418,15 +431,22 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	};
 
 	const client: PushClient = {
-		negotiate: (body) =>
-			Promise.resolve({
+		negotiate: (body) => {
+			negotiatedPaths.push(
+				body.paths.map((candidate) =>
+					storePathSchema.parse(candidate.storePath)
+				)
+			);
+
+			return Promise.resolve({
 				uploads: body.paths.map((negotiated) =>
 					decisionFor(
 						storePathSchema.parse(negotiated.storePath),
 						config.action ?? 'skip'
 					)
 				)
-			}),
+			});
+		},
 		preview: () => Promise.resolve({ uploads: [] }),
 		uploadNar: () =>
 			config.uploadFailure === undefined
@@ -439,14 +459,17 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 				status: 'committed' as const,
 				settled: Promise.resolve()
 			}),
-		setRoot: (name, _body) =>
-			Promise.resolve({
+		setRoot: (name, _body) => {
+			rootSets.push(name);
+
+			return Promise.resolve({
 				name: rootNameSchema.parse(name),
 				expired: false,
 				createdAt: '2026-07-31T00:00:00.000Z',
 				updatedAt: '2026-07-31T00:00:00.000Z',
 				targets: []
-			})
+			});
+		}
 	};
 
 	// The store answers what it holds, and records what it was asked and when.
@@ -488,6 +511,21 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 
 			return Promise.resolve([...(config.declaredOutputs ?? [])]);
 		},
+		readDerivation: () => {
+			recordCall('readDerivation');
+			const outputs = (config.declaredOutputs ?? [])
+				.map(
+					(output, index) =>
+						`("${index === 0 ? 'out' : 'dev'}","${output}","","")`
+				)
+				.join(',');
+
+			return Promise.resolve(
+				Derivation.parse(
+					`Derive([${outputs}],[],[],"aarch64-darwin","/bin/sh",[],[])`
+				)
+			);
+		},
 		resolveClosure: () => Promise.resolve([]),
 		narFromPath: () => emptyNar
 	};
@@ -523,15 +561,23 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 
 			return `attempt-${String(attemptIdsIssued)}`;
 		},
-		sleep: (delayMs) => {
+		startDelay: (delayMs) => {
 			sleeps.push(delayMs);
 
-			return Promise.resolve();
+			return {
+				completed: Promise.resolve(),
+				cancel() {
+					return;
+				}
+			};
 		},
 		runChild: (options) => {
 			verifications.push(options.command);
 
 			return Promise.resolve({ status: 0, signal: undefined });
+		},
+		settledTargets: (targets) => {
+			settledTargets = targets;
 		}
 	};
 
@@ -579,7 +625,10 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		receiptFile,
 		sleeps,
 		attemptIdsIssued,
-		verifications
+		verifications,
+		negotiatedPaths,
+		rootSets,
+		settledTargets
 	};
 }
 
@@ -732,13 +781,48 @@ describe('runBuildPush', () => {
 		expect({ error: run.error, storeCalls: run.storeCalls }).toStrictEqual({
 			error: undefined,
 			storeCalls: [
-				'queryDerivationOutputPaths before the build',
+				'readDerivation before the build',
 				'queryValidPaths before the build',
 				'queryValidPaths after the build',
 				'queryValidPathsInfo after the build'
 			]
 		});
 	});
+
+	it.each([
+		{
+			selection: 'out',
+			outPaths: [pathA],
+			expected: [pathA]
+		},
+		{
+			selection: '*',
+			outPaths: [pathA, pathB],
+			expected: [pathA, pathB]
+		}
+	])(
+		'publishes only the explicitly selected ^$selection outputs in reconciled mode',
+		async ({ selection, outPaths, expected }) => {
+			const run = await runFlow({
+				preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+				constructed: {
+					succeedOn: 1,
+					installables: [`${drvA}^${selection}`]
+				},
+				declaredOutputs: [pathA, pathB],
+				valid: [pathA, pathB],
+				outPaths
+			});
+			const receipt = buildReceiptV3Schema.parse(
+				JSON.parse(await readFile(run.receiptFile, 'utf8'))
+			);
+
+			expect({ error: run.error, paths: receipt.paths }).toStrictEqual({
+				error: undefined,
+				paths: expected
+			});
+		}
+	);
 
 	// The receipt one reconciled local run writes over a cohort that realises
 	// exactly one path, under the facts each case establishes about it.
@@ -890,9 +974,127 @@ describe('runBuildPush', () => {
 			receipt
 		}).toStrictEqual({
 			error: { name: 'BuildCommandFailedError', exitCode: 1 },
-			receipt: { version: 3, paths: [], subjects: [], childExitStatus: 1 }
+			receipt: {
+				version: 3,
+				paths: [],
+				subjects: [],
+				childExitStatus: 1,
+				terminalFailure: {
+					kind: 'target-build',
+					failedTargets: [`${drvA}^*`]
+				}
+			}
 		});
 	});
+
+	it('publishes failed-build survivors without replacing their target root', async () => {
+		const run = await runFlow({
+			preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+			constructed: {
+				succeedOn: 4,
+				attempts: 1,
+				installables: [`${drvA}^*`]
+			},
+			declaredOutputs: [pathA, pathB],
+			valid: [pathA],
+			options: { root: rootNameSchema.parse('github:owner/repo/main/app') }
+		});
+
+		expect({
+			error:
+				run.error instanceof BuildCommandFailedError
+					? { name: run.error.name, exitCode: run.error.exitCode }
+					: run.error,
+			rootSets: run.rootSets
+		}).toStrictEqual({
+			error: { name: 'BuildCommandFailedError', exitCode: 1 },
+			rootSets: []
+		});
+	});
+
+	it('publishes failed-build survivors without verifying or claiming them', async () => {
+		const run = await runFlow({
+			preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+			constructed: {
+				succeedOn: 4,
+				attempts: 1,
+				installables: [`${drvA}^*`],
+				verifyRebuilds: true,
+				machine: 'ssh://builder-1'
+			},
+			declaredOutputs: [pathA, pathB],
+			valid: [pathA]
+		});
+		const receipt: unknown = JSON.parse(
+			await readFile(run.receiptFile, 'utf8')
+		);
+
+		expect({
+			error:
+				run.error instanceof BuildCommandFailedError
+					? { name: run.error.name, exitCode: run.error.exitCode }
+					: run.error,
+			negotiatedPaths: run.negotiatedPaths,
+			verifications: run.verifications,
+			receipt
+		}).toStrictEqual({
+			error: { name: 'BuildCommandFailedError', exitCode: 1 },
+			negotiatedPaths: [[pathA]],
+			verifications: [],
+			receipt: {
+				version: 3,
+				paths: [pathA],
+				subjects: [],
+				childExitStatus: 1,
+				terminalFailure: {
+					kind: 'target-build',
+					failedTargets: [`${drvA}^*`]
+				},
+				uploaded: []
+			}
+		});
+	});
+
+	it.each([
+		{
+			name: 'successful build',
+			succeedOn: 1,
+			error: { name: 'BuildPublicationFailedError', exitCode: 74 }
+		},
+		{
+			name: 'failed build',
+			succeedOn: 4,
+			error: { name: 'BuildCommandFailedError', exitCode: 1 }
+		}
+	])(
+		'classifies an unwritable reconciled receipt after a $name',
+		async ({ succeedOn, error: expectedError }) => {
+			const run = await runFlow({
+				preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+				constructed: {
+					succeedOn,
+					attempts: 1,
+					installables: [`${drvA}^*`]
+				},
+				declaredOutputs: [pathA],
+				valid: [pathA],
+				unwritableReceipt: true
+			});
+			const error = run.error;
+
+			expect({
+				error:
+					error instanceof BuildCommandFailedError ||
+					error instanceof BuildPublicationFailedError
+						? { name: error.name, exitCode: error.exitCode }
+						: error,
+				negotiatedPaths: run.negotiatedPaths
+			}).toStrictEqual({
+				error: expectedError,
+				negotiatedPaths: [[pathA]]
+			});
+		}
+	);
 
 	it('refuses a user-supplied command with the condition that ruled streaming out', async () => {
 		const failure = new DaemonRequiredError('/run/nix/daemon.sock');
@@ -936,12 +1138,35 @@ describe('runBuildPush', () => {
 		});
 	});
 
+	it('settles exactly the selected top-level output when a dependency built and the target was already valid', async () => {
+		const run = await runFlow({
+			constructed: { succeedOn: 1 },
+			valid: [pathA, pathB],
+			outPaths: [pathB]
+		});
+		const receipt = buildReceiptV3Schema.parse(
+			JSON.parse(await readFile(run.receiptFile, 'utf8'))
+		);
+
+		expect({
+			error: run.error,
+			settledTargets: run.settledTargets,
+			outcomes: receipt.outcomes
+		}).toStrictEqual({
+			error: undefined,
+			settledTargets: [pathB],
+			outcomes: [{ outcome: 'destination-served', storePath: pathB }]
+		});
+	});
+
 	it('accepts an event whose child exited before the endpoint read it', async () => {
 		const run = await runFlow({
 			emitEvent: true,
 			emitDetached: true,
 			valid: [pathA]
 		});
+
+		expect(run.error).toBeUndefined();
 		const receipt: unknown = JSON.parse(
 			await readFile(run.receiptFile, 'utf8')
 		);
@@ -999,6 +1224,8 @@ describe('runBuildPush', () => {
 			constructed: { succeedOn: 2 },
 			valid: [pathA]
 		});
+
+		expect(run.error).toBeUndefined();
 		const receipt: unknown = JSON.parse(
 			await readFile(run.receiptFile, 'utf8')
 		);
@@ -1219,6 +1446,7 @@ describe('runBuildPush', () => {
 					{ outcome: 'failed', storePath: pathA, reason: 'collected' }
 				],
 				childExitStatus: 7,
+				terminalFailure: { kind: 'command' },
 				uploaded: [],
 				failed: [pathA],
 				collected: []

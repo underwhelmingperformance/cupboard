@@ -35,8 +35,10 @@ import { ORPCError } from '@orpc/client';
 import { z } from 'zod';
 
 import {
+	AttestationAttachResponseMismatchError,
 	AttestationBundleInvalidError,
 	AttestationDivergedPathError,
+	AttestationNegotiationMismatchError,
 	AttestationSubjectNotPushedError,
 	AttestationUploadUnavailableError,
 	ReferencePathMismatchError,
@@ -123,6 +125,11 @@ export interface AttestationPathInfo {
 	readonly narHash: NixSha256Hash;
 }
 
+interface AttestationSubject {
+	readonly name: string;
+	readonly sha256: Sha256HexDigest;
+}
+
 // Cache reads and bundle uploads share the same bounded fan-out.
 const bundleConcurrency = 6;
 
@@ -167,16 +174,23 @@ export async function readCommittedAttestationPathInfos(
 
 /**
  * Reads and parses the bundle sources, matching each bundle's in-toto subject
- * digests against the given paths' NAR hashes. A bundle whose subjects match
- * no path refuses, as does one describing a path whose cached NAR diverges
- * from the local bytes; duplicate (path, bundle) pairs collapse to one entry.
+ * names and digests against the given store paths and NAR hashes. A bundle
+ * whose subjects match no path refuses, as does one describing a path whose
+ * cached NAR diverges from the local bytes; duplicate (path, bundle) pairs
+ * collapse to one entry.
  */
 export async function prepareAttestationBundles(
 	pathInfos: readonly AttestationPathInfo[],
 	options: PrepareAttestationBundlesOptions
 ): Promise<readonly PreparedAttestationBundle[]> {
-	const byNarHash = new Map(
-		pathInfos.map((pathInfo) => [pathInfo.narHash.digestHex(), pathInfo])
+	const bySubject = new Map(
+		pathInfos.map((pathInfo) => [
+			attestationSubjectKey({
+				name: StorePath.basename(pathInfo.storePath),
+				sha256: pathInfo.narHash.digestHex()
+			}),
+			pathInfo
+		])
 	);
 	const prepared: PreparedAttestationBundle[] = [];
 	const seen = new Set<string>();
@@ -186,14 +200,14 @@ export async function prepareAttestationBundles(
 		const parsed = parseAttestationBundle(source.path, bytes);
 		const digest = sha256Hex(bytes);
 
-		const matched = parsed.subjectDigests
-			.map((subjectDigest) => byNarHash.get(subjectDigest))
+		const matched = parsed.subjects
+			.map((subject) => bySubject.get(attestationSubjectKey(subject)))
 			.filter((item) => item !== undefined);
 
 		if (matched.length === 0) {
 			throw new AttestationSubjectNotPushedError(
 				source.path,
-				parsed.subjectDigests
+				parsed.subjects.map((subject) => subject.sha256)
 			);
 		}
 
@@ -218,6 +232,10 @@ export async function prepareAttestationBundles(
 	}
 
 	return prepared;
+}
+
+function attestationSubjectKey(subject: AttestationSubject): string {
+	return `${subject.name}\0${subject.sha256}`;
 }
 
 function recordPreparedBundle(
@@ -268,6 +286,88 @@ export interface AttestationAttachOutcome {
 	readonly bundles: readonly AttestationBundleOutcome[];
 }
 
+interface AttestationBundleIdentity {
+	readonly storePathHash: string;
+	readonly digest: string;
+}
+
+function attestationBundleIdentityKey(
+	identity: AttestationBundleIdentity
+): string {
+	return `${identity.storePathHash}\0${identity.digest}`;
+}
+
+// The response is a protocol answer, not a best-effort list: every requested
+// bundle must have one decision, and no decision may name anything else.
+function exactAttestationDecisions(
+	requested: readonly AttestationBundleIdentity[],
+	decisions: readonly AttestationDecision[]
+): readonly AttestationDecision[] {
+	const requestedByKey = new Map(
+		requested.map((identity) => [
+			attestationBundleIdentityKey(identity),
+			identity
+		])
+	);
+	const answered = new Set<string>();
+
+	for (const decision of decisions) {
+		const key = attestationBundleIdentityKey(decision);
+		const identity = requestedByKey.get(key);
+
+		if (identity === undefined) {
+			throw new AttestationNegotiationMismatchError(
+				'unexpected',
+				decision.storePathHash,
+				decision.digest
+			);
+		}
+
+		if (answered.has(key)) {
+			throw new AttestationNegotiationMismatchError(
+				'duplicate',
+				decision.storePathHash,
+				decision.digest
+			);
+		}
+
+		answered.add(key);
+	}
+
+	for (const [key, identity] of requestedByKey) {
+		if (answered.has(key)) {
+			continue;
+		}
+
+		throw new AttestationNegotiationMismatchError(
+			'missing',
+			identity.storePathHash,
+			identity.digest
+		);
+	}
+
+	return decisions;
+}
+
+function requireMatchingAttachResponse(
+	decision: Extract<AttestationDecision, { action: 'upload' }>,
+	response: AttestationAttachResponse
+): AttestationAttachResponse {
+	if (
+		response.storePathHash === decision.storePathHash &&
+		response.digest === decision.digest
+	) {
+		return response;
+	}
+
+	throw new AttestationAttachResponseMismatchError(
+		decision.storePathHash,
+		decision.digest,
+		response.storePathHash,
+		response.digest
+	);
+}
+
 // Whether an attach was refused because nothing committed backs it: the
 // pending row's path has no committed narinfo, or the row itself lapsed
 // before the attach ran. Both answer `NOT_FOUND`.
@@ -293,10 +393,11 @@ export async function runAttestationAttachment(
 			digest: bundle.digest
 		}))
 	});
-	const toUpload = negotiation.bundles.filter((decision) =>
+	const decisions = exactAttestationDecisions(prepared, negotiation.bundles);
+	const toUpload = decisions.filter((decision) =>
 		isAttestationUpload(decision)
 	);
-	const reused = negotiation.bundles.filter((decision) =>
+	let reused = decisions.filter((decision) =>
 		isAttestationSkip(decision)
 	).length;
 	negotiateStep.success(
@@ -325,7 +426,7 @@ export async function runAttestationAttachment(
 	// A decision names its path by the wire's plain strings; the prepared
 	// bundle it answers carries the branded pair, so outcomes record through
 	// the match.
-	const bundles: AttestationBundleOutcome[] = negotiation.bundles
+	const bundles: AttestationBundleOutcome[] = decisions
 		.filter((decision) => isAttestationSkip(decision))
 		.flatMap((decision) => {
 			const match = prepared.find(
@@ -349,12 +450,23 @@ export async function runAttestationAttachment(
 		const bundle = findAttestationBundle(prepared, decision);
 
 		try {
-			await options.client.attachAttestation(decision.uploadId);
-			attached += 1;
+			const response = requireMatchingAttachResponse(
+				decision,
+				await options.client.attachAttestation(decision.uploadId)
+			);
+			const outcome =
+				response.status === 'already-present' ? 'reused' : 'attached';
+
+			if (outcome === 'attached') {
+				attached += 1;
+			} else {
+				reused += 1;
+			}
+
 			bundles.push({
 				storePathHash: bundle.storePathHash,
 				digest: bundle.digest,
-				outcome: 'attached'
+				outcome
 			});
 		} catch (error) {
 			if (
@@ -593,6 +705,7 @@ const dsseEnvelopeSchema = z.object({
 });
 
 const sigstoreBundleSubjectSchema = z.object({
+	name: z.string().min(1),
 	digest: z.object({
 		sha256: sha256HexDigestSchema
 	})
@@ -612,7 +725,7 @@ const sigstoreBundleSchema = z.object({
 export function parseAttestationBundle(
 	path: string,
 	bytes: Uint8Array
-): { readonly subjectDigests: readonly Sha256HexDigest[] } {
+): { readonly subjects: readonly AttestationSubject[] } {
 	let json: unknown;
 
 	try {
@@ -654,9 +767,10 @@ export function parseAttestationBundle(
 	}
 
 	return {
-		subjectDigests: statement.data.subject.map(
-			(subject) => subject.digest.sha256
-		)
+		subjects: statement.data.subject.map((subject) => ({
+			name: subject.name,
+			sha256: subject.digest.sha256
+		}))
 	};
 }
 

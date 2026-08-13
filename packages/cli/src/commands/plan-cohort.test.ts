@@ -603,25 +603,52 @@ describe('requeryUnknownWith', () => {
 	});
 
 	it.each([
-		{ name: 'not-trusted', trust: 'not-trusted' as const },
-		{ name: 'unknown', trust: 'unknown' as const }
+		{
+			name: 'not-trusted',
+			settings: {
+				isHonoured: false,
+				reason: 'daemon-trust',
+				trust: 'not-trusted'
+			} as const,
+			reason:
+				'the daemon connection is not-trusted, so its narinfo-cache-negative-ttl override cannot be relied on to take effect'
+		},
+		{
+			name: 'unknown',
+			settings: {
+				isHonoured: false,
+				reason: 'daemon-trust',
+				trust: 'unknown'
+			} as const,
+			reason:
+				'the daemon connection is unknown, so its narinfo-cache-negative-ttl override cannot be relied on to take effect'
+		},
+		{
+			name: 'preserving remote daemon options',
+			settings: {
+				isHonoured: false,
+				reason: 'daemon-options-preserved',
+				trust: 'unknown'
+			} as const,
+			reason:
+				'the transport preserves the remote daemon options, so it does not send the narinfo-cache-negative-ttl override'
+		}
 	])(
-		'refuses, without opening a bypass, when the daemon is $name',
-		async ({ trust }) => {
+		'refuses, without opening a bypass, when the connection is $name',
+		async ({ settings, reason }) => {
 			const opened: string[] = [];
 
 			const outcome = await requeryUnknownWith(
 				{
 					cachesSubstituterAnswers: true,
-					honoursSubstituterSettings: () =>
-						Promise.resolve({ isHonoured: false, trust })
+					honoursSubstituterSettings: () => Promise.resolve(settings)
 				},
 				bypassAnswering(opened),
 				[appPath]
 			);
 
-			expect({ kind: outcome.kind, opened }).toStrictEqual({
-				kind: 'refused',
+			expect({ outcome, opened }).toStrictEqual({
+				outcome: { kind: 'refused', reason },
 				opened: []
 			});
 		}

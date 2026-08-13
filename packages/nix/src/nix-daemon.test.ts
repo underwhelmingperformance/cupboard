@@ -5,6 +5,8 @@ import path from 'node:path';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
+	storeDirectorySchema,
+	storePathBasenameSchema,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
@@ -21,7 +23,9 @@ import { ProtocolWriter } from '../../../tests/support/protocol-writer.ts';
 import {
 	connectToNixDaemon,
 	InvalidNixDaemonNarError,
+	NixDaemonRemoteError,
 	NixDaemonStoreClient,
+	type NixDaemonTransport,
 	UnsupportedNixDaemonProtocolError
 } from './nix-daemon.ts';
 import {
@@ -47,6 +51,28 @@ const runtimeHash = '33'.repeat(32);
 const buildDrvPath = storePathSchema.parse(
 	'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv'
 );
+const appBasename = storePathBasenameSchema.parse(appPath.slice(11));
+const libraryBasename = storePathBasenameSchema.parse(libraryPath.slice(11));
+
+class CloseCancellableTransport implements NixDaemonTransport {
+	constructor(
+		private readonly transport: NixDaemonTransport,
+		private readonly cancelOperation: () => void
+	) {}
+
+	write(bytes: Uint8Array): Promise<void> {
+		return this.transport.write(bytes);
+	}
+
+	read(byteLength: number): Promise<Uint8Array> {
+		return this.transport.read(byteLength);
+	}
+
+	async close(): Promise<void> {
+		this.cancelOperation();
+		await this.transport.close();
+	}
+}
 
 interface BuildResultCase {
 	readonly name: string;
@@ -74,11 +100,11 @@ const buildResultCases: readonly BuildResultCase[] = [
 			builtOutputs: [
 				{
 					id: `sha256:${'aa'.repeat(32)}!out`,
-					realisation: JSON.stringify({ outPath: appPath })
+					realisation: JSON.stringify({ outPath: appBasename })
 				},
 				{
 					id: `sha256:${'aa'.repeat(32)}!dev`,
-					realisation: JSON.stringify({ outPath: libraryPath })
+					realisation: JSON.stringify({ outPath: libraryBasename })
 				}
 			]
 		},
@@ -207,7 +233,7 @@ const buildResultCases: readonly BuildResultCase[] = [
 			builtOutputs: [
 				{
 					id: `sha256:${'bb'.repeat(32)}!out`,
-					realisation: JSON.stringify({ outPath: appPath })
+					realisation: JSON.stringify({ outPath: appBasename })
 				}
 			]
 		},
@@ -221,6 +247,37 @@ const buildResultCases: readonly BuildResultCase[] = [
 			nonDeterministic: false,
 			startTime: 0,
 			stopTime: 0
+		}
+	},
+	{
+		name: 'a built derivation whose output is named __proto__',
+		targets: [`${buildDrvPath}^__proto__`],
+		expectedTargets: [`${buildDrvPath}!__proto__`],
+		result: {
+			target: `${buildDrvPath}!__proto__`,
+			status: 0,
+			errorMessage: '',
+			timesBuilt: 1,
+			nonDeterministic: false,
+			startTime: 100,
+			stopTime: 260,
+			builtOutputs: [
+				{
+					id: `sha256:${'aa'.repeat(32)}!__proto__`,
+					realisation: JSON.stringify({ outPath: appBasename })
+				}
+			]
+		},
+		expected: {
+			target: `${buildDrvPath}^__proto__`,
+			outcome: {
+				kind: 'built',
+				outputs: Object.fromEntries([['__proto__', appPath]])
+			},
+			timesBuilt: 1,
+			nonDeterministic: false,
+			startTime: 100,
+			stopTime: 260
 		}
 	}
 ];
@@ -315,6 +372,103 @@ describe('NixDaemonStoreClient', () => {
 			ultimate: true
 		});
 		expect(transport?.closed).toBe(true);
+	});
+
+	it('shares the connection limit across concurrent top-level calls', async () => {
+		const firstStarted = Promise.withResolvers<undefined>();
+		const releaseFirst = Promise.withResolvers<undefined>();
+		let connections = 0;
+		const client = new NixDaemonStoreClient({
+			maxConnections: 1,
+			connect: () => {
+				connections += 1;
+				const connection = connections;
+
+				return Promise.resolve(
+					new FakeDaemonTransport(
+						{
+							[appPath]: {
+								hash: appHash,
+								narSize: 123,
+								references: [],
+								signatures: []
+							}
+						},
+						{
+							async beforeOperation() {
+								if (connection !== 1) {
+									return;
+								}
+
+								firstStarted.resolve(undefined);
+								await releaseFirst.promise;
+							}
+						}
+					)
+				);
+			}
+		});
+
+		const first = client.queryPathInfo(appPath);
+		await firstStarted.promise;
+		const second = client.queryPathInfo(appPath);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+
+		expect(connections).toBe(1);
+
+		releaseFirst.resolve(undefined);
+		await expect(Promise.all([first, second])).resolves.toStrictEqual([
+			pathInfo(appPath, appHash, 123, []),
+			pathInfo(appPath, appHash, 123, [])
+		]);
+		expect(connections).toBe(2);
+	});
+
+	it('aborts a call waiting for the shared connection limit', async () => {
+		const controller = new AbortController();
+		const reason = new Error('stop every daemon query');
+		const firstStarted = Promise.withResolvers<undefined>();
+		const releaseFirst = Promise.withResolvers<undefined>();
+		let connections = 0;
+		const client = new NixDaemonStoreClient({
+			maxConnections: 1,
+			signal: controller.signal,
+			connect: () => {
+				connections += 1;
+
+				return Promise.resolve(
+					new FakeDaemonTransport(
+						{
+							[appPath]: {
+								hash: appHash,
+								narSize: 123,
+								references: [],
+								signatures: []
+							}
+						},
+						{
+							async beforeOperation() {
+								firstStarted.resolve(undefined);
+								await releaseFirst.promise;
+							}
+						}
+					)
+				);
+			}
+		});
+
+		const first = client.queryPathInfo(appPath);
+		await firstStarted.promise;
+		const second = client.queryPathInfo(appPath);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		controller.abort(reason);
+		releaseFirst.resolve(undefined);
+
+		await expect(Promise.allSettled([first, second])).resolves.toStrictEqual([
+			{ status: 'rejected', reason },
+			{ status: 'rejected', reason }
+		]);
+		expect(connections).toBe(1);
 	});
 
 	// Nix counts the silent time in a signed width, so a configuration stating
@@ -746,6 +900,68 @@ describe('NixDaemonStoreClient', () => {
 		expect(connections).toBe(1);
 	});
 
+	it('cancels a blocked probing connection when a fallback sibling fails', async () => {
+		const siblingFailure = new Error('sibling path query failed');
+		const probingCancellation = new Error('probing connection closed');
+		const queryStarted = Promise.withResolvers<undefined>();
+		const blockedQuery = Promise.withResolvers<undefined>();
+		const probingTransport = new FakeDaemonTransport(
+			{
+				[appPath]: {
+					hash: appHash,
+					narSize: 123,
+					references: [],
+					signatures: []
+				}
+			},
+			{
+				beforeOperation: () => {
+					queryStarted.resolve(undefined);
+
+					return blockedQuery.promise;
+				}
+			}
+		);
+		const transports: NixDaemonTransport[] = [
+			new CloseCancellableTransport(probingTransport, () => {
+				blockedQuery.reject(probingCancellation);
+			}),
+			new FakeDaemonTransport(
+				{
+					[libraryPath]: {
+						hash: libraryHash,
+						narSize: 456,
+						references: [],
+						signatures: []
+					}
+				},
+				{
+					beforeOperation: async () => {
+						await queryStarted.promise;
+						throw siblingFailure;
+					}
+				}
+			)
+		];
+		const client = new NixDaemonStoreClient({
+			maxConnections: 2,
+			connect: () => {
+				const transport = transports.shift();
+
+				if (transport === undefined) {
+					throw new Error('unexpected third daemon connection');
+				}
+
+				return Promise.resolve(transport);
+			}
+		});
+
+		await expect(client.queryPathsInfo([appPath, libraryPath])).rejects.toBe(
+			siblingFailure
+		);
+		expect(probingTransport.closed).toBe(true);
+	});
+
 	it('filters unregistered paths from a pooled valid-path-info query', async () => {
 		const missingPath = storePathSchema.parse(
 			'/nix/store/9123456789abcdfghijklmnpqrsvwxyz-missing'
@@ -790,6 +1006,161 @@ describe('NixDaemonStoreClient', () => {
 			expect(transport?.closed).toBe(true);
 		}
 	);
+
+	it('accepts an absolute realisation output inside the active store directory', async () => {
+		const build = buildResultCases[5];
+
+		if (build === undefined) {
+			throw new Error('The build result fixture is missing');
+		}
+
+		const result = {
+			...build.result,
+			builtOutputs: [
+				{
+					id: `sha256:${'bb'.repeat(32)}!out`,
+					realisation: JSON.stringify({ outPath: appPath })
+				}
+			]
+		};
+		const client = new NixDaemonStoreClient({
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport(
+						{},
+						{
+							builds: {
+								expectedTargets: build.expectedTargets,
+								results: [result]
+							}
+						}
+					)
+				)
+		});
+
+		await expect(
+			client.buildPathsWithResults(build.targets)
+		).resolves.toStrictEqual([build.expected]);
+	});
+
+	it('rejects duplicate output names in one keyed build result', async () => {
+		const build = buildResultCases[0];
+
+		if (build === undefined) {
+			throw new Error('The build result fixture is missing');
+		}
+
+		const duplicate = build.result.builtOutputs[0];
+
+		if (duplicate === undefined) {
+			throw new Error('The build result fixture has no output to duplicate');
+		}
+
+		let transport: FakeDaemonTransport | undefined;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				transport = new FakeDaemonTransport(
+					{},
+					{
+						builds: {
+							expectedTargets: build.expectedTargets,
+							results: [
+								{
+									...build.result,
+									builtOutputs: [...build.result.builtOutputs, duplicate]
+								}
+							]
+						}
+					}
+				);
+
+				return Promise.resolve(transport);
+			}
+		});
+
+		await expect(client.buildPathsWithResults(build.targets)).rejects.toThrow(
+			'keyed build result contains duplicate output name: out'
+		);
+		expect(transport?.closed).toBe(true);
+	});
+
+	it('decodes a realisation basename against the active store directory', async () => {
+		const customStoreDirectory = storeDirectorySchema.parse('/custom/store');
+		const customAppPath = storePathSchema.parse(
+			`${customStoreDirectory}/${appBasename}`
+		);
+		const build = buildResultCases[5];
+
+		if (build === undefined) {
+			throw new Error('The build result fixture is missing');
+		}
+
+		const client = new NixDaemonStoreClient({
+			storeDirectory: customStoreDirectory,
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport(
+						{},
+						{
+							builds: {
+								expectedTargets: build.expectedTargets,
+								results: [build.result]
+							}
+						}
+					)
+				)
+		});
+
+		await expect(
+			client.buildPathsWithResults(build.targets)
+		).resolves.toStrictEqual([
+			{
+				...build.expected,
+				outcome: {
+					kind: 'resolves-to-already-valid',
+					outputs: { out: customAppPath }
+				}
+			}
+		]);
+	});
+
+	it('rejects an absolute realisation output outside the active store directory', async () => {
+		const build = buildResultCases[5];
+
+		if (build === undefined) {
+			throw new Error('The build result fixture is missing');
+		}
+
+		const client = new NixDaemonStoreClient({
+			storeDirectory: storeDirectorySchema.parse('/custom/store'),
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport(
+						{},
+						{
+							builds: {
+								expectedTargets: build.expectedTargets,
+								results: [
+									{
+										...build.result,
+										builtOutputs: [
+											{
+												id: `sha256:${'bb'.repeat(32)}!out`,
+												realisation: JSON.stringify({ outPath: appPath })
+											}
+										]
+									}
+								]
+							}
+						}
+					)
+				)
+		});
+
+		await expect(client.buildPathsWithResults(build.targets)).rejects.toThrow(
+			NixDaemonRemoteError
+		);
+	});
 
 	it('answers an empty build request without opening a connection', async () => {
 		let connections = 0;
@@ -843,6 +1214,55 @@ describe('NixDaemonStoreClient', () => {
 		expect(Buffer.concat(chunks)).toStrictEqual(Buffer.concat(frames));
 		expect(transport?.closed).toBe(true);
 	}, 30_000);
+
+	it('shares the connection limit across concurrent NAR streams', async () => {
+		const frames = [
+			narFrame('nix-archive-1'),
+			narFrame('(', 'type', 'regular', 'contents', 'nar contents', ')')
+		];
+		const firstStarted = Promise.withResolvers<undefined>();
+		const releaseFirst = Promise.withResolvers<undefined>();
+		let connections = 0;
+		const client = new NixDaemonStoreClient({
+			maxConnections: 1,
+			connect: () => {
+				connections += 1;
+				const connection = connections;
+
+				return Promise.resolve(
+					new FakeDaemonTransport(
+						{},
+						{
+							nar: { expectedPath: appPath, frames },
+							async beforeOperation() {
+								if (connection !== 1) {
+									return;
+								}
+
+								firstStarted.resolve(undefined);
+								await releaseFirst.promise;
+							}
+						}
+					)
+				);
+			}
+		});
+
+		const first = Array.fromAsync(client.narFromPath(appPath));
+		await firstStarted.promise;
+		const second = Array.fromAsync(client.narFromPath(appPath));
+		await new Promise<void>((resolve) => setImmediate(resolve));
+
+		expect(connections).toBe(1);
+
+		releaseFirst.resolve(undefined);
+		const archives = await Promise.all([first, second]);
+		expect(archives.map((chunks) => Buffer.concat(chunks))).toStrictEqual([
+			Buffer.concat(frames),
+			Buffer.concat(frames)
+		]);
+		expect(connections).toBe(2);
+	});
 
 	it('reads a derivation out of the single regular file its NAR holds', async () => {
 		const aterm = 'Derive([],[],[],"aarch64-linux","builder",[],[])';
@@ -976,6 +1396,39 @@ describe('NixDaemonStoreClient', () => {
 		expect(transport?.closed).toBe(true);
 	});
 
+	it('closes a paused NAR stream when its client is aborted', async () => {
+		const controller = new AbortController();
+		const frames = [
+			narFrame('nix-archive-1'),
+			narFrame('(', 'type', 'regular', 'contents', 'nar contents', ')')
+		];
+		let transport: FakeDaemonTransport | undefined;
+		const client = new NixDaemonStoreClient({
+			maxConnections: 1,
+			signal: controller.signal,
+			connect: () => {
+				transport = new FakeDaemonTransport(
+					{},
+					{ nar: { expectedPath: appPath, frames } }
+				);
+
+				return Promise.resolve(transport);
+			}
+		});
+		const stream = client.narFromPath(appPath)[Symbol.asyncIterator]();
+
+		await expect(stream.next()).resolves.toMatchObject({ done: false });
+
+		try {
+			controller.abort(new Error('cancel paused NAR stream'));
+			await new Promise<void>((resolve) => setImmediate(resolve));
+
+			expect(transport?.closed).toBe(true);
+		} finally {
+			await stream.return?.();
+		}
+	});
+
 	it('builds, holds temporary roots and queries on one session connection', async () => {
 		const build = buildResultCases[0];
 
@@ -1080,6 +1533,66 @@ describe('NixDaemonStoreClient', () => {
 		}
 	);
 
+	it('aborts and closes a session while its callback is parked', async () => {
+		const controller = new AbortController();
+		const reason = new Error('cancel parked session');
+		const entered = Promise.withResolvers<undefined>();
+		const releaseCallback = Promise.withResolvers<undefined>();
+		const callbackCompleted = Promise.withResolvers<undefined>();
+		let transport: FakeDaemonTransport | undefined;
+		const client = new NixDaemonStoreClient({
+			signal: controller.signal,
+			connect: () => {
+				transport = new FakeDaemonTransport({});
+
+				return Promise.resolve(transport);
+			}
+		});
+		const run = client.withConnection(async (session) => {
+			await session.addTempRoot(appPath);
+			entered.resolve(undefined);
+
+			try {
+				await releaseCallback.promise;
+			} finally {
+				callbackCompleted.resolve(undefined);
+			}
+		});
+		await entered.promise;
+
+		controller.abort(reason);
+		const observeRun = async (): Promise<
+			| { readonly kind: 'resolved' }
+			| { readonly error: unknown; readonly kind: 'rejected' }
+		> => {
+			try {
+				await run;
+
+				return { kind: 'resolved' };
+			} catch (error) {
+				return { error, kind: 'rejected' };
+			}
+		};
+		const outcome = await Promise.race([
+			observeRun(),
+			new Promise<{ readonly kind: 'pending' }>((resolve) => {
+				setImmediate(() => {
+					resolve({ kind: 'pending' });
+				});
+			})
+		]);
+
+		try {
+			expect({ outcome, closed: transport?.closed }).toStrictEqual({
+				outcome: { error: reason, kind: 'rejected' },
+				closed: true
+			});
+		} finally {
+			releaseCallback.resolve(undefined);
+			await callbackCompleted.promise;
+		}
+	});
+
 	it('partitions realisation work through one QueryMissing operation', async () => {
 		const appDrvPath = storePathSchema.parse(
 			'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv'
@@ -1173,6 +1686,40 @@ describe('NixDaemonStoreClient', () => {
 			true,
 			true
 		]);
+	});
+
+	it('does not reuse idle connections when max-connection-age is zero', async () => {
+		const appDrvPath = storePathSchema.parse(
+			'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv'
+		);
+		const libraryDrvPath = storePathSchema.parse(
+			'/nix/store/5123456789abcdfghijklmnpqrsvwxyz-lib.drv'
+		);
+		let connections = 0;
+		const client = new NixDaemonStoreClient({
+			maxConnections: 1,
+			maxConnectionAge: 0,
+			connect: () => {
+				connections += 1;
+
+				return Promise.resolve(
+					new FakeDaemonTransport(
+						{},
+						{
+							derivationOutputs: {
+								[appDrvPath]: { out: appPath },
+								[libraryDrvPath]: { out: libraryPath }
+							}
+						}
+					)
+				);
+			}
+		});
+
+		await expect(
+			client.queryDerivationOutputPaths([appDrvPath, libraryDrvPath])
+		).resolves.toStrictEqual([appPath, libraryPath]);
+		expect(connections).toBe(2);
 	});
 
 	it('bounds concurrent derivation output queries to the daemon pool size', async () => {

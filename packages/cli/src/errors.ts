@@ -81,9 +81,13 @@ export class InvalidReadUserError extends CliUsageError {
 }
 
 export class InvalidStoreUriError extends CliUsageError {
-	constructor(public readonly value: string) {
+	constructor(
+		public readonly value: string,
+		options?: { readonly cause: unknown }
+	) {
 		super(
-			`Invalid --store (expected an ssh-ng:// URI naming a destination): ${value}`
+			`Invalid --store (expected an ssh-ng:// URI naming a destination): ${value}`,
+			options
 		);
 		this.name = 'InvalidStoreUriError';
 	}
@@ -348,6 +352,22 @@ export class UnexpectedUploadDecisionError extends CliError {
 	}
 }
 
+export type UploadNegotiationMismatch = 'missing' | 'duplicate' | 'unexpected';
+
+/** A negotiate or preview response that is not an exact answer to its request. */
+export class UploadNegotiationMismatchError extends CliError {
+	constructor(
+		public readonly mismatch: UploadNegotiationMismatch,
+		public readonly storePathHash: string,
+		public readonly narHash: string
+	) {
+		super(
+			`Upload negotiation response carried a ${mismatch} decision: ${storePathHash} ${narHash}`
+		);
+		this.name = 'UploadNegotiationMismatchError';
+	}
+}
+
 export type UploadVerificationStatus = 'mismatch' | 'over-quota' | 'absent';
 
 export class UploadVerificationFailedError extends CliError {
@@ -507,6 +527,40 @@ export class UnexpectedAttestationDecisionError extends CliError {
 			`Attestation decision did not match a prepared bundle: ${storePathHash} ${digest}`
 		);
 		this.name = 'UnexpectedAttestationDecisionError';
+	}
+}
+
+export type AttestationNegotiationMismatch =
+	'missing' | 'duplicate' | 'unexpected';
+
+/** An attestation negotiate response that is not an exact answer to its request. */
+export class AttestationNegotiationMismatchError extends CliError {
+	constructor(
+		public readonly mismatch: AttestationNegotiationMismatch,
+		public readonly storePathHash: string,
+		public readonly digest: string
+	) {
+		super(
+			`Attestation negotiation response carried a ${mismatch} decision: ${storePathHash} ${digest}`
+		);
+		this.name = 'AttestationNegotiationMismatchError';
+	}
+}
+
+/** An attestation attach response that answers for another bundle identity. */
+export class AttestationAttachResponseMismatchError extends CliError {
+	constructor(
+		public readonly expectedStorePathHash: string,
+		public readonly expectedDigest: string,
+		public readonly actualStorePathHash: string,
+		public readonly actualDigest: string
+	) {
+		super(
+			'Attestation attach response did not match its negotiated bundle: ' +
+				`expected ${expectedStorePathHash} ${expectedDigest}, ` +
+				`received ${actualStorePathHash} ${actualDigest}`
+		);
+		this.name = 'AttestationAttachResponseMismatchError';
 	}
 }
 
@@ -1029,8 +1083,7 @@ export class HookHelperMissingError extends CliError {
 	constructor(public readonly candidates: readonly string[]) {
 		super(
 			`This installation is missing its cupboard-hook-relay hook helper; ` +
-				`checked: ${candidates.join(', ')}. Set CUPBOARD_HOOK_HELPER to ` +
-				`name one explicitly.`
+				`checked: ${candidates.join(', ')}.`
 		);
 		this.name = 'HookHelperMissingError';
 	}
@@ -1118,6 +1171,16 @@ export class CohortInputError extends CliUsageError {
 	constructor() {
 		super('pass a build command after -- or --cohorts-file, and not both');
 		this.name = 'CohortInputError';
+	}
+}
+
+/** A push must name at least one local, intermediate, or reference path. */
+export class EmptyPublicationError extends CliUsageError {
+	constructor() {
+		super(
+			'push at least one path argument, intermediate path, or reference path'
+		);
+		this.name = 'EmptyPublicationError';
 	}
 }
 

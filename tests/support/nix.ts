@@ -1,12 +1,15 @@
 import { type ChildProcess, spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { z } from 'zod';
 
-import { temporaryRoot, withTemporaryDirectory } from './filesystem.ts';
+import {
+	temporaryRoot,
+	waitForFile,
+	withTemporaryDirectory
+} from './filesystem.ts';
 import { runCommand } from './process.ts';
 
 export interface NixPathInfo {
@@ -178,53 +181,70 @@ export class DivertedNixDaemon {
 	) {}
 
 	async stop(): Promise<void> {
-		if (this.child.exitCode !== null || this.child.signalCode !== null) {
+		if (this.child.stderr?.closed === true) {
 			return;
 		}
 
-		const exited = new Promise<void>((resolve) => {
-			this.child.once('exit', () => {
+		const closed = new Promise<void>((resolve) => {
+			this.child.once('close', () => {
 				resolve();
 			});
 		});
-		this.child.kill();
-		await exited;
+
+		if (this.child.exitCode === null && this.child.signalCode === null) {
+			this.child.kill();
+		}
+
+		await closed;
 	}
 }
 
-const daemonStartTimeoutMs = 30_000;
-
-function waitForDaemonSocket(
+/** Waits for socket creation unless the daemon process closes first. */
+export async function waitForDaemonSocket(
 	child: ChildProcess,
 	socketPath: string,
 	stderr: () => string
 ): Promise<void> {
-	return new Promise((resolve, reject) => {
-		const deadline = Date.now() + daemonStartTimeoutMs;
-		const settle = (outcome: () => void): void => {
-			clearInterval(timer);
-			child.removeListener('exit', onExit);
-			outcome();
-		};
-		const onExit = (): void => {
-			settle(() => {
-				reject(new NixDaemonStartError(socketPath, stderr()));
-			});
-		};
-		const timer = setInterval(() => {
-			if (existsSync(socketPath)) {
-				settle(resolve);
-				return;
-			}
+	const socketWait = new AbortController();
+	const processClose = Promise.withResolvers<'closed'>();
+	let processError: Error | undefined;
+	const onError = (error: Error): void => {
+		processError = error;
+	};
+	const onClose = (): void => {
+		processClose.resolve('closed');
+	};
 
-			if (Date.now() > deadline) {
-				settle(() => {
-					reject(new NixDaemonStartError(socketPath, stderr()));
-				});
-			}
-		}, 50);
-		child.once('exit', onExit);
-	});
+	child.once('error', onError);
+	child.once('close', onClose);
+
+	if (
+		child.stderr?.closed === true ||
+		(child.stderr === null &&
+			(child.exitCode !== null || child.signalCode !== null))
+	) {
+		onClose();
+	}
+
+	try {
+		const outcome = await Promise.race([
+			waitForFile(socketPath, socketWait.signal),
+			processClose.promise
+		]);
+
+		if (outcome === 'closed') {
+			const daemonStderr = stderr();
+
+			throw new NixDaemonStartError(
+				socketPath,
+				daemonStderr === '' ? (processError?.message ?? '') : daemonStderr
+			);
+		}
+	} finally {
+		socketWait.abort();
+		child.removeListener('error', onError);
+		child.removeListener('close', onClose);
+	}
 }
 
 export class NixDaemonStartError extends Error {
@@ -259,9 +279,9 @@ export async function generatePublicKey(name: string): Promise<string> {
 }
 
 /**
- * An environment in which Nix reads no configuration but what the caller puts
- * under `home`: an empty system `nix.conf` it is pointed at, and no user files
- * at all. Every Nix invocation a test makes runs in one of these, so the
+ * An environment in which Nix reads no configuration but what the harness puts
+ * under `home`: the command features its own invocations require, and no user
+ * files at all. Every Nix invocation a test makes runs in one of these, so the
  * machine's own settings never decide what the test observes.
  */
 export async function isolatedEnvironment(
@@ -269,7 +289,10 @@ export async function isolatedEnvironment(
 ): Promise<NodeJS.ProcessEnv> {
 	const configDirectory = path.join(home, 'nix-conf');
 	await mkdir(configDirectory, { recursive: true });
-	await writeFile(path.join(configDirectory, 'nix.conf'), '');
+	await writeFile(
+		path.join(configDirectory, 'nix.conf'),
+		'experimental-features = nix-command flakes\n'
+	);
 
 	return {
 		HOME: home,

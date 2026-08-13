@@ -395,28 +395,39 @@ interface ClassifiedTarget {
  */
 const maximumConcurrentConfirmations = 4;
 
-// Only a target the classification would leave upstream is worth confirming,
-// and one candidate per distinct path: two targets resolving to the same path
-// get the same answer.
+// Only a target the classification would leave upstream is worth confirming.
+// A path answer is shared, but the derivation's substitution option belongs to
+// the installable, so every distinct path-and-installable pair needs an answer.
 async function confirmCandidates(
 	classified: readonly ClassifiedTarget[],
 	options: AvailabilityPartitionOptions
 ): Promise<readonly LeftUpstreamRejection[]> {
-	const candidates = new Map<StorePathString, LeftUpstreamCandidate>();
+	const candidates = new Map<
+		StorePathString,
+		Map<NixDerivedPathString, LeftUpstreamCandidate>
+	>();
 
 	for (const { target, classification } of classified) {
 		if (classification.bucket !== 'leftUpstream') {
 			continue;
 		}
 
-		candidates.set(classification.path, {
+		const aliases =
+			candidates.get(classification.path) ??
+			new Map<NixDerivedPathString, LeftUpstreamCandidate>();
+		aliases.set(target.installable, {
 			installable: target.installable,
 			storePath: classification.path
 		});
+		candidates.set(classification.path, aliases);
 	}
+	const distinctCandidates = candidates
+		.values()
+		.flatMap((aliases) => aliases.values())
+		.toArray();
 
 	const verdicts = await mapWithConcurrency(
-		candidates.values().toArray(),
+		distinctCandidates,
 		maximumConcurrentConfirmations,
 		async (candidate) => ({
 			storePath: candidate.storePath,

@@ -44,17 +44,6 @@ export const settingTypesFilePath = `packages/nix/src/${settingTypesFileName}`;
 /** The flake output holding the `nix` the suite runs. */
 export const conformanceNixOutput = '.#conformanceNix';
 
-/** Environment switch that makes an unavailable conformance oracle fatal. */
-export const requireConformanceOracleEnvironment =
-	'CUPBOARD_REQUIRE_CONFORMANCE_ORACLE';
-
-/** Whether this run requires the pinned Nix rather than allowing skipped suites. */
-export function requiresConformanceOracle(
-	environment: Readonly<Record<string, string | undefined>> = process.env
-): boolean {
-	return environment[requireConformanceOracleEnvironment] === '1';
-}
-
 /** The command that rebuilds the record, as an error names it. */
 const updateCommand = 'pnpm update:conformance-oracle';
 

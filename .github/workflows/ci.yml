@@ -85,8 +85,11 @@ jobs:
           persist-credentials: false
 
       # The end-to-end suite drives real Nix store operations against an
-      # in-process Worker, so the runner needs a working Nix.
-      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+      # in-process Worker, so exercise the same Nix client and installer as the
+      # reusable publication action.
+      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+        with:
+          nix_version: 2.34.7
 
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
 
@@ -99,13 +102,13 @@ jobs:
 
       - run: pnpm --config.verify-deps-before-run=false check:e2e
 
+      - run: pnpm --config.verify-deps-before-run=false check:e2e-remote-store
+
       # The conformance suite compares our Nix client against the `nix` the
       # flake pins, so it needs the same working Nix the suite above does. It
       # runs on ubuntu only, which leaves the darwin-only configuration cases to
       # developer machines.
       - run: pnpm --config.verify-deps-before-run=false check:conformance
-        env:
-          CUPBOARD_REQUIRE_CONFORMANCE_ORACLE: '1'
 
   action-e2e:
     name: action e2e

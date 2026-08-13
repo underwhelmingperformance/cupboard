@@ -33,8 +33,8 @@ nix build .#conformanceNix --no-link --print-out-paths
 ```
 
 Each test file resolves it once and shares the result across its cases. A
-machine that cannot build it reports every case as skipped, naming the reason,
-so an absent oracle never reads as a pass.
+machine that cannot build it fails the suite, so an absent oracle never reads as
+a pass.
 
 Which `nix` that is comes from [`tests/conformance/oracle.json`], which pairs
 the version string the output resolves to with the nixpkgs revision it was built

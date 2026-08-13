@@ -30,6 +30,7 @@ export class FakeDaemonTransport implements NixDaemonTransport {
 		private readonly options: {
 			readonly protocolMinor?: number;
 			readonly trust?: number;
+			readonly expectSetOptions?: boolean;
 			readonly expectedSetOptions?: FakeSetOptionsFields;
 			readonly expectedOverrides?: Readonly<Record<string, string>>;
 			readonly substitutable?: FakeSubstitutable;
@@ -67,7 +68,7 @@ export class FakeDaemonTransport implements NixDaemonTransport {
 			return;
 		}
 
-		if (this.writeCount === 4) {
+		if (this.writeCount === 4 && this.options.expectSetOptions !== false) {
 			const request = readSetOptionsRequest(Buffer.from(bytes));
 
 			expect(request.overrides).toStrictEqual(

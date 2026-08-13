@@ -88,6 +88,7 @@ import { compressNarToStream, type NarUploadStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 
+import { exactUploadDecisions } from './negotiation.ts';
 import {
 	type PublicationCollection,
 	type PublicationEntry,
@@ -277,10 +278,14 @@ async function negotiateUpload(
 	paths: Omit<UploadNegotiateRequest, 'pushId'>['paths'],
 	attachRoot?: UploadAttachRoot
 ): Promise<ParsedUploadNegotiateResponse> {
-	return client.negotiate({
+	const response = await client.negotiate({
 		paths,
 		...(attachRoot !== undefined && { attachRoot })
 	});
+
+	exactUploadDecisions(paths, response.uploads);
+
+	return response;
 }
 
 // The read-only twin of `negotiateUpload`. A server that predates preview
@@ -301,7 +306,11 @@ async function previewUpload(
 	paths: UploadPreviewRequest['paths']
 ): Promise<ParsedUploadPreviewResponse> {
 	try {
-		return await client.preview({ paths });
+		const response = await client.preview({ paths });
+
+		exactUploadDecisions(paths, response.uploads);
+
+		return response;
 	} catch (error) {
 		if (
 			error instanceof ORPCError &&

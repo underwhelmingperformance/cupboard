@@ -1,11 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 
 import {
 	createNixDaemonStoreClient,
 	discoverNixStoreConfig,
-	Nix
+	Nix,
+	type NixDaemonClientOptions,
+	type NixStoreConfig
 } from '@cupboard/nix';
 import { InvalidStorePathError } from '@cupboard/nix-store/errors';
 import {
@@ -15,7 +19,14 @@ import {
 	type StorePathString,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
-import { invocationIdSchema } from '@cupboard/protocol/build';
+import {
+	buildReceiptSchema,
+	buildReceiptV3Schema,
+	invocationIdSchema,
+	type ParsedBuildReceipt,
+	type ParsedBuildReceiptV3
+} from '@cupboard/protocol/build';
+import type { RootSetBody } from '@cupboard/protocol/retention';
 import type { Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 import { z } from 'zod';
@@ -45,6 +56,7 @@ import {
 	type WaitTimeoutSeconds
 } from '../duration.ts';
 import {
+	BuildCommandFailedError,
 	CohortInputError,
 	CohortsFileInvalidError,
 	InvalidUploadConcurrencyError
@@ -71,6 +83,7 @@ interface BuildPushOptions {
 	readonly waitTimeout?: WaitTimeoutSeconds;
 	readonly uploadConcurrency?: number;
 	readonly receiptFile?: string;
+	readonly aggregateReceiptV3?: boolean;
 	readonly cohortsFile?: string;
 	readonly gcBetweenCohorts?: boolean;
 	readonly keepGoingCohorts?: boolean;
@@ -102,17 +115,45 @@ const cohortsFileSchema = z.strictObject({
  * the run root's server-side retention, a user's own gc roots) are untouched.
  * A boundary only runs after the cohort's publication has drained, so no
  * batch temporary roots are held either. Collection is an optimisation: a
- * failed sweep surfaces as a warning and never fails a green build.
+ * failed sweep surfaces as a warning and never fails a green build, while a
+ * sweep killed by a signal preserves that cancellation for the sequence.
  */
+export interface BetweenCohortCollectorOptions {
+	/** The enclosing CLI run's cancellation signal. */
+	readonly signal?: AbortSignal;
+	/** Runs the collector child; injectable for tests. */
+	readonly runCollector?: (options: RunChildOptions) => Promise<ChildExit>;
+}
+
 export function betweenCohortCollector(
 	reporter: Pick<Reporter, 'warn'>,
-	runCollector: (options: RunChildOptions) => Promise<ChildExit> = runChild
+	options: BetweenCohortCollectorOptions = {}
 ): () => Promise<void> {
 	return async () => {
-		const exit = await runCollector({
+		options.signal?.throwIfAborted();
+
+		const exit = await (options.runCollector ?? runChild)({
 			command: ['nix', 'store', 'gc'],
-			environment: process.env
+			environment: process.env,
+			...(options.signal !== undefined && { signal: options.signal })
 		});
+		options.signal?.throwIfAborted();
+
+		const signal =
+			exit.signal ??
+			(exit.status === 130
+				? 'SIGINT'
+				: exit.status === 143
+					? 'SIGTERM'
+					: undefined);
+
+		if (signal !== undefined) {
+			throw new BuildCommandFailedError(
+				exit.status,
+				signal,
+				childExitCode(exit)
+			);
+		}
 
 		if (exit.status === 0) {
 			return;
@@ -174,12 +215,140 @@ export function parseCohortsFile(contents: string): readonly BuildInvocation[] {
 	});
 }
 
+/** Successful cohort targets retained by one aggregate multi-cohort root. */
+export function aggregateCohortTargets(
+	cohorts: readonly (readonly StorePathString[])[]
+): readonly StorePathString[] {
+	return [...new Set(cohorts.flat())].toSorted((left, right) =>
+		left.localeCompare(right)
+	);
+}
+
+function unique<T>(values: readonly T[]): readonly T[] {
+	return [...new Set(values)];
+}
+
+/** One schema-valid receipt over every settled cohort in a sequence. */
+export function aggregateBuildReceipts(
+	receipts: readonly ParsedBuildReceipt[]
+): ParsedBuildReceiptV3 {
+	const parsed = receipts.map((receipt) => buildReceiptV3Schema.parse(receipt));
+	const terminalFailures = parsed.flatMap((receipt) =>
+		receipt.terminalFailure === undefined ? [] : [receipt.terminalFailure]
+	);
+	const targetFailures = terminalFailures.flatMap((failure) =>
+		failure.kind === 'target-build' ? failure.failedTargets : []
+	);
+	const terminalFailure =
+		terminalFailures.length === 0
+			? undefined
+			: terminalFailures.every((failure) => failure.kind === 'target-build')
+				? ({
+						kind: 'target-build',
+						failedTargets: unique(targetFailures)
+					} as const)
+				: ({ kind: 'command' } as const);
+	const firstFailedReceipt = parsed.find(
+		(receipt) => receipt.terminalFailure !== undefined
+	);
+	const subjects = new Map(
+		parsed.flatMap((receipt) =>
+			receipt.subjects.map((subject) => [subject.storePath, subject] as const)
+		)
+	);
+
+	return buildReceiptV3Schema.parse({
+		version: 3,
+		paths: unique(parsed.flatMap((receipt) => receipt.paths)),
+		subjects: subjects.values().toArray(),
+		...(firstFailedReceipt?.childExitStatus !== undefined && {
+			childExitStatus: firstFailedReceipt.childExitStatus
+		}),
+		...(terminalFailure !== undefined && { terminalFailure }),
+		uploaded: unique(parsed.flatMap((receipt) => receipt.uploaded ?? [])),
+		failed: unique(parsed.flatMap((receipt) => receipt.failed ?? [])),
+		collected: unique(parsed.flatMap((receipt) => receipt.collected ?? []))
+	});
+}
+
+/** The stable public multi-cohort envelope, or the action's explicit V3 view. */
+export function multiCohortReceiptDocument(
+	receipts: readonly ParsedBuildReceipt[],
+	shouldAggregateReceiptV3: boolean
+): ParsedBuildReceiptV3 | { readonly receipts: readonly ParsedBuildReceipt[] } {
+	return shouldAggregateReceiptV3
+		? aggregateBuildReceipts(receipts)
+		: { receipts: [...receipts] };
+}
+
+interface AggregateCohortRootOptions {
+	readonly cohortCount: number;
+	readonly failed: boolean;
+	readonly root: RootName;
+	readonly settledTargets: ReadonlyMap<number, readonly StorePathString[]>;
+	readonly ttlSeconds?: TtlSeconds;
+}
+
+/** Replaces a multi-cohort root once, and only after every cohort succeeded. */
+export async function updateAggregateCohortRoot(
+	options: AggregateCohortRootOptions,
+	setRoot: (root: RootName, body: RootSetBody) => Promise<void>
+): Promise<void> {
+	if (options.failed) {
+		return;
+	}
+
+	const targetGroups = Array.from({ length: options.cohortCount }).flatMap(
+		(_unused, index) => {
+			const targets = options.settledTargets.get(index + 1);
+
+			return targets === undefined ? [] : [targets];
+		}
+	);
+	const targets = aggregateCohortTargets(targetGroups);
+
+	await setRoot(options.root, {
+		targets: [...targets],
+		...(options.ttlSeconds !== undefined && {
+			ttlSeconds: options.ttlSeconds
+		})
+	});
+}
+
+async function settledReceipt(
+	receiptFile: string
+): Promise<ParsedBuildReceipt | undefined> {
+	try {
+		return buildReceiptSchema.parse(
+			JSON.parse(await readFile(receiptFile, 'utf8'))
+		);
+	} catch (error) {
+		if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+			return;
+		}
+
+		throw error;
+	}
+}
+
 function parseUploadConcurrency(value: string): number {
 	if (!/^\d+$/.test(value) || Number(value) < 1) {
 		throw new InvalidUploadConcurrencyError(value);
 	}
 
 	return Number(value);
+}
+
+/**
+ * Opens the daemon used by build-push preflight and batched publication. The
+ * command signal owns the client, so cancellation also abandons a daemon
+ * connection that is waiting on a protocol operation.
+ */
+export function createBuildPushDaemon(
+	config: NixStoreConfig,
+	options: Pick<NixDaemonClientOptions, 'connect' | 'signal'>
+): ReturnType<typeof createNixDaemonStoreClient> {
+	return createNixDaemonStoreClient(undefined, config, options);
 }
 
 // The path file is transport only; every line must name a store path before
@@ -274,6 +443,10 @@ export function registerBuildPushCommand(
 			'write the build receipt (JSON) to this file; a multi-cohort run writes {"receipts": [...]} in cohort order'
 		)
 		.option(
+			'--aggregate-receipt-v3',
+			'write one schema-valid V3 aggregate instead of the public multi-cohort receipt envelope'
+		)
+		.option(
 			'--cohorts-file <path>',
 			'JSON file naming the cohorts to build in order, each {"command": [...]} or {"installables": [...]}; replaces the -- build command'
 		)
@@ -345,31 +518,54 @@ export function registerBuildPushCommand(
 					audience: options.audience ?? audienceSchema.parse(url),
 					authorizationDetails
 				});
+				const pushClient = pushClientFor(url, token, {
+					cache: options.cache,
+					signal: programOptions.signal
+				});
 
 				const config = discoverNixStoreConfig();
-				const daemon = createNixDaemonStoreClient(undefined, config);
+				let daemon: ReturnType<typeof createNixDaemonStoreClient> | undefined;
+				const openDaemon = (): ReturnType<
+					typeof createNixDaemonStoreClient
+				> => {
+					daemon ??= createBuildPushDaemon(config, {
+						signal: programOptions.signal
+					});
+
+					return daemon;
+				};
 				// The store Nix itself would read through: the daemon where one
 				// answers, and this process's own reader on a machine where none
 				// does, which is the machine a reconciled local run publishes from.
 				const nix = Nix.open();
 
 				reportUnknownSettings(reporter, nix.unknownSettings);
-				// A multi-cohort run aggregates its receipts itself, so only the
-				// single-cohort form hands the receipt file to the run.
-				const perCohortReceiptFile =
-					cohorts.length === 1 ? options.receiptFile : undefined;
+				const sequenceDirectory =
+					cohorts.length === 1
+						? undefined
+						: await mkdtemp(path.join(tmpdir(), 'cupboard-build-push-'));
+				const receiptFileFor = (cohort: number): string | undefined =>
+					sequenceDirectory === undefined
+						? options.receiptFile
+						: path.join(sequenceDirectory, `cohort-${String(cohort)}.json`);
+				const settledTargets = new Map<number, readonly StorePathString[]>();
 
 				// Each cohort is its own supervising invocation, with its own
 				// identity, runtime endpoint and preflight.
 				const runCohort = (
-					invocation: BuildInvocation
+					invocation: BuildInvocation,
+					cohort: number
 				): ReturnType<typeof runBuildPush> => {
 					const invocationId = invocationIdSchema.parse(randomUUID());
+					const receiptFile = receiptFileFor(cohort);
 
 					return runBuildPush(
 						{
 							invocation,
-							...(targetRoot !== undefined && { root: targetRoot }),
+							...(cohorts.length === 1 &&
+								targetRoot !== undefined && {
+									root: targetRoot
+								}),
 							...(options.ttl !== undefined && { ttlSeconds: options.ttl }),
 							...(options.runRoot !== undefined && {
 								runRoot: {
@@ -383,8 +579,8 @@ export function registerBuildPushCommand(
 								closure: options.closure
 							}),
 							...(intermediatePaths !== undefined && { intermediatePaths }),
-							...(perCohortReceiptFile !== undefined && {
-								receiptFile: perCohortReceiptFile
+							...(receiptFile !== undefined && {
+								receiptFile
 							}),
 							...(options.wait !== undefined && { wait: options.wait }),
 							...(options.waitTimeout !== undefined && {
@@ -396,21 +592,21 @@ export function registerBuildPushCommand(
 						},
 						reporter,
 						{
-							client: pushClientFor(url, token, {
-								cache: options.cache,
-								signal: programOptions.signal
-							}),
+							client: pushClient,
 							store: nix,
 							batchStore: {
-								withConnection: (use) => daemon.withConnection(use)
+								withConnection: (use) => openDaemon().withConnection(use)
 							},
 							storeDirectory: config.storeDirectory,
 							invocationId,
+							settledTargets: (targets) => {
+								settledTargets.set(cohort, targets);
+							},
 							preflight: () =>
 								preflightBuildPush({
 									config,
 									socketExists: (socketPath) => existsSync(socketPath),
-									daemonTrust: () => daemon.daemonTrust(),
+									daemonTrust: () => openDaemon().daemonTrust(),
 									invocationId,
 									grants: authorizationDetails,
 									cache: cacheSelector,
@@ -433,30 +629,70 @@ export function registerBuildPushCommand(
 					);
 				};
 
-				const result = await runCohortSequence(
-					{
-						cohorts,
-						...(options.gcBetweenCohorts === true && {
-							collectBetweenCohorts: true
-						}),
-						...(options.keepGoingCohorts === true && {
-							keepGoingCohorts: true
-						})
-					},
-					{ runCohort, collect: betweenCohortCollector(reporter) }
-				);
+				try {
+					const result = await runCohortSequence(
+						{
+							cohorts,
+							signal: programOptions.signal,
+							...(options.gcBetweenCohorts === true && {
+								collectBetweenCohorts: true
+							}),
+							...(options.keepGoingCohorts === true && {
+								keepGoingCohorts: true
+							})
+						},
+						{
+							runCohort,
+							settledReceipt: (_error, cohort) => {
+								const receiptFile = receiptFileFor(cohort);
 
-				if (cohorts.length > 1 && options.receiptFile !== undefined) {
-					await writeFile(
-						options.receiptFile,
-						`${JSON.stringify({ receipts: result.receipts }, undefined, '\t')}\n`
+								return receiptFile === undefined
+									? Promise.resolve(undefined)
+									: settledReceipt(receiptFile);
+							},
+							collect: betweenCohortCollector(reporter, {
+								signal: programOptions.signal
+							})
+						}
 					);
-				}
+					const [firstFailure] = result.failures;
 
-				const [firstFailure] = result.failures;
+					if (cohorts.length > 1 && options.receiptFile !== undefined) {
+						const receipt = multiCohortReceiptDocument(
+							result.receipts,
+							options.aggregateReceiptV3 === true
+						);
+						await writeFile(
+							options.receiptFile,
+							`${JSON.stringify(receipt, undefined, '\t')}\n`
+						);
+					}
 
-				if (firstFailure !== undefined) {
-					throw firstFailure.error;
+					if (targetRoot !== undefined && cohorts.length > 1) {
+						await updateAggregateCohortRoot(
+							{
+								cohortCount: cohorts.length,
+								failed: firstFailure !== undefined,
+								root: targetRoot,
+								settledTargets,
+								...(options.ttl !== undefined && {
+									ttlSeconds: options.ttl
+								})
+							},
+							(root, body) =>
+								reporter.phase('Updating retention root', async () => {
+									await pushClient.setRoot(root, body);
+								})
+						);
+					}
+
+					if (firstFailure !== undefined) {
+						throw firstFailure.error;
+					}
+				} finally {
+					if (sequenceDirectory !== undefined) {
+						await rm(sequenceDirectory, { recursive: true, force: true });
+					}
 				}
 			}
 		);

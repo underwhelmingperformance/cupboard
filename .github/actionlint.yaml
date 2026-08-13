@@ -9,6 +9,9 @@
 # the unknown-property report is ignored for exactly that message and file.
 # Remove the entry once the pinned actionlint release models the properties.
 paths:
+  .github/workflows/cupboard-publish.yml:
+    ignore:
+      - 'property "workflow_sha" is not defined in object type'
   .github/workflows/cupboard-flake-publish.yml:
     ignore:
       - 'property "workflow_(repository|sha)" is not defined in object type'

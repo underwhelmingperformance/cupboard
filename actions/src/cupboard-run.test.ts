@@ -5,6 +5,8 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { waitForFile } from '../../tests/support/filesystem.ts';
+
 import { runCupboard } from './cupboard-run.ts';
 import {
 	CommandFailedError,
@@ -18,6 +20,7 @@ interface FakeCupboardOptions {
 	readonly exitCode: number;
 	readonly writeResultFile?: boolean;
 	readonly captureArgvFile?: string;
+	readonly holdOpen?: boolean;
 	readonly supportsResultFile?: boolean;
 }
 
@@ -57,7 +60,9 @@ async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
 		'} else if (!resultFile) {',
 		`  process.stderr.write(${JSON.stringify(legacyPayload)});`,
 		'}',
-		`process.exit(${String(options.exitCode)});`,
+		options.holdOpen
+			? 'setInterval(() => undefined, 1000);'
+			: `process.exit(${String(options.exitCode)});`,
 		''
 	].join('\n');
 
@@ -268,6 +273,37 @@ describe('runCupboard', () => {
 
 		expect(error).toBeInstanceOf(CommandFailedError);
 	});
+
+	it.each([
+		{ protocol: 'result-file', supportsResultFile: true },
+		{ protocol: 'legacy stderr', supportsResultFile: false }
+	])(
+		'aborts a running $protocol cupboard subprocess through the command signal',
+		async ({ supportsResultFile }) => {
+			const temporary = await runnerTemporary();
+			const captureArgvFile = path.join(temporary, 'argv.json');
+			const binary = await fakeCupboard({
+				results: [],
+				exitCode: 0,
+				captureArgvFile,
+				holdOpen: true,
+				supportsResultFile
+			});
+			const controller = new AbortController();
+			const running = runCupboard(
+				binary,
+				[],
+				{ RUNNER_TEMP: temporary },
+				{ signal: controller.signal }
+			);
+
+			await waitForFile(captureArgvFile);
+			const reason = new Error('cancel real command');
+			controller.abort(reason);
+
+			expect(await rejectionOf(running)).toBe(reason);
+		}
+	);
 
 	it('requires RUNNER_TEMP to place the result file', async () => {
 		const binary = await fakeCupboard({ results: [], exitCode: 0 });
