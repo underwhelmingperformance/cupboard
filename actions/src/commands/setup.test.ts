@@ -58,6 +58,7 @@ describe('resolveSetupInputs', () => {
 	};
 
 	const defaults = {
+		cupboard: undefined,
 		version: 'latest',
 		includePrereleases: true,
 		githubToken: '',
@@ -71,7 +72,8 @@ describe('resolveSetupInputs', () => {
 		trustedPublicKey: '',
 		readUser: '',
 		readPassword: '',
-		nixConfigFile: ''
+		nixConfigFile: '',
+		checkoutDirectory: ''
 	};
 
 	it('applies defaults when optional flags are absent', () => {
@@ -120,6 +122,52 @@ describe('resolveSetupInputs', () => {
 		);
 
 		expect(resolved.expectedSourceCommit).toBe('a'.repeat(40));
+	});
+
+	it('parses a canonical source and resolves its action checkout', () => {
+		const sourceCommit = 'a'.repeat(40);
+		const resolved = resolveSetupInputs(
+			{
+				cupboard: JSON.stringify({
+					kind: 'source',
+					repository: 'owner/cupboard',
+					sourceCommit
+				})
+			},
+			{
+				...environment,
+				GITHUB_ACTION_PATH: '/workspace/.cupboard/actions/setup'
+			}
+		);
+
+		expect({
+			cupboard: resolved.cupboard,
+			checkoutDirectory: resolved.checkoutDirectory
+		}).toStrictEqual({
+			cupboard: {
+				kind: 'source',
+				repository: 'owner/cupboard',
+				sourceCommit
+			},
+			checkoutDirectory: '/workspace/.cupboard'
+		});
+	});
+
+	it('rejects canonical JSON combined with a release selector', () => {
+		expect(() =>
+			resolveSetupInputs(
+				{
+					cupboard: JSON.stringify({
+						kind: 'release',
+						repository: 'owner/cupboard',
+						tag: 'v1.2.3',
+						sourceCommit: 'a'.repeat(40)
+					}),
+					cupboardVersion: 'v1.2.3'
+				},
+				environment
+			)
+		).toThrow(InvalidInputError);
 	});
 
 	it.each([

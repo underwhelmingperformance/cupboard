@@ -15,6 +15,7 @@ import {
 	AttestationNotFoundError,
 	AttestationSourceMismatchError,
 	AttestationVerificationFailedError,
+	InstalledReleaseVersionMismatchError,
 	InvalidInputError,
 	MalformedReleaseResponseError,
 	NoReleaseFoundError,
@@ -23,6 +24,7 @@ import {
 } from './errors.ts';
 import {
 	assertExpectedSourceCommit,
+	assertInstalledReleaseVersion,
 	assetNameFor,
 	expectedSourceCommitFor,
 	fetchRelease,
@@ -84,6 +86,17 @@ describe('assertExpectedSourceCommit', () => {
 		expect(() => {
 			assertExpectedSourceCommit('v1.2.3', 'b'.repeat(40), 'a'.repeat(40));
 		}).toThrow(ReleaseCoordinateMismatchError);
+	});
+});
+
+describe('assertInstalledReleaseVersion', () => {
+	it('accepts the exact selected tag and rejects any other output', () => {
+		expect(() => {
+			assertInstalledReleaseVersion('v1.2.3', 'v1.2.3');
+		}).not.toThrow();
+		expect(() => {
+			assertInstalledReleaseVersion('v1.2.3', '0.0.0');
+		}).toThrow(InstalledReleaseVersionMismatchError);
 	});
 });
 
