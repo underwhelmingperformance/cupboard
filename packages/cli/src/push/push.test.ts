@@ -3793,7 +3793,10 @@ describe('runPush', () => {
 // already served, so both are servable and only the target is a subject.
 function receiptPush(
 	appInfo: NixValidPathInfo,
-	dependencies: Pick<PushDependencies, 'buildStore' | 'alreadyHeld'>
+	dependencies: Pick<
+		PushDependencies,
+		'buildStore' | 'alreadyHeld' | 'claimable' | 'verifiedDerivations'
+	>
 ): Promise<ParsedBuildReceiptV3 | undefined> {
 	return runPush(publication([appPath], [runtimePath]), reporter([]), {
 		retain: false,
@@ -3859,6 +3862,31 @@ describe('the build receipt a push writes', () => {
 		});
 	});
 
+	it('claims an output a local rebuild reproduced during this run', async () => {
+		// A builder realised it and the build store copied it back, so the store
+		// holds it without the mark it gives its own; the rebuild is what
+		// establishes it.
+		const receipt = await receiptPush(
+			{ ...pathInfo(appPath, appDigest, [], appDrv), ultimate: false },
+			{ buildStore, verifiedDerivations: [appDrv] }
+		);
+
+		expect(receipt).toStrictEqual({
+			version: 3,
+			paths: [appPath, runtimePath],
+			subjects: [
+				{
+					storePath: appPath,
+					narHash: appDigest.narHash.digestHex(),
+					derivation: appDrv,
+					buildStore,
+					verification: 'verified-rebuild'
+				}
+			],
+			uploaded: [appPath]
+		});
+	});
+
 	it.each([
 		{
 			case: 'a target with no deriver',
@@ -3874,9 +3902,22 @@ describe('the build receipt a push writes', () => {
 			dependencies: { buildStore }
 		},
 		{
+			case: 'an output a builder realised that no rebuild reproduced',
+			appInfo: {
+				...pathInfo(appPath, appDigest, [], appDrv),
+				ultimate: false
+			},
+			dependencies: { buildStore, verifiedDerivations: [] }
+		},
+		{
 			case: 'a path the build store already held',
 			appInfo: pathInfo(appPath, appDigest, [], appDrv),
 			dependencies: { buildStore, alreadyHeld: [appPath] }
+		},
+		{
+			case: 'a path this run never resolved before it built',
+			appInfo: pathInfo(appPath, appDigest, [], appDrv),
+			dependencies: { buildStore, claimable: [runtimePath] }
 		}
 	])(
 		'publishes $case without claiming it as a subject',

@@ -347,8 +347,7 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 									environment: { CUPBOARD_HOOK_HELPER: helperPath }
 								},
 								runtime: { environment: {}, temporaryDirectory: tmpdir() }
-							}),
-						resolveClosure: (paths) => nix.resolveClosure(paths)
+							})
 					}
 				);
 			} catch (error) {
