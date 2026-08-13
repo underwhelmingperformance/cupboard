@@ -196,6 +196,12 @@ describe('prepare SSH transport implementation', () => {
 				config: 'SecurityKeyProvider /tmp/provider.so'
 			},
 			{ directive: 'AddKeysToAgent', config: 'AddKeysToAgent yes' },
+			{ directive: 'ControlMaster', config: 'ControlMaster auto' },
+			{
+				directive: 'ControlPath',
+				config: 'ControlPath /tmp/cupboard-control'
+			},
+			{ directive: 'ControlPersist', config: 'ControlPersist 5m' },
 			{
 				directive: 'Match exec',
 				config: 'Match host store.example.com exec "true"'
@@ -255,6 +261,18 @@ describe('prepare SSH transport implementation', () => {
 		{
 			directive: 'Match exec',
 			config: "'Match' exec 'true'"
+		},
+		{
+			directive: 'ControlMaster',
+			config: 'cOnTrOlMaStEr=auto'
+		},
+		{
+			directive: 'ControlPath',
+			config: 'cOnTrOlPaTh=/tmp/cupboard-control'
+		},
+		{
+			directive: 'ControlPersist',
+			config: 'cOnTrOlPeRsIsT=yes'
 		},
 		{ directive: 'Include', config: 'iNcLuDe=/tmp/unmanaged.conf' }
 	])('rejects obscured $directive syntax', async ({ directive, config }) => {
@@ -682,6 +700,49 @@ describe('prepare SSH transport implementation', () => {
 				'identityagent none',
 				'identityfile none'
 			],
+			exported: `GIT_SSH_COMMAND=ssh -F '${config}'\n`
+		});
+	});
+
+	it('disables ambient private-input SSH when no credentials are supplied', async () => {
+		const directory = await temporaryDirectory();
+
+		await runTransport('configure-input', directory, {});
+
+		const config = path.join(directory, 'cupboard_input_ssh_config');
+		const { stdout } = await execFileAsync('ssh', [
+			'-G',
+			'-F',
+			config,
+			'input.example.com'
+		]);
+		const effective = new Map(
+			stdout
+				.split('\n')
+				.filter((line) => line !== '')
+				.map((line) => {
+					const separator = line.indexOf(' ');
+
+					return [line.slice(0, separator), line.slice(separator + 1)] as const;
+				})
+		);
+
+		expect({
+			knownHosts: await readFile(
+				path.join(directory, 'cupboard_input_known_hosts'),
+				'utf8'
+			),
+			identityAgent: effective.get('identityagent'),
+			identityFile: effective.get('identityfile'),
+			identitiesOnly: effective.get('identitiesonly'),
+			strictHostKeyChecking: effective.get('stricthostkeychecking'),
+			exported: await readFile(path.join(directory, 'github-env'), 'utf8')
+		}).toStrictEqual({
+			knownHosts: '\n',
+			identityAgent: 'none',
+			identityFile: 'none',
+			identitiesOnly: 'yes',
+			strictHostKeyChecking: 'true',
 			exported: `GIT_SSH_COMMAND=ssh -F '${config}'\n`
 		});
 	});

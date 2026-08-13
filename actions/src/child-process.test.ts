@@ -1,7 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+	type AbortableChildProcessLifecycle,
+	type ChildProcessEscalationScheduler,
 	type ChildProcessLifecycle,
+	terminationGracePeriodMs,
+	waitForAbortableChildProcess,
 	waitForChildProcess
 } from './child-process.ts';
 
@@ -42,6 +46,49 @@ class ControlledChildProcess implements ChildProcessLifecycle {
 	}
 }
 
+class ControlledAbortableChildProcess
+	extends ControlledChildProcess
+	implements AbortableChildProcessLifecycle
+{
+	readonly signals: NodeJS.Signals[] = [];
+
+	kill(signal: NodeJS.Signals): boolean {
+		this.signals.push(signal);
+
+		return true;
+	}
+}
+
+interface ScheduledEscalation {
+	readonly delayMs: number;
+	readonly run: () => void;
+	cancelled: boolean;
+}
+
+class ControlledScheduler implements ChildProcessEscalationScheduler {
+	readonly escalations: ScheduledEscalation[] = [];
+
+	schedule(run: () => void, delayMs: number): { cancel(): void } {
+		const escalation = { delayMs, run, cancelled: false };
+
+		this.escalations.push(escalation);
+
+		return {
+			cancel() {
+				escalation.cancelled = true;
+			}
+		};
+	}
+
+	runPending(): void {
+		for (const escalation of this.escalations) {
+			if (!escalation.cancelled) {
+				escalation.run();
+			}
+		}
+	}
+}
+
 describe('waitForChildProcess', () => {
 	it('records an error without settling before process closure', async () => {
 		const child = new ControlledChildProcess();
@@ -74,6 +121,93 @@ describe('waitForChildProcess', () => {
 			error: undefined,
 			signal: 'SIGKILL',
 			status: 1
+		});
+	});
+});
+
+describe('waitForAbortableChildProcess', () => {
+	it('terminates exactly once when the signal is already aborted', async () => {
+		const child = new ControlledAbortableChildProcess();
+		const scheduler = new ControlledScheduler();
+		const reason = new Error('already cancelled');
+		const completion = waitForAbortableChildProcess(
+			child,
+			AbortSignal.abort(reason),
+			scheduler
+		);
+
+		expect(child.signals).toStrictEqual(['SIGTERM']);
+
+		child.emitClose(1, 'SIGTERM');
+
+		await expect(completion).rejects.toBe(reason);
+		expect(scheduler.escalations).toHaveLength(1);
+	});
+
+	it('terminates, escalates and preserves the exact abort reason after close', async () => {
+		const child = new ControlledAbortableChildProcess();
+		const scheduler = new ControlledScheduler();
+		const controller = new AbortController();
+		const reason = new Error('cancel the child');
+		const settled = vi.fn();
+		const completion = waitForAbortableChildProcess(
+			child,
+			controller.signal,
+			scheduler
+		);
+
+		void completion.then(settled).catch(settled);
+		controller.abort(reason);
+		child.emitError(new Error('The operation was aborted'));
+		await new Promise<void>((resolve) => setImmediate(resolve));
+
+		expect({
+			signals: child.signals,
+			escalations: scheduler.escalations.map(({ delayMs, cancelled }) => ({
+				delayMs,
+				cancelled
+			})),
+			settled: settled.mock.calls
+		}).toStrictEqual({
+			signals: ['SIGTERM'],
+			escalations: [{ delayMs: terminationGracePeriodMs, cancelled: false }],
+			settled: []
+		});
+
+		scheduler.runPending();
+
+		expect(child.signals).toStrictEqual(['SIGTERM', 'SIGKILL']);
+
+		child.emitClose(1, 'SIGKILL');
+
+		await expect(completion).rejects.toBe(reason);
+	});
+
+	it('cancels escalation when the child closes during the grace period', async () => {
+		const child = new ControlledAbortableChildProcess();
+		const scheduler = new ControlledScheduler();
+		const controller = new AbortController();
+		const reason = new Error('cancel gracefully');
+		const completion = waitForAbortableChildProcess(
+			child,
+			controller.signal,
+			scheduler
+		);
+
+		controller.abort(reason);
+		child.emitClose(1, 'SIGTERM');
+		scheduler.runPending();
+
+		await expect(completion).rejects.toBe(reason);
+		expect({
+			signals: child.signals,
+			escalations: scheduler.escalations.map(({ delayMs, cancelled }) => ({
+				delayMs,
+				cancelled
+			}))
+		}).toStrictEqual({
+			signals: ['SIGTERM'],
+			escalations: [{ delayMs: terminationGracePeriodMs, cancelled: true }]
 		});
 	});
 });

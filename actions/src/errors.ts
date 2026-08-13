@@ -41,6 +41,7 @@ function withCause(cause: unknown): ErrorOptions | undefined {
 
 export interface GithubApiErrorOptions {
 	readonly status?: number;
+	readonly detail?: string;
 	readonly cause?: unknown;
 }
 
@@ -48,10 +49,12 @@ export class GithubApiError extends CodedError {
 	readonly status: number | undefined;
 
 	constructor(operation: string, options: GithubApiErrorOptions = {}) {
-		super(
-			`${operation}: ${options.status === undefined ? 'an unknown error' : String(options.status)}`,
-			withCause(options.cause)
-		);
+		const reason =
+			options.detail ??
+			(options.status === undefined
+				? 'an unknown error'
+				: String(options.status));
+		super(`${operation}: ${reason}`, withCause(options.cause));
 		this.name = 'GithubApiError';
 		this.status = options.status;
 	}
@@ -127,6 +130,20 @@ export class InstalledReleaseVersionMismatchError extends CodedError {
 			`release ${expected} installed an executable reporting version '${actual}'`
 		);
 		this.name = 'InstalledReleaseVersionMismatchError';
+	}
+}
+
+/** A verified release archive omitted an executable required at runtime. */
+export class ReleaseInstallationIncompleteError extends CodedError {
+	constructor(
+		public readonly path: string,
+		options: { readonly cause?: unknown } = {}
+	) {
+		super(
+			`released Cupboard is missing executable file ${path}`,
+			withCause(options.cause)
+		);
+		this.name = 'ReleaseInstallationIncompleteError';
 	}
 }
 
@@ -287,6 +304,24 @@ export class AttestationAttachmentIncompleteError extends CodedError {
 	constructor(public readonly storePaths: readonly string[]) {
 		super(`Attestation attachment did not settle ${storePaths.join(', ')}`);
 		this.name = 'AttestationAttachmentIncompleteError';
+	}
+}
+
+/** Receipt subjects whose signed checksum is absent or no longer exact. */
+export class AttestationChecksumsMismatchError extends CodedError {
+	constructor(
+		public readonly storePaths: readonly string[],
+		public readonly unexpectedNames: readonly string[] = []
+	) {
+		const missing = storePaths.length === 0 ? '' : storePaths.join(', ');
+		const unexpected =
+			unexpectedNames.length === 0
+				? ''
+				: `; unexpected signed subjects: ${unexpectedNames.join(', ')}`;
+		super(
+			`Signed subject checksums do not exactly match the build receipt${missing === '' ? '' : ` for: ${missing}`}${unexpected}`
+		);
+		this.name = 'AttestationChecksumsMismatchError';
 	}
 }
 

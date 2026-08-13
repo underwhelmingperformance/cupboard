@@ -84,6 +84,18 @@ export class SourceInstallationIncompleteError extends CodedError {
 	}
 }
 
+export class SourceInstallationVersionMismatchError extends CodedError {
+	constructor(
+		public readonly expected: string,
+		public readonly actual: string
+	) {
+		super(
+			`source-built Cupboard should report version '${expected}', but reported '${actual}'`
+		);
+		this.name = 'SourceInstallationVersionMismatchError';
+	}
+}
+
 const execFileAsync = promisify(execFile);
 
 const defaultSourceCommandRunner: SourceCommandRunner = (command, arguments_) =>
@@ -239,6 +251,17 @@ export async function acquireSourceCupboard(
 		if (!(await inspectExecutable(executable))) {
 			throw new SourceInstallationIncompleteError(executable);
 		}
+	}
+
+	const expectedVersion = options.cupboard.sourceCommit.slice(0, 7);
+	const versionResult = await runCommand(binaryPath, ['--version']);
+	const actualVersion = versionResult.stdout.trim();
+
+	if (actualVersion !== expectedVersion) {
+		throw new SourceInstallationVersionMismatchError(
+			expectedVersion,
+			actualVersion
+		);
 	}
 
 	return { binaryPath, cupboard: options.cupboard };

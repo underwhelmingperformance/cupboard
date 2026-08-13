@@ -22,11 +22,38 @@ export interface SignalSource {
 	off(signal: 'SIGINT' | 'SIGTERM', listener: () => void): unknown;
 }
 
+/** A pending forced child termination that can be cancelled after child exit. */
+export interface ScheduledChildTermination {
+	cancel(): void;
+}
+
+/** Schedules forced child termination after the graceful shutdown window. */
+export interface ChildTerminationScheduler {
+	schedule(run: () => void, delayMs: number): ScheduledChildTermination;
+}
+
+/** Time allowed for an interrupted child to exit before SIGKILL. */
+export const childTerminationGracePeriodMs = 10_000;
+
+const defaultChildTerminationScheduler: ChildTerminationScheduler = {
+	schedule(run, delayMs) {
+		const timeout = setTimeout(run, delayMs);
+		timeout.unref();
+
+		return {
+			cancel() {
+				clearTimeout(timeout);
+			}
+		};
+	}
+};
+
 export interface RunChildOptions {
 	readonly command: ChildCommand;
 	readonly environment: ChildEnvironment;
 	readonly signal?: AbortSignal;
 	readonly signalSource?: SignalSource;
+	readonly terminationScheduler?: ChildTerminationScheduler;
 }
 
 export interface SuperviseOptions {
@@ -41,6 +68,7 @@ export interface SuperviseOptions {
 	 */
 	readonly onExit?: (exit: ChildExit) => Promise<void>;
 	readonly signalSource?: SignalSource;
+	readonly terminationScheduler?: ChildTerminationScheduler;
 }
 
 function waitForExit(child: ChildProcess): Promise<ChildExit> {
@@ -56,8 +84,9 @@ function waitForExit(child: ChildProcess): Promise<ChildExit> {
  * Runs one child to completion with the given environment and inherited
  * stdio, so its output and semantics are untouched. SIGINT and SIGTERM
  * arriving at the supervisor are forwarded to the child while it runs, as is
- * an explicit AbortSignal cancellation. The first forwarded signal remains
- * the run's result even when the child traps it.
+ * an explicit AbortSignal cancellation. A child that does not exit within the
+ * graceful shutdown window is killed. The first forwarded signal remains the
+ * run's result even when the child traps it.
  */
 export async function runChild(options: RunChildOptions): Promise<ChildExit> {
 	options.signal?.throwIfAborted();
@@ -68,15 +97,30 @@ export async function runChild(options: RunChildOptions): Promise<ChildExit> {
 		stdio: 'inherit',
 		env: { ...options.environment }
 	});
+	const terminationScheduler =
+		options.terminationScheduler ?? defaultChildTerminationScheduler;
 	let interrupted: NodeJS.Signals | undefined;
+	let isChildExited = false;
+	let scheduledTermination: ScheduledChildTermination | undefined;
 
+	const interruptWith = (signal: 'SIGINT' | 'SIGTERM'): void => {
+		if (interrupted !== undefined) {
+			return;
+		}
+
+		interrupted = signal;
+		child.kill(signal);
+		scheduledTermination = terminationScheduler.schedule(() => {
+			if (!isChildExited) {
+				child.kill('SIGKILL');
+			}
+		}, childTerminationGracePeriodMs);
+	};
 	const forwardInt = (): void => {
-		interrupted ??= 'SIGINT';
-		child.kill('SIGINT');
+		interruptWith('SIGINT');
 	};
 	const forwardTerm = (): void => {
-		interrupted ??= 'SIGTERM';
-		child.kill('SIGTERM');
+		interruptWith('SIGTERM');
 	};
 	const abort = (): void => {
 		forwardTerm();
@@ -92,10 +136,13 @@ export async function runChild(options: RunChildOptions): Promise<ChildExit> {
 
 	try {
 		const exit = await waitForExit(child);
+		isChildExited = true;
 		const signal = interrupted ?? exit.signal;
 
 		return signal === undefined ? exit : { status: undefined, signal };
 	} finally {
+		isChildExited = true;
+		scheduledTermination?.cancel();
 		options.signal?.removeEventListener('abort', abort);
 		signalSource.off('SIGINT', forwardInt);
 		signalSource.off('SIGTERM', forwardTerm);
@@ -108,9 +155,10 @@ export async function runChild(options: RunChildOptions): Promise<ChildExit> {
  * untouched: a failed build is still a failed build, and the caller reads the
  * child's own exit status or signal from the result unless the supervisor was
  * interrupted. SIGINT and SIGTERM arriving at the supervisor are forwarded to
- * the child, the first one remains the run's result even when the child traps
- * it, and the invocation runtime directory is removed once the run is over,
- * whether the child succeeded, failed, or could not start.
+ * the child and escalate to SIGKILL after the graceful shutdown window. The
+ * first signal remains the run's result, and the invocation runtime directory
+ * is removed once the run is over, whether the child succeeded, failed, or
+ * could not start.
  */
 export async function superviseBuild(
 	options: SuperviseOptions
@@ -121,6 +169,9 @@ export async function superviseBuild(
 			environment: options.environment,
 			...(options.signalSource !== undefined && {
 				signalSource: options.signalSource
+			}),
+			...(options.terminationScheduler !== undefined && {
+				terminationScheduler: options.terminationScheduler
 			})
 		});
 
@@ -153,6 +204,7 @@ export interface AttemptedBuildOptions {
 	/** The invocation runtime directory, removed once the run is over. */
 	readonly runtimeDirectory: string;
 	readonly signalSource?: SignalSource;
+	readonly terminationScheduler?: ChildTerminationScheduler;
 	/** Names each attempt; injectable for tests. */
 	readonly nextAttemptId?: () => string;
 	/** Starts the cancellable wait between attempts; injectable for tests. */
@@ -257,6 +309,9 @@ export async function superviseAttemptedBuild(
 				environment: options.environment,
 				...(options.signalSource !== undefined && {
 					signalSource: options.signalSource
+				}),
+				...(options.terminationScheduler !== undefined && {
+					terminationScheduler: options.terminationScheduler
 				})
 			});
 			attempts.push({

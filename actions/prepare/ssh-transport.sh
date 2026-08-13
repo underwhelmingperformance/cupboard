@@ -43,11 +43,6 @@ configure_input() {
   validate_input
   validate_runner_paths
 
-  if [ -z "${INPUT_SSH_KEY}" ] && [[ ! "${INPUT_KNOWN_HOSTS}" =~ [^[:space:]] ]]; then
-    echo 'No SSH key was provided; private flake inputs will not be reachable.'
-    return
-  fi
-
   known_hosts="${RUNNER_TEMP}/cupboard_input_known_hosts"
   install -m 600 /dev/null "${known_hosts}"
   printf '%s\n' "${INPUT_KNOWN_HOSTS}" > "${known_hosts}"
@@ -238,6 +233,15 @@ validate_caller_ssh_config() {
         ;;
       addkeystoagent)
         error "${input_name} must not use AddKeysToAgent; pass the private key through ${key_input}"
+        ;;
+      controlmaster)
+        error "${input_name} must not use ControlMaster; remove SSH multiplexing directives so Cupboard can close every authenticated connection when the action finishes"
+        ;;
+      controlpath)
+        error "${input_name} must not use ControlPath; remove SSH multiplexing directives so Cupboard can close every authenticated connection when the action finishes"
+        ;;
+      controlpersist)
+        error "${input_name} must not use ControlPersist; remove SSH multiplexing directives so Cupboard can close every authenticated connection when the action finishes"
         ;;
       include)
         error "${input_name} must not use Include because included files can add authentication identities; put non-identity settings directly in ${input_name}"

@@ -40,9 +40,9 @@ import type { Command } from 'commander';
 import { z } from 'zod';
 
 import {
-	type ChildProcessLifecycle,
+	type AbortableChildProcessLifecycle,
 	observeChildProcess,
-	waitForChildProcess
+	waitForAbortableChildProcess
 } from '../child-process.ts';
 import {
 	type CupboardRunDependencies,
@@ -2246,7 +2246,7 @@ const nixDerivationShowEnvelopeSchema = z.looseObject({
 });
 
 /** A Nix child whose stdout is captured until the complete process closes. */
-export interface CapturedNixProcess extends ChildProcessLifecycle {
+export interface CapturedNixProcess extends AbortableChildProcessLifecycle {
 	onStdout(listener: (chunk: string) => void): void;
 }
 
@@ -2265,11 +2265,10 @@ export interface NixDerivationShowDependencies {
 
 function startCapturedNixProcess(
 	arguments_: readonly string[],
-	signal: AbortSignal | undefined
+	_signal: AbortSignal | undefined
 ): CapturedNixProcess {
 	const child = spawn('nix', arguments_, {
-		stdio: ['ignore', 'pipe', 'inherit'],
-		...(signal !== undefined && { signal })
+		stdio: ['ignore', 'pipe', 'inherit']
 	});
 	const lifecycle = observeChildProcess(child);
 
@@ -2303,11 +2302,7 @@ async function runCapturedNixProcess(
 		stdout += chunk;
 	});
 
-	const result = await waitForChildProcess(child);
-
-	if (signal?.aborted) {
-		throw signal.reason;
-	}
+	const result = await waitForAbortableChildProcess(child, signal);
 
 	if (result.error !== undefined) {
 		throw result.error;
@@ -2514,16 +2509,15 @@ export interface RunNixCopyDependencies {
 	readonly start: (
 		arguments_: readonly string[],
 		signal: AbortSignal | undefined
-	) => ChildProcessLifecycle;
+	) => AbortableChildProcessLifecycle;
 }
 
 function startNixCopy(
 	arguments_: readonly string[],
-	signal: AbortSignal | undefined
-): ChildProcessLifecycle {
+	_signal: AbortSignal | undefined
+): AbortableChildProcessLifecycle {
 	const child = spawn('nix', arguments_, {
-		stdio: 'inherit',
-		...(signal !== undefined && { signal })
+		stdio: 'inherit'
 	});
 
 	return observeChildProcess(child);
@@ -2542,13 +2536,10 @@ export async function runNixCopy(
 ): Promise<void> {
 	signal?.throwIfAborted();
 
-	const result = await waitForChildProcess(
-		dependencies.start(nixCopyArguments(derivations, store), signal)
+	const result = await waitForAbortableChildProcess(
+		dependencies.start(nixCopyArguments(derivations, store), signal),
+		signal
 	);
-
-	if (signal?.aborted) {
-		throw signal.reason;
-	}
 
 	if (result.error !== undefined) {
 		throw result.error;

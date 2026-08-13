@@ -76,6 +76,35 @@ jobs:
 
       - run: nix run . -- --version
 
+      # Exercise the reusable workflows' no-release path through the real
+      # composite action. The canonical coordinate names this checkout, so
+      # setup must build the flake package and return its complete executable
+      # layout rather than contacting the release asset API.
+      - name: Describe this source revision
+        id: source
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          cupboard=$(jq -cn \
+            --arg repository "$REPOSITORY" \
+            --arg sourceCommit "$SOURCE_COMMIT" \
+            '{kind:"source", $repository, $sourceCommit}')
+          echo "cupboard=${cupboard}" >> "$GITHUB_OUTPUT"
+
+      - uses: ./actions/setup
+        id: source-setup
+        with:
+          cupboard: ${{ steps.source.outputs.cupboard }}
+
+      - name: Verify the source installation
+        env:
+          CUPBOARD_PATH: ${{ steps.source-setup.outputs.cupboard-path }}
+        run: |
+          expected=$(git rev-parse --short=7 HEAD)
+          test "$("$CUPBOARD_PATH" --version)" = "$expected"
+          test -x "$(dirname "$(dirname "$CUPBOARD_PATH")")/libexec/cupboard/cupboard-hook-relay"
+
   e2e:
     name: e2e
     runs-on: ubuntu-24.04
@@ -134,7 +163,11 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Run the installed binary
-        run: cupboard --version
+        env:
+          CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
+        run: |
+          "$CUPBOARD_PATH" --version
+          test -x "$(dirname "$CUPBOARD_PATH")/cupboard-hook-relay"
 
   action-e2e-no-project:
     name: action e2e (no caller project)
@@ -164,4 +197,8 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Run the installed binary
-        run: cupboard --version
+        env:
+          CUPBOARD_PATH: ${{ steps.setup.outputs.cupboard-path }}
+        run: |
+          "$CUPBOARD_PATH" --version
+          test -x "$(dirname "$CUPBOARD_PATH")/cupboard-hook-relay"

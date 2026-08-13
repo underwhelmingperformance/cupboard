@@ -9,12 +9,41 @@ import { waitForFile } from '../../../../tests/support/filesystem.ts';
 
 import {
 	type ChildExit,
+	childTerminationGracePeriodMs,
+	type ChildTerminationScheduler,
 	runChild,
 	type SignalSource,
 	startTimerDelay,
 	superviseAttemptedBuild,
 	superviseBuild
 } from './supervisor.ts';
+
+class ControlledTerminationScheduler implements ChildTerminationScheduler {
+	readonly scheduled: {
+		readonly delayMs: number;
+		readonly run: () => void;
+		cancelled: boolean;
+	}[] = [];
+
+	schedule(run: () => void, delayMs: number) {
+		const termination = { delayMs, run, cancelled: false };
+		this.scheduled.push(termination);
+
+		return {
+			cancel() {
+				termination.cancelled = true;
+			}
+		};
+	}
+
+	runPending(): void {
+		for (const termination of this.scheduled) {
+			if (!termination.cancelled) {
+				termination.run();
+			}
+		}
+	}
+}
 
 async function runtimeDirectory(): Promise<string> {
 	return mkdtemp(path.join(tmpdir(), 'cup-sup-'));
@@ -58,6 +87,10 @@ function recordingSignalSource() {
 
 function blockUntilSignal(exitStatus: number): string {
 	return `mkfifo "$CUPBOARD_TEST_GATE"; trap 'exit ${String(exitStatus)}' INT TERM; : > "$CUPBOARD_TEST_READY"; read _ 2>/dev/null < "$CUPBOARD_TEST_GATE"`;
+}
+
+function ignoreSignalsUntilKilled(): string {
+	return `mkfifo "$CUPBOARD_TEST_GATE"; trap '' INT TERM; : > "$CUPBOARD_TEST_READY"; read _ 2>/dev/null < "$CUPBOARD_TEST_GATE"`;
 }
 
 describe('superviseBuild', () => {
@@ -202,6 +235,77 @@ describe('superviseBuild', () => {
 				}).toStrictEqual({
 					exit: { status: undefined, signal },
 					remainingListeners: 0
+				});
+			} finally {
+				await Promise.all([
+					rm(gateFile, { force: true }),
+					rm(readyFile, { force: true })
+				]);
+			}
+		}
+	);
+
+	it.runIf(platform === 'darwin' || platform === 'linux')(
+		'escalates an ignored signal and cleans up the completed supervision',
+		async () => {
+			const directory = await runtimeDirectory();
+			const readyFile = path.join(
+				tmpdir(),
+				`cup-sup-kill-ready-${String(Date.now())}`
+			);
+			const gateFile = `${readyFile}.fifo`;
+			const signals = recordingSignalSource();
+			const scheduler = new ControlledTerminationScheduler();
+
+			try {
+				const running = superviseBuild({
+					command: ['sh', '-c', ignoreSignalsUntilKilled()],
+					environment: {
+						PATH: '/usr/bin:/bin',
+						CUPBOARD_TEST_GATE: gateFile,
+						CUPBOARD_TEST_READY: readyFile
+					},
+					runtimeDirectory: directory,
+					signalSource: signals.source,
+					terminationScheduler: scheduler
+				});
+
+				await waitForFile(readyFile);
+				signals.emit('SIGTERM');
+
+				expect(
+					scheduler.scheduled.map(({ delayMs, cancelled }) => ({
+						delayMs,
+						cancelled
+					}))
+				).toStrictEqual([
+					{ delayMs: childTerminationGracePeriodMs, cancelled: false }
+				]);
+
+				scheduler.runPending();
+				const exit = await running;
+				let didRuntimeDirectoryExist = true;
+
+				try {
+					await stat(directory);
+				} catch {
+					didRuntimeDirectoryExist = false;
+				}
+
+				expect({
+					exit,
+					remainingListeners: signals.listenerCount(),
+					runtimeDirectoryExists: didRuntimeDirectoryExist,
+					scheduledTerminations: scheduler.scheduled.map(
+						({ delayMs, cancelled }) => ({ delayMs, cancelled })
+					)
+				}).toStrictEqual({
+					exit: { status: undefined, signal: 'SIGTERM' },
+					remainingListeners: 0,
+					runtimeDirectoryExists: false,
+					scheduledTerminations: [
+						{ delayMs: childTerminationGracePeriodMs, cancelled: true }
+					]
 				});
 			} finally {
 				await Promise.all([

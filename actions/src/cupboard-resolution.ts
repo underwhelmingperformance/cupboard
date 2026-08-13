@@ -51,7 +51,7 @@ export const resolvedCupboardSchema = z.discriminatedUnion('kind', [
 export type ResolvedCupboard = z.infer<typeof resolvedCupboardSchema>;
 
 export interface ResolveCupboardOptions {
-	/** An explicit exact release or `latest`; blank means resolve from the workflow. */
+	/** An explicit published release tag or `latest`; blank resolves from the workflow. */
 	readonly cupboardVersion?: string;
 	/** Whether an explicit `latest` may select a prerelease. */
 	readonly includePrereleases: boolean;
@@ -77,7 +77,10 @@ interface ReleaseAtCommit {
 const releaseNodeSchema = z.strictObject({
 	tagName: tagSchema,
 	isDraft: z.boolean(),
-	tagCommit: z.strictObject({ oid: commitSchema })
+	tagCommit: z
+		.strictObject({ oid: commitSchema })
+		.nullable()
+		.transform((value) => value ?? undefined)
 });
 
 const releasePageInfoSchema = z.strictObject({
@@ -90,7 +93,11 @@ const releasePageInfoSchema = z.strictObject({
 });
 
 const releaseConnectionSchema = z.strictObject({
-	nodes: z.array(releaseNodeSchema),
+	nodes: z
+		.array(releaseNodeSchema.nullable().transform((node) => node ?? undefined))
+		.transform((nodes) =>
+			nodes.flatMap((node) => (node === undefined ? [] : [node]))
+		),
 	pageInfo: releasePageInfoSchema
 });
 
@@ -102,6 +109,14 @@ const releasePageSchema = z.strictObject({
 	data: z.strictObject({
 		repository: releaseRepositorySchema
 	})
+});
+
+const graphqlErrorSchema = z.looseObject({
+	message: z.string().min(1),
+	type: z.string().min(1).optional()
+});
+const graphqlFailureSchema = z.looseObject({
+	errors: z.array(graphqlErrorSchema).min(1)
 });
 
 const releaseDiscoveryQuery = `
@@ -322,7 +337,7 @@ function collectMatchingReleases(
 	workflowSha: string
 ): void {
 	for (const release of releases) {
-		if (release.isDraft || release.tagCommit.oid !== workflowSha) {
+		if (release.isDraft || release.tagCommit?.oid !== workflowSha) {
 			continue;
 		}
 
@@ -362,6 +377,23 @@ async function fetchReleasePage(
 		throw new GithubApiError('failed to discover cupboard releases', {
 			status: error instanceof RequestError ? error.status : undefined,
 			cause: error
+		});
+	}
+
+	const failure = graphqlFailureSchema.safeParse(response.data);
+
+	if (failure.success) {
+		const detail = failure.data.errors
+			.map((error) =>
+				error.type === undefined
+					? error.message
+					: `${error.type}: ${error.message}`
+			)
+			.join('; ');
+
+		throw new GithubApiError('failed to discover cupboard releases', {
+			detail,
+			cause: failure.data.errors
 		});
 	}
 

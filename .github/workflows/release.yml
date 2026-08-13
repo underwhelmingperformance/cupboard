@@ -57,7 +57,9 @@ jobs:
 
       - id: build
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION:
+            ${{ startsWith(inputs.version, 'v') && inputs.version ||
+            format('v{0}', inputs.version) }}
         run: >
           pnpm build:binary -- --version "$VERSION" --out-dir dist/release
 

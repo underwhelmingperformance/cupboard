@@ -310,7 +310,7 @@ permissions:
   contents: read
 
 steps:
-  - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+  - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
   - uses: owner/repo/actions/setup@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
     with:
       cache-url: https://cupboard.example.workers.dev/t/<slug>
@@ -355,7 +355,7 @@ permissions:
   id-token: write
 
 steps:
-  - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+  - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
   - run: nix build .#package
   - uses: owner/repo/actions/push@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
     with:
@@ -408,7 +408,7 @@ permissions:
   id-token: write
 
 steps:
-  - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+  - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
   - id: setup
     uses: owner/repo/actions/setup@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
     with:
@@ -476,7 +476,7 @@ permissions:
   id-token: write
 
 steps:
-  - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
+  - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
   - id: setup
     uses: owner/repo/actions/setup@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
     with:

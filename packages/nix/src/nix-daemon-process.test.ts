@@ -12,8 +12,41 @@ import { NixDaemonRemoteError, NixDaemonStoreClient } from './nix-daemon.ts';
 import {
 	createProcessNixDaemonConnector,
 	type DaemonChildProcess,
-	type DaemonCommandRunner
+	type DaemonCommandRunner,
+	daemonProcessTerminationGraceMs,
+	type ScheduleDaemonProcessKill
 } from './nix-daemon-process.ts';
+
+class ControlledKillScheduler {
+	private onElapsed: (() => void) | undefined;
+
+	readonly delays: number[] = [];
+
+	readonly cancellations: number[] = [];
+
+	readonly schedule: ScheduleDaemonProcessKill = (delayMs, onElapsed) => {
+		this.delays.push(delayMs);
+		this.onElapsed = onElapsed;
+
+		return {
+			cancel: () => {
+				this.cancellations.push(delayMs);
+				this.onElapsed = undefined;
+			}
+		};
+	};
+
+	elapse(): void {
+		const onElapsed = this.onElapsed;
+		this.onElapsed = undefined;
+
+		if (onElapsed === undefined) {
+			throw new Error('Expected a pending daemon-process kill');
+		}
+
+		onElapsed();
+	}
+}
 
 class ControlledDaemonChild implements DaemonChildProcess {
 	private errorListener: ((error: Error) => void) | undefined;
@@ -172,6 +205,7 @@ describe('createProcessNixDaemonConnector', () => {
 
 	it('settles close after an ordinary TERM exit without escalation', async () => {
 		const child = new ControlledDaemonChild();
+		const scheduler = new ControlledKillScheduler();
 		child.onKill = (signal) => {
 			if (signal === 'SIGTERM') {
 				child.emitExit();
@@ -180,12 +214,22 @@ describe('createProcessNixDaemonConnector', () => {
 		const transport = await createProcessNixDaemonConnector(
 			'nix',
 			['daemon'],
-			() => child
+			() => child,
+			undefined,
+			scheduler.schedule
 		)('', undefined);
 
 		await transport.close();
 
-		expect(child.killSignals).toStrictEqual(['SIGTERM']);
+		expect({
+			killSignals: child.killSignals,
+			delays: scheduler.delays,
+			cancellations: scheduler.cancellations
+		}).toStrictEqual({
+			killSignals: ['SIGTERM'],
+			delays: [daemonProcessTerminationGraceMs],
+			cancellations: [daemonProcessTerminationGraceMs]
+		});
 	});
 
 	it('shares one close operation across repeated callers', async () => {
@@ -209,14 +253,21 @@ describe('createProcessNixDaemonConnector', () => {
 		await first;
 	});
 
-	it('keeps close pending until the child exits', async () => {
+	it('escalates a TERM-resistant child to KILL and waits for its exit', async () => {
 		const child = new ControlledDaemonChild();
+		const scheduler = new ControlledKillScheduler();
 		const afterExit = vi.fn();
+		child.onKill = (signal) => {
+			if (signal === 'SIGKILL') {
+				child.emitExit();
+			}
+		};
 		const transport = await createProcessNixDaemonConnector(
 			'nix',
 			['daemon'],
 			() => child,
-			afterExit
+			afterExit,
+			scheduler.schedule
 		)('', undefined);
 
 		const closing = transport.close();
@@ -232,12 +283,21 @@ describe('createProcessNixDaemonConnector', () => {
 		});
 		expect(settled).not.toHaveBeenCalled();
 
-		child.emitExit();
+		scheduler.elapse();
 		await closing;
 
 		expect({
+			killSignals: child.killSignals,
+			delays: scheduler.delays,
+			cancellations: scheduler.cancellations,
 			afterExitCalls: afterExit.mock.calls,
 			settledCalls: settled.mock.calls
-		}).toStrictEqual({ afterExitCalls: [[]], settledCalls: [[undefined]] });
+		}).toStrictEqual({
+			killSignals: ['SIGTERM', 'SIGKILL'],
+			delays: [daemonProcessTerminationGraceMs],
+			cancellations: [daemonProcessTerminationGraceMs],
+			afterExitCalls: [[]],
+			settledCalls: [[undefined]]
+		});
 	});
 });

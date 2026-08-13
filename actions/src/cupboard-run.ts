@@ -15,7 +15,10 @@ import {
 } from '@cupboard/shared/github-actions';
 import { z } from 'zod';
 
-import { observeChildProcess, waitForChildProcess } from './child-process.ts';
+import {
+	observeChildProcess,
+	waitForAbortableChildProcess
+} from './child-process.ts';
 import { CommandFailedError, CupboardReportedError } from './errors.ts';
 import { type Environment, requireEnvironment } from './inputs.ts';
 
@@ -104,8 +107,7 @@ export async function detectCupboardResultProtocol(
 	signal?.throwIfAborted();
 
 	const child = spawn(binaryPath, ['--help'], {
-		stdio: ['ignore', 'pipe', 'ignore'],
-		...(signal !== undefined && { signal })
+		stdio: ['ignore', 'pipe', 'ignore']
 	});
 	let output = '';
 
@@ -114,7 +116,10 @@ export async function detectCupboardResultProtocol(
 		output += chunk;
 	});
 
-	const result = await waitForChildProcess(observeChildProcess(child));
+	const result = await waitForAbortableChildProcess(
+		observeChildProcess(child),
+		signal
+	);
 
 	if (result.error !== undefined) {
 		throw spawnFailure(binaryPath, result.status, result.error, signal);
@@ -141,8 +146,7 @@ async function runLegacyCupboard(
 		commands.warning(message);
 	});
 	const child = spawn(binaryPath, ['--output-mode', 'json', ...arguments_], {
-		stdio: ['inherit', 'inherit', 'pipe'],
-		...(signal !== undefined && { signal })
+		stdio: ['inherit', 'inherit', 'pipe']
 	});
 
 	child.stderr.setEncoding('utf8');
@@ -151,7 +155,10 @@ async function runLegacyCupboard(
 		events.push(chunk);
 	});
 
-	const result = await waitForChildProcess(observeChildProcess(child));
+	const result = await waitForAbortableChildProcess(
+		observeChildProcess(child),
+		signal
+	);
 
 	if (result.error !== undefined) {
 		throw spawnFailure(binaryPath, result.status, result.error, signal);
@@ -276,10 +283,12 @@ async function spawnCupboard(
 	signal?.throwIfAborted();
 
 	const child = spawn(binaryPath, [...arguments_], {
-		stdio: 'inherit',
-		...(signal !== undefined && { signal })
+		stdio: 'inherit'
 	});
-	const result = await waitForChildProcess(observeChildProcess(child));
+	const result = await waitForAbortableChildProcess(
+		observeChildProcess(child),
+		signal
+	);
 
 	if (result.error !== undefined) {
 		throw spawnFailure(binaryPath, result.status, result.error, signal);

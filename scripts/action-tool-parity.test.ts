@@ -11,6 +11,11 @@ import { z } from 'zod';
 // action must derive the pins the same way.
 const repositoryRoot = path.join(import.meta.dirname, '..');
 const actionsDirectory = path.join(repositoryRoot, 'actions');
+const githubActionsDocumentationPath = path.join(
+	repositoryRoot,
+	'docs',
+	'github-actions.md'
+);
 
 const manifestSchema = z.object({
 	packageManager: z.templateLiteral(['pnpm@', z.string()])
@@ -24,6 +29,18 @@ function actionFiles(): string[] {
 }
 
 const manifestPath = path.join(repositoryRoot, 'package.json');
+const ciWorkflowPath = path.join(
+	repositoryRoot,
+	'.github',
+	'workflows',
+	'ci.yml'
+);
+const releaseWorkflowPath = path.join(
+	repositoryRoot,
+	'.github',
+	'workflows',
+	'release.yml'
+);
 
 function manifestPnpmVersion(): string {
 	const manifest = manifestSchema.parse(
@@ -109,4 +126,108 @@ describe('composite action toolchain derivation', () => {
 
 		expect([...revisions]).toHaveLength(1);
 	});
+});
+
+describe('source acquisition smoke', () => {
+	it('runs the setup action from a canonical source coordinate in CI', () => {
+		const workflow = readFileSync(ciWorkflowPath, 'utf8');
+
+		expect({
+			canonicalSource: workflow.includes(
+				'\'{kind:"source", $repository, $sourceCommit}\''
+			),
+			setupInput: workflow.includes(
+				'cupboard: ${{ steps.source.outputs.cupboard }}'
+			),
+			checksVersion: workflow.includes(
+				'test "$("$CUPBOARD_PATH" --version)" = "$expected"'
+			),
+			checksHookRelay: workflow.includes(
+				'/libexec/cupboard/cupboard-hook-relay"'
+			)
+		}).toStrictEqual({
+			canonicalSource: true,
+			setupInput: true,
+			checksVersion: true,
+			checksHookRelay: true
+		});
+	});
+});
+
+describe('release acquisition smoke', () => {
+	it('canonicalises a bare release input before building every asset', () => {
+		const workflow = readFileSync(releaseWorkflowPath, 'utf8');
+
+		expect({
+			acceptsBareVersion: workflow.includes(
+				"startsWith(inputs.version, 'v') && inputs.version"
+			),
+			addsReleasePrefix: workflow.includes("format('v{0}', inputs.version)"),
+			checksHookRelay:
+				workflow.includes('cupboard-hook-relay') ||
+				readFileSync(ciWorkflowPath, 'utf8').includes(
+					'$(dirname "$CUPBOARD_PATH")/cupboard-hook-relay'
+				)
+		}).toStrictEqual({
+			acceptsBareVersion: true,
+			addsReleasePrefix: true,
+			checksHookRelay: true
+		});
+	});
+});
+
+describe('documentation action pins', () => {
+	it('pins checkout independently from the example cupboard revision', () => {
+		const documentation = readFileSync(githubActionsDocumentationPath, 'utf8');
+		const checkoutUses = documentation
+			.matchAll(/uses: actions\/checkout@(?<revision>\S+) # (?<version>\S+)/g)
+			.map((match) => ({
+				revision: match.groups?.revision,
+				version: match.groups?.version
+			}))
+			.toArray();
+
+		expect(checkoutUses).toStrictEqual([
+			{
+				revision: '3d3c42e5aac5ba805825da76410c181273ba90b1',
+				version: 'v7.0.1'
+			},
+			{
+				revision: '3d3c42e5aac5ba805825da76410c181273ba90b1',
+				version: 'v7.0.1'
+			},
+			{
+				revision: '3d3c42e5aac5ba805825da76410c181273ba90b1',
+				version: 'v7.0.1'
+			},
+			{
+				revision: '3d3c42e5aac5ba805825da76410c181273ba90b1',
+				version: 'v7.0.1'
+			}
+		]);
+	});
+});
+
+describe('canonical acquisition composition', () => {
+	it.each(['setup', 'push'])(
+		'%s leaves release-repository unset for canonical acquisition',
+		(action) => {
+			const body = readFileSync(
+				path.join(actionsDirectory, action, 'action.yml'),
+				'utf8'
+			);
+
+			expect({
+				rawInput: body.includes(
+					'RELEASE_REPOSITORY: ${{ inputs.release-repository }}'
+				),
+				actionRepositoryFallback: body.includes(
+					'inputs.release-repository || github.action_repository'
+				)
+			}).toStrictEqual({
+				rawInput: true,
+				actionRepositoryFallback: false
+			});
+		}
+	);
 });

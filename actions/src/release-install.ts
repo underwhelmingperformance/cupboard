@@ -1,6 +1,16 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmod, readFile, writeFile } from 'node:fs/promises';
+import {
+	access,
+	chmod,
+	constants,
+	mkdtemp,
+	readFile,
+	rename,
+	rm,
+	stat,
+	writeFile
+} from 'node:fs/promises';
 import path from 'node:path';
 import { arch, platform } from 'node:process';
 
@@ -33,6 +43,7 @@ import {
 	NoReleaseFoundError,
 	ReleaseAssetNotFoundError,
 	ReleaseCoordinateMismatchError,
+	ReleaseInstallationIncompleteError,
 	UnsupportedPlatformError
 } from './errors.ts';
 import { type Environment, parseLines } from './inputs.ts';
@@ -86,20 +97,14 @@ const githubHeaders: Readonly<Record<string, string>> = {
 export function normaliseVersion(version: string): string {
 	const trimmed = version.trim();
 
-	if (trimmed === 'latest') {
-		return 'latest';
-	}
-
-	const normalised = trimmed.startsWith('v') ? trimmed : `v${trimmed}`;
-
-	if (semverValid(normalised) === null) {
+	if (trimmed === '') {
 		throw new InvalidInputError(
 			'cupboard-version',
-			`cupboard-version must be 'latest' or a release tag like v1.2.3, got '${version}'`
+			'cupboard-version must be latest or an exact release tag'
 		);
 	}
 
-	return normalised;
+	return trimmed;
 }
 
 export function expectedSourceCommitFor(
@@ -110,7 +115,7 @@ export function expectedSourceCommitFor(
 		return undefined;
 	}
 
-	if (normaliseVersion(version) === 'latest') {
+	if (exactResolvedReleaseTag(version) === 'latest') {
 		throw new InvalidInputError(
 			'cupboard-version',
 			'cupboard-version must be an exact release when expected-source-commit is set'
@@ -127,6 +132,19 @@ export function expectedSourceCommitFor(
 	}
 
 	return normalised;
+}
+
+function exactResolvedReleaseTag(version: string): string {
+	const tag = version.trim();
+
+	if (tag === '') {
+		throw new InvalidInputError(
+			'cupboard-version',
+			'cupboard-version must name an exact release'
+		);
+	}
+
+	return tag;
 }
 
 export function assertExpectedSourceCommit(
@@ -284,20 +302,77 @@ export async function installCupboard(
 		}
 	);
 
-	await reporter.phase('Install cupboard binary', async () => {
-		run('tar', ['-xzf', archivePath, '-C', options.installDirectory]);
-		await chmod(binaryPath, 0o755);
-		assertInstalledReleaseVersion(
-			release.tagName,
-			readInstalledCupboardVersion(binaryPath)
-		);
-	});
+	await reporter.phase('Install cupboard binary', () =>
+		publishReleaseArchive(
+			archivePath,
+			options.installDirectory,
+			release.tagName
+		)
+	);
 
 	return {
 		binaryPath,
 		version: release.tagName,
 		sourceCommit
 	};
+}
+
+/** Validate a release in isolation before replacing the installed executables. */
+export async function publishReleaseArchive(
+	archivePath: string,
+	installDirectory: string,
+	expectedVersion: string
+): Promise<void> {
+	const stagingDirectory = await mkdtemp(
+		path.join(installDirectory, '.cupboard-release-')
+	);
+	const stagedBinaryPath = path.join(stagingDirectory, 'cupboard');
+	const stagedHookHelperPath = path.join(
+		stagingDirectory,
+		'cupboard-hook-relay'
+	);
+
+	try {
+		run('tar', ['-xzf', archivePath, '-C', stagingDirectory]);
+		await Promise.all([
+			prepareReleaseExecutable(stagedBinaryPath),
+			prepareReleaseExecutable(stagedHookHelperPath)
+		]);
+		assertInstalledReleaseVersion(
+			expectedVersion,
+			readInstalledCupboardVersion(stagedBinaryPath)
+		);
+
+		await rename(stagedBinaryPath, path.join(installDirectory, 'cupboard'));
+		await rename(
+			stagedHookHelperPath,
+			path.join(installDirectory, 'cupboard-hook-relay')
+		);
+	} finally {
+		await rm(stagingDirectory, { recursive: true, force: true });
+	}
+}
+
+/** Require a release archive member to be a runnable regular file. */
+export async function prepareReleaseExecutable(
+	candidate: string
+): Promise<void> {
+	try {
+		const metadata = await stat(candidate);
+
+		if (!metadata.isFile()) {
+			throw new ReleaseInstallationIncompleteError(candidate);
+		}
+
+		await chmod(candidate, 0o755);
+		await access(candidate, constants.X_OK);
+	} catch (error) {
+		if (error instanceof ReleaseInstallationIncompleteError) {
+			throw error;
+		}
+
+		throw new ReleaseInstallationIncompleteError(candidate, { cause: error });
+	}
 }
 
 /** Require a release executable to report the exact selected release tag. */
@@ -334,11 +409,17 @@ export async function fetchRelease(
 	octokit: Octokit,
 	options: Pick<
 		InstallCupboardOptions,
-		'releaseRepository' | 'version' | 'includePrereleases'
+		| 'releaseRepository'
+		| 'version'
+		| 'includePrereleases'
+		| 'expectedSourceCommit'
 	>
 ): Promise<Release> {
 	const [owner, repo] = splitRepository(options.releaseRepository);
-	const version = normaliseVersion(options.version);
+	const version =
+		options.expectedSourceCommit === undefined
+			? normaliseVersion(options.version)
+			: exactResolvedReleaseTag(options.version);
 
 	if (version === 'latest' && options.includePrereleases) {
 		return fetchNewestRelease(octokit, owner, repo);
@@ -347,7 +428,13 @@ export async function fetchRelease(
 	const { data } =
 		version === 'latest'
 			? await octokit.rest.repos.getLatestRelease({ owner, repo })
-			: await octokit.rest.repos.getReleaseByTag({ owner, repo, tag: version });
+			: await fetchReleaseByExplicitTag(
+					octokit,
+					owner,
+					repo,
+					version,
+					options.expectedSourceCommit === undefined
+				);
 	const parsed = releaseResponseSchema.safeParse(data);
 
 	if (!parsed.success) {
@@ -355,6 +442,43 @@ export async function fetchRelease(
 	}
 
 	return releaseFromResponse(parsed.data);
+}
+
+async function fetchReleaseByExplicitTag(
+	octokit: Octokit,
+	owner: string,
+	repo: string,
+	tag: string,
+	canUseLegacyPrefix: boolean
+): ReturnType<Octokit['rest']['repos']['getReleaseByTag']> {
+	try {
+		return await octokit.rest.repos.getReleaseByTag({ owner, repo, tag });
+	} catch (error) {
+		const prefixedTag = legacyPrefixedTag(tag);
+
+		if (
+			!canUseLegacyPrefix ||
+			prefixedTag === undefined ||
+			!(error instanceof RequestError) ||
+			error.status !== notFoundStatus
+		) {
+			throw error;
+		}
+
+		return octokit.rest.repos.getReleaseByTag({
+			owner,
+			repo,
+			tag: prefixedTag
+		});
+	}
+}
+
+function legacyPrefixedTag(tag: string): string | undefined {
+	if (tag.startsWith('v') || semverValid(tag) === null) {
+		return undefined;
+	}
+
+	return `v${tag}`;
 }
 
 // `GET /releases/latest` only returns the latest stable release, so the newest

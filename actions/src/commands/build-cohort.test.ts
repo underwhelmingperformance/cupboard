@@ -474,6 +474,8 @@ class ControlledNixProcess implements CapturedNixProcess {
 		| ((status: number | null, signal: NodeJS.Signals | undefined) => void)
 		| undefined;
 
+	readonly signals: NodeJS.Signals[] = [];
+
 	onceError(listener: (error: Error) => void): void {
 		this.errorListener = listener;
 	}
@@ -489,6 +491,12 @@ class ControlledNixProcess implements CapturedNixProcess {
 
 	onStdout(_listener: (chunk: string) => void): void {
 		return;
+	}
+
+	kill(signal: NodeJS.Signals): boolean {
+		this.signals.push(signal);
+
+		return true;
 	}
 
 	emitError(error: Error): void {
@@ -533,9 +541,11 @@ describe('runNixCopy', () => {
 
 		expect({
 			settled: settled.mock.calls,
+			signals: process.signals,
 			start: start.mock.calls
 		}).toStrictEqual({
 			settled: [],
+			signals: ['SIGTERM'],
 			start: [
 				[
 					[
@@ -614,7 +624,10 @@ describe('captured Nix subprocesses', () => {
 				process.emitError(new Error('The operation was aborted'));
 				await new Promise<void>((resolve) => setImmediate(resolve));
 
-				expect(settled.mock.calls).toStrictEqual([]);
+				expect({
+					settled: settled.mock.calls,
+					signals: process.signals
+				}).toStrictEqual({ settled: [], signals: ['SIGTERM'] });
 
 				process.emitClose(0);
 

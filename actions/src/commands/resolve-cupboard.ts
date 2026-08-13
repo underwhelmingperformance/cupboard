@@ -39,7 +39,7 @@ export function registerResolveCupboardCommand(
 		)
 		.option(
 			'--cupboard-version <version>',
-			"explicit release selector: 'latest' or an exact release version"
+			"explicit release selector: 'latest' or an exact published tag"
 		)
 		.requiredOption(
 			'--workflow-repository <repository>',

@@ -6,7 +6,11 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 import type { Reporter } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
-import { InvalidInputError, MissingInputError } from '../errors.ts';
+import {
+	AttestationChecksumsMismatchError,
+	InvalidInputError,
+	MissingInputError
+} from '../errors.ts';
 
 import {
 	attestAttachAction,
@@ -281,9 +285,11 @@ describe('attestAttachArguments', () => {
 describe('attestAttachAction', () => {
 	it('shells the installed cupboard with the receipt paths and bundle', async () => {
 		const fixture = await writeReceipt([appPath, runtimePath]);
+		const controller = new AbortController();
 		const invocations: {
 			binaryPath: string;
 			arguments: readonly string[];
+			dependencies: { readonly signal?: AbortSignal } | undefined;
 		}[] = [];
 
 		await attestAttachAction(
@@ -295,11 +301,16 @@ describe('attestAttachAction', () => {
 			{},
 			recordingReporter([]),
 			{
-				runCupboard: (binaryPath, arguments_) => {
-					invocations.push({ binaryPath, arguments: arguments_ });
+				runCupboard: (binaryPath, arguments_, _environment, dependencies) => {
+					invocations.push({
+						binaryPath,
+						arguments: arguments_,
+						dependencies
+					});
 
 					return Promise.resolve(attachedResults([appPath, runtimePath]));
-				}
+				},
+				signal: controller.signal
 			}
 		);
 
@@ -320,12 +331,13 @@ describe('attestAttachAction', () => {
 					'secret',
 					'--attestation',
 					'/tmp/bundle.sigstore.json'
-				]
+				],
+				dependencies: { signal: controller.signal }
 			}
 		]);
 	});
 
-	it('passes only the receipt subjects that were actually signed', async () => {
+	it('passes only the receipt subjects eligible to be signed', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attach-'));
 		const receiptFile = path.join(directory, 'receipt.json');
 		const checksumsFile = path.join(directory, 'subjects.txt');
@@ -385,6 +397,56 @@ describe('attestAttachAction', () => {
 				'/tmp/bundle.sigstore.json'
 			]
 		]);
+	});
+
+	it('rejects checksums that omit an eligible receipt subject', async () => {
+		const fixture = await writeReceipt([appPath, runtimePath]);
+		await writeFile(
+			fixture.checksumsFile,
+			`${'1'.repeat(64)}  ${path.basename(appPath)}\n`
+		);
+
+		await expect(
+			attestAttachAction(options(fixture), {}, recordingReporter([]), {
+				runCupboard: () => {
+					throw new Error('must not attach a partial subject set');
+				}
+			})
+		).rejects.toStrictEqual(
+			expect.objectContaining({
+				name: 'AttestationChecksumsMismatchError',
+				storePaths: [runtimePath]
+			})
+		);
+	});
+
+	it('rejects a changed checksum for an eligible receipt subject', async () => {
+		const fixture = await writeReceipt([appPath]);
+		await writeFile(
+			fixture.checksumsFile,
+			`${'f'.repeat(64)}  ${path.basename(appPath)}\n`
+		);
+
+		await expect(
+			attestAttachAction(options(fixture), {}, recordingReporter([]))
+		).rejects.toBeInstanceOf(AttestationChecksumsMismatchError);
+	});
+
+	it('rejects checksums that name subjects outside the eligible receipt', async () => {
+		const fixture = await writeReceipt([appPath]);
+		await writeFile(
+			fixture.checksumsFile,
+			`${'1'.repeat(64)}  ${path.basename(appPath)}\n${'2'.repeat(64)}  unrelated-output\n`
+		);
+
+		await expect(
+			attestAttachAction(options(fixture), {}, recordingReporter([]))
+		).rejects.toStrictEqual(
+			expect.objectContaining({
+				name: 'AttestationChecksumsMismatchError',
+				unexpectedNames: ['unrelated-output']
+			})
+		);
 	});
 
 	it('warns and runs nothing for a receipt with no paths', async () => {

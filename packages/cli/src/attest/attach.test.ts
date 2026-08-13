@@ -608,6 +608,31 @@ describe('runAttestAttach', () => {
 		).rejects.toBeInstanceOf(AttestationSubjectNotPushedError);
 	});
 
+	it('refuses a bundle that mixes pushed and unrelated subjects', async () => {
+		const bundle = sigstoreBundleBytes(bundleSubject(appPath, appHash), {
+			name: 'unrelated-output',
+			digest: narDigestHex(runtimeHash)
+		});
+
+		await expect(
+			runAttestAttach([appPath], reporter([]), {
+				client: recordedClient(
+					{ negotiations: [], uploads: [], attached: [] },
+					{ decide: () => 'skip' }
+				),
+				pathInfos: [pathInfo(appPath, appHash)],
+				attestations: [{ path: 'mixed.sigstore.json' }],
+				readAttestationBundle: () => Promise.resolve(bundle)
+			})
+		).rejects.toStrictEqual(
+			expect.objectContaining({
+				name: 'AttestationSubjectNotPushedError',
+				path: 'mixed.sigstore.json',
+				subjectDigests: [narDigestHex(runtimeHash)]
+			})
+		);
+	});
+
 	it('records a path the cache does not serve as unservable and attaches the rest', async () => {
 		const record: RecordedClient = {
 			negotiations: [],

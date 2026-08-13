@@ -17,6 +17,7 @@ import { runCupboard as defaultRunCupboard } from '../cupboard-run.ts';
 import {
 	AttestationAttachmentIncompleteError,
 	AttestationAttachmentResultError,
+	AttestationChecksumsMismatchError,
 	InvalidInputError,
 	MissingInputError
 } from '../errors.ts';
@@ -56,11 +57,13 @@ export interface AttestAttachInputs {
 
 export interface AttestAttachDependencies {
 	readonly runCupboard?: typeof defaultRunCupboard;
+	readonly signal?: AbortSignal;
 }
 
 export function registerAttestAttachCommand(
 	program: Command,
-	environment: Environment = env
+	environment: Environment = env,
+	signal?: AbortSignal
 ): void {
 	program
 		.command('attest-attach')
@@ -91,7 +94,9 @@ export function registerAttestAttachCommand(
 			[]
 		)
 		.action((options: AttestAttachOptions) =>
-			attestAttachAction(options, environment)
+			attestAttachAction(options, environment, undefined, {
+				...(signal !== undefined && { signal })
+			})
 		);
 }
 
@@ -242,6 +247,8 @@ export async function attestAttachAction(
 	reporter: Reporter = createGithubReporter(),
 	dependencies: AttestAttachDependencies = {}
 ): Promise<void> {
+	dependencies.signal?.throwIfAborted();
+
 	const inputs = resolveAttestAttachInputs(options);
 	const receipt = buildReceiptSchema.parse(
 		JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
@@ -249,11 +256,31 @@ export async function attestAttachAction(
 	const checksums = parseChecksums(
 		await readFile(inputs.checksumsFile, 'utf8')
 	);
-	const subjectPaths = receipt.subjects.flatMap((subject) =>
-		checksums.get(path.basename(subject.storePath)) === subject.narHash
-			? [subject.storePath]
-			: []
+	const eligibleSubjects =
+		receipt.version === 3
+			? receipt.subjects.filter(
+					(subject) => subject.verification !== 'unverified'
+				)
+			: receipt.subjects;
+	const mismatched = eligibleSubjects
+		.filter(
+			(subject) =>
+				checksums.get(path.basename(subject.storePath)) !== subject.narHash
+		)
+		.map((subject) => subject.storePath);
+	const eligibleNames = new Set(
+		eligibleSubjects.map((subject) => path.basename(subject.storePath))
 	);
+	const unexpectedNames = checksums
+		.keys()
+		.filter((name) => !eligibleNames.has(name))
+		.toArray();
+
+	if (mismatched.length > 0 || unexpectedNames.length > 0) {
+		throw new AttestationChecksumsMismatchError(mismatched, unexpectedNames);
+	}
+
+	const subjectPaths = eligibleSubjects.map((subject) => subject.storePath);
 
 	if (subjectPaths.length === 0) {
 		reporter.warn(
@@ -267,7 +294,8 @@ export async function attestAttachAction(
 	const results = await runCupboard(
 		inputs.cupboardPath,
 		attestAttachArguments(inputs, subjectPaths),
-		environment
+		environment,
+		dependencies.signal === undefined ? {} : { signal: dependencies.signal }
 	);
 	requireSettledAttachment(results, subjectPaths);
 }
