@@ -42,7 +42,6 @@ jobs:
       cache: ${{ github.event.release.tag_name }}
       root: github:${{ github.repository }}/${{ github.event.release.tag_name }}
       cupboard-version: ${{ github.event.release.tag_name }}
-      cupboard-source-commit: ${{ github.sha }}
 
   flakehub:
     name: publish (flakehub)

@@ -72,11 +72,10 @@ on:
         default: ''
         type: string
       cupboard-version:
-        description:
-          cupboard release used by the actions. Pass the release tag the caller
-          pins this workflow with; the workflow code already comes from that
-          tag, so one value keeps the code and the CLI it drives from skewing.
-        required: true
+        description: >-
+          cupboard release tag to install, or 'latest'. Empty uses a release for
+          the called workflow revision when one exists, otherwise source.
+        required: false
         type: string
       maximise-space:
         description:
@@ -223,22 +222,41 @@ on:
 permissions: {}
 
 jobs:
-  # Resolves the effective cache, root prefix, TTL and reuse view once, so a
-  # preset caller and an explicit caller feed every later job identically. No
-  # secret and no caller-controlled code reaches this job: it evaluates only
-  # workflow expressions over the event context.
+  # Resolves cupboard and the effective cache, root prefix, TTL and reuse view
+  # once, so every later job consumes the same validated values. The only code
+  # executed here is this reusable workflow's own immutable checkout.
   configure:
     name: Resolve the publication inputs
     runs-on: ${{ inputs.plan-runner }}
     # A hung leg must not burn the 360-minute default.
     timeout-minutes: 10
-    permissions: {}
+    permissions:
+      contents: read # resolve cupboard releases and check out workflow code
     outputs:
+      cupboard: ${{ steps.resolve-cupboard.outputs.cupboard }}
       cache: ${{ steps.resolve.outputs.cache }}
       root-prefix: ${{ steps.resolve.outputs.root-prefix }}
       ttl: ${{ steps.resolve.outputs.ttl }}
       reuse-view: ${{ steps.resolve.outputs.reuse-view }}
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .cupboard
+          persist-credentials: false
+
+      - uses: ./.cupboard/actions/resolve-cupboard
+        id: resolve-cupboard
+        with:
+          cupboard-version: ${{ inputs.cupboard-version }}
+          workflow-repository: ${{ job.workflow_repository }}
+          workflow-ref: ${{ job.workflow_ref }}
+          workflow-sha: ${{ job.workflow_sha }}
+          github-token: ${{ github.token }}
+          github-api-url: ${{ github.api_url }}
+          github-graphql-url: ${{ github.graphql_url }}
+
       - name: Resolve inputs
         id: resolve
         env:
@@ -382,6 +400,7 @@ jobs:
     # A hung leg must not burn the 360-minute default.
     timeout-minutes: 30
     permissions:
+      attestations: read # verify a selected cupboard release
       contents: read # check out the flake source
       id-token: write # OIDC token for the retention-root ensure calls
     outputs:
@@ -434,9 +453,7 @@ jobs:
         with:
           cache-url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
-          cupboard-version: ${{ inputs.cupboard-version }}
-          expected-source-commit: ${{ job.workflow_sha }}
-          release-repository: underwhelmingperformance/cupboard
+          cupboard: ${{ needs.configure.outputs.cupboard }}
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
@@ -545,9 +562,7 @@ jobs:
         with:
           cache-url: ${{ inputs.url }}
           cache: ${{ needs.configure.outputs.cache }}
-          cupboard-version: ${{ inputs.cupboard-version }}
-          expected-source-commit: ${{ job.workflow_sha }}
-          release-repository: underwhelmingperformance/cupboard
+          cupboard: ${{ needs.configure.outputs.cupboard }}
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}

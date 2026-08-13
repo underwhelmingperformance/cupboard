@@ -17,9 +17,10 @@ The deeper material lives in its own documents and is linked where it matters:
 - [docs/releases.md](./releases.md): how the binaries themselves are built and
   attested.
 
-## Version Selection
+## Version selection
 
-Both actions accept `cupboard-version`. The default is `latest`.
+The standalone setup and push actions accept `cupboard-version`. The default is
+`latest`.
 
 - `latest` resolves to the newest published release of any kind, prereleases
   included, because `include-prereleases` defaults to `true`. With
@@ -29,21 +30,22 @@ Both actions accept `cupboard-version`. The default is `latest`.
 - `1.2.3` is normalised to `v1.2.3` and resolved by tag.
 - `v1.2.3` is used as-is and resolved by tag.
 
-The flake reusable workflow requires the caller to pass an exact release tag.
-The compact workflow keeps an immutable release and source-commit default so an
-existing caller of its moving `@main` reference does not break when the workflow
-gains release verification. New callers should still pass an exact tag. Pin both
-reusable workflows to a full commit SHA and retain the release as a comment on
-the `uses` line. Release API calls use `github-token`, which defaults to the
-workflow `github.token`. Public unauthenticated downloads work, but the token
-avoids unnecessary rate-limit failures.
+The reusable workflows make `cupboard-version` optional. When it is omitted,
+they resolve the called workflow's full commit SHA to a published release. Any
+published tag qualifies; if no release exists for that commit, the workflow
+builds cupboard from the same immutable checkout. If several releases point to
+one commit, an exact tag-pinned `uses` reference selects that tag; a SHA or
+branch reference is ambiguous and the workflow asks for an explicit version.
 
-`cupboard-publish.yml` also accepts `cupboard-source-commit`. Its compatibility
-default names the source of its default release. An explicitly empty value
-verifies the release against the reusable workflow's resolved commit. Set it to
-another full commit only when the workflow reference must remain moving while
-the CLI coordinate stays pinned; the version and source commit must still name
-one attested release.
+Pass an exact tag or `latest` only when deliberately selecting a released CLI
+independently of the workflow code. Once a release is selected, checksum,
+attestation, tag and source-commit verification are fail-closed; a broken
+release never falls back to source.
+
+Pin both reusable workflows to a full commit SHA and retain the release as a
+comment on the `uses` line. The comment is for update tools and human review;
+the workflow resolves the SHA itself. Release API calls use the workflow token,
+which also avoids unnecessary rate-limit failures for public repositories.
 
 [github-latest-release]:
   https://docs.github.com/en/rest/releases/releases#get-the-latest-release
@@ -98,8 +100,8 @@ cupboard github setup "$tenant" --repo "$repo" \
 The `--workflow-ref` pins the trust rules to the exact commit SHA in the
 caller's `uses` line. Setup verifies through GitHub that the workflow file
 exists at that immutable commit, so the workflow code and the claims the tenant
-trusts name the same revision. `cupboard-version` separately names the matching
-release binary, whose provenance check ties it back to that source commit.
+trusts name the same revision. When that commit has a release, the workflow
+installs its verified binary; otherwise it builds the checked-out revision.
 
 Re-running converges state that already matches. A different grace policy or
 reuse view is reported as drift and never replaced. Trust-rule differences are
@@ -179,7 +181,6 @@ jobs:
       targets: .#cupboardOutputs
       preset: pull-request-and-branch
       reuse-view: pull-requests
-      cupboard-version: vX.Y.Z
 ```
 
 The preset derives the cache, root prefix and TTL from the triggering event: a
@@ -193,9 +194,9 @@ is refused in the configure job before planning or building. Under the preset,
 builds while each PR stays destination-only. A repository whose caches or roots
 follow a different layout passes `cache`, `root-prefix` and `ttl` explicitly
 instead; the preset and those inputs are mutually exclusive, so the two never
-mix. The workflow reference and the `cupboard-version` input are pinned to one
-release, so the action code and the CLI it invokes upgrade together and a
-cupboard change never silently alters a repository's CI.
+mix. The workflow reference is pinned to one release commit, so the action code
+and the CLI it invokes upgrade together and a cupboard change never silently
+alters a repository's CI.
 [Move to a new cupboard release](#move-to-a-new-cupboard-release) describes the
 overlap needed to change that tag without interrupting publishing.
 
@@ -316,8 +317,12 @@ steps:
       trusted-public-key: cupboard-1:...
 ```
 
-The action outputs `cupboard-path`, `cupboard-version`, and, when Nix config is
-generated, `nix-config-file`.
+The action outputs `cupboard-path`, its canonical `cupboard` coordinate, and,
+when Nix config is generated, `nix-config-file`.
+
+Reusable workflows pass a canonical release-or-source JSON coordinate through
+the `cupboard` input. Direct action callers normally leave that internal
+coordinate unset and select a released binary with `cupboard-version` instead.
 
 Generated Nix config is written under `$RUNNER_TEMP` and exported through
 `NIX_CONFIG`. The action does not mutate `/etc/nix/nix.conf`. If
@@ -359,7 +364,8 @@ steps:
         ./result
 ```
 
-The action outputs `cupboard-path` and `cupboard-version`.
+The action outputs `cupboard-path`. Pass that path to another cupboard action to
+reuse the already-installed executable.
 
 `paths` is newline-delimited. Use block scalar YAML for paths so spaces and
 other shell-sensitive characters are not reinterpreted. The helper validates and
@@ -416,6 +422,7 @@ steps:
     with:
       url: https://cupboard.example.workers.dev/t/<slug>
       paths: ${{ steps.build.outputs.paths }}
+      cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
   - id: attest
     uses: owner/repo/actions/attest@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
     with:
@@ -483,6 +490,7 @@ steps:
     with:
       url: https://cupboard.example.workers.dev/t/<slug>
       paths: ${{ steps.build.outputs.paths }}
+      cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
   - id: attest
     uses: owner/repo/actions/attest@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
     with:
@@ -526,8 +534,6 @@ jobs:
       cache: pr-${{ github.event.pull_request.number }}
       root: github:acme/app/pr-${{ github.event.pull_request.number }}
       ttl: 14d
-      cupboard-version: vX.Y.Z
-      cupboard-source-commit: 0123456789abcdef0123456789abcdef01234567
 ```
 
 `cache`, `root`, and `ttl` say where the paths land and how long they are kept.
@@ -544,19 +550,20 @@ each stay retained under their own root.
 
 The remaining inputs: `installable` picks what to build (the default is `.`, the
 flake at the repository root), `attest` turns provenance signing off for tenants
-that do not accept it, `runs-on` picks the runner, and `trusted-public-key` and
-`cupboard-version` and `cupboard-source-commit` pass through to `actions/setup`.
-When `attest` is enabled, the workflow requires provenance for every final
-output. A cache hit therefore rebuilds the final derivation locally before the
-workflow signs it, while dependencies may still substitute. This makes a rerun
-after a failed signing or attachment step retry the missing provenance instead
-of succeeding with an empty receipt.
+that do not accept it, `runs-on` picks the runner, and `trusted-public-key`
+configures the substituter. `cupboard-version` is an optional explicit release
+override; normally the workflow derives cupboard from its own pin. When `attest`
+is enabled, the workflow requires provenance for every final output. A cache hit
+therefore rebuilds the final derivation locally before the workflow signs it,
+while dependencies may still substitute. This makes a rerun after a failed
+signing or attachment step retry the missing provenance instead of succeeding
+with an empty receipt.
 
 Pin this workflow to a full release commit SHA. It fetches its local action code
 from that same commit, and a trust rule that pins its `job_workflow_ref` names
-the same SHA. Keep the release version as the `uses` comment, pass that tag as
-`cupboard-version`, and pass the same full SHA as `cupboard-source-commit`, so
-the workflow code and installed CLI move together.
+the same SHA. Keep the release version as the `uses` comment. With no explicit
+`cupboard-version`, the workflow finds the release for that SHA and verifies its
+provenance before installation.
 
 ### Publishing a target manifest
 
@@ -647,7 +654,6 @@ jobs:
       cache: pr-${{ github.event.pull_request.number }}
       root-prefix: github:acme/app/pr-${{ github.event.pull_request.number }}
       ttl: 14d
-      cupboard-version: vX.Y.Z
       nix-config: .#nix.substituterConfig
       builders: ssh://builds.example.com x86_64-linux,aarch64-linux - 100 1
       builder-known-hosts: |
@@ -740,9 +746,9 @@ tenant reuse view when the destination is missing them; see
 [docs/reuse-views.md](./reuse-views.md). Empty, the default, keeps planning and
 substitution destination-only.
 
-`cupboard-version` pins the CLI release the jobs install, and `maximise-space`
-(default `false`) reclaims runner disk space before building by deleting
-preinstalled software from the runner image; opt in only on ephemeral
+`cupboard-version` optionally overrides the CLI derived from the workflow pin.
+`maximise-space` (default `false`) reclaims runner disk space before building by
+deleting preinstalled software from the runner image; opt in only on ephemeral
 GitHub-hosted runners, since the reclamation is destructive and permanent on a
 self-hosted machine.
 
@@ -802,7 +808,6 @@ jobs:
       url: https://cupboard.example.workers.dev/t/acme
       targets: .#cupboardOutputs
       root-prefix: github:acme/app/main
-      cupboard-version: vX.Y.Z
       store: ssh-ng://nix@store.example.com
       store-known-hosts:
         store.example.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...
@@ -878,8 +883,7 @@ Routine changes to a working setup, and where each one's state lives.
 ### Move to a new cupboard release
 
 Resolve the release tag to its full commit SHA, then establish trust for that
-exact revision before updating the caller's `uses:` reference and
-`cupboard-version` input:
+exact revision before updating the caller's `uses:` reference:
 
 ```bash
 new_cupboard_version=vA.B.C
@@ -907,10 +911,10 @@ workflow. Leave superseded rules unselected while runs using the old reference
 can still be active. Check then proves that a run carrying the new reference can
 obtain every grant it needs while the old caller still works.
 
-Update the caller workflow's `uses:` reference to `$new_cupboard_sha`, retain
-`# $new_cupboard_version` on that line, and set `cupboard-version` to the
-release tag. Once runs using the old reference have finished, run setup again
-and select the superseded rules for removal:
+Update the caller workflow's `uses:` reference to `$new_cupboard_sha` and retain
+`# $new_cupboard_version` on that line. The workflow resolves the SHA to that
+release automatically. Once runs using the old reference have finished, run
+setup again and select the superseded rules for removal:
 
 ```bash
 cupboard github setup "$tenant" --repo "$repo" \
