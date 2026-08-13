@@ -58,8 +58,13 @@ export class FakeSubstituter {
 
 	private listen(): Promise<void> {
 		return new Promise((resolve, reject) => {
-			this.server.once('error', reject);
+			const onError = (error: Error): void => {
+				reject(error);
+			};
+
+			this.server.once('error', onError);
 			this.server.listen(0, '127.0.0.1', () => {
+				this.server.removeListener('error', onError);
 				const address = this.server.address();
 
 				if (address === null || typeof address === 'string') {

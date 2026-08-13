@@ -109,8 +109,13 @@ function base64url(value: string): string {
 
 function listen(server: Server): Promise<string> {
 	return new Promise((resolve, reject) => {
-		server.once('error', reject);
+		const onError = (error: Error): void => {
+			reject(error);
+		};
+
+		server.once('error', onError);
 		server.listen(0, '127.0.0.1', () => {
+			server.removeListener('error', onError);
 			const address = server.address() as AddressInfo;
 
 			resolve(`http://127.0.0.1:${String(address.port)}`);

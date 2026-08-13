@@ -1,4 +1,9 @@
-import { execFile, spawn, spawnSync } from 'node:child_process';
+import {
+	type ChildProcess,
+	execFile,
+	spawn,
+	spawnSync
+} from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
@@ -48,6 +53,49 @@ const helperSource = path.resolve(
 	'../../packages/cli/hook-helper/cupboard-hook-relay.c'
 );
 const fakeDrvPath = '/nix/store/8123456789abcdfghijklmnpqrsvwxyz-e2e.drv';
+
+function waitForChildClose(child: ChildProcess): Promise<number | null> {
+	return new Promise((resolve, reject) => {
+		const onError = (error: Error): void => {
+			child.removeListener('close', onClose);
+			reject(error);
+		};
+		const onClose = (status: number | null): void => {
+			child.removeListener('error', onError);
+			resolve(status);
+		};
+
+		child.once('error', onError);
+		child.once('close', onClose);
+	});
+}
+
+function listenOnSocket(server: Server, socketPath: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const onError = (error: Error): void => {
+			reject(error);
+		};
+
+		server.once('error', onError);
+		server.listen(socketPath, () => {
+			server.removeListener('error', onError);
+			resolve();
+		});
+	});
+}
+
+function closeServer(server: Server): Promise<void> {
+	return new Promise((resolve, reject) => {
+		server.close((error) => {
+			if (error !== undefined) {
+				reject(error);
+				return;
+			}
+
+			resolve();
+		});
+	});
+}
 
 // A child that records the runtime directory and socket modes while the run
 // is live, the only moment they exist.
@@ -388,13 +436,10 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 
 		it('exits promptly and zero when no listener is present', async () => {
 			const started = performance.now();
-			const helper = spawn(helperPath, [path.join(workspace, 'absent.sock')]);
-			helper.stdin.end('{"version":1}\n');
-			const status = await new Promise<number | null>((resolve) => {
-				helper.once('exit', (code) => {
-					resolve(code);
-				});
+			const helper = spawn(helperPath, [path.join(workspace, 'absent.sock')], {
+				stdio: 'ignore'
 			});
+			const status = await waitForChildClose(helper);
 			const elapsedMs = performance.now() - started;
 
 			expect({ status, prompt: elapsedMs < 2000 }).toStrictEqual({
@@ -409,19 +454,13 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 				// Accept and stay silent: the helper's standard input never
 				// closes either, so only its inactivity timeout can end the run.
 			});
-			await new Promise<void>((resolve) => {
-				listener.listen(socketPath, resolve);
-			});
+			await listenOnSocket(listener, socketPath);
 
 			try {
 				const started = performance.now();
 				const helper = spawn(helperPath, [socketPath]);
 				// Standard input stays open and quiet.
-				const status = await new Promise<number | null>((resolve) => {
-					helper.once('exit', (code) => {
-						resolve(code);
-					});
-				});
+				const status = await waitForChildClose(helper);
 				const elapsedMs = performance.now() - started;
 
 				expect({
@@ -434,25 +473,25 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 					releasedPromptly: true
 				});
 			} finally {
-				await new Promise<void>((resolve) => {
-					listener.close(() => {
-						resolve();
-					});
-				});
+				await closeServer(listener);
 			}
 		});
 
 		it('completes the hook within its budget through the rendered script', async () => {
 			const socketPath = path.join(workspace, 'budget.sock');
-			const lines: string[] = [];
+			const event = Promise.withResolvers<string>();
 			const listener: Server = createServer((connection) => {
+				const chunks: Buffer[] = [];
+
 				connection.on('data', (chunk: Buffer) => {
-					lines.push(chunk.toString('utf8'));
+					chunks.push(chunk);
+				});
+				connection.once('error', event.reject);
+				connection.once('close', () => {
+					event.resolve(Buffer.concat(chunks).toString('utf8'));
 				});
 			});
-			await new Promise<void>((resolve) => {
-				listener.listen(socketPath, resolve);
-			});
+			await listenOnSocket(listener, socketPath);
 			const scriptPath = path.join(workspace, 'budget-hook.sh');
 			await writeFile(
 				scriptPath,
@@ -466,16 +505,16 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 
 			try {
 				const started = performance.now();
-				const { stdout } = await run('/bin/sh', [
-					'-c',
-					fireHook(scriptPath, [outA])
+				const [{ stdout }, eventLine] = await Promise.all([
+					run('/bin/sh', ['-c', fireHook(scriptPath, [outA])]),
+					event.promise
 				]);
 				const elapsedMs = performance.now() - started;
 
 				expect({
 					stdout,
 					withinBudget: elapsedMs < 2000,
-					event: JSON.parse(lines.join('')) as unknown
+					event: JSON.parse(eventLine) as unknown
 				}).toStrictEqual({
 					stdout: '',
 					withinBudget: true,
@@ -487,11 +526,7 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 					}
 				});
 			} finally {
-				await new Promise<void>((resolve) => {
-					listener.close(() => {
-						resolve();
-					});
-				});
+				await closeServer(listener);
 			}
 		});
 

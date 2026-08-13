@@ -41,8 +41,9 @@
 	"scripts": {
 		"bench:push": "pnpm --filter @cupboard/server build-info && vitest bench --run --config tests/perf/vitest.config.ts",
 		"build:binary": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/build-cupboard-binary.ts",
-		"check": "pnpm run '/^check:.*/'",
+		"check": "pnpm run --sequential '/^check:.*/'",
 		"check:deps": "syncpack lint",
+		"check:e2e": "pnpm --filter @cupboard/server build-info && vitest run --config tests/e2e/vitest.config.ts",
 		"check:flake-deps": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/flake-dependencies.ts check",
 		"check:format": "prettier --check .",
 		"check:knip": "knip --include dependencies,unlisted --no-progress",
@@ -64,7 +65,6 @@
 		"fixtures:generate": "node tests/fixtures/generate.ts",
 		"measure:realisation": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/measure-realisation/main.ts",
 		"test:actions": "vitest run --config actions/vitest.config.ts",
-		"test:e2e": "pnpm --filter @cupboard/server build-info && vitest run --config tests/e2e/vitest.config.ts",
 		"test:scripts": "vitest run scripts --exclude '**/.claude/**'",
 		"update:flake-deps": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/flake-dependencies.ts update"
 	},
