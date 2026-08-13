@@ -2,7 +2,10 @@ import process from 'node:process';
 import type { DatabaseSync } from 'node:sqlite';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
-import { storePathSchema } from '@cupboard/nix-store/scalars';
+import {
+	storeDirectorySchema,
+	storePathSchema
+} from '@cupboard/nix-store/scalars';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -238,7 +241,48 @@ describe('NixLocalStoreClient', () => {
 			{ ...infoA, storePath: divertedPath, references: [divertedPath] }
 		]);
 	});
+
+	// A derivation is one regular file in the store, so the local store reads
+	// it where it sits.
+	it('reads a derivation from the file the store directory holds', async () => {
+		const aterm = 'Derive([],[],[],"aarch64-linux","builder",[],[])';
+		const read = vi.fn(() => Promise.resolve(aterm));
+		const client = new NixLocalStoreClient(
+			() => emptyDatabase(),
+			storeDirectorySchema.parse('/nix/store'),
+			read
+		);
+
+		const contents = await client.readDerivation(deriverA);
+
+		expect({ contents, calls: read.mock.calls }).toStrictEqual({
+			contents: aterm,
+			calls: [[deriverA]]
+		});
+	});
+
+	it('refuses a derivation the store directory does not hold', async () => {
+		const client = new NixLocalStoreClient(
+			() => emptyDatabase(),
+			storeDirectorySchema.parse('/nix/store'),
+			() => Promise.reject(new Error('ENOENT'))
+		);
+
+		await expect(client.readDerivation(missingDrvPath)).rejects.toThrow(
+			NixStorePathNotFoundError
+		);
+	});
 });
+
+function emptyDatabase(): NixStoreDatabase {
+	return {
+		pathRow: () => rowsByPath.none,
+		references: () => [],
+		validPaths: () => [],
+		derivationOutputs: () => [],
+		close: vi.fn()
+	};
+}
 
 function seededDatabase(): DatabaseSync {
 	const { DatabaseSync } = process.getBuiltinModule('node:sqlite');

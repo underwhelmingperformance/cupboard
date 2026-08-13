@@ -23,6 +23,10 @@ import {
 	type InvocationRuntimePlan,
 	planInvocationRuntime
 } from './runtime-directory.ts';
+import {
+	requireVerifiableTargets,
+	type VerificationSupportOptions
+} from './verification.ts';
 
 export interface BuildPushPreflightOptions {
 	readonly config: NixStoreConfig;
@@ -37,6 +41,11 @@ export interface BuildPushPreflightOptions {
 	readonly runRoot?: RootName;
 	/** The target roots reconciliation will set, when the run declares any. */
 	readonly targetRoots?: readonly RootName[];
+	/**
+	 * The targets a constructed invocation declares, and whether it verifies
+	 * its rebuilds. A user-supplied build command declares nothing here.
+	 */
+	readonly verification?: Omit<VerificationSupportOptions, 'building'>;
 	readonly helper?: HelperResolutionOptions;
 	readonly runtime?: Omit<InvocationRuntimeOptions, 'invocationId'>;
 }
@@ -66,8 +75,10 @@ function requireGrant(
  * to hold temporary roots, a daemon that trusts this client (an untrusted
  * client's `post-build-hook` override is silently ignored), no operator hook
  * to collide with, a compiled helper in this installation, a socket path that
- * fits `sun_path`, and the root authority the run's later phases need. Each
- * refusal is a typed error; success returns the proven endpoints.
+ * fits `sun_path`, the root authority the run's later phases need, and a
+ * declared target set this machine could rebuild itself when the run verifies
+ * its rebuilds. Each refusal is a typed error; success returns the proven
+ * endpoints.
  */
 export async function preflightBuildPush(
 	options: BuildPushPreflightOptions
@@ -102,6 +113,13 @@ export async function preflightBuildPush(
 
 	for (const targetRoot of targetRoots) {
 		requireGrant(options.grants, 'root:set', options.cache, targetRoot);
+	}
+
+	if (options.verification !== undefined) {
+		await requireVerifiableTargets({
+			...options.verification,
+			building: config.building
+		});
 	}
 
 	return { daemonSocketPath: config.daemonSocketPath, helperPath, runtimePlan };

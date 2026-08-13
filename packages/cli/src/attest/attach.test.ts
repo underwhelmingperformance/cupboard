@@ -124,6 +124,9 @@ function nixStore(paths: Record<string, NixValidPathInfo>): Nix {
 				downloadSize: 0,
 				narSize: 0
 			}),
+		readDerivation: (drvPath: StorePathString): Promise<string> => {
+			throw new Error(`No derivation is modelled for ${drvPath}`);
+		},
 		narFromPath: (storePath: StorePathString): AsyncIterable<Uint8Array> => {
 			throw new Error(`No NAR stream is modelled for ${storePath}`);
 		},

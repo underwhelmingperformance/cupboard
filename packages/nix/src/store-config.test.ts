@@ -10,6 +10,7 @@ import {
 } from './nix-store.ts';
 import {
 	discoverNixStoreConfig,
+	type NixBuildSettings,
 	type NixConfigEnvironment,
 	type NixStoreConfig,
 	type NixSubstitutionSettings
@@ -19,13 +20,16 @@ interface Fixture {
 	readonly env?: Readonly<Record<string, string | undefined>>;
 	readonly files?: Readonly<Record<string, string>>;
 	readonly home?: string;
+	/** The machine the fixture discovers on, defaulting to an Apple silicon one. */
+	readonly currentSystem?: () => string | undefined;
 }
 
 function environmentFrom(fixture: Fixture): NixConfigEnvironment {
 	return {
 		env: fixture.env ?? {},
 		readFile: (filePath) => fixture.files?.[filePath],
-		homeDirectory: () => fixture.home
+		homeDirectory: () => fixture.home,
+		currentSystem: fixture.currentSystem ?? (() => 'aarch64-darwin')
 	};
 }
 
@@ -45,12 +49,22 @@ function thrownBy(fixture: Fixture): unknown {
 
 const overlongStoreDirectory = `/${'d'.repeat(storeDirectoryMaxLength)}`;
 
+// A machine whose CPU or kernel has no Nix name, so nothing reports a system.
+const unnamedMachine = new Map<string, string>();
+
 // Nix's own defaults: substitution on, a derivation's `allowSubstitutes`
 // honoured, and the one compiled-in substituter.
 const defaultSubstitution: NixSubstitutionSettings = {
 	substitute: true,
 	alwaysAllowSubstitutes: false,
 	substituters: ['https://cache.nixos.org/']
+};
+
+// Nix's own defaults for the fixture machine: Rosetta 2 adds the x86_64
+// platform, and the features are the portable three plus the darwin one.
+const defaultBuilding: NixBuildSettings = {
+	systems: ['aarch64-darwin', 'x86_64-darwin'],
+	features: ['nixos-test', 'benchmark', 'big-parallel', 'apple-virt']
 };
 
 describe('discoverNixStoreConfig', () => {
@@ -62,7 +76,8 @@ describe('discoverNixStoreConfig', () => {
 			daemonSocketPath: '/nix/var/nix/daemon-socket/socket',
 			daemonSetOptions: {},
 			daemonOverrides: {},
-			substitution: defaultSubstitution
+			substitution: defaultSubstitution,
+			building: defaultBuilding
 		});
 	});
 
@@ -138,7 +153,8 @@ describe('discoverNixStoreConfig', () => {
 			daemonSocketPath: '/srv/nix/daemon-socket/socket',
 			daemonSetOptions: {},
 			daemonOverrides: {},
-			substitution: defaultSubstitution
+			substitution: defaultSubstitution,
+			building: defaultBuilding
 		});
 	});
 
@@ -662,4 +678,128 @@ describe('discoverNixStoreConfig', () => {
 			expect(discover(fixture).substitution).toStrictEqual(expected);
 		}
 	);
+
+	it.each<{
+		readonly name: string;
+		readonly fixture: Fixture;
+		readonly expected: NixBuildSettings;
+	}>([
+		{
+			name: 'no configuration at all',
+			fixture: {},
+			expected: defaultBuilding
+		},
+		{
+			name: 'a machine Nix has no name for',
+			fixture: { currentSystem: () => unnamedMachine.get('system') },
+			expected: {
+				systems: [],
+				features: ['nixos-test', 'benchmark', 'big-parallel']
+			}
+		},
+		{
+			name: 'an assigned system, which takes its own defaults',
+			fixture: { files: { '/etc/nix/nix.conf': 'system = x86_64-linux\n' } },
+			expected: {
+				systems: ['x86_64-linux', 'i686-linux'],
+				features: [
+					'nixos-test',
+					'benchmark',
+					'big-parallel',
+					'kvm',
+					'uid-range'
+				]
+			}
+		},
+		{
+			name: 'extra platforms replacing the computed ones',
+			fixture: {
+				files: {
+					'/etc/nix/nix.conf': 'extra-platforms = aarch64-linux i686-linux\n'
+				}
+			},
+			expected: {
+				...defaultBuilding,
+				systems: ['aarch64-darwin', 'aarch64-linux', 'i686-linux']
+			}
+		},
+		{
+			name: 'an extra-platforms append over the computed ones',
+			fixture: {
+				files: {
+					'/etc/nix/nix.conf': 'extra-extra-platforms = aarch64-linux\n'
+				}
+			},
+			expected: {
+				...defaultBuilding,
+				systems: ['aarch64-darwin', 'x86_64-darwin', 'aarch64-linux']
+			}
+		},
+		{
+			name: 'system features replacing the computed ones',
+			fixture: {
+				files: { '/etc/nix/nix.conf': 'system-features = kvm big-parallel\n' }
+			},
+			expected: { ...defaultBuilding, features: ['kvm', 'big-parallel'] }
+		},
+		{
+			name: 'a system-features append over the computed ones',
+			fixture: {
+				files: {
+					'/etc/nix/nix.conf': 'extra-system-features = gccarch-x86-64-v3\n'
+				}
+			},
+			expected: {
+				...defaultBuilding,
+				features: [
+					'nixos-test',
+					'benchmark',
+					'big-parallel',
+					'apple-virt',
+					'gccarch-x86-64-v3'
+				]
+			}
+		},
+		{
+			name: 'an assignment discarding the appends ahead of it',
+			fixture: {
+				files: {
+					'/etc/nix/nix.conf':
+						'extra-system-features = discarded\nsystem-features = kvm\n'
+				}
+			},
+			expected: { ...defaultBuilding, features: ['kvm'] }
+		},
+		{
+			name: 'configured remote builders',
+			fixture: {
+				files: {
+					'/etc/nix/nix.conf':
+						'builders = ssh://builds.example x86_64-linux - 8\n'
+				}
+			},
+			expected: {
+				...defaultBuilding,
+				builders: 'ssh://builds.example x86_64-linux - 8'
+			}
+		},
+		{
+			name: 'an empty builders setting',
+			fixture: { files: { '/etc/nix/nix.conf': 'builders =\n' } },
+			expected: defaultBuilding
+		},
+		{
+			name: 'a user file overriding the system file',
+			fixture: {
+				home: '/home/u',
+				files: {
+					'/etc/nix/nix.conf': 'builders = ssh://system.example\n',
+					'/home/u/.config/nix/nix.conf': 'builders = ssh://user.example\n'
+				}
+			},
+			expected: { ...defaultBuilding, builders: 'ssh://user.example' }
+		}
+	])('resolves the build settings from $name', ({ fixture, expected }) => {
+		expect(discover(fixture).building).toStrictEqual(expected);
+	});
 });

@@ -415,6 +415,14 @@ export function registerBuildPushCommand(
 									}),
 									...(targetRoot !== undefined && {
 										targetRoots: [targetRoot]
+									}),
+									...(invocation.kind === 'constructed' && {
+										verification: {
+											verifyRebuilds: invocation.build.verifyRebuilds === true,
+											installables: invocation.build.installables,
+											requirements: (drvPath: string) =>
+												nix.derivationBuildRequirements(drvPath)
+										}
 									})
 								}),
 							resolveClosure: (paths) => nix.resolveClosure(paths)

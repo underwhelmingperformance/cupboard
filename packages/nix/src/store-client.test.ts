@@ -32,7 +32,8 @@ const baseConfig: NixStoreConfig = {
 		substitute: true,
 		alwaysAllowSubstitutes: false,
 		substituters: ['https://cache.nixos.org/']
-	}
+	},
+	building: { systems: ['x86_64-linux'], features: [] }
 };
 
 interface Probes {
@@ -57,6 +58,7 @@ function environment(env: Record<string, string>): StoreClientEnvironment {
 		env,
 		readFile: (filePath) => noFiles.get(filePath),
 		homeDirectory: () => noFiles.get('home'),
+		currentSystem: () => 'x86_64-linux',
 		canWriteStateDirectory: () => false,
 		socketExists: () => true
 	};
@@ -69,7 +71,8 @@ describe('resolveStoreBackend', () => {
 	};
 	const local: StoreBackend = {
 		backend: 'local',
-		stateDirectory: '/nix/var/nix'
+		stateDirectory: '/nix/var/nix',
+		storeDirectory: storeDirectorySchema.parse('/nix/store')
 	};
 
 	it.each([
@@ -166,6 +169,7 @@ function daemonEnvironment(probes: Probes): StoreClientEnvironment {
 		env: {},
 		readFile: (filePath) => noFiles.get(filePath),
 		homeDirectory: () => noFiles.get('home'),
+		currentSystem: () => 'x86_64-linux',
 		canWriteStateDirectory: () => probes.canWrite ?? false,
 		socketExists: () => probes.socket ?? false
 	};

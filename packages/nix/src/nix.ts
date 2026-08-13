@@ -1,13 +1,15 @@
 import { realpathSync } from 'node:fs';
 
-import { canSubstituteDerivation } from '@cupboard/nix-store/derivation';
+import {
+	Derivation,
+	type DerivationBuildRequirements
+} from '@cupboard/nix-store/derivation';
 import {
 	type StoreDirectory,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 
-import { narRegularFileContents } from './nar-file.ts';
 import { parseSshNgStoreUri } from './nix-daemon-ssh.ts';
 import {
 	type NixBuildResult,
@@ -234,16 +236,37 @@ export class Nix {
 	/**
 	 * Whether the named derivation's own `allowSubstitutes` option lets Nix
 	 * fetch its outputs rather than build them.
-	 *
-	 * No store operation reports a derivation's options, so the derivation
-	 * itself is read: a derivation is one regular file in the store, and its
-	 * serialisation carries the environment the option lives in. Reading it
-	 * costs the derivation's own bytes and nothing of its outputs.
 	 */
 	async canSubstituteDerivation(drvPath: string): Promise<boolean> {
-		const contents = await narRegularFileContents(this.narFromPath(drvPath));
+		const derivation = await this.readDerivation(drvPath);
 
-		return canSubstituteDerivation(new TextDecoder().decode(contents));
+		return derivation.allowsSubstitutes;
+	}
+
+	/**
+	 * What the named derivation asks of the machine that builds it: the system
+	 * it builds for and the system features it requires.
+	 */
+	async derivationBuildRequirements(
+		drvPath: string
+	): Promise<DerivationBuildRequirements> {
+		const derivation = await this.readDerivation(drvPath);
+
+		return derivation.buildRequirements;
+	}
+
+	/**
+	 * The named derivation, read from the store that holds it.
+	 *
+	 * No store operation reports a derivation's contents, so the derivation
+	 * itself is read: a derivation is one regular file in the store, and its
+	 * serialisation carries everything below. Reading it costs the
+	 * derivation's own bytes and nothing of its outputs.
+	 */
+	async readDerivation(drvPath: string): Promise<Derivation> {
+		const contents = await this.store.readDerivation(this.toStorePath(drvPath));
+
+		return Derivation.parse(contents);
 	}
 
 	/** The registered output paths of the given derivations, sorted. */

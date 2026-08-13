@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { availableParallelism, homedir } from 'node:os';
 import path from 'node:path';
-import { env } from 'node:process';
+import { arch, env, platform } from 'node:process';
 
 import {
 	type StoreDirectory,
@@ -39,6 +39,8 @@ export interface NixStoreConfig {
 	readonly daemonOverrides: NixDaemonOverrides;
 	/** The discovered settings that decide what may be substituted, and from where. */
 	readonly substitution: NixSubstitutionSettings;
+	/** The discovered settings that decide where a derivation is built. */
+	readonly building: NixBuildSettings;
 	/**
 	 * The effective `post-build-hook` setting from the merged configuration.
 	 * Nix supports exactly one post-build hook, so a caller about to apply its
@@ -83,9 +85,81 @@ export interface NixSubstitutionSettings {
 	readonly substituters: readonly string[];
 }
 
+/**
+ * The effective settings deciding where Nix would build a derivation. Nix
+ * builds one on this machine when its system is among `systems` and every
+ * feature it requires is among `features`; anything else it hands to a remote
+ * builder, and with none configured it has nowhere to hand it.
+ */
+export interface NixBuildSettings {
+	/**
+	 * The systems this machine builds itself: the `system` setting followed by
+	 * every `extra-platforms` entry. Empty when nothing names this machine's
+	 * system.
+	 */
+	readonly systems: readonly string[];
+	/** The `system-features` setting: what a derivation may require here. */
+	readonly features: readonly string[];
+	/** The `builders` setting, absent when the configuration assigns none. */
+	readonly builders?: string;
+}
+
 // Nix's compiled-in `substituters` value, which applies to a configuration
 // that never assigns the setting.
 const defaultSubstituters = ['https://cache.nixos.org/'];
+
+/**
+ * The `extra-platforms` Nix computes for a machine whose configuration
+ * assigns none: an x86_64-linux machine also runs i686-linux binaries, and
+ * Rosetta 2 lets an aarch64-darwin machine run x86_64-darwin ones.
+ */
+const defaultExtraPlatforms: ReadonlyMap<string, readonly string[]> = new Map([
+	['x86_64-linux', ['i686-linux']],
+	['aarch64-darwin', ['x86_64-darwin']]
+]);
+
+// The `system-features` Nix computes for a machine whose configuration assigns
+// none: three names Nixpkgs routes builds by without asking anything of the
+// machine, plus the kernel-specific features Nix probes for.
+const portableSystemFeatures = ['nixos-test', 'benchmark', 'big-parallel'];
+const kernelSystemFeatures: ReadonlyMap<string, readonly string[]> = new Map([
+	['linux', ['kvm', 'uid-range']],
+	['darwin', ['apple-virt']]
+]);
+
+function defaultSystemFeatures(system: string | undefined): readonly string[] {
+	const kernel = system?.slice(system.indexOf('-') + 1);
+
+	return [
+		...portableSystemFeatures,
+		...(kernel === undefined ? [] : (kernelSystemFeatures.get(kernel) ?? []))
+	];
+}
+
+// Nix names a machine's system `<cpu>-<kernel>`. These are the halves Nix
+// spells differently from Node, and a machine Node names anything else has no
+// system double here: nothing then claims to know what this machine builds.
+const nixCpuNames: ReadonlyMap<string, string> = new Map([
+	['arm64', 'aarch64'],
+	['ia32', 'i686'],
+	['x64', 'x86_64'],
+	['riscv64', 'riscv64']
+]);
+const nixKernelNames: ReadonlyMap<string, string> = new Map([
+	['darwin', 'darwin'],
+	['freebsd', 'freebsd'],
+	['linux', 'linux'],
+	['openbsd', 'openbsd']
+]);
+
+function nixSystemOf(architecture: string, kernel: string): string | undefined {
+	const cpu = nixCpuNames.get(architecture);
+	const named = nixKernelNames.get(kernel);
+
+	return cpu === undefined || named === undefined
+		? undefined
+		: `${cpu}-${named}`;
+}
 
 /** Filesystem and environment access, injected so discovery is testable. */
 export interface NixConfigEnvironment {
@@ -93,6 +167,11 @@ export interface NixConfigEnvironment {
 	/** The file's contents, or `undefined` when it does not exist. */
 	readonly readFile: (filePath: string) => string | undefined;
 	readonly homeDirectory: () => string | undefined;
+	/**
+	 * This machine's Nix system, which the `system` setting defaults to, or
+	 * `undefined` when nothing names it.
+	 */
+	readonly currentSystem: () => string | undefined;
 }
 
 const defaultStoreDirectory = storeDirectorySchema.parse('/nix/store');
@@ -109,7 +188,8 @@ export const defaultNixConfigEnvironment: NixConfigEnvironment = {
 			return;
 		}
 	},
-	homeDirectory: () => homedir() || undefined
+	homeDirectory: () => homedir() || undefined,
+	currentSystem: () => nixSystemOf(arch, platform)
 };
 
 /**
@@ -121,8 +201,13 @@ export const defaultNixConfigEnvironment: NixConfigEnvironment = {
 export function discoverNixStoreConfig(
 	dependencies: NixConfigEnvironment = defaultNixConfigEnvironment
 ): NixStoreConfig {
-	const { settings, daemonSetOptions, daemonOverrides, substitution } =
-		mergedSettings(dependencies);
+	const {
+		settings,
+		daemonSetOptions,
+		daemonOverrides,
+		substitution,
+		building
+	} = mergedSettings(dependencies);
 	const storeDirectory = resolveStoreDirectory(dependencies, settings);
 	const stateDirectory =
 		nonEmpty(dependencies.env.NIX_STATE_DIR) ?? defaultStateDirectory;
@@ -141,6 +226,7 @@ export function discoverNixStoreConfig(
 		daemonSetOptions,
 		daemonOverrides,
 		substitution,
+		building,
 		...(postBuildHook !== undefined && { postBuildHook })
 	};
 }
@@ -189,9 +275,10 @@ function mergedSettings(dependencies: NixConfigEnvironment): {
 	readonly daemonSetOptions: NixDaemonSetOptions;
 	readonly daemonOverrides: NixDaemonOverrides;
 	readonly substitution: NixSubstitutionSettings;
+	readonly building: NixBuildSettings;
 } {
 	const settings = new Map<string, string>();
-	const daemonSettings = new EffectiveSettings();
+	const daemonSettings = new EffectiveSettings(dependencies.currentSystem());
 	const systemConfigPath = path.join(
 		nonEmpty(dependencies.env.NIX_CONF_DIR) ?? defaultSystemConfigDirectory,
 		'nix.conf'
@@ -233,7 +320,8 @@ function mergedSettings(dependencies: NixConfigEnvironment): {
 		settings,
 		daemonSetOptions: daemonSettings.setOptions(),
 		daemonOverrides: daemonSettings.overrides(),
-		substitution: daemonSettings.substitution()
+		substitution: daemonSettings.substitution(),
+		building: daemonSettings.building()
 	};
 }
 
@@ -394,15 +482,22 @@ function applyInclude(
 // SetOptions field always lands there; any other setting from a user-owned
 // source joins the named overrides, keyed by its canonical name. Every
 // setting, whichever source it came from, is also offered to the substitution
-// settings, which describe the configuration rather than the connection.
+// and build settings, which describe the configuration rather than the
+// connection.
 class EffectiveSettings {
 	private readonly overridden = new EffectiveDaemonOverrides();
 
 	private readonly substituting = new EffectiveSubstitutionSettings();
 
+	private readonly builds: EffectiveBuildSettings;
+
 	private readonly dedicated: {
 		-readonly [Key in keyof NixDaemonSetOptions]: NixDaemonSetOptions[Key];
 	} = {};
+
+	constructor(currentSystem: string | undefined) {
+		this.builds = new EffectiveBuildSettings(currentSystem);
+	}
 
 	private applySetOption(name: string, value: string): boolean {
 		const canonicalName = canonicalSettingName(name);
@@ -447,6 +542,7 @@ class EffectiveSettings {
 
 	apply(name: string, value: string, shouldMarkOverridden: boolean): void {
 		this.substituting.apply(name, value);
+		this.builds.apply(name, value);
 
 		if (this.applySetOption(name, value)) {
 			return;
@@ -470,6 +566,103 @@ class EffectiveSettings {
 	substitution(): NixSubstitutionSettings {
 		return this.substituting.values();
 	}
+
+	building(): NixBuildSettings {
+		return this.builds.values();
+	}
+}
+
+// A list setting as the merge proceeds. An assignment replaces whatever the
+// setting holds, including the values appended so far; an `extra-` assignment
+// appends to it. A setting never assigned resolves to the default it is given.
+class EffectiveList {
+	private assigned: readonly string[] | undefined;
+
+	private appended: readonly string[] = [];
+
+	assign(value: string): void {
+		this.assigned = listOf(value);
+		this.appended = [];
+	}
+
+	append(value: string): void {
+		this.appended = [...this.appended, ...listOf(value)];
+	}
+
+	resolve(fallback: readonly string[]): readonly string[] {
+		return [...new Set([...(this.assigned ?? fallback), ...this.appended])];
+	}
+}
+
+function listOf(value: string): readonly string[] {
+	return value.split(/\s+/u).filter(Boolean);
+}
+
+// The build settings as the merge proceeds, starting from the system this
+// machine reports so a configuration that never assigns one still describes
+// what Nix would build here. The platforms and features a configuration
+// leaves alone take the defaults Nix computes for the effective system.
+class EffectiveBuildSettings {
+	private readonly extraPlatforms = new EffectiveList();
+
+	private readonly features = new EffectiveList();
+
+	private builders: string | undefined;
+
+	constructor(private system: string | undefined) {}
+
+	apply(name: string, value: string): void {
+		const canonicalName = canonicalSettingName(name);
+
+		if (canonicalName === 'system') {
+			this.system = nonEmpty(value);
+			return;
+		}
+
+		if (canonicalName === 'builders') {
+			this.builders = nonEmpty(value);
+			return;
+		}
+
+		if (canonicalName === 'extra-platforms') {
+			this.extraPlatforms.assign(value);
+			return;
+		}
+
+		if (canonicalName === 'extra-extra-platforms') {
+			this.extraPlatforms.append(value);
+			return;
+		}
+
+		if (canonicalName === 'system-features') {
+			this.features.assign(value);
+			return;
+		}
+
+		if (canonicalName === 'extra-system-features') {
+			this.features.append(value);
+		}
+	}
+
+	values(): NixBuildSettings {
+		const { system } = this;
+
+		return {
+			systems:
+				system === undefined
+					? []
+					: [
+							...new Set([
+								system,
+								...this.extraPlatforms.resolve(
+									defaultExtraPlatforms.get(system) ?? []
+								)
+							])
+						],
+			features: this.features.resolve(defaultSystemFeatures(system)),
+			...(this.builders !== undefined && { builders: this.builders })
+		};
+	}
 }
 
 // The substitution settings as the merge proceeds, starting from Nix's own
@@ -490,7 +683,7 @@ class EffectiveSubstitutionSettings {
 		);
 
 		if (canonicalName === 'substituters') {
-			const listed = value.split(/\s+/u).filter(Boolean);
+			const listed = listOf(value);
 			this.substituters = isAppend ? [...this.substituters, ...listed] : listed;
 
 			return;

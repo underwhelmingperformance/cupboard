@@ -52,6 +52,7 @@ interface RecordingStore extends NixStoreClient {
 	readonly missingBatches: string[][];
 	readonly infoBatches: string[][];
 	readonly narRequests: string[];
+	readonly derivationRequests: string[];
 	readonly buildBatches: string[][];
 	readonly closures: string[][];
 }
@@ -64,6 +65,8 @@ interface RecordingStoreOptions {
 	>;
 	/** The bytes `narFromPath` streams for every path. */
 	readonly narBytes?: Uint8Array;
+	/** The text `readDerivation` answers for every derivation. */
+	readonly derivationText?: string;
 }
 
 function recordingStore(options: RecordingStoreOptions = {}): RecordingStore {
@@ -79,6 +82,7 @@ function recordingStore(options: RecordingStoreOptions = {}): RecordingStore {
 	const missingBatches: string[][] = [];
 	const infoBatches: string[][] = [];
 	const narRequests: string[] = [];
+	const derivationRequests: string[] = [];
 	const buildBatches: string[][] = [];
 	const closures: string[][] = [];
 
@@ -91,6 +95,7 @@ function recordingStore(options: RecordingStoreOptions = {}): RecordingStore {
 		missingBatches,
 		infoBatches,
 		narRequests,
+		derivationRequests,
 		buildBatches,
 		closures,
 		queryPathInfo: (storePath) => {
@@ -147,6 +152,11 @@ function recordingStore(options: RecordingStoreOptions = {}): RecordingStore {
 				narSize: 0
 			});
 		},
+		readDerivation: (drvPath) => {
+			derivationRequests.push(drvPath);
+
+			return Promise.resolve(options.derivationText ?? '');
+		},
 		narFromPath: (storePath) => {
 			narRequests.push(storePath);
 
@@ -163,28 +173,6 @@ function recordingStore(options: RecordingStoreOptions = {}): RecordingStore {
 			return Promise.resolve(storePaths.map((storePath) => info(storePath)));
 		}
 	};
-}
-
-// The serialisation of a store path holding one regular file, which is what a
-// derivation in the store is.
-function regularFileNar(contents: string): Buffer {
-	const frame = (value: string): Buffer => {
-		const bytes = Buffer.from(value, 'utf8');
-		const header = Buffer.alloc(8);
-		header.writeBigUInt64LE(BigInt(bytes.byteLength));
-
-		return Buffer.concat([
-			header,
-			bytes,
-			Buffer.alloc((8 - (bytes.byteLength % 8)) % 8)
-		]);
-	};
-
-	return Buffer.concat(
-		['nix-archive-1', '(', 'type', 'regular', 'contents', contents, ')'].map(
-			(word) => frame(word)
-		)
-	);
 }
 
 function byteChunks(
@@ -283,6 +271,7 @@ describe('Nix.open', () => {
 				env: { NIX_STORE_DIR: 'relative/store' },
 				readFile: (filePath) => noConfigurationFiles[filePath],
 				homeDirectory: () => '/home/u',
+				currentSystem: () => 'x86_64-linux',
 				canWriteStateDirectory: () => true,
 				socketExists: () => false,
 				realpath: (path) => path
@@ -298,6 +287,7 @@ function daemonDependencies(hasSocket: boolean): NixDependencies {
 		env: {},
 		readFile: (filePath) => noFiles.get(filePath),
 		homeDirectory: () => noFiles.get('home'),
+		currentSystem: () => 'x86_64-linux',
 		canWriteStateDirectory: () => true,
 		socketExists: () => hasSocket,
 		realpath: (path) => path
@@ -374,6 +364,7 @@ function openDependencies(overrides: {
 		env: overrides.env ?? {},
 		readFile: (filePath) => noFiles.get(filePath),
 		homeDirectory: () => noFiles.get('home'),
+		currentSystem: () => 'x86_64-linux',
 		canWriteStateDirectory: () => overrides.canWrite ?? true,
 		socketExists: () => overrides.socket ?? false,
 		realpath: (path) => path
@@ -498,7 +489,7 @@ describe('Nix queries', () => {
 		'reads the substitution option out of $name in the store',
 		async ({ environment, expected }) => {
 			const aterm = `Derive([],[],[],"system","builder",[],${environment})`;
-			const store = recordingStore({ narBytes: regularFileNar(aterm) });
+			const store = recordingStore({ derivationText: aterm });
 
 			const isAllowed = await nixOver(store).canSubstituteDerivation(
 				`${appPath}/self.drv`
@@ -506,13 +497,35 @@ describe('Nix queries', () => {
 
 			expect({
 				allowed: isAllowed,
-				narRequests: store.narRequests
+				derivationRequests: store.derivationRequests
 			}).toStrictEqual({
 				allowed: expected,
-				narRequests: [appPath]
+				derivationRequests: [appPath]
 			});
 		}
 	);
+
+	it('reads what a derivation in the store asks of its machine', async () => {
+		const aterm =
+			'Derive([],[],[],"aarch64-linux","builder",[],' +
+			'[("requiredSystemFeatures","big-parallel kvm")])';
+		const store = recordingStore({ derivationText: aterm });
+
+		const requirements = await nixOver(store).derivationBuildRequirements(
+			`${appPath}/self.drv`
+		);
+
+		expect({
+			requirements,
+			derivationRequests: store.derivationRequests
+		}).toStrictEqual({
+			requirements: {
+				system: 'aarch64-linux',
+				requiredSystemFeatures: ['big-parallel', 'kvm']
+			},
+			derivationRequests: [appPath]
+		});
+	});
 
 	it('canonicalises every derivation path in an output query', async () => {
 		const store = recordingStore();

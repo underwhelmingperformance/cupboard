@@ -38,24 +38,34 @@ export async function narRegularFileContents(
 ): Promise<Uint8Array> {
 	const reader = new NarReader(chunks);
 
-	await reader.expectWord('nix-archive-1');
-	await reader.expectWord('(');
-	await reader.expectWord('type');
-	await reader.expectWord('regular');
+	// The reader stops as soon as it has the file, leaving the stream
+	// suspended. Releasing it here is what lets a producer holding a resource
+	// for the stream's lifetime, such as a dedicated daemon connection, close
+	// that resource when this returns.
+	try {
+		await reader.expectWord('nix-archive-1');
+		await reader.expectWord('(');
+		await reader.expectWord('type');
+		await reader.expectWord('regular');
 
-	const marker = await reader.readWord();
+		const marker = await reader.readWord();
 
-	if (marker === 'executable') {
-		await reader.expectWord('');
-		await reader.expectWord('contents');
-	} else if (marker !== 'contents') {
-		throw new UnexpectedNarShapeError(`'${marker}' where the contents belong`);
+		if (marker === 'executable') {
+			await reader.expectWord('');
+			await reader.expectWord('contents');
+		} else if (marker !== 'contents') {
+			throw new UnexpectedNarShapeError(
+				`'${marker}' where the contents belong`
+			);
+		}
+
+		const contents = await reader.readBlob(maxByteLength);
+		await reader.expectWord(')');
+
+		return contents;
+	} finally {
+		await reader.release();
 	}
-
-	const contents = await reader.readBlob(maxByteLength);
-	await reader.expectWord(')');
-
-	return contents;
 }
 
 // The longest fixed word of the NAR grammar this reader accepts; anything
@@ -126,6 +136,11 @@ class NarReader {
 		if (padding > 0) {
 			await this.read(padding);
 		}
+	}
+
+	/** Tells the stream this reader is finished with it. */
+	async release(): Promise<void> {
+		await this.iterator.return?.();
 	}
 
 	async readWord(): Promise<string> {

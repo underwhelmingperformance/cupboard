@@ -2,14 +2,10 @@ import type {
 	Nix,
 	NixDaemonOverrides,
 	NixDaemonTrust,
-	NixDerivedPathString,
 	NixSubstitutionSettings,
 	SubstitutableClosureOptions
 } from '@cupboard/nix';
-import {
-	storePathSchema,
-	type StorePathString
-} from '@cupboard/nix-store/scalars';
+import { derivationPathOf } from '@cupboard/nix-store/derivation';
 
 import type {
 	LeftUpstreamCandidate,
@@ -140,8 +136,6 @@ function isTenantEndpoint(substituter: string, tenantUrl: URL): boolean {
 	);
 }
 
-const derivationSuffix = '.drv';
-
 // `always-allow-substitutes` overrules whatever a derivation asks for, so with
 // it on there is nothing to read. An installable naming a plain store path
 // carries no derivation option either: Nix substitutes such a path without
@@ -154,7 +148,7 @@ async function derivationRefusal(
 		return undefined;
 	}
 
-	const drvPath = derivationOf(candidate.installable);
+	const drvPath = derivationPathOf(candidate.installable);
 
 	if (drvPath === undefined) {
 		return undefined;
@@ -172,18 +166,4 @@ async function derivationRefusal(
 	}
 
 	return { kind: 'substitutes-not-allowed' };
-}
-
-function derivationOf(
-	installable: NixDerivedPathString
-): StorePathString | undefined {
-	const separator = installable.indexOf('^');
-	const base = separator === -1 ? installable : installable.slice(0, separator);
-	const parsed = storePathSchema.safeParse(base);
-
-	if (!parsed.success || !parsed.data.endsWith(derivationSuffix)) {
-		return undefined;
-	}
-
-	return parsed.data;
 }

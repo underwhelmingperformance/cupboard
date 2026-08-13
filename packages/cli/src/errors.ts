@@ -1009,6 +1009,42 @@ export class HookHelperMissingError extends CliError {
 	}
 }
 
+/** One declared target the coordinating machine could not rebuild itself. */
+export interface UnverifiableTarget {
+	readonly drvPath: string;
+	/** The system the derivation builds for. */
+	readonly system: string;
+	/** The features it requires that this machine does not offer. */
+	readonly missingFeatures: readonly string[];
+}
+
+/**
+ * A run that verifies its rebuilds declares a target this machine cannot
+ * build. The verification rebuild runs with remote builders off, so the
+ * remote build would finish and the rebuild behind it would then have nowhere
+ * to run. Refused before any target is dispatched, naming each target that
+ * does not fit and what this machine offers.
+ */
+export class UnverifiableTargetError extends CliError {
+	constructor(
+		public readonly targets: readonly UnverifiableTarget[],
+		public readonly systems: readonly string[],
+		public readonly features: readonly string[]
+	) {
+		super(
+			`This machine builds ${systems.join(', ')} and cannot rebuild ` +
+				`${targets.map((target) => target.drvPath).join(', ')} to verify ` +
+				`what a remote builder produces. Build these targets on a machine ` +
+				`that covers them, or run without rebuild verification.`
+		);
+		this.name = 'UnverifiableTargetError';
+	}
+
+	override get exitCode(): number {
+		return usageExitCode;
+	}
+}
+
 /**
  * A well-formed build event naming an output path outside the selected store
  * directory. Only paths beneath that directory are publication candidates, so
