@@ -67,13 +67,14 @@ describe('buildProgram', () => {
 		).rejects.toBeInstanceOf(InvalidInputError);
 	});
 
-	it('passes the invocation signal to build-cohort', async () => {
-		const reason = new Error('cancel build-cohort');
-
-		await expect(
-			buildProgram(noRunnerEnvironment, AbortSignal.abort(reason)).parseAsync([
-				'node',
-				'cupboard-action',
+	it.each([
+		{
+			command: 'build',
+			arguments_: ['build', '--installables', '.#package']
+		},
+		{
+			command: 'build-cohort',
+			arguments_: [
 				'build-cohort',
 				'--cohort-json',
 				'{}',
@@ -81,6 +82,56 @@ describe('buildProgram', () => {
 				'https://cache.example.test/t/acme',
 				'--cupboard-path',
 				'/opt/cupboard/cupboard'
+			]
+		},
+		{
+			command: 'push',
+			arguments_: [
+				'push',
+				'--url',
+				'https://cache.example.test/t/acme',
+				'--paths',
+				'.#package',
+				'--cupboard-path',
+				'/opt/cupboard/cupboard'
+			]
+		},
+		{
+			command: 'attest-attach',
+			arguments_: [
+				'attest-attach',
+				'--url',
+				'https://cache.example.test/t/acme',
+				'--cupboard-path',
+				'/opt/cupboard/cupboard',
+				'--receipt-file',
+				'/tmp/receipt.json',
+				'--checksums-file',
+				'/tmp/checksums.txt'
+			]
+		},
+		{
+			command: 'plan',
+			arguments_: [
+				'plan',
+				'--targets',
+				'[]',
+				'--url',
+				'https://cache.example.test/t/acme',
+				'--cupboard-path',
+				'/opt/cupboard/cupboard',
+				'--root-prefix',
+				'github:owner/repo/main'
+			]
+		}
+	])('passes the invocation signal to $command', async ({ arguments_ }) => {
+		const reason = new Error('cancel action command');
+
+		await expect(
+			buildProgram(noRunnerEnvironment, AbortSignal.abort(reason)).parseAsync([
+				'node',
+				'cupboard-action',
+				...arguments_
 			])
 		).rejects.toBe(reason);
 	});
@@ -111,12 +162,75 @@ describe('runAction', () => {
 		});
 	});
 
-	it.each([
-		{ signal: 'SIGINT' as const, exitCode: 130 },
-		{ signal: 'SIGTERM' as const, exitCode: 143 }
-	])(
-		'aborts build-cohort with the typed $signal exit and removes its production signal handlers',
-		async ({ signal: interruptedBy, exitCode: expectedExitCode }) => {
+	it.each(
+		[
+			{
+				command: 'build',
+				arguments_: ['build', '--installables', '.#package']
+			},
+			{
+				command: 'build-cohort',
+				arguments_: [
+					'build-cohort',
+					'--cohort-json',
+					'{}',
+					'--url',
+					'https://cache.example.test/t/acme',
+					'--cupboard-path',
+					'/opt/cupboard/cupboard'
+				]
+			},
+			{
+				command: 'push',
+				arguments_: [
+					'push',
+					'--url',
+					'https://cache.example.test/t/acme',
+					'--paths',
+					'.#package',
+					'--cupboard-path',
+					'/opt/cupboard/cupboard'
+				]
+			},
+			{
+				command: 'attest-attach',
+				arguments_: [
+					'attest-attach',
+					'--url',
+					'https://cache.example.test/t/acme',
+					'--cupboard-path',
+					'/opt/cupboard/cupboard',
+					'--receipt-file',
+					'/tmp/receipt.json',
+					'--checksums-file',
+					'/tmp/checksums.txt'
+				]
+			},
+			{
+				command: 'plan',
+				arguments_: [
+					'plan',
+					'--targets',
+					'[]',
+					'--url',
+					'https://cache.example.test/t/acme',
+					'--cupboard-path',
+					'/opt/cupboard/cupboard',
+					'--root-prefix',
+					'github:owner/repo/main'
+				]
+			}
+		].flatMap(({ command, arguments_ }) => [
+			{ command, arguments_, signal: 'SIGINT' as const, exitCode: 130 },
+			{ command, arguments_, signal: 'SIGTERM' as const, exitCode: 143 }
+		])
+	)(
+		'aborts $command with the typed $signal exit and removes its production signal handlers',
+		async ({
+			arguments_,
+			signal: interruptedBy,
+			exitCode: expectedExitCode
+		}) => {
 			const active = new Map<string, () => void>();
 			const added: string[] = [];
 			const removed: string[] = [];
@@ -139,17 +253,7 @@ describe('runAction', () => {
 			};
 
 			const exitCode = await runAction(
-				[
-					'node',
-					'cupboard-action',
-					'build-cohort',
-					'--cohort-json',
-					'{}',
-					'--url',
-					'https://cache.example.test/t/acme',
-					'--cupboard-path',
-					'/opt/cupboard/cupboard'
-				],
+				['node', 'cupboard-action', ...arguments_],
 				noRunnerEnvironment,
 				signalSource
 			);

@@ -22,6 +22,34 @@ export type DaemonCommandRunner = (
 	commandArguments: readonly string[]
 ) => DaemonChildProcess;
 
+/** How long a daemon child has to exit after TERM before cleanup sends KILL. */
+export const daemonProcessTerminationGraceMs = 5000;
+
+/** A pending daemon-process escalation that can be cancelled after child exit. */
+export interface ScheduledDaemonProcessKill {
+	cancel(): void;
+}
+
+/** Starts the cancellable grace period before daemon-process cleanup escalates. */
+export type ScheduleDaemonProcessKill = (
+	delayMs: number,
+	onElapsed: () => void
+) => ScheduledDaemonProcessKill;
+
+const scheduleDaemonProcessKill: ScheduleDaemonProcessKill = (
+	delayMs,
+	onElapsed
+) => {
+	const timeout = setTimeout(onElapsed, delayMs);
+	timeout.unref();
+
+	return {
+		cancel() {
+			clearTimeout(timeout);
+		}
+	};
+};
+
 /** Starts the daemon command as a child of this process. */
 export const spawnDaemonProcess: DaemonCommandRunner = (
 	command,
@@ -42,11 +70,16 @@ export function createProcessNixDaemonConnector(
 	command: string,
 	commandArguments: readonly string[],
 	run: DaemonCommandRunner = spawnDaemonProcess,
-	afterExit?: () => void
+	afterExit?: () => void,
+	scheduleKill: ScheduleDaemonProcessKill = scheduleDaemonProcessKill
 ): NixDaemonConnector {
 	return () =>
 		Promise.resolve(
-			new ProcessNixDaemonTransport(run(command, commandArguments), afterExit)
+			new ProcessNixDaemonTransport(
+				run(command, commandArguments),
+				afterExit,
+				scheduleKill
+			)
 		);
 }
 
@@ -61,7 +94,8 @@ class ProcessNixDaemonTransport implements NixDaemonTransport {
 
 	constructor(
 		private readonly child: DaemonChildProcess,
-		afterExit: (() => void) | undefined
+		afterExit: (() => void) | undefined,
+		private readonly scheduleKill: ScheduleDaemonProcessKill
 	) {
 		this.reader = new ByteStreamReader(child.stdout);
 		const exit = Promise.withResolvers<undefined>();
@@ -96,7 +130,18 @@ class ProcessNixDaemonTransport implements NixDaemonTransport {
 
 	private async closeOnce(): Promise<void> {
 		this.child.kill('SIGTERM');
-		await this.exited;
+		const scheduledKill = this.scheduleKill(
+			daemonProcessTerminationGraceMs,
+			() => {
+				this.child.kill('SIGKILL');
+			}
+		);
+
+		try {
+			await this.exited;
+		} finally {
+			scheduledKill.cancel();
+		}
 	}
 
 	write(bytes: Uint8Array): Promise<void> {

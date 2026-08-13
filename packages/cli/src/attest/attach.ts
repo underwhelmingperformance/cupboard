@@ -200,16 +200,28 @@ export async function prepareAttestationBundles(
 		const parsed = parseAttestationBundle(source.path, bytes);
 		const digest = sha256Hex(bytes);
 
-		const matched = parsed.subjects
-			.map((subject) => bySubject.get(attestationSubjectKey(subject)))
-			.filter((item) => item !== undefined);
+		const unmatched = parsed.subjects.filter(
+			(subject) => !bySubject.has(attestationSubjectKey(subject))
+		);
 
-		if (matched.length === 0) {
+		if (unmatched.length > 0) {
 			throw new AttestationSubjectNotPushedError(
 				source.path,
-				parsed.subjects.map((subject) => subject.sha256)
+				unmatched.map((subject) => subject.sha256)
 			);
 		}
+
+		const matched = parsed.subjects.map((subject) => {
+			const pathInfo = bySubject.get(attestationSubjectKey(subject));
+
+			if (pathInfo === undefined) {
+				throw new AttestationSubjectNotPushedError(source.path, [
+					subject.sha256
+				]);
+			}
+
+			return pathInfo;
+		});
 
 		for (const pathInfo of matched) {
 			// The bundle describes the local bytes, but the cache committed a

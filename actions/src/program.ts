@@ -64,13 +64,13 @@ export function buildProgram(
 		});
 
 	registerSetupCommand(program, environment);
-	registerPushCommand(program, environment);
+	registerPushCommand(program, environment, signal);
 	registerResolveCupboardCommand(program, environment);
 	registerAttestCommand(program, environment);
-	registerAttestAttachCommand(program, environment);
-	registerBuildCommand(program, environment);
+	registerAttestAttachCommand(program, environment, signal);
+	registerBuildCommand(program, environment, signal);
 	registerBuildCohortCommand(program, environment, signal);
-	registerPlanCommand(program, environment);
+	registerPlanCommand(program, environment, signal);
 
 	return program;
 }
@@ -86,8 +86,14 @@ export async function runAction(
 	signalSource: ActionSignalSource = process
 ): Promise<number> {
 	const githubActions = workflowCommands();
-	const isBuildCohort = argument[2] === 'build-cohort';
-	const controller = isBuildCohort ? new AbortController() : undefined;
+	const isSignalAwareCommand = [
+		'attest-attach',
+		'build',
+		'build-cohort',
+		'plan',
+		'push'
+	].includes(argument[2] ?? '');
+	const controller = isSignalAwareCommand ? new AbortController() : undefined;
 	const abortSigint = (): void => {
 		controller?.abort(new ActionSignalError('SIGINT'));
 	};

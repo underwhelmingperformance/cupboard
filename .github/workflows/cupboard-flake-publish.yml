@@ -73,8 +73,9 @@ on:
         type: string
       cupboard-version:
         description: >-
-          cupboard release tag to install, or 'latest'. Empty uses a release for
-          the called workflow revision when one exists, otherwise source.
+          Exact published cupboard release tag to install, or 'latest'. Empty
+          uses a release for the called workflow revision when one exists,
+          otherwise source.
         required: false
         type: string
       maximise-space:
@@ -95,12 +96,11 @@ on:
         type: boolean
       gc-between-cohorts:
         description:
-          Release the build's out-links and collect the local Nix store once a
-          cohort job has published and attested its work, so a later cohort job
-          sharing the runner substitutes both the cohort's own outputs and its
-          shared dependencies from the cache. Off by default; the run never
-          deletes user store paths unless opted in, and only dead paths are ever
-          swept.
+          On a GitHub-hosted runner using its local store, release the build's
+          out-links and collect dead paths once a cohort job has published and
+          attested its work. Requested collection is skipped with a notice on a
+          self-hosted runner or when a direct remote store is selected. Off by
+          default.
         required: false
         default: false
         type: boolean
@@ -239,14 +239,24 @@ jobs:
       ttl: ${{ steps.resolve.outputs.ttl }}
       reuse-view: ${{ steps.resolve.outputs.reuse-view }}
     steps:
+      - name: Reserve the cupboard workflow checkout
+        env:
+          CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
+        run: |
+          set -euo pipefail
+          if [ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ] || [ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
+            echo '::error::The caller checkout already contains .cupboard-workflow; refusing to replace caller content'
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
-          path: .cupboard
+          path: .cupboard-workflow
           persist-credentials: false
 
-      - uses: ./.cupboard/actions/resolve-cupboard
+      - uses: ./.cupboard-workflow/actions/resolve-cupboard
         id: resolve-cupboard
         with:
           cupboard-version: ${{ inputs.cupboard-version }}
@@ -411,16 +421,26 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Reserve the cupboard workflow checkout
+        env:
+          CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
+        run: |
+          set -euo pipefail
+          if [ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ] || [ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
+            echo '::error::The caller checkout already contains .cupboard-workflow; refusing to replace caller content'
+            exit 1
+          fi
+
       # Checked out at the called workflow's own commit, not `main`, so a
       # tagged or SHA-pinned caller executes matching action code.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
-          path: .cupboard
+          path: .cupboard-workflow
           persist-credentials: false
 
-      - uses: ./.cupboard/actions/prepare
+      - uses: ./.cupboard-workflow/actions/prepare
         with:
           ssh-key: ${{ secrets.input_ssh_key }}
           input-known-hosts: ${{ inputs.input-known-hosts }}
@@ -448,7 +468,7 @@ jobs:
           store-ambient-identity:
             ${{ inputs.store != '' && inputs.store-ambient-identity || false }}
 
-      - uses: ./.cupboard/actions/setup
+      - uses: ./.cupboard-workflow/actions/setup
         id: setup
         with:
           cache-url: ${{ inputs.url }}
@@ -475,7 +495,7 @@ jobs:
           fi
           echo "manifest=${manifest}" >> "${GITHUB_OUTPUT}"
 
-      - uses: ./.cupboard/actions/plan
+      - uses: ./.cupboard-workflow/actions/plan
         id: plan
         with:
           targets: ${{ steps.targets.outputs.manifest }}
@@ -522,14 +542,24 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Reserve the cupboard workflow checkout
+        env:
+          CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
+        run: |
+          set -euo pipefail
+          if [ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ] || [ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
+            echo '::error::The caller checkout already contains .cupboard-workflow; refusing to replace caller content'
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
-          path: .cupboard
+          path: .cupboard-workflow
           persist-credentials: false
 
-      - uses: ./.cupboard/actions/prepare
+      - uses: ./.cupboard-workflow/actions/prepare
         with:
           ssh-key: ${{ secrets.input_ssh_key }}
           input-known-hosts: ${{ inputs.input-known-hosts }}
@@ -557,7 +587,7 @@ jobs:
           store-ambient-identity:
             ${{ inputs.store != '' && inputs.store-ambient-identity || false }}
 
-      - uses: ./.cupboard/actions/setup
+      - uses: ./.cupboard-workflow/actions/setup
         id: setup
         with:
           cache-url: ${{ inputs.url }}
@@ -571,7 +601,7 @@ jobs:
       # the supervised `cupboard build-push` build with streamed uploads,
       # retry attempts, remote attribution and the receipt, and one push per
       # root group to set each target root over its full declared list.
-      - uses: ./.cupboard/actions/build-cohort
+      - uses: ./.cupboard-workflow/actions/build-cohort
         id: build-cohort
         with:
           cohort-json: ${{ toJSON(matrix) }}
@@ -590,7 +620,9 @@ jobs:
           max-jobs: ${{ matrix.remote && inputs.store == '' && '0' || '' }}
           store: ${{ inputs.store }}
           push: ${{ inputs.push }}
-          gc-between-cohorts: ${{ inputs.gc-between-cohorts }}
+          gc-between-cohorts:
+            ${{ inputs.gc-between-cohorts && runner.environment ==
+            'github-hosted' && inputs.store == '' }}
           # Every cohort job in this run shares one root, so a later cohort
           # can substitute an earlier one's streamed work instead of
           # rebuilding it.
@@ -606,7 +638,7 @@ jobs:
       # built, then reconciles every returned path without treating substitution,
       # already-valid paths or floating targets as build evidence. A cohort that
       # publishes nothing has no receipt.
-      - uses: ./.cupboard/actions/attest
+      - uses: ./.cupboard-workflow/actions/attest
         id: attest
         if: ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' }}
         with:
@@ -620,7 +652,7 @@ jobs:
       # receipt's subjects, so a dedicated step files it against the paths the
       # cache already serves. Gated as the attest step is, plus the bundle
       # itself: a receipt with no established subjects signs nothing.
-      - uses: ./.cupboard/actions/attest-attach
+      - uses: ./.cupboard-workflow/actions/attest-attach
         if:
           ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' &&
           steps.attest.outputs.bundle-path != '' }}
@@ -645,8 +677,24 @@ jobs:
       # roots standing, and a sweep that fails is reported without failing the
       # job. The boundary runs after a failed cohort too, where the disk it
       # reclaims is worth most.
+      - name: Explain skipped local store collection
+        if:
+          ${{ !cancelled() && inputs.gc-between-cohorts && (runner.environment
+          != 'github-hosted' || inputs.store != '') }}
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          STORE: ${{ inputs.store }}
+        run: |
+          if [ "${RUNNER_ENVIRONMENT}" != github-hosted ]; then
+            echo '::notice::gc-between-cohorts was requested, but local store collection is unsupported on self-hosted runners; leaving the store untouched'
+          elif [ -n "${STORE}" ]; then
+            echo '::notice::gc-between-cohorts was requested, but the build uses a direct remote store; leaving the runner local store untouched'
+          fi
+
       - name: Collect the local store
-        if: ${{ !cancelled() && inputs.gc-between-cohorts }}
+        if:
+          ${{ !cancelled() && inputs.gc-between-cohorts && runner.environment ==
+          'github-hosted' && inputs.store == '' }}
         env:
           OUT_LINK_DIRECTORY:
             ${{ steps.build-cohort.outputs.out-link-directory }}

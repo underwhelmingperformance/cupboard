@@ -83,7 +83,10 @@ Always reference cupboard's reusable workflows by a full commit SHA in the
 caller, with the release version retained as a comment. The tenant's trust rule
 can then require pushes to come from the exact file at that commit, so a pull
 request cannot smuggle in an edited publish job and gain the rule's access. The
-workflow's `cupboard-version` input names the matching release binary.
+workflow automatically uses a release published for that commit, or builds
+cupboard from the pinned source when there is no release. An explicit
+`cupboard-version` is only needed to intentionally run a different release from
+the workflow pin.
 
 ## Writing a rule directly
 
@@ -162,7 +165,6 @@ jobs:
     with:
       url: https://cupboard.example.workers.dev/t/acme
       root-prefix: github:acme/app/main
-      cupboard-version: vX.Y.Z
 ```
 
 The `job_workflow_ref` names the file in `underwhelmingperformance/cupboard`,

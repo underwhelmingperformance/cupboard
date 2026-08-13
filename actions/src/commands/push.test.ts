@@ -331,17 +331,32 @@ describe('acquirePushCupboard', () => {
 
 	it('uses and inspects a pre-acquired executable without installing', async () => {
 		const install = vi.fn();
+		const controller = new AbortController();
+		const inspectVersion = vi.fn((binaryPath: string) =>
+			Promise.resolve(`cupboard source (${binaryPath})`)
+		);
 
 		await expect(
-			acquirePushCupboard(inputs, {}, reporter, {
-				install,
-				inspectVersion: (binaryPath) => `cupboard source (${binaryPath})`
-			})
+			acquirePushCupboard(
+				inputs,
+				{},
+				reporter,
+				{ install, inspectVersion },
+				controller.signal
+			)
 		).resolves.toStrictEqual({
 			binaryPath: '/nix/store/cupboard/bin/cupboard',
 			version: 'cupboard source (/nix/store/cupboard/bin/cupboard)'
 		});
-		expect(install).not.toHaveBeenCalled();
+		expect({
+			installCalls: install.mock.calls,
+			inspectVersionCalls: inspectVersion.mock.calls
+		}).toStrictEqual({
+			installCalls: [],
+			inspectVersionCalls: [
+				['/nix/store/cupboard/bin/cupboard', controller.signal]
+			]
+		});
 	});
 
 	it('retains released installation when no path is supplied', async () => {
@@ -376,7 +391,7 @@ describe('acquirePushCupboard', () => {
 		await writeFile(binaryPath, '#!/bin/sh\nexit 0\n');
 		await chmod(binaryPath, 0o755);
 
-		expect(() => inspectCupboardVersion(binaryPath)).toThrow(
+		await expect(inspectCupboardVersion(binaryPath)).rejects.toBeInstanceOf(
 			CupboardVersionOutputMissingError
 		);
 	});
@@ -912,6 +927,10 @@ describe('runPushCupboard', () => {
 
 	it('passes the detected protocol into the cupboard invocation', async () => {
 		const result = { protocol: 'legacy-stderr' as const, results: [] };
+		const controller = new AbortController();
+		const detectResultProtocol = vi.fn(() =>
+			Promise.resolve('legacy-stderr' as const)
+		);
 		const run = vi.fn(() => Promise.resolve(result));
 
 		await expect(
@@ -921,17 +940,30 @@ describe('runPushCupboard', () => {
 					arguments: ['push'],
 					environment: { RUNNER_TEMP: '/tmp' },
 					requireGrace: false,
-					version: 'v0.0.13'
+					version: 'v0.0.13',
+					signal: controller.signal
 				},
 				{
-					detectResultProtocol: () => Promise.resolve('legacy-stderr'),
+					detectResultProtocol,
 					run
 				}
 			)
 		).resolves.toStrictEqual(result);
 
-		expect(run.mock.calls).toStrictEqual([
-			['/tmp/cupboard', ['push'], { RUNNER_TEMP: '/tmp' }, 'legacy-stderr']
-		]);
+		expect({
+			detectResultProtocol: detectResultProtocol.mock.calls,
+			run: run.mock.calls
+		}).toStrictEqual({
+			detectResultProtocol: [['/tmp/cupboard', controller.signal]],
+			run: [
+				[
+					'/tmp/cupboard',
+					['push'],
+					{ RUNNER_TEMP: '/tmp' },
+					'legacy-stderr',
+					{ signal: controller.signal }
+				]
+			]
+		});
 	});
 });

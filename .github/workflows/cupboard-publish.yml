@@ -52,8 +52,9 @@ on:
         default: ''
       cupboard-version:
         description: >-
-          cupboard release tag to install, or 'latest'. Empty uses a release for
-          the called workflow revision when one exists, otherwise source.
+          Exact published cupboard release tag to install, or 'latest'. Empty
+          uses a release for the called workflow revision when one exists,
+          otherwise source.
         required: false
         type: string
 
@@ -74,22 +75,31 @@ jobs:
           persist-credentials: false
 
       # The composite actions ship alongside this workflow, so fetch the called
-      # workflow's resolved revision into the workspace. Running them from a
-      # local path keeps a repository's SHA-pinning policy for remote actions
-      # intact; the directory is untracked, so the flake source and its revision
-      # are unaffected.
+      # workflow's resolved revision into a reserved workspace path. A caller is
+      # allowed to own any path in its checkout, so fail before checkout rather
+      # than letting actions/checkout replace caller content at that path.
+      - name: Reserve the cupboard workflow checkout
+        env:
+          CUPBOARD_WORKFLOW_CHECKOUT: ${{ github.workspace }}/.cupboard-workflow
+        run: |
+          set -euo pipefail
+          if [ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ] || [ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]; then
+            echo '::error::The caller checkout already contains .cupboard-workflow; refusing to replace caller content'
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
-          path: .cupboard
+          path: .cupboard-workflow
           persist-credentials: false
 
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
       # Collapse an explicit selector, or the called workflow revision, to one
       # validated coordinate before setup or publication consumes it.
-      - uses: ./.cupboard/actions/resolve-cupboard
+      - uses: ./.cupboard-workflow/actions/resolve-cupboard
         id: resolve-cupboard
         with:
           cupboard-version: ${{ inputs.cupboard-version }}
@@ -102,7 +112,7 @@ jobs:
 
       # Substitute from the cache being published to, so builds reuse the
       # store paths it already holds.
-      - uses: ./.cupboard/actions/setup
+      - uses: ./.cupboard-workflow/actions/setup
         id: setup
         with:
           cache-url: ${{ inputs.url }}
@@ -110,7 +120,7 @@ jobs:
           trusted-public-key: ${{ inputs.trusted-public-key }}
           cupboard: ${{ steps.resolve-cupboard.outputs.cupboard }}
 
-      - uses: ./.cupboard/actions/build-paths
+      - uses: ./.cupboard-workflow/actions/build-paths
         id: build
         with:
           installables: ${{ inputs.installable }}
@@ -132,7 +142,7 @@ jobs:
           echo "root=${ROOT}/$(nix config show system)" | tee -a
           "${GITHUB_OUTPUT}"
 
-      - uses: ./.cupboard/actions/push
+      - uses: ./.cupboard-workflow/actions/push
         id: push
         with:
           url: ${{ inputs.url }}
@@ -148,13 +158,13 @@ jobs:
       - name: Attest committed paths
         id: attest
         if: ${{ inputs.attest }}
-        uses: ./.cupboard/actions/attest
+        uses: ./.cupboard-workflow/actions/attest
         with:
           receipt-file: ${{ steps.build.outputs.receipt-file }}
           url: ${{ inputs.url }}
           cache: ${{ inputs.cache }}
 
-      - uses: ./.cupboard/actions/attest-attach
+      - uses: ./.cupboard-workflow/actions/attest-attach
         if: ${{ inputs.attest && steps.attest.outputs.bundle-path != '' }}
         with:
           url: ${{ inputs.url }}

@@ -157,19 +157,54 @@ describe('resolved cupboard JSON', () => {
 });
 
 describe('resolveCupboard', () => {
+	it('canonicalises an arbitrary explicit release tag', async () => {
+		const requests: string[] = [];
+		const fetcher: typeof fetch = (input) => {
+			const url = requestUrl(input);
+			requests.push(url);
+
+			if (url.endsWith('/repos/owner/cupboard/releases/tags/production')) {
+				return Promise.resolve(
+					Response.json({ tag_name: 'production', assets: [] })
+				);
+			}
+
+			if (url.endsWith('/repos/owner/cupboard/commits/production')) {
+				return Promise.resolve(Response.json({ sha: otherSha }));
+			}
+
+			return Promise.resolve(new Response('not found', { status: 404 }));
+		};
+
+		await expect(
+			resolveCupboard(options({ cupboardVersion: 'production' }), {
+				fetch: fetcher
+			})
+		).resolves.toStrictEqual({
+			kind: 'release',
+			repository: 'owner/cupboard',
+			tag: 'production',
+			sourceCommit: otherSha
+		});
+		expect(requests).toStrictEqual([
+			'https://api.github.com/repos/owner/cupboard/releases/tags/production',
+			'https://api.github.com/repos/owner/cupboard/commits/production'
+		]);
+	});
+
 	it('canonicalises an explicit exact version independently of the workflow ref', async () => {
 		const requests: RequestRecord[] = [];
 		const fetcher: typeof fetch = (input, init) => {
 			const url = requestUrl(input);
 			requests.push({ url, body: requestBody(init) });
 
-			if (url.endsWith('/repos/owner/cupboard/releases/tags/v1.2.3')) {
+			if (url.endsWith('/repos/owner/cupboard/releases/tags/1.2.3')) {
 				return Promise.resolve(
-					Response.json({ tag_name: 'v1.2.3', assets: [] })
+					Response.json({ tag_name: '1.2.3', assets: [] })
 				);
 			}
 
-			if (url.endsWith('/repos/owner/cupboard/commits/v1.2.3')) {
+			if (url.endsWith('/repos/owner/cupboard/commits/1.2.3')) {
 				return Promise.resolve(Response.json({ sha: otherSha }));
 			}
 
@@ -189,12 +224,52 @@ describe('resolveCupboard', () => {
 		).resolves.toStrictEqual({
 			kind: 'release',
 			repository: 'owner/cupboard',
-			tag: 'v1.2.3',
+			tag: '1.2.3',
 			sourceCommit: otherSha
 		});
 		expect(requests.map(({ url }) => url)).toStrictEqual([
-			'https://github.example/api/v3/repos/owner/cupboard/releases/tags/v1.2.3',
-			'https://github.example/api/v3/repos/owner/cupboard/commits/v1.2.3'
+			'https://github.example/api/v3/repos/owner/cupboard/releases/tags/1.2.3',
+			'https://github.example/api/v3/repos/owner/cupboard/commits/1.2.3'
+		]);
+	});
+
+	it('retains the legacy v-prefix fallback when an unprefixed semver tag is absent', async () => {
+		const requests: string[] = [];
+		const fetcher: typeof fetch = (input) => {
+			const url = requestUrl(input);
+			requests.push(url);
+
+			if (url.endsWith('/repos/owner/cupboard/releases/tags/1.2.3')) {
+				return Promise.resolve(new Response('not found', { status: 404 }));
+			}
+
+			if (url.endsWith('/repos/owner/cupboard/releases/tags/v1.2.3')) {
+				return Promise.resolve(
+					Response.json({ tag_name: 'v1.2.3', assets: [] })
+				);
+			}
+
+			if (url.endsWith('/repos/owner/cupboard/commits/v1.2.3')) {
+				return Promise.resolve(Response.json({ sha: otherSha }));
+			}
+
+			return Promise.resolve(new Response('not found', { status: 404 }));
+		};
+
+		await expect(
+			resolveCupboard(options({ cupboardVersion: '1.2.3' }), {
+				fetch: fetcher
+			})
+		).resolves.toStrictEqual({
+			kind: 'release',
+			repository: 'owner/cupboard',
+			tag: 'v1.2.3',
+			sourceCommit: otherSha
+		});
+		expect(requests).toStrictEqual([
+			'https://api.github.com/repos/owner/cupboard/releases/tags/1.2.3',
+			'https://api.github.com/repos/owner/cupboard/releases/tags/v1.2.3',
+			'https://api.github.com/repos/owner/cupboard/commits/v1.2.3'
 		]);
 	});
 
@@ -286,6 +361,42 @@ describe('resolveCupboard', () => {
 		]);
 	});
 
+	it('ignores a release whose tag no longer resolves to a commit', async () => {
+		const nodes = [
+			{
+				tagName: 'deleted-tag',
+				isDraft: false,
+				tagCommit: new URLSearchParams().get('missing-tag')
+			},
+			releaseNode('production', workflowSha)
+		];
+
+		await expect(
+			resolveCupboard(options(), { fetch: fetchingGraphql(nodes) })
+		).resolves.toStrictEqual({
+			kind: 'release',
+			repository: 'owner/cupboard',
+			tag: 'production',
+			sourceCommit: workflowSha
+		});
+	});
+
+	it('ignores null release nodes in a valid GraphQL connection', async () => {
+		const nodes = [
+			new URLSearchParams().get('missing-release'),
+			releaseNode('production', workflowSha)
+		];
+
+		await expect(
+			resolveCupboard(options(), { fetch: fetchingGraphql(nodes) })
+		).resolves.toStrictEqual({
+			kind: 'release',
+			repository: 'owner/cupboard',
+			tag: 'production',
+			sourceCommit: workflowSha
+		});
+	});
+
 	it('falls back to the exact workflow source when no release matches', async () => {
 		const nodes = [releaseNode('other', otherSha)];
 
@@ -350,6 +461,37 @@ describe('resolveCupboard', () => {
 					Promise.resolve(new Response('unavailable', { status: 503 }))
 			})
 		).rejects.toThrow(GithubApiError);
+	});
+
+	it('preserves an HTTP-successful GraphQL API failure', async () => {
+		const failure = resolveCupboard(options(), {
+			fetch: () =>
+				Promise.resolve(
+					Response.json({
+						data: new URLSearchParams().get('missing-data'),
+						errors: [
+							{
+								type: 'FORBIDDEN',
+								message: 'Resource not accessible by integration'
+							}
+						]
+					})
+				)
+		});
+
+		await expect(failure).rejects.toStrictEqual(
+			expect.objectContaining({
+				name: 'GithubApiError',
+				message:
+					'failed to discover cupboard releases: FORBIDDEN: Resource not accessible by integration',
+				cause: [
+					{
+						type: 'FORBIDDEN',
+						message: 'Resource not accessible by integration'
+					}
+				]
+			})
+		);
 	});
 
 	it('uses the explicit GHES GraphQL endpoint', async () => {

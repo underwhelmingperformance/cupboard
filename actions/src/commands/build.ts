@@ -10,6 +10,10 @@ import type { Command } from 'commander';
 import { z } from 'zod';
 
 import {
+	observeChildProcess,
+	waitForAbortableChildProcess
+} from '../child-process.ts';
+import {
 	CommandFailedError,
 	InvalidInputError,
 	ProvenanceSubjectsIncompleteError
@@ -62,30 +66,92 @@ export interface NixInvocation {
 }
 
 export interface BuildDependencies {
-	readonly runNix?: (invocation: NixInvocation) => Promise<RunResult>;
+	readonly runNix?: (
+		invocation: NixInvocation,
+		signal?: AbortSignal
+	) => Promise<RunResult>;
 	readonly nix?: Pick<Nix, 'queryPathInfo'>;
 	readonly nextAttemptId?: () => string;
-	readonly sleep?: (delayMs: number) => Promise<void>;
+	readonly sleep?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	readonly signal?: AbortSignal;
 }
 
-function runNix(invocation: NixInvocation): Promise<RunResult> {
-	return new Promise((resolve, reject) => {
-		const child = spawn('nix', [...invocation.arguments], {
-			stdio: ['pipe', 'pipe', 'inherit']
-		});
-		let stdout = '';
+function sleep(delayMs: number, signal?: AbortSignal): Promise<void> {
+	signal?.throwIfAborted();
 
-		child.stdin.once('error', reject);
-		child.stdout.setEncoding('utf8');
-		child.stdout.on('data', (chunk: string) => {
-			stdout += chunk;
-		});
-		child.once('error', reject);
-		child.once('close', (status) => {
-			resolve({ status: status ?? undefined, stdout });
-		});
-		child.stdin.end(invocation.stdin);
+	return new Promise((resolve, reject) => {
+		let hasSettled = false;
+		const timeout = setTimeout(() => {
+			if (hasSettled) {
+				return;
+			}
+
+			hasSettled = true;
+			signal?.removeEventListener('abort', abort);
+			resolve();
+		}, delayMs);
+		const abort = (): void => {
+			if (hasSettled) {
+				return;
+			}
+
+			hasSettled = true;
+			clearTimeout(timeout);
+			signal?.removeEventListener('abort', abort);
+			const reason: unknown = signal?.reason;
+
+			reject(
+				reason instanceof Error
+					? reason
+					: new Error('The retry delay was aborted', { cause: reason })
+			);
+		};
+
+		signal?.addEventListener('abort', abort, { once: true });
+
+		if (signal?.aborted === true) {
+			abort();
+		}
 	});
+}
+
+async function runNix(
+	invocation: NixInvocation,
+	signal?: AbortSignal
+): Promise<RunResult> {
+	signal?.throwIfAborted();
+
+	const child = spawn('nix', [...invocation.arguments], {
+		stdio: ['pipe', 'pipe', 'inherit']
+	});
+	const observed = observeChildProcess(child);
+	let stdout = '';
+
+	child.stdout.setEncoding('utf8');
+	child.stdout.on('data', (chunk: string) => {
+		stdout += chunk;
+	});
+
+	const completion = waitForAbortableChildProcess(
+		{
+			...observed,
+			onceError(listener) {
+				observed.onceError(listener);
+				child.stdin.once('error', listener);
+			}
+		},
+		signal
+	);
+
+	child.stdin.end(invocation.stdin);
+
+	const result = await completion;
+
+	if (result.error !== undefined) {
+		throw result.error;
+	}
+
+	return { status: result.status ?? undefined, stdout };
 }
 
 function nixBuildInvocation(
@@ -236,7 +302,8 @@ export function plannedOutputPaths(value: string): string[] {
 
 export function registerBuildCommand(
 	program: Command,
-	environment: Environment = env
+	environment: Environment = env,
+	signal?: AbortSignal
 ): void {
 	program
 		.command('build')
@@ -272,7 +339,11 @@ export function registerBuildCommand(
 			'--receipt-file <path>',
 			'where to write the current-run build receipt'
 		)
-		.action((options: BuildOptions) => buildAction(options, environment));
+		.action((options: BuildOptions) =>
+			buildAction(options, environment, {
+				...(signal !== undefined && { signal })
+			})
+		);
 }
 
 export async function buildAction(
@@ -280,6 +351,8 @@ export async function buildAction(
 	environment: Environment = env,
 	dependencies: BuildDependencies = {}
 ): Promise<void> {
+	dependencies.signal?.throwIfAborted();
+
 	const installables = [...(options.installables ?? [])];
 	const installablesFile = provided(options.installablesFile);
 	if (installablesFile !== undefined) {
@@ -336,12 +409,13 @@ export async function buildAction(
 	await mkdir(path.dirname(receiptFile), { recursive: true });
 	const nix = dependencies.nix ?? Nix.open();
 	const executeNix = dependencies.runNix ?? runNix;
+	const execute = (invocation: NixInvocation): Promise<RunResult> =>
+		dependencies.signal === undefined
+			? executeNix(invocation)
+			: executeNix(invocation, dependencies.signal);
 	const nextAttemptId = dependencies.nextAttemptId ?? randomUUID;
-	const sleep =
-		dependencies.sleep ??
-		((delayMs: number) =>
-			new Promise((resolve) => setTimeout(resolve, delayMs)));
-	const plan = await executeNix(
+	const waitBeforeRetry = dependencies.sleep ?? sleep;
+	const plan = await execute(
 		nixBuildInvocation(
 			['build', '--dry-run', '--json', '--no-link'],
 			installables
@@ -385,7 +459,7 @@ export async function buildAction(
 		}
 		const invocation = nixBuildInvocation(arguments_, installables);
 
-		const result = await executeNix(invocation);
+		const result = await execute(invocation);
 		status = result.status;
 		finalPaths = result.stdout.split(/\r?\n/u).filter((line) => line !== '');
 		let log = '';
@@ -410,7 +484,7 @@ export async function buildAction(
 				attemptInfos
 			);
 			if (verificationDerivations.length > 0) {
-				const verification = await executeNix(
+				const verification = await execute(
 					nixBuildInvocation(
 						[
 							'build',
@@ -451,7 +525,7 @@ export async function buildAction(
 			break;
 		}
 		if (attempt < attempts) {
-			await sleep(attempt * 15_000);
+			await waitBeforeRetry(attempt * 15_000, dependencies.signal);
 		}
 	}
 
@@ -485,7 +559,7 @@ export async function buildAction(
 				info.deriver === undefined ? [] : [info.deriver]
 			)
 		);
-		const rebuild = await executeNix(
+		const rebuild = await execute(
 			nixBuildInvocation(
 				[
 					'build',

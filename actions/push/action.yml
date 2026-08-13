@@ -16,8 +16,7 @@ inputs:
     required: false
   cupboard-version:
     description:
-      cupboard version to install. Use latest or an exact version such as 1.2.3
-      or v1.2.3.
+      cupboard version to install. Use latest or an exact published release tag.
     required: false
   include-prereleases:
     description:
@@ -181,8 +180,7 @@ runs:
         CUPBOARD_VERSION: ${{ inputs.cupboard-version }}
         INCLUDE_PRERELEASES: ${{ inputs.include-prereleases }}
         GH_TOKEN: ${{ inputs.github-token || github.token }}
-        RELEASE_REPOSITORY:
-          ${{ inputs.release-repository || github.action_repository }}
+        RELEASE_REPOSITORY: ${{ inputs.release-repository }}
         EXPECTED_SOURCE_COMMIT: ${{ inputs.expected-source-commit }}
         INSTALL_DIR: ${{ inputs.install-dir }}
         CACHE: ${{ inputs.cache }}

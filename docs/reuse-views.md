@@ -93,8 +93,11 @@ jobs:
       url: https://cupboard.example.workers.dev/t/acme
       root-prefix: github:acme/app/main
       reuse-view: pull-requests
-      cupboard-version: vX.Y.Z
 ```
+
+The SHA pin automatically selects a release published for that commit, or the
+pinned source when no release exists. An explicit `cupboard-version` is only
+needed to intentionally run a different release from the workflow pin.
 
 If the merged commit's outputs already sit in the PR's cache from CI, the cohort
 job publishes them by reference through the view, and the destination adopts and

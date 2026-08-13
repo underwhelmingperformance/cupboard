@@ -4,8 +4,8 @@ description:
 inputs:
   cupboard-version:
     description:
-      Optional release override. Use latest or an exact version such as 1.2.3 or
-      v1.2.3. Empty resolves from workflow-sha.
+      Optional release override. Use latest or any exact published release tag.
+      Empty resolves from workflow-sha.
     required: false
   workflow-repository:
     description: Repository containing the called reusable workflow.

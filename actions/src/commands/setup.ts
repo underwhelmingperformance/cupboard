@@ -121,7 +121,7 @@ export function registerSetupCommand(
 		.option('--cupboard <json>', 'canonical cupboard acquisition JSON')
 		.option(
 			'--cupboard-version <version>',
-			'cupboard version to install: latest or an exact version such as 1.2.3'
+			'cupboard version to install: latest or an exact published release tag'
 		)
 		.option(
 			'--include-prereleases <value>',
@@ -283,7 +283,7 @@ export async function setupAction(
 	if (inputs.addToPath) {
 		await appendEnvironmentFile(
 			environment.GITHUB_PATH,
-			`${installDirectory}\n`
+			cupboardPathEntry(acquired.binaryPath)
 		);
 	}
 
@@ -302,6 +302,11 @@ export async function setupAction(
 		{ ...inputs, cacheUrl: inputs.cacheUrl, environment },
 		reporter
 	);
+}
+
+/** Render the PATH entry for either a downloaded or immutable Nix binary. */
+export function cupboardPathEntry(binaryPath: string): string {
+	return `${path.dirname(binaryPath)}\n`;
 }
 
 async function installReleasedCupboard(

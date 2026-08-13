@@ -8,8 +8,7 @@ inputs:
     required: false
   cupboard-version:
     description:
-      cupboard version to install. Use latest or an exact version such as 1.2.3
-      or v1.2.3.
+      cupboard version to install. Use latest or an exact published release tag.
     required: false
   include-prereleases:
     description:
@@ -31,7 +30,7 @@ inputs:
     description: Directory for the downloaded cupboard binary.
     required: false
   add-to-path:
-    description: Add install-dir to PATH.
+    description: Add the directory containing the acquired binary to PATH.
     required: false
     default: 'true'
   cache-url:
@@ -122,8 +121,7 @@ runs:
         CUPBOARD_VERSION: ${{ inputs.cupboard-version }}
         INCLUDE_PRERELEASES: ${{ inputs.include-prereleases }}
         GH_TOKEN: ${{ inputs.github-token || github.token }}
-        RELEASE_REPOSITORY:
-          ${{ inputs.release-repository || github.action_repository }}
+        RELEASE_REPOSITORY: ${{ inputs.release-repository }}
         EXPECTED_SOURCE_COMMIT: ${{ inputs.expected-source-commit }}
         INSTALL_DIR: ${{ inputs.install-dir }}
         ADD_TO_PATH: ${{ inputs.add-to-path }}

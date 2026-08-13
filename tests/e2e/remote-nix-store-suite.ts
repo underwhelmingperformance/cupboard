@@ -28,7 +28,10 @@ import {
 	type WithLocalDerivationRoots
 } from '../../actions/src/commands/build-cohort.ts';
 import type { runCupboard } from '../../actions/src/cupboard-run.ts';
-import { RemoteCohortBuildFailedError } from '../../actions/src/errors.ts';
+import {
+	RemoteCohortBuildFailedError,
+	SubjectNarHashMovedError
+} from '../../actions/src/errors.ts';
 import { writeCachedSession } from '../../packages/cli/src/auth/token-store.ts';
 import { buildProgram as buildCliProgram } from '../../packages/cli/src/cli.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
@@ -419,6 +422,10 @@ export function describeRemoteNixStore(): void {
 			);
 		});
 
+		it('cancels an action-level remote cohort before publication', async () => {
+			await runCancelledBuildCohort(remoteStore());
+		}, 300_000);
+
 		it('publishes and roots an already-valid remote output without claiming it', async () => {
 			await runAlreadyValidPublication(remoteStore());
 		}, 300_000);
@@ -621,6 +628,146 @@ interface RemotePublicationPlan {
 	readonly members: readonly Pick<RemotePreparedMember, 'target'>[];
 	readonly server: CupboardTestServer;
 	readonly token: string;
+	readonly uploadBarrier?: AsyncBarrier;
+}
+
+class AsyncBarrier {
+	private readonly arrival = Promise.withResolvers<undefined>();
+	private readonly continuation = Promise.withResolvers<undefined>();
+
+	readonly arrived = this.arrival.promise;
+
+	async pause(): Promise<void> {
+		this.arrival.resolve(undefined);
+		await this.continuation.promise;
+	}
+
+	release(): void {
+		this.continuation.resolve(undefined);
+	}
+}
+
+async function runCancelledBuildCohort(
+	store: NixSshStoreFixture
+): Promise<void> {
+	await withTemporaryDirectory(
+		'cupboard-remote-action-cancel-',
+		async (directory) => {
+			const flakeDirectory = path.join(directory, 'flake');
+			const runDirectory = path.join(directory, 'run');
+			await Promise.all([
+				mkdir(flakeDirectory, { recursive: true }),
+				mkdir(runDirectory, { recursive: true })
+			]);
+			const system = await store.exec([
+				'nix',
+				'eval',
+				'--raw',
+				'--impure',
+				'--expr',
+				'builtins.currentSystem'
+			]);
+			await writeFile(
+				path.join(flakeDirectory, 'flake.nix'),
+				allSuccessPublicationFlake(system)
+			);
+			const member = await prepareRemotePreparedMember(
+				flakeDirectory,
+				system,
+				'single',
+				'cancelled-root'
+			);
+			const server = await CupboardTestServer.start(
+				path.join(directory, 'server')
+			);
+
+			try {
+				const token = await server.ownerAdminToken();
+				const sshDirectory = path.join(directory, 'ssh');
+				await mkdir(sshDirectory);
+				const sshOptions = await preparedSshOptions(
+					sshDirectory,
+					store,
+					store.transportInputs.knownHosts
+				);
+				const controller = new AbortController();
+				const reason = new Error('cancel action-level remote cohort');
+				const receiptFile = path.join(runDirectory, 'receipt.json');
+				const outputFile = path.join(runDirectory, 'github-output');
+				const plan: RemotePublicationPlan = {
+					members: [member],
+					server,
+					token
+				};
+
+				const started = store.waitForBlockingDaemonEvent('started');
+				const action = withSshOptions(sshOptions, () =>
+					buildCohortAction(
+						{
+							cohortJson: JSON.stringify({
+								key: 'cancelled-remote-action',
+								attrs: [member.attribute],
+								installables: [member.installable],
+								queryInstallables: [member.target],
+								expectedPaths: [member.outputs[0]],
+								roots: [member.root],
+								system,
+								os: 'linux',
+								remote: true,
+								runsOn: 'ubuntu-24.04'
+							}),
+							url: server.tenantUrl.href,
+							cupboardPath: 'in-process-cupboard',
+							store: store.blockingTransportConfiguredStoreUri,
+							push: 'true',
+							receiptFile
+						},
+						{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: outputFile },
+						{
+							reporter: silentReporter(),
+							runCupboard: publicationCupboard(plan),
+							withLocalDerivationRoots: withFixtureLocalDerivationRoots,
+							runNixDerivationShow: runFixtureNixDerivationShow,
+							signal: controller.signal
+						}
+					)
+				);
+
+				await started;
+				const stopped = store.waitForBlockingDaemonEvent('stopped');
+				controller.abort(reason);
+
+				await expect(action).rejects.toBe(reason);
+				await expect(stopped).resolves.toBeUndefined();
+				await expect(readFile(receiptFile, 'utf8')).rejects.toMatchObject({
+					code: 'ENOENT'
+				});
+				await expect(readFile(outputFile, 'utf8')).rejects.toMatchObject({
+					code: 'ENOENT'
+				});
+
+				const roots = await tenantRpc(server.tenantUrl, {
+					credential: token
+				}).roots.list({ params: { cacheName: '_default' } });
+				const validPaths = await withSshOptions(sshOptions, () => {
+					const reconnected = Nix.openForAvailability(undefined, {
+						storeUri: store.transportConfiguredStoreUri,
+						overrides: { substituters: '' }
+					});
+
+					return reconnected.queryValidPaths([]);
+				});
+
+				expect({
+					roots: roots.roots,
+					validPaths
+				}).toStrictEqual({ roots: [], validPaths: [] });
+			} finally {
+				await server.stop();
+			}
+		},
+		{ makeWritableBeforeCleanup: true }
+	);
 }
 
 interface RealPlanningHarness {
@@ -841,15 +988,17 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 				const token = await activeServer.ownerAdminToken();
 				const receiptFile = path.join(runDirectory, 'receipt.json');
 				const outputFile = path.join(runDirectory, 'build-output');
+				const uploadBarrier = new AsyncBarrier();
 				const plan: RemotePublicationPlan = {
 					members,
 					server: activeServer,
-					token
+					token,
+					uploadBarrier
 				};
 				let didCollectLocalBeforeCopy = false;
-				let didCollectRemoteAfterCopy = false;
+				let didCollectRemoteDuringUpload = false;
 
-				await withSshOptions(sshOptions, () =>
+				const publication = withSshOptions(sshOptions, () =>
 					buildCohortAction(
 						{
 							cohortJson: JSON.stringify({
@@ -880,12 +1029,20 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 								await runCommand('nix', ['store', 'gc']);
 								didCollectLocalBeforeCopy = true;
 								await runNixCopy(derivations, storeUri, signal);
-								await activeStore.exec(['nix', 'store', 'gc']);
-								didCollectRemoteAfterCopy = true;
 							}
 						}
 					)
 				);
+				await uploadBarrier.arrived;
+
+				try {
+					await activeStore.exec(['nix', 'store', 'gc']);
+					didCollectRemoteDuringUpload = true;
+				} finally {
+					uploadBarrier.release();
+				}
+
+				await publication;
 
 				const receipt = buildReceiptV3Schema.parse(
 					JSON.parse(await readFile(receiptFile, 'utf8'))
@@ -931,12 +1088,12 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 
 				expect({
 					didCollectLocalBeforeCopy,
-					didCollectRemoteAfterCopy,
+					didCollectRemoteDuringUpload,
 					receipt,
 					receiptOutput: buildOutputs
 				}).toStrictEqual({
 					didCollectLocalBeforeCopy: true,
-					didCollectRemoteAfterCopy: true,
+					didCollectRemoteDuringUpload: true,
 					receipt: {
 						version: 3,
 						paths,
@@ -1041,6 +1198,52 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 						)
 						.join(''),
 					outputs: `checksums-file=${checksumsFile}\nsubject-count=${String(paths.length)}\n`
+				});
+
+				const rejectedChecksumsFile = path.join(
+					runDirectory,
+					'tampered-subjects.txt'
+				);
+				const rejectedOutput = path.join(
+					runDirectory,
+					'tampered-attest-output'
+				);
+				const alteredNarHash = NixSha256Hash.fromDigest(
+					Buffer.alloc(32, 0xff)
+				).toString();
+				const tamperedFetch: typeof fetch = async (input, init) => {
+					const response = await fetch(input, init);
+					const source = await response.text();
+
+					return new Response(
+						source.replace(
+							/^NarHash: .+$/mu,
+							() => `NarHash: ${alteredNarHash}`
+						),
+						{
+							status: response.status,
+							headers: response.headers
+						}
+					);
+				};
+
+				await expect(
+					attestAction(
+						{
+							receiptFile,
+							checksumsFile: rejectedChecksumsFile,
+							url: activeServer.tenantUrl.href
+						},
+						{ RUNNER_TEMP: runDirectory, GITHUB_OUTPUT: rejectedOutput },
+						silentReporter(),
+						{ fetch: tamperedFetch }
+					)
+				).rejects.toBeInstanceOf(SubjectNarHashMovedError);
+				await expect(
+					readFile(rejectedChecksumsFile, 'utf8')
+				).rejects.toMatchObject({ code: 'ENOENT' });
+				await expect(readFile(rejectedOutput, 'utf8')).rejects.toMatchObject({
+					code: 'ENOENT'
 				});
 			} finally {
 				const storeToClose = store;
@@ -1508,10 +1711,14 @@ async function runPublicationPush(
 	const receiptFile = optionValue(arguments_, '--receipt-file');
 	const root = optionValue(arguments_, '--root');
 	const publication = PublicationCollection.of({ targets });
-	const nix = Nix.openForAvailability(undefined, {
+	const openedNix = Nix.openForAvailability(undefined, {
 		storeUri,
 		overrides: { substituters: '' }
 	});
+	const nix =
+		plan.uploadBarrier === undefined
+			? openedNix
+			: withNarUploadBarrier(openedNix, plan.uploadBarrier);
 	const receipt = await runPush(publication, silentReporter(), {
 		client: plan.server.pushClient(plan.token),
 		nix,
@@ -1530,6 +1737,43 @@ async function runPublicationPush(
 			receiptFile,
 			`${JSON.stringify(receipt, undefined, '\t')}\n`
 		);
+	}
+}
+
+function withNarUploadBarrier(nix: Nix, barrier: AsyncBarrier): Nix {
+	return new Proxy(nix, {
+		get(target, property) {
+			if (property === 'narFromPath') {
+				return (storePath: string) =>
+					pauseNarStream(target.narFromPath(storePath), barrier);
+			}
+
+			const value = Reflect.get(target, property, target) as unknown;
+
+			if (typeof value !== 'function') {
+				return value;
+			}
+
+			const method = value as (...arguments_: readonly unknown[]) => unknown;
+
+			return method.bind(target);
+		}
+	});
+}
+
+async function* pauseNarStream(
+	source: AsyncIterable<Uint8Array>,
+	barrier: AsyncBarrier
+): AsyncIterable<Uint8Array> {
+	let isFirst = true;
+
+	for await (const chunk of source) {
+		if (isFirst) {
+			isFirst = false;
+			await barrier.pause();
+		}
+
+		yield chunk;
 	}
 }
 

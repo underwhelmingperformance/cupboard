@@ -4,6 +4,7 @@ import {
 	compileHookHelper,
 	hookHelperBinaryName,
 	hookHelperSourcePath,
+	normaliseBuildVersion,
 	releaseArchiveArguments
 } from './build-cupboard-binary.ts';
 
@@ -49,6 +50,15 @@ describe('compileHookHelper', () => {
 				}
 			]
 		});
+	});
+});
+
+describe('normaliseBuildVersion', () => {
+	it.each([
+		[' v1.2.3 ', 'v1.2.3'],
+		['03ab395', '03ab395']
+	])('preserves the build identity in %s', (version, expected) => {
+		expect(normaliseBuildVersion(version)).toBe(expected);
 	});
 });
 

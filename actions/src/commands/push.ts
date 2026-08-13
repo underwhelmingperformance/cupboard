@@ -1,4 +1,4 @@
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
@@ -19,6 +19,10 @@ import {
 import type { Command } from 'commander';
 import { z } from 'zod';
 
+import {
+	observeChildProcess,
+	waitForAbortableChildProcess
+} from '../child-process.ts';
 import {
 	type CupboardResultProtocol,
 	type CupboardRunResult,
@@ -127,6 +131,11 @@ interface RunPushCupboardOptions {
 	readonly environment: Environment;
 	readonly requireGrace: boolean;
 	readonly version: string;
+	readonly signal?: AbortSignal;
+}
+
+export interface PushActionDependencies {
+	readonly signal?: AbortSignal;
 }
 
 interface RunPushCupboardDependencies {
@@ -160,7 +169,8 @@ interface PushArgumentsOptions {
 
 export function registerPushCommand(
 	program: Command,
-	environment: Environment = env
+	environment: Environment = env,
+	signal?: AbortSignal
 ): void {
 	program
 		.command('push')
@@ -180,7 +190,7 @@ export function registerPushCommand(
 		)
 		.option(
 			'--cupboard-version <version>',
-			'cupboard version to install: latest or an exact version such as 1.2.3'
+			'cupboard version to install: latest or an exact published release tag'
 		)
 		.option(
 			'--include-prereleases <value>',
@@ -247,7 +257,11 @@ export function registerPushCommand(
 			'--root-groups <json>',
 			'JSON array of {root, paths} groups: one push per group, replacing the flat paths and root inputs'
 		)
-		.action((options: PushOptions) => pushAction(options, environment));
+		.action((options: PushOptions) =>
+			pushAction(options, environment, undefined, {
+				...(signal !== undefined && { signal })
+			})
+		);
 }
 
 export function resolvePushInputs(
@@ -449,14 +463,20 @@ export interface PushInvocation {
 export async function pushAction(
 	options: PushOptions,
 	environment: Environment = env,
-	reporter: Reporter = createGithubReporter()
+	reporter: Reporter = createGithubReporter(),
+	dependencies: PushActionDependencies = {}
 ): Promise<void> {
+	dependencies.signal?.throwIfAborted();
+
 	const inputs = resolvePushInputs(options, environment);
 	const installedCupboard = await acquirePushCupboard(
 		inputs,
 		environment,
-		reporter
+		reporter,
+		defaultAcquirePushCupboardDependencies,
+		dependencies.signal
 	);
+	dependencies.signal?.throwIfAborted();
 
 	const nix = Nix.open();
 	const pushes: readonly PushInvocation[] =
@@ -478,7 +498,8 @@ export async function pushAction(
 			arguments: arguments_,
 			environment,
 			requireGrace: inputs.requireGrace,
-			version: installedCupboard.version
+			version: installedCupboard.version,
+			signal: dependencies.signal
 		});
 
 		summaries.push(requirePushSummary(run.results, run.protocol));
@@ -511,7 +532,7 @@ export interface PushCupboard {
 
 interface AcquirePushCupboardDependencies {
 	readonly install: typeof installCupboard;
-	readonly inspectVersion: (binaryPath: string) => string;
+	readonly inspectVersion: typeof inspectCupboardVersion;
 }
 
 const defaultAcquirePushCupboardDependencies: AcquirePushCupboardDependencies =
@@ -533,14 +554,15 @@ export async function acquirePushCupboard(
 	>,
 	environment: Environment,
 	reporter: Reporter,
-	dependencies: AcquirePushCupboardDependencies = defaultAcquirePushCupboardDependencies
+	dependencies: AcquirePushCupboardDependencies = defaultAcquirePushCupboardDependencies,
+	signal?: AbortSignal
 ): Promise<PushCupboard> {
 	if (inputs.cupboardPath !== '') {
 		const binaryPath = path.resolve(inputs.cupboardPath);
 
 		return {
 			binaryPath,
-			version: dependencies.inspectVersion(binaryPath)
+			version: await dependencies.inspectVersion(binaryPath, signal)
 		};
 	}
 
@@ -564,14 +586,33 @@ export async function acquirePushCupboard(
 	);
 }
 
-export function inspectCupboardVersion(binaryPath: string): string {
-	const result = spawnSync(binaryPath, ['--version'], { encoding: 'utf8' });
+export async function inspectCupboardVersion(
+	binaryPath: string,
+	signal?: AbortSignal
+): Promise<string> {
+	signal?.throwIfAborted();
+
+	const child = spawn(binaryPath, ['--version'], {
+		stdio: ['ignore', 'pipe', 'inherit']
+	});
+	let stdout = '';
+
+	child.stdout.setEncoding('utf8');
+	child.stdout.on('data', (chunk: string) => {
+		stdout += chunk;
+	});
+
+	const result = await waitForAbortableChildProcess(
+		observeChildProcess(child),
+		signal
+	);
 
 	if (result.error !== undefined) {
 		throw new CommandFailedError(
 			binaryPath,
 			result.status,
-			result.error.message
+			result.error.message,
+			{ cause: result.error }
 		);
 	}
 
@@ -579,7 +620,7 @@ export function inspectCupboardVersion(binaryPath: string): string {
 		throw new CommandFailedError(binaryPath, result.status);
 	}
 
-	const version = result.stdout.trim();
+	const version = stdout.trim();
 
 	if (version === '') {
 		throw new CupboardVersionOutputMissingError(binaryPath);
@@ -627,7 +668,10 @@ export async function runPushCupboard(
 	options: RunPushCupboardOptions,
 	dependencies: RunPushCupboardDependencies = defaultRunPushCupboardDependencies
 ): Promise<CupboardRunResult> {
-	const protocol = await dependencies.detectResultProtocol(options.binaryPath);
+	const protocol = await dependencies.detectResultProtocol(
+		options.binaryPath,
+		options.signal
+	);
 
 	if (options.requireGrace) {
 		requireGraceResultProtocol(protocol, options.version);
@@ -637,7 +681,8 @@ export async function runPushCupboard(
 		options.binaryPath,
 		options.arguments,
 		options.environment,
-		protocol
+		protocol,
+		options.signal === undefined ? {} : { signal: options.signal }
 	);
 }
 

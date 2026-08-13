@@ -1,9 +1,8 @@
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
-import { promisify } from 'node:util';
 
 import { discoverNixStoreConfig } from '@cupboard/nix';
 import {
@@ -33,6 +32,12 @@ import type { Command } from 'commander';
 import { z } from 'zod';
 
 import {
+	type ClosedChildProcess,
+	observeChildProcess,
+	waitForAbortableChildProcess
+} from '../child-process.ts';
+import {
+	CommandFailedError,
 	ComponentRootTargetLimitError,
 	InvalidInputError,
 	MatrixJobLimitError,
@@ -81,15 +86,94 @@ import {
 
 export type EnsureRunner = (
 	command: string,
-	arguments_: readonly string[]
+	arguments_: readonly string[],
+	signal?: AbortSignal
 ) => Promise<{ stdout: string; stderr: string }>;
 
-const execFileAsync = promisify(execFile);
-const defaultEnsureRunner: EnsureRunner = (command, arguments_) =>
-	execFileAsync(command, arguments_, {
-		encoding: 'utf8',
-		maxBuffer: 16 * 1024 * 1024
+const maximumCapturedOutputBytes = 16 * 1024 * 1024;
+
+class CapturedCommandError extends CommandFailedError {
+	constructor(
+		command: string,
+		result: ClosedChildProcess,
+		public readonly stdout: string,
+		public readonly stderr: string
+	) {
+		super(command, result.status, result.error?.message, {
+			...(result.error !== undefined && { cause: result.error }),
+			...(result.signal !== undefined && { signal: result.signal })
+		});
+		this.name = 'CapturedCommandError';
+	}
+}
+
+const defaultEnsureRunner: EnsureRunner = async (
+	command,
+	arguments_,
+	signal
+) => {
+	signal?.throwIfAborted();
+
+	const child = spawn(command, [...arguments_], {
+		stdio: ['ignore', 'pipe', 'pipe']
 	});
+	const outputLimit = new AbortController();
+	const lifecycleSignal =
+		signal === undefined
+			? outputLimit.signal
+			: AbortSignal.any([signal, outputLimit.signal]);
+	const stdout: Buffer[] = [];
+	const stderr: Buffer[] = [];
+	let stdoutBytes = 0;
+	let stderrBytes = 0;
+	const capture = (
+		chunks: Buffer[],
+		chunk: Buffer,
+		capturedBytes: number,
+		stream: 'stdout' | 'stderr'
+	): number => {
+		const nextBytes = capturedBytes + chunk.byteLength;
+
+		if (nextBytes > maximumCapturedOutputBytes) {
+			outputLimit.abort(
+				new Error(
+					`${command} ${stream} exceeded ${String(maximumCapturedOutputBytes)} bytes`
+				)
+			);
+
+			return nextBytes;
+		}
+
+		chunks.push(chunk);
+
+		return nextBytes;
+	};
+
+	child.stdout.on('data', (chunk: Buffer) => {
+		stdoutBytes = capture(stdout, chunk, stdoutBytes, 'stdout');
+	});
+	child.stderr.on('data', (chunk: Buffer) => {
+		stderrBytes = capture(stderr, chunk, stderrBytes, 'stderr');
+	});
+
+	const result = await waitForAbortableChildProcess(
+		observeChildProcess(child),
+		lifecycleSignal
+	);
+	const capturedStdout = Buffer.concat(stdout).toString('utf8');
+	const capturedStderr = Buffer.concat(stderr).toString('utf8');
+
+	if (result.error !== undefined || result.status !== 0) {
+		throw new CapturedCommandError(
+			command,
+			result,
+			capturedStdout,
+			capturedStderr
+		);
+	}
+
+	return { stdout: capturedStdout, stderr: capturedStderr };
+};
 const maximumConcurrentRootEnsures = 8;
 
 const capturedCommandOutputSchema = z.looseObject({
@@ -182,6 +266,7 @@ export interface PlanDependencies {
 	readonly storeDirectory?: StoreDirectory;
 	readonly fetcher?: typeof fetch;
 	readonly runner?: EnsureRunner;
+	readonly signal?: AbortSignal;
 	readonly createArtifactName?: () => string;
 	/**
 	 * Prices every surviving cohort target's own measured substitutable NAR
@@ -197,7 +282,8 @@ export interface PlanDependencies {
 
 export function registerPlanCommand(
 	program: Command,
-	environment: Environment = env
+	environment: Environment = env,
+	signal?: AbortSignal
 ): void {
 	program
 		.command('plan')
@@ -236,7 +322,11 @@ export function registerPlanCommand(
 			'--store <uri>',
 			'remote ssh-ng store the cohorts build against; selected output paths must be known during planning'
 		)
-		.action((options: PlanOptions) => planAction(options, environment));
+		.action((options: PlanOptions) =>
+			planAction(options, environment, undefined, {
+				...(signal !== undefined && { signal })
+			})
+		);
 }
 
 export function resolvePlanInputs(
@@ -444,6 +534,8 @@ export async function planAction(
 	reporter: Reporter = createGithubReporter(),
 	dependencies: PlanDependencies = {}
 ): Promise<void> {
+	dependencies.signal?.throwIfAborted();
+
 	const inputs = resolvePlanInputs(options, environment);
 	const { plan, evaluations } = inputs.optimise
 		? await optimisedPlan(inputs, reporter, dependencies)
@@ -452,7 +544,13 @@ export async function planAction(
 	// it only runs when planning did: the unoptimised path never inspects the
 	// cache, and spawning every cohort's job unfiltered matches that.
 	const cohortDecisions = inputs.optimise
-		? await cohortPreFilter(inputs, plan, evaluations, dependencies.runner)
+		? await cohortPreFilter(
+				inputs,
+				plan,
+				evaluations,
+				dependencies.runner,
+				dependencies.signal
+			)
 		: plan.cohorts.map((cohort) => ({ key: cohort.key, pruned: false }));
 
 	await writePlan(
@@ -464,7 +562,12 @@ export async function planAction(
 		dependencies.createArtifactName?.() ??
 			`cupboard-publish-plan-${randomUUID()}`,
 		dependencies.measurer ??
-			packingMeasurer(inputs, reporter, dependencies.runner)
+			packingMeasurer(
+				inputs,
+				reporter,
+				dependencies.runner,
+				dependencies.signal
+			)
 	);
 }
 
@@ -514,7 +617,8 @@ async function optimisedPlan(
 		inputs,
 		evaluations,
 		availablePaths,
-		dependencies.runner
+		dependencies.runner,
+		dependencies.signal
 	);
 	const plan = planPublish({
 		evaluations,
@@ -617,7 +721,8 @@ export async function ensureAvailableTargets(
 	inputs: PlanInputs,
 	evaluations: readonly TargetEvaluation[],
 	availablePaths: ReadonlySet<StorePathString>,
-	runner: EnsureRunner = defaultEnsureRunner
+	runner: EnsureRunner = defaultEnsureRunner,
+	signal?: AbortSignal
 ): Promise<Set<string>> {
 	const cached = evaluations.filter(
 		(evaluation) =>
@@ -633,7 +738,8 @@ export async function ensureAvailableTargets(
 				inputs,
 				root,
 				evaluation.targetPaths,
-				runner
+				runner,
+				signal
 			);
 
 			return { rootSuffix: evaluation.target.rootSuffix, response };
@@ -655,7 +761,8 @@ async function ensureRoot(
 	inputs: PlanInputs,
 	root: string,
 	storePaths: readonly StorePathString[],
-	runner: EnsureRunner
+	runner: EnsureRunner,
+	signal?: AbortSignal
 ): Promise<ParsedRootEnsureResponse> {
 	const resultFile = path.join(
 		inputs.temporaryDirectory,
@@ -688,8 +795,10 @@ async function ensureRoot(
 	}
 
 	try {
-		await runner(inputs.cupboardPath, arguments_);
+		await runner(inputs.cupboardPath, arguments_, signal);
 	} catch (error) {
+		signal?.throwIfAborted();
+
 		const replayed = replayCapturedCommandOutput(error);
 
 		throw new RootEnsureCommandError(root, {
@@ -759,7 +868,8 @@ function ensureResponse(
 async function readRootTargets(
 	inputs: PlanInputs,
 	root: string,
-	runner: EnsureRunner
+	runner: EnsureRunner,
+	signal?: AbortSignal
 ): Promise<ReadonlySet<StorePathString>> {
 	const resultFile = path.join(
 		inputs.temporaryDirectory,
@@ -787,8 +897,10 @@ async function readRootTargets(
 	}
 
 	try {
-		await runner(inputs.cupboardPath, arguments_);
+		await runner(inputs.cupboardPath, arguments_, signal);
 	} catch (error) {
+		signal?.throwIfAborted();
+
 		const replayed = replayCapturedCommandOutput(error);
 
 		throw new RootTargetsCommandError(root, {
@@ -860,7 +972,8 @@ async function targetCoverageOutcome(
 	target: PublishTarget,
 	evaluationByAttribute: ReadonlyMap<string, TargetEvaluation>,
 	inputs: PlanInputs,
-	runner: EnsureRunner
+	runner: EnsureRunner,
+	signal?: AbortSignal
 ): Promise<TargetCoverage> {
 	const evaluation = evaluationByAttribute.get(target.attr);
 
@@ -872,8 +985,10 @@ async function targetCoverageOutcome(
 	let reconciledPaths: ReadonlySet<StorePathString>;
 
 	try {
-		reconciledPaths = await readRootTargets(inputs, root, runner);
+		reconciledPaths = await readRootTargets(inputs, root, runner, signal);
 	} catch (error) {
+		signal?.throwIfAborted();
+
 		return {
 			attr: target.attr,
 			status: 'failed',
@@ -892,7 +1007,8 @@ async function targetCoverageOutcome(
 			inputs,
 			root,
 			[...reconciledPaths],
-			runner
+			runner,
+			signal
 		);
 
 		return evaluateTargetCoverage(target, evaluation.targetPaths, {
@@ -900,6 +1016,8 @@ async function targetCoverageOutcome(
 			reconciledPaths
 		});
 	} catch (error) {
+		signal?.throwIfAborted();
+
 		return {
 			attr: target.attr,
 			status: 'failed',
@@ -921,7 +1039,8 @@ export async function cohortPreFilter(
 	inputs: PlanInputs,
 	plan: Pick<PublishPlan, 'cohorts'>,
 	evaluations: readonly TargetEvaluation[],
-	runner: EnsureRunner = defaultEnsureRunner
+	runner: EnsureRunner = defaultEnsureRunner,
+	signal?: AbortSignal
 ): Promise<readonly CohortPreFilterDecision[]> {
 	const evaluationByAttribute = new Map(
 		evaluations.map((evaluation) => [evaluation.target.attr, evaluation])
@@ -931,7 +1050,13 @@ export async function cohortPreFilter(
 		targets,
 		maximumConcurrentRootEnsures,
 		(target) =>
-			targetCoverageOutcome(target, evaluationByAttribute, inputs, runner)
+			targetCoverageOutcome(
+				target,
+				evaluationByAttribute,
+				inputs,
+				runner,
+				signal
+			)
 	);
 	const coverageByAttribute = new Map(
 		coverageEntries.map((entry) => [entry.attr, entry])
@@ -1062,7 +1187,8 @@ interface MeasurableTarget {
 export function packingMeasurer(
 	inputs: PlanInputs,
 	reporter: Reporter,
-	runner: EnsureRunner = defaultEnsureRunner
+	runner: EnsureRunner = defaultEnsureRunner,
+	signal?: AbortSignal
 ): NonNullable<PlanDependencies['measurer']> {
 	return async (cohorts, evaluations) => {
 		const evaluationByAttribute = new Map(
@@ -1086,8 +1212,10 @@ export function packingMeasurer(
 		}
 
 		try {
-			return await measureTargetSizes(inputs, targets, runner);
+			return await measureTargetSizes(inputs, targets, runner, signal);
 		} catch (error) {
+			signal?.throwIfAborted();
+
 			reporter.warn(
 				'Leaving every cohort as the manifest declared it: the packing measurement failed',
 				error instanceof Error ? error.message : String(error)
@@ -1101,7 +1229,8 @@ export function packingMeasurer(
 async function measureTargetSizes(
 	inputs: PlanInputs,
 	targets: readonly MeasurableTarget[],
-	runner: EnsureRunner
+	runner: EnsureRunner,
+	signal?: AbortSignal
 ): Promise<ReadonlyMap<string, number>> {
 	const identifier = randomUUID();
 	const targetsFile = path.join(
@@ -1118,20 +1247,24 @@ async function measureTargetSizes(
 	);
 
 	await writeFile(targetsFile, `${JSON.stringify({ targets })}\n`);
-	await runner(inputs.cupboardPath, [
-		'--output-mode',
-		'github',
-		'--no-colour',
-		'--result-file',
-		resultFile,
-		'plan',
-		'measure',
-		'--targets-file',
-		targetsFile,
-		'--measure-file',
-		measureFile,
-		...(inputs.store === '' ? [] : ['--store', inputs.store])
-	]);
+	await runner(
+		inputs.cupboardPath,
+		[
+			'--output-mode',
+			'github',
+			'--no-colour',
+			'--result-file',
+			resultFile,
+			'plan',
+			'measure',
+			'--targets-file',
+			targetsFile,
+			'--measure-file',
+			measureFile,
+			...(inputs.store === '' ? [] : ['--store', inputs.store])
+		],
+		signal
+	);
 
 	return measureResponse(await readMeasureResults(resultFile));
 }

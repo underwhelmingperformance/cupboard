@@ -346,15 +346,14 @@ function parseOptions(arguments_: readonly string[]): Options {
 	}
 
 	return {
-		version: normaliseReleaseVersion(parsed.version),
+		version: normaliseBuildVersion(parsed.version),
 		outputDirectory: parsed.outputDirectory
 	};
 }
 
-function normaliseReleaseVersion(version: string): string {
-	const trimmed = version.trim();
-
-	return trimmed.startsWith('v') ? trimmed : `v${trimmed}`;
+/** Preserve the caller's build identity after rejecting surrounding whitespace. */
+export function normaliseBuildVersion(version: string): string {
+	return version.trim();
 }
 
 if (

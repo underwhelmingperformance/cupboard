@@ -32,6 +32,14 @@ const githubActionsDocumentation = new URL(
 	'../docs/github-actions.md',
 	import.meta.url
 );
+const trustRulesDocumentation = new URL(
+	'../docs/trust-rules.md',
+	import.meta.url
+);
+const reuseViewsDocumentation = new URL(
+	'../docs/reuse-views.md',
+	import.meta.url
+);
 const remoteStoreDockerfile = new URL(
 	'../tests/fixtures/nix-ssh-store/Dockerfile',
 	import.meta.url
@@ -59,17 +67,104 @@ function stepText(step: readonly string[] | undefined): string {
 	return (step ?? []).map((line) => line.trim()).join(' ');
 }
 
+describe('reusable workflow action checkout isolation', () => {
+	it.each([
+		{ name: 'flake publish', workflow: flakeWorkflow, checkoutCount: 3 },
+		{ name: 'publish', workflow: publishWorkflow, checkoutCount: 1 }
+	])(
+		'reserves every workflow-source checkout in $name',
+		async ({ workflow, checkoutCount }) => {
+			const contents = await readFile(workflow, 'utf8');
+			const lines = contents.split('\n');
+			const workflowCheckouts = actionSteps(
+				lines,
+				/^ {6}- uses: actions\/checkout@/u
+			).filter((step) =>
+				step.some(
+					(line) => line.trim() === 'repository: ${{ job.workflow_repository }}'
+				)
+			);
+			const reservations = actionSteps(
+				lines,
+				/^ {6}- name: Reserve the cupboard workflow checkout$/u
+			);
+			const checkoutLines = lines.flatMap((line, index) =>
+				line.trim() === 'repository: ${{ job.workflow_repository }}'
+					? [index]
+					: []
+			);
+			const reservationLines = lines.flatMap((line, index) =>
+				line === '      - name: Reserve the cupboard workflow checkout'
+					? [index]
+					: []
+			);
+
+			expect({
+				workflowCheckouts: workflowCheckouts.map((step) =>
+					step
+						.map((line) => line.trim())
+						.find((line) => line.startsWith('path:'))
+				),
+				reservationCount: reservations.length,
+				guardsImmediatelyPrecedeTheirCheckout: checkoutLines.every(
+					(checkoutLine, index) => {
+						const reservationLine = reservationLines[index];
+						const previousCheckoutLine = checkoutLines[index - 1] ?? -1;
+
+						return (
+							reservationLine !== undefined &&
+							reservationLine > previousCheckoutLine &&
+							reservationLine < checkoutLine
+						);
+					}
+				),
+				reservations: reservations.map((step) => ({
+					checkoutPath: stepText(step).includes(
+						'${{ github.workspace }}/.cupboard-workflow'
+					),
+					ordinaryPathGuard: stepText(step).includes(
+						'[ -e "${CUPBOARD_WORKFLOW_CHECKOUT}" ]'
+					),
+					symlinkGuard: stepText(step).includes(
+						'[ -L "${CUPBOARD_WORKFLOW_CHECKOUT}" ]'
+					),
+					failClosed: stepText(step).includes(
+						'refusing to replace caller content'
+					)
+				})),
+				legacyCheckoutDestination: contents.includes('path: .cupboard\n'),
+				legacyActionReference: contents.includes('./.cupboard/actions/')
+			}).toStrictEqual({
+				workflowCheckouts: Array.from(
+					{ length: checkoutCount },
+					() => 'path: .cupboard-workflow'
+				),
+				reservationCount: checkoutCount,
+				guardsImmediatelyPrecedeTheirCheckout: true,
+				reservations: Array.from({ length: checkoutCount }, () => ({
+					checkoutPath: true,
+					ordinaryPathGuard: true,
+					symlinkGuard: true,
+					failClosed: true
+				})),
+				legacyCheckoutDestination: false,
+				legacyActionReference: false
+			});
+		}
+	);
+});
+
 describe('cupboard flake publish release coordinates', () => {
 	it('resolves one canonical cupboard coordinate for every consuming job', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 		const lines = contents.split('\n');
 		const [resolver] = actionSteps(
 			lines,
-			/^ {6}- uses: \.\/\.cupboard\/actions\/resolve-cupboard$/u
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/resolve-cupboard$/u
 		);
 		const setups = actionSteps(
 			lines,
-			/^ {6}- uses: \.\/\.cupboard\/actions\/setup$/u
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/setup$/u
 		);
 		const versionInput = contents.slice(
 			contents.indexOf('      cupboard-version:'),
@@ -105,7 +200,7 @@ describe('cupboard flake publish release coordinates', () => {
 			configurePermission: true,
 			canonicalOutput: true,
 			resolver: [
-				'- uses: ./.cupboard/actions/resolve-cupboard',
+				'- uses: ./.cupboard-workflow/actions/resolve-cupboard',
 				'id: resolve-cupboard',
 				'with:',
 				'cupboard-version: ${{ inputs.cupboard-version }}',
@@ -128,7 +223,7 @@ describe('cupboard flake publish release coordinates', () => {
 		const lines = contents.split('\n');
 		const prepares = actionSteps(
 			lines,
-			/^ {6}- uses: \.\/\.cupboard\/actions\/prepare$/u
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/prepare$/u
 		);
 		const planPrepare = prepares[0]?.map((line) => line.trim());
 		const planPrepareText = planPrepare?.join(' ');
@@ -173,7 +268,7 @@ describe('cupboard flake publish release coordinates', () => {
 		const lines = contents.split('\n');
 		const prepares = actionSteps(
 			lines,
-			/^ {6}- uses: \.\/\.cupboard\/actions\/prepare$/u
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/prepare$/u
 		);
 		const values = prepares.map((step) =>
 			step.map((line) => line.trim()).join(' ')
@@ -230,7 +325,7 @@ describe('cupboard flake publish release coordinates', () => {
 		const lines = contents.split('\n');
 		const prepares = actionSteps(
 			lines,
-			/^ {6}- uses: \.\/\.cupboard\/actions\/prepare$/u
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/prepare$/u
 		);
 
 		expect({
@@ -358,15 +453,15 @@ describe('cupboard publish release coordinates', () => {
 		const cupboardCheckout = checkouts[1]?.map((line) => line.trim());
 		const [setup] = actionSteps(
 			lines,
-			/^ {6}- uses: \.\/\.cupboard\/actions\/setup$/u
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/setup$/u
 		);
 		const [push] = actionSteps(
 			lines,
-			/^ {6}- uses: \.\/\.cupboard\/actions\/push$/u
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/push$/u
 		);
 		const [resolver] = actionSteps(
 			lines,
-			/^ {6}- uses: \.\/\.cupboard\/actions\/resolve-cupboard$/u
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/resolve-cupboard$/u
 		);
 		const versionInput = contents.slice(
 			contents.indexOf('      cupboard-version:'),
@@ -408,7 +503,7 @@ describe('cupboard publish release coordinates', () => {
 		const lines = contents.split('\n');
 		const [build] = actionSteps(
 			lines,
-			/^ {6}- uses: \.\/\.cupboard\/actions\/build-paths$/u
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/build-paths$/u
 		);
 		const buildInputs = new Set((build ?? []).map((line) => line.trim()));
 
@@ -428,8 +523,9 @@ describe('cupboard publish release coordinates', () => {
 			omitsVersion: !caller.includes('cupboard-version:'),
 			omitsSource: !caller.includes('cupboard-source-commit:'),
 			automaticResolution:
-				workflow.includes('- uses: ./.cupboard/actions/resolve-cupboard') &&
-				workflow.includes('workflow-sha: ${{ job.workflow_sha }}')
+				workflow.includes(
+					'- uses: ./.cupboard-workflow/actions/resolve-cupboard'
+				) && workflow.includes('workflow-sha: ${{ job.workflow_sha }}')
 		}).toStrictEqual({
 			callsMovingWorkflow: true,
 			omitsVersion: true,
@@ -505,6 +601,32 @@ describe('cupboard repository cache publishing', () => {
 	});
 });
 
+describe('SHA-pinned reusable-workflow documentation', () => {
+	it.each([
+		['trust rules', trustRulesDocumentation],
+		['reuse views', reuseViewsDocumentation]
+	])('derives the release from the pin in %s', async (_name, documentation) => {
+		const contents = await readFile(documentation, 'utf8');
+		const prose = contents.replaceAll(/\s+/gu, ' ');
+		const examples = contents.match(
+			/```yaml\n[\s\S]*?uses: underwhelmingperformance\/cupboard\/\.github\/workflows\/cupboard-flake-publish\.yml@[0-9a-f]{40} # vX\.Y\.Z[\s\S]*?```/gu
+		);
+
+		expect({
+			examples: examples?.map((example) => ({
+				shaPinned: /@[0-9a-f]{40} # vX\.Y\.Z/u.test(example),
+				versionOverride: example.includes('cupboard-version:')
+			})),
+			explainsOverride: prose.includes(
+				'An explicit `cupboard-version` is only needed to intentionally run a different release from the workflow pin.'
+			)
+		}).toStrictEqual({
+			examples: [{ shaPinned: true, versionOverride: false }],
+			explainsOverride: true
+		});
+	});
+});
+
 describe('cupboard flake publish cohort job', () => {
 	it('replaces the target fan-out with a cohort job gated on the cohort matrix', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
@@ -542,9 +664,13 @@ describe('cupboard flake publish cohort job', () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 
 		expect({
-			usesBuildCohort: contents.includes('./.cupboard/actions/build-cohort'),
-			usesPush: contents.includes('./.cupboard/actions/push'),
-			usesBuildPaths: contents.includes('./.cupboard/actions/build-paths'),
+			usesBuildCohort: contents.includes(
+				'./.cupboard-workflow/actions/build-cohort'
+			),
+			usesPush: contents.includes('./.cupboard-workflow/actions/push'),
+			usesBuildPaths: contents.includes(
+				'./.cupboard-workflow/actions/build-paths'
+			),
 			rootGroupingStepRemoved: !contents.includes('root-groups')
 		}).toStrictEqual({
 			usesBuildCohort: true,
@@ -569,7 +695,7 @@ describe('cupboard flake publish cohort job', () => {
 		);
 		const [buildCohortStep] = actionSteps(
 			lines,
-			/^ {6}- uses: \.\/\.cupboard\/actions\/build-cohort$/u
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/build-cohort$/u
 		);
 		const buildCohortInputs = new Set(
 			(buildCohortStep ?? []).map((line) => line.trim())
@@ -634,7 +760,7 @@ describe('cupboard flake publish cohort job', () => {
 		const lines = contents.split('\n');
 		const [planStep] = actionSteps(
 			lines,
-			/^ {6}- uses: \.\/\.cupboard\/actions\/plan$/u
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/plan$/u
 		);
 		const trimmed = new Set((planStep ?? []).map((line) => line.trim()));
 
@@ -654,7 +780,7 @@ describe('cupboard flake publish cohort job', () => {
 		const lines = contents.split('\n');
 		const [buildCohortStep] = actionSteps(
 			lines,
-			/^ {6}- uses: \.\/\.cupboard\/actions\/build-cohort$/u
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/build-cohort$/u
 		);
 		const trimmed = (buildCohortStep ?? []).map((line) => line.trim());
 
@@ -676,12 +802,12 @@ describe('cupboard flake publish cohort job', () => {
 		const lines = contents.split('\n');
 		const prepares = actionSteps(
 			lines,
-			/^ {6}- uses: \.\/\.cupboard\/actions\/prepare$/u
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/prepare$/u
 		);
 		const cohortPrepare = prepares[1]?.map((line) => line.trim());
 		const [buildCohortStep] = actionSteps(
 			lines,
-			/^ {6}- uses: \.\/\.cupboard\/actions\/build-cohort$/u
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/build-cohort$/u
 		);
 		const build = (buildCohortStep ?? []).map((line) => line.trim());
 
@@ -700,11 +826,16 @@ describe('cupboard flake publish cohort job', () => {
 
 	it('threads publication and the shared run root into build-cohort', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
+		const [buildCohortStep] = actionSteps(
+			contents.split('\n'),
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/build-cohort$/u
+		);
+		const buildCohortText = stepText(buildCohortStep);
 
 		expect({
 			pushThreaded: contents.includes('push: ${{ inputs.push }}'),
-			gcThreaded: contents.includes(
-				'gc-between-cohorts: ${{ inputs.gc-between-cohorts }}'
+			gcThreaded: buildCohortText.includes(
+				"gc-between-cohorts: ${{ inputs.gc-between-cohorts && runner.environment == 'github-hosted' && inputs.store == '' }}"
 			),
 			gcWorkflowInput: contents.includes(
 				'      gc-between-cohorts:\n        description:'
@@ -807,6 +938,11 @@ describe('prepare SSH transport', () => {
 			refusesStoreCredentialsOutsideStoreMode: implementation.includes(
 				'store SSH inputs require the store input'
 			),
+			refusesPersistentMultiplexing: [
+				'controlmaster)',
+				'controlpath)',
+				'controlpersist)'
+			].every((directive) => implementation.includes(directive)),
 			usesTransportImplementation: contents.match(
 				/ssh-transport\.sh" (?:validate|configure)/gu
 			)?.length,
@@ -839,6 +975,7 @@ describe('prepare SSH transport', () => {
 			refusesBothModes: true,
 			refusesBuilderCredentialsOutsideBuilderMode: true,
 			refusesStoreCredentialsOutsideStoreMode: true,
+			refusesPersistentMultiplexing: true,
 			usesTransportImplementation: 3,
 			requiresBuilderHostKeyEvidence: true,
 			requiresStoreHostKeyEvidence: true,
@@ -851,33 +988,70 @@ describe('prepare SSH transport', () => {
 });
 
 describe('cupboard cohort collection boundary', () => {
-	it('collects the local store after the cohort has published and attested', async () => {
+	it('collects only an ephemeral local store and explains unsupported requests', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 		const lines = contents.split('\n');
+		const [skipStep] = actionSteps(
+			lines,
+			/^ {6}- name: Explain skipped local store collection$/u
+		);
+		const [collectStep] = actionSteps(
+			lines,
+			/^ {6}- name: Collect the local store$/u
+		);
+		const [buildCohortStep] = actionSteps(
+			lines,
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/build-cohort$/u
+		);
+		const skip = lines.indexOf(
+			'      - name: Explain skipped local store collection'
+		);
 		const collect = lines.indexOf('      - name: Collect the local store');
 		const attach = lines.indexOf(
-			'      - uses: ./.cupboard/actions/attest-attach'
+			'      - uses: ./.cupboard-workflow/actions/attest-attach'
 		);
-		const step = lines.slice(collect).map((line) => line.trim());
-		const releases = step.indexOf('rm -rf -- "${OUT_LINK_DIRECTORY}"');
-		const sweeps = step.indexOf('if ! nix store gc; then');
+		const collectText = stepText(collectStep);
+		const skipText = stepText(skipStep);
+		const buildCohortText = stepText(buildCohortStep);
+		const releases = collectText.indexOf('rm -rf -- "${OUT_LINK_DIRECTORY}"');
+		const sweeps = collectText.indexOf('if ! nix store gc; then');
 
 		expect({
-			followsTheAttachStep: attach !== -1 && collect > attach,
-			gatedOnTheInput: step.includes(
-				'if: ${{ !cancelled() && inputs.gc-between-cohorts }}'
+			followsTheAttachStep: attach !== -1 && skip > attach && collect > skip,
+			collectsOnlyGithubHosted: collectText.includes(
+				"runner.environment == 'github-hosted'"
 			),
-			takesTheOutLinksFromBuildCohort: step.includes(
+			collectsOnlyTheLocalStore: collectText.includes("inputs.store == ''"),
+			internalCollectionUsesTheSameGate: buildCohortText.includes(
+				"gc-between-cohorts: ${{ inputs.gc-between-cohorts && runner.environment == 'github-hosted' && inputs.store == '' }}"
+			),
+			skipCoversSelfHosted: skipText.includes(
+				"runner.environment != 'github-hosted'"
+			),
+			skipCoversDirectStore: skipText.includes("inputs.store != ''"),
+			skipReportsSelfHosted: skipText.includes(
+				'local store collection is unsupported on self-hosted runners'
+			),
+			skipReportsDirectStore: skipText.includes(
+				'the build uses a direct remote store'
+			),
+			takesTheOutLinksFromBuildCohort: collectText.includes(
 				'${{ steps.build-cohort.outputs.out-link-directory }}'
 			),
 			releasesTheOutLinksBeforeSweeping:
 				releases !== -1 && sweeps !== -1 && releases < sweeps,
-			warnsWithoutFailingTheJob: step.some((line) =>
-				line.startsWith("echo '::warning::nix store gc failed")
+			warnsWithoutFailingTheJob: collectText.includes(
+				"echo '::warning::nix store gc failed"
 			)
 		}).toStrictEqual({
 			followsTheAttachStep: true,
-			gatedOnTheInput: true,
+			collectsOnlyGithubHosted: true,
+			collectsOnlyTheLocalStore: true,
+			internalCollectionUsesTheSameGate: true,
+			skipCoversSelfHosted: true,
+			skipCoversDirectStore: true,
+			skipReportsSelfHosted: true,
+			skipReportsDirectStore: true,
 			takesTheOutLinksFromBuildCohort: true,
 			releasesTheOutLinksBeforeSweeping: true,
 			warnsWithoutFailingTheJob: true
@@ -935,7 +1109,7 @@ describe('cupboard build provenance', () => {
 		const attestations = workflows.flatMap(({ file, lines }) =>
 			actionSteps(
 				lines,
-				/^\s+(?:- )?uses: \.\/\.cupboard\/actions\/attest$/u
+				/^\s+(?:- )?uses: \.\/\.cupboard-workflow\/actions\/attest$/u
 			).map((step) => ({ file, step }))
 		);
 
@@ -988,18 +1162,18 @@ describe('cupboard build provenance', () => {
 		const lines = contents.split('\n');
 		const [attachStep] = actionSteps(
 			lines,
-			/^ {6}- uses: \.\/\.cupboard\/actions\/attest-attach$/u
+			/^ {6}- uses: \.\/\.cupboard-workflow\/actions\/attest-attach$/u
 		);
 		const trimmed = (attachStep ?? []).map((line) => line.trim());
 		const stepText = trimmed.join(' ');
 
 		expect({
 			attestStepNamed: contents.includes(
-				'- uses: ./.cupboard/actions/attest\n        id: attest\n'
+				'- uses: ./.cupboard-workflow/actions/attest\n        id: attest\n'
 			),
 			followsAttest:
-				contents.indexOf('./.cupboard/actions/attest-attach') >
-				contents.indexOf('./.cupboard/actions/attest\n'),
+				contents.indexOf('./.cupboard-workflow/actions/attest-attach') >
+				contents.indexOf('./.cupboard-workflow/actions/attest\n'),
 			gatedLikeAttestPlusBundle: stepText.includes(
 				"if: ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' && steps.attest.outputs.bundle-path != '' }}"
 			),
@@ -1036,10 +1210,12 @@ describe('cupboard build provenance', () => {
 
 	it('publishes before signing and attaches the resulting bundle in the simple workflow', async () => {
 		const contents = await readFile(publishWorkflow, 'utf8');
-		const push = contents.indexOf('- uses: ./.cupboard/actions/push');
-		const attest = contents.indexOf('uses: ./.cupboard/actions/attest\n');
+		const push = contents.indexOf('- uses: ./.cupboard-workflow/actions/push');
+		const attest = contents.indexOf(
+			'uses: ./.cupboard-workflow/actions/attest\n'
+		);
 		const attach = contents.indexOf(
-			'- uses: ./.cupboard/actions/attest-attach'
+			'- uses: ./.cupboard-workflow/actions/attest-attach'
 		);
 
 		expect({

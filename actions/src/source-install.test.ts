@@ -12,7 +12,8 @@ import {
 	SourceCheckoutDirtyError,
 	SourceCheckoutRepositoryMismatchError,
 	type SourceCommandRunner,
-	SourceInstallationIncompleteError
+	SourceInstallationIncompleteError,
+	SourceInstallationVersionMismatchError
 } from './source-install.ts';
 
 const sourceCommit = '0123456789abcdef0123456789abcdef01234567';
@@ -85,7 +86,8 @@ function successfulResults(output: string): readonly CommandResult[] {
 		{ stdout: 'https://github.com/underwhelmingperformance/cupboard.git\n' },
 		{ stdout: `${sourceCommit}\n` },
 		{ stdout: '' },
-		{ stdout: `${output}\n` }
+		{ stdout: `${output}\n` },
+		{ stdout: `${sourceCommit.slice(0, 7)}\n` }
 	];
 }
 
@@ -147,6 +149,10 @@ describe('acquireSourceCupboard', () => {
 					'--print-out-paths',
 					`${checkoutDirectory}#cupboard`
 				]
+			},
+			{
+				command: path.join(output, 'bin', 'cupboard'),
+				arguments_: ['--version']
 			}
 		]);
 	});
@@ -310,4 +316,27 @@ describe('acquireSourceCupboard', () => {
 			).rejects.toBeInstanceOf(SourceInstallationIncompleteError);
 		}
 	);
+
+	it('rejects a source result which does not identify as the resolved commit', async () => {
+		const checkoutDirectory = await temporaryDirectory(
+			'cupboard-source-checkout-'
+		);
+		const output = await completeCupboardOutput();
+		const commands = new RecordingCommandRunner([
+			...successfulResults(output).slice(0, -1),
+			{ stdout: 'deadbee\n' }
+		]);
+
+		const outcome = acquireSourceCupboard(
+			{ checkoutDirectory, cupboard },
+			{ runCommand: commands.run }
+		);
+
+		await expect(outcome).rejects.toStrictEqual(
+			new SourceInstallationVersionMismatchError(
+				sourceCommit.slice(0, 7),
+				'deadbee'
+			)
+		);
+	});
 });

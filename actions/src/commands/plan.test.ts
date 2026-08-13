@@ -633,6 +633,31 @@ describe('ensureAvailableTargets', () => {
 		});
 	});
 
+	it('passes the action signal to every root ensure runner invocation', async () => {
+		const value = storePath('/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app');
+		const controller = new AbortController();
+		const signals: (AbortSignal | undefined)[] = [];
+		const runner: EnsureRunner = async (_command, arguments_, signal) => {
+			signals.push(signal);
+			await writeFile(
+				resultFileArgument(arguments_),
+				retainedResultLine('github:owner/repo/main/app')
+			);
+
+			return { stdout: '', stderr: '' };
+		};
+
+		await ensureAvailableTargets(
+			planInputs({ temporaryDirectory: directory }),
+			[evaluation('app', value)],
+			new Set([value]),
+			runner,
+			controller.signal
+		);
+
+		expect(signals).toStrictEqual([controller.signal]);
+	});
+
 	it('replays a failed child command and marks its workflow error as reported', async () => {
 		const value = storePath('/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app');
 		const failure = Object.assign(new Error('cupboard exited 1'), {
@@ -1081,6 +1106,28 @@ describe('cohortPreFilter', () => {
 	const developmentPath = storePath(`/nix/store/${'2'.repeat(32)}-dev`);
 	const changedPath = storePath(`/nix/store/${'3'.repeat(32)}-changed`);
 	const firstRoot = 'github:owner/repo/main/first';
+
+	it('propagates cancellation instead of recording it as an advisory failure', async () => {
+		const first = evaluation('first', outPath);
+		const controller = new AbortController();
+		const reason = new Error('cancel cohort pre-filter');
+		const runner: EnsureRunner = (_command, _arguments, signal) => {
+			expect(signal).toBe(controller.signal);
+			controller.abort(reason);
+
+			return Promise.reject(reason);
+		};
+
+		await expect(
+			cohortPreFilter(
+				planInputs({ temporaryDirectory: directory }),
+				{ cohorts: [singleCohort([first])] },
+				[first],
+				runner,
+				controller.signal
+			)
+		).rejects.toBe(reason);
+	});
 
 	it('prunes a cohort whose member is fully covered by its reconciled list, and still refreshes its root', async () => {
 		const ensuredRoots: string[] = [];
@@ -1694,6 +1741,30 @@ describe('packingMeasurer', () => {
 
 	const outPath = storePath(`/nix/store/${'1'.repeat(32)}-out`);
 	const developmentPath = storePath(`/nix/store/${'2'.repeat(32)}-dev`);
+
+	it('propagates cancellation instead of treating it as a best-effort measurement failure', async () => {
+		const first = evaluation('first', outPath);
+		const warnings: string[] = [];
+		const controller = new AbortController();
+		const reason = new Error('cancel packing measurement');
+		const runner: EnsureRunner = (_command, _arguments, signal) => {
+			expect(signal).toBe(controller.signal);
+			controller.abort(reason);
+
+			return Promise.reject(reason);
+		};
+		const measurer = packingMeasurer(
+			planInputs({ temporaryDirectory: directory }),
+			warningReporter(warnings),
+			runner,
+			controller.signal
+		);
+
+		await expect(measurer([singleCohort([first])], [first])).rejects.toBe(
+			reason
+		);
+		expect(warnings).toStrictEqual([]);
+	});
 
 	it.each([
 		{ name: "this runner's own store", store: '', storeArguments: [] },

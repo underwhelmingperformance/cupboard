@@ -18,6 +18,7 @@ import {
 } from '../errors.ts';
 
 import {
+	cupboardPathEntry,
 	fetchCachePublicKeyAt,
 	resolveSetupInputs,
 	resolveSubstituters,
@@ -27,6 +28,18 @@ import {
 } from './setup.ts';
 
 const alice = readUserInputSchema.parse('alice');
+
+describe('cupboardPathEntry', () => {
+	it.each([
+		['/runner/temp/cupboard-bin/cupboard', '/runner/temp/cupboard-bin\n'],
+		[
+			'/nix/store/012345-cupboard/bin/cupboard',
+			'/nix/store/012345-cupboard/bin\n'
+		]
+	])('adds the binary directory for %s', (binaryPath, expected) => {
+		expect(cupboardPathEntry(binaryPath)).toBe(expected);
+	});
+});
 
 describe('writeNetrc', () => {
 	it('writes a private netrc file scoped to the cache host', async () => {

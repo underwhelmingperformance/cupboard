@@ -115,6 +115,42 @@ afterEach(async () => {
 });
 
 describe('buildAction', () => {
+	it('cancels retry backoff without waiting for its delay', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-build-test-')
+		);
+		temporaryDirectories.push(directory);
+		const controller = new AbortController();
+		const reason = new Error('cancel build retries');
+		let invocation = 0;
+
+		const action = buildAction(
+			{ installables: ['.#app'], attempts: '2' },
+			{
+				RUNNER_TEMP: directory,
+				GITHUB_OUTPUT: path.join(directory, 'github-output')
+			},
+			{
+				signal: controller.signal,
+				nix: { queryPathInfo: () => Promise.reject(new Error('not present')) },
+				runNix: () => {
+					invocation += 1;
+
+					if (invocation === 1) {
+						return Promise.resolve({ status: 0, stdout: '[]' });
+					}
+
+					controller.abort(reason);
+
+					return Promise.resolve({ status: 1, stdout: '' });
+				}
+			}
+		);
+
+		await expect(action).rejects.toBe(reason);
+		expect(invocation).toBe(2);
+	});
+
 	it.each(['--refresh', '.#app\t--refresh'])(
 		'rejects the unsafe installable %j',
 		async (installable) => {
