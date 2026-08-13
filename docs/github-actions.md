@@ -27,8 +27,14 @@ The standalone setup and push actions accept `cupboard-version`. The default is
   `include-prereleases: false` it resolves through GitHub's [latest release
   endpoint][github-latest-release], which selects the latest non-prerelease,
   non-draft release.
-- `1.2.3` is normalised to `v1.2.3` and resolved by tag.
+- `1.2.3` first resolves the literal `1.2.3` tag. If it has no published
+  release, the actions try the legacy `v1.2.3` spelling.
 - `v1.2.3` is used as-is and resolved by tag.
+
+The current actions require release `v0.0.19` or newer, the first release whose
+archive includes the `cupboard-hook-relay` runtime helper. Older semver releases
+are rejected before their assets are downloaded. Arbitrary non-semver tags
+remain supported and are validated from their downloaded archive contents.
 
 The reusable workflows make `cupboard-version` optional. When it is omitted,
 they resolve the called workflow's full commit SHA to a published release. Any
@@ -46,6 +52,12 @@ Pin both reusable workflows to a full commit SHA and retain the release as a
 comment on the `uses` line. The comment is for update tools and human review;
 the workflow resolves the SHA itself. Release API calls use the workflow token,
 which also avoids unnecessary rate-limit failures for public repositories.
+
+The reusable workflows require GitHub Cloud. They fail before checkout on GitHub
+Enterprise Server because GHES does not expose the `job.workflow_*` identity
+fields needed to fetch and verify the called workflow's exact source. This
+restriction is at the reusable-workflow boundary; the lower-level resolver still
+accepts explicit API endpoints and workflow identity inputs.
 
 [github-latest-release]:
   https://docs.github.com/en/rest/releases/releases#get-the-latest-release
@@ -317,8 +329,11 @@ steps:
       trusted-public-key: cupboard-1:...
 ```
 
-The action outputs `cupboard-path`, its canonical `cupboard` coordinate, and,
-when Nix config is generated, `nix-config-file`.
+The action outputs `cupboard-path`, its canonical `cupboard` coordinate, the
+resolved release tag as `cupboard-version`, and, when Nix config is generated,
+`nix-config-file`. `cupboard-version` is empty when the canonical coordinate
+selects source rather than a release; `cupboard` remains the authoritative
+acquisition identity in both modes.
 
 Reusable workflows pass a canonical release-or-source JSON coordinate through
 the `cupboard` input. Direct action callers normally leave that internal
@@ -665,13 +680,14 @@ jobs:
       input_ssh_key: ${{ secrets.FLAKE_INPUT_SSH_KEY }}
 ```
 
-Any builder Nix can reach over SSH works. `builder_ssh_config` carries per-host
-connection settings as ssh_config Host blocks, and it is a secret so connection
-environment tokens may appear in it. Identity-bearing directives
-(`IdentityFile`, `IdentityAgent`, `CertificateFile`, `PKCS11Provider`,
-`SecurityKeyProvider` and `AddKeysToAgent`), `Include` and `Match exec` are
-rejected; pass the private key only through `builder_ssh_key`. nixbuild.net's
-auth tokens, for example, travel in the SSH connection environment:
+Any builder Nix can reach directly over SSH works. `builder_ssh_config` carries
+per-host connection settings as ssh_config `Host` blocks, and it is a secret so
+an allowlisted `SetEnv` token may appear in it. The allowlist covers endpoint,
+transport tuning, algorithm and liveness settings. Commands, proxies,
+forwarding, identity sources, multiplexing, verbose logging, `Include` and
+`Match` are rejected; pass the private key only through `builder_ssh_key`.
+nixbuild.net's auth tokens, for example, travel in the SSH connection
+environment:
 
 Keep the builders specification inline and on one line, separating multiple
 builders with semicolons. Put `-` in its third (SSH-key) column, and do not put
@@ -826,9 +842,10 @@ One supported pinning mechanism is required; the workflow never accepts a direct
 store on first use. Do not put a non-empty `ssh-key` in the store URI: pass the
 managed private key through `store_ssh_key`, so the store cannot select another
 job identity by its runner path. As with builder configuration,
-`store_ssh_config` rejects identity-bearing directives, `Include` and
-`Match exec`; it is only for non-identity connection settings scoped under
-`Host` or non-exec `Match` blocks.
+`store_ssh_config` accepts only allowlisted endpoint, transport tuning,
+algorithm, liveness and `SetEnv` settings scoped under `Host` blocks. Commands,
+proxies, forwarding, identity sources, multiplexing, `Include` and `Match` are
+rejected.
 
 Host-key pinning and client authentication are independent. Without a
 `store_ssh_key`, the generated transport fails closed by disabling the runner's

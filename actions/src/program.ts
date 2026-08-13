@@ -63,7 +63,7 @@ export function buildProgram(
 			}
 		});
 
-	registerSetupCommand(program, environment);
+	registerSetupCommand(program, environment, signal);
 	registerPushCommand(program, environment, signal);
 	registerResolveCupboardCommand(program, environment);
 	registerAttestCommand(program, environment);
@@ -87,6 +87,7 @@ export async function runAction(
 ): Promise<number> {
 	const githubActions = workflowCommands();
 	const isSignalAwareCommand = [
+		'setup',
 		'attest-attach',
 		'build',
 		'build-cohort',

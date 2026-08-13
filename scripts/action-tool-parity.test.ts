@@ -155,22 +155,34 @@ describe('source acquisition smoke', () => {
 });
 
 describe('release acquisition smoke', () => {
-	it('canonicalises a bare release input before building every asset', () => {
+	it('validates and canonicalises the release input before building every asset', () => {
 		const workflow = readFileSync(releaseWorkflowPath, 'utf8');
+		const compactWorkflow = workflow.replaceAll(/\s+/gu, ' ');
+		const validationJob = workflow.indexOf('  validate:');
+		const buildJob = workflow.indexOf('  build:');
 
 		expect({
-			acceptsBareVersion: workflow.includes(
-				"startsWith(inputs.version, 'v') && inputs.version"
+			validationPrecedesBuild:
+				workflow.includes('  validate:') && validationJob < buildJob,
+			validatesExactVersion: workflow.includes(
+				'[[ ! "${INPUT_VERSION}" =~ ^v?(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$ ]]'
 			),
-			addsReleasePrefix: workflow.includes("format('v{0}', inputs.version)"),
+			canonicalConcurrency: compactWorkflow.includes(
+				"group: ${{ github.workflow }}-${{ startsWith(inputs.version, 'v') && inputs.version || format('v{0}', inputs.version) }}"
+			),
+			buildUsesValidatedVersion: workflow.includes(
+				'VERSION: ${{ needs.validate.outputs.version }}'
+			),
 			checksHookRelay:
 				workflow.includes('cupboard-hook-relay') ||
 				readFileSync(ciWorkflowPath, 'utf8').includes(
 					'$(dirname "$CUPBOARD_PATH")/cupboard-hook-relay'
 				)
 		}).toStrictEqual({
-			acceptsBareVersion: true,
-			addsReleasePrefix: true,
+			validationPrecedesBuild: true,
+			validatesExactVersion: true,
+			canonicalConcurrency: true,
+			buildUsesValidatedVersion: true,
 			checksHookRelay: true
 		});
 	});
@@ -209,6 +221,33 @@ describe('documentation action pins', () => {
 });
 
 describe('canonical acquisition composition', () => {
+	it('keeps the legacy setup version output beside the canonical coordinate', () => {
+		const setupAction = readFileSync(
+			path.join(actionsDirectory, 'setup', 'action.yml'),
+			'utf8'
+		);
+
+		expect({
+			canonical: setupAction.includes(
+				'cupboard:\n    description: Canonical release or source acquisition as validated JSON.\n    value: ${{ steps.setup.outputs.cupboard }}'
+			),
+			legacyVersion: setupAction.includes(
+				'cupboard-version:\n    description: Resolved cupboard release tag; empty for source acquisition.\n    value: ${{ steps.setup.outputs.cupboard-version }}'
+			)
+		}).toStrictEqual({ canonical: true, legacyVersion: true });
+	});
+
+	it('keeps the standalone push version output beside its path', () => {
+		const pushAction = readFileSync(
+			path.join(actionsDirectory, 'push', 'action.yml'),
+			'utf8'
+		);
+
+		expect(pushAction).toContain(
+			'cupboard-version:\n    description: Inspected cupboard version.\n    value: ${{ steps.push.outputs.cupboard-version }}'
+		);
+	});
+
 	it.each(['setup', 'push'])(
 		'%s leaves release-repository unset for canonical acquisition',
 		(action) => {

@@ -71,6 +71,13 @@ const isolatedNixConfig = [
 	'builders =',
 	'sandbox = false'
 ].join('\n');
+const rejectingUnknownHostSshOptions = [
+	'-oBatchMode=yes',
+	'-oStrictHostKeyChecking=yes',
+	'-oUserKnownHostsFile=/dev/null',
+	'-oGlobalKnownHostsFile=/dev/null',
+	'-oKnownHostsCommand=none'
+].join(' ');
 
 function remoteStore(): NixSshStoreFixture {
 	const store = fixture.store;
@@ -294,7 +301,12 @@ export function describeRemoteNixStore(): void {
 								'--',
 								storePath
 							],
-							{ env: { ...process.env, NIX_SSHOPTS: '' } }
+							{
+								env: {
+									...process.env,
+									NIX_SSHOPTS: rejectingUnknownHostSshOptions
+								}
+							}
 						)
 					).rejects.toBeInstanceOf(CommandFailedError);
 

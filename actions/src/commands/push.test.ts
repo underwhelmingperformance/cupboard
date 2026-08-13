@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -27,6 +27,7 @@ import {
 	hasUngracedPath,
 	inspectCupboardVersion,
 	pathsMissingGraceDeadline,
+	publishPushAcquisitionOutputs,
 	pushArgumentsForInvocations,
 	type PushInputs,
 	type PushInvocation,
@@ -395,6 +396,34 @@ describe('acquirePushCupboard', () => {
 			CupboardVersionOutputMissingError
 		);
 	});
+});
+
+describe('push acquisition compatibility outputs', () => {
+	it.each([
+		['installed release', '/runner/temp/cupboard', 'v1.2.3'],
+		[
+			'pre-acquired source binary',
+			'/nix/store/cupboard/bin/cupboard',
+			'1a01598'
+		]
+	])(
+		'publishes the path and version for %s',
+		async (_name, binaryPath, version) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-push-output-')
+			);
+			const outputFile = path.join(directory, 'github-output');
+
+			await publishPushAcquisitionOutputs(
+				{ GITHUB_OUTPUT: outputFile },
+				{ binaryPath, version }
+			);
+
+			expect(await readFile(outputFile, 'utf8')).toBe(
+				`cupboard-path=${binaryPath}\ncupboard-version=${version}\n`
+			);
+		}
+	);
 });
 
 describe('buildPushArguments unretained', () => {

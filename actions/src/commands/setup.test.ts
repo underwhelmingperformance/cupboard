@@ -1,10 +1,11 @@
-import { mkdtemp, readFile, stat } from 'node:fs/promises';
+import { access, mkdtemp, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { CacheInfoParseError } from '@cupboard/nix-store/errors';
 import { DEFAULT_CACHE, storedCacheSchema } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import { createGithubReporter } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -23,11 +24,22 @@ import {
 	resolveSetupInputs,
 	resolveSubstituters,
 	type ResolveSubstitutersOptions,
+	setupAction,
 	type SetupOptions,
 	writeNetrc
 } from './setup.ts';
 
 const alice = readUserInputSchema.parse('alice');
+
+async function pathExists(candidate: string): Promise<boolean> {
+	try {
+		await access(candidate);
+
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 describe('cupboardPathEntry', () => {
 	it.each([
@@ -40,6 +52,144 @@ describe('cupboardPathEntry', () => {
 		expect(cupboardPathEntry(binaryPath)).toBe(expected);
 	});
 });
+
+describe('setupAction compatibility outputs', () => {
+	it.each([
+		{
+			name: 'canonical release',
+			options: {
+				cupboard: JSON.stringify({
+					kind: 'release',
+					repository: 'owner/cupboard',
+					tag: 'v1.2.3',
+					sourceCommit: 'a'.repeat(40)
+				})
+			},
+			cupboard: {
+				kind: 'release' as const,
+				repository: 'owner/cupboard',
+				tag: 'v1.2.3',
+				sourceCommit: 'a'.repeat(40)
+			},
+			expectedVersion: 'v1.2.3'
+		},
+		{
+			name: 'canonical source',
+			options: {
+				cupboard: JSON.stringify({
+					kind: 'source',
+					repository: 'owner/cupboard',
+					sourceCommit: 'b'.repeat(40)
+				}),
+				checkoutDir: '/workspace/.cupboard'
+			},
+			cupboard: {
+				kind: 'source' as const,
+				repository: 'owner/cupboard',
+				sourceCommit: 'b'.repeat(40)
+			},
+			expectedVersion: ''
+		}
+	])('projects $name onto the legacy version output', async (testCase) => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-setup-output-')
+		);
+		const outputFile = path.join(directory, 'github-output');
+		const binaryPath = '/nix/store/cupboard/bin/cupboard';
+
+		await setupAction(
+			{
+				...testCase.options,
+				installDir: path.join(directory, 'bin'),
+				addToPath: 'false'
+			},
+			{ GITHUB_OUTPUT: outputFile },
+			createGithubReporter(),
+			{
+				acquire: () =>
+					Promise.resolve({ binaryPath, cupboard: testCase.cupboard })
+			}
+		);
+
+		expect(await readActionOutputs(outputFile)).toStrictEqual({
+			'cupboard-path': binaryPath,
+			cupboard: JSON.stringify(testCase.cupboard),
+			'cupboard-version': testCase.expectedVersion
+		});
+	});
+
+	it.each([
+		['latest-resolved release', undefined, 'v9.8.7'],
+		['explicit arbitrary release tag', 'production', 'production']
+	])(
+		'projects a %s onto the legacy version output',
+		async (_name, selected, resolved) => {
+			const directory = await mkdtemp(
+				path.join(tmpdir(), 'cupboard-setup-output-')
+			);
+			const outputFile = path.join(directory, 'github-output');
+			const binaryPath = path.join(directory, 'bin', 'cupboard');
+			let selectedVersion: string | undefined;
+			const installRelease = vi.fn((options: { readonly version: string }) => {
+				selectedVersion = options.version;
+
+				return Promise.resolve({
+					binaryPath,
+					version: resolved,
+					sourceCommit: 'c'.repeat(40)
+				});
+			});
+
+			await setupAction(
+				{
+					...(selected !== undefined && { cupboardVersion: selected }),
+					installDir: path.join(directory, 'bin'),
+					addToPath: 'false'
+				},
+				{
+					GITHUB_ACTION_REPOSITORY: 'owner/cupboard',
+					GITHUB_OUTPUT: outputFile
+				},
+				createGithubReporter(),
+				{ installRelease }
+			);
+
+			expect({
+				outputs: await readActionOutputs(outputFile),
+				selectedVersion
+			}).toStrictEqual({
+				outputs: {
+					'cupboard-path': binaryPath,
+					cupboard: JSON.stringify({
+						kind: 'release',
+						repository: 'owner/cupboard',
+						tag: resolved,
+						sourceCommit: 'c'.repeat(40)
+					}),
+					'cupboard-version': resolved
+				},
+				selectedVersion: selected ?? 'latest'
+			});
+		}
+	);
+});
+
+async function readActionOutputs(
+	outputFile: string
+): Promise<Readonly<Record<string, string>>> {
+	const contents = await readFile(outputFile, 'utf8');
+
+	return Object.fromEntries(
+		contents
+			.trimEnd()
+			.split('\n')
+			.map((line) => {
+				const separator = line.indexOf('=');
+
+				return [line.slice(0, separator), line.slice(separator + 1)];
+			})
+	);
+}
 
 describe('writeNetrc', () => {
 	it('writes a private netrc file scoped to the cache host', async () => {
@@ -546,6 +696,79 @@ describe('fetchCachePublicKeyAt', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+describe('setupAction cancellation', () => {
+	it('preserves an in-flight probe abort and writes no Nix configuration', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-setup-abort-')
+		);
+		const environmentFile = path.join(directory, 'github-env');
+		const outputFile = path.join(directory, 'github-output');
+		const controller = new AbortController();
+		const reason = new Error('cancel setup configuration');
+		const started = Promise.withResolvers<undefined>();
+		const sourceCommit = 'a'.repeat(40);
+		const fetcher: typeof fetch = (_input, init) =>
+			new Promise((_resolve, reject) => {
+				const signal = init?.signal;
+
+				if (signal === undefined || signal === null) {
+					reject(new Error('expected a setup cancellation signal'));
+					return;
+				}
+
+				started.resolve(undefined);
+				signal.addEventListener(
+					'abort',
+					() => {
+						reject(reason);
+					},
+					{ once: true }
+				);
+			});
+		const pending = setupAction(
+			{
+				cupboard: JSON.stringify({
+					kind: 'source',
+					repository: 'owner/cupboard',
+					sourceCommit
+				}),
+				installDir: path.join(directory, 'bin'),
+				addToPath: 'false',
+				cacheUrl: 'https://cache.example.test'
+			},
+			{
+				RUNNER_TEMP: directory,
+				GITHUB_ACTION_PATH: directory,
+				GITHUB_ENV: environmentFile,
+				GITHUB_OUTPUT: outputFile
+			},
+			createGithubReporter(),
+			{
+				signal: controller.signal,
+				fetch: fetcher,
+				acquire: () =>
+					Promise.resolve({
+						binaryPath: '/nix/store/cupboard/bin/cupboard',
+						cupboard: {
+							kind: 'source',
+							repository: 'owner/cupboard',
+							sourceCommit
+						}
+					})
+			}
+		);
+
+		await started.promise;
+		controller.abort(reason);
+
+		await expect(pending).rejects.toBe(reason);
+		expect({
+			environmentFile: await pathExists(environmentFile),
+			configFile: await pathExists(path.join(directory, 'cupboard-nix.conf'))
+		}).toStrictEqual({ environmentFile: false, configFile: false });
 	});
 });
 

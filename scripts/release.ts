@@ -89,6 +89,8 @@ interface PublishInputs {
 
 const fallbackReleaseRepository = 'cupboard/cupboard';
 const fallbackCacheUrl = 'https://cupboard.supply/t/cupboard';
+const canonicalVersionPattern =
+	/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 
 export class MissingInputError extends UsageError {
 	constructor(public readonly input: string) {
@@ -158,7 +160,7 @@ export function assertCanonicalVersion(version: string): string {
 		throw new MissingInputError('version');
 	}
 
-	if (!version.startsWith('v')) {
+	if (!canonicalVersionPattern.test(version)) {
 		throw new NonCanonicalVersionError(version);
 	}
 

@@ -120,6 +120,33 @@ export class ReleaseAssetNotFoundError extends CodedError {
 	}
 }
 
+/** A release asset exceeded the bounded size accepted by the action. */
+export class DownloadAssetTooLargeError extends CodedError {
+	constructor(
+		public readonly assetName: string,
+		public readonly maximumBytes: number,
+		public readonly observedBytes: number
+	) {
+		super(
+			`release asset ${assetName} is ${String(observedBytes)} bytes, exceeding the ${String(maximumBytes)}-byte download limit`
+		);
+		this.name = 'DownloadAssetTooLargeError';
+	}
+}
+
+/** A historical release cannot satisfy the current action's runtime contract. */
+export class ReleaseCompatibilityError extends CodedError {
+	constructor(
+		public readonly tag: string,
+		public readonly minimumTag: string
+	) {
+		super(
+			`release ${tag} predates the cupboard-hook-relay helper required by this action; select ${minimumTag} or newer`
+		);
+		this.name = 'ReleaseCompatibilityError';
+	}
+}
+
 /** A release archive's executable does not identify as the selected tag. */
 export class InstalledReleaseVersionMismatchError extends CodedError {
 	constructor(
@@ -144,6 +171,86 @@ export class ReleaseInstallationIncompleteError extends CodedError {
 			withCause(options.cause)
 		);
 		this.name = 'ReleaseInstallationIncompleteError';
+	}
+}
+
+/** An installed executable no longer has the bytes in its verified archive. */
+export class ReleaseInstallationIntegrityError extends CodedError {
+	constructor(
+		public readonly generationDirectory: string,
+		public readonly executable: string
+	) {
+		super(
+			`release generation does not match the verified archive: ${executable} in ${generationDirectory}`
+		);
+		this.name = 'ReleaseInstallationIntegrityError';
+	}
+}
+
+/** Persisted installation state cannot be trusted for recovery. */
+export class ReleaseInstallationStateError extends CodedError {
+	constructor(
+		public readonly statePath: string,
+		options: { readonly cause?: unknown } = {}
+	) {
+		super(
+			`Cupboard release installation state at ${statePath} is invalid; inspect it before removing it`,
+			withCause(options.cause)
+		);
+		this.name = 'ReleaseInstallationStateError';
+	}
+}
+
+/** A persisted installation lock is corrupt or from an unsupported installer. */
+export class ReleaseInstallationLockStateError extends CodedError {
+	constructor(public readonly lockPath: string) {
+		super(
+			`Cupboard release installation lock ${lockPath} has an unsupported owner record; confirm no installation is running before removing it`
+		);
+		this.name = 'ReleaseInstallationLockStateError';
+	}
+}
+
+/** The installer was fenced out before it could commit its release. */
+export class ReleaseInstallationLockLostError extends CodedError {
+	constructor(
+		public readonly lockPath: string,
+		options: { readonly cause?: unknown } = {}
+	) {
+		super(
+			`Cupboard release installation lock ${lockPath} was lost`,
+			withCause(options.cause)
+		);
+		this.name = 'ReleaseInstallationLockLostError';
+	}
+}
+
+/** An expired lease still names a process that may own the installation lock. */
+export class ReleaseInstallationLockOwnerAliveError extends CodedError {
+	constructor(
+		public readonly lockPath: string,
+		public readonly pid: number,
+		options: { readonly cause?: unknown } = {}
+	) {
+		super(
+			`Cupboard release installation lock ${lockPath} has an expired lease, but PID ${String(pid)} still exists; stop that installer or confirm it has exited before removing the lock`,
+			withCause(options.cause)
+		);
+		this.name = 'ReleaseInstallationLockOwnerAliveError';
+	}
+}
+
+/** A release failed to publish and its previous installation was not fully restored. */
+export class ReleaseInstallationRollbackError extends CodedError {
+	constructor(
+		public readonly transactionPath: string,
+		options: { readonly cause?: unknown } = {}
+	) {
+		super(
+			`Could not restore the previous Cupboard installation; inspect ${transactionPath} before retrying`,
+			withCause(options.cause)
+		);
+		this.name = 'ReleaseInstallationRollbackError';
 	}
 }
 
@@ -190,8 +297,9 @@ export class AttestationNotFoundError extends CodedError {
 }
 
 /**
- * Every published bundle failed verification. `cause` carries the last
- * bundle's failure; earlier attempts may have failed for other reasons.
+ * Every published attestation candidate failed acquisition or verification.
+ * `cause` carries the last candidate's failure; earlier attempts may have
+ * failed for other reasons.
  */
 export class AttestationVerificationFailedError extends CodedError {
 	constructor(

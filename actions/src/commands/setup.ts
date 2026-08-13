@@ -97,6 +97,13 @@ export interface SetupInputs {
 	readonly checkoutDirectory: string;
 }
 
+export interface SetupActionDependencies {
+	readonly acquire?: typeof acquireCupboard;
+	readonly fetch?: typeof fetch;
+	readonly installRelease?: typeof installCupboard;
+	readonly signal?: AbortSignal;
+}
+
 interface ConfigureNixInputs extends SetupInputs {
 	readonly cacheUrl: URL;
 	readonly environment: Environment;
@@ -111,7 +118,8 @@ interface WriteNetrcOptions {
 
 export function registerSetupCommand(
 	program: Command,
-	environment: Environment = env
+	environment: Environment = env,
+	signal?: AbortSignal
 ): void {
 	program
 		.command('setup')
@@ -164,7 +172,11 @@ export function registerSetupCommand(
 			'--checkout-dir <directory>',
 			'workflow source checkout used for source acquisition'
 		)
-		.action((options: SetupOptions) => setupAction(options, environment));
+		.action((options: SetupOptions) =>
+			setupAction(options, environment, undefined, {
+				...(signal !== undefined && { signal })
+			})
+		);
 }
 
 export function resolveSetupInputs(
@@ -254,28 +266,37 @@ export function resolveSetupInputs(
 export async function setupAction(
 	options: SetupOptions,
 	environment: Environment = env,
-	reporter: Reporter = createGithubReporter()
+	reporter: Reporter = createGithubReporter(),
+	dependencies: SetupActionDependencies = {}
 ): Promise<void> {
+	dependencies.signal?.throwIfAborted();
+
 	const inputs = resolveSetupInputs(options, environment);
 	const installDirectory = path.resolve(inputs.installDirectory);
 
 	await mkdir(installDirectory, { recursive: true });
 
+	const acquire = dependencies.acquire ?? acquireCupboard;
 	const acquired =
 		inputs.cupboard === undefined
 			? await installReleasedCupboard(
 					inputs,
 					installDirectory,
 					environment,
-					reporter
+					reporter,
+					dependencies.installRelease,
+					dependencies.signal
 				)
-			: await acquireCupboard(
+			: await acquire(
 					{
 						cupboard: inputs.cupboard,
 						installDirectory,
 						checkoutDirectory: inputs.checkoutDirectory,
 						githubToken: inputs.githubToken,
-						environment
+						environment,
+						...(dependencies.signal !== undefined && {
+							signal: dependencies.signal
+						})
 					},
 					reporter
 				);
@@ -293,6 +314,11 @@ export async function setupAction(
 		'cupboard',
 		serialiseResolvedCupboard(acquired.cupboard)
 	);
+	await setOutput(
+		environment,
+		'cupboard-version',
+		acquired.cupboard.kind === 'release' ? acquired.cupboard.tag : ''
+	);
 
 	if (inputs.cacheUrl === undefined) {
 		return;
@@ -300,7 +326,11 @@ export async function setupAction(
 
 	await configureNix(
 		{ ...inputs, cacheUrl: inputs.cacheUrl, environment },
-		reporter
+		reporter,
+		{
+			...(dependencies.fetch !== undefined && { fetch: dependencies.fetch }),
+			...(dependencies.signal !== undefined && { signal: dependencies.signal })
+		}
 	);
 }
 
@@ -313,12 +343,14 @@ async function installReleasedCupboard(
 	inputs: SetupInputs,
 	installDirectory: string,
 	environment: Environment,
-	reporter: Reporter
+	reporter: Reporter,
+	installRelease: typeof installCupboard = installCupboard,
+	signal?: AbortSignal
 ): Promise<{
 	readonly binaryPath: string;
 	readonly cupboard: ResolvedCupboard;
 }> {
-	const installed = await installCupboard(
+	const installed = await installRelease(
 		{
 			installDirectory,
 			releaseRepository: inputs.releaseRepository,
@@ -328,7 +360,8 @@ async function installReleasedCupboard(
 			environment,
 			...(inputs.expectedSourceCommit !== '' && {
 				expectedSourceCommit: inputs.expectedSourceCommit
-			})
+			}),
+			...(signal !== undefined && { signal })
 		},
 		reporter
 	);
@@ -346,13 +379,15 @@ async function installReleasedCupboard(
 
 interface CacheInfoFetchDependencies {
 	readonly fetch?: typeof fetch;
+	readonly signal?: AbortSignal;
 }
 
 async function fetchCacheInfoPriority(
 	fetcher: typeof fetch,
 	substituter: URL,
 	side: 'destination' | 'view',
-	headers: Readonly<Record<string, string>> | undefined
+	headers: Readonly<Record<string, string>> | undefined,
+	signal: AbortSignal | undefined
 ): Promise<CachePriority> {
 	const url = canonicalHref(substituter);
 	const target = `${url}/nix-cache-info`;
@@ -361,7 +396,10 @@ async function fetchCacheInfoPriority(
 	return fetchWithProbeDeadline(
 		fetcher,
 		target,
-		{ ...(headers !== undefined && { headers }) },
+		{
+			...(headers !== undefined && { headers }),
+			...(signal !== undefined && { signal })
+		},
 		async (response) => {
 			if (!response.ok) {
 				throw new CacheInfoFetchError(side, url, response.status);
@@ -414,8 +452,20 @@ export async function resolveSubstituters(
 					password: options.readPassword
 				});
 	const [destinationPriority, rawViewPriority] = await Promise.all([
-		fetchCacheInfoPriority(fetcher, destinationUrl, 'destination', headers),
-		fetchCacheInfoPriority(fetcher, viewUrl, 'view', headers)
+		fetchCacheInfoPriority(
+			fetcher,
+			destinationUrl,
+			'destination',
+			headers,
+			dependencies.signal
+		),
+		fetchCacheInfoPriority(
+			fetcher,
+			viewUrl,
+			'view',
+			headers,
+			dependencies.signal
+		)
 	]);
 	// The view's priority comes from its own endpoint's cache-info, so its
 	// provenance is known here: carry it as a reuse-view priority.
@@ -430,22 +480,29 @@ export async function resolveSubstituters(
 
 async function configureNix(
 	inputs: ConfigureNixInputs,
-	reporter: Reporter
+	reporter: Reporter,
+	dependencies: CacheInfoFetchDependencies = {}
 ): Promise<void> {
+	dependencies.signal?.throwIfAborted();
+
 	const trustedPublicKey =
 		inputs.trustedPublicKey === ''
-			? await fetchTrustedPublicKey(inputs, reporter)
+			? await fetchTrustedPublicKey(inputs, reporter, dependencies)
 			: inputs.trustedPublicKey;
 	// A private tenant's reuse view lives under the same host as its
 	// destination cache, so the netrc entry built below already covers it:
 	// netrc is host-scoped, not path-scoped.
-	const substituters = await resolveSubstituters({
-		cacheUrl: inputs.cacheUrl,
-		cache: inputs.cache,
-		reuseView: inputs.reuseView,
-		readUser: inputs.readUser,
-		readPassword: inputs.readPassword
-	});
+	const substituters = await resolveSubstituters(
+		{
+			cacheUrl: inputs.cacheUrl,
+			cache: inputs.cache,
+			reuseView: inputs.reuseView,
+			readUser: inputs.readUser,
+			readPassword: inputs.readPassword
+		},
+		dependencies
+	);
+	dependencies.signal?.throwIfAborted();
 	const runnerTemporaryDirectory = requireEnvironment(
 		inputs.environment,
 		'RUNNER_TEMP'
@@ -469,14 +526,18 @@ async function configureNix(
 		'cupboard-nix.conf'
 	);
 
+	dependencies.signal?.throwIfAborted();
 	await writeFile(generatedConfigFile, nixConfig, { mode: 0o600 });
+	dependencies.signal?.throwIfAborted();
 	await appendEnvironmentFile(
 		inputs.environment.GITHUB_ENV,
 		environmentFileBlock('NIX_CONFIG', nixConfig)
 	);
+	dependencies.signal?.throwIfAborted();
 	await setOutput(inputs.environment, 'nix-config-file', generatedConfigFile);
 
 	if (inputs.nixConfigFile !== '') {
+		dependencies.signal?.throwIfAborted();
 		await appendEnvironmentFile(inputs.nixConfigFile, nixConfig);
 	}
 }
@@ -493,10 +554,13 @@ function environmentFileBlock(name: string, value: string): string {
 
 async function fetchTrustedPublicKey(
 	inputs: ConfigureNixInputs,
-	reporter: Reporter
+	reporter: Reporter,
+	dependencies: CacheInfoFetchDependencies
 ): Promise<string> {
 	const trimmedPublicKey = await fetchCachePublicKeyAt(
-		publicKeyUrl(inputs.cacheUrl)
+		publicKeyUrl(inputs.cacheUrl),
+		dependencies.fetch ?? fetch,
+		dependencies.signal
 	);
 
 	reporter.warn(
@@ -509,14 +573,18 @@ async function fetchTrustedPublicKey(
 /** Fetch and validate the signing key returned by a cache's public-key endpoint. */
 export async function fetchCachePublicKeyAt(
 	endpoint: URL,
-	fetcher: typeof fetch = fetch
+	fetcher: typeof fetch = fetch,
+	signal?: AbortSignal
 ): Promise<string> {
 	const url = canonicalHref(endpoint);
 
 	return fetchWithProbeDeadline(
 		retryingFetcher(fetcher),
 		url,
-		{ headers: cachePublicKeyRequestHeaders() },
+		{
+			headers: cachePublicKeyRequestHeaders(),
+			...(signal !== undefined && { signal })
+		},
 		async (response) => {
 			if (!response.ok) {
 				throw new CachePublicKeyRequestFailedError(url, response.status);

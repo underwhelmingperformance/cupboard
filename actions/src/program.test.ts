@@ -69,6 +69,10 @@ describe('buildProgram', () => {
 
 	it.each([
 		{
+			command: 'setup',
+			arguments_: ['setup']
+		},
+		{
 			command: 'build',
 			arguments_: ['build', '--installables', '.#package']
 		},
@@ -164,6 +168,10 @@ describe('runAction', () => {
 
 	it.each(
 		[
+			{
+				command: 'setup',
+				arguments_: ['setup']
+			},
 			{
 				command: 'build',
 				arguments_: ['build', '--installables', '.#package']

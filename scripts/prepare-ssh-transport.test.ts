@@ -197,13 +197,34 @@ describe('prepare SSH transport implementation', () => {
 			},
 			{ directive: 'AddKeysToAgent', config: 'AddKeysToAgent yes' },
 			{ directive: 'ControlMaster', config: 'ControlMaster auto' },
+			{ directive: 'LogLevel', config: 'LogLevel DEBUG3' },
 			{
 				directive: 'ControlPath',
 				config: 'ControlPath /tmp/cupboard-control'
 			},
 			{ directive: 'ControlPersist', config: 'ControlPersist 5m' },
 			{
-				directive: 'Match exec',
+				directive: 'ProxyCommand',
+				config: 'ProxyCommand sh -c "cat /tmp/cupboard_store_key"'
+			},
+			{
+				directive: 'ProxyJump',
+				config: 'ProxyJump bastion.example.com'
+			},
+			{
+				directive: 'LocalCommand',
+				config: 'LocalCommand sh -c "cat /tmp/cupboard_store_key"'
+			},
+			{
+				directive: 'PermitLocalCommand',
+				config: 'PermitLocalCommand yes'
+			},
+			{
+				directive: 'RemoteCommand',
+				config: 'RemoteCommand /tmp/unmanaged-command'
+			},
+			{
+				directive: 'Match',
 				config: 'Match host store.example.com exec "true"'
 			},
 			{ directive: 'Include', config: 'Include /tmp/unmanaged.conf' }
@@ -243,23 +264,23 @@ describe('prepare SSH transport implementation', () => {
 			config: 'iDeNtItYfIlE=/tmp/unmanaged-key'
 		},
 		{
-			directive: 'Match exec',
+			directive: 'Match',
 			config: 'mAtCh host store.example.com !ExEc="false"'
 		},
 		{
-			directive: 'Match exec',
+			directive: 'Match',
 			config: 'Match host store.example.com "exec" "true"'
 		},
 		{
-			directive: 'Match exec',
+			directive: 'Match',
 			config: 'Match host store.example.com e"x"e"c" "true"'
 		},
 		{
-			directive: 'Match exec',
+			directive: 'Match',
 			config: '"Match" exec "true"'
 		},
 		{
-			directive: 'Match exec',
+			directive: 'Match',
 			config: "'Match' exec 'true'"
 		},
 		{
@@ -286,7 +307,7 @@ describe('prepare SSH transport implementation', () => {
 		expect(failure).toContain(`store-ssh-config must not use ${directive}`);
 	});
 
-	it('accepts non-identity proxy configuration', async () => {
+	it('accepts the documented connection-only configuration', async () => {
 		const directory = await temporaryDirectory();
 
 		await expect(
@@ -294,13 +315,46 @@ describe('prepare SSH transport implementation', () => {
 				store: 'ssh-ng://nix@store.example.com',
 				storeSshConfig: [
 					'Host store.example.com',
-					'  ProxyJump bastion.example.com',
-					'Host bastion.example.com',
-					'  ProxyCommand ssh -W %h:%p gateway.example.com'
+					'  HostName store.internal.example.com',
+					'  User nix',
+					'  Port 2222',
+					'  AddressFamily inet',
+					'  Compression yes',
+					'  ConnectTimeout 30',
+					'  ServerAliveCountMax 3',
+					'  ServerAliveInterval 20',
+					'  PreferredAuthentications none',
+					'  SetEnv NIXBUILDNET_TOKEN=fixture'
 				].join('\n'),
 				storeKnownHosts: 'store.example.com ssh-ed25519 AAAAC3NzaFixture'
 			})
 		).resolves.toMatchObject({ stdout: '' });
+	});
+
+	it('rejects an unsupported directive rather than passing it to OpenSSH', async () => {
+		const directory = await temporaryDirectory();
+		const failure = await transportFailure('validate', directory, {
+			store: 'ssh-ng://nix@store.example.com',
+			storeSshConfig: 'Host store.example.com\n  ForwardAgent yes',
+			storeKnownHosts: 'store.example.com ssh-ed25519 AAAAC3NzaFixture'
+		});
+
+		expect(failure).toContain(
+			'store-ssh-config does not support the ForwardAgent directive'
+		);
+	});
+
+	it('rejects connection directives outside a Host block', async () => {
+		const directory = await temporaryDirectory();
+		const failure = await transportFailure('validate', directory, {
+			store: 'ssh-ng://nix@store.example.com',
+			storeSshConfig: 'User nix\nHost store.example.com',
+			storeKnownHosts: 'store.example.com ssh-ed25519 AAAAC3NzaFixture'
+		});
+
+		expect(failure).toContain(
+			'store-ssh-config must scope User under a Host block'
+		);
 	});
 
 	it.each([
@@ -459,11 +513,8 @@ describe('prepare SSH transport implementation', () => {
 			storeKnownHosts: knownHost,
 			storeSshConfig: [
 				'Host store.example.com',
-				'  StrictHostKeyChecking no',
-				'  UserKnownHostsFile /dev/null',
-				'  GlobalKnownHostsFile /tmp/caller-known-hosts',
-				'  KnownHostsCommand /bin/false',
-				'  IdentitiesOnly no'
+				'  User nix',
+				'  ConnectTimeout 30'
 			].join('\n')
 		});
 

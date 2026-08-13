@@ -64,6 +64,9 @@ outputs:
   cupboard:
     description: Canonical release or source acquisition as validated JSON.
     value: ${{ steps.setup.outputs.cupboard }}
+  cupboard-version:
+    description: Resolved cupboard release tag; empty for source acquisition.
+    value: ${{ steps.setup.outputs.cupboard-version }}
   nix-config-file:
     description: Path to the generated runner-local Nix config file.
     value: ${{ steps.setup.outputs.nix-config-file }}
