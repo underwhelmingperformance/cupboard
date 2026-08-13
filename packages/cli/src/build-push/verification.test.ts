@@ -28,8 +28,8 @@ const coordinator: NixBuildSettings = {
 	builders: 'ssh://builds.example aarch64-darwin - 8'
 };
 
-// Every read is recorded, so a case that refuses without reading anything is
-// visible as an empty list rather than as an absent assertion.
+// Every read is recorded, so a case that refuses without reading anything
+// asserts an empty list.
 function optionsFor(
 	overrides: Partial<VerificationSupportOptions>,
 	read: string[]

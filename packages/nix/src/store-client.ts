@@ -1,6 +1,11 @@
-import { accessSync, constants, existsSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync } from 'node:fs';
+import path from 'node:path';
+import { geteuid } from 'node:process';
 
-import type { StoreDirectory } from '@cupboard/nix-store/scalars';
+import {
+	type StoreDirectory,
+	storeDirectorySchema
+} from '@cupboard/nix-store/scalars';
 
 import { type NixDaemonConnector, NixDaemonStoreClient } from './nix-daemon.ts';
 import {
@@ -20,10 +25,14 @@ import {
 import {
 	defaultNixConfigEnvironment,
 	discoverNixStoreConfig,
+	isEnabledSettingValue,
+	listOf,
 	type NixConfigEnvironment,
 	type NixDaemonOverrides,
 	type NixDaemonSetOptions,
-	type NixStoreConfig
+	type NixFileTransferSettings,
+	type NixStoreConfig,
+	type NixSubstitutionSettings
 } from './store-config.ts';
 import { openSubstituters, SubstituterClient } from './substituter.ts';
 
@@ -32,6 +41,11 @@ export interface StoreClientEnvironment extends NixConfigEnvironment {
 	/** Whether the state directory is readable and writable by this process. */
 	canWriteStateDirectory(stateDirectory: string): boolean;
 	socketExists(socketPath: string): boolean;
+	directoryExists(directoryPath: string): boolean;
+	/** Whether this process runs as the superuser, which owns `/nix`. */
+	isSuperuser(): boolean;
+	/** Creates the directory and every parent of it, reporting whether it now exists. */
+	createDirectory(directoryPath: string): boolean;
 }
 
 export const defaultStoreClientEnvironment: StoreClientEnvironment = {
@@ -45,7 +59,18 @@ export const defaultStoreClientEnvironment: StoreClientEnvironment = {
 			return false;
 		}
 	},
-	socketExists: (socketPath) => existsSync(socketPath)
+	socketExists: (socketPath) => existsSync(socketPath),
+	directoryExists: (directoryPath) => existsSync(directoryPath),
+	isSuperuser: () => geteuid?.() === 0,
+	createDirectory: (directoryPath) => {
+		try {
+			mkdirSync(directoryPath, { recursive: true });
+
+			return true;
+		} catch {
+			return false;
+		}
+	}
 };
 
 export type StoreBackend =
@@ -84,14 +109,23 @@ export function createNixStoreClient(
 ): NixStoreClient {
 	return storeClientForBackend(
 		resolveStoreBackend(config, dependencies),
-		config
+		config,
+		substituterClientOver(
+			config.storeDirectory,
+			config.substitution,
+			config.fileTransfer
+		)
 	);
 }
 
-/** The store client a resolved backend opens. */
+/**
+ * The store client a resolved backend opens, asking `substituters` whatever it
+ * answers for itself about what is available elsewhere.
+ */
 export function storeClientForBackend(
 	backend: StoreBackend,
-	config: NixStoreConfig
+	config: NixStoreConfig,
+	substituters: SubstituterClient
 ): NixStoreClient {
 	if (backend.backend === 'daemon') {
 		return new NixDaemonStoreClient({
@@ -109,24 +143,62 @@ export function storeClientForBackend(
 		});
 	}
 
-	return new NixLocalStoreClient(
-		() => openLocalStoreDatabase(backend.stateDirectory),
+	return localStoreOver(
+		backend.stateDirectory,
+		backend.storeDirectory,
+		substituters,
+		config.substitution
+	);
+}
+
+/**
+ * The client that asks a store's substituters what they hold, opening them
+ * when it is first asked something. Every answer is read from the substituter
+ * itself, narinfo and all, so an offer it reports names the NAR hash and the
+ * signatures a consumer would check.
+ *
+ * The caller's signal reaches every request the client makes, so abandoning
+ * the work abandons all of it.
+ */
+export function substituterClientOver(
+	storeDirectory: StoreDirectory,
+	substitution: NixSubstitutionSettings,
+	transfer: NixFileTransferSettings,
+	signal?: AbortSignal
+): SubstituterClient {
+	const reach = {
+		storeDirectory,
+		transfer,
+		...(signal !== undefined && { signal })
+	};
+
+	return new SubstituterClient(
+		() => openSubstituters(substitution.substituters, reach),
 		{
-			storeDirectory: backend.storeDirectory,
-			substituters: new SubstituterClient(
-				() => openSubstituters(config.substitution.substituters),
-				{
-					storeDirectory: backend.storeDirectory,
-					substitute: config.substitution.substitute,
-					fallback: config.substitution.fallback
-				}
-			),
-			substitution: {
-				substitute: config.substitution.substitute,
-				alwaysAllowSubstitutes: config.substitution.alwaysAllowSubstitutes
-			}
+			...reach,
+			substitute: substitution.substitute,
+			fallback: substitution.fallback
 		}
 	);
+}
+
+/** A local store reading the given directories, asking the given substituters. */
+function localStoreOver(
+	stateDirectory: string,
+	storeDirectory: StoreDirectory,
+	substituters: SubstituterClient,
+	substitution: NixSubstitutionSettings,
+	signal?: AbortSignal
+): NixLocalStoreClient {
+	return new NixLocalStoreClient(() => openLocalStoreDatabase(stateDirectory), {
+		...(signal !== undefined && { signal }),
+		storeDirectory,
+		substituters,
+		substitution: {
+			substitute: substitution.substitute,
+			alwaysAllowSubstitutes: substitution.alwaysAllowSubstitutes
+		}
+	});
 }
 
 /** Per-call adjustments for an explicitly daemon-backed client. */
@@ -138,6 +210,8 @@ export interface NixDaemonClientOptions {
 	/** Merged over the discovered overrides, this value winning per key. */
 	readonly overrides?: NixDaemonOverrides;
 	readonly connect?: NixDaemonConnector;
+	/** Abandons the work this client is doing, raising the signal's reason. */
+	readonly signal?: AbortSignal;
 }
 
 /**
@@ -179,6 +253,17 @@ export function createNixDaemonStoreClient(
 	});
 }
 
+/** A store opened to answer what is available elsewhere. */
+export interface AvailabilityStore {
+	readonly client: NixStoreClient;
+	readonly kind: NixStoreKind;
+	/**
+	 * The substituters the settings this store was opened with name, asked
+	 * directly whatever backend the store itself reads through.
+	 */
+	readonly substituters: SubstituterClient;
+}
+
 /**
  * A store that can answer what is available elsewhere: which paths the
  * substituters offer, what they offer for one, and what realising a target
@@ -190,6 +275,10 @@ export function createNixDaemonStoreClient(
  * the way libstore answers them in a single-user install: reading the store
  * database directly and asking the substituters over HTTP.
  *
+ * The substituters come back alongside the store, opened over the settings the
+ * overrides settle, so a caller needing a full offer (its NAR hash and its
+ * signatures) asks them itself.
+ *
  * An `ssh-ng` store names a remote daemon, which answers for the remote store.
  * A store URI naming a daemon that is not running is refused with
  * {@link NixDaemonUnavailableError}.
@@ -198,14 +287,25 @@ export function createAvailabilityStoreClient(
 	dependencies: StoreClientEnvironment = defaultStoreClientEnvironment,
 	config: NixStoreConfig = discoverNixStoreConfig(dependencies),
 	options: NixDaemonClientOptions = {}
-): { readonly client: NixStoreClient; readonly kind: NixStoreKind } {
+): AvailabilityStore {
 	const storeUri = options.storeUri ?? config.storeUri;
+	const substitution = overriddenSubstitution(config.substitution, {
+		...config.daemonOverrides,
+		...options.overrides
+	});
+	const substituters = substituterClientOver(
+		config.storeDirectory,
+		substitution,
+		config.fileTransfer,
+		options.signal
+	);
 	const sshRemote = parseSshNgStoreUri(storeUri);
 
 	if (sshRemote !== undefined) {
 		return {
 			client: createNixDaemonStoreClient(dependencies, config, options),
-			kind: 'ssh-ng'
+			kind: 'ssh-ng',
+			substituters
 		};
 	}
 
@@ -214,7 +314,8 @@ export function createAvailabilityStoreClient(
 	if (dependencies.socketExists(socketPath)) {
 		return {
 			client: createNixDaemonStoreClient(dependencies, config, options),
-			kind: 'daemon'
+			kind: 'daemon',
+			substituters
 		};
 	}
 
@@ -224,63 +325,69 @@ export function createAvailabilityStoreClient(
 		throw new NixDaemonUnavailableError(socketPath);
 	}
 
-	const overrides = { ...config.daemonOverrides, ...options.overrides };
-	const substitution = {
-		...config.substitution,
-		...overriddenSubstitution(config, overrides)
-	};
-
 	return {
-		client: new NixLocalStoreClient(
-			() => openLocalStoreDatabase(config.stateDirectory),
-			{
-				storeDirectory: config.storeDirectory,
-				substituters: new SubstituterClient(
-					() => openSubstituters(substitution.substituters),
-					{
-						storeDirectory: config.storeDirectory,
-						substitute: substitution.substitute,
-						fallback: substitution.fallback
-					}
-				),
-				substitution: {
-					substitute: substitution.substitute,
-					alwaysAllowSubstitutes: substitution.alwaysAllowSubstitutes
-				}
-			}
+		client: localStoreOver(
+			config.stateDirectory,
+			config.storeDirectory,
+			substituters,
+			substitution,
+			options.signal
 		),
-		kind: 'local-filesystem'
+		kind: 'local-filesystem',
+		substituters
 	};
 }
 
-// A daemon takes its substituter list from the settings a client sends it. The
-// list is this client's own, so the same overrides select which substituters
-// it opens.
-function overriddenSubstitution(
-	config: NixStoreConfig,
+/**
+ * The substitution settings an override settles, over the ones discovery
+ * found. A daemon takes these from the frame its client sends it, and here the
+ * client is the store, so the same overrides settle the same settings: a plain
+ * `substituters` assignment replaces the discovered list, an
+ * `extra-substituters` one appends to whatever it holds, and each boolean is
+ * read the one way the configuration layer reads it.
+ */
+export function overriddenSubstitution(
+	discovered: NixSubstitutionSettings,
 	overrides: NixDaemonOverrides
-): { readonly substitute: boolean; readonly substituters: readonly string[] } {
+): NixSubstitutionSettings {
 	const assigned = overrides.substituters;
 	const appended = overrides['extra-substituters'];
-	const base =
-		assigned === undefined
-			? config.substitution.substituters
-			: listOf(assigned);
-	const substitute = overrides.substitute;
 
 	return {
-		substitute:
-			substitute === undefined
-				? config.substitution.substitute
-				: substitute !== 'false',
+		substitute: isSettingEnabled(
+			overrides,
+			'substitute',
+			discovered.substitute
+		),
+		alwaysAllowSubstitutes: isSettingEnabled(
+			overrides,
+			'always-allow-substitutes',
+			discovered.alwaysAllowSubstitutes
+		),
+		fallback: isSettingEnabled(overrides, 'fallback', discovered.fallback),
 		substituters: [
-			...new Set([...base, ...(appended === undefined ? [] : listOf(appended))])
+			...new Set([
+				...(assigned === undefined
+					? discovered.substituters
+					: listOf(assigned)),
+				...(appended === undefined ? [] : listOf(appended))
+			])
 		]
 	};
 }
 
-function listOf(value: string): readonly string[] {
-	return value.split(/\s+/u).filter(Boolean);
+// A setting an override names is read the way the configuration layer reads
+// it; one it leaves alone keeps the value discovery settled.
+function isSettingEnabled(
+	overrides: NixDaemonOverrides,
+	name: string,
+	isEnabledByDefault: boolean
+): boolean {
+	const value = overrides[name];
+
+	return value === undefined
+		? isEnabledByDefault
+		: isEnabledSettingValue(name, value);
 }
 
 const daemonStoreUris = new Set(['daemon', 'unix://']);
@@ -302,14 +409,9 @@ function configuredDaemonSocketPath(
 	return config.daemonSocketPath;
 }
 
-interface StoreBackendProbes {
-	canWriteStateDirectory(stateDirectory: string): boolean;
-	socketExists(socketPath: string): boolean;
-}
-
 export function resolveStoreBackend(
 	config: NixStoreConfig,
-	probes: StoreBackendProbes
+	environment: StoreClientEnvironment
 ): StoreBackend {
 	const uri = config.storeUri;
 
@@ -317,7 +419,7 @@ export function resolveStoreBackend(
 		return { backend: 'daemon', socketPath: config.daemonSocketPath };
 	}
 
-	if (uri === 'local' || uri === '') {
+	if (uri === 'local') {
 		return {
 			backend: 'local',
 			stateDirectory: config.stateDirectory,
@@ -325,8 +427,10 @@ export function resolveStoreBackend(
 		};
 	}
 
-	if (uri === 'auto') {
-		return resolveAuto(config, probes);
+	// Nix reads an empty store reference as the automatic store, the same as
+	// `auto`: a `store =` line naming nothing names no store in particular.
+	if (uri === 'auto' || uri === '') {
+		return resolveAuto(config, environment);
 	}
 
 	if (uri.startsWith(unixScheme)) {
@@ -345,30 +449,99 @@ export function resolveStoreBackend(
 	throw new UnsupportedNixStoreError(uri);
 }
 
-// Nix's `auto`: use the local store when this process can read and write the
-// state directory, else the daemon when its socket is present, else fall back to
-// the local store.
+// The `auto` store: the local store when this process can read and write the
+// state directory, else the daemon when its socket is present, else a chroot
+// store where one is called for, else the local store as configured.
 function resolveAuto(
 	config: NixStoreConfig,
-	probes: StoreBackendProbes
+	environment: StoreClientEnvironment
 ): StoreBackend {
-	if (probes.canWriteStateDirectory(config.stateDirectory)) {
-		return {
-			backend: 'local',
-			stateDirectory: config.stateDirectory,
-			storeDirectory: config.storeDirectory
-		};
-	}
-
-	if (probes.socketExists(config.daemonSocketPath)) {
-		return { backend: 'daemon', socketPath: config.daemonSocketPath };
-	}
-
-	return {
+	const configured: StoreBackend = {
 		backend: 'local',
 		stateDirectory: config.stateDirectory,
 		storeDirectory: config.storeDirectory
 	};
+
+	if (environment.canWriteStateDirectory(config.stateDirectory)) {
+		return configured;
+	}
+
+	if (environment.socketExists(config.daemonSocketPath)) {
+		return { backend: 'daemon', socketPath: config.daemonSocketPath };
+	}
+
+	return chrootStore(config, environment) ?? configured;
+}
+
+/**
+ * The store Nix sets up for a Linux machine with no `/nix` and no daemon: a
+ * store of this user's own under the data directory. Nix offers it only when
+ * nothing else could have been meant, so an ordinary user who has never
+ * installed Nix gets a working store while an install that names its
+ * directories keeps them.
+ *
+ * Absent on any other platform, and absent whenever the state directory
+ * exists, this process is the superuser, or the environment names a store or
+ * state directory of its own.
+ */
+function chrootStore(
+	config: NixStoreConfig,
+	environment: StoreClientEnvironment
+): StoreBackend | undefined {
+	if (
+		!isLinuxMachine(environment) ||
+		environment.directoryExists(config.stateDirectory) ||
+		environment.isSuperuser() ||
+		environment.env.NIX_STORE_DIR !== undefined ||
+		environment.env.NIX_STATE_DIR !== undefined
+	) {
+		return;
+	}
+
+	const root = chrootStoreRoot(environment);
+
+	if (root === undefined || !environment.createDirectory(root)) {
+		return;
+	}
+
+	return {
+		backend: 'local',
+		stateDirectory: path.join(root, 'nix', 'var', 'nix'),
+		storeDirectory: storeDirectorySchema.parse(path.join(root, 'nix', 'store'))
+	};
+}
+
+// Nix compiles the chroot fallback in for Linux alone, so the kernel this
+// machine reports is what decides whether it applies.
+function isLinuxMachine(environment: StoreClientEnvironment): boolean {
+	return environment.currentSystem()?.endsWith('-linux') === true;
+}
+
+// Nix roots the chroot store at `root` under its data directory, which
+// `NIX_DATA_HOME` names outright and `XDG_DATA_HOME` names `nix` under.
+function chrootStoreRoot(
+	environment: StoreClientEnvironment
+): string | undefined {
+	const named = environment.env.NIX_DATA_HOME;
+
+	if (named !== undefined) {
+		return path.join(named, 'root');
+	}
+
+	const dataHome =
+		environment.env.XDG_DATA_HOME ?? defaultDataHome(environment);
+
+	return dataHome === undefined
+		? undefined
+		: path.join(dataHome, 'nix', 'root');
+}
+
+function defaultDataHome(
+	environment: StoreClientEnvironment
+): string | undefined {
+	const home = environment.homeDirectory();
+
+	return home === undefined ? undefined : path.join(home, '.local', 'share');
 }
 
 function unixSocketPath(uri: string): string | undefined {

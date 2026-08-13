@@ -1,3 +1,4 @@
+import type { SubjectVerification } from '@cupboard/protocol/build';
 import type { ReporterResultEvent } from '@cupboard/reporter';
 import {
 	CodedError,
@@ -132,6 +133,59 @@ export class AttestationVerificationFailedError extends CodedError {
 			withCause(options.cause)
 		);
 		this.name = 'AttestationVerificationFailedError';
+	}
+}
+
+/**
+ * A receipt subject whose path this store holds, but whose recorded NAR hash
+ * is not the one the store holds now. Signing the receipt's checksum would
+ * attest to bytes this machine cannot show.
+ */
+export class SubjectNarHashMovedError extends CodedError {
+	constructor(
+		public readonly storePath: string,
+		public readonly recorded: string,
+		public readonly held: string
+	) {
+		super(
+			`${storePath} was recorded with NAR hash ${recorded}, but this store holds ${held}`
+		);
+		this.name = 'SubjectNarHashMovedError';
+	}
+}
+
+/**
+ * A receipt subject whose path this store holds under a deriver other than
+ * the one the receipt recorded, so the run cannot claim it built the path the
+ * receipt attributes to it.
+ */
+export class SubjectDeriverMovedError extends CodedError {
+	constructor(
+		public readonly storePath: string,
+		public readonly recorded: string,
+		public readonly held: string | undefined
+	) {
+		super(
+			`${storePath} was recorded with deriver ${recorded}, but this store holds ${held ?? 'none'}`
+		);
+		this.name = 'SubjectDeriverMovedError';
+	}
+}
+
+/**
+ * A receipt subject this machine realised, whose path its store does not hold.
+ * The receipt's checksum is all that is left to sign, and nothing present
+ * backs it, so the run refuses rather than attest a build it cannot show.
+ */
+export class SubjectNotHeldError extends CodedError {
+	constructor(
+		public readonly storePath: string,
+		public readonly verification: SubjectVerification
+	) {
+		super(
+			`${storePath} was recorded as ${verification}, but this store does not hold it`
+		);
+		this.name = 'SubjectNotHeldError';
 	}
 }
 

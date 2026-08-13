@@ -1,9 +1,16 @@
-import type { Nix, NixDaemonTrust, NixDerivedPathString } from '@cupboard/nix';
+import type {
+	Nix,
+	NixDaemonTrust,
+	NixDerivedPathString,
+	NixMissingPartition,
+	UnreachableSubstituter
+} from '@cupboard/nix';
 import {
 	type RootName,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import type { ParsedRootEnsureResponse } from '@cupboard/protocol/retention';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
@@ -42,11 +49,11 @@ export interface DestinationAnswers {
 
 /**
  * The unknown-count ceiling this partition enforces once a `queryMissing`
- * answer settles: the configured value applies whenever the daemon
- * connection is trusted (and may be zero, for a fixture that requires every
- * path to resolve), and the nonzero fallback applies otherwise, since an
- * untrusted connection cannot be relied on to honour the bypass client's
- * negative-cache override.
+ * answer settles: the configured value applies whenever the unknowns are as
+ * settled as the store can make them (and may be zero, for a fixture that
+ * requires every path to resolve), and the nonzero fallback applies when a
+ * re-query was refused, since unknowns left behind a cache the plan could
+ * not read past cannot be told from unknowns that are really unknown.
  */
 export interface AvailabilityCeilingConfig {
 	readonly value: number;
@@ -92,6 +99,31 @@ export type LeftUpstreamVerdict =
 			readonly kind: 'closure-not-served';
 			readonly missing: StorePathString;
 	  }
+	/**
+	 * A path in the candidate's closure that this store does not hold, so
+	 * there is no closure to prove anything about past it.
+	 */
+	| {
+			readonly kind: 'closure-not-held-locally';
+			readonly missing: StorePathString;
+	  }
+	/**
+	 * A substituter offers a path in the closure under a NAR hash other than
+	 * the one this store holds, so what a consumer would fetch is not what
+	 * this run has.
+	 */
+	| {
+			readonly kind: 'closure-divergent';
+			readonly missing: StorePathString;
+			readonly held: string;
+			readonly offered: string;
+	  }
+	/**
+	 * A path in the closure carries no signature this configuration would
+	 * accept, so a consumer would refuse to fetch it however well the
+	 * substituter serves it.
+	 */
+	| { readonly kind: 'closure-unsigned'; readonly missing: StorePathString }
 	| { readonly kind: 'closure-over-cap'; readonly maxPaths: number };
 
 /** One rejected candidate, as the partition reports it. */
@@ -101,6 +133,17 @@ export type LeftUpstreamRejection = Exclude<
 > & { readonly storePath: StorePathString };
 
 export type CeilingSource = 'configured' | 'untrusted-fallback';
+
+/**
+ * How a re-query of the unknown paths settled. `answered` carries what the
+ * fresh look found; `already-fresh` says the first answer was uncached, so
+ * there is nothing to look past; `refused` names why the store would not
+ * give a fresh answer, which is what puts the plan on its fallback ceiling.
+ */
+export type UnknownRequeryOutcome =
+	| { readonly kind: 'answered'; readonly partition: NixMissingPartition }
+	| { readonly kind: 'already-fresh' }
+	| { readonly kind: 'refused'; readonly reason: string };
 
 export interface AvailabilityCeiling {
 	readonly value: number;
@@ -113,19 +156,22 @@ export interface AvailabilityPartitionOptions {
 	/** The selected store's own availability queries; no override applied. */
 	readonly store: Pick<
 		Nix,
-		'queryMissing' | 'querySubstitutablePaths' | 'queryValidPaths'
+		| 'queryMissing'
+		| 'querySubstitutablePaths'
+		| 'queryValidPaths'
+		| 'unreachableSubstituters'
 	>;
 	readonly destinationAnswers: DestinationAnswers;
 	/** One `roots.ensure` result per target root, keyed by root name. */
 	readonly rootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse>;
-	readonly daemonTrust: () => Promise<NixDaemonTrust>;
 	/**
-	 * Opens a daemon connection carrying a `narinfo-cache-negative-ttl=0`
-	 * override, built by the caller on `Nix.openForAvailability`. Reached only when
-	 * `daemonTrust()` reports `'trusted'`, since the daemon silently drops an
-	 * untrusted client's overrides.
+	 * Asks the store about the paths the first pass left unknown, past
+	 * whatever cache stood in front of that answer. Reached only when there
+	 * are unknowns, since there is otherwise nothing to ask about.
 	 */
-	readonly openReQueryClient: () => Pick<Nix, 'queryMissing'>;
+	readonly requeryUnknown: (
+		storePaths: readonly StorePathString[]
+	) => Promise<UnknownRequeryOutcome>;
 	/**
 	 * Proves that a candidate really is held by substituters a consumer
 	 * elsewhere could reach, and that Nix would fetch it rather than build it.
@@ -163,9 +209,22 @@ export interface AvailabilityPartition {
 	};
 	readonly downloadSize: number;
 	readonly narSize: number;
+	/**
+	 * The targets this store already held when the plan ran. A run that builds
+	 * afterwards realised everything else it publishes, so a receipt claiming
+	 * what the run built claims none of these.
+	 */
+	readonly alreadyValid: readonly StorePathString[];
 	/** Equal to `counts.unknown`, flattened for a capacity preflight to read directly. */
 	readonly unknownCount: number;
 	readonly ceiling: AvailabilityCeiling;
+	/**
+	 * The configured substituters nothing could be asked of while this
+	 * partition was worked out. Every availability answer above was given
+	 * without them, so a path counted as held nowhere is held nowhere among
+	 * the substituters that answered.
+	 */
+	readonly unreachableSubstituters: readonly UnreachableSubstituter[];
 }
 
 /**
@@ -198,9 +257,6 @@ export class UnknownPathsCeilingError extends CliError {
 		return transientExitCode;
 	}
 }
-
-const untrustedFallbackReason =
-	'the daemon connection is not fully trusted, so its narinfo-cache-negative-ttl override cannot be relied on to take effect';
 
 /**
  * Partitions a manifest's targets by what realising and publishing each one
@@ -291,8 +347,12 @@ export async function partitionAvailability(
 		},
 		downloadSize: settled.downloadSize,
 		narSize: settled.narSize,
+		alreadyValid: validPaths
+			.map((storePath) => storePathSchema.parse(storePath))
+			.toSorted(byCodeUnit),
 		unknownCount: settled.unknown.length,
-		ceiling
+		ceiling,
+		unreachableSubstituters: await options.store.unreachableSubstituters()
 	};
 }
 
@@ -454,10 +514,9 @@ interface SettledMissing {
 	readonly narSize: number;
 }
 
-// A trusted connection gets one more chance to resolve what negative-cached
-// narinfo answers left unknown, through a dedicated client carrying the
-// bypass override; an untrusted one is not asked at all, since the daemon
-// would silently drop the override that makes the re-query meaningful.
+// An unknown path is one no substituter offered. That answer may have come
+// from a cache holding an earlier absence, so the store is given one more
+// chance to answer it afresh.
 async function settleUnknowns(
 	missing: Awaited<ReturnType<Nix['queryMissing']>>,
 	options: AvailabilityPartitionOptions
@@ -465,29 +524,33 @@ async function settleUnknowns(
 	readonly partition: SettledMissing;
 	readonly ceiling: AvailabilityCeiling;
 }> {
+	const configured = {
+		value: options.ceiling.value,
+		source: 'configured' as const
+	};
+
 	if (missing.unknown.length === 0) {
-		return {
-			partition: missing,
-			ceiling: { value: options.ceiling.value, source: 'configured' }
-		};
+		return { partition: missing, ceiling: configured };
 	}
 
-	const trust = await options.daemonTrust();
+	const outcome = await options.requeryUnknown(missing.unknown);
 
-	if (trust !== 'trusted') {
+	if (outcome.kind === 'refused') {
 		return {
 			partition: missing,
 			ceiling: {
 				value: options.ceiling.untrustedFallback,
 				source: 'untrusted-fallback',
-				fallbackReason: untrustedFallbackReason
+				fallbackReason: outcome.reason
 			}
 		};
 	}
 
-	const requery = await options
-		.openReQueryClient()
-		.queryMissing(missing.unknown);
+	if (outcome.kind === 'already-fresh') {
+		return { partition: missing, ceiling: configured };
+	}
+
+	const requery = outcome.partition;
 
 	return {
 		partition: {
@@ -497,6 +560,6 @@ async function settleUnknowns(
 			downloadSize: missing.downloadSize + requery.downloadSize,
 			narSize: missing.narSize + requery.narSize
 		},
-		ceiling: { value: options.ceiling.value, source: 'configured' }
+		ceiling: configured
 	};
 }

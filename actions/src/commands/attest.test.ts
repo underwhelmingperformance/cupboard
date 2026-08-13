@@ -5,11 +5,17 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
-import { InvalidInputError } from '../errors.ts';
+import {
+	InvalidInputError,
+	SubjectDeriverMovedError,
+	SubjectNarHashMovedError,
+	SubjectNotHeldError
+} from '../errors.ts';
 import { parseChecksums } from '../release-install.ts';
 
 import {
 	attestationSubjects,
+	type LocalPathInfos,
 	provenancedSubjects,
 	renderChecksums,
 	resolveAttestInputs
@@ -111,7 +117,7 @@ describe('attestationSubjects', () => {
 function provenancedSubject(
 	storePath: StorePathString,
 	digestByte: string,
-	verification: 'local' | 'verified-rebuild' | 'coordinating-store'
+	verification: 'local' | 'verified-rebuild' | 'build-store'
 ) {
 	return {
 		storePath,
@@ -121,6 +127,10 @@ function provenancedSubject(
 		verification
 	};
 }
+
+// A machine holding none of the receipt's subjects, which is what a run
+// attesting a remote store's work looks like.
+const heldNowhere: LocalPathInfos = new Map();
 
 describe('provenancedSubjects', () => {
 	const builtPath = storePathSchema.parse(
@@ -133,47 +143,154 @@ describe('provenancedSubjects', () => {
 		'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-runtime'
 	);
 
-	it.each([
+	const realisedHere = [
 		{ name: 'a local build', verification: 'local' as const },
 		{
 			name: 'a reproduced remote build',
 			verification: 'verified-rebuild' as const
+		}
+	];
+
+	// The store of a machine that still holds what it built, under the NAR hash
+	// and deriver its receipt recorded.
+	const holdsBuiltPath: LocalPathInfos = new Map([
+		[builtPath, attestPathInfo(builtPath, 0xaa)]
+	]);
+
+	it.each(realisedHere)(
+		'attests $name whose path this machine still holds',
+		({ verification }) => {
+			expect(
+				provenancedSubjects(
+					{
+						version: 3,
+						paths: [builtPath, substitutedPath],
+						subjects: [provenancedSubject(builtPath, 'aa', verification)]
+					},
+					holdsBuiltPath
+				)
+			).toStrictEqual({
+				subjects: [{ storePath: builtPath, sha256: 'aa'.repeat(32) }],
+				skipped: [substitutedPath],
+				refused: []
+			});
+		}
+	);
+
+	it.each(realisedHere)(
+		'refuses $name whose path this machine no longer holds',
+		({ verification }) => {
+			let failure: unknown;
+
+			try {
+				provenancedSubjects(
+					{
+						version: 3,
+						paths: [builtPath],
+						subjects: [provenancedSubject(builtPath, 'aa', verification)]
+					},
+					heldNowhere
+				);
+			} catch (error) {
+				failure = error;
+			}
+
+			expect(failure).toBeInstanceOf(SubjectNotHeldError);
+
+			if (failure instanceof SubjectNotHeldError) {
+				expect({
+					storePath: failure.storePath,
+					verification: failure.verification
+				}).toStrictEqual({ storePath: builtPath, verification });
+			}
+		}
+	);
+
+	// A subject this machine holds is one the run can check for itself, and
+	// the checksum it renders is signed under this repository's identity.
+	it.each([
+		{
+			name: 'a NAR hash that moved since the receipt was written',
+			digestByte: 0xcc,
+			deriver: `${builtPath}.drv`,
+			expected: SubjectNarHashMovedError
 		},
 		{
-			name: 'a path the selected store realised',
-			verification: 'coordinating-store' as const
+			name: 'a deriver that moved since the receipt was written',
+			digestByte: 0xaa,
+			deriver: `${remotePath}.drv`,
+			expected: SubjectDeriverMovedError
 		}
-	])('renders $name from the receipt alone', ({ verification }) => {
+	])(
+		'refuses to attest a held subject with $name',
+		({ digestByte, deriver, expected }) => {
+			const held: LocalPathInfos = new Map([
+				[
+					builtPath,
+					{
+						storePath: builtPath,
+						narHash: NixSha256Hash.fromDigest(Buffer.alloc(32, digestByte)),
+						narSize: 1,
+						references: [],
+						deriver,
+						signatures: [],
+						ultimate: true
+					}
+				]
+			]);
+
+			expect(() =>
+				provenancedSubjects(
+					{
+						version: 3,
+						paths: [builtPath],
+						subjects: [provenancedSubject(builtPath, 'aa', 'local')]
+					},
+					held
+				)
+			).toThrow(expected);
+		}
+	);
+
+	// A subject the selected build store realised is not on this machine, so
+	// the receipt is what the run established about it.
+	it('attests a build-store subject this machine does not hold from the receipt', () => {
 		expect(
-			provenancedSubjects({
-				version: 3,
-				paths: [builtPath, substitutedPath],
-				subjects: [provenancedSubject(builtPath, 'aa', verification)]
-			})
+			provenancedSubjects(
+				{
+					version: 3,
+					paths: [remotePath],
+					subjects: [provenancedSubject(remotePath, 'bb', 'build-store')]
+				},
+				heldNowhere
+			)
 		).toStrictEqual({
-			subjects: [{ storePath: builtPath, sha256: 'aa'.repeat(32) }],
-			skipped: [substitutedPath],
+			subjects: [{ storePath: remotePath, sha256: 'bb'.repeat(32) }],
+			skipped: [],
 			refused: []
 		});
 	});
 
 	it('refuses a subject built on a machine the run did not verify', () => {
 		expect(
-			provenancedSubjects({
-				version: 3,
-				paths: [builtPath, remotePath],
-				subjects: [
-					provenancedSubject(builtPath, 'aa', 'local'),
-					{
-						storePath: remotePath,
-						narHash: 'bb'.repeat(32),
-						derivation: `${remotePath}.drv`,
-						buildStore: 'auto',
-						machine: 'ssh://builder-1',
-						verification: 'unverified'
-					}
-				]
-			})
+			provenancedSubjects(
+				{
+					version: 3,
+					paths: [builtPath, remotePath],
+					subjects: [
+						provenancedSubject(builtPath, 'aa', 'local'),
+						{
+							storePath: remotePath,
+							narHash: 'bb'.repeat(32),
+							derivation: `${remotePath}.drv`,
+							buildStore: 'auto',
+							machine: 'ssh://builder-1',
+							verification: 'unverified'
+						}
+					]
+				},
+				holdsBuiltPath
+			)
 		).toStrictEqual({
 			subjects: [{ storePath: builtPath, sha256: 'aa'.repeat(32) }],
 			skipped: [],
@@ -183,19 +300,22 @@ describe('provenancedSubjects', () => {
 
 	it('refuses an unverified subject whose machine the receipt does not name', () => {
 		expect(
-			provenancedSubjects({
-				version: 3,
-				paths: [remotePath],
-				subjects: [
-					{
-						storePath: remotePath,
-						narHash: 'bb'.repeat(32),
-						derivation: `${remotePath}.drv`,
-						buildStore: 'auto',
-						verification: 'unverified'
-					}
-				]
-			})
+			provenancedSubjects(
+				{
+					version: 3,
+					paths: [remotePath],
+					subjects: [
+						{
+							storePath: remotePath,
+							narHash: 'bb'.repeat(32),
+							derivation: `${remotePath}.drv`,
+							buildStore: 'auto',
+							verification: 'unverified'
+						}
+					]
+				},
+				heldNowhere
+			)
 		).toStrictEqual({
 			subjects: [],
 			skipped: [],

@@ -1,9 +1,10 @@
 import type {
+	AcceptsOffer,
 	Nix,
 	NixDaemonOverrides,
-	NixDaemonTrust,
 	NixSubstitutionSettings,
-	SubstitutableClosureOptions
+	SubstitutableClosureOptions,
+	SubstituterSettingsOutcome
 } from '@cupboard/nix';
 import { derivationPathOf } from '@cupboard/nix-store/derivation';
 
@@ -11,26 +12,39 @@ import type {
 	LeftUpstreamCandidate,
 	LeftUpstreamVerdict
 } from './availability-partition.ts';
+import {
+	isReachableElsewhere,
+	type SubstituterReach
+} from './substituter-reach.ts';
 
 /**
- * The store a confirmation asks, opened over a connection whose substituter
- * list holds only the ones a consumer elsewhere could also reach. Cupboard's
- * own destination cache and the tenant's reuse views are not among them: they
- * are configured on the runner, and content only they hold is the tenant's,
- * not something a target can be left upstream on.
+ * The store a confirmation asks, opened over settings whose substituter list
+ * holds only the ones a consumer elsewhere could also reach. Cupboard's own
+ * destination cache and the tenant's reuse views are not among them: they are
+ * configured on the runner, and content only they hold is the tenant's, not
+ * something a target can be left upstream on. Neither are the substituters
+ * that serve the runner alone, such as a directory on its disk or a cache on
+ * its own network.
  *
- * The connection reports its own trust, because the settings it was opened
- * with hold only for a client the daemon trusts.
+ * The store reports its own trust, because the settings a daemon connection
+ * was opened with hold only for a client the daemon trusts.
  */
 export type PermittedSubstituterStore = Pick<
 	Nix,
-	'resolveSubstitutableClosure' | 'canSubstituteDerivation' | 'daemonTrust'
+	| 'resolveSubstitutableClosure'
+	| 'canSubstituteDerivation'
+	| 'honoursSubstituterSettings'
 >;
 
 export interface UpstreamConfirmationOptions {
 	/** The effective settings deciding whether Nix would substitute at all. */
 	readonly substitution: NixSubstitutionSettings;
 	readonly store: PermittedSubstituterStore;
+	/**
+	 * Whether a consumer would take what a substituter offers, which decides
+	 * whether the offer proves anything.
+	 */
+	readonly accepts: AcceptsOffer;
 	readonly closure?: SubstitutableClosureOptions;
 }
 
@@ -38,31 +52,30 @@ export interface UpstreamConfirmationOptions {
  * Builds the check a target must pass before it is finally classed as left
  * upstream: the daemon has to trust the connection carrying the confirmation's
  * settings, Nix has to be willing to substitute the target, and the permitted
- * substituters have to hold its whole closure, proven by walking it.
+ * substituters have to hold the whole closure this store recorded for it.
  *
- * What a `confirmed` verdict does not cover is signature acceptance. Whether
- * the daemon's `trusted-public-keys` policy would accept the paths a
- * substituter offers is decided by the daemon at substitution time, and
- * nothing here validates it.
+ * The walk reads each path's narinfo from the substituter serving it, so every
+ * path of that closure is offered under the NAR hash this store holds and
+ * signed by a key the configuration trusts.
  */
 export function confirmLeftUpstreamWith(
 	options: UpstreamConfirmationOptions
 ): (candidate: LeftUpstreamCandidate) => Promise<LeftUpstreamVerdict> {
-	// Trust belongs to the peer the daemon accepted, so one handshake answers
-	// for every candidate this confirmation settles.
-	let trust: Promise<NixDaemonTrust> | undefined;
+	// Whichever store answers, it answers the same way for every candidate
+	// this confirmation settles, so it is asked once.
+	let honoured: Promise<SubstituterSettingsOutcome> | undefined;
 
 	return async (candidate) => {
 		if (!options.substitution.substitute) {
 			return { kind: 'substitution-disabled' };
 		}
 
-		trust ??= options.store.daemonTrust();
+		honoured ??= options.store.honoursSubstituterSettings();
 
-		const connectionTrust = await trust;
+		const settings = await honoured;
 
-		if (connectionTrust !== 'trusted') {
-			return { kind: 'connection-not-trusted', trust: connectionTrust };
+		if (!settings.isHonoured) {
+			return { kind: 'connection-not-trusted', trust: settings.trust };
 		}
 
 		const ineligible = await derivationRefusal(candidate, options);
@@ -73,11 +86,28 @@ export function confirmLeftUpstreamWith(
 
 		const closure = await options.store.resolveSubstitutableClosure(
 			candidate.storePath,
-			options.closure ?? {}
+			{ ...options.closure, accepts: options.accepts }
 		);
 
 		if (closure.kind === 'not-served') {
 			return { kind: 'closure-not-served', missing: closure.storePath };
+		}
+
+		if (closure.kind === 'not-held-locally') {
+			return { kind: 'closure-not-held-locally', missing: closure.storePath };
+		}
+
+		if (closure.kind === 'divergent') {
+			return {
+				kind: 'closure-divergent',
+				missing: closure.storePath,
+				held: closure.held,
+				offered: closure.offered
+			};
+		}
+
+		if (closure.kind === 'unsigned') {
+			return { kind: 'closure-unsigned', missing: closure.storePath };
 		}
 
 		if (closure.kind === 'over-cap') {
@@ -88,26 +118,38 @@ export function confirmLeftUpstreamWith(
 	};
 }
 
+export interface UpstreamConfirmationOverrideOptions {
+	/**
+	 * Which of the configured substituters a consumer elsewhere could also
+	 * reach. {@link isReachableElsewhere} decides for a plan; a test injects
+	 * its own so a fixture it controls can stand in for a public cache.
+	 */
+	readonly isReachable?: SubstituterReach;
+}
+
 /**
- * The daemon overrides a confirmation's connection carries.
+ * The overrides a confirmation's store is opened with.
  *
  * The substituter list is assigned outright, and the append that produced the
- * runner's own entries is cleared, so what the connection ends up with is
- * exactly the permitted list. Positive narinfo cache entries expire at once,
- * so every answer the walk reads is one the substituter gives now: a target is
- * left upstream on what its substituters serve today, not on what they served
- * when the runner last asked.
+ * runner's own entries is cleared, so the substituters the confirmation asks
+ * are exactly the permitted ones: the configured caches a consumer elsewhere
+ * could also reach, less this tenant's own. Positive narinfo cache entries
+ * expire at once, so an answer a daemon gives about one of them is the answer
+ * that substituter gives now.
  *
- * The daemon honours these for a trusted client only, so
+ * A daemon honours these for a trusted client only, so
  * {@link confirmLeftUpstreamWith} settles the connection's trust before any
  * answer over it decides a verdict.
  */
 export function upstreamConfirmationOverrides(
 	substitution: NixSubstitutionSettings,
-	tenantUrl: URL
+	tenantUrl: URL,
+	options: UpstreamConfirmationOverrideOptions = {}
 ): NixDaemonOverrides {
+	const isReachable = options.isReachable ?? isReachableElsewhere;
 	const permitted = substitution.substituters.filter(
-		(substituter) => !isTenantEndpoint(substituter, tenantUrl)
+		(substituter) =>
+			isReachable(substituter) && !isTenantEndpoint(substituter, tenantUrl)
 	);
 
 	return {

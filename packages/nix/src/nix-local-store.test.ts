@@ -277,7 +277,7 @@ describe('NixLocalStoreClient', () => {
 // so a store given them answers all three the way a daemon-backed one does.
 describe('NixLocalStoreClient with substituters', () => {
 	const cacheInfo = 'StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\n';
-	const narInfo = [
+	const narInfo = `${[
 		`StorePath: ${pathB}`,
 		'URL: nar/bbbb.nar.xz',
 		'Compression: xz',
@@ -286,7 +286,7 @@ describe('NixLocalStoreClient with substituters', () => {
 		`NarHash: ${hashB}`,
 		'NarSize: 50',
 		'References: '
-	].join('\n');
+	].join('\n')}\n`;
 
 	const served = servedBy(cacheInfo, narInfo);
 
@@ -315,8 +315,12 @@ describe('NixLocalStoreClient with substituters', () => {
 			clientOver().querySubstitutablePathInfos([pathB])
 		).resolves.toStrictEqual([
 			{
+				source: 'substituter',
 				storePath: pathB,
 				references: [],
+				narHash: NixSha256Hash.parsePrefixed(hashB),
+				signatures: [],
+				fromTrustedSubstituter: false,
 				downloadSize: 400,
 				narSize: 50
 			}

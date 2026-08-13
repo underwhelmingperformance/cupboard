@@ -1,18 +1,18 @@
 import { Derivation } from '@cupboard/nix-store/derivation';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
-import type {
-	NixMissingPartition,
-	NixSubstitutablePathInfo
-} from './nix-store.ts';
+import type { NixMissingPartition, NixSubstituterOffer } from './nix-store.ts';
 import {
 	FloatingOutputUnsupportedError,
 	queryMissingOver,
-	type RealisationPartitionSource
+	type RealisationPartitionSource,
+	RealisationWalkOverCapError,
+	UndeclaredOutputError
 } from './realisation-partition.ts';
 
 function path(letter: string, name: string): StorePathString {
@@ -68,6 +68,25 @@ function offers(
 	return new Map(entries);
 }
 
+// One substituter's answer for a path. The client that answers this question
+// reads the path's narinfo, so an offer it reports names the NAR hash and the
+// signatures the substituter published alongside the sizes the walk counts.
+function offer(
+	storePath: StorePathString,
+	references: readonly StorePathString[],
+	sizes: { readonly downloadSize: number; readonly narSize: number }
+): NixSubstituterOffer {
+	return {
+		source: 'substituter',
+		storePath,
+		references,
+		narHash: NixSha256Hash.fromDigest(new Uint8Array(32)),
+		signatures: [],
+		fromTrustedSubstituter: false,
+		...sizes
+	};
+}
+
 interface SourceOptions {
 	/** The paths this store already holds. */
 	readonly valid?: readonly StorePathString[];
@@ -110,12 +129,14 @@ function source(options: SourceOptions = {}): RecordingSource {
 			substituterBatches.push([...storePaths]);
 
 			return Promise.resolve(
-				storePaths.flatMap((storePath): NixSubstitutablePathInfo[] => {
+				storePaths.flatMap((storePath): NixSubstituterOffer[] => {
 					const references = offered.get(storePath);
 
 					return references === undefined
 						? []
-						: [{ storePath, references, downloadSize: 10, narSize: 100 }];
+						: [
+								offer(storePath, references, { downloadSize: 10, narSize: 100 })
+							];
 				})
 			);
 		}
@@ -269,6 +290,26 @@ describe('queryMissingOver', () => {
 		});
 	});
 
+	// A target naming an output its derivation does not produce names
+	// something that cannot be realised. Reading it as nothing to do would
+	// report a plan where every target is already available.
+	it.each([
+		{
+			name: 'an output the derivation does not declare',
+			target: `${appDrv}^typo` as const
+		},
+		{ name: 'no output at all', target: `${appDrv}^` as const }
+	])('refuses a target naming $name', async ({ target }) => {
+		const built = source({
+			valid: [appDrv],
+			derivations: stored([appDrv, derivation({ outputs: [['out', appPath]] })])
+		});
+
+		await expect(queryMissingOver([target], built)).rejects.toThrow(
+			UndeclaredOutputError
+		);
+	});
+
 	it('reports a derivation the store does not hold as unknown', async () => {
 		await expect(
 			queryMissingOver([`${appDrv}^out`], source())
@@ -396,6 +437,53 @@ describe('queryMissingOver', () => {
 		await expect(queryMissingOver([`${appDrv}^out`], floating)).rejects.toThrow(
 			FloatingOutputUnsupportedError
 		);
+	});
+
+	// Every edge the walk follows comes from an answer a substituter gave, so
+	// a substituter offering a fresh reference for every path it is asked
+	// about decides how far the walk goes.
+	it('refuses a walk that passes its cap', async () => {
+		let issued = 0;
+		const endless: RealisationPartitionSource = {
+			substitute: true,
+			alwaysAllowSubstitutes: false,
+			maxPaths: 20,
+			validPaths: () => Promise.resolve([]),
+			readDerivation: () => {
+				throw new Error('No derivation is reached here');
+			},
+			substitutablePathInfos: (storePaths) =>
+				Promise.resolve(
+					storePaths.map((storePath) => {
+						issued += 1;
+
+						return offer(
+							storePath,
+							// Wider than the cap, so a walk that gathered a whole
+							// level before checking would hold all of them.
+							Array.from({ length: 50 }, (_, index) =>
+								path('a', `fresh-${String(issued)}-${String(index)}`)
+							),
+							{ downloadSize: 1, narSize: 1 }
+						);
+					})
+				)
+		};
+
+		await expect(queryMissingOver([appPath], endless)).rejects.toThrow(
+			RealisationWalkOverCapError
+		);
+
+		// The cap stops the walk as the path that passes it is reached, so no
+		// further round of questions is asked.
+		expect(issued).toBe(1);
+	});
+
+	it('abandons a walk whose signal is already aborted', async () => {
+		const reason = new Error('the caller gave up');
+		const abandoned = { ...source(), signal: AbortSignal.abort(reason) };
+
+		await expect(queryMissingOver([appPath], abandoned)).rejects.toBe(reason);
 	});
 
 	// Every path a level reaches is asked about together, so a wide closure

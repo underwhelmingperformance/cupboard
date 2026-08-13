@@ -181,7 +181,7 @@ describe('buildReceiptSchema', () => {
 		narHash: 'aa'.repeat(32),
 		derivation,
 		buildStore: 'ssh-ng://builder.example',
-		verification: 'coordinating-store'
+		verification: 'build-store'
 	};
 
 	it('accepts a receipt whose subjects carry their provenance', () => {

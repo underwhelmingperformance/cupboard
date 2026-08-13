@@ -17,7 +17,9 @@ import {
 	type NixMissingPartition,
 	type NixStoreClient,
 	type NixValidPathInfo,
-	NotInNixStoreError
+	NotInNixStoreError,
+	type UnreachableSubstituter,
+	UnsupportedNixStoreOperationError
 } from './nix-store.ts';
 import {
 	createAvailabilityStoreClient,
@@ -27,14 +29,24 @@ import {
 	resolveStoreBackend,
 	type StoreClientEnvironment,
 	storeClientForBackend,
-	storeKindOf
+	storeKindOf,
+	substituterClientOver
 } from './store-client.ts';
 import { discoverNixStoreConfig } from './store-config.ts';
 import {
+	type QuerySubstitutablePathInfos,
 	resolveSubstitutableClosure,
 	type SubstitutableClosureOptions,
 	type SubstitutableClosureVerdict
 } from './substitutable-closure.ts';
+
+/**
+ * Whether a store's answers reflect the substituter settings it was opened
+ * with, naming the trust that settled it when they do not.
+ */
+export type SubstituterSettingsOutcome =
+	| { readonly isHonoured: true }
+	| { readonly isHonoured: false; readonly trust: NixDaemonTrust };
 
 /** Resolves a path's real location, injected so canonicalisation is testable. */
 export type RealPath = (path: string) => string;
@@ -44,6 +56,13 @@ export interface NixDependencies extends StoreClientEnvironment {
 }
 
 const defaultRealPath: RealPath = (path) => realpathSync(path);
+
+// A client built over a bare backend was given no substituters, so the
+// questions only they answer are ones it cannot put.
+const noSubstituters: QuerySubstitutablePathInfos = () =>
+	Promise.reject(
+		new UnsupportedNixStoreOperationError('substitutable-path-info queries')
+	);
 
 /**
  * A client for the Nix store on the system. {@link Nix.open} discovers the
@@ -57,9 +76,15 @@ export class Nix {
 	): Nix {
 		const config = discoverNixStoreConfig(dependencies);
 		const backend = resolveStoreBackend(config, dependencies);
+		const substituters = substituterClientOver(
+			config.storeDirectory,
+			config.substitution,
+			config.fileTransfer
+		);
 
 		return new Nix(
-			storeClientForBackend(backend, config),
+			storeClientForBackend(backend, config, substituters),
+			(storePaths) => substituters.querySubstitutablePathInfos(storePaths),
 			config.storeDirectory,
 			dependencies.realpath ?? defaultRealPath,
 			storeKindOf(backend)
@@ -83,7 +108,7 @@ export class Nix {
 		options: NixDaemonClientOptions = {}
 	): Nix {
 		const config = discoverNixStoreConfig(dependencies);
-		const { client, kind } = createAvailabilityStoreClient(
+		const { client, kind, substituters } = createAvailabilityStoreClient(
 			dependencies,
 			config,
 			options
@@ -91,6 +116,7 @@ export class Nix {
 
 		return new Nix(
 			client,
+			(storePaths) => substituters.querySubstitutablePathInfos(storePaths),
 			config.storeDirectory,
 			dependencies.realpath ?? defaultRealPath,
 			kind
@@ -108,10 +134,16 @@ export class Nix {
 			readonly storeDirectory: StoreDirectory;
 			readonly realpath?: RealPath;
 			readonly storeKind?: NixStoreKind;
+			/**
+			 * Asks the substituters what they offer, which a substitutable-closure
+			 * walk reads. A client given none has no substituters to ask.
+			 */
+			readonly offers?: QuerySubstitutablePathInfos;
 		}
 	): Nix {
 		return new Nix(
 			store,
+			options.offers ?? noSubstituters,
 			options.storeDirectory,
 			options.realpath ?? defaultRealPath,
 			options.storeKind ?? 'local-filesystem'
@@ -120,6 +152,11 @@ export class Nix {
 
 	private constructor(
 		private readonly store: NixStoreClient,
+		/**
+		 * The substituters this client asks about what is available elsewhere,
+		 * which answer for themselves whatever backend `store` reads through.
+		 */
+		private readonly offers: QuerySubstitutablePathInfos,
 		private readonly storeDirectory: StoreDirectory,
 		private readonly realpath: RealPath,
 		/** The kind of store backend this client reads through. */
@@ -183,11 +220,16 @@ export class Nix {
 	}
 
 	/**
-	 * Whether everything reachable from the argument is offered by this
-	 * client's substituters, proven by walking the references they report.
-	 * The substituters that answer are the ones this client's connection was
-	 * opened with, so a caller that needs a particular set of them opens a
-	 * client carrying that set.
+	 * Whether everything in this store's closure of the argument is offered by
+	 * this client's substituters, proven by walking the closure the store
+	 * holds and asking them about every path in it. The substituters that
+	 * answer are the ones this client was opened with, so a caller that needs a
+	 * particular set of them opens a client carrying that set.
+	 *
+	 * Each substituter is asked for the path's narinfo, so every offer the walk
+	 * reads names the NAR hash it would be served under and the signatures made
+	 * over it. An offer is proof only if a consumer would take it, so a caller
+	 * with a signing policy passes it in `options.accepts`.
 	 */
 	async resolveSubstitutableClosure(
 		path: string,
@@ -195,7 +237,10 @@ export class Nix {
 	): Promise<SubstitutableClosureVerdict> {
 		return resolveSubstitutableClosure(
 			this.toStorePath(path),
-			(storePaths) => this.store.querySubstitutablePathInfos(storePaths),
+			{
+				heldLocally: (storePaths) => this.store.queryValidPathsInfo(storePaths),
+				offered: (storePaths) => this.offers(storePaths)
+			},
 			options
 		);
 	}
@@ -218,6 +263,48 @@ export class Nix {
 	 */
 	async daemonTrust(): Promise<NixDaemonTrust> {
 		return (await this.store.daemonTrust?.()) ?? 'unknown';
+	}
+
+	/**
+	 * The configured substituters nothing could be asked of, so a caller can
+	 * tell an answer of "nobody holds this" from one given without asking
+	 * everybody. A daemon holds its own substituters and reports what it
+	 * reached to its own log, so a daemon-backed store names none here.
+	 */
+	async unreachableSubstituters(): Promise<readonly UnreachableSubstituter[]> {
+		return (await this.store.unreachableSubstituters?.()) ?? [];
+	}
+
+	/**
+	 * Whether an answer about what the substituters offer can have come from a
+	 * cache. A daemon keeps one, so an absence it reports may be an absence it
+	 * recorded earlier; a store this process drives asks the substituters as
+	 * the question is put, so its answers are always current.
+	 */
+	get cachesSubstituterAnswers(): boolean {
+		return this.storeKind !== 'local-filesystem';
+	}
+
+	/**
+	 * Whether the substituter settings this client was opened with are the
+	 * ones its answers reflect.
+	 *
+	 * A daemon applies an untrusted client's settings selectively and says
+	 * nothing about which it dropped, so only a trusted connection answers for
+	 * the settings it was sent, and an untrusted one reports the trust it did
+	 * report. A store this process drives holds the settings itself, so they
+	 * are always the ones in force.
+	 */
+	async honoursSubstituterSettings(): Promise<SubstituterSettingsOutcome> {
+		if (!this.cachesSubstituterAnswers) {
+			return { isHonoured: true };
+		}
+
+		const trust = await this.daemonTrust();
+
+		return trust === 'trusted'
+			? { isHonoured: true }
+			: { isHonoured: false, trust };
 	}
 
 	/** The NAR serialisation of the store path the argument names. */

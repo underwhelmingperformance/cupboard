@@ -149,6 +149,12 @@ export interface PushDependencies {
 	 * opened, which is everything a receipt subject needs.
 	 */
 	readonly buildStore?: string;
+	/**
+	 * The paths the build store held before this run built anything. A run
+	 * publishes what it realised alongside what was already there, and only
+	 * the first is work this run can claim provenance for.
+	 */
+	readonly alreadyHeld?: readonly string[];
 }
 
 // Each upload streams one NAR's compression into its R2 PUT, a CPU-bound zstd
@@ -372,6 +378,7 @@ interface PushRuntimeDependencies {
 	readonly uploadConcurrency?: number;
 	readonly dryRun?: boolean;
 	readonly buildStore?: string;
+	readonly alreadyHeld?: readonly string[];
 }
 
 // One publication path with its metadata resolved: a local entry carries the
@@ -528,17 +535,18 @@ async function resolveReferenceEntries(
 /**
  * The build receipt a push writes for the build it published: the paths that
  * ended servable, and one subject per published target the build store holds a
- * deriver for. The store answered every subject's NAR hash and deriver over the
- * connection the push already opened, so the subjects are what that store
- * realised; no build was observed here, so each subject is classified as the
- * coordinating store's. Reference and intermediate entries are nobody's build
- * subject: a reference is republished from elsewhere and an intermediate is not
- * a target of this push.
+ * deriver for and records as its own. The store answered every subject's NAR
+ * hash and deriver over the connection the push already opened, so the subjects
+ * are what that store realised; no build was observed here, so each subject is
+ * classified as the build store's. Reference and intermediate entries are
+ * nobody's build subject: a reference is republished from elsewhere and an
+ * intermediate is not a target of this push.
  */
 function reconciledReceipt(
 	buildStore: string,
 	resolved: readonly ResolvedPushPath[],
-	summaryPaths: readonly PushSummaryPath[]
+	summaryPaths: readonly PushSummaryPath[],
+	alreadyHeld: ReadonlySet<string>
 ): ParsedBuildReceiptV3 {
 	const servable = new Set<string>();
 	const published = new Set<string>();
@@ -569,13 +577,28 @@ function reconciledReceipt(
 				return [];
 			}
 
+			// The store marks a path ultimately trusted when it holds the path as
+			// its own. A path a substituter served during this run carries that
+			// substituter's signatures and no such mark, so the receipt claims no
+			// provenance for it.
+			if (!pathInfo.ultimate) {
+				return [];
+			}
+
+			// The build store held this before the build, so this run did not
+			// realise it and has no provenance to claim for it. It is still
+			// published, and still a path the receipt records.
+			if (alreadyHeld.has(pathInfo.storePath)) {
+				return [];
+			}
+
 			return [
 				{
 					storePath: pathInfo.storePath,
 					narHash: pathInfo.narHash.digestHex(),
 					derivation: pathInfo.deriver,
 					buildStore,
-					verification: 'coordinating-store'
+					verification: 'build-store'
 				}
 			];
 		})
@@ -1111,7 +1134,12 @@ async function runPushFlow(
 
 		return dependencies.buildStore === undefined
 			? undefined
-			: reconciledReceipt(dependencies.buildStore, resolved, summaryPaths);
+			: reconciledReceipt(
+					dependencies.buildStore,
+					resolved,
+					summaryPaths,
+					new Set(dependencies.alreadyHeld)
+				);
 	} finally {
 		session?.close();
 	}

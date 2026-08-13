@@ -1,4 +1,3 @@
-import type { Nix } from '@cupboard/nix';
 import {
 	type RootName,
 	rootNameSchema,
@@ -40,35 +39,6 @@ function target(
 	};
 }
 
-// A store double that records every call it receives, so a test can assert
-// exactly how many round trips the confirmation cost.
-class RecordingStore implements Pick<
-	Nix,
-	'querySubstitutablePaths' | 'queryValidPaths'
-> {
-	readonly substitutableCalls: (readonly string[])[] = [];
-	readonly validCalls: (readonly string[])[] = [];
-
-	constructor(
-		private readonly valid: readonly string[] = [],
-		private readonly substitutable: readonly string[] = []
-	) {}
-
-	querySubstitutablePaths(
-		paths: readonly string[]
-	): Promise<readonly string[]> {
-		this.substitutableCalls.push(paths);
-
-		return Promise.resolve(this.substitutable);
-	}
-
-	queryValidPaths(paths: readonly string[]): Promise<readonly string[]> {
-		this.validCalls.push(paths);
-
-		return Promise.resolve(this.valid);
-	}
-}
-
 function noAnswers(): DestinationAnswers {
 	return {
 		destinationServed: () => Promise.resolve(new Set()),
@@ -87,7 +57,6 @@ function baseOptions(
 ): AvailabilityReprobeOptions {
 	return {
 		targets: [],
-		store: new RecordingStore(),
 		destinationAnswers: noAnswers(),
 		...overrides
 	};
@@ -95,11 +64,9 @@ function baseOptions(
 
 describe('reprobeAvailability', () => {
 	it('leaves a build set nothing has caught up with exactly as it was', async () => {
-		const store = new RecordingStore();
 		const reprobe = await reprobeAvailability(
 			baseOptions({
-				targets: [target(), target({ installable: otherPath })],
-				store
+				targets: [target(), target({ installable: otherPath })]
 			})
 		);
 
@@ -112,7 +79,6 @@ describe('reprobeAvailability', () => {
 	it('asks each question once over the whole build set', async () => {
 		const destinationCalls: (readonly StorePathString[])[] = [];
 		const viewCalls: (readonly StorePathString[])[] = [];
-		const store = new RecordingStore([appPath]);
 
 		await reprobeAvailability(
 			baseOptions({
@@ -120,7 +86,6 @@ describe('reprobeAvailability', () => {
 					target(),
 					target({ installable: otherPath, expectedPath: otherPath })
 				],
-				store,
 				destinationAnswers: {
 					destinationServed: (paths) => {
 						destinationCalls.push(paths);
@@ -136,16 +101,9 @@ describe('reprobeAvailability', () => {
 			})
 		);
 
-		expect({
-			destinationCalls,
-			viewCalls,
-			validCalls: store.validCalls,
-			substitutableCalls: store.substitutableCalls
-		}).toStrictEqual({
+		expect({ destinationCalls, viewCalls }).toStrictEqual({
 			destinationCalls: [[appPath, otherPath]],
-			viewCalls: [[appPath, otherPath]],
-			validCalls: [[appPath, otherPath]],
-			substitutableCalls: [[appPath]]
+			viewCalls: [[appPath, otherPath]]
 		});
 	});
 
@@ -167,11 +125,6 @@ describe('reprobeAvailability', () => {
 					viewServed: () => Promise.resolve(new Set([appPath]))
 				})
 			}
-		},
-		{
-			becameAvailable: 'upstream, with the store now holding it',
-			outcome: 'leftUpstream',
-			options: { store: new RecordingStore([appPath], [appPath]) }
 		}
 	] satisfies readonly {
 		readonly becameAvailable: string;
@@ -197,17 +150,6 @@ describe('reprobeAvailability', () => {
 		}
 	);
 
-	it('keeps a target the store holds but nothing else serves in the build set', async () => {
-		const reprobe = await reprobeAvailability(
-			baseOptions({
-				targets: [target()],
-				store: new RecordingStore([appPath])
-			})
-		);
-
-		expect(reprobe).toStrictEqual({ buildSet: [appPath], withdrawn: [] });
-	});
-
 	it('never withdraws a target with no predictable output', async () => {
 		const floating = target({
 			installable: otherPath,
@@ -231,11 +173,9 @@ describe('reprobeAvailability', () => {
 	});
 
 	it('asks nothing at all when no target has a predictable output', async () => {
-		const store = new RecordingStore();
 		const reprobe = await reprobeAvailability(
 			baseOptions({
 				targets: [target({ expectedPath: undefined })],
-				store,
 				destinationAnswers: {
 					destinationServed: () => {
 						throw new Error('the destination must not be asked here');
@@ -247,14 +187,6 @@ describe('reprobeAvailability', () => {
 			})
 		);
 
-		expect({
-			reprobe,
-			validCalls: store.validCalls,
-			substitutableCalls: store.substitutableCalls
-		}).toStrictEqual({
-			reprobe: { buildSet: [appPath], withdrawn: [] },
-			validCalls: [],
-			substitutableCalls: []
-		});
+		expect(reprobe).toStrictEqual({ buildSet: [appPath], withdrawn: [] });
 	});
 });

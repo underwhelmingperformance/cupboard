@@ -3793,7 +3793,7 @@ describe('runPush', () => {
 // already served, so both are servable and only the target is a subject.
 function receiptPush(
 	appInfo: NixValidPathInfo,
-	dependencies: Pick<PushDependencies, 'buildStore'>
+	dependencies: Pick<PushDependencies, 'buildStore' | 'alreadyHeld'>
 ): Promise<ParsedBuildReceiptV3 | undefined> {
 	return runPush(publication([appPath], [runtimePath]), reporter([]), {
 		retain: false,
@@ -3852,25 +3852,45 @@ describe('the build receipt a push writes', () => {
 					narHash: appDigest.narHash.digestHex(),
 					derivation: appDrv,
 					buildStore,
-					verification: 'coordinating-store'
+					verification: 'build-store'
 				}
 			],
 			uploaded: [appPath]
 		});
 	});
 
-	it('publishes a target with no deriver without claiming it as a subject', async () => {
-		const receipt = await receiptPush(pathInfo(appPath, appDigest, []), {
-			buildStore
-		});
+	it.each([
+		{
+			case: 'a target with no deriver',
+			appInfo: pathInfo(appPath, appDigest, []),
+			dependencies: { buildStore }
+		},
+		{
+			case: 'a target the build store substituted',
+			appInfo: {
+				...pathInfo(appPath, appDigest, [], appDrv),
+				ultimate: false
+			},
+			dependencies: { buildStore }
+		},
+		{
+			case: 'a path the build store already held',
+			appInfo: pathInfo(appPath, appDigest, [], appDrv),
+			dependencies: { buildStore, alreadyHeld: [appPath] }
+		}
+	])(
+		'publishes $case without claiming it as a subject',
+		async ({ appInfo, dependencies }) => {
+			const receipt = await receiptPush(appInfo, dependencies);
 
-		expect(receipt).toStrictEqual({
-			version: 3,
-			paths: [appPath, runtimePath],
-			subjects: [],
-			uploaded: [appPath]
-		});
-	});
+			expect(receipt).toStrictEqual({
+				version: 3,
+				paths: [appPath, runtimePath],
+				subjects: [],
+				uploaded: [appPath]
+			});
+		}
+	);
 
 	it('writes no receipt when the push names no build store', async () => {
 		const receipt = await receiptPush(

@@ -111,6 +111,7 @@ const partitionSchema = z.object({
 	attachOnly: z.array(z.string()),
 	publishByReference: z.array(z.string()),
 	leftUpstream: z.array(z.string()),
+	alreadyValid: z.array(z.string()),
 	buildSet: z.array(z.string()),
 	counts: z.object({
 		willBuild: z.number(),
@@ -126,11 +127,13 @@ const partitionSchema = z.object({
 type PartitionData = z.output<typeof partitionSchema>;
 
 // One target `cupboard plan reprobe` took out of the build set, in the
-// partition's own vocabulary for where it belongs instead.
+// partition's own vocabulary for where it belongs instead. The confirmation
+// answers for the destination and the reuse view alone, so those are the two
+// buckets a withdrawal can name.
 const withdrawnTargetSchema = z.object({
 	installable: z.string().min(1),
 	storePath: storePathSchema,
-	outcome: z.enum(['attachOnly', 'publishByReference', 'leftUpstream'])
+	outcome: z.enum(['attachOnly', 'publishByReference'])
 });
 
 const planReprobeResultDataSchema = z.object({
@@ -503,10 +506,10 @@ export async function buildCohortAction(
 					dependencies.cupboardRunDependencies
 				);
 
-	// The partition settled when the cohort started; the store, the destination
-	// and the reuse view are asked once more about the exact outputs still on
-	// the build set, so a target something has published in the meantime is
-	// withdrawn before Nix is asked to realise it.
+	// The partition settled when the cohort started; the destination and the
+	// reuse view are asked once more about the exact outputs still on the build
+	// set, so a target something has published in the meantime is withdrawn
+	// before Nix is asked to realise it.
 	const reprobe =
 		result === undefined
 			? undefined
@@ -606,7 +609,7 @@ export async function buildCohortAction(
 	if (isReconciled) {
 		await runCupboard(
 			inputs.cupboardPath,
-			cohortReceiptPushArguments(inputs, built),
+			cohortReceiptPushArguments(inputs, built, partition?.alreadyValid ?? []),
 			environment,
 			dependencies.cupboardRunDependencies
 		);
@@ -763,7 +766,8 @@ export function cohortReceiptPushArguments(
 		| 'runRootTtl'
 		| 'receiptFile'
 	>,
-	paths: readonly string[]
+	paths: readonly string[],
+	alreadyHeld: readonly string[]
 ): readonly string[] {
 	const arguments_ = [
 		'--no-colour',
@@ -775,7 +779,8 @@ export function cohortReceiptPushArguments(
 		'--store',
 		inputs.store,
 		'--receipt-file',
-		inputs.receiptFile
+		inputs.receiptFile,
+		...alreadyHeld.flatMap((storePath) => ['--already-held', storePath])
 	];
 
 	if (inputs.audience !== '') {
@@ -979,8 +984,9 @@ function linesOf(paths: readonly string[]): string {
 /**
  * The partition as the re-probe leaves it: every withdrawn target moves out of
  * the build set and into the bucket the re-probe classified it under, so the
- * target paths, the reference paths, the left-upstream record and the pushes
- * that set the target roots all read one partition rather than two.
+ * target paths, the reference paths and the pushes that set the target roots
+ * all read one partition rather than two. The left-upstream list stays the
+ * plan's own, since the confirmation behind it runs when the partition settles.
  */
 export function withdrawFromPartition(
 	partition: PartitionData,
@@ -1007,15 +1013,14 @@ export function withdrawFromPartition(
 			...partition.publishByReference,
 			...pathsOf('publishByReference')
 		],
-		leftUpstream: [...partition.leftUpstream, ...pathsOf('leftUpstream')],
 		buildSet: partition.buildSet.filter(
 			(installable) => !withdrawnInstallables.has(installable)
 		)
 	};
 }
 
-// The confirmation `cupboard plan reprobe` answers, asked of the store the
-// build itself runs against and of the destination this cohort publishes to.
+// The confirmation `cupboard plan reprobe` answers, asked of the destination
+// this cohort publishes to and of the reuse view it may substitute from.
 // Best-effort by design: a failed confirmation leaves the partition exactly as
 // the plan settled it and names the cause, so the cohort builds its whole
 // build set rather than failing on a question it only asked to save work.
@@ -1107,15 +1112,16 @@ function reprobeTargets(
 }
 
 /**
- * The `cupboard plan reprobe` argv for one cohort. No token is exchanged: the
- * confirmation reconciles no retention root, so it asks the cache's own read
+ * The `cupboard plan reprobe` argv for one cohort. No token is exchanged and no
+ * store is named: the confirmation reconciles no retention root and asks
+ * nothing of a store, so it puts its questions to the cache's own read
  * endpoints with this run's read credentials, or with none at all for a public
  * cache.
  */
 export function planReprobeArguments(
 	inputs: Pick<
 		BuildCohortInputs,
-		'url' | 'cache' | 'reuseView' | 'readUser' | 'readPassword' | 'store'
+		'url' | 'cache' | 'reuseView' | 'readUser' | 'readPassword'
 	>,
 	targetsFile: string
 ): readonly string[] {
@@ -1143,10 +1149,6 @@ export function planReprobeArguments(
 			'--read-password',
 			inputs.readPassword
 		);
-	}
-
-	if (inputs.store !== '') {
-		arguments_.push('--store', inputs.store);
 	}
 
 	return arguments_;

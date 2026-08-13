@@ -1,4 +1,5 @@
 import type {
+	AcceptsOffer,
 	NixDaemonTrust,
 	NixSubstitutionSettings,
 	SubstitutableClosureVerdict
@@ -67,10 +68,15 @@ function storeDouble(
 		walked,
 		derivationsRead,
 		trustAsked: () => trustAsked,
-		daemonTrust: () => {
+		honoursSubstituterSettings: () => {
 			trustAsked += 1;
+			const trust = options.trust ?? 'trusted';
 
-			return Promise.resolve(options.trust ?? 'trusted');
+			return Promise.resolve(
+				trust === 'trusted'
+					? { isHonoured: true }
+					: { isHonoured: false, trust }
+			);
 		},
 		resolveSubstitutableClosure: (storePath) => {
 			walked.push(storePath);
@@ -89,6 +95,10 @@ function storeDouble(
 	};
 }
 
+// The acceptance policy is exercised where it lives; these cases are about
+// what the confirmation does with the verdict it gets back.
+const acceptsEveryOffer: AcceptsOffer = () => Promise.resolve(true);
+
 interface ClosureRefusalCase {
 	readonly name: string;
 	readonly closure: SubstitutableClosureVerdict;
@@ -100,6 +110,31 @@ const closureRefusalCases: readonly ClosureRefusalCase[] = [
 		name: 'a reference no permitted substituter offers',
 		closure: { kind: 'not-served', storePath: missingPath },
 		expected: { kind: 'closure-not-served', missing: missingPath }
+	},
+	{
+		name: 'a reference this store does not hold',
+		closure: { kind: 'not-held-locally', storePath: missingPath },
+		expected: { kind: 'closure-not-held-locally', missing: missingPath }
+	},
+	{
+		name: 'a reference offered under a NAR hash this store does not hold',
+		closure: {
+			kind: 'divergent',
+			storePath: missingPath,
+			held: `sha256:${'1'.repeat(52)}`,
+			offered: `sha256:${'2'.repeat(52)}`
+		},
+		expected: {
+			kind: 'closure-divergent',
+			missing: missingPath,
+			held: `sha256:${'1'.repeat(52)}`,
+			offered: `sha256:${'2'.repeat(52)}`
+		}
+	},
+	{
+		name: 'a reference carrying no signature this configuration accepts',
+		closure: { kind: 'unsigned', storePath: missingPath },
+		expected: { kind: 'closure-unsigned', missing: missingPath }
 	},
 	{
 		name: 'a closure larger than the walk allows',
@@ -114,7 +149,8 @@ describe('confirmLeftUpstreamWith', () => {
 
 		const verdict = await confirmLeftUpstreamWith({
 			substitution: defaultSubstitution,
-			store
+			store,
+			accepts: acceptsEveryOffer
 		})({ installable: `${drvPath}^out`, storePath: appPath });
 
 		expect({
@@ -134,7 +170,8 @@ describe('confirmLeftUpstreamWith', () => {
 		const store = storeDouble();
 		const confirm = confirmLeftUpstreamWith({
 			substitution: defaultSubstitution,
-			store
+			store,
+			accepts: acceptsEveryOffer
 		});
 
 		const verdicts = [
@@ -159,7 +196,8 @@ describe('confirmLeftUpstreamWith', () => {
 
 		const verdict = await confirmLeftUpstreamWith({
 			substitution: defaultSubstitution,
-			store
+			store,
+			accepts: acceptsEveryOffer
 		})({ installable: `${drvPath}^out`, storePath: appPath });
 
 		expect({
@@ -178,7 +216,8 @@ describe('confirmLeftUpstreamWith', () => {
 		async ({ closure, expected }) => {
 			const verdict = await confirmLeftUpstreamWith({
 				substitution: defaultSubstitution,
-				store: storeDouble({ closure })
+				store: storeDouble({ closure }),
+				accepts: acceptsEveryOffer
 			})({ installable: `${drvPath}^out`, storePath: appPath });
 
 			expect(verdict).toStrictEqual(expected);
@@ -223,7 +262,11 @@ describe('confirmLeftUpstreamWith', () => {
 		}) => {
 			const store = storeDouble({ allowsSubstitutes });
 
-			const verdict = await confirmLeftUpstreamWith({ substitution, store })({
+			const verdict = await confirmLeftUpstreamWith({
+				substitution,
+				store,
+				accepts: acceptsEveryOffer
+			})({
 				installable: `${drvPath}^out`,
 				storePath: appPath
 			});
@@ -239,7 +282,8 @@ describe('confirmLeftUpstreamWith', () => {
 	it('refuses a candidate whose derivation cannot be read', async () => {
 		const verdict = await confirmLeftUpstreamWith({
 			substitution: defaultSubstitution,
-			store: storeDouble({ derivationFails: true })
+			store: storeDouble({ derivationFails: true }),
+			accepts: acceptsEveryOffer
 		})({ installable: `${drvPath}^out`, storePath: appPath });
 
 		expect(verdict).toStrictEqual({
@@ -255,7 +299,8 @@ describe('confirmLeftUpstreamWith', () => {
 
 		const verdict = await confirmLeftUpstreamWith({
 			substitution: defaultSubstitution,
-			store
+			store,
+			accepts: acceptsEveryOffer
 		})({ installable: appPath, storePath: appPath });
 
 		expect({ verdict, derivationsRead: store.derivationsRead }).toStrictEqual({
@@ -304,9 +349,37 @@ describe('upstreamConfirmationOverrides', () => {
 				'https://cupboard.example.workers.dev/t/other https://cache.nixos.org/'
 		},
 		{
-			name: 'nothing, leaving a substituter that is not a URL alone',
+			name: 'a substituter that is not a URL',
 			substituters: ['daemon', 'https://cache.nixos.org/'],
-			expected: 'daemon https://cache.nixos.org/'
+			expected: 'https://cache.nixos.org/'
+		},
+		{
+			name: 'a directory on the runner',
+			substituters: ['file:///var/cache/nix', 'https://cache.nixos.org/'],
+			expected: 'https://cache.nixos.org/'
+		},
+		{
+			name: 'a cache on the loopback interface',
+			substituters: [
+				'http://localhost:5000/',
+				'http://127.0.0.1:5001/',
+				'http://[::1]:5002/',
+				'https://cache.nixos.org/'
+			],
+			expected: 'https://cache.nixos.org/'
+		},
+		{
+			name: 'a cache on the runner network',
+			substituters: [
+				'http://10.1.2.3/',
+				'http://172.16.9.9/',
+				'http://192.168.0.2/',
+				'http://169.254.1.1/',
+				'http://[fc00::2]/',
+				'http://0.0.0.0/',
+				'https://cache.nixos.org/'
+			],
+			expected: 'https://cache.nixos.org/'
 		},
 		{
 			name: 'every substituter, leaving the list empty',
@@ -321,6 +394,53 @@ describe('upstreamConfirmationOverrides', () => {
 			)
 		).toStrictEqual({
 			substituters: expected,
+			'extra-substituters': '',
+			...freshNarinfo
+		});
+	});
+
+	const loopbackCache = 'http://127.0.0.1:5000/';
+	const tenantCache = 'https://cupboard.example.workers.dev/t/acme/c/nightly';
+
+	it.each([
+		{
+			name: 'keeps what an injected reach admits',
+			isReachable: (substituter: string) => substituter === loopbackCache,
+			substituters: [loopbackCache, 'https://cache.nixos.org/'],
+			expected: loopbackCache
+		},
+		{
+			name: 'excludes the tenant endpoints an injected reach admits',
+			isReachable: () => true,
+			substituters: [tenantCache, loopbackCache],
+			expected: loopbackCache
+		}
+	])('$name', ({ isReachable, substituters, expected }) => {
+		expect(
+			upstreamConfirmationOverrides(
+				{ ...defaultSubstitution, substituters },
+				tenantUrl,
+				{ isReachable }
+			)
+		).toStrictEqual({
+			substituters: expected,
+			'extra-substituters': '',
+			...freshNarinfo
+		});
+	});
+
+	it('falls back to the reach of a consumer elsewhere when none is injected', () => {
+		expect(
+			upstreamConfirmationOverrides(
+				{
+					...defaultSubstitution,
+					substituters: [loopbackCache, 'https://cache.nixos.org/']
+				},
+				tenantUrl,
+				{}
+			)
+		).toStrictEqual({
+			substituters: 'https://cache.nixos.org/',
 			'extra-substituters': '',
 			...freshNarinfo
 		});

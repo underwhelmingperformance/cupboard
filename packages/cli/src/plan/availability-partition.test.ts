@@ -1,4 +1,8 @@
-import type { Nix, NixDaemonTrust, NixMissingPartition } from '@cupboard/nix';
+import type {
+	Nix,
+	NixMissingPartition,
+	UnreachableSubstituter
+} from '@cupboard/nix';
 import {
 	type RootName,
 	rootNameSchema,
@@ -17,7 +21,8 @@ import {
 	type LeftUpstreamCandidate,
 	type LeftUpstreamVerdict,
 	partitionAvailability,
-	UnknownPathsCeilingError
+	UnknownPathsCeilingError,
+	type UnknownRequeryOutcome
 } from './availability-partition.ts';
 
 function path(basename: string): StorePathString {
@@ -96,7 +101,10 @@ const defaultCeiling: AvailabilityCeilingConfig = {
 // exactly what was asked of it, and of nothing else.
 class RecordingStore implements Pick<
 	Nix,
-	'queryMissing' | 'querySubstitutablePaths' | 'queryValidPaths'
+	| 'queryMissing'
+	| 'querySubstitutablePaths'
+	| 'queryValidPaths'
+	| 'unreachableSubstituters'
 > {
 	readonly missingCalls: (readonly string[])[] = [];
 	readonly substitutableCalls: (readonly string[])[] = [];
@@ -105,8 +113,13 @@ class RecordingStore implements Pick<
 	constructor(
 		private readonly missing: NixMissingPartition = emptyMissing(),
 		private readonly substitutable: readonly string[] = [],
-		private readonly valid: readonly string[] = []
+		private readonly valid: readonly string[] = [],
+		private readonly unreachable: readonly UnreachableSubstituter[] = []
 	) {}
+
+	unreachableSubstituters(): Promise<readonly UnreachableSubstituter[]> {
+		return Promise.resolve(this.unreachable);
+	}
 
 	queryMissing(targets: readonly string[]): Promise<NixMissingPartition> {
 		this.missingCalls.push(targets);
@@ -129,20 +142,12 @@ class RecordingStore implements Pick<
 	}
 }
 
-function alwaysTrusted(): Promise<NixDaemonTrust> {
-	return Promise.resolve('trusted');
+function neverAsked(): Promise<UnknownRequeryOutcome> {
+	throw new Error('The unknown paths were re-queried unexpectedly');
 }
 
 function alwaysConfirms(): Promise<LeftUpstreamVerdict> {
 	return Promise.resolve({ kind: 'confirmed' });
-}
-
-function neverOpened(): Pick<Nix, 'queryMissing'> {
-	return {
-		queryMissing() {
-			throw new Error('the bypass client must not be opened here');
-		}
-	};
 }
 
 function baseOptions(
@@ -153,8 +158,7 @@ function baseOptions(
 		store: new RecordingStore(),
 		destinationAnswers: noAnswers(),
 		rootEnsureResults: new Map(),
-		daemonTrust: alwaysTrusted,
-		openReQueryClient: neverOpened,
+		requeryUnknown: neverAsked,
 		confirmLeftUpstream: alwaysConfirms,
 		ceiling: defaultCeiling,
 		...overrides
@@ -360,25 +364,17 @@ describe('partitionAvailability', () => {
 		}
 	);
 
-	it('re-queries only the unknown paths through the dedicated bypass client when the daemon is trusted', async () => {
+	it('re-queries only the unknown paths, and folds the fresh answer in', async () => {
 		const unknownPath = path('33333333333333333333333333333333-unknown');
 		const store = new RecordingStore(
 			missingWith({ unknown: [unknownPath], downloadSize: 10, narSize: 20 })
 		);
+		const bypassPartition = missingWith({
+			willSubstitute: [unknownPath],
+			downloadSize: 5,
+			narSize: 8
+		});
 		let bypassCalls: (readonly string[])[] = [];
-		const bypassClient: Pick<Nix, 'queryMissing'> = {
-			queryMissing(targets: readonly string[]) {
-				bypassCalls = [...bypassCalls, targets];
-
-				return Promise.resolve(
-					missingWith({
-						willSubstitute: [unknownPath],
-						downloadSize: 5,
-						narSize: 8
-					})
-				);
-			}
-		};
 
 		const partition = await partitionAvailability(
 			baseOptions({
@@ -386,8 +382,14 @@ describe('partitionAvailability', () => {
 					target({ expectedPath: unknownPath, installable: unknownPath })
 				],
 				store,
-				daemonTrust: alwaysTrusted,
-				openReQueryClient: () => bypassClient
+				requeryUnknown: (storePaths) => {
+					bypassCalls = [...bypassCalls, [...storePaths]];
+
+					return Promise.resolve({
+						kind: 'answered',
+						partition: bypassPartition
+					});
+				}
 			})
 		);
 
@@ -412,7 +414,7 @@ describe('partitionAvailability', () => {
 		{ name: 'not-trusted', trust: 'not-trusted' as const },
 		{ name: 'unknown', trust: 'unknown' as const }
 	])(
-		'falls back to the nonzero ceiling and never opens the bypass client when the daemon is $name',
+		'falls back to the nonzero ceiling when a re-query is refused because the daemon is $name',
 		async ({ trust }) => {
 			const unknownPath = path('33333333333333333333333333333333-unknown');
 			const store = new RecordingStore(missingWith({ unknown: [unknownPath] }));
@@ -423,7 +425,11 @@ describe('partitionAvailability', () => {
 						target({ expectedPath: unknownPath, installable: unknownPath })
 					],
 					store,
-					daemonTrust: () => Promise.resolve(trust),
+					requeryUnknown: () =>
+						Promise.resolve({
+							kind: 'refused',
+							reason: `the daemon connection is ${trust}`
+						}),
 					ceiling: { value: 0, untrustedFallback: 20 }
 				})
 			);
@@ -431,8 +437,7 @@ describe('partitionAvailability', () => {
 			expect(partition.ceiling).toStrictEqual({
 				value: 20,
 				source: 'untrusted-fallback',
-				fallbackReason:
-					'the daemon connection is not fully trusted, so its narinfo-cache-negative-ttl override cannot be relied on to take effect'
+				fallbackReason: `the daemon connection is ${trust}`
 			});
 		}
 	);
@@ -452,7 +457,8 @@ describe('partitionAvailability', () => {
 						target({ expectedPath: unknownPath, installable: unknownPath })
 					],
 					store,
-					daemonTrust: () => Promise.resolve('not-trusted'),
+					requeryUnknown: () =>
+						Promise.resolve({ kind: 'refused', reason: 'not trusted' }),
 					ceiling: { value: 0, untrustedFallback: 0 }
 				})
 			);
@@ -477,12 +483,53 @@ describe('partitionAvailability', () => {
 			ceiling: {
 				value: 0,
 				source: 'untrusted-fallback',
-				fallbackReason:
-					'the daemon connection is not fully trusted, so its narinfo-cache-negative-ttl override cannot be relied on to take effect'
+				fallbackReason: 'not trusted'
 			},
 			downloadSize: 1,
 			narSize: 2,
 			exitCode: 75
+		});
+	});
+
+	// A path counted as held nowhere is held nowhere among the substituters
+	// that answered, so which ones did not answer belongs beside the counts.
+	it('records the substituters nothing could be asked of', async () => {
+		const unreachable = [
+			{ uri: 'https://down.example', reason: 'no-cache-info' as const }
+		];
+		const store = new RecordingStore(emptyMissing(), [], [], unreachable);
+
+		const partition = await partitionAvailability(
+			baseOptions({ targets: [target()], store })
+		);
+
+		expect(partition.unreachableSubstituters).toStrictEqual(unreachable);
+	});
+
+	// A store asking the substituters as the question is put has no cache to
+	// look past, so its unknowns are as settled as they get and the configured
+	// ceiling stands.
+	it('keeps the configured ceiling when the first answer was already fresh', async () => {
+		const unknownPath = path('33333333333333333333333333333333-unknown');
+		const store = new RecordingStore(missingWith({ unknown: [unknownPath] }));
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({ expectedPath: unknownPath, installable: unknownPath })
+				],
+				store,
+				requeryUnknown: () => Promise.resolve({ kind: 'already-fresh' }),
+				ceiling: { value: 5, untrustedFallback: 20 }
+			})
+		);
+
+		expect({
+			ceiling: partition.ceiling,
+			unknown: partition.counts.unknown
+		}).toStrictEqual({
+			ceiling: { value: 5, source: 'configured' },
+			unknown: 1
 		});
 	});
 

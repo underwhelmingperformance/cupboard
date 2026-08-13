@@ -4,6 +4,7 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 /**
@@ -11,6 +12,21 @@ import { mapWithConcurrency } from '@cupboard/shared/concurrency';
  * `unknown` when the daemon leaves the flag unset.
  */
 export type NixDaemonTrust = 'trusted' | 'not-trusted' | 'unknown';
+
+/**
+ * A configured substituter nothing could be asked of. Its answers are missing
+ * from every query made without it, so a caller reading those answers as
+ * "nobody holds this" is reading them one substituter short.
+ */
+export interface UnreachableSubstituter {
+	readonly uri: string;
+	/** Why nothing could be asked of it. */
+	readonly reason:
+		| 'unreadable-uri'
+		/** A store this reader does not open, such as `s3://` or `ssh://`. */
+		| 'unsupported-scheme'
+		| 'no-cache-info';
+}
 
 export interface NixValidPathInfo {
 	readonly storePath: StorePathString;
@@ -29,20 +45,57 @@ export interface NixValidPathInfo {
 }
 
 /**
- * What a substituter offers for one store path: enough metadata to walk the
- * path's closure without fetching any of its bytes. A store answers with an
- * entry only for a path one of its permitted substituters serves, whatever
- * this machine's own store already holds.
+ * What every offer states about one store path, whichever answer carried it:
+ * enough metadata to walk the path's closure without fetching any of its
+ * bytes.
  */
-export interface NixSubstitutablePathInfo {
+interface NixOfferedPath {
 	readonly storePath: StorePathString;
 	readonly deriver?: string;
 	readonly references: readonly StorePathString[];
-	/** Bytes the fetch would transfer; 0 when the substituter does not say. */
-	readonly downloadSize: number;
-	/** Bytes the path would occupy; 0 when the substituter does not say. */
+	/**
+	 * The bytes the path would occupy, as the answer states them, which the
+	 * fingerprint a signature is made over commits to.
+	 */
 	readonly narSize: number;
+	/** Bytes the fetch would transfer; 0 when the answer does not say. */
+	readonly downloadSize: number;
 }
+
+/**
+ * An offer as the daemon's batched answer carries one. That answer names the
+ * sizes and the references and nothing else, so it says how much work a fetch
+ * would be and nothing about what the fetch would produce.
+ */
+export interface NixDaemonOffer extends NixOfferedPath {
+	readonly source: 'daemon';
+}
+
+/**
+ * An offer read from a substituter's own narinfo, which every substituter
+ * publishes in full: the path's NAR hash and each signature made over it, so a
+ * consumer's checks can run against what this substituter would serve.
+ */
+export interface NixSubstituterOffer extends NixOfferedPath {
+	readonly source: 'substituter';
+	/** The NAR hash the substituter would serve the path under. */
+	readonly narHash: NixSha256Hash;
+	/** The signatures the substituter published for the path. */
+	readonly signatures: readonly string[];
+	/**
+	 * Whether the substituter that made this offer is configured as trusted,
+	 * which takes what it serves without asking for a signature.
+	 */
+	readonly fromTrustedSubstituter: boolean;
+}
+
+/**
+ * What a substituter offers for one store path, as the answer that carried it
+ * can state. A store answers with an entry only for a path one of its
+ * permitted substituters serves, whatever this machine's own store already
+ * holds.
+ */
+export type NixSubstitutablePathInfo = NixDaemonOffer | NixSubstituterOffer;
 
 /**
  * A realisation target the way an installable names one: a plain store path,
@@ -190,6 +243,13 @@ export interface NixStoreClient {
 	 * connection to ask; a backend without one leaves this undefined.
 	 */
 	daemonTrust?(): Promise<NixDaemonTrust>;
+	/**
+	 * The store's configured substituters that nothing could be asked of, so a
+	 * caller can tell an answer of "nobody holds this" from one given without
+	 * asking everybody. Only a store this process drives knows; a daemon keeps
+	 * its own substituters and reports what it reached to its own log.
+	 */
+	unreachableSubstituters?(): Promise<readonly UnreachableSubstituter[]>;
 }
 
 /**
@@ -252,7 +312,7 @@ export async function resolveClosureBy(
 	return closure
 		.values()
 		.toArray()
-		.toSorted((left, right) => left.storePath.localeCompare(right.storePath));
+		.toSorted((left, right) => byCodeUnit(left.storePath, right.storePath));
 }
 
 // The candidates not yet claimed, in order and deduplicated, marking each one
@@ -308,6 +368,37 @@ export class NixConfigIncludeError extends NixStoreError {
 	}
 }
 
+/**
+ * A configuration line Nix cannot read as one. Nix takes a line's
+ * whitespace-separated tokens and requires `<name> = <value…>`, refusing the
+ * whole configuration over anything else, so a client reading that
+ * configuration refuses it too: carrying on would run under settings Nix
+ * itself would not start with.
+ */
+export class NixConfigSyntaxError extends NixStoreError {
+	constructor(
+		public readonly line: string,
+		public readonly source: string
+	) {
+		super(`Syntax error in Nix configuration line '${line}' in ${source}`);
+		this.name = 'NixConfigSyntaxError';
+	}
+}
+
+/**
+ * A `builders` value whose `@file` entries could not be expanded. A machines
+ * file may name another, so a chain of them can be followed only so far.
+ */
+export class NixMachineFileError extends NixStoreError {
+	constructor(
+		public readonly builders: string,
+		public readonly reason: string
+	) {
+		super(`Could not read the Nix builders '${builders}': ${reason}`);
+		this.name = 'NixMachineFileError';
+	}
+}
+
 export class NixConfigSettingError extends NixStoreError {
 	constructor(
 		public readonly setting: string,
@@ -322,7 +413,7 @@ export class NixConfigSettingError extends NixStoreError {
 }
 
 /** The setting a discovered store directory came from. */
-export type NixStoreDirectorySource = 'NIX_STORE_DIR' | 'store-dir';
+export type NixStoreDirectorySource = 'NIX_STORE_DIR' | 'NIX_STORE';
 
 export class InvalidNixStoreDirectoryError extends NixStoreError {
 	constructor(

@@ -1,9 +1,5 @@
-import type { Nix, NixDerivedPathString } from '@cupboard/nix';
-import {
-	type RootName,
-	storePathSchema,
-	type StorePathString
-} from '@cupboard/nix-store/scalars';
+import type { NixDerivedPathString } from '@cupboard/nix';
+import type { RootName, StorePathString } from '@cupboard/nix-store/scalars';
 import type { ParsedRootEnsureResponse } from '@cupboard/protocol/retention';
 
 import {
@@ -13,13 +9,12 @@ import {
 } from './availability-partition.ts';
 
 /** The bucket a withdrawn target moved into, named as the partition names it. */
-export type WithdrawnOutcome =
-	'attachOnly' | 'publishByReference' | 'leftUpstream';
+export type WithdrawnOutcome = 'attachOnly' | 'publishByReference';
 
 /**
  * One target the re-probe took out of the build set: the installable Nix is no
- * longer asked to realise, the path that answers for it, and the outcome the
- * partition's own rules give it now that it is available.
+ * longer asked to realise, the path that answers for it, and the bucket it
+ * moved into now that it is available.
  */
 export interface WithdrawnTarget {
 	readonly installable: NixDerivedPathString;
@@ -30,8 +25,6 @@ export interface WithdrawnTarget {
 export interface AvailabilityReprobeOptions {
 	/** The build set as it stands, one entry per target Nix is about to realise. */
 	readonly targets: readonly AvailabilityTarget[];
-	/** The store the build itself will run against; no override applied. */
-	readonly store: Pick<Nix, 'querySubstitutablePaths' | 'queryValidPaths'>;
 	readonly destinationAnswers: DestinationAnswers;
 }
 
@@ -41,21 +34,27 @@ export interface AvailabilityReprobe {
 	readonly withdrawn: readonly WithdrawnTarget[];
 }
 
-// The re-probe asks the store and the destination, never a retention root: a
-// target a root already served was answered by the first partition and is not
-// in the build set to begin with.
+// The re-probe asks the destination and the reuse view, never a retention
+// root: a target a root already served was answered by the first partition and
+// is not in the build set to begin with.
 const noRootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse> =
 	new Map();
+
+// Leaving a target upstream stays with the partition's confirmation, which
+// proves a consumer could fetch exactly what this run holds before anyone is
+// sent to a substituter for it, so the re-probe offers no substitutability of
+// its own.
+const noSubstitutableExternal: ReadonlySet<StorePathString> = new Set();
 
 /**
  * Confirms, immediately before the build set is dispatched, that every target
  * in it still needs realising. The exact requested outputs are asked of the
- * store the build will run against, and of the destination and reuse view, in
- * one batch per question however large the build set is. A target that has
- * become available since the partition settled is withdrawn under the same
- * rules the partition applied, so it takes the outcome it would have had had
- * the partition seen it. Availability is racy: a path can go again straight
- * after the answer, and Nix reports that failure the way it reports any other.
+ * destination and of the reuse view, in one batch per question however large
+ * the build set is. A target either of them has gained since the partition
+ * settled is withdrawn, to be attached to its root or published by reference.
+ * Every other target keeps its place in the build set. Availability is racy: a
+ * path can go again straight after the answer, and Nix reports that failure the
+ * way it reports any other.
  */
 export async function reprobeAvailability(
 	options: AvailabilityReprobeOptions
@@ -71,25 +70,10 @@ export async function reprobeAvailability(
 		};
 	}
 
-	const [destinationServedPaths, viewServedPaths, validPaths] =
-		await Promise.all([
-			options.destinationAnswers.destinationServed(knownPaths),
-			options.destinationAnswers.viewServed(knownPaths),
-			options.store.queryValidPaths(knownPaths)
-		]);
-
-	// The same restriction the partition applies: only a path this store already
-	// holds valid is a "leave it upstream" candidate.
-	const substitutableRaw =
-		await options.store.querySubstitutablePaths(validPaths);
-	const substitutableExternal = new Set(
-		substitutableRaw
-			.map((path) => storePathSchema.parse(path))
-			.filter(
-				(path) =>
-					!destinationServedPaths.has(path) && !viewServedPaths.has(path)
-			)
-	);
+	const [destinationServedPaths, viewServedPaths] = await Promise.all([
+		options.destinationAnswers.destinationServed(knownPaths),
+		options.destinationAnswers.viewServed(knownPaths)
+	]);
 
 	const buildSet: NixDerivedPathString[] = [];
 	const withdrawn: WithdrawnTarget[] = [];
@@ -99,11 +83,14 @@ export async function reprobeAvailability(
 			target,
 			destinationServedPaths,
 			viewServedPaths,
-			substitutableExternal,
+			noSubstitutableExternal,
 			noRootEnsureResults
 		);
 
-		if (classification.bucket === 'buildSet') {
+		if (
+			classification.bucket !== 'attachOnly' &&
+			classification.bucket !== 'publishByReference'
+		) {
 			buildSet.push(target.installable);
 			continue;
 		}

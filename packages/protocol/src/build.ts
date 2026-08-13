@@ -60,20 +60,22 @@ export type BuildStore = z.output<typeof buildStoreSchema>;
 /** The store Nix itself would use, which a run selecting none builds in. */
 export const autoBuildStore = 'auto';
 
-// How far the coordinating machine established that a subject is what this run
-// produced.
+// How far the machine running the push established that a subject is what this
+// run produced.
 //
-// `local` is a build the coordinator ran itself. `verified-rebuild` is a build
+// `local` is a build that machine ran itself. `verified-rebuild` is a build
 // some other machine ran whose outputs a local rebuild then reproduced.
-// `coordinating-store` is a path the selected build store realised: the
-// coordinator read its metadata back over the store connection and did not
-// watch the build, so the claim rests on the store the operator configured.
-// `unverified` is a build some other machine ran that nothing since has
-// checked, which is not a subject anything may attest.
+// `build-store` is a path the selected build store realised: its metadata was
+// read back over the store connection and the build itself was not watched, so
+// the claim rests on the store the operator configured. That store marks such a
+// path ultimately trusted, which it also does for a path added to it directly,
+// so the claim covers every path the store holds as its own. `unverified` is a
+// build some other machine ran that nothing since has checked, which is not a
+// subject anything may attest.
 export const subjectVerificationSchema = z.enum([
 	'local',
 	'verified-rebuild',
-	'coordinating-store',
+	'build-store',
 	'unverified'
 ]);
 export type SubjectVerification = z.output<typeof subjectVerificationSchema>;
@@ -83,7 +85,7 @@ export type SubjectVerification = z.output<typeof subjectVerificationSchema>;
 // produced the path; a run that reconciles its subjects from the store after
 // the build has no attempt loop to name. `machine` names the builder the
 // activity log recorded, absent when the run only knows the path was not built
-// on the machine that coordinated it.
+// on the machine that ran the push.
 export const buildSubjectV3Schema = z.strictObject({
 	storePath: storePathSchema,
 	narHash: sha256HexDigestSchema,

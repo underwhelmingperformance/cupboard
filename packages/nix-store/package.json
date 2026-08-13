@@ -25,6 +25,7 @@
 		"./signature": "./src/signature.ts",
 		"./store-path": "./src/store-path.ts",
 		"./url": "./src/url.ts",
+		"./verify": "./src/verify.ts",
 		"./zstd": "./src/zstd.ts"
 	},
 	"license": "AGPL-3.0-or-later",

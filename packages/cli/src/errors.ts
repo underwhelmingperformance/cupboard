@@ -1009,7 +1009,7 @@ export class HookHelperMissingError extends CliError {
 	}
 }
 
-/** One declared target the coordinating machine could not rebuild itself. */
+/** One declared target this machine could not rebuild itself. */
 export interface UnverifiableTarget {
 	readonly drvPath: string;
 	/** The system the derivation builds for. */

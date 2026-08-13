@@ -2,7 +2,11 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import type { NixStoreConfig } from '@cupboard/nix';
+import {
+	defaultFileTransferSettings,
+	defaultSignatureSettings,
+	type NixStoreConfig
+} from '@cupboard/nix';
 import {
 	cacheSelectorSchema,
 	rootNameSchema,
@@ -47,6 +51,8 @@ const config: NixStoreConfig = {
 	storeDirectory: storeDirectorySchema.parse('/nix/store'),
 	stateDirectory: '/nix/var/nix',
 	daemonSocketPath: '/nix/var/nix/daemon-socket/socket',
+	fileTransfer: defaultFileTransferSettings,
+	signatures: defaultSignatureSettings,
 	daemonSetOptions: {},
 	daemonOverrides: {},
 	substitution: {

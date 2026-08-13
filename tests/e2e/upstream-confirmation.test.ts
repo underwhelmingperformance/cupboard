@@ -1,9 +1,14 @@
 import { existsSync } from 'node:fs';
 import process from 'node:process';
 
+import {
+	storePathSchema,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { describe, expect, it, type TestContext } from 'vitest';
 
+import { isReachableElsewhere } from '../../packages/cli/src/plan/substituter-reach.ts';
 import {
 	confirmLeftUpstreamWith,
 	upstreamConfirmationOverrides
@@ -13,15 +18,36 @@ import {
 	NixDaemonConnectionError,
 	NixDaemonStoreClient
 } from '../../packages/nix/src/nix-daemon.ts';
+import { offerAcceptance } from '../../packages/nix/src/offer-acceptance.ts';
 import {
 	discoverNixStoreConfig,
 	type NixSubstitutionSettings
 } from '../../packages/nix/src/store-config.ts';
 import { FakeSubstituter } from '../support/substituter.ts';
 
+/** A machine holding none of the configured secret key files. */
+const missingKeyFiles = new Map<string, string>();
+const readNoKeyFile = (filePath: string): string | undefined =>
+	missingKeyFiles.get(filePath);
+
 const socketPath =
 	process.env.NIX_DAEMON_SOCKET_PATH ?? '/nix/var/nix/daemon-socket/socket';
 const tenantUrl = new URL('https://cupboard.example.workers.dev/t/acme');
+const executableStorePath = /^\/nix\/store\/[^/]+/u.exec(process.execPath)?.[0];
+
+// The confirmation walks the closure this store holds, so the candidate has to
+// be a path it really holds. The test process's own store path is one whenever
+// this Node came from the store, and the case skips anywhere else.
+function requireExecutableStorePath(
+	context: Pick<TestContext, 'skip'>
+): StorePathString {
+	if (executableStorePath === undefined) {
+		context.skip();
+		throw new Error('unreachable: skip does not return');
+	}
+
+	return storePathSchema.parse(executableStorePath);
+}
 
 // Connecting to the daemon socket needs a peer the daemon accepts; outside CI
 // a sandboxed process may be refused with EPERM, which is a limitation of the
@@ -50,14 +76,15 @@ async function requireTrustedDaemon(
 describe.skipIf(!existsSync(socketPath))('left-upstream confirmation', () => {
 	// The daemon holds a positive narinfo answer for a month by default, long
 	// enough for an upstream to have dropped the path since. A confirmation
-	// leaves a target out of a build on the strength of that answer, so it has
-	// to be one the substituter gives now.
+	// leaves a target out of a build on the strength of that answer, so it
+	// asks the substituter itself and reads what it serves now.
 	it('asks the substituter afresh and refuses a path it no longer serves', async (context) => {
 		const config = discoverNixStoreConfig();
 		const substituter = await FakeSubstituter.start(config.storeDirectory);
 
 		try {
-			const storePath = substituter.serve('cupboard-upstream-confirmation');
+			const storePath = requireExecutableStorePath(context);
+			substituter.servePath(storePath);
 			const permitted = { substituters: substituter.url };
 			const substitution: NixSubstitutionSettings = {
 				substitute: true,
@@ -86,15 +113,29 @@ describe.skipIf(!existsSync(socketPath))('left-upstream confirmation', () => {
 			}).querySubstitutablePathInfos([storePath]);
 			const requestsWhileRemembered = substituter.narInfoRequests;
 
-			const confirming = new NixDaemonStoreClient({
-				socketPath,
-				overrides: upstreamConfirmationOverrides(substitution, tenantUrl)
-			});
+			// The fixture stands in for a cache a consumer elsewhere reads, and
+			// it binds loopback because it runs beside this test. What this
+			// case proves is that the confirmation reads what a substituter
+			// serves now, so the fixture has to be among the permitted ones.
+			const isReachableOrFixture = (candidate: string): boolean =>
+				candidate === substituter.url || isReachableElsewhere(candidate);
+
 			const confirm = confirmLeftUpstreamWith({
 				substitution,
-				store: Nix.forStore(confirming, {
-					storeDirectory: config.storeDirectory
-				})
+				// The store a plan opens for its confirmation: the daemon
+				// answers for what this machine holds, and the permitted
+				// substituters are asked for each path's narinfo by this
+				// process, which keeps no memory of one.
+				store: Nix.openForAvailability(undefined, {
+					overrides: upstreamConfirmationOverrides(substitution, tenantUrl, {
+						isReachable: isReachableOrFixture
+					})
+				}),
+				// Every offer carries the signatures the substituter published
+				// for the path, so the policy a consumer applies at fetch time
+				// applies here; the case under test is which substituters
+				// answer at all.
+				accepts: offerAcceptance(config.signatures, readNoKeyFile)
 			});
 
 			expect({
