@@ -17,6 +17,7 @@ import {
 	CacheAvailabilityResponseSchemaError,
 	CacheAvailabilityResponseUnexpectedHashError,
 	CohortExecutionContextError,
+	CohortFailureToleranceError,
 	DerivationGraphShapeError,
 	DerivationRootCountError,
 	DuplicateGroupKeyError,
@@ -296,6 +297,21 @@ describe('cohortsFor', () => {
 
 		expect(() => cohortsFor(targets)).toThrow(
 			new CohortExecutionContextError('group-a', '.#first', '.#second')
+		);
+	});
+
+	it('refuses an explicitly labelled cohort with mixed failure tolerance', () => {
+		const targets = [
+			{ ...target('first'), cohort: 'group-a' },
+			{
+				...target('second'),
+				cohort: 'group-a',
+				bestEffort: false
+			}
+		];
+
+		expect(() => cohortsFor(targets)).toThrow(
+			new CohortFailureToleranceError('group-a', '.#first', '.#second')
 		);
 	});
 });

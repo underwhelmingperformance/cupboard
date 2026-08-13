@@ -15,13 +15,17 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 import { derivationPathSchema } from '@cupboard/protocol/build';
 import type { RootSetBody } from '@cupboard/protocol/retention';
 import {
+	type ParsedUploadNegotiateResponse,
 	type UploadDecision,
 	uploadDecisionSchema
 } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
 import type { CommitOutcome } from '../client/commit-socket.ts';
-import { UploadVerificationFailedError } from '../errors.ts';
+import {
+	UploadNegotiationMismatchError,
+	UploadVerificationFailedError
+} from '../errors.ts';
 import type { PushClient } from '../push/push.ts';
 
 import type { BatchPathOutcome } from './batching.ts';
@@ -137,6 +141,9 @@ interface HarnessOptions {
 		'pending-servable' | 'pending-failed'
 	>;
 	readonly derivationOutputs?: ReadonlyMap<string, readonly StorePathString[]>;
+	readonly decisions?: (
+		paths: readonly { readonly storePath: string }[]
+	) => ParsedUploadNegotiateResponse['uploads'];
 }
 
 interface Harness {
@@ -181,14 +188,16 @@ function harness(options: HarnessOptions = {}): Harness {
 			negotiatedPaths.push(body.paths.map((path) => path.storePath));
 
 			return Promise.resolve({
-				uploads: body.paths.map((path) => {
-					const storePath = storePathSchema.parse(path.storePath);
+				uploads:
+					options.decisions?.(body.paths) ??
+					body.paths.map((path) => {
+						const storePath = storePathSchema.parse(path.storePath);
 
-					return decisionFor(
-						storePath,
-						options.actions?.get(storePath) ?? 'skip'
-					);
-				})
+						return decisionFor(
+							storePath,
+							options.actions?.get(storePath) ?? 'skip'
+						);
+					})
 			});
 		},
 		preview: () => Promise.resolve({ uploads: [] }),
@@ -262,6 +271,65 @@ function reconcileWith(
 }
 
 describe('reconcileBuild', () => {
+	it.each([
+		{
+			name: 'empty',
+			valid: [pathA],
+			decisions: () => [],
+			expectedMismatch: 'missing'
+		},
+		{
+			name: 'partial',
+			valid: [pathA, pathB],
+			decisions: () => [decisionFor(pathA, 'skip')],
+			expectedMismatch: 'missing'
+		},
+		{
+			name: 'duplicate',
+			valid: [pathA],
+			decisions: () => [decisionFor(pathA, 'skip'), decisionFor(pathA, 'skip')],
+			expectedMismatch: 'duplicate'
+		},
+		{
+			name: 'unexpected',
+			valid: [pathA],
+			decisions: () => [decisionFor(pathB, 'skip')],
+			expectedMismatch: 'unexpected'
+		}
+	])(
+		'records every target failed for an $name negotiation response',
+		async ({ valid, decisions, expectedMismatch }) => {
+			const fixture = harness({ valid, decisions });
+			const targets = valid.map((storePath) => target(storePath, rootOne));
+			const result = await reconcileWith(fixture, { targets });
+
+			expect({
+				outcomes: result.receipt.outcomes,
+				failed: result.receipt.failed,
+				roots: result.roots,
+				failureCauses: result.failures.map((failure) => ({
+					name: failure.cause instanceof Error ? failure.cause.name : undefined,
+					mismatch:
+						failure.cause instanceof UploadNegotiationMismatchError
+							? failure.cause.mismatch
+							: undefined
+				}))
+			}).toStrictEqual({
+				outcomes: valid.map((storePath) => ({
+					outcome: 'failed',
+					storePath,
+					reason: 'upload'
+				})),
+				failed: valid,
+				roots: [{ root: rootOne, applied: false, targets: valid }],
+				failureCauses: valid.map(() => ({
+					name: UploadNegotiationMismatchError.name,
+					mismatch: expectedMismatch
+				}))
+			});
+		}
+	);
+
 	interface Scenario {
 		readonly name: string;
 		readonly harness: HarnessOptions;

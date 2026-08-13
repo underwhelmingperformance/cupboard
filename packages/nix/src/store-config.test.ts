@@ -252,8 +252,7 @@ const thirdLevelFlags = [
 	'f16c',
 	'fma',
 	'abm',
-	'movbe',
-	'osxsave'
+	'movbe'
 ];
 const fourthLevelFlags = [
 	'avx512f',
@@ -314,12 +313,13 @@ describe('microarchitectureLevelsOf', () => {
 		expect(microarchitectureLevelsOf(new Set(flags))).toStrictEqual(expected);
 	});
 
-	// The operating system's own enabling of XSAVE is what the third level
-	// asks for, which Linux prints beside the `xsave` the CPU offers.
-	it('reads the third level from the enabling rather than the offer', () => {
-		const offered = everyLevelFlags.map((flag) =>
-			flag === 'osxsave' ? 'xsave' : flag
-		);
+	// Linux may report that the CPU offers XSAVE while withholding AVX when
+	// the operating system has not enabled the state AVX needs.
+	it('does not infer the third level from xsave without avx', () => {
+		const offered = [
+			...everyLevelFlags.filter((flag) => flag !== 'avx'),
+			'xsave'
+		];
 
 		expect(microarchitectureLevelsOf(new Set(offered))).toStrictEqual([
 			'x86_64-v1',

@@ -18,7 +18,8 @@ import {
 	type DerivationPath,
 	type ParsedBuildReceiptV3,
 	type TargetFailureReason,
-	type TargetOutcome
+	type TargetOutcome,
+	type TerminalBuildFailure
 } from '@cupboard/protocol/build';
 import type {
 	ParsedUploadDecision,
@@ -31,6 +32,7 @@ import { PushNarMetadataMismatchError } from '../errors.ts';
 import { compressNarToStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
+import { exactUploadDecisions } from '../push/negotiation.ts';
 import {
 	type CompressNar,
 	defaultUploadConcurrency,
@@ -108,6 +110,7 @@ export interface ReconcileOptions {
 	readonly compressNar?: CompressNar;
 	readonly uploadConcurrency?: number;
 	readonly childExitStatus?: number;
+	readonly terminalFailure?: TerminalBuildFailure;
 	readonly subjects?: readonly BuildSubjectV3[];
 }
 
@@ -435,7 +438,10 @@ async function publishRequired(
 			...(options.runRoot !== undefined && { attachRoot: options.runRoot })
 		});
 
-		decisions = negotiation.uploads;
+		decisions = exactUploadDecisions(
+			infos.map((info) => prepareStorePathNegotiation(info)),
+			negotiation.uploads
+		);
 	} catch (error) {
 		for (const info of infos) {
 			recordFailure(ledger, info.storePath, 'upload', error);
@@ -735,6 +741,9 @@ export async function reconcileBuild(
 		}),
 		...(options.childExitStatus !== undefined && {
 			childExitStatus: options.childExitStatus
+		}),
+		...(options.terminalFailure !== undefined && {
+			terminalFailure: options.terminalFailure
 		}),
 		uploaded: [...ledger.published].toSorted(byCodeUnit),
 		failed: ledger.failures.keys().toArray().toSorted(byCodeUnit),

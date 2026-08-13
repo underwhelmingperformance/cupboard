@@ -12,6 +12,7 @@ import {
 	InvalidNixStoreParameterError,
 	NixConfigSettingError,
 	NixDaemonUnavailableError,
+	type NixDerivedPathString,
 	type NixStoreClient,
 	UnsupportedNixStoreError
 } from './nix-store.ts';
@@ -789,7 +790,7 @@ describe('createNixDaemonStoreClient', () => {
 		});
 	});
 
-	it('opens an ssh-ng store without probing a local socket', async () => {
+	it('preserves the remote daemon policy when opening an ssh-ng store', async () => {
 		const storePath = storePathSchema.parse(
 			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
 		);
@@ -799,14 +800,17 @@ describe('createNixDaemonStoreClient', () => {
 			{
 				connect: () =>
 					Promise.resolve(
-						new FakeDaemonTransport({
-							[storePath]: {
-								hash: '11'.repeat(32),
-								narSize: 123,
-								references: [],
-								signatures: []
-							}
-						})
+						new FakeDaemonTransport(
+							{
+								[storePath]: {
+									hash: '11'.repeat(32),
+									narSize: 123,
+									references: [],
+									signatures: []
+								}
+							},
+							{ expectSetOptions: false }
+						)
 					)
 			}
 		);
@@ -814,6 +818,7 @@ describe('createNixDaemonStoreClient', () => {
 		await expect(client.queryValidPaths([storePath])).resolves.toStrictEqual([
 			storePath
 		]);
+		expect(client.preservesDaemonOptions).toBe(true);
 	});
 
 	it('opens the ssh-ng store a per-call storeUri names over a local configuration', async () => {
@@ -827,14 +832,17 @@ describe('createNixDaemonStoreClient', () => {
 				storeUri: 'ssh-ng://build@example.test',
 				connect: () =>
 					Promise.resolve(
-						new FakeDaemonTransport({
-							[storePath]: {
-								hash: '11'.repeat(32),
-								narSize: 123,
-								references: [],
-								signatures: []
-							}
-						})
+						new FakeDaemonTransport(
+							{
+								[storePath]: {
+									hash: '11'.repeat(32),
+									narSize: 123,
+									references: [],
+									signatures: []
+								}
+							},
+							{ expectSetOptions: false }
+						)
 					)
 			}
 		);
@@ -842,6 +850,72 @@ describe('createNixDaemonStoreClient', () => {
 		await expect(client.queryValidPaths([storePath])).resolves.toStrictEqual([
 			storePath
 		]);
+	});
+
+	it('decodes ssh-ng realisations in the remote store directory', async () => {
+		const derivation = storePathSchema.parse(
+			'/remote/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv'
+		);
+		const output = storePathSchema.parse(
+			'/remote/store/0123456789abcdfghijklmnpqrsvwxyz-app'
+		);
+		const target: NixDerivedPathString = `${derivation}^out`;
+		const realisation = JSON.stringify({
+			outPath: output.slice('/remote/store/'.length)
+		});
+		const client = createNixDaemonStoreClient(
+			daemonEnvironment({ socket: false }),
+			baseConfig,
+			{
+				storeUri:
+					'ssh-ng://build@example.test?remote-store=local%3Fstore%3D%2Fremote%2Fstore',
+				connect: () =>
+					Promise.resolve(
+						new FakeDaemonTransport(
+							{},
+							{
+								expectSetOptions: false,
+								builds: {
+									expectedTargets: [`${derivation}!out`],
+									results: [
+										{
+											target: `${derivation}!out`,
+											status: 13,
+											errorMessage: '',
+											timesBuilt: 0,
+											nonDeterministic: false,
+											startTime: 0,
+											stopTime: 0,
+											builtOutputs: [
+												{
+													id: `sha256:${'aa'.repeat(32)}!out`,
+													realisation
+												}
+											]
+										}
+									]
+								}
+							}
+						)
+					)
+			}
+		);
+
+		await expect(client.buildPathsWithResults([target])).resolves.toStrictEqual(
+			[
+				{
+					target,
+					outcome: {
+						kind: 'resolves-to-already-valid',
+						outputs: { out: output }
+					},
+					timesBuilt: 0,
+					nonDeterministic: false,
+					startTime: 0,
+					stopTime: 0
+				}
+			]
+		);
 	});
 
 	it('merges per-call options over the discovered daemon settings', async () => {

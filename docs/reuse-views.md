@@ -84,7 +84,7 @@ cupboard reuse-view set https://cupboard.example.workers.dev/t/acme pull-request
 ```yaml
 jobs:
   publish:
-    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@vX.Y.Z
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@0123456789abcdef0123456789abcdef01234567 # vX.Y.Z
     permissions:
       attestations: write
       contents: read

@@ -344,7 +344,7 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 								grants: [],
 								cache: selectorForCache(storedCacheFor(undefined)),
 								helper: {
-									environment: { CUPBOARD_HOOK_HELPER: helperPath }
+									executablePath: path.join(workspace, 'cupboard')
 								},
 								runtime: { environment: {}, temporaryDirectory: tmpdir() }
 							})

@@ -148,9 +148,12 @@ export function storeClientForBackend(
 	config: NixStoreConfig,
 	substituters: SubstituterClient
 ): NixStoreClient {
+	const { storeDirectory } = storeDirectoriesOf(backend, config);
+
 	if (backend.backend === 'daemon') {
 		return new NixDaemonStoreClient({
 			socketPath: backend.socketPath,
+			storeDirectory,
 			setOptions: config.daemonSetOptions,
 			overrides: config.daemonOverrides
 		});
@@ -159,8 +162,10 @@ export function storeClientForBackend(
 	if (backend.backend === 'ssh-ng') {
 		return new NixDaemonStoreClient({
 			connect: createSshNixDaemonConnector(backend.remote),
-			setOptions: config.daemonSetOptions,
-			overrides: config.daemonOverrides
+			storeDirectory,
+			maxConnectionAge: backend.remote.maxConnectionAge,
+			maxConnections: backend.remote.maxConnections ?? 1,
+			shouldPreserveDaemonOptions: true
 		});
 	}
 
@@ -254,9 +259,15 @@ function localStoreOver(
 export interface NixDaemonClientOptions {
 	/** The store URI this client opens (default: the discovered `store` setting). */
 	readonly storeUri?: string;
-	/** Merged over the discovered SetOptions fields, this value winning per key. */
+	/**
+	 * Merged over the discovered SetOptions fields for a local daemon, this value
+	 * winning per key. An ssh-ng store preserves its remote daemon's policy.
+	 */
 	readonly setOptions?: NixDaemonSetOptions;
-	/** Merged over the discovered overrides, this value winning per key. */
+	/**
+	 * Merged over the discovered overrides for a local daemon, this value winning
+	 * per key. An ssh-ng store preserves its remote daemon's policy.
+	 */
 	readonly overrides?: NixDaemonOverrides;
 	readonly connect?: NixDaemonConnector;
 	/** Abandons the work this client is doing, raising the signal's reason. */
@@ -281,10 +292,17 @@ export function createNixDaemonStoreClient(
 	const sshRemote = parseSshNgStoreUri(storeUri);
 
 	if (sshRemote !== undefined) {
+		const { storeDirectory } = storeDirectoriesOf(
+			{ backend: 'ssh-ng', remote: sshRemote },
+			config
+		);
+
 		return new NixDaemonStoreClient({
 			connect: options.connect ?? createSshNixDaemonConnector(sshRemote),
-			setOptions: { ...config.daemonSetOptions, ...options.setOptions },
-			overrides: { ...config.daemonOverrides, ...options.overrides },
+			storeDirectory,
+			maxConnectionAge: sshRemote.maxConnectionAge,
+			maxConnections: sshRemote.maxConnections ?? 1,
+			shouldPreserveDaemonOptions: true,
 			signal: options.signal
 		});
 	}
@@ -298,6 +316,7 @@ export function createNixDaemonStoreClient(
 	return new NixDaemonStoreClient({
 		socketPath,
 		connect: options.connect,
+		storeDirectory: config.storeDirectory,
 		setOptions: { ...config.daemonSetOptions, ...options.setOptions },
 		overrides: { ...config.daemonOverrides, ...options.overrides },
 		signal: options.signal

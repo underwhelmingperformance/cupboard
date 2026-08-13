@@ -8,7 +8,12 @@ import {
 	InvalidInputError,
 	RootEnsureCommandError
 } from './errors.ts';
-import { buildProgram, reportActionFailure, runAction } from './program.ts';
+import {
+	ActionSignalError,
+	buildProgram,
+	reportActionFailure,
+	runAction
+} from './program.ts';
 
 const noRunnerEnvironment = {};
 
@@ -61,9 +66,131 @@ describe('buildProgram', () => {
 			])
 		).rejects.toBeInstanceOf(InvalidInputError);
 	});
+
+	it('passes the invocation signal to build-cohort', async () => {
+		const reason = new Error('cancel build-cohort');
+
+		await expect(
+			buildProgram(noRunnerEnvironment, AbortSignal.abort(reason)).parseAsync([
+				'node',
+				'cupboard-action',
+				'build-cohort',
+				'--cohort-json',
+				'{}',
+				'--url',
+				'https://cache.example.test/t/acme',
+				'--cupboard-path',
+				'/opt/cupboard/cupboard'
+			])
+		).rejects.toBe(reason);
+	});
 });
 
 describe('runAction', () => {
+	it('does not install signal handlers for a command that cannot honour them', async () => {
+		const added: string[] = [];
+		const removed: string[] = [];
+		const signalSource: NonNullable<Parameters<typeof runAction>[2]> = {
+			once(signal) {
+				added.push(signal);
+			},
+			removeListener(signal) {
+				removed.push(signal);
+			}
+		};
+		const exitCode = await runAction(
+			['node', 'cupboard-action', 'frobnicate'],
+			noRunnerEnvironment,
+			signalSource
+		);
+
+		expect({ exitCode, added, removed }).toStrictEqual({
+			exitCode: usageExitCode,
+			added: [],
+			removed: []
+		});
+	});
+
+	it.each([
+		{ signal: 'SIGINT' as const, exitCode: 130 },
+		{ signal: 'SIGTERM' as const, exitCode: 143 }
+	])(
+		'aborts build-cohort with the typed $signal exit and removes its production signal handlers',
+		async ({ signal: interruptedBy, exitCode: expectedExitCode }) => {
+			const active = new Map<string, () => void>();
+			const added: string[] = [];
+			const removed: string[] = [];
+			const signalSource: NonNullable<Parameters<typeof runAction>[2]> = {
+				once(signal, listener) {
+					added.push(signal);
+					active.set(signal, listener);
+
+					if (signal === interruptedBy) {
+						listener();
+					}
+				},
+				removeListener(signal, listener) {
+					removed.push(signal);
+
+					if (active.get(signal) === listener) {
+						active.delete(signal);
+					}
+				}
+			};
+
+			const exitCode = await runAction(
+				[
+					'node',
+					'cupboard-action',
+					'build-cohort',
+					'--cohort-json',
+					'{}',
+					'--url',
+					'https://cache.example.test/t/acme',
+					'--cupboard-path',
+					'/opt/cupboard/cupboard'
+				],
+				noRunnerEnvironment,
+				signalSource
+			);
+
+			expect({
+				exitCode,
+				added,
+				removed,
+				active: active.keys().toArray()
+			}).toStrictEqual({
+				exitCode: expectedExitCode,
+				added: ['SIGINT', 'SIGTERM'],
+				removed: ['SIGINT', 'SIGTERM'],
+				active: []
+			});
+		}
+	);
+
+	it.each([
+		{ signal: 'SIGINT' as const, exitCode: 130 },
+		{ signal: 'SIGTERM' as const, exitCode: 143 }
+	])(
+		'does not annotate an ordinary failure for $signal cancellation',
+		({ signal, exitCode: expectedExitCode }) => {
+			const annotations: string[] = [];
+			const exitCode = reportActionFailure(
+				{
+					error(message) {
+						annotations.push(message);
+					}
+				},
+				new ActionSignalError(signal)
+			);
+
+			expect({ annotations, exitCode }).toStrictEqual({
+				annotations: [],
+				exitCode: expectedExitCode
+			});
+		}
+	);
+
 	it.each([
 		['an unknown command', ['node', 'cupboard-action', 'frobnicate']],
 		['an unknown option', ['node', 'cupboard-action', 'setup', '--frobnicate']],

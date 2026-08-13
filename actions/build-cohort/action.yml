@@ -2,9 +2,9 @@ name: Build a publish cohort
 description:
   Check a publish cohort's availability partition and capacity against this
   runner's store, build its missing targets, and, when publication is enabled,
-  drive the build through `cupboard build-push` (streamed uploads, retry
-  attempts, remote attribution and the build receipt) and set each target root
-  with one push per root group.
+  stream local builds through `cupboard build-push` or publish keyed results
+  directly from an ssh-ng store, write the build receipt, and set each target
+  root with one push per root group.
 inputs:
   cohort-json:
     description: This job's entry from the plan cohort-matrix.
@@ -34,18 +34,27 @@ inputs:
     description: Password for private cache reads.
     required: false
   max-jobs:
-    description: Maximum local build jobs. Empty uses the Nix default.
+    description:
+      Maximum build jobs for the selected store. Empty uses that store's Nix
+      default.
     required: false
   store:
     description: >-
       Remote ssh-ng store URI the plan, the build and the push run against.
-      Empty plans and builds in this runner's own store.
+      Every selected output path must be known during planning; floating
+      content-addressed outputs require a local build. Empty plans and builds in
+      this runner's own store.
     required: false
   push:
     description: >-
-      Publish the cohort. `true` streams the build through `cupboard build-push`
-      and sets each target root with one push per root group; `false` only
-      builds.
+      Publish the cohort. `true` streams a local build or publishes keyed
+      remote-store results, then sets each target root; `false` only builds.
+    required: false
+  best-effort:
+    description: >-
+      Treat target build failures as tolerated only after every surviving path,
+      root and output file has settled. Planning, authentication, copying,
+      publication, retention and receipt failures remain fatal.
     required: false
   gc-between-cohorts:
     description: >-
@@ -156,6 +165,7 @@ runs:
         MAX_JOBS: ${{ inputs.max-jobs }}
         STORE: ${{ inputs.store }}
         PUSH: ${{ inputs.push }}
+        BEST_EFFORT: ${{ inputs.best-effort }}
         GC_BETWEEN_COHORTS: ${{ inputs.gc-between-cohorts }}
         RUN_ROOT: ${{ inputs.run-root }}
         RUN_ROOT_TTL: ${{ inputs.run-root-ttl }}
@@ -179,6 +189,7 @@ runs:
           --max-jobs "$MAX_JOBS"
           --store "$STORE"
           --push "$PUSH"
+          --best-effort "$BEST_EFFORT"
           --gc-between-cohorts "$GC_BETWEEN_COHORTS"
           --run-root "$RUN_ROOT"
           --run-root-ttl "$RUN_ROOT_TTL"

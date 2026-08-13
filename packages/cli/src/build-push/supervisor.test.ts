@@ -3,11 +3,15 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { platform } from 'node:process';
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+import { waitForFile } from '../../../../tests/support/filesystem.ts';
 
 import {
 	type ChildExit,
+	runChild,
 	type SignalSource,
+	startTimerDelay,
 	superviseAttemptedBuild,
 	superviseBuild
 } from './supervisor.ts';
@@ -52,16 +56,8 @@ function recordingSignalSource() {
 	};
 }
 
-async function waitForFile(filePath: string): Promise<void> {
-	for (;;) {
-		try {
-			await stat(filePath);
-
-			return;
-		} catch {
-			await new Promise((resolve) => setTimeout(resolve, 20));
-		}
-	}
+function blockUntilSignal(exitStatus: number): string {
+	return `mkfifo "$CUPBOARD_TEST_GATE"; trap 'exit ${String(exitStatus)}' INT TERM; : > "$CUPBOARD_TEST_READY"; read _ 2>/dev/null < "$CUPBOARD_TEST_GATE"`;
 }
 
 describe('superviseBuild', () => {
@@ -171,45 +167,87 @@ describe('superviseBuild', () => {
 	});
 
 	it.runIf(platform === 'darwin' || platform === 'linux').each([
-		{ signal: 'SIGINT', trap: 'INT', status: 42 },
-		{ signal: 'SIGTERM', trap: 'TERM', status: 43 }
-	])('forwards $signal to the child', async ({ signal, trap, status }) => {
-		const directory = await runtimeDirectory();
-		const readyFile = path.join(
-			tmpdir(),
-			`cup-sup-ready-${signal}-${String(Date.now())}`
-		);
-		const signals = recordingSignalSource();
+		{ signal: 'SIGINT', followingSignal: 'SIGTERM' },
+		{ signal: 'SIGTERM', followingSignal: 'SIGINT' }
+	])(
+		'preserves the first $signal when the child traps signals and exits successfully',
+		async ({ signal, followingSignal }) => {
+			const directory = await runtimeDirectory();
+			const readyFile = path.join(
+				tmpdir(),
+				`cup-sup-ready-${signal}-${String(Date.now())}`
+			);
+			const gateFile = `${readyFile}.fifo`;
+			const signals = recordingSignalSource();
 
-		try {
-			const running = superviseBuild({
-				command: [
-					'sh',
-					'-c',
-					`trap 'exit ${String(status)}' ${trap}; : > "$CUPBOARD_TEST_READY"; while :; do sleep 0.05; done`
-				],
-				environment: {
-					PATH: '/usr/bin:/bin',
-					CUPBOARD_TEST_READY: readyFile
-				},
-				runtimeDirectory: directory,
-				signalSource: signals.source
-			});
+			try {
+				const running = superviseBuild({
+					command: ['sh', '-c', blockUntilSignal(0)],
+					environment: {
+						PATH: '/usr/bin:/bin',
+						CUPBOARD_TEST_GATE: gateFile,
+						CUPBOARD_TEST_READY: readyFile
+					},
+					runtimeDirectory: directory,
+					signalSource: signals.source
+				});
 
-			await waitForFile(readyFile);
-			signals.emit(signal);
+				await waitForFile(readyFile);
+				signals.emit(signal);
+				signals.emit(followingSignal);
 
-			expect({
-				exit: await running,
-				remainingListeners: signals.listenerCount()
-			}).toStrictEqual({
-				exit: { status, signal: undefined },
-				remainingListeners: 0
-			});
-		} finally {
-			await rm(readyFile, { force: true });
+				expect({
+					exit: await running,
+					remainingListeners: signals.listenerCount()
+				}).toStrictEqual({
+					exit: { status: undefined, signal },
+					remainingListeners: 0
+				});
+			} finally {
+				await Promise.all([
+					rm(gateFile, { force: true }),
+					rm(readyFile, { force: true })
+				]);
+			}
 		}
-	});
+	);
+
+	it.runIf(platform === 'darwin' || platform === 'linux')(
+		'forwards AbortSignal cancellation to the running child',
+		async () => {
+			const readyFile = path.join(
+				tmpdir(),
+				`cup-child-abort-ready-${String(Date.now())}`
+			);
+			const gateFile = `${readyFile}.fifo`;
+			const controller = new AbortController();
+
+			try {
+				const running = runChild({
+					command: ['sh', '-c', blockUntilSignal(0)],
+					environment: {
+						PATH: '/usr/bin:/bin',
+						CUPBOARD_TEST_GATE: gateFile,
+						CUPBOARD_TEST_READY: readyFile
+					},
+					signal: controller.signal
+				});
+
+				await waitForFile(readyFile);
+				controller.abort(new Error('cancel child'));
+
+				await expect(running).resolves.toStrictEqual({
+					status: undefined,
+					signal: 'SIGTERM'
+				});
+			} finally {
+				await Promise.all([
+					rm(gateFile, { force: true }),
+					rm(readyFile, { force: true })
+				]);
+			}
+		}
+	);
 });
 
 function attemptIds(): () => string {
@@ -242,10 +280,15 @@ describe('superviseAttemptedBuild', () => {
 			environment: { PATH: '/usr/bin:/bin' },
 			runtimeDirectory: directory,
 			nextAttemptId: attemptIds(),
-			sleep: (delayMs) => {
+			startDelay: (delayMs) => {
 				sleeps.push(delayMs);
 
-				return Promise.resolve();
+				return {
+					completed: Promise.resolve(),
+					cancel() {
+						return;
+					}
+				};
 			}
 		});
 
@@ -281,10 +324,15 @@ describe('superviseAttemptedBuild', () => {
 			environment: { PATH: '/usr/bin:/bin' },
 			runtimeDirectory: directory,
 			nextAttemptId: attemptIds(),
-			sleep: (delayMs) => {
+			startDelay: (delayMs) => {
 				sleeps.push(delayMs);
 
-				return Promise.resolve();
+				return {
+					completed: Promise.resolve(),
+					cancel() {
+						return;
+					}
+				};
 			}
 		});
 
@@ -316,6 +364,140 @@ describe('superviseAttemptedBuild', () => {
 		});
 	});
 
+	it.runIf(platform === 'darwin' || platform === 'linux')(
+		'does not retry a child interrupted by a forwarded signal',
+		async () => {
+			const directory = await runtimeDirectory();
+			const readyFile = path.join(
+				tmpdir(),
+				`cup-attempt-ready-${String(Date.now())}`
+			);
+			const gateFile = `${readyFile}.fifo`;
+			const signals = recordingSignalSource();
+			let calls = 0;
+
+			try {
+				const running = superviseAttemptedBuild({
+					command: () => {
+						calls += 1;
+
+						return ['sh', '-c', blockUntilSignal(42)];
+					},
+					attempts: 3,
+					environment: {
+						PATH: '/usr/bin:/bin',
+						CUPBOARD_TEST_GATE: gateFile,
+						CUPBOARD_TEST_READY: readyFile
+					},
+					runtimeDirectory: directory,
+					signalSource: signals.source,
+					nextAttemptId: attemptIds()
+				});
+
+				await waitForFile(readyFile);
+				signals.emit('SIGINT');
+
+				expect({ result: await running, calls }).toStrictEqual({
+					result: {
+						exit: { status: undefined, signal: 'SIGINT' },
+						attempts: [
+							{
+								attempt: 1,
+								attemptId: 'attempt-1',
+								log: '',
+								exit: { status: undefined, signal: 'SIGINT' }
+							}
+						]
+					},
+					calls: 1
+				});
+			} finally {
+				await Promise.all([
+					rm(gateFile, { force: true }),
+					rm(readyFile, { force: true })
+				]);
+			}
+		}
+	);
+
+	it('aborts a retry delay when a signal arrives', async () => {
+		const directory = await runtimeDirectory();
+		const signals = recordingSignalSource();
+		let calls = 0;
+		let cancellations = 0;
+
+		const result = await superviseAttemptedBuild({
+			command: () => {
+				calls += 1;
+
+				return ['sh', '-c', 'exit 2'];
+			},
+			attempts: 3,
+			environment: { PATH: '/usr/bin:/bin' },
+			runtimeDirectory: directory,
+			signalSource: signals.source,
+			nextAttemptId: attemptIds(),
+			startDelay: () => {
+				queueMicrotask(() => {
+					signals.emit('SIGTERM');
+				});
+
+				return {
+					completed: Promise.withResolvers<never>().promise,
+					cancel() {
+						cancellations += 1;
+					}
+				};
+			}
+		});
+
+		expect({
+			result,
+			calls,
+			cancellations,
+			listeners: signals.listenerCount()
+		}).toStrictEqual({
+			result: {
+				exit: { status: undefined, signal: 'SIGTERM' },
+				attempts: [
+					{
+						attempt: 1,
+						attemptId: 'attempt-1',
+						log: '',
+						exit: { status: 2, signal: undefined }
+					}
+				]
+			},
+			calls: 1,
+			cancellations: 1,
+			listeners: 0
+		});
+	});
+
+	it('clears the production retry timer when it is cancelled', async () => {
+		vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+
+		try {
+			const baselineTimers = vi.getTimerCount();
+			const delay = startTimerDelay(15_000);
+			const timersAfterStarting = vi.getTimerCount() - baselineTimers;
+
+			delay.cancel();
+			const timersAfterCancelling = vi.getTimerCount() - baselineTimers;
+			await delay.completed;
+
+			expect({
+				timersAfterStarting,
+				timersAfterCancelling
+			}).toStrictEqual({
+				timersAfterStarting: 1,
+				timersAfterCancelling: 0
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('removes the runtime directory once the attempts are over', async () => {
 		const directory = await runtimeDirectory();
 
@@ -324,7 +506,12 @@ describe('superviseAttemptedBuild', () => {
 			attempts: 2,
 			environment: { PATH: '/usr/bin:/bin' },
 			runtimeDirectory: directory,
-			sleep: () => Promise.resolve()
+			startDelay: () => ({
+				completed: Promise.resolve(),
+				cancel() {
+					return;
+				}
+			})
 		});
 
 		await expect(stat(directory)).rejects.toMatchObject({ code: 'ENOENT' });

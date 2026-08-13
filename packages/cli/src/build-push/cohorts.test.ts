@@ -5,7 +5,7 @@ import {
 } from '@cupboard/protocol/build';
 import { describe, expect, it } from 'vitest';
 
-import { BuildCommandFailedError } from '../errors.ts';
+import { BuildCommandFailedError, CliAbortError } from '../errors.ts';
 
 import type { BuildInvocation } from './build-push.ts';
 import { type CohortSequenceOptions, runCohortSequence } from './cohorts.ts';
@@ -43,10 +43,12 @@ async function runSequence(
 	options: Omit<CohortSequenceOptions, 'cohorts'> & {
 		readonly cohorts: number;
 		readonly failing?: readonly number[];
+		readonly settledFailures?: readonly number[];
 	}
 ): Promise<SequenceRun> {
 	const events: string[] = [];
 	const failing = new Set(options.failing);
+	const settledFailures = new Set(options.settledFailures);
 	const invocations = Array.from({ length: options.cohorts }, (_, index) =>
 		cohortInvocation(index + 1)
 	);
@@ -75,6 +77,10 @@ async function runSequence(
 
 				return receiptFor(cohort);
 			},
+			settledReceipt: (_error, cohort) =>
+				Promise.resolve(
+					settledFailures.has(cohort) ? receiptFor(cohort) : undefined
+				),
 			collect: async () => {
 				events.push('collect');
 				await Promise.resolve();
@@ -162,6 +168,169 @@ describe('runCohortSequence', () => {
 		}).toStrictEqual({
 			events: ['cohort:1', 'collect', 'cohort:2', 'collect', 'cohort:3'],
 			receipts: [receiptFor(1), receiptFor(3)],
+			failures: [2]
+		});
+	});
+
+	it.each([
+		{
+			name: 'an abort error',
+			error: new DOMException('cancelled', 'AbortError')
+		},
+		{
+			name: 'a signalled child',
+			error: new BuildCommandFailedError(undefined, 'SIGTERM', 143)
+		}
+	])('stops keep-going after $name', async ({ error }) => {
+		const events: string[] = [];
+		const result = await runCohortSequence(
+			{
+				cohorts: [cohortInvocation(1), cohortInvocation(2)],
+				collectBetweenCohorts: true,
+				keepGoingCohorts: true
+			},
+			{
+				runCohort: (_invocation, cohort) => {
+					events.push(`cohort:${String(cohort)}`);
+
+					return Promise.reject(error);
+				},
+				collect: () => {
+					events.push('collect');
+
+					return Promise.resolve();
+				}
+			}
+		);
+
+		expect({ events, result }).toStrictEqual({
+			events: ['cohort:1'],
+			result: {
+				receipts: [],
+				failures: [{ cohort: 1, error }]
+			}
+		});
+	});
+
+	it.each(['SIGINT', 'SIGTERM'] as const)(
+		'stops before the next cohort when collection receives %s',
+		async (signal) => {
+			const events: string[] = [];
+			const error = new BuildCommandFailedError(
+				undefined,
+				signal,
+				signal === 'SIGINT' ? 130 : 143
+			);
+			const run = runCohortSequence(
+				{
+					cohorts: [
+						cohortInvocation(1),
+						cohortInvocation(2),
+						cohortInvocation(3)
+					],
+					collectBetweenCohorts: true,
+					keepGoingCohorts: true
+				},
+				{
+					runCohort: (_invocation, cohort) => {
+						events.push(`cohort:${String(cohort)}`);
+
+						return Promise.resolve(receiptFor(cohort));
+					},
+					collect: () => {
+						events.push('collect');
+
+						return Promise.reject(error);
+					}
+				}
+			);
+
+			await expect(run).rejects.toBe(error);
+			expect(events).toStrictEqual(['cohort:1', 'collect']);
+		}
+	);
+
+	it.each([
+		{
+			name: 'before the first cohort',
+			abortAt: 'before-cohort' as const,
+			expectedEvents: []
+		},
+		{
+			name: 'before collection',
+			abortAt: 'before-collection' as const,
+			expectedEvents: ['cohort:1']
+		},
+		{
+			name: 'after collection',
+			abortAt: 'after-collection' as const,
+			expectedEvents: ['cohort:1', 'collect']
+		},
+		{
+			name: 'after the final cohort',
+			abortAt: 'after-final-cohort' as const,
+			expectedEvents: ['cohort:1', 'collect', 'cohort:2']
+		}
+	])(
+		'stops on cancellation $name without starting more work',
+		async ({ abortAt, expectedEvents }) => {
+			const events: string[] = [];
+			const controller = new AbortController();
+			const reason = new CliAbortError();
+
+			if (abortAt === 'before-cohort') {
+				controller.abort(reason);
+			}
+
+			const run = runCohortSequence(
+				{
+					cohorts: [cohortInvocation(1), cohortInvocation(2)],
+					collectBetweenCohorts: true,
+					signal: controller.signal
+				},
+				{
+					runCohort: (_invocation, cohort) => {
+						events.push(`cohort:${String(cohort)}`);
+
+						if (
+							abortAt === 'before-collection' ||
+							(abortAt === 'after-final-cohort' && cohort === 2)
+						) {
+							controller.abort(reason);
+						}
+
+						return Promise.resolve(receiptFor(cohort));
+					},
+					collect: () => {
+						events.push('collect');
+
+						if (abortAt === 'after-collection') {
+							controller.abort(reason);
+						}
+
+						return Promise.resolve();
+					}
+				}
+			);
+
+			await expect(run).rejects.toBe(reason);
+			expect(events).toStrictEqual(expectedEvents);
+		}
+	);
+
+	it('keeps a failed cohort receipt in run order when settlement produced one', async () => {
+		const run = await runSequence({
+			cohorts: 3,
+			failing: [2],
+			settledFailures: [2],
+			keepGoingCohorts: true
+		});
+
+		expect({
+			receipts: run.result.receipts,
+			failures: run.result.failures.map(({ cohort }) => cohort)
+		}).toStrictEqual({
+			receipts: [receiptFor(1), receiptFor(2), receiptFor(3)],
 			failures: [2]
 		});
 	});

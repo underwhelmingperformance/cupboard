@@ -168,6 +168,10 @@ describe('buildReceiptSchema', () => {
 			substitutable: { downloadSize: 1024, narSize: 4096 },
 			evaluationTimeMs: 250,
 			childExitStatus: 0,
+			terminalFailure: {
+				kind: 'target-build',
+				failedTargets: ['.#packages.x86_64-linux.optional']
+			},
 			uploaded: [storePath],
 			failed: [],
 			collected: [outputPath]
@@ -266,6 +270,15 @@ describe('buildReceiptSchema', () => {
 				paths: [storePath],
 				subjects: [],
 				childExitStatus: 1.5
+			}
+		},
+		{
+			name: 'a target failure without a failed request',
+			value: {
+				version: 3,
+				paths: [],
+				subjects: [],
+				terminalFailure: { kind: 'target-build', failedTargets: [] }
 			}
 		},
 		{

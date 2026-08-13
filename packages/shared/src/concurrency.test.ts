@@ -87,6 +87,7 @@ describe('mapWithConcurrency', () => {
 		const failure = new Error('boom');
 		const started: number[] = [];
 		const blocked = deferred<number>();
+		let hasSettled = false;
 
 		const resultPromise = mapWithConcurrency([1, 2, 3], 2, async (value) => {
 			started.push(value);
@@ -102,36 +103,79 @@ describe('mapWithConcurrency', () => {
 			return value;
 		});
 
-		void (async () => {
-			try {
-				await resultPromise;
-			} catch {
-				// Settled deliberately below; this only silences the rejection
-				// while the test orchestrates the in-flight work.
-			}
-		})();
+		void resultPromise
+			.then(() => {
+				hasSettled = true;
+			})
+			.catch(() => {
+				hasSettled = true;
+			});
 
 		await flushMicrotasks();
+		expect({ hasSettled, started }).toStrictEqual({
+			hasSettled: false,
+			started: [1, 2]
+		});
+
 		blocked.resolve(2);
 
 		await expect(resultPromise).rejects.toBe(failure);
-		expect(started).toStrictEqual([1, 2]);
+		expect({ hasSettled, started }).toStrictEqual({
+			hasSettled: true,
+			started: [1, 2]
+		});
+	});
+
+	it('preserves the first rejection after every started call has settled', async () => {
+		const firstStarted = deferred<number>();
+		const secondStarted = deferred<number>();
+		const firstFailure = new Error('first');
+		const laterFailure = new Error('later');
+		let hasSettled = false;
+		const resultPromise = mapWithConcurrency([1, 2, 3], 2, (value) =>
+			value === 1 ? firstStarted.promise : secondStarted.promise
+		);
+
+		void resultPromise
+			.then(() => {
+				hasSettled = true;
+			})
+			.catch(() => {
+				hasSettled = true;
+			});
+
+		secondStarted.reject(firstFailure);
+		await flushMicrotasks();
+		expect(hasSettled).toBe(false);
+
+		firstStarted.reject(laterFailure);
+
+		await expect(resultPromise).rejects.toBe(firstFailure);
+		expect(hasSettled).toBe(true);
 	});
 });
 
 function deferred<T>(): {
 	readonly promise: Promise<T>;
 	readonly resolve: (value: T) => void;
+	readonly reject: (reason: unknown) => void;
 } {
-	const box: { resolve?: (value: T) => void } = {};
-	const promise = new Promise<T>((resolve) => {
+	const box: {
+		resolve?: (value: T) => void;
+		reject?: (reason: unknown) => void;
+	} = {};
+	const promise = new Promise<T>((resolve, reject) => {
 		box.resolve = resolve;
+		box.reject = reject;
 	});
 
 	return {
 		promise,
 		resolve: (value: T) => {
 			box.resolve?.(value);
+		},
+		reject: (reason: unknown) => {
+			box.reject?.(reason);
 		}
 	};
 }

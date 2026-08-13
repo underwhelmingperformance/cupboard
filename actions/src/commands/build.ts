@@ -9,7 +9,11 @@ import type { BuildReceiptV2 } from '@cupboard/protocol/build';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
-import { CommandFailedError, InvalidInputError } from '../errors.ts';
+import {
+	CommandFailedError,
+	InvalidInputError,
+	ProvenanceSubjectsIncompleteError
+} from '../errors.ts';
 import {
 	appendEnvironmentFile,
 	type Environment,
@@ -42,6 +46,7 @@ export interface BuildOptions {
 	readonly keepGoing?: string;
 	readonly maxJobs?: string;
 	readonly allowFailure?: string;
+	readonly requireProvenance?: string;
 	readonly pathsFile?: string;
 	readonly receiptFile?: string;
 }
@@ -165,7 +170,8 @@ export function derivationsRequiringVerification(
 export function receiptSubjects(
 	attempts: readonly BuildAttempt[],
 	finalInfos: readonly NixValidPathInfo[],
-	preExisting: ReadonlySet<string>
+	preExisting: ReadonlySet<string>,
+	provenanceRebuilds: ReadonlySet<string> = new Set()
 ): BuildReceiptV2['subjects'] {
 	const firstBuild = new Map<string, Omit<BuildAttempt, 'activities'>>();
 
@@ -179,7 +185,11 @@ export function receiptSubjects(
 
 	return finalInfos
 		.flatMap((info) => {
-			if (info.deriver === undefined || preExisting.has(info.storePath)) {
+			if (
+				info.deriver === undefined ||
+				(preExisting.has(info.storePath) &&
+					!provenanceRebuilds.has(info.deriver))
+			) {
 				return [];
 			}
 
@@ -252,6 +262,11 @@ export function registerBuildCommand(
 			'return successfully after exhausting attempts',
 			'false'
 		)
+		.option(
+			'--require-provenance <boolean>',
+			'rebuild outputs without current-run build evidence',
+			'false'
+		)
 		.option('--paths-file <path>', 'where to write realised output paths')
 		.option(
 			'--receipt-file <path>',
@@ -297,6 +312,11 @@ export async function buildAction(
 	const isAllowFailure = isEnabled(
 		'allow-failure',
 		options.allowFailure,
+		false
+	);
+	const requiresProvenance = isEnabled(
+		'require-provenance',
+		options.requireProvenance,
 		false
 	);
 	const runnerTemporary = requireEnvironment(environment, 'RUNNER_TEMP');
@@ -439,10 +459,88 @@ export async function buildAction(
 		throw new CommandFailedError('nix build', status ?? -1);
 	}
 
-	const finalInfos = await Promise.all(
+	let finalInfos = await Promise.all(
 		finalPaths.map((storePath) => nix.queryPathInfo(storePath))
 	);
-	const subjects = receiptSubjects(attributed, finalInfos, preExisting);
+	const provenanceRebuilds = new Set<string>();
+	let subjects = receiptSubjects(attributed, finalInfos, preExisting);
+
+	if (requiresProvenance && subjects.length !== finalInfos.length) {
+		const attributedPaths = new Set(
+			subjects.map((subject) => subject.storePath)
+		);
+		const missing = finalInfos.filter(
+			(info) => !attributedPaths.has(info.storePath)
+		);
+		const unavailable = missing
+			.filter((info) => info.deriver === undefined)
+			.map((info) => info.storePath);
+
+		if (unavailable.length > 0) {
+			throw new ProvenanceSubjectsIncompleteError(unavailable);
+		}
+
+		const derivations = new Set(
+			missing.flatMap((info) =>
+				info.deriver === undefined ? [] : [info.deriver]
+			)
+		);
+		const rebuild = await executeNix(
+			nixBuildInvocation(
+				[
+					'build',
+					'--rebuild',
+					'--no-link',
+					'--builders',
+					'',
+					'--max-jobs',
+					'1'
+				],
+				derivations
+					.values()
+					.map((derivation) => `${derivation}^*`)
+					.toArray()
+			)
+		);
+
+		if (rebuild.status !== 0) {
+			throw new CommandFailedError(
+				'nix build --rebuild for provenance',
+				rebuild.status ?? -1
+			);
+		}
+
+		const rebuildAttempt: BuildAttempt = {
+			attempt: observed.length + 1,
+			attemptId: nextAttemptId(),
+			activities: derivations
+				.values()
+				.map((derivation) => ({ derivation, machine: '' }))
+				.toArray()
+		};
+		for (const derivation of derivations) {
+			provenanceRebuilds.add(derivation);
+		}
+		attributed = [...attributed, rebuildAttempt];
+		finalInfos = await Promise.all(
+			finalPaths.map((storePath) => nix.queryPathInfo(storePath))
+		);
+		subjects = receiptSubjects(
+			attributed,
+			finalInfos,
+			preExisting,
+			provenanceRebuilds
+		);
+
+		if (subjects.length !== finalInfos.length) {
+			const completed = new Set(subjects.map((subject) => subject.storePath));
+			throw new ProvenanceSubjectsIncompleteError(
+				finalInfos
+					.filter((info) => !completed.has(info.storePath))
+					.map((info) => info.storePath)
+			);
+		}
+	}
 	const receipt: BuildReceiptV2 = { version: 2, paths: finalPaths, subjects };
 	await mkdir(path.dirname(pathsFile), { recursive: true });
 	await writeFile(

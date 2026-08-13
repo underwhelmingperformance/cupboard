@@ -9,6 +9,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
+	type ParsedUploadNegotiateResponse,
 	uploadAttachRootSchema,
 	type UploadDecision,
 	uploadDecisionSchema,
@@ -99,6 +100,9 @@ interface HarnessOptions {
 	readonly vanished?: ReadonlySet<StorePathString>;
 	readonly failCommitsOnce?: ReadonlySet<StorePathString>;
 	readonly failNegotiate?: boolean;
+	readonly decisions?: (
+		paths: NegotiateBody['paths']
+	) => ParsedUploadNegotiateResponse['uploads'];
 	readonly maxEntries?: number;
 }
 
@@ -148,14 +152,16 @@ function harness(options: HarnessOptions = {}): Harness {
 			}
 
 			return Promise.resolve({
-				uploads: body.paths.map((path) => {
-					const storePath = storePathSchema.parse(path.storePath);
+				uploads:
+					options.decisions?.(body.paths) ??
+					body.paths.map((path) => {
+						const storePath = storePathSchema.parse(path.storePath);
 
-					return decisionFor(
-						storePath,
-						options.actions?.get(storePath) ?? 'upload'
-					);
-				})
+						return decisionFor(
+							storePath,
+							options.actions?.get(storePath) ?? 'upload'
+						);
+					})
 			});
 		},
 		preview: () => Promise.resolve({ uploads: [] }),
@@ -220,6 +226,29 @@ afterEach(() => {
 });
 
 describe('BuildOutputBatcher', () => {
+	it('returns every path to candidacy when negotiation omits decisions', async () => {
+		const { batcher, failures } = harness({ decisions: () => [] });
+
+		batcher.enqueue(pathA);
+		batcher.enqueue(pathB);
+		await vi.advanceTimersByTimeAsync(500);
+		await batcher.settled();
+
+		expect({
+			candidates: batcher.candidates,
+			failures: failures.map((failure) => ({
+				storePath: failure.storePath,
+				name: failure.reason instanceof Error ? failure.reason.name : undefined
+			}))
+		}).toStrictEqual({
+			candidates: [pathA, pathB],
+			failures: [
+				{ storePath: pathA, name: 'UploadNegotiationMismatchError' },
+				{ storePath: pathB, name: 'UploadNegotiationMismatchError' }
+			]
+		});
+	});
+
 	it('holds accepted paths until the debounce window lapses', async () => {
 		const { batcher, events } = harness();
 

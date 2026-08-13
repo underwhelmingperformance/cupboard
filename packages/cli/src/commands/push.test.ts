@@ -16,9 +16,11 @@ import { describe, expect, it } from 'vitest';
 import {
 	BuildStoreRequiresAlreadyHeldError,
 	BuildStoreRequiresClaimableError,
+	EmptyPublicationError,
 	InvalidStoreUriError,
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
+	ReadCredentialPairError,
 	ReceiptFileRequiresStoreError,
 	ReferenceSourcePairError,
 	RunRootTtlWithoutRunRootError
@@ -332,6 +334,49 @@ describe('pushCommandAuthorizationDetails', () => {
 });
 
 describe('push command', () => {
+	it('accepts a reference-file-only publication past positional parsing', async () => {
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-push-'));
+		const file = path.join(directory, 'references.txt');
+		writeFileSync(
+			file,
+			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime\n'
+		);
+
+		try {
+			const result = await parsePush([
+				'https://cache.example.workers.dev/t/acme',
+				'--reference-paths-file',
+				file,
+				'--reference-source',
+				'https://cache.example.workers.dev/t/acme/reuse/reuse',
+				'--dry-run'
+			]);
+
+			expect(result).not.toMatchObject({ code: 'commander.missingArgument' });
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('rejects a publication with no paths of any kind', async () => {
+		const result = await parsePush([
+			'https://cache.example.workers.dev/t/acme',
+			'--dry-run'
+		]);
+
+		expect(result).toBeInstanceOf(EmptyPublicationError);
+	});
+
+	it('accepts an empty named-root replacement past publication validation', async () => {
+		const result = await parsePush([
+			'https://cache.example.workers.dev/t/acme',
+			'--root',
+			'main'
+		]);
+
+		expect(result).not.toBeInstanceOf(EmptyPublicationError);
+	});
+
 	it('rejects --no-retain combined with --root before authenticating', async () => {
 		const result = await parsePush([
 			'https://cache.example.workers.dev/t/acme',
@@ -416,6 +461,20 @@ describe('push command', () => {
 		]);
 
 		expect(result).toBeInstanceOf(ReferenceSourcePairError);
+	});
+
+	it.each([
+		['--read-user', 'reader'],
+		['--read-password', 'secret']
+	])('rejects an unpaired %s before authenticating', async (option, value) => {
+		const result = await parsePush([
+			'https://cache.example.workers.dev/t/acme',
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+			option,
+			value
+		]);
+
+		expect(result).toBeInstanceOf(ReadCredentialPairError);
 	});
 
 	it('rejects a reference paths file naming a non-store path', async () => {

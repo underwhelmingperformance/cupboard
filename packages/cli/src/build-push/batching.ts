@@ -15,6 +15,7 @@ import { PushNarMetadataMismatchError } from '../errors.ts';
 import { compressNarToStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
+import { exactUploadDecisions } from '../push/negotiation.ts';
 import type { CompressNar, PushClient, PushNarArchive } from '../push/push.ts';
 
 // Cachix's narinfo batcher (one hundred paths or half a second) and Attic's
@@ -214,18 +215,20 @@ export class BuildOutputBatcher {
 						return [];
 					}
 
+					const paths = infos.map((info) => prepareStorePathNegotiation(info));
 					const negotiation = await this.options.client.negotiate({
-						paths: infos.map((info) => prepareStorePathNegotiation(info)),
+						paths,
 						...(this.options.runRoot !== undefined && {
 							attachRoot: this.options.runRoot
 						})
 					});
+					const decisions = exactUploadDecisions(paths, negotiation.uploads);
 					const infoByHash = new Map(
 						infos.map((info) => [StorePath.hash(info.storePath), info])
 					);
 					const candidates: CommitCandidate[] = [];
 
-					for (const decision of negotiation.uploads) {
+					for (const decision of decisions) {
 						const info = infoByHash.get(decision.storePathHash);
 
 						if (info === undefined) {

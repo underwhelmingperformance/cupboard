@@ -16,7 +16,6 @@ import {
 	parseOracleRecord,
 	parseSettingTypes,
 	renderSettingTypes,
-	requiresConformanceOracle,
 	serialiseOracleRecord,
 	SettingTypesDriftError,
 	UnknownIntegerWidthError,
@@ -30,24 +29,6 @@ const pinnedRevision = 'b5aa0fbd538984f6e3d201be0005b4463d8b09f8';
 const movedRevision = 'f'.repeat(40);
 const pinnedVersion = 'nix (Nix) 2.34.7';
 const movedVersion = 'nix (Nix) 2.35.0';
-
-describe('requiresConformanceOracle', () => {
-	it.each([
-		{ value: undefined, expected: false },
-		{ value: '', expected: false },
-		{ value: '0', expected: false },
-		{ value: '1', expected: true }
-	])(
-		'reads the required-oracle environment value $value',
-		({ value, expected }) => {
-			expect(
-				requiresConformanceOracle({
-					CUPBOARD_REQUIRE_CONFORMANCE_ORACLE: value
-				})
-			).toBe(expected);
-		}
-	);
-});
 
 const pinnedSettingTypes: NixSettingTypes = {
 	'keep-outputs': 'boolean',

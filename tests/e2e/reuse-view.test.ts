@@ -89,7 +89,7 @@ describe('Nix substitution through a reuse view', () => {
 					// narinfo's relative URL against the reuse base to the tenant's
 					// canonical NAR route.
 					await target.realise(storePath, {
-						substituter: `${server.tenantUrl.toString()}/reuse/reuse`,
+						substituter: `${server.tenantUrl.href}/reuse/reuse`,
 						trustedPublicKeys: [publicKey],
 						requireSigs: true
 					});

@@ -1,4 +1,4 @@
-import { env } from 'node:process';
+import process, { env } from 'node:process';
 
 import { configureLogging, rootLogger } from '@cupboard/logger';
 import { wasErrorReported } from '@cupboard/reporter';
@@ -22,13 +22,33 @@ import type { Environment } from './inputs.ts';
 
 type GithubActions = Pick<ReturnType<typeof workflowCommands>, 'error'>;
 
+interface ActionSignalSource {
+	once(signal: 'SIGINT' | 'SIGTERM', listener: () => void): unknown;
+	removeListener(signal: 'SIGINT' | 'SIGTERM', listener: () => void): unknown;
+}
+
+/** A runner signal whose conventional shell exit status the action preserves. */
+export class ActionSignalError extends CodedError {
+	constructor(public readonly signal: 'SIGINT' | 'SIGTERM') {
+		super(`Action cancelled by ${signal}`);
+		this.name = 'ActionSignalError';
+	}
+
+	override get exitCode(): number {
+		return this.signal === 'SIGINT' ? 130 : 143;
+	}
+}
+
 /**
  * The `cupboard-action` command: the composite GitHub Action's `setup`, `push`,
  * `attest` and `plan` steps run through it, with the runner-contract
  * environment threaded to each subcommand so its handler can resolve
  * runner-derived defaults.
  */
-export function buildProgram(environment: Environment = env): Command {
+export function buildProgram(
+	environment: Environment = env,
+	signal?: AbortSignal
+): Command {
 	const program = new Command()
 		.name('cupboard-action')
 		.description('Run the cupboard composite GitHub Action steps.')
@@ -47,7 +67,7 @@ export function buildProgram(environment: Environment = env): Command {
 	registerAttestCommand(program, environment);
 	registerAttestAttachCommand(program, environment);
 	registerBuildCommand(program, environment);
-	registerBuildCohortCommand(program, environment);
+	registerBuildCohortCommand(program, environment, signal);
 	registerPlanCommand(program, environment);
 
 	return program;
@@ -60,17 +80,38 @@ export function buildProgram(environment: Environment = env): Command {
  */
 export async function runAction(
 	argument: readonly string[],
-	environment: Environment = env
+	environment: Environment = env,
+	signalSource: ActionSignalSource = process
 ): Promise<number> {
 	const githubActions = workflowCommands();
+	const isBuildCohort = argument[2] === 'build-cohort';
+	const controller = isBuildCohort ? new AbortController() : undefined;
+	const abortSigint = (): void => {
+		controller?.abort(new ActionSignalError('SIGINT'));
+	};
+	const abortSigterm = (): void => {
+		controller?.abort(new ActionSignalError('SIGTERM'));
+	};
 
 	configureLogging();
 
+	if (controller !== undefined) {
+		signalSource.once('SIGINT', abortSigint);
+		signalSource.once('SIGTERM', abortSigterm);
+	}
+
 	try {
-		await buildProgram(environment).parseAsync([...argument]);
+		await buildProgram(environment, controller?.signal).parseAsync([
+			...argument
+		]);
 		return 0;
 	} catch (error: unknown) {
 		return reportActionFailure(githubActions, error);
+	} finally {
+		if (controller !== undefined) {
+			signalSource.removeListener('SIGINT', abortSigint);
+			signalSource.removeListener('SIGTERM', abortSigterm);
+		}
 	}
 }
 
@@ -88,6 +129,10 @@ export function reportActionFailure(
 		githubActions.error(error.message);
 
 		return usageExitCode;
+	}
+
+	if (error instanceof ActionSignalError) {
+		return error.exitCode;
 	}
 
 	if (error instanceof CodedError) {

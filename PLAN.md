@@ -417,9 +417,11 @@ so the unit run does not pick them up.
 Runs the Worker in Miniflare behind a local HTTP server and drives a real `nix`
 against fixture store paths. Catches protocol drift (wrong header, fingerprint
 typo, missing `Compression` field) that internal contract tests cannot catch.
-Lives under `tests/e2e/`, invoked via `pnpm test:e2e`. Runs in CI; the CI image
-installs Nix, pinned to a specific version so the gate matches the version named
-in Compatibility rather than drifting with whatever the runner ships.
+Lives under `tests/e2e/`. `pnpm test:e2e` runs the ordinary local-store cases;
+`pnpm test:e2e:remote-store` separately runs the Linux container-backed SSH
+store suite. Both run in CI. The CI image installs Nix, pinned to a specific
+version so the gates match the version named in Compatibility rather than
+drifting with whatever the runner ships.
 
 #### Isolation
 

@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import {
+	CohortFailureToleranceError,
 	ComponentRootTargetLimitError,
 	InvalidInputError,
 	MatrixJobLimitError,
@@ -41,7 +42,8 @@ import {
 	planAction,
 	type PlanInputs,
 	type PlanOptions,
-	resolvePlanInputs
+	resolvePlanInputs,
+	validateRemoteOutputPredictability
 } from './plan.ts';
 
 function storePath(value: string): StorePathString {
@@ -183,14 +185,6 @@ describe('planAction', () => {
 				{ attrs: [target.attr], bestEffort: false },
 				{ attrs: [secondTarget.attr], bestEffort: false }
 			]
-		},
-		{
-			name: 'a shared cohort mixing a best-effort target with a required one',
-			targets: [
-				{ ...target, bestEffort: true, cohort: 'group-a' },
-				{ ...secondTarget, bestEffort: false, cohort: 'group-a' }
-			],
-			expected: [{ attrs: [target.attr, secondTarget.attr], bestEffort: false }]
 		}
 	])(
 		'carries the cohort tolerance into the matrix for $name',
@@ -214,6 +208,28 @@ describe('planAction', () => {
 			).toStrictEqual(expected);
 		}
 	);
+
+	it('rejects a shared cohort that mixes required and best-effort targets', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+
+		await expect(
+			planAction(
+				{
+					...baseOptions,
+					targets: JSON.stringify([
+						{ ...target, bestEffort: true, cohort: 'group-a' },
+						{ ...secondTarget, bestEffort: false, cohort: 'group-a' }
+					])
+				},
+				{
+					RUNNER_TEMP: directory,
+					GITHUB_RUN_ID: '12345'
+				}
+			)
+		).rejects.toStrictEqual(
+			new CohortFailureToleranceError('group-a', target.attr, secondTarget.attr)
+		);
+	});
 
 	it('rejects an invalid optimisation input', async () => {
 		await expect(
@@ -492,6 +508,63 @@ describe('resolvePlanInputs', () => {
 				'pack-capacity must be a positive integer number of bytes'
 			)
 		);
+	});
+});
+
+describe('validateRemoteOutputPredictability', () => {
+	it('rejects a floating selected output before remote publication starts', () => {
+		const floating = {
+			...evaluation('floating', storePath(`/nix/store/${'4'.repeat(32)}-out`)),
+			targetPaths: []
+		};
+
+		expect(() => {
+			validateRemoteOutputPredictability('ssh-ng://builds.example', [floating]);
+		}).toThrow(
+			new InvalidInputError(
+				'store',
+				'Remote publication cannot build targets whose selected output paths are unknown during planning: .#floating. Publish them from the local store until the Nix daemon can return and root newly discovered outputs atomically.'
+			)
+		);
+	});
+
+	it('rejects an unevaluated target before creating a remote cohort', () => {
+		expect(() => {
+			validateRemoteOutputPredictability(
+				'ssh-ng://builds.example',
+				[],
+				['.#unevaluated']
+			);
+		}).toThrow(
+			new InvalidInputError(
+				'store',
+				'Remote publication cannot build targets whose selected output paths are unknown during planning: .#unevaluated. Publish them from the local store until the Nix daemon can return and root newly discovered outputs atomically.'
+			)
+		);
+	});
+
+	it('keeps local publication and predictable remote multi-output targets valid', () => {
+		const predictable = {
+			...evaluation('multi', storePath(`/nix/store/${'5'.repeat(32)}-out`)),
+			target: {
+				...evaluation('multi', storePath(`/nix/store/${'5'.repeat(32)}-out`))
+					.target,
+				outputs: ['out', 'dev']
+			},
+			targetPaths: [
+				storePath(`/nix/store/${'5'.repeat(32)}-out`),
+				storePath(`/nix/store/${'6'.repeat(32)}-dev`)
+			]
+		};
+
+		expect(() => {
+			validateRemoteOutputPredictability('ssh-ng://builds.example', [
+				predictable
+			]);
+		}).not.toThrow();
+		expect(() => {
+			validateRemoteOutputPredictability('', []);
+		}).not.toThrow();
 	});
 });
 

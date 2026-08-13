@@ -16,7 +16,8 @@ import {
 	buildReceiptV3Schema,
 	type BuildSubjectV3,
 	type InvocationId,
-	type ParsedBuildReceiptV3
+	type ParsedBuildReceiptV3,
+	type TerminalBuildFailure
 } from '@cupboard/protocol/build';
 import {
 	type BuildSummary,
@@ -86,6 +87,7 @@ import {
 	runChild,
 	type RunChildOptions,
 	type SignalSource,
+	type StartDelay,
 	superviseAttemptedBuild,
 	superviseBuild,
 	type SupervisedAttempt
@@ -149,7 +151,7 @@ export interface BuildPushRunOptions {
  */
 export type BuildPushStore = ReconcileOptions['store'] &
 	PushStore &
-	Pick<Nix, 'queryValidPaths'>;
+	Pick<Nix, 'queryValidPaths' | 'readDerivation'>;
 
 export interface BuildPushDependencies {
 	readonly client: PushClient;
@@ -168,10 +170,14 @@ export interface BuildPushDependencies {
 	readonly compressNar?: CompressNar;
 	/** Names a constructed invocation's attempts; injectable for tests. */
 	readonly nextAttemptId?: () => string;
-	/** Waits between a constructed invocation's attempts; injectable for tests. */
-	readonly sleep?: (delayMs: number) => Promise<void>;
+	/** Starts the cancellable wait between attempts; injectable for tests. */
+	readonly startDelay?: StartDelay;
 	/** Runs the verification rebuild child; injectable for tests. */
 	readonly runChild?: (options: RunChildOptions) => Promise<ChildExit>;
+	/** Receives the successfully settled targets before this run returns. */
+	readonly settledTargets?: (
+		targets: readonly StorePathString[]
+	) => Promise<void> | void;
 }
 
 /**
@@ -248,8 +254,13 @@ async function runStreamedBuildPush(
 	preflight: BuildPushPreflight
 ): Promise<ParsedBuildReceiptV3> {
 	const plan = preflight.runtimePlan;
+	const targetLinkDirectory = `${plan.directory}-targets`;
 
 	await createRuntimeDirectory(plan.directory);
+
+	if (options.invocation.kind === 'constructed') {
+		await createRuntimeDirectory(targetLinkDirectory);
+	}
 
 	const hookScriptPath = path.join(plan.directory, hookScriptFileName);
 
@@ -299,7 +310,13 @@ async function runStreamedBuildPush(
 			hookScriptPath
 		);
 		const { exit, attempts } = await reporter.phase(buildPushPhases.build, () =>
-			runInvocation(options.invocation, environment, plan, dependencies)
+			runInvocation(
+				options.invocation,
+				environment,
+				plan,
+				dependencies,
+				targetLinkDirectory
+			)
 		);
 
 		// Every helper has connected by the time the child exits, though its
@@ -312,11 +329,20 @@ async function runStreamedBuildPush(
 		const eventPaths = orderedUnique(
 			accepted.flatMap((event) => event.outputPaths)
 		);
+		const selectedTargetPaths =
+			options.invocation.kind === 'constructed'
+				? await outLinkTargets(targetLinkDirectory)
+				: undefined;
 		const subjects = await attributeSubjects(
 			options.invocation,
 			dependencies,
 			attempts,
 			eventPaths,
+			exit
+		);
+		const terminalFailure = terminalFailureFor(
+			options.invocation,
+			attempts,
 			exit
 		);
 
@@ -326,10 +352,13 @@ async function runStreamedBuildPush(
 			batcher,
 			maxQueueDepth,
 			eventPaths,
-			subjects
+			subjects,
+			...(selectedTargetPaths !== undefined && { selectedTargetPaths }),
+			...(terminalFailure !== undefined && { terminalFailure })
 		});
 	} finally {
 		await listener.close();
+		await removeInvocationRuntimeDirectory(targetLinkDirectory);
 	}
 }
 
@@ -340,7 +369,8 @@ async function runInvocation(
 	invocation: BuildInvocation,
 	environment: ChildEnvironment,
 	plan: { readonly directory: string },
-	dependencies: BuildPushDependencies
+	dependencies: BuildPushDependencies,
+	targetLinkDirectory: string
 ): Promise<{
 	readonly exit: ChildExit;
 	readonly attempts: readonly SupervisedAttempt[];
@@ -359,7 +389,12 @@ async function runInvocation(
 	}
 
 	return superviseAttemptedBuild({
-		command: (logFile) => constructedNixCommand(invocation.build, logFile),
+		command: (logFile) =>
+			constructedNixCommand(
+				invocation.build,
+				logFile,
+				path.join(targetLinkDirectory, outLinkName)
+			),
 		attempts: invocation.build.attempts ?? defaultBuildAttempts,
 		environment,
 		runtimeDirectory: plan.directory,
@@ -369,7 +404,9 @@ async function runInvocation(
 		...(dependencies.nextAttemptId !== undefined && {
 			nextAttemptId: dependencies.nextAttemptId
 		}),
-		...(dependencies.sleep !== undefined && { sleep: dependencies.sleep })
+		...(dependencies.startDelay !== undefined && {
+			startDelay: dependencies.startDelay
+		})
 	});
 }
 
@@ -431,11 +468,7 @@ async function attributeSubjects(
 	eventPaths: readonly StorePathString[],
 	exit: ChildExit
 ): Promise<readonly BuildSubjectV3[]> {
-	if (
-		invocation.kind !== 'constructed' ||
-		exit.status !== 0 ||
-		eventPaths.length === 0
-	) {
+	if (invocation.kind !== 'constructed' || eventPaths.length === 0) {
 		return [];
 	}
 
@@ -452,7 +485,7 @@ async function attributeSubjects(
 
 	const infos = await dependencies.store.queryValidPathsInfo(eventPaths);
 
-	if (invocation.build.verifyRebuilds !== true) {
+	if (invocation.build.verifyRebuilds !== true || exit.status !== 0) {
 		return receiptSubjects(observed, infos, new Set(), autoBuildStore);
 	}
 
@@ -469,6 +502,34 @@ async function attributeSubjects(
 		new Set(),
 		autoBuildStore
 	);
+}
+
+// A singleton constructed request that reached Nix's build graph is the only
+// child failure this layer can attribute to a requested target. A command, a
+// signal, a grouped request, or a failure before any build activity remains a
+// command failure for callers to treat as fatal.
+function terminalFailureFor(
+	invocation: BuildInvocation,
+	attempts: readonly SupervisedAttempt[],
+	exit: ChildExit
+): TerminalBuildFailure | undefined {
+	if (exit.status === 0) {
+		return undefined;
+	}
+
+	if (
+		invocation.kind === 'constructed' &&
+		invocation.build.installables.length === 1 &&
+		exit.status !== undefined &&
+		attempts.some((attempt) => parseBuildActivities(attempt.log).length > 0)
+	) {
+		return {
+			kind: 'target-build',
+			failedTargets: [...invocation.build.installables]
+		};
+	}
+
+	return { kind: 'command' };
 }
 
 // The local re-verification pass: rebuilds every derivation the successful
@@ -568,7 +629,9 @@ async function runReconciledLocalBuildPush(
 				...(dependencies.nextAttemptId !== undefined && {
 					nextAttemptId: dependencies.nextAttemptId
 				}),
-				...(dependencies.sleep !== undefined && { sleep: dependencies.sleep })
+				...(dependencies.startDelay !== undefined && {
+					startDelay: dependencies.startDelay
+				})
 			})
 		);
 		const realised = await realisedOutputs(
@@ -578,17 +641,33 @@ async function runReconciledLocalBuildPush(
 		);
 
 		const verified =
-			build.verifyRebuilds === true
+			build.verifyRebuilds === true && exit.status === 0
 				? await verifyRealised(realised, attempts, dependencies)
 				: [];
+		const terminalFailure = terminalFailureFor(invocation, attempts, exit);
 		const receipt = await publishRealised(
-			{ realised, declared, alreadyHeld, verified, exit },
+			{
+				realised,
+				declared,
+				alreadyHeld,
+				verified,
+				exit,
+				...(terminalFailure !== undefined && { terminalFailure })
+			},
 			options,
 			reporter,
 			dependencies
 		);
 
-		await writeReceiptFile(options.receiptFile, receipt);
+		try {
+			await writeReceiptFile(options.receiptFile, receipt);
+		} catch (error) {
+			if (exit.status !== 0) {
+				throw childFailure(exit);
+			}
+
+			throw publicationFailure(error);
+		}
 
 		const uploaded = receipt.uploaded?.length ?? 0;
 		reportBuildSummary(reporter, {
@@ -607,6 +686,10 @@ async function runReconciledLocalBuildPush(
 			throw childFailure(exit);
 		}
 
+		await dependencies.settledTargets?.(
+			realised.map((storePath) => storePathSchema.parse(storePath))
+		);
+
 		return receipt;
 	} finally {
 		await removeInvocationRuntimeDirectory(directory);
@@ -622,19 +705,32 @@ async function declaredOutputs(
 	build: ConstructedBuild,
 	store: BuildPushStore
 ): Promise<readonly string[]> {
-	const drvPaths = new Set(
-		build.installables.flatMap((installable) => {
-			const drvPath = derivationPathOf(installable);
+	const outputs = new Set<string>();
 
-			return drvPath === undefined ? [] : [drvPath];
-		})
-	);
+	for (const installable of build.installables) {
+		const drvPath = derivationPathOf(installable);
 
-	if (drvPaths.size === 0) {
-		return [];
+		if (drvPath === undefined) {
+			continue;
+		}
+
+		const derivation = await store.readDerivation(drvPath);
+		const selection = installable.split('^', 2)[1];
+		const selectedNames =
+			selection === undefined || selection === '*'
+				? derivation.outputs.keys()
+				: selection.split(',').values();
+
+		for (const name of selectedNames) {
+			const output = derivation.outputs.get(name);
+
+			if (output !== undefined) {
+				outputs.add(output);
+			}
+		}
 	}
 
-	return store.queryDerivationOutputPaths(drvPaths.values().toArray());
+	return outputs.values().toArray();
 }
 
 // What the build left in the store: the paths its out-links name, together
@@ -706,6 +802,7 @@ interface RealisedBuild {
 	readonly alreadyHeld: readonly string[];
 	readonly verified: readonly string[];
 	readonly exit: ChildExit;
+	readonly terminalFailure?: TerminalBuildFailure;
 }
 
 // The one push a reconciled run makes, under the run's numeric exit contract:
@@ -733,13 +830,18 @@ async function publishRealised(
 			version: 3,
 			paths: [],
 			subjects: [],
-			childExitStatus
+			childExitStatus,
+			...(built.terminalFailure !== undefined && {
+				terminalFailure: built.terminalFailure
+			})
 		});
 	}
 
 	let published: ParsedBuildReceiptV3 | undefined;
 
 	try {
+		const shouldRetainTargets = exit.status === 0 && options.root !== undefined;
+
 		published = await runPush(publication, reporter, {
 			client: dependencies.client,
 			nix: dependencies.store,
@@ -747,11 +849,12 @@ async function publishRealised(
 			alreadyHeld: built.alreadyHeld,
 			claimable: built.declared,
 			verifiedDerivations: built.verified,
-			retain: options.root !== undefined,
-			...(options.root !== undefined && { root: options.root }),
-			...(options.ttlSeconds !== undefined && {
-				ttlSeconds: options.ttlSeconds
-			}),
+			retain: shouldRetainTargets,
+			...(shouldRetainTargets && { root: options.root }),
+			...(shouldRetainTargets &&
+				options.ttlSeconds !== undefined && {
+					ttlSeconds: options.ttlSeconds
+				}),
 			...(options.runRoot !== undefined && { runRoot: options.runRoot }),
 			...(options.closure !== undefined && { closure: options.closure }),
 			...(options.wait !== undefined && { wait: options.wait }),
@@ -784,7 +887,13 @@ async function publishRealised(
 		throw publicationFailure(undefined);
 	}
 
-	return buildReceiptV3Schema.parse({ ...published, childExitStatus });
+	return buildReceiptV3Schema.parse({
+		...published,
+		childExitStatus,
+		...(built.terminalFailure !== undefined && {
+			terminalFailure: built.terminalFailure
+		})
+	});
 }
 
 // A lost publication as the run's exit contract states it: the sysexits
@@ -807,6 +916,8 @@ interface RunFacts {
 	readonly maxQueueDepth: number;
 	readonly eventPaths: readonly StorePathString[];
 	readonly subjects: readonly BuildSubjectV3[];
+	readonly selectedTargetPaths?: readonly StorePathString[];
+	readonly terminalFailure?: TerminalBuildFailure;
 }
 
 // The phases after the child exits: drain, reconcile, receipt, exit contract.
@@ -833,10 +944,17 @@ async function settleRun(
 			ctx.fact('remaining', formatCount(batcher.candidates.length));
 		});
 
-		const intermediates = new Set(options.intermediatePaths);
-		const targetPaths = facts.eventPaths.filter(
-			(eventPath) => !intermediates.has(eventPath)
-		);
+		const declaredIntermediates = new Set(options.intermediatePaths);
+		const targetPaths =
+			facts.selectedTargetPaths ??
+			facts.eventPaths.filter(
+				(eventPath) => !declaredIntermediates.has(eventPath)
+			);
+		const targetSet = new Set(targetPaths);
+		const intermediates = new Set([
+			...declaredIntermediates,
+			...facts.eventPaths.filter((eventPath) => !targetSet.has(eventPath))
+		]);
 		const targets: readonly ReconcileTarget[] = targetPaths.map(
 			(targetPath) => ({
 				installable: targetPath,
@@ -881,7 +999,10 @@ async function settleRun(
 						compressNar: dependencies.compressNar
 					}),
 					...(facts.subjects.length > 0 && { subjects: facts.subjects }),
-					childExitStatus: childExitCode(exit)
+					childExitStatus: childExitCode(exit),
+					...(facts.terminalFailure !== undefined && {
+						terminalFailure: facts.terminalFailure
+					})
 				});
 
 				ctx.fact('servable', formatCount(reconciled.receipt.paths.length));
@@ -903,6 +1024,7 @@ async function settleRun(
 		await writeReceiptFile(options.receiptFile, result.receipt);
 		reportSummary(reporter, dependencies, facts, targets.length, result);
 		raiseExitContract(exit, result);
+		await dependencies.settledTargets?.(targetPaths);
 
 		return result.receipt;
 	} catch (error) {

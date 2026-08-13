@@ -1,3 +1,4 @@
+import { NixConfigSettingError } from '@cupboard/nix';
 import { describe, expect, it } from 'vitest';
 
 import { InvalidStoreUriError } from './errors.ts';
@@ -31,5 +32,40 @@ describe('parseStoreUri', () => {
 		}
 
 		expect(error.value).toBe(uri);
+	});
+
+	it.each([
+		{
+			name: 'a malformed query escape',
+			uri: 'ssh-ng://example.test?remote-program=%ZZ',
+			cause: URIError
+		},
+		{
+			name: 'a malformed public host key',
+			uri: 'ssh-ng://example.test?base64-ssh-public-host-key=not-base64',
+			cause: Error
+		},
+		{
+			name: 'an invalid typed setting',
+			uri: 'ssh-ng://example.test?compress=perhaps',
+			cause: NixConfigSettingError
+		}
+	])('wraps $name', ({ uri, cause }) => {
+		let error: unknown;
+
+		try {
+			parseStoreUri(uri);
+		} catch (error_: unknown) {
+			error = error_;
+		}
+
+		expect(error).toBeInstanceOf(InvalidStoreUriError);
+
+		if (!(error instanceof InvalidStoreUriError)) {
+			return;
+		}
+
+		expect(error.value).toBe(uri);
+		expect(error.cause).toBeInstanceOf(cause);
 	});
 });

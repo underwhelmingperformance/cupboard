@@ -1,5 +1,5 @@
 import { storePathSchema } from '@cupboard/nix-store/scalars';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
 	DyingDaemonChild,
@@ -11,8 +11,52 @@ import { FakeDaemonTransport } from '../../../tests/support/fake-daemon-transpor
 import { NixDaemonRemoteError, NixDaemonStoreClient } from './nix-daemon.ts';
 import {
 	createProcessNixDaemonConnector,
+	type DaemonChildProcess,
 	type DaemonCommandRunner
 } from './nix-daemon-process.ts';
+
+class ControlledDaemonChild implements DaemonChildProcess {
+	private errorListener: ((error: Error) => void) | undefined;
+
+	private exitListener: ((error: Error) => void) | undefined;
+
+	readonly killSignals: NodeJS.Signals[] = [];
+
+	readonly stdin = {
+		write: (
+			_chunk: Uint8Array,
+			callback: (error?: Error | null) => void
+		): void => {
+			callback();
+		}
+	};
+
+	readonly stdout = new FakeDaemonChild(new FakeDaemonTransport({})).stdout;
+
+	onKill: ((signal: NodeJS.Signals) => void) | undefined;
+
+	once(event: 'exit' | 'error', listener: (error: Error) => void): void {
+		if (event === 'exit') {
+			this.exitListener = listener;
+			return;
+		}
+
+		this.errorListener = listener;
+	}
+
+	kill(signal: NodeJS.Signals = 'SIGTERM'): void {
+		this.killSignals.push(signal);
+		this.onKill?.(signal);
+	}
+
+	emitExit(): void {
+		this.exitListener?.(new Error('child exited'));
+	}
+
+	emitError(error: Error): void {
+		this.errorListener?.(error);
+	}
+}
 
 const appPath = storePathSchema.parse(
 	'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
@@ -124,5 +168,76 @@ describe('createProcessNixDaemonConnector', () => {
 		await client.queryValidPaths([]);
 
 		expect(children.map((child) => child.killed)).toStrictEqual([1]);
+	});
+
+	it('settles close after an ordinary TERM exit without escalation', async () => {
+		const child = new ControlledDaemonChild();
+		child.onKill = (signal) => {
+			if (signal === 'SIGTERM') {
+				child.emitExit();
+			}
+		};
+		const transport = await createProcessNixDaemonConnector(
+			'nix',
+			['daemon'],
+			() => child
+		)('', undefined);
+
+		await transport.close();
+
+		expect(child.killSignals).toStrictEqual(['SIGTERM']);
+	});
+
+	it('shares one close operation across repeated callers', async () => {
+		const child = new ControlledDaemonChild();
+		child.onKill = () => {
+			child.emitExit();
+		};
+		const transport = await createProcessNixDaemonConnector(
+			'nix',
+			['daemon'],
+			() => child
+		)('', undefined);
+
+		const first = transport.close();
+		const second = transport.close();
+
+		expect({
+			samePromise: first === second,
+			killSignals: child.killSignals
+		}).toStrictEqual({ samePromise: true, killSignals: ['SIGTERM'] });
+		await first;
+	});
+
+	it('keeps close pending until the child exits', async () => {
+		const child = new ControlledDaemonChild();
+		const afterExit = vi.fn();
+		const transport = await createProcessNixDaemonConnector(
+			'nix',
+			['daemon'],
+			() => child,
+			afterExit
+		)('', undefined);
+
+		const closing = transport.close();
+		const settled = vi.fn();
+		void closing.then(settled);
+
+		expect({
+			killSignals: child.killSignals,
+			afterExitCalls: afterExit.mock.calls
+		}).toStrictEqual({
+			killSignals: ['SIGTERM'],
+			afterExitCalls: []
+		});
+		expect(settled).not.toHaveBeenCalled();
+
+		child.emitExit();
+		await closing;
+
+		expect({
+			afterExitCalls: afterExit.mock.calls,
+			settledCalls: settled.mock.calls
+		}).toStrictEqual({ afterExitCalls: [[]], settledCalls: [[undefined]] });
 	});
 });

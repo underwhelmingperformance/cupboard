@@ -14,7 +14,7 @@ export interface DaemonChildProcess {
 	};
 	readonly stdout: ByteStreamSource;
 	once(event: 'exit' | 'error', listener: (error: Error) => void): unknown;
-	kill(): unknown;
+	kill(signal?: NodeJS.Signals): unknown;
 }
 
 export type DaemonCommandRunner = (
@@ -55,37 +55,48 @@ class ProcessNixDaemonTransport implements NixDaemonTransport {
 
 	private readonly exited: Promise<void>;
 
+	private readonly finish: () => void;
+
 	private closePromise?: Promise<void>;
 
 	constructor(
 		private readonly child: DaemonChildProcess,
-		afterExit?: () => void
+		afterExit: (() => void) | undefined
 	) {
 		this.reader = new ByteStreamReader(child.stdout);
-		this.exited = new Promise((resolve) => {
-			let isFinished = false;
-			const finish = (): void => {
-				if (isFinished) {
-					return;
-				}
+		const exit = Promise.withResolvers<undefined>();
+		this.exited = exit.promise;
+		let isFinished = false;
+		this.finish = (): void => {
+			if (isFinished) {
+				return;
+			}
 
-				isFinished = true;
+			isFinished = true;
+
+			try {
 				afterExit?.();
-				resolve();
-			};
+			} finally {
+				exit.resolve(undefined);
+			}
+		};
 
-			child.once('exit', () => {
-				finish();
-			});
-			// A spawn failure surfaces on the child, never on its stdout, and a
-			// child that never spawned emits no exit. The error therefore
-			// settles both any read waiting on bytes and the promise close()
-			// awaits.
-			child.once('error', (error) => {
-				this.reader.fail(error);
-				finish();
-			});
+		child.once('exit', () => {
+			this.finish();
 		});
+		// A spawn failure surfaces on the child, never on its stdout, and a
+		// child that never spawned emits no exit. The error therefore
+		// settles both any read waiting on bytes and the promise close()
+		// awaits.
+		child.once('error', (error) => {
+			this.reader.fail(error);
+			this.finish();
+		});
+	}
+
+	private async closeOnce(): Promise<void> {
+		this.child.kill('SIGTERM');
+		await this.exited;
 	}
 
 	write(bytes: Uint8Array): Promise<void> {
@@ -106,10 +117,7 @@ class ProcessNixDaemonTransport implements NixDaemonTransport {
 	}
 
 	close(): Promise<void> {
-		if (this.closePromise === undefined) {
-			this.child.kill();
-			this.closePromise = this.exited;
-		}
+		this.closePromise ??= this.closeOnce();
 
 		return this.closePromise;
 	}

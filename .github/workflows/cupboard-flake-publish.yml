@@ -111,19 +111,46 @@ on:
         required: false
         default: ''
         type: string
+      input-known-hosts:
+        description:
+          Required known_hosts lines pinning private flake input SSH hosts when
+          input_ssh_key is supplied.
+        required: false
+        default: ''
+        type: string
       builders:
         description:
-          nix.conf builders specification used by remote target groups.
+          One-line nix.conf builders specification used by remote target groups;
+          use semicolons for multiple entries. Classic builder delegation is
+          mutually exclusive with store. The machine SSH-key column must be -
+          and builder store URIs must not set a non-empty ssh-key; pass a
+          private key through the builder_ssh_key secret.
         required: false
         default: ''
         type: string
       builder-known-hosts:
         description:
-          known_hosts lines for the remote builders. Hosts they name are pinned;
-          other hosts are accepted on first connection.
+          Required known_hosts lines pinning every enabled remote builder.
         required: false
         default: ''
         type: string
+      store-known-hosts:
+        description:
+          known_hosts lines pinning the direct ssh-ng store. Required unless
+          store uses the default SSH port and supplies
+          base64-ssh-public-host-key; independent of classic builder delegation.
+        required: false
+        default: ''
+        type: string
+      store-ambient-identity:
+        description:
+          Authenticate the direct store with the runner's SSH agent or default
+          identity files instead of store_ssh_key. Intended only for explicitly
+          provisioned self-hosted runners; false fails closed when no managed
+          key is supplied.
+        required: false
+        default: false
+        type: boolean
       store:
         description: >-
           Remote ssh-ng store URI every cohort job runs against: the cohort's
@@ -132,7 +159,8 @@ on:
           streams NAR bytes from the same store, so the built closure never
           enters the runner's local store. Measured cohort packing prices its
           candidate groupings against the same store's answers. Empty plans and
-          builds in each runner's own store.
+          builds in each runner's own store. Must not set a non-empty ssh-key;
+          pass a private key through the store_ssh_key secret.
         required: false
         default: ''
         type: string
@@ -168,10 +196,22 @@ on:
       builder_ssh_config:
         description:
           ssh_config text for the remote builder connections, scoped under Host
-          blocks. Carries connection-environment secrets such as auth tokens.
+          blocks. Carries connection-environment secrets such as auth tokens;
+          identity-bearing directives, Include and Match exec are rejected.
+        required: false
+      store_ssh_key:
+        description: SSH private key authenticating to the direct ssh-ng store.
+        required: false
+      store_ssh_config:
+        description:
+          ssh_config text for the direct store connection, scoped under Host
+          blocks. Identity-bearing directives, Include and Match exec are
+          rejected. Independent of classic builder scheduling.
         required: false
       input_ssh_key:
-        description: SSH key used while evaluating private flake inputs.
+        description:
+          SSH key used while evaluating private flake inputs. Requires
+          input-known-hosts.
         required: false
       read_user:
         description: Basic-auth credentials for tenants whose reads are private.
@@ -212,6 +252,11 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           REF: ${{ github.ref }}
           BRANCH: ${{ inputs.branch }}
+          STORE: ${{ inputs.store }}
+          STORE_AMBIENT_IDENTITY: ${{ inputs.store-ambient-identity }}
+          BUILDERS: ${{ inputs.builders }}
+          BUILDER_KNOWN_HOSTS: ${{ inputs.builder-known-hosts }}
+          STORE_KNOWN_HOSTS: ${{ inputs.store-known-hosts }}
         run: |
           set -euo pipefail
           for name in PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH; do
@@ -220,6 +265,69 @@ jobs:
               exit 1
             fi
           done
+          if [[ "${BUILDERS}" == *$'\n'* || "${BUILDERS}" == *$'\r'* ]]; then
+            echo '::error::builders must not contain line breaks; separate inline builders with semicolons'
+            exit 1
+          fi
+          if [ -n "${STORE}" ] && [ -n "${BUILDERS}" ]; then
+            echo '::error::store and builders select different build modes and are mutually exclusive'
+            exit 1
+          fi
+          if [ "${STORE_AMBIENT_IDENTITY}" = true ] && [ -z "${STORE}" ]; then
+            echo '::error::store-ambient-identity requires the store input'
+            exit 1
+          fi
+          if [ -n "${BUILDERS}" ] && [[ ! "${BUILDER_KNOWN_HOSTS}" =~ [^[:space:]] ]]; then
+            echo '::error::builder-known-hosts is required when builders are enabled'
+            exit 1
+          fi
+
+          store_uri_has_host_key=false
+          if [[ "${STORE}" == *'?'* ]]; then
+            store_query="${STORE#*\?}"
+            store_query="${store_query%%#*}"
+            IFS='&' read -r -a store_parameters <<< "${store_query}"
+            for parameter in "${store_parameters[@]}"; do
+              case "${parameter}" in
+                base64-ssh-public-host-key=?*)
+                  store_uri_has_host_key=true
+                  break
+                  ;;
+                base64-ssh-public-host-key=)
+                  break
+                  ;;
+              esac
+            done
+          fi
+
+          store_uri_uses_default_ssh_port=false
+          if [[ "${STORE}" == ssh-ng://* ]]; then
+            store_authority="${STORE#ssh-ng://}"
+            store_authority="${store_authority%%[/?#]*}"
+            store_destination="${store_authority##*@}"
+            store_port=''
+            if [[ "${store_destination}" == \[*\] ]]; then
+              store_port=''
+            elif [[ "${store_destination}" == \[*\]:* ]]; then
+              store_port="${store_destination##*]:}"
+            elif [[ "${store_destination}" == *:* ]]; then
+              store_port="${store_destination##*:}"
+            fi
+            if [ -z "${store_port}" ] || [ "${store_port}" = 22 ]; then
+              store_uri_uses_default_ssh_port=true
+            fi
+          fi
+
+          if [ -n "${STORE}" ] && [[ ! "${STORE_KNOWN_HOSTS}" =~ [^[:space:]] ]]; then
+            if [ "${store_uri_has_host_key}" != true ]; then
+              echo '::error::store-known-hosts is required unless the store URI supplies base64-ssh-public-host-key'
+              exit 1
+            fi
+            if [ "${store_uri_uses_default_ssh_port}" != true ]; then
+              echo '::error::store-known-hosts is required for a nonstandard SSH port; URI-only host-key pinning supports only the default SSH port'
+              exit 1
+            fi
+          fi
           case "${PRESET}" in
             '')
               if [ -z "${ROOT_PREFIX}" ]; then
@@ -296,14 +404,30 @@ jobs:
       - uses: ./.cupboard/actions/prepare
         with:
           ssh-key: ${{ secrets.input_ssh_key }}
+          input-known-hosts: ${{ inputs.input-known-hosts }}
           nix-config: ${{ inputs.nix-config }}
           # Evaluating closure roots can realise derivations for their target
           # systems, so planning needs the caller's builders as well.
-          remote: ${{ inputs.builders != '' }}
-          builders: ${{ inputs.builders }}
-          builder-ssh-key: ${{ secrets.builder_ssh_key }}
-          builder-ssh-config: ${{ secrets.builder_ssh_config }}
-          builder-known-hosts: ${{ inputs.builder-known-hosts }}
+          remote: ${{ inputs.builders != '' && inputs.store == '' }}
+          store: ${{ inputs.store }}
+          builders: ${{ inputs.store == '' && inputs.builders || '' }}
+          builder-ssh-key:
+            ${{ inputs.builders != '' && inputs.store == '' &&
+            secrets.builder_ssh_key || '' }}
+          builder-ssh-config:
+            ${{ inputs.builders != '' && inputs.store == '' &&
+            secrets.builder_ssh_config || '' }}
+          builder-known-hosts:
+            ${{ inputs.builders != '' && inputs.store == '' &&
+            inputs.builder-known-hosts || '' }}
+          store-ssh-key:
+            ${{ inputs.store != '' && secrets.store_ssh_key || '' }}
+          store-ssh-config:
+            ${{ inputs.store != '' && secrets.store_ssh_config || '' }}
+          store-known-hosts:
+            ${{ inputs.store != '' && inputs.store-known-hosts || '' }}
+          store-ambient-identity:
+            ${{ inputs.store != '' && inputs.store-ambient-identity || false }}
 
       - uses: ./.cupboard/actions/setup
         id: setup
@@ -372,9 +496,6 @@ jobs:
     runs-on: ${{ matrix.runsOn }}
     # A hung leg must not burn the 360-minute default.
     timeout-minutes: 180
-    # A cohort is best-effort only when every one of its targets is, so a
-    # cohort holding a required target still fails the run.
-    continue-on-error: ${{ matrix.bestEffort }}
     permissions:
       attestations: write # record build provenance on the repository
       contents: read # check out the flake source
@@ -394,13 +515,30 @@ jobs:
       - uses: ./.cupboard/actions/prepare
         with:
           ssh-key: ${{ secrets.input_ssh_key }}
+          input-known-hosts: ${{ inputs.input-known-hosts }}
           nix-config: ${{ inputs.nix-config }}
           maximise-space: ${{ inputs.maximise-space }}
-          remote: ${{ matrix.remote }}
-          builders: ${{ inputs.builders }}
-          builder-ssh-key: ${{ secrets.builder_ssh_key }}
-          builder-ssh-config: ${{ secrets.builder_ssh_config }}
-          builder-known-hosts: ${{ inputs.builder-known-hosts }}
+          remote: ${{ matrix.remote && inputs.store == '' }}
+          store: ${{ inputs.store }}
+          builders:
+            ${{ matrix.remote && inputs.store == '' && inputs.builders || '' }}
+          builder-ssh-key:
+            ${{ matrix.remote && inputs.store == '' && secrets.builder_ssh_key
+            || '' }}
+          builder-ssh-config:
+            ${{ matrix.remote && inputs.store == '' &&
+            secrets.builder_ssh_config || '' }}
+          builder-known-hosts:
+            ${{ matrix.remote && inputs.store == '' &&
+            inputs.builder-known-hosts || '' }}
+          store-ssh-key:
+            ${{ inputs.store != '' && secrets.store_ssh_key || '' }}
+          store-ssh-config:
+            ${{ inputs.store != '' && secrets.store_ssh_config || '' }}
+          store-known-hosts:
+            ${{ inputs.store != '' && inputs.store-known-hosts || '' }}
+          store-ambient-identity:
+            ${{ inputs.store != '' && inputs.store-ambient-identity || false }}
 
       - uses: ./.cupboard/actions/setup
         id: setup
@@ -422,6 +560,11 @@ jobs:
         id: build-cohort
         with:
           cohort-json: ${{ toJSON(matrix) }}
+          # The planner rejects mixed tolerance, so this is every member's
+          # declared severity. The action applies it only to attributable target
+          # failures; infrastructure and unbounded publication failures remain
+          # fatal instead of being hidden by workflow-level continue-on-error.
+          best-effort: ${{ matrix.bestEffort }}
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           cache: ${{ needs.configure.outputs.cache }}
@@ -429,7 +572,7 @@ jobs:
           ttl: ${{ needs.configure.outputs.ttl }}
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
-          max-jobs: ${{ matrix.remote && '0' || '' }}
+          max-jobs: ${{ matrix.remote && inputs.store == '' && '0' || '' }}
           store: ${{ inputs.store }}
           push: ${{ inputs.push }}
           gc-between-cohorts: ${{ inputs.gc-between-cohorts }}
@@ -473,6 +616,7 @@ jobs:
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
+          checksums-file: ${{ steps.attest.outputs.checksums-file }}
           bundle: ${{ steps.attest.outputs.bundle-path }}
 
       # The cohort job is where a run of one cohort per job crosses a

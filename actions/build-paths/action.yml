@@ -19,6 +19,13 @@ inputs:
     description: Return successfully when all three attempts fail.
     required: false
     default: 'false'
+  require-provenance:
+    description: >-
+      Require every realised output to have current-run local build evidence in
+      the receipt. Outputs supplied by substitution or present before the run
+      are rebuilt before the action succeeds.
+    required: false
+    default: 'false'
 outputs:
   paths:
     description: Newline-delimited realised output paths.
@@ -66,6 +73,7 @@ runs:
         KEEP_GOING: ${{ inputs.keep-going }}
         MAX_JOBS: ${{ inputs.max-jobs }}
         ALLOW_FAILURE: ${{ inputs.allow-failure }}
+        REQUIRE_PROVENANCE: ${{ inputs.require-provenance }}
       run: |
         node --experimental-transform-types \
           --disable-warning=ExperimentalWarning \
@@ -74,4 +82,5 @@ runs:
           --installables-file "$INSTALLABLES_FILE" \
           --keep-going "$KEEP_GOING" \
           --max-jobs "$MAX_JOBS" \
-          --allow-failure "$ALLOW_FAILURE"
+          --allow-failure "$ALLOW_FAILURE" \
+          --require-provenance "$REQUIRE_PROVENANCE"

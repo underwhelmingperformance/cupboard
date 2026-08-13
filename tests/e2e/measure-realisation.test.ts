@@ -1,13 +1,14 @@
 import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import process from 'node:process';
 
 import { describe, expect, it } from 'vitest';
 
 import type { PublishTarget } from '../../actions/src/publish-plan.ts';
 import { discoverNixStoreConfig } from '../../packages/nix/src/index.ts';
+import { parseFlakeLockRevision } from '../../scripts/conformance-oracle.ts';
 import {
 	createDivertedStoreDirectory,
 	createDivertedStorePlanner,
@@ -15,11 +16,13 @@ import {
 } from '../../scripts/measure-realisation/diverted-store.ts';
 import { measureRealisation } from '../../scripts/measure-realisation/measurement.ts';
 
-// The fixture measures a flake, so this case needs `nix` and the network
-// behind whichever flake it is pointed at. Both are the point of the case:
-// the unit suites already cover the parsing and the aggregation with
-// injected answers.
-const flake = process.env.CUPBOARD_MEASURE_FLAKE ?? 'nixpkgs';
+// The fixture measures the exact nixpkgs revision this repository pins, so a
+// registry update cannot change the e2e underneath the code being tested. The
+// unit suites already cover parsing and aggregation with injected answers.
+const nixpkgsRevision = parseFlakeLockRevision(
+	readFileSync(path.resolve('flake.lock'), 'utf8')
+);
+const flake = `github:NixOS/nixpkgs/${nixpkgsRevision}`;
 const isNixPresent =
 	spawnSync('nix', ['--version'], { stdio: 'ignore' }).status === 0;
 

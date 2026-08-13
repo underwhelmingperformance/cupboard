@@ -125,5 +125,6 @@ The parsing, the aggregation and the command construction are covered by unit
 tests in `scripts/measure-realisation`, which need no Nix: the planner is an
 interface and the suites drive it with injected answers.
 `tests/e2e/measure-realisation.test.ts` runs the real thing and skips when `nix`
-is not on the path. It measures `nixpkgs` by default; point it elsewhere with
-`CUPBOARD_MEASURE_FLAKE`.
+is not on the path. It measures `hello` and `cowsay` from the exact nixpkgs
+revision in `flake.lock`; use the command's `--flake` option for experiments
+against another flake.

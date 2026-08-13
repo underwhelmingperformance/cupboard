@@ -49,7 +49,7 @@ describe('Nix substitution through a signing-key rotation', () => {
 							[storePath]
 						);
 					const trusting = (keys: readonly string[]): RealiseOptions => ({
-						substituter: server.tenantUrl.toString(),
+						substituter: server.tenantUrl.href,
 						trustedPublicKeys: keys,
 						requireSigs: true
 					});

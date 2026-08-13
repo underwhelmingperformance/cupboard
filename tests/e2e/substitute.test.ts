@@ -256,7 +256,7 @@ function pushContext(harness: Harness): PushContext {
 
 function signedBy(harness: Harness, trustedPublicKey: string): RealiseOptions {
 	return {
-		substituter: harness.server.tenantUrl.toString(),
+		substituter: harness.server.tenantUrl.href,
 		trustedPublicKeys: [trustedPublicKey],
 		requireSigs: true
 	};

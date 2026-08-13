@@ -1,5 +1,6 @@
 import type {
 	Nix,
+	NixDerivedPathString,
 	NixMissingPartition,
 	UnreachableSubstituter
 } from '@cupboard/nix';
@@ -306,6 +307,51 @@ describe('partitionAvailability', () => {
 			leftUpstream: [appPath, appPath],
 			attachOnly: [otherPath],
 			rejections: []
+		});
+	});
+
+	it('builds every alias of a shared path when any installable refuses substitution', async () => {
+		const store = new RecordingStore(emptyMissing(), [appPath], [appPath]);
+		const asked: LeftUpstreamCandidate[] = [];
+		const substitutable: NixDerivedPathString = `${path(
+			'33333333333333333333333333333333-first.drv'
+		)}^out`;
+		const nonSubstitutable: NixDerivedPathString = `${path(
+			'44444444444444444444444444444444-second.drv'
+		)}^out`;
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({ expectedPath: appPath, installable: substitutable }),
+					target({ expectedPath: appPath, installable: nonSubstitutable })
+				],
+				store,
+				confirmLeftUpstream: (candidate) => {
+					asked.push(candidate);
+
+					return Promise.resolve(
+						candidate.installable === nonSubstitutable
+							? { kind: 'substitutes-not-allowed' }
+							: { kind: 'confirmed' }
+					);
+				}
+			})
+		);
+
+		expect({
+			asked,
+			leftUpstream: partition.leftUpstream,
+			buildSet: partition.buildSet,
+			rejections: partition.leftUpstreamRejections
+		}).toStrictEqual({
+			asked: [
+				{ installable: substitutable, storePath: appPath },
+				{ installable: nonSubstitutable, storePath: appPath }
+			],
+			leftUpstream: [],
+			buildSet: [substitutable, nonSubstitutable],
+			rejections: [{ kind: 'substitutes-not-allowed', storePath: appPath }]
 		});
 	});
 

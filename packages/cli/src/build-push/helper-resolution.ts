@@ -6,12 +6,7 @@ import { HookHelperMissingError } from '../errors.ts';
 
 export const hookHelperName = 'cupboard-hook-relay';
 
-export interface HelperResolutionEnvironment {
-	readonly CUPBOARD_HOOK_HELPER?: string;
-}
-
 export interface HelperResolutionOptions {
-	readonly environment?: HelperResolutionEnvironment;
 	readonly executablePath?: string;
 }
 
@@ -30,24 +25,12 @@ async function isFile(candidate: string): Promise<boolean> {
  * installation itself: resolution evaluates nothing, runs no subprocess and
  * depends on no substituter. The release tarball unpacks the helper beside
  * the `cupboard` executable, and the Nix package installs it under the
- * sibling `libexec/cupboard/` directory; `CUPBOARD_HOOK_HELPER` names an
- * explicit helper for development. Preflight calls this before the expensive
- * build starts, so an installation missing its helper refuses early.
+ * sibling `libexec/cupboard/` directory. Preflight calls this before the
+ * expensive build starts, so an installation missing its helper refuses early.
  */
 export async function resolveHookHelper(
 	options: HelperResolutionOptions = {}
 ): Promise<string> {
-	const environment = options.environment ?? process.env;
-	const override = environment.CUPBOARD_HOOK_HELPER;
-
-	if (override !== undefined && override !== '') {
-		if (await isFile(override)) {
-			return override;
-		}
-
-		throw new HookHelperMissingError([override]);
-	}
-
 	const executableDirectory = path.dirname(
 		options.executablePath ?? process.execPath
 	);

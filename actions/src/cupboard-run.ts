@@ -15,6 +15,7 @@ import {
 } from '@cupboard/shared/github-actions';
 import { z } from 'zod';
 
+import { observeChildProcess, waitForChildProcess } from './child-process.ts';
 import { CommandFailedError, CupboardReportedError } from './errors.ts';
 import { type Environment, requireEnvironment } from './inputs.ts';
 
@@ -27,6 +28,7 @@ export interface CupboardRunResult {
 
 export interface CupboardRunDependencies {
 	readonly legacyCommands?: Pick<WorkflowCommands, 'warning'>;
+	readonly signal?: AbortSignal;
 }
 
 /**
@@ -43,7 +45,10 @@ export async function runCupboard(
 	environment: Environment,
 	dependencies: CupboardRunDependencies = {}
 ): Promise<readonly ReporterResultEvent[]> {
-	const protocol = await detectCupboardResultProtocol(binaryPath);
+	const protocol = await detectCupboardResultProtocol(
+		binaryPath,
+		dependencies.signal
+	);
 	const run = await runCupboardWithProtocol(
 		binaryPath,
 		arguments_,
@@ -67,7 +72,8 @@ export async function runCupboardWithProtocol(
 		return runLegacyCupboard(
 			binaryPath,
 			arguments_,
-			dependencies.legacyCommands ?? workflowCommands()
+			dependencies.legacyCommands ?? workflowCommands(),
+			dependencies.signal
 		);
 	}
 
@@ -76,13 +82,11 @@ export async function runCupboardWithProtocol(
 		`cupboard-result-${randomUUID()}.jsonl`
 	);
 
-	const status = await spawnCupboard(binaryPath, [
-		'--output-mode',
-		'github',
-		'--result-file',
-		resultFile,
-		...arguments_
-	]);
+	const status = await spawnCupboard(
+		binaryPath,
+		['--output-mode', 'github', '--result-file', resultFile, ...arguments_],
+		dependencies.signal
+	);
 
 	const results = await readResults(resultFile, status);
 
@@ -94,77 +98,70 @@ export async function runCupboardWithProtocol(
 }
 
 export async function detectCupboardResultProtocol(
-	binaryPath: string
+	binaryPath: string,
+	signal?: AbortSignal
 ): Promise<CupboardResultProtocol> {
-	return new Promise((resolve, reject) => {
-		const child = spawn(binaryPath, ['--help'], {
-			stdio: ['ignore', 'pipe', 'ignore']
-		});
-		let output = '';
+	signal?.throwIfAborted();
 
-		child.stdout.setEncoding('utf8');
-		child.stdout.on('data', (chunk: string) => {
-			output += chunk;
-		});
-
-		child.once('error', (error) => {
-			reject(
-				new CommandFailedError(binaryPath, child.exitCode, error.message, {
-					cause: error
-				})
-			);
-		});
-
-		child.once('close', (status) => {
-			if (status !== 0) {
-				reject(new CommandFailedError(binaryPath, status));
-				return;
-			}
-
-			resolve(
-				/(?:^|\s)--result-file(?:\s|[<=])/mu.test(output)
-					? 'result-file'
-					: 'legacy-stderr'
-			);
-		});
+	const child = spawn(binaryPath, ['--help'], {
+		stdio: ['ignore', 'pipe', 'ignore'],
+		...(signal !== undefined && { signal })
 	});
+	let output = '';
+
+	child.stdout.setEncoding('utf8');
+	child.stdout.on('data', (chunk: string) => {
+		output += chunk;
+	});
+
+	const result = await waitForChildProcess(observeChildProcess(child));
+
+	if (result.error !== undefined) {
+		throw spawnFailure(binaryPath, result.status, result.error, signal);
+	}
+
+	if (result.status !== 0) {
+		throw new CommandFailedError(binaryPath, result.status);
+	}
+
+	return /(?:^|\s)--result-file(?:\s|[<=])/mu.test(output)
+		? 'result-file'
+		: 'legacy-stderr';
 }
 
 async function runLegacyCupboard(
 	binaryPath: string,
 	arguments_: readonly string[],
-	commands: Pick<WorkflowCommands, 'warning'>
+	commands: Pick<WorkflowCommands, 'warning'>,
+	signal?: AbortSignal
 ): Promise<CupboardRunResult> {
+	signal?.throwIfAborted();
+
 	const events = new LegacyResultStream((message) => {
 		commands.warning(message);
 	});
-	const status = await new Promise<number | null>((resolve, reject) => {
-		const child = spawn(binaryPath, ['--output-mode', 'json', ...arguments_], {
-			stdio: ['inherit', 'inherit', 'pipe']
-		});
-
-		child.stderr.setEncoding('utf8');
-		child.stderr.on('data', (chunk: string) => {
-			process.stderr.write(chunk);
-			events.push(chunk);
-		});
-
-		child.once('error', (error) => {
-			reject(
-				new CommandFailedError(binaryPath, child.exitCode, error.message, {
-					cause: error
-				})
-			);
-		});
-
-		child.once('close', resolve);
+	const child = spawn(binaryPath, ['--output-mode', 'json', ...arguments_], {
+		stdio: ['inherit', 'inherit', 'pipe'],
+		...(signal !== undefined && { signal })
 	});
+
+	child.stderr.setEncoding('utf8');
+	child.stderr.on('data', (chunk: string) => {
+		process.stderr.write(chunk);
+		events.push(chunk);
+	});
+
+	const result = await waitForChildProcess(observeChildProcess(child));
+
+	if (result.error !== undefined) {
+		throw spawnFailure(binaryPath, result.status, result.error, signal);
+	}
 
 	events.flush();
 
-	if (status !== 0) {
+	if (result.status !== 0) {
 		throw new CupboardReportedError(
-			status,
+			result.status,
 			events.results(),
 			events.lastError()
 		);
@@ -271,25 +268,45 @@ function warningMessage(event: LegacyReporterEvent): string {
 	return event.value === undefined ? label : `${label}: ${event.value}`;
 }
 
-function spawnCupboard(
+async function spawnCupboard(
 	binaryPath: string,
-	arguments_: readonly string[]
+	arguments_: readonly string[],
+	signal?: AbortSignal
 ): Promise<number | null> {
-	return new Promise((resolve, reject) => {
-		const child = spawn(binaryPath, [...arguments_], { stdio: 'inherit' });
+	signal?.throwIfAborted();
 
-		child.once('error', (error) => {
-			reject(
-				new CommandFailedError(binaryPath, child.exitCode, error.message, {
-					cause: error
-				})
-			);
-		});
-
-		child.once('close', (code) => {
-			resolve(code);
-		});
+	const child = spawn(binaryPath, [...arguments_], {
+		stdio: 'inherit',
+		...(signal !== undefined && { signal })
 	});
+	const result = await waitForChildProcess(observeChildProcess(child));
+
+	if (result.error !== undefined) {
+		throw spawnFailure(binaryPath, result.status, result.error, signal);
+	}
+
+	return result.status;
+}
+
+function spawnFailure(
+	binaryPath: string,
+	status: number | null,
+	error: Error,
+	signal?: AbortSignal
+): Error {
+	if (signal?.aborted === true) {
+		return errorForRejection(signal.reason);
+	}
+
+	return new CommandFailedError(binaryPath, status, error.message, {
+		cause: error
+	});
+}
+
+function errorForRejection(error: unknown): Error {
+	return error instanceof Error
+		? error
+		: new Error('The command was aborted', { cause: error });
 }
 
 async function readResults(

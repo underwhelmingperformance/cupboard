@@ -1,0 +1,16 @@
+name: legacy cupboard publish caller
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  publish:
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main
+    with:
+      url: https://cupboard.example.workers.dev/t/acme

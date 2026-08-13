@@ -26,6 +26,11 @@ inputs:
   receipt-file:
     description: Current-run receipt produced by the build action.
     required: true
+  checksums-file:
+    description:
+      Subject checksums produced by actions/attest and passed to the signing
+      action. Only matching receipt subjects are attached.
+    required: true
   bundle:
     description: Sigstore attestation bundle produced by actions/attest.
     required: true
@@ -85,6 +90,7 @@ runs:
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
         RECEIPT_FILE: ${{ inputs.receipt-file }}
+        CHECKSUMS_FILE: ${{ inputs.checksums-file }}
         BUNDLE: ${{ inputs.bundle }}
       run: |
         args=(attest-attach
@@ -95,6 +101,7 @@ runs:
           --read-user "$READ_USER"
           --read-password "$READ_PASSWORD"
           --receipt-file "$RECEIPT_FILE"
+          --checksums-file "$CHECKSUMS_FILE"
           --bundle "$BUNDLE")
         node --experimental-transform-types \
           --disable-warning=ExperimentalWarning \

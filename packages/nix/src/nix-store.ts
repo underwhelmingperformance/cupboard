@@ -176,6 +176,8 @@ export interface NixBuildResult {
 
 /** Operations provided by a selected Nix store backend. */
 export interface NixStoreClient {
+	/** Whether this transport deliberately omits per-connection SetOptions. */
+	readonly preservesDaemonOptions?: boolean;
 	resolveClosure(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly NixValidPathInfo[]>;

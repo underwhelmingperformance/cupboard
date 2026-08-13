@@ -170,6 +170,23 @@ export type ParsedSubstitutableSizes = z.output<
 	typeof substitutableSizesSchema
 >;
 
+// Why the supervised child ended unsuccessfully. A target-build failure is
+// safe for a best-effort caller to tolerate because the receipt also names the
+// exact requested installables that failed. A command failure carries no such
+// claim: the process may have failed before Nix settled any requested target.
+const failedBuildTargetsSchema = z.array(z.string().min(1)).min(1);
+
+export const terminalBuildFailureSchema = z.discriminatedUnion('kind', [
+	z.strictObject({
+		kind: z.literal('target-build'),
+		failedTargets: failedBuildTargetsSchema
+	}),
+	z.strictObject({ kind: z.literal('command') })
+]);
+export type ParsedTerminalBuildFailure = z.output<
+	typeof terminalBuildFailureSchema
+>;
+
 // What every receipt version records besides its subjects: the realised paths
 // and, when the run planned and published, the per-target outcomes, the
 // planner's counts and sizes, the timings and child exit status, and the
@@ -182,6 +199,7 @@ const buildReceiptFields = {
 	substitutable: substitutableSizesSchema.optional(),
 	evaluationTimeMs: countSchema.optional(),
 	childExitStatus: z.number().int().optional(),
+	terminalFailure: terminalBuildFailureSchema.optional(),
 	uploaded: z.array(storePathSchema).optional(),
 	failed: z.array(storePathSchema).optional(),
 	collected: z.array(storePathSchema).optional()
@@ -223,6 +241,7 @@ export type BuildSubjectV3 = z.input<typeof buildSubjectV3Schema>;
 export type TargetOutcome = z.input<typeof targetOutcomeSchema>;
 export type PlannerPartition = z.input<typeof plannerPartitionSchema>;
 export type SubstitutableSizes = z.input<typeof substitutableSizesSchema>;
+export type TerminalBuildFailure = z.input<typeof terminalBuildFailureSchema>;
 export type BuildReceiptV2 = z.input<typeof buildReceiptV2Schema>;
 export type BuildReceiptV3 = z.input<typeof buildReceiptV3Schema>;
 export type BuildReceipt = z.input<typeof buildReceiptSchema>;

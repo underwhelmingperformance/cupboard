@@ -76,17 +76,22 @@ afterEach(async () => {
 	);
 });
 
-async function helperFixture(): Promise<string> {
+async function helperFixture(): Promise<{
+	readonly executablePath: string;
+	readonly helperPath: string;
+}> {
 	const directory = await mkdtemp(path.join(tmpdir(), 'cup-pre-'));
 	fixtures.push(directory);
 
 	const helperPath = path.join(directory, 'cupboard-hook-relay');
 	await writeFile(helperPath, '');
 
-	return helperPath;
+	return { executablePath: path.join(directory, 'cupboard'), helperPath };
 }
 
 async function baseOptions(): Promise<BuildPushPreflightOptions> {
+	const helper = await helperFixture();
+
 	return {
 		config,
 		socketExists: () => true,
@@ -94,7 +99,7 @@ async function baseOptions(): Promise<BuildPushPreflightOptions> {
 		invocationId,
 		grants,
 		cache,
-		helper: { environment: { CUPBOARD_HOOK_HELPER: await helperFixture() } },
+		helper: { executablePath: helper.executablePath },
 		runtime: { environment: {}, platform: 'linux', temporaryDirectory: '/tmp' }
 	};
 }
@@ -111,7 +116,10 @@ describe('preflightBuildPush', () => {
 			})
 		).resolves.toStrictEqual({
 			daemonSocketPath: '/nix/var/nix/daemon-socket/socket',
-			helperPath: options.helper?.environment?.CUPBOARD_HOOK_HELPER,
+			helperPath: path.join(
+				path.dirname(options.helper?.executablePath ?? ''),
+				'cupboard-hook-relay'
+			),
 			runtimePlan: {
 				directory: '/tmp/cupboard/invocation-1',
 				socketPath: '/tmp/cupboard/invocation-1/hook.sock'
@@ -181,9 +189,7 @@ describe('preflightBuildPush', () => {
 		{
 			name: 'an installation missing its helper',
 			overrides: (): Partial<BuildPushPreflightOptions> => ({
-				helper: {
-					environment: { CUPBOARD_HOOK_HELPER: '/missing/relay' }
-				}
+				helper: { executablePath: '/missing/bin/cupboard' }
 			}),
 			probe: (error: unknown) =>
 				error instanceof HookHelperMissingError
@@ -191,7 +197,10 @@ describe('preflightBuildPush', () => {
 					: undefined,
 			expected: {
 				name: 'HookHelperMissingError',
-				candidates: ['/missing/relay']
+				candidates: [
+					'/missing/bin/cupboard-hook-relay',
+					'/missing/libexec/cupboard/cupboard-hook-relay'
+				]
 			}
 		},
 		{

@@ -1,7 +1,12 @@
 import { createConnection, type Socket } from 'node:net';
+import { performance } from 'node:perf_hooks';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
-import type { StorePathString } from '@cupboard/nix-store/scalars';
+import {
+	type StoreDirectory,
+	storeDirectorySchema,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
@@ -26,6 +31,7 @@ import type {
 } from './store-config.ts';
 
 const defaultDaemonSocketPath = '/nix/var/nix/daemon-socket/socket';
+const defaultStoreDirectory = storeDirectorySchema.parse('/nix/store');
 const workerMagic1 = 0x6e_69_78_63;
 const workerMagic2 = 0x64_78_69_6f;
 const protocolMajor = 1;
@@ -96,13 +102,31 @@ const stderrStartActivity = 0x53_54_52_54;
 const stderrStopActivity = 0x53_54_4f_50;
 const stderrResult = 0x52_53_4c_54;
 
-export interface NixDaemonStoreClientOptions {
+interface NixDaemonStoreClientConnectionOptions {
 	readonly socketPath?: string;
 	readonly connect?: NixDaemonConnector;
-	readonly setOptions?: NixDaemonSetOptions;
-	readonly overrides?: NixDaemonOverrides;
+	readonly storeDirectory?: StoreDirectory;
+	readonly maxConnections?: number;
+	readonly maxConnectionAge?: number;
 	readonly signal?: AbortSignal;
 }
+
+/** How a daemon client configures a connection after its handshake. */
+export type NixDaemonStoreClientOptions =
+	NixDaemonStoreClientConnectionOptions &
+		(
+			| {
+					/** Preserve the daemon's settings by omitting SetOptions. */
+					readonly shouldPreserveDaemonOptions: true;
+					readonly setOptions?: never;
+					readonly overrides?: never;
+			  }
+			| {
+					readonly shouldPreserveDaemonOptions?: false;
+					readonly setOptions?: NixDaemonSetOptions;
+					readonly overrides?: NixDaemonOverrides;
+			  }
+		);
 
 export type NixDaemonConnector = (
 	socketPath: string,
@@ -132,6 +156,8 @@ export interface NixDaemonSession {
 	buildPathsWithResults(
 		targets: readonly NixDerivedPathString[]
 	): Promise<readonly NixBuildResult[]>;
+	/** Read one derivation through this session's selected store. */
+	readDerivation(drvPath: StorePathString): Promise<string>;
 	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo>;
 	queryValidPaths(
 		storePaths: readonly StorePathString[]
@@ -254,10 +280,33 @@ export class NixDaemonConnectionPoolClosedError extends NixDaemonError {
 	}
 }
 
+function combinedAbortSignal(
+	first: AbortSignal | undefined,
+	second: AbortSignal | undefined
+): AbortSignal | undefined {
+	if (first === undefined || first === second) {
+		return second;
+	}
+
+	if (second === undefined) {
+		return first;
+	}
+
+	return AbortSignal.any([first, second]);
+}
+
 export class NixDaemonStoreClient implements NixStoreClient {
 	private readonly socketPath: string;
 
 	private readonly connect: NixDaemonConnector;
+
+	private readonly maxConnections: number;
+
+	private readonly maxConnectionAge?: number;
+
+	private readonly storeDirectory: StoreDirectory;
+
+	private readonly connectionBudget: NixDaemonConnectionBudget;
 
 	private readonly daemonSetOptions: NixDaemonSetOptions;
 
@@ -265,27 +314,63 @@ export class NixDaemonStoreClient implements NixStoreClient {
 
 	private readonly signal?: AbortSignal;
 
+	/** Whether this client deliberately omits SetOptions on every connection. */
+	readonly preservesDaemonOptions: boolean;
+
 	constructor(options: NixDaemonStoreClientOptions = {}) {
 		this.socketPath = options.socketPath ?? defaultDaemonSocketPath;
 		this.connect = options.connect ?? connectToNixDaemon;
+		this.preservesDaemonOptions = options.shouldPreserveDaemonOptions ?? false;
+		this.maxConnections = Math.max(
+			1,
+			options.maxConnections ?? defaultClosureConcurrency
+		);
+		this.maxConnectionAge = options.maxConnectionAge;
+		this.storeDirectory = options.storeDirectory ?? defaultStoreDirectory;
+		this.connectionBudget = new NixDaemonConnectionBudget(this.maxConnections);
 		this.daemonSetOptions = options.setOptions ?? {};
 		this.overrides = options.overrides ?? {};
 		this.signal = options.signal;
 	}
 
-	private async openConnection(): Promise<NixDaemonConnection> {
-		this.signal?.throwIfAborted();
+	private async openConnection(
+		operationSignal?: AbortSignal
+	): Promise<NixDaemonConnection> {
+		const signal = combinedAbortSignal(this.signal, operationSignal);
+		signal?.throwIfAborted();
+		const release = await this.connectionBudget.acquire(signal);
+		const openedAt = performance.now();
+		let connected: Promise<NixDaemonTransport>;
 
-		const connected = this.connect(this.socketPath, this.signal);
-		const transport = await waitForTransport(connected, this.signal);
+		try {
+			connected = this.connect(this.socketPath, signal);
+		} catch (error) {
+			release();
+			throw error;
+		}
+
+		let transport: NixDaemonTransport;
+
+		try {
+			transport = await waitForTransport(connected, signal);
+		} catch (error) {
+			void closeTransportWhenConnected(connected).finally(release);
+			throw error;
+		}
+
 		const abortableTransport =
-			this.signal === undefined
+			signal === undefined
 				? transport
-				: new AbortableNixDaemonTransport(transport, this.signal);
+				: new AbortableNixDaemonTransport(transport, signal);
 		const connection = new NixDaemonConnection(
 			abortableTransport,
+			this.preservesDaemonOptions,
 			this.daemonSetOptions,
-			this.overrides
+			this.overrides,
+			this.storeDirectory,
+			openedAt,
+			release,
+			signal
 		);
 
 		try {
@@ -296,6 +381,31 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		}
 
 		return connection;
+	}
+
+	private connectionPool(
+		initialConnection?: NixDaemonConnection
+	): NixDaemonConnectionPool {
+		return new NixDaemonConnectionPool(
+			(signal) => this.openConnection(signal),
+			this.maxConnections,
+			initialConnection,
+			(connection) =>
+				this.maxConnectionAge === undefined ||
+				connection.ageAt(performance.now()) < this.maxConnectionAge
+		);
+	}
+
+	private async cancelPoolOnFailure<T>(
+		pool: NixDaemonConnectionPool,
+		operation: () => Promise<T>
+	): Promise<T> {
+		try {
+			return await operation();
+		} catch (error) {
+			pool.cancelPendingQueries();
+			throw error;
+		}
 	}
 
 	// One connection decides how a whole batch is answered: its handshake
@@ -336,17 +446,14 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		) => Promise<T>,
 		initialConnection: NixDaemonConnection
 	): Promise<readonly T[]> {
-		const pool = new NixDaemonConnectionPool(
-			() => this.openConnection(),
-			defaultClosureConcurrency,
-			initialConnection
-		);
+		const pool = this.connectionPool(initialConnection);
 
 		try {
 			return await mapWithConcurrency(
 				storePaths,
-				defaultClosureConcurrency,
-				(storePath) => query(storePath, pool)
+				this.maxConnections,
+				(storePath) =>
+					this.cancelPoolOnFailure(pool, () => query(storePath, pool))
 			);
 		} finally {
 			await pool.closeAll();
@@ -356,16 +463,14 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	async resolveClosure(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly NixValidPathInfo[]> {
-		const pool = new NixDaemonConnectionPool(
-			() => this.openConnection(),
-			defaultClosureConcurrency
-		);
+		const pool = this.connectionPool();
 
 		try {
 			return await resolveClosureBy(
 				storePaths,
-				(storePath) => pool.queryPathInfo(storePath),
-				defaultClosureConcurrency
+				(storePath) =>
+					this.cancelPoolOnFailure(pool, () => pool.queryPathInfo(storePath)),
+				this.maxConnections
 			);
 		} finally {
 			await pool.closeAll();
@@ -533,7 +638,15 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		const connection = await this.openConnection();
 
 		try {
-			return await use(new NixDaemonConnectionSession(connection));
+			const operation = use(new NixDaemonConnectionSession(connection));
+
+			if (this.signal === undefined) {
+				return await operation;
+			}
+
+			return await runWithSignal(operation, this.signal, () => {
+				void connection.close();
+			});
 		} finally {
 			await connection.close();
 		}
@@ -543,16 +656,16 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		drvPaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]> {
 		const candidates = sortedUnique(drvPaths);
-		const pool = new NixDaemonConnectionPool(
-			() => this.openConnection(),
-			defaultClosureConcurrency
-		);
+		const pool = this.connectionPool();
 
 		try {
 			const outputPathGroups = await mapWithConcurrency(
 				candidates,
-				defaultClosureConcurrency,
-				(drvPath) => pool.queryDerivationOutputPaths(drvPath)
+				this.maxConnections,
+				(drvPath) =>
+					this.cancelPoolOnFailure(pool, () =>
+						pool.queryDerivationOutputPaths(drvPath)
+					)
 			);
 
 			return sortedUnique(outputPathGroups.flat());
@@ -598,6 +711,10 @@ class NixDaemonConnectionSession implements NixDaemonSession {
 		targets: readonly NixDerivedPathString[]
 	): Promise<readonly NixBuildResult[]> {
 		return this.connection.buildPathsWithResults(sortedUnique(targets));
+	}
+
+	readDerivation(drvPath: StorePathString): Promise<string> {
+		return this.connection.readDerivation(drvPath);
 	}
 
 	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo> {
@@ -651,6 +768,95 @@ class NixDaemonConnectionSession implements NixDaemonSession {
 	}
 }
 
+interface NixDaemonConnectionBudgetWaiter {
+	readonly signal?: AbortSignal;
+	readonly resolve: (release: () => void) => void;
+	readonly reject: (error: unknown) => void;
+	readonly abort: () => void;
+}
+
+// Every operation ultimately opens through this client-owned budget. Pools
+// still decide which of their connections to reuse, while the budget makes the
+// store URI's limit apply across pools, sessions, builds, and streaming reads.
+class NixDaemonConnectionBudget {
+	private active = 0;
+
+	private readonly waiters: NixDaemonConnectionBudgetWaiter[] = [];
+
+	constructor(private readonly max: number) {}
+
+	private lease(): () => void {
+		let isReleased = false;
+
+		return () => {
+			if (isReleased) {
+				return;
+			}
+
+			isReleased = true;
+			this.release();
+		};
+	}
+
+	private release(): void {
+		let waiter = this.waiters.shift();
+
+		while (waiter !== undefined) {
+			waiter.signal?.removeEventListener('abort', waiter.abort);
+
+			if (waiter.signal?.aborted === true) {
+				waiter.reject(abortReason(waiter.signal));
+				waiter = this.waiters.shift();
+				continue;
+			}
+
+			waiter.resolve(this.lease());
+			return;
+		}
+
+		this.active -= 1;
+	}
+
+	async acquire(signal?: AbortSignal): Promise<() => void> {
+		signal?.throwIfAborted();
+
+		if (this.active < this.max) {
+			this.active += 1;
+
+			return this.lease();
+		}
+
+		return new Promise((resolve, reject) => {
+			const abort = (): void => {
+				const index = this.waiters.indexOf(waiter);
+
+				if (index === -1 || signal === undefined) {
+					return;
+				}
+
+				this.waiters.splice(index, 1);
+				reject(abortReason(signal));
+			};
+			const waiter: NixDaemonConnectionBudgetWaiter = {
+				signal,
+				resolve,
+				reject,
+				abort
+			};
+			this.waiters.push(waiter);
+			signal?.addEventListener('abort', abort, { once: true });
+		});
+	}
+}
+
+function abortReason(signal: AbortSignal): Error {
+	return signal.reason instanceof Error
+		? signal.reason
+		: new Error('The Nix daemon operation was aborted', {
+				cause: signal.reason
+			});
+}
+
 // A lazily grown pool of daemon connections, each a serial request/response
 // channel. The closure walk issues several queries at once; this hands each one
 // a free connection, opens a new one up to the cap when none is free, and parks
@@ -663,17 +869,26 @@ class NixDaemonConnectionPool {
 
 	private readonly waiters: {
 		readonly resolve: (connection: NixDaemonConnection) => void;
-		readonly reject: (error: NixDaemonConnectionPoolClosedError) => void;
+		readonly reject: (error: unknown) => void;
 	}[] = [];
 
 	private opened = 0;
 
 	private closed = false;
 
+	private readonly shutdown = new AbortController();
+
+	private readonly opening = new Set<Promise<NixDaemonConnection>>();
+
 	constructor(
-		private readonly open: () => Promise<NixDaemonConnection>,
+		private readonly open: (
+			signal: AbortSignal
+		) => Promise<NixDaemonConnection>,
 		private readonly max: number,
-		initialConnection?: NixDaemonConnection
+		initialConnection?: NixDaemonConnection,
+		private readonly isReusable: (
+			connection: NixDaemonConnection
+		) => boolean = () => true
 	) {
 		if (initialConnection === undefined) {
 			return;
@@ -689,30 +904,41 @@ class NixDaemonConnectionPool {
 			throw new NixDaemonConnectionPoolClosedError();
 		}
 
-		const free = this.free.pop();
+		let free = this.free.pop();
 
-		if (free !== undefined) {
-			return free;
+		while (free !== undefined) {
+			if (this.isReusable(free)) {
+				return free;
+			}
+
+			await this.retire(free);
+			free = this.free.pop();
 		}
 
 		if (this.opened < this.max) {
 			this.opened += 1;
-
-			let connection: NixDaemonConnection;
+			const opening = this.openAndRegister();
+			this.opening.add(opening);
 
 			try {
-				connection = await this.open();
+				return await opening;
 			} catch (error) {
 				this.opened -= 1;
 				throw error;
+			} finally {
+				this.opening.delete(opening);
 			}
-
-			return this.registerOpened(connection);
 		}
 
 		return new Promise((resolve, reject) => {
 			this.waiters.push({ resolve, reject });
 		});
+	}
+
+	private async openAndRegister(): Promise<NixDaemonConnection> {
+		const connection = await this.open(this.shutdown.signal);
+
+		return this.registerOpened(connection);
 	}
 
 	private async registerOpened(
@@ -739,12 +965,59 @@ class NixDaemonConnectionPool {
 		const waiter = this.waiters.shift();
 
 		if (waiter !== undefined) {
-			waiter.resolve(connection);
+			this.free.push(connection);
+			void this.serve(waiter);
 
 			return;
 		}
 
 		this.free.push(connection);
+	}
+
+	private async serve(waiter: {
+		readonly resolve: (connection: NixDaemonConnection) => void;
+		readonly reject: (error: unknown) => void;
+	}): Promise<void> {
+		try {
+			waiter.resolve(await this.acquire());
+		} catch (error) {
+			waiter.reject(error);
+		}
+	}
+
+	private async retire(connection: NixDaemonConnection): Promise<void> {
+		const index = this.all.indexOf(connection);
+
+		if (index !== -1) {
+			this.all.splice(index, 1);
+			this.opened -= 1;
+		}
+
+		await connection.close();
+	}
+
+	cancelPendingQueries(): void {
+		if (this.closed) {
+			return;
+		}
+
+		this.closed = true;
+		this.shutdown.abort(new NixDaemonConnectionPoolClosedError());
+
+		// Connections already registered with the pool may not carry the
+		// shutdown signal: the feature-probing connection is opened before the
+		// fallback pool exists and then reused by it. Closing every registered
+		// connection makes cancellation reach those in-flight operations too.
+		for (const connection of this.all) {
+			void connection.close();
+		}
+
+		const waiters = [...this.waiters];
+		this.waiters.length = 0;
+
+		for (const waiter of waiters) {
+			waiter.reject(new NixDaemonConnectionPoolClosedError());
+		}
 	}
 
 	async queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo> {
@@ -770,16 +1043,12 @@ class NixDaemonConnectionPool {
 	}
 
 	async closeAll(): Promise<void> {
-		this.closed = true;
+		this.cancelPendingQueries();
 
-		await Promise.all(this.all.map((connection) => connection.close()));
-
-		const waiters = [...this.waiters];
-		this.waiters.length = 0;
-
-		for (const waiter of waiters) {
-			waiter.reject(new NixDaemonConnectionPoolClosedError());
-		}
+		await Promise.all([
+			Promise.all(this.all.map((connection) => connection.close())),
+			Promise.allSettled(this.opening)
+		]);
 	}
 }
 
@@ -824,7 +1093,7 @@ async function waitForTransport(
 	signal.throwIfAborted();
 
 	return runWithSignal(connected, signal, () => {
-		void closeTransportWhenConnected(connected);
+		signal.throwIfAborted();
 	});
 }
 
@@ -927,6 +1196,10 @@ class AbortableNixDaemonTransport implements NixDaemonTransport {
 }
 
 class NixDaemonConnection {
+	private closePromise?: Promise<void>;
+
+	private readonly abortListener?: () => void;
+
 	private version: NixDaemonProtocolVersion = {
 		major: protocolMajor,
 		minor: protocolMinor
@@ -938,9 +1211,39 @@ class NixDaemonConnection {
 
 	constructor(
 		private readonly transport: NixDaemonTransport,
+		private readonly shouldPreserveDaemonOptions: boolean,
 		private readonly options: NixDaemonSetOptions,
-		private readonly overrides: NixDaemonOverrides
-	) {}
+		private readonly overrides: NixDaemonOverrides,
+		private readonly storeDirectory: StoreDirectory,
+		private readonly openedAt: number,
+		private readonly releaseBudget: () => void,
+		private readonly signal?: AbortSignal
+	) {
+		if (signal === undefined) {
+			return;
+		}
+
+		this.abortListener = () => {
+			void this.close();
+		};
+		signal.addEventListener('abort', this.abortListener, { once: true });
+
+		if (signal.aborted) {
+			this.abortListener();
+		}
+	}
+
+	private async closeTransport(): Promise<void> {
+		if (this.abortListener !== undefined) {
+			this.signal?.removeEventListener('abort', this.abortListener);
+		}
+
+		try {
+			await this.transport.close();
+		} finally {
+			this.releaseBudget();
+		}
+	}
 
 	private async handshake(): Promise<void> {
 		const request = new NixDaemonWriter();
@@ -1216,16 +1519,30 @@ class NixDaemonConnection {
 	// name and the realised store path are what a build outcome carries.
 	private async readBuiltOutputs(): Promise<Record<string, StorePathString>> {
 		const count = await this.readInteger();
-		const outputs: Record<string, StorePathString> = {};
+		const outputs: [string, StorePathString][] = [];
+		const outputNames = new Set<string>();
 
 		for (let index = 0; index < count; index += 1) {
 			const id = await this.readString();
 			const realisation = await this.readString();
-			outputs[outputNameFromDrvOutputId(id)] =
-				realisationOutputPath(realisation);
+			const outputName = outputNameFromDrvOutputId(id);
+
+			if (outputNames.has(outputName)) {
+				throw new NixDaemonRemoteError(
+					`keyed build result contains duplicate output name: ${outputName}`
+				);
+			}
+
+			const outputPath = realisationOutputPath(
+				realisation,
+				this.storeDirectory
+			);
+
+			outputNames.add(outputName);
+			outputs.push([outputName, outputPath]);
 		}
 
-		return outputs;
+		return Object.fromEntries(outputs);
 	}
 
 	private async readString(): Promise<string> {
@@ -1392,15 +1709,24 @@ class NixDaemonConnection {
 		return this.features.has(featureQueryPathInfos);
 	}
 
+	ageAt(now: number): number {
+		return (now - this.openedAt) / 1000;
+	}
+
 	close(): Promise<void> {
-		return this.transport.close();
+		this.closePromise ??= this.closeTransport();
+
+		return this.closePromise;
 	}
 
 	async initialise(): Promise<void> {
 		await this.handshake();
 		await this.postHandshake();
 		await this.processStderr();
-		await this.setOptions();
+
+		if (!this.shouldPreserveDaemonOptions) {
+			await this.setOptions();
+		}
 	}
 
 	async queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo> {
@@ -1569,6 +1895,12 @@ class NixDaemonConnection {
 		await this.processStderr();
 		// The reply carries one confirmation integer.
 		await this.readInteger();
+	}
+
+	async readDerivation(drvPath: StorePathString): Promise<string> {
+		return new TextDecoder().decode(
+			await narRegularFileContents(this.narFromPath(drvPath))
+		);
 	}
 
 	async *narFromPath(storePath: StorePathString): AsyncIterable<Uint8Array> {
@@ -1923,7 +2255,10 @@ function outputNameFromDrvOutputId(id: string): string {
 	return id.slice(separator + 1);
 }
 
-function realisationOutputPath(json: string): StorePathString {
+function realisationOutputPath(
+	json: string,
+	storeDirectory: StoreDirectory
+): StorePathString {
 	let parsed: unknown;
 
 	try {
@@ -1941,7 +2276,18 @@ function realisationOutputPath(json: string): StorePathString {
 		throw new NixDaemonRemoteError('realisation without an outPath');
 	}
 
-	return requireStorePath(parsed.outPath);
+	const reported = parsed.outPath;
+	const outputPath = requireStorePath(
+		reported.startsWith('/') ? reported : `${storeDirectory}/${reported}`
+	);
+
+	if (!outputPath.startsWith(`${storeDirectory}/`)) {
+		throw new NixDaemonRemoteError(
+			`realisation outPath outside ${storeDirectory}: ${reported}`
+		);
+	}
+
+	return outputPath;
 }
 
 const buildSuccessKinds = [

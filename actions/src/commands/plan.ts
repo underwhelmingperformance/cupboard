@@ -234,7 +234,7 @@ export function registerPlanCommand(
 		)
 		.option(
 			'--store <uri>',
-			'remote ssh-ng store the cohorts build against, whose own answers price the packing measurement'
+			'remote ssh-ng store the cohorts build against; selected output paths must be known during planning'
 		)
 		.action((options: PlanOptions) => planAction(options, environment));
 }
@@ -481,6 +481,11 @@ async function optimisedPlan(
 		dependencies.storeDirectory ?? discoverNixStoreConfig().storeDirectory,
 		dependencies.evaluator
 	);
+	validateRemoteOutputPredictability(
+		inputs.store,
+		evaluations,
+		unevaluated.map((failure) => failure.target.attr)
+	);
 
 	for (const failure of unevaluated) {
 		reporter.warn(
@@ -518,6 +523,36 @@ async function optimisedPlan(
 	});
 
 	return { plan, evaluations };
+}
+
+/** Refuses remote publication unless every target's selected paths are known. */
+export function validateRemoteOutputPredictability(
+	store: string,
+	evaluations: readonly TargetEvaluation[],
+	unevaluatedTargets: readonly string[] = []
+): void {
+	if (store === '') {
+		return;
+	}
+
+	const unsupportedTargets = [
+		...evaluations
+			.filter(
+				(evaluation) =>
+					evaluation.targetPaths.length !== evaluation.target.outputs.length
+			)
+			.map((evaluation) => evaluation.target.attr),
+		...unevaluatedTargets
+	];
+
+	if (unsupportedTargets.length === 0) {
+		return;
+	}
+
+	throw new InvalidInputError(
+		'store',
+		`Remote publication cannot build targets whose selected output paths are unknown during planning: ${unsupportedTargets.join(', ')}. Publish them from the local store until the Nix daemon can return and root newly discovered outputs atomically.`
+	);
 }
 
 function unoptimisedPlan(targets: readonly PublishTarget[]): PublishPlan {

@@ -45,11 +45,21 @@ import {
 
 /**
  * Whether a store's answers reflect the substituter settings it was opened
- * with, naming the trust that settled it when they do not.
+ * with, naming the transport policy or trust that prevents that when they do
+ * not.
  */
 export type SubstituterSettingsOutcome =
 	| { readonly isHonoured: true }
-	| { readonly isHonoured: false; readonly trust: NixDaemonTrust };
+	| {
+			readonly isHonoured: false;
+			readonly reason: 'daemon-options-preserved';
+			readonly trust: 'unknown';
+	  }
+	| {
+			readonly isHonoured: false;
+			readonly reason?: 'daemon-trust';
+			readonly trust: NixDaemonTrust;
+	  };
 
 /** Resolves a path's real location, injected so canonicalisation is testable. */
 export type RealPath = (path: string) => string;
@@ -315,26 +325,39 @@ export class Nix {
 		return this.storeKind !== 'local-filesystem';
 	}
 
+	/** Whether this transport leaves the remote daemon's options untouched. */
+	get preservesDaemonOptions(): boolean {
+		return this.store.preservesDaemonOptions ?? false;
+	}
+
 	/**
 	 * Whether the substituter settings this client was opened with are the
 	 * ones its answers reflect.
 	 *
-	 * A daemon applies an untrusted client's settings selectively and says
-	 * nothing about which it dropped, so only a trusted connection answers for
-	 * the settings it was sent, and an untrusted one reports the trust it did
-	 * report. A store this process drives holds the settings itself, so they
-	 * are always the ones in force.
+	 * An SSH store preserves the remote daemon's settings rather than sending
+	 * these options. Other daemons apply an untrusted client's settings
+	 * selectively and say nothing about which they dropped, so only a trusted
+	 * connection answers for the settings it was sent. A store this process
+	 * drives holds the settings itself, so they are always the ones in force.
 	 */
 	async honoursSubstituterSettings(): Promise<SubstituterSettingsOutcome> {
 		if (!this.cachesSubstituterAnswers) {
 			return { isHonoured: true };
 		}
 
+		if (this.preservesDaemonOptions) {
+			return {
+				isHonoured: false,
+				reason: 'daemon-options-preserved',
+				trust: 'unknown'
+			};
+		}
+
 		const trust = await this.daemonTrust();
 
 		return trust === 'trusted'
 			? { isHonoured: true }
-			: { isHonoured: false, trust };
+			: { isHonoured: false, reason: 'daemon-trust', trust };
 	}
 
 	/** The NAR serialisation of the store path the argument names. */

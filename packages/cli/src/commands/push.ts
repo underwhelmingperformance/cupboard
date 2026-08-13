@@ -10,6 +10,7 @@ import {
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
+import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
 
 import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
@@ -30,9 +31,11 @@ import {
 	AttestationsDisabledError,
 	BuildStoreRequiresAlreadyHeldError,
 	BuildStoreRequiresClaimableError,
+	EmptyPublicationError,
 	InvalidUploadConcurrencyError,
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
+	ReadCredentialPairError,
 	ReceiptFileRequiresStoreError,
 	ReferenceSourcePairError,
 	RunRootTtlWithoutRunRootError
@@ -40,6 +43,7 @@ import {
 import { PublicationCollection } from '../push/publication.ts';
 import { runPush } from '../push/push.ts';
 import { pushClientFor } from '../push/push-client.ts';
+import { parseReadUser } from '../read-user.ts';
 import { parseRootName } from '../root-name.ts';
 import { parseStoreUri } from '../store-uri.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
@@ -53,6 +57,8 @@ interface PushOptions {
 	readonly intermediatePathsFile?: string;
 	readonly referencePathsFile?: string;
 	readonly referenceSource?: URL;
+	readonly readUser?: ReadUser;
+	readonly readPassword?: string;
 	readonly runRoot?: RootName;
 	readonly runRootTtl?: TtlSeconds;
 	readonly cache?: string;
@@ -257,7 +263,7 @@ export function registerPushCommand(
 			'Push one or more store paths to the configured cupboard cache.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<paths...>', 'Nix store paths to push')
+		.argument('[paths...]', 'Nix store paths to push')
 		.option(
 			'--github-oidc',
 			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
@@ -297,6 +303,15 @@ export function registerPushCommand(
 			'--reference-source <url>',
 			'served cache endpoint the reference paths are read from (required with --reference-paths-file)',
 			parseWorkerUrl
+		)
+		.option(
+			'--read-user <user>',
+			'username for private reference-source reads',
+			parseReadUser
+		)
+		.option(
+			'--read-password <password>',
+			'password for private reference-source reads'
 		)
 		.option(
 			'--run-root <name>',
@@ -397,6 +412,13 @@ export function registerPushCommand(
 
 			validateRetentionChoice(options);
 
+			if (
+				(options.readUser === undefined) !==
+				(options.readPassword === undefined)
+			) {
+				throw new ReadCredentialPairError();
+			}
+
 			const buildStore = receiptBuildStore(options);
 
 			if (
@@ -430,6 +452,15 @@ export function registerPushCommand(
 					referencePaths: resolvePushPaths(referencePaths)
 				})
 			});
+
+			const isEmptyRootReplacement =
+				publication.entries.length === 0 &&
+				options.root !== undefined &&
+				options.dryRun !== true;
+
+			if (!isEmptyRootReplacement && publication.entries.length === 0) {
+				throw new EmptyPublicationError();
+			}
 			const reporter = commandUi(program, programOptions).reporter();
 			const raw = CupboardClient.fromUrl(url, {
 				cache: options.cache,
@@ -461,7 +492,13 @@ export function registerPushCommand(
 				}),
 				...(options.closure !== undefined && { closure: options.closure }),
 				...(options.referenceSource !== undefined && {
-					referenceSource: { url: options.referenceSource }
+					referenceSource: {
+						url: options.referenceSource,
+						...(options.readUser !== undefined && {
+							readUser: options.readUser,
+							readPassword: options.readPassword
+						})
+					}
 				}),
 				wait: options.wait,
 				signal: programOptions.signal,
