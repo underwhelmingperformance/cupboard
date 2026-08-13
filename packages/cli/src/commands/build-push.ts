@@ -49,6 +49,7 @@ import {
 	CohortsFileInvalidError,
 	InvalidUploadConcurrencyError
 } from '../errors.ts';
+import { reportUnknownSettings } from '../nix/settings.ts';
 import { pushClientFor } from '../push/push-client.ts';
 import { parseRootName } from '../root-name.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
@@ -351,6 +352,8 @@ export function registerBuildPushCommand(
 				// answers, and this process's own reader on a machine where none
 				// does, which is the machine a reconciled local run publishes from.
 				const nix = Nix.open();
+
+				reportUnknownSettings(reporter, nix.unknownSettings);
 				// A multi-cohort run aggregates its receipts itself, so only the
 				// single-cohort form hands the receipt file to the run.
 				const perCohortReceiptFile =

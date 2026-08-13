@@ -150,6 +150,7 @@ function openStore(overrides: Readonly<Record<string, string>> = {}): Nix {
 			},
 			readFile: noConfigFile,
 			homeDirectory: noConfigFile,
+			workingDirectory: () => process.cwd(),
 			currentSystem: () => nixSystem(),
 			// This store's configuration is the environment above; what the
 			// machine running the test offers a build has no bearing on it.

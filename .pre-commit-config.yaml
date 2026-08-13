@@ -70,6 +70,18 @@ repos:
             scripts/flake-dependencies\.ts
           )$
 
+      - id: pnpm-check-conformance-oracle
+        name: pnpm check:conformance-oracle
+        entry: pnpm check:conformance-oracle
+        language: system
+        pass_filenames: false
+        files: >-
+          (?x)^(
+            flake\.lock|
+            scripts/conformance-oracle\.ts|
+            tests/conformance/oracle\.json
+          )$
+
       - id: pnpm-check-format
         name: pnpm check:format
         entry: pnpm check:format

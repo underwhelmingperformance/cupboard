@@ -2,25 +2,46 @@ import { open } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { MismatchedNarInfoPathError } from '@cupboard/nix-store/errors';
 import {
-	referencesSchema,
+	type NarInfoOffer,
+	offerFromNarInfo
+} from '@cupboard/nix-store/narinfo-reader';
+import {
 	type StoreDirectory,
 	storeDirectorySchema,
-	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import {
+	basicAuthHeader,
+	type BasicCredential,
+	readUserSchema
+} from '@cupboard/shared/http';
 
 import {
+	type LocalStoreDirectories,
+	localStoreOfUri,
+	storeUriParameters,
+	storeUriQuery
+} from './local-store-uri.ts';
+import { netrcCredentialFor } from './netrc.ts';
+import {
+	type NixStoreDatabase,
+	openLocalStoreDatabase,
+	pathInfoIn
+} from './nix-local-store.ts';
+import {
+	NixConfigSettingError,
 	NixStoreError,
 	type NixSubstituterOffer,
 	type UnreachableSubstituter
 } from './nix-store.ts';
 import {
 	defaultFileTransferSettings,
+	isEnabledSettingValue,
 	type NixFileTransferSettings
 } from './store-config.ts';
 
@@ -79,6 +100,14 @@ function transferSettings(
 	dependencies: SubstituterEnvironment
 ): NixFileTransferSettings {
 	return dependencies.transfer ?? defaultFileTransferSettings;
+}
+
+// The store directory the answers are for, which is also the one a substituter
+// naming none of its own is read as serving.
+function queriedStoreDirectory(
+	dependencies: SubstituterEnvironment
+): StoreDirectory {
+	return dependencies.storeDirectory ?? servedStoreDirectory;
 }
 
 // `http-connections` reads zero as no limit, which still needs a bound here:
@@ -155,7 +184,24 @@ export interface SubstituterDescription {
  * this machine.
  */
 export type SubstituterLocation =
-	| { readonly kind: 'http'; readonly baseUrl: URL }
+	| {
+			/**
+			 * A local Nix store, which serves what its database holds. A store
+			 * publishes no `nix-cache-info` and no narinfo, so its answers are
+			 * read from the database rather than from documents.
+			 */
+			readonly kind: 'local-store';
+			readonly directories: LocalStoreDirectories;
+	  }
+	| {
+			readonly kind: 'http';
+			readonly baseUrl: URL;
+			/**
+			 * What the cache asks for before it serves anything, when the store
+			 * URI or the netrc names it.
+			 */
+			readonly credential?: BasicCredential;
+	  }
 	| { readonly kind: 'file'; readonly directory: string };
 
 /** One configured substituter, ready to be asked about paths. */
@@ -190,6 +236,18 @@ export interface SubstituterEnvironment {
 	 * serves, which is the one being asked about.
 	 */
 	readonly storeDirectory?: StoreDirectory;
+	/**
+	 * Where a local store keeps its database, for a substituter naming a store
+	 * rather than a cache. A URI naming a root of its own states this itself.
+	 */
+	readonly stateDirectory?: string;
+	/** Opens a local store's database, injected so a test needs no store. */
+	readonly openStore?: (stateDirectory: string) => NixStoreDatabase;
+	/**
+	 * The netrc the configuration names, as it was read. A request to a host it
+	 * names carries that host's credentials.
+	 */
+	readonly netrc?: string;
 }
 
 /** The substituters a client can ask, and the ones it cannot. */
@@ -203,10 +261,12 @@ export interface OpenedSubstituters {
 }
 
 /**
- * Opens each configured substituter. One that cannot describe itself is left
- * out, since a substituter that cannot answer for its own `nix-cache-info`
- * cannot be asked about paths either, and it is named among the unreachable:
- * every later answer is missing whatever it held.
+ * Opens each configured substituter. One that cannot describe itself and one
+ * serving another store's paths are both left out, and each is named among the
+ * unreachable: every later answer is missing whatever it held.
+ *
+ * A resolved configuration holds the substituters Nix holds, a URI stated
+ * twice among them, so each distinct one is opened and asked once.
  */
 export async function openSubstituters(
 	uris: readonly string[],
@@ -216,22 +276,45 @@ export async function openSubstituters(
 		[...new Set(uris)],
 		requestConcurrency(dependencies),
 		async (uri): Promise<OpenOutcome> => {
-			const parsed = substituterConfiguration(uri);
+			const parsed = substituterConfiguration(uri, dependencies);
 
 			if (!parsed.opened) {
-				return { ...parsed, uri };
+				return { opened: false, unreachable: { uri, reason: parsed.reason } };
 			}
 
 			const { location, configured } = parsed;
 			const described = await describeSubstituter(location, uri, dependencies);
 
+			if (described.kind !== 'described') {
+				return {
+					opened: false,
+					unreachable: { uri, reason: described.reason }
+				};
+			}
+
 			// A store URI's own parameters settle what they name, and the
 			// document fills in the rest.
-			return described === undefined
-				? { opened: false, uri, reason: 'no-cache-info' }
+			const substituter = {
+				uri,
+				location,
+				...described.description,
+				...configured
+			};
+			const queried = queriedStoreDirectory(dependencies);
+
+			// Nix refuses to open a cache serving another store's paths, so it
+			// is named here rather than left out of the query silently: every
+			// answer the query gives is missing whatever that cache held.
+			return substituter.storeDirectory === queried
+				? { opened: true, substituter }
 				: {
-						opened: true,
-						substituter: { uri, location, ...described, ...configured }
+						opened: false,
+						unreachable: {
+							uri,
+							reason: 'store-directory-mismatch',
+							servesStoreDirectory: substituter.storeDirectory,
+							queriedStoreDirectory: queried
+						}
 					};
 		}
 	);
@@ -242,7 +325,7 @@ export async function openSubstituters(
 		if (outcome.opened) {
 			substituters.push(outcome.substituter);
 		} else {
-			unreachable.push({ uri: outcome.uri, reason: outcome.reason });
+			unreachable.push(outcome.unreachable);
 		}
 	}
 
@@ -262,7 +345,7 @@ export async function openSubstituters(
 // How opening one configured substituter settled.
 type OpenOutcome =
 	| { readonly opened: true; readonly substituter: Substituter }
-	| ({ readonly opened: false } & UnreachableSubstituter);
+	| { readonly opened: false; readonly unreachable: UnreachableSubstituter };
 
 /**
  * The substituters a client asks: the opened ones, or a way to open them when
@@ -374,6 +457,9 @@ export class SubstituterClient {
 		}
 	}
 
+	// Nix puts a question only to the substituters serving the store directory
+	// it is asking about, so one serving another store's paths answers nothing
+	// here.
 	private serves(substituter: Substituter): boolean {
 		return substituter.storeDirectory === this.options.storeDirectory;
 	}
@@ -382,6 +468,14 @@ export class SubstituterClient {
 		substituter: Substituter,
 		storePath: StorePathString
 	): Promise<SubstituterAnswer> {
+		if (substituter.location.kind === 'local-store') {
+			return this.offerFromStore(
+				substituter,
+				substituter.location.directories,
+				storePath
+			);
+		}
+
 		const asked = await readDocument(
 			substituter.location,
 			substituter.uri,
@@ -420,6 +514,67 @@ export class SubstituterClient {
 					cause: error
 				})
 			};
+		}
+	}
+
+	/**
+	 * What a local store offers for the path, read from its database. A store
+	 * serves the NAR it would dump on request, so it names no transfer size:
+	 * Nix reports a download of nothing for a store that publishes no narinfo,
+	 * and the NAR size the database holds for what the fetch would materialise.
+	 */
+	private offerFromStore(
+		substituter: Substituter,
+		directories: LocalStoreDirectories,
+		storePath: StorePathString
+	): SubstituterAnswer {
+		const open = this.options.openStore ?? openLocalStoreDatabase;
+		let database: NixStoreDatabase;
+
+		try {
+			database = open(directories.stateDirectory);
+		} catch (error) {
+			this.raiseIfAbandoned();
+
+			return {
+				kind: 'failed',
+				error: new SubstituterUnreachableError(substituter.uri, undefined, {
+					cause: error
+				})
+			};
+		}
+
+		try {
+			const held = pathInfoIn(database, storePath);
+
+			if (held === undefined) {
+				return { kind: 'absent' };
+			}
+
+			return {
+				kind: 'held',
+				offer: {
+					source: 'substituter',
+					narHash: held.narHash,
+					narSize: held.narSize,
+					downloadSize: 0,
+					references: held.references,
+					signatures: held.signatures,
+					fromTrustedSubstituter: substituter.isTrusted,
+					...(held.deriver !== undefined && { deriver: held.deriver })
+				}
+			};
+		} catch (error) {
+			this.raiseIfAbandoned();
+
+			return {
+				kind: 'failed',
+				error: new SubstituterAnswerUnreadableError(substituter.uri, {
+					cause: error
+				})
+			};
+		} finally {
+			database.close();
 		}
 	}
 
@@ -537,10 +692,9 @@ export class SubstituterClient {
 }
 
 /** What a substituter reported for one path, without naming the path. */
-type SubstituterOffer = Omit<NixSubstituterOffer, 'storePath'>;
-
-/** What one narinfo states, before the substituter serving it is named. */
-type NarInfoOffer = Omit<SubstituterOffer, 'fromTrustedSubstituter'>;
+type SubstituterOffer = NarInfoOffer & {
+	readonly fromTrustedSubstituter: boolean;
+};
 
 /** A substituter that answered neither what it holds nor that it holds nothing. */
 type SubstituterFailure =
@@ -583,6 +737,7 @@ type DocumentOutcome =
 async function fetchDocument(
 	url: URL,
 	uri: string,
+	credential: BasicCredential | undefined,
 	dependencies: SubstituterEnvironment
 ): Promise<DocumentOutcome> {
 	const fetcher = dependencies.fetch ?? fetch;
@@ -601,7 +756,10 @@ async function fetchDocument(
 				signal: requestSignal(
 					settings.stalledTransferTimeoutMs,
 					dependencies.signal
-				)
+				),
+				...(credential !== undefined && {
+					headers: basicAuthHeader(credential)
+				})
 			});
 		} catch (error) {
 			dependencies.signal?.throwIfAborted();
@@ -729,25 +887,51 @@ function retryDelayMs(
 		: Math.max(floor, backoff);
 }
 
-// A server asking for a wait states it in seconds, or as the moment to come
-// back at.
+/**
+ * The wait a server asked for, or nothing when it asked for none this can read.
+ * A server states the wait in seconds or as the moment to come back at, and Nix
+ * reads it that way round; a header naming neither is one Nix passes over, so
+ * the wait is the one the backoff would have settled on anyway.
+ */
 function retryAfterMilliseconds(response: Response): number | undefined {
-	const asked = response.headers.get('retry-after');
+	const header = response.headers.get('retry-after');
 
-	if (asked === null) {
+	if (header === null) {
 		return;
 	}
 
-	const seconds = leadingInteger(asked);
+	const asked = header.trim();
+	const seconds = delaySeconds(asked);
 
 	if (seconds !== undefined) {
-		return Math.max(0, seconds) * 1000;
+		return seconds * 1000;
 	}
 
 	const moment = Date.parse(asked);
 
 	return Number.isNaN(moment) ? undefined : Math.max(0, moment - Date.now());
 }
+
+/**
+ * The seconds a `Retry-After` states, when the whole of it states them. The
+ * header writes a delay as digits and nothing else, and Nix reads the whole
+ * value into an unsigned 32-bit count, so a sign, a fraction, anything
+ * following the digits, and a count wider than that field all leave the value
+ * naming no delay at all.
+ */
+function delaySeconds(value: string): number | undefined {
+	if (!/^\d+$/u.test(value)) {
+		return;
+	}
+
+	const seconds = Number(value);
+
+	return seconds <= maxDelaySeconds ? seconds : undefined;
+}
+
+// The widest delay a `Retry-After` can stand for, which is the field Nix reads
+// one into.
+const maxDelaySeconds = 2 ** 32 - 1;
 
 // A signal carries whatever reason the caller gave, which need not be an
 // error; a caller that gave none gets the one abandoning always means.
@@ -762,6 +946,14 @@ function sleep(
 	signal: AbortSignal | undefined
 ): Promise<void> {
 	return new Promise((resolve, reject) => {
+		// A listener added to a signal already aborted never fires, so that case
+		// is settled here rather than left to one.
+		if (signal?.aborted === true) {
+			reject(abandonedReason(signal));
+
+			return;
+		}
+
 		const timer = setTimeout(() => {
 			signal?.removeEventListener('abort', abandon);
 			resolve();
@@ -785,17 +977,6 @@ async function discard(response: Response): Promise<void> {
 	await response.body?.cancel();
 }
 
-/**
- * A narinfo missing what Nix requires of one. Nix reads such a document as a
- * corrupt answer, so nothing here is read out of it either.
- */
-class CorruptNarInfoError extends NixStoreError {
-	constructor(public readonly storePath: StorePathString) {
-		super(`The narinfo served for ${storePath} is missing required fields`);
-		this.name = 'CorruptNarInfoError';
-	}
-}
-
 /** An answer longer than a substituter's answer can be. */
 class OversizedSubstituterAnswerError extends NixStoreError {
 	constructor(public readonly maxByteLength: number) {
@@ -805,341 +986,6 @@ class OversizedSubstituterAnswerError extends NixStoreError {
 		this.name = 'OversizedSubstituterAnswerError';
 	}
 }
-
-/** A narinfo that describes a path other than the one it was asked for. */
-class MismatchedNarInfoPathError extends NixStoreError {
-	constructor(public readonly storePath: StorePathString) {
-		super(`The narinfo served does not describe ${storePath}`);
-		this.name = 'MismatchedNarInfoPathError';
-	}
-}
-
-// The literal a cache serves for a path whose deriver it does not know.
-// cache.nixos.org carries it on many older paths, and Nix reads it as an
-// absent deriver.
-const unknownDeriver = 'unknown-deriver';
-
-// A served narinfo names the deriver and every reference by basename, while a
-// substitutable-path answer names them the way the store does. A narinfo is
-// read whatever compression it names, and a document missing what Nix
-// requires of one is refused as corrupt, the way Nix refuses it.
-function offerFromNarInfo(
-	source: string,
-	storePath: StorePathString,
-	storeDirectory: StoreDirectory
-): NarInfoOffer {
-	const read = new NarInfoReader(source, storePath, storeDirectory);
-
-	return read.offer();
-}
-
-/**
- * Reads a narinfo the way Nix reads one from a substituter. Nix accepts a
- * document only when it can read
- * every field it carries, so a value this reader let through is a value Nix
- * would refuse the whole document over: a path counted as available on the
- * strength of one is a path Nix would decline to fetch.
- *
- * A field's value starts two characters past its colon, and every line ends
- * with a newline, both of which Nix requires exactly.
- */
-class NarInfoReader {
-	private references?: readonly StorePathString[];
-
-	private deriver?: StorePathString;
-
-	private url = '';
-
-	private narSize = 0;
-
-	private downloadSize = 0;
-
-	private hasPath = false;
-
-	private narHash?: NixSha256Hash;
-
-	// A narinfo carries one `Sig` line per key that signed the path.
-	private readonly signatures: string[] = [];
-
-	constructor(
-		private readonly source: string,
-		private readonly storePath: StorePathString,
-		private readonly storeDirectory: StoreDirectory
-	) {}
-
-	private readLines(): void {
-		let position = 0;
-
-		while (position < this.source.length) {
-			const colon = this.source.indexOf(':', position);
-
-			if (colon === -1) {
-				throw new CorruptNarInfoError(this.storePath);
-			}
-
-			const end = this.source.indexOf('\n', colon + 2);
-
-			if (end === -1) {
-				throw new CorruptNarInfoError(this.storePath);
-			}
-
-			this.readField(
-				this.source.slice(position, colon),
-				this.source.slice(colon + 2, end)
-			);
-			position = end + 1;
-		}
-	}
-
-	private readField(name: string, value: string): void {
-		if (name === 'StorePath') {
-			// The answer stands for the path it was asked about. A substituter
-			// naming another describes something the caller did not ask for.
-			if (value !== this.storePath) {
-				throw new MismatchedNarInfoPathError(this.storePath);
-			}
-
-			this.hasPath = true;
-
-			return;
-		}
-
-		if (name === 'URL') {
-			this.url = value;
-
-			return;
-		}
-
-		this.readMeasuredField(name, value);
-	}
-
-	private readMeasuredField(name: string, value: string): void {
-		if (name === 'Compression') {
-			// An empty value is the one Nix reads as its own default.
-			if (value !== '' && !compressionAlgorithms.has(value)) {
-				throw new CorruptNarInfoError(this.storePath);
-			}
-
-			return;
-		}
-
-		if (name === 'FileHash' || name === 'NarHash') {
-			this.readHash(name, value);
-
-			return;
-		}
-
-		if (name === 'FileSize' || name === 'NarSize') {
-			this.readSize(name, value);
-
-			return;
-		}
-
-		this.readNamedField(name, value);
-	}
-
-	private readNamedField(name: string, value: string): void {
-		if (name === 'References') {
-			// Nix separates them with single spaces, so anything else lands
-			// inside a name and stops it being one.
-			if (this.references !== undefined) {
-				throw new CorruptNarInfoError(this.storePath);
-			}
-
-			this.references = referencesSchema
-				.parse(value.split(' ').filter(Boolean))
-				.map((basename) => this.inStore(basename));
-
-			return;
-		}
-
-		if (name === 'Deriver') {
-			// The literal a cache serves for a path whose deriver it does not
-			// know, which Nix reads as no deriver.
-			this.deriver = value === unknownDeriver ? undefined : this.inStore(value);
-
-			return;
-		}
-
-		if (name === 'Sig') {
-			if (!signaturePattern.test(value)) {
-				throw new CorruptNarInfoError(this.storePath);
-			}
-
-			this.signatures.push(value);
-
-			return;
-		}
-
-		if (name === 'CA' && value !== '' && !contentAddressPattern.test(value)) {
-			throw new CorruptNarInfoError(this.storePath);
-		}
-	}
-
-	// Nix reads a hash field as an algorithm and a digest, in any of the
-	// spellings it writes them in, and refuses the document when it cannot.
-	// A NAR hash is kept when it is sha256, the algorithm a store path's own
-	// hash uses and so the only one an offer can be compared under; a document
-	// naming any other algorithm states a hash this reader has no offer to
-	// make from.
-	private readHash(name: string, value: string): void {
-		if (!isHashField(value)) {
-			throw new CorruptNarInfoError(this.storePath);
-		}
-
-		if (name !== 'NarHash') {
-			return;
-		}
-
-		this.narHash = sha256Of(value);
-	}
-
-	private readSize(name: string, value: string): void {
-		if (!/^\d+$/u.test(value)) {
-			throw new CorruptNarInfoError(this.storePath);
-		}
-
-		const parsed = Number(value);
-
-		if (!Number.isSafeInteger(parsed)) {
-			throw new CorruptNarInfoError(this.storePath);
-		}
-
-		if (name === 'NarSize') {
-			this.narSize = parsed;
-		} else {
-			this.downloadSize = parsed;
-		}
-	}
-
-	private inStore(basename: string): StorePathString {
-		const named = storePathSchema.safeParse(
-			`${this.storeDirectory}/${basename}`
-		);
-
-		if (!named.success) {
-			throw new CorruptNarInfoError(this.storePath);
-		}
-
-		return named.data;
-	}
-
-	offer(): NarInfoOffer {
-		this.readLines();
-
-		const narHash = this.narHash;
-
-		// Nix reads a document missing any of these as one the substituter did
-		// not finish writing.
-		if (
-			narHash === undefined ||
-			!this.hasPath ||
-			this.url === '' ||
-			this.narSize === 0
-		) {
-			throw new CorruptNarInfoError(this.storePath);
-		}
-
-		return {
-			source: 'substituter',
-			references: this.references ?? [],
-			...(this.deriver !== undefined && { deriver: this.deriver }),
-			narHash,
-			signatures: [...this.signatures],
-			downloadSize: this.downloadSize,
-			narSize: this.narSize
-		};
-	}
-}
-
-// The compression a narinfo may name, which Nix reads by the same list.
-const compressionAlgorithms = new Set([
-	'none',
-	'br',
-	'bzip2',
-	'compress',
-	'grzip',
-	'gzip',
-	'lrzip',
-	'lz4',
-	'lzip',
-	'lzma',
-	'lzop',
-	'xz',
-	'zstd'
-]);
-
-// `<algorithm>:<digest>`, the digest written base16, base32 or base64.
-// The digest sizes, in bytes, of the algorithms a hash field may name.
-const hashDigestBytes = new Map([
-	['md5', 16],
-	['sha1', 20],
-	['sha256', 32],
-	['sha512', 64]
-]);
-
-const hashFieldPattern = /^([\da-z]+)([:-])([\d+/A-Za-z]+={0,2})$/u;
-
-/**
- * Whether the value names an algorithm and a digest that algorithm writes.
- * Nix takes the algorithm from before the separator and reads the digest by
- * its length, so a digest of any other length is one it cannot read.
- */
-function isHashField(value: string): boolean {
-	const named = hashFieldPattern.exec(value);
-
-	if (named === null) {
-		return false;
-	}
-
-	const [, algorithm, separator, digest] = named;
-
-	if (algorithm === undefined || digest === undefined) {
-		return false;
-	}
-
-	const bytes = hashDigestBytes.get(algorithm);
-
-	if (bytes === undefined) {
-		return false;
-	}
-
-	// A dash names the SRI spelling, which is always base64.
-	return separator === '-'
-		? digest.length === base64Length(bytes)
-		: [2 * bytes, base32Length(bytes), base64Length(bytes)].includes(
-				digest.length
-			);
-}
-
-// The sha256 spellings a narinfo writes, read as a hash. A field naming any
-// other algorithm is one no store path's NAR hash can be compared under, and
-// the SRI spelling separates the algorithm from its base64 digest with a dash.
-function sha256Of(value: string): NixSha256Hash | undefined {
-	const prefixed = value.startsWith('sha256-')
-		? `sha256:${value.slice('sha256-'.length)}`
-		: value;
-
-	if (!prefixed.startsWith('sha256:')) {
-		return;
-	}
-
-	return NixSha256Hash.parsePrefixed(prefixed);
-}
-
-function base32Length(bytes: number): number {
-	return Math.ceil((bytes * 8) / 5);
-}
-
-function base64Length(bytes: number): number {
-	return 4 * Math.ceil(bytes / 3);
-}
-
-// A signature names the key that made it and carries the signature itself.
-const signaturePattern = /^[^\s:]+:[\d+/A-Za-z]+={0,2}$/u;
-
-// A content address names how it was made before the hash it is.
-const contentAddressPattern = /^[\d:A-Za-z-]+$/u;
 
 // Nix reads a priority with a signed conversion, which takes the digits it
 // starts with and stops at the first character that is not one.
@@ -1235,12 +1081,25 @@ function requestSignal(
 }
 
 /**
- * A substituter is configured as a store URI. A binary cache served over HTTP
- * and one held in a directory are both read here; any other scheme names a
- * store this reader does not open, and it is reported as such so a caller
- * knows its answers are missing whatever that store holds.
+ * A substituter is configured as a store URI. A binary cache served over HTTP,
+ * one held in a directory, and a local store are all read here; any other
+ * scheme names a store this reader does not open, and it is reported as such
+ * so a caller knows its answers are missing whatever that store holds.
+ *
+ * A local store is read from the URI as it was written, since Nix names one by
+ * the bare word as well as by the scheme, and the bare word carrying
+ * parameters is no URL.
  */
-function substituterConfiguration(uri: string): ConfigurationOutcome {
+function substituterConfiguration(
+	uri: string,
+	dependencies: SubstituterEnvironment
+): ConfigurationOutcome {
+	const local = localStoreLocation(uri, dependencies);
+
+	if (local !== undefined) {
+		return describedBy(local, storeUriQuery(uri));
+	}
+
 	let parsed: URL;
 
 	try {
@@ -1249,14 +1108,48 @@ function substituterConfiguration(uri: string): ConfigurationOutcome {
 		return { opened: false, reason: 'unreadable-uri' };
 	}
 
-	const location = substituterLocation(parsed);
+	const location = substituterLocation(parsed, dependencies);
 
 	if (location === undefined) {
 		return { opened: false, reason: 'unsupported-scheme' };
 	}
 
-	return { opened: true, location, configured: configuredDescription(parsed) };
+	return describedBy(location, parsed.search.replace(/^\?/u, ''));
 }
+
+// The parameters a store URI carries settle what they name, and a value the
+// setting they name could not hold leaves the URI naming a substituter this
+// reader will not invent.
+function describedBy(
+	location: SubstituterLocation,
+	query: string
+): ConfigurationOutcome {
+	try {
+		return { opened: true, location, configured: configuredDescription(query) };
+	} catch {
+		return { opened: false, reason: 'unreadable-uri' };
+	}
+}
+
+// The local store a substituter names, or `undefined` for one naming anything
+// else. A URI naming no root of its own reads the directories the running
+// configuration settled.
+function localStoreLocation(
+	uri: string,
+	dependencies: SubstituterEnvironment
+): SubstituterLocation | undefined {
+	const directories = localStoreOfUri(uri, {
+		storeDirectory: queriedStoreDirectory(dependencies),
+		stateDirectory: dependencies.stateDirectory ?? defaultStateDirectory
+	});
+
+	return directories === undefined
+		? undefined
+		: { kind: 'local-store', directories };
+}
+
+// Where Nix keeps a local store's state when nothing names another directory.
+const defaultStateDirectory = '/nix/var/nix';
 
 type ConfigurationOutcome =
 	| {
@@ -1266,10 +1159,13 @@ type ConfigurationOutcome =
 	  }
 	| {
 			readonly opened: false;
-			readonly reason: UnreachableSubstituter['reason'];
+			readonly reason: 'unreadable-uri' | 'unsupported-scheme';
 	  };
 
-function substituterLocation(parsed: URL): SubstituterLocation | undefined {
+function substituterLocation(
+	parsed: URL,
+	dependencies: SubstituterEnvironment
+): SubstituterLocation | undefined {
 	if (parsed.protocol === 'file:') {
 		return {
 			kind: 'file',
@@ -1277,17 +1173,57 @@ function substituterLocation(parsed: URL): SubstituterLocation | undefined {
 		};
 	}
 
-	return parsed.protocol === 'http:' || parsed.protocol === 'https:'
-		? { kind: 'http', baseUrl: withoutParameters(parsed) }
-		: undefined;
+	if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+		return;
+	}
+
+	const credential = substituterCredential(parsed, dependencies.netrc);
+
+	return {
+		kind: 'http',
+		baseUrl: withoutParameters(parsed),
+		...(credential !== undefined && { credential })
+	};
 }
 
-// A store URI's parameters configure the store, so the base every document is
-// read under is the URI without them.
+/**
+ * What a cache asks for before it serves anything. A store URI stating a user
+ * and password states the credentials itself, and one stating none leaves the
+ * netrc to name them by host.
+ */
+function substituterCredential(
+	parsed: URL,
+	netrc: string | undefined
+): BasicCredential | undefined {
+	if (parsed.username !== '') {
+		return {
+			user: readUserSchema.parse(decodeURIComponent(parsed.username)),
+			password: decodeURIComponent(parsed.password)
+		};
+	}
+
+	const named =
+		netrc === undefined
+			? undefined
+			: netrcCredentialFor(netrc, parsed.hostname);
+
+	return named === undefined
+		? undefined
+		: { user: readUserSchema.parse(named.login), password: named.password };
+}
+
+/**
+ * A store URI's parameters configure the store, so the base every document is
+ * read under is the URI without them. The credentials it may state go the same
+ * way: they are carried as a header, and a URL holding any is one no request
+ * can be made from.
+ */
 function withoutParameters(parsed: URL): URL {
 	const base = new URL(parsed);
 	base.search = '';
 	base.hash = '';
+	base.username = '';
+	base.password = '';
 
 	return base;
 }
@@ -1298,8 +1234,9 @@ function withoutParameters(parsed: URL): URL {
  * it holds nothing, and anything else that stops the read is the substituter
  * failing to answer.
  */
+// A local store publishes no documents, so only a cache reaches this.
 async function readDocument(
-	location: SubstituterLocation,
+	location: Exclude<SubstituterLocation, { kind: 'local-store' }>,
 	uri: string,
 	documentPath: string,
 	dependencies: SubstituterEnvironment
@@ -1308,6 +1245,7 @@ async function readDocument(
 		return fetchDocument(
 			new URL(`${canonicalHref(location.baseUrl)}/${documentPath}`),
 			uri,
+			location.credential,
 			dependencies
 		);
 	}
@@ -1323,7 +1261,7 @@ async function readDocument(
 	} catch (error) {
 		dependencies.signal?.throwIfAborted();
 
-		return absentFileErrorCodes.has(errorCodeOf(error))
+		return errorCodeOf(error) === absentFileErrorCode
 			? { kind: 'absent' }
 			: {
 					kind: 'failed',
@@ -1334,10 +1272,12 @@ async function readDocument(
 	}
 }
 
-// What a filesystem reports for a document a directory does not hold, whether
-// because the file is absent or because a component of its path is not a
-// directory at all.
-const absentFileErrorCodes = new Set(['ENOENT', 'ENOTDIR', 'EISDIR']);
+// What a filesystem reports for a document a directory does not hold. Nix reads
+// this one code as the cache saying it holds nothing and lets every other one
+// stand as the read failing, so a directory whose path runs through a file, or
+// one this process may not read, is a substituter that could not answer rather
+// than one answering that it holds nothing.
+const absentFileErrorCode = 'ENOENT';
 
 function errorCodeOf(error: unknown): string {
 	return error instanceof Error && 'code' in error
@@ -1350,54 +1290,149 @@ function errorCodeOf(error: unknown): string {
  * same way every other one is, so a cache that is briefly unreachable while a
  * plan starts is still opened rather than left out of every answer after.
  *
- * A substituter that cannot say which store it serves, says something
- * unreadable, or says more than an answer can hold cannot be asked about that
- * store's paths.
+ * A substituter that says something unreadable, or says more than an answer
+ * can hold, cannot be asked about a store's paths.
  */
 async function describeSubstituter(
 	location: SubstituterLocation,
 	uri: string,
 	dependencies: SubstituterEnvironment
-): Promise<SubstituterDescription | undefined> {
+): Promise<CacheInfoOutcome> {
+	// A local store publishes nothing about itself, so it stands on the
+	// compiled-in defaults: priority zero, and unwilling to answer a batch.
+	if (location.kind === 'local-store') {
+		return {
+			kind: 'described',
+			description: parseCacheInfo('', location.directories.storeDirectory)
+		};
+	}
+
+	const servedBy = queriedStoreDirectory(dependencies);
+
 	const asked = await readDocument(location, uri, cacheInfoFile, dependencies);
 
-	if (asked.kind !== 'answered') {
-		return;
+	// A cache serving no `nix-cache-info` states nothing about itself, which is
+	// what an empty document states too. Nix opens a directory cache by writing
+	// the document into it and carries on with the defaults; over HTTP it
+	// reports a cache as not being a binary cache, since the upload it attempts
+	// there is refused by anything serving reads alone.
+	if (asked.kind === 'absent') {
+		return location.kind === 'file'
+			? { kind: 'described', description: parseCacheInfo('', servedBy) }
+			: { kind: 'unreachable', reason: 'no-cache-info' };
+	}
+
+	if (asked.kind === 'failed') {
+		return { kind: 'unreachable', reason: reasonFor(asked.error) };
 	}
 
 	try {
-		return parseCacheInfo(
-			asked.document,
-			dependencies.storeDirectory ?? servedStoreDirectory
-		);
+		return {
+			kind: 'described',
+			description: parseCacheInfo(asked.document, servedBy)
+		};
 	} catch {
-		return;
+		return { kind: 'unreachable', reason: 'no-cache-info' };
 	}
 }
+
+/** What a substituter's own document made of it. */
+type CacheInfoOutcome =
+	| { readonly kind: 'described'; readonly description: SubstituterDescription }
+	| {
+			readonly kind: 'unreachable';
+			readonly reason: 'no-cache-info' | 'needs-credentials';
+	  };
+
+/**
+ * Which of a cache's own answers this was. A cache asking to be identified, and
+ * a proxy asking the same before it will carry the request, are both a
+ * credential this run does not hold, which reads differently from a cache that
+ * said nothing a reader could use.
+ */
+function reasonFor(
+	failure: SubstituterFailure
+): 'no-cache-info' | 'needs-credentials' {
+	return failure instanceof SubstituterUnreachableError &&
+		credentialStatuses.has(failure.status ?? 0)
+		? 'needs-credentials'
+		: 'no-cache-info';
+}
+
+/**
+ * The statuses that name a credential rather than an answer about the path. A
+ * cache answers 401 when it wants the reader identified and a proxy answers 407
+ * when it wants the same before carrying the request; Nix reads both as being
+ * unauthorised, and neither is worth attempting again with what this run holds.
+ */
+const credentialStatuses = new Set([401, 407]);
 
 /**
  * What a store URI's own parameters say about the substituter, which stand
  * whatever its `nix-cache-info` goes on to say.
  */
-function configuredDescription(url: URL): Partial<SubstituterDescription> {
-	const priority = configuredPriority(url);
-	const massQuery = url.searchParams.get('want-mass-query');
-	const trusted = url.searchParams.get('trusted');
+function configuredDescription(query: string): Partial<SubstituterDescription> {
+	const parameters = storeUriParameters(query);
+	const priority = parameters.get('priority');
+	const massQuery = parameters.get('want-mass-query');
+	const trusted = parameters.get('trusted');
 
 	return {
-		...(priority !== undefined && { priority }),
-		...(massQuery !== null && { hasMassQuery: massQuery === '1' }),
-		...(trusted !== null && { isTrusted: trusted === '1' })
+		...(priority !== undefined && { priority: settingPriority(priority) }),
+		...(massQuery !== undefined && {
+			hasMassQuery: isEnabledSettingValue('want-mass-query', massQuery)
+		}),
+		...(trusted !== undefined && {
+			isTrusted: isEnabledSettingValue('trusted', trusted)
+		})
 	};
 }
 
-// The `?priority=` parameter a store URI may carry, which settles the priority
-// whatever the substituter advertises.
-function configuredPriority(url: URL): number | undefined {
-	const configured = url.searchParams.get('priority');
+/**
+ * A `priority` parameter's value, read the way Nix reads an integer setting:
+ * an optional binary unit multiplying what comes before it, and before that a
+ * signed decimal number the width Nix declared the setting with can hold.
+ * Nothing else states a priority, so digits with anything after them, a
+ * fraction, another base, and a number too wide for the setting all leave the
+ * URI naming one this reader will not invent.
+ */
+function settingPriority(value: string): number {
+	const suffix = value.slice(-1);
+	const multiplier = binaryUnits.get(suffix.toUpperCase());
+	const number = multiplier === undefined ? value : value.slice(0, -1);
 
-	return configured === null ? undefined : leadingInteger(configured);
+	if (
+		(multiplier === undefined && /^\p{Letter}$/u.test(suffix)) ||
+		!/^[+-]?\d+$/u.test(number)
+	) {
+		throw new NixConfigSettingError('priority', value, priorityExpectation);
+	}
+
+	const parsed = Number(number);
+
+	if (parsed < minPriority || parsed > maxPriority) {
+		throw new NixConfigSettingError('priority', value, priorityExpectation);
+	}
+
+	return parsed * (multiplier ?? 1);
 }
+
+// The units Nix multiplies an integer setting by, named by the letter each
+// value may end with.
+const binaryUnits: ReadonlyMap<string, number> = new Map([
+	['K', 1024],
+	['M', 1024 ** 2],
+	['G', 1024 ** 3],
+	['T', 1024 ** 4]
+]);
+
+// Nix declares the priority as a signed 32-bit setting, and reads the number
+// into that width before any unit multiplies it.
+const minPriority = -(2 ** 31);
+const maxPriority = 2 ** 31 - 1;
+
+const priorityExpectation =
+	'a 32-bit integer, optionally followed by K, M, G or T';
 
 // Nix reads the document line by line and applies its own default to every
 // field the document leaves out, so a cache publishing a partial one is

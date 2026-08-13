@@ -16,6 +16,7 @@ import {
 	type NixDerivedPathString,
 	type NixMissingPartition,
 	type NixStoreClient,
+	type NixSubstitutablePathInfo,
 	type NixValidPathInfo,
 	NotInNixStoreError,
 	type UnreachableSubstituter,
@@ -77,9 +78,10 @@ export class Nix {
 		const config = discoverNixStoreConfig(dependencies);
 		const backend = resolveStoreBackend(config, dependencies);
 		const substituters = substituterClientOver(
-			config.storeDirectory,
+			config,
 			config.substitution,
-			config.fileTransfer
+			config.fileTransfer,
+			dependencies
 		);
 
 		return new Nix(
@@ -87,7 +89,8 @@ export class Nix {
 			(storePaths) => substituters.querySubstitutablePathInfos(storePaths),
 			config.storeDirectory,
 			dependencies.realpath ?? defaultRealPath,
-			storeKindOf(backend)
+			storeKindOf(backend),
+			config.unknownSettings
 		);
 	}
 
@@ -119,7 +122,8 @@ export class Nix {
 			(storePaths) => substituters.querySubstitutablePathInfos(storePaths),
 			config.storeDirectory,
 			dependencies.realpath ?? defaultRealPath,
-			kind
+			kind,
+			config.unknownSettings
 		);
 	}
 
@@ -160,7 +164,15 @@ export class Nix {
 		private readonly storeDirectory: StoreDirectory,
 		private readonly realpath: RealPath,
 		/** The kind of store backend this client reads through. */
-		public readonly storeKind: NixStoreKind
+		public readonly storeKind: NixStoreKind,
+		/**
+		 * The setting names the configuration this client was opened from
+		 * states that no Nix it knows has. Nix warns about such a name and
+		 * reads nothing out of it; this client reads nothing out of it either
+		 * and reports it, leaving the warning to whoever has somewhere to
+		 * write one.
+		 */
+		public readonly unknownSettings: readonly string[] = []
 	) {}
 
 	private resolveRealPath(path: string): string {
@@ -215,6 +227,24 @@ export class Nix {
 		paths: readonly string[]
 	): Promise<readonly string[]> {
 		return this.store.querySubstitutablePaths(
+			paths.map((path) => this.toStorePath(path))
+		);
+	}
+
+	/**
+	 * What this store's substituters offer for each of the given paths: the
+	 * bytes a fetch would move, the references the path carries, and, from a
+	 * substituter's own narinfo, the NAR hash and signatures it would serve
+	 * the path under. A path none of them offers has no entry.
+	 *
+	 * The answer comes from the store this client opened, so it carries
+	 * whatever settings that store was opened with: a client opened to look
+	 * past a narinfo cache reads these past it too.
+	 */
+	async querySubstitutablePathInfos(
+		paths: readonly string[]
+	): Promise<readonly NixSubstitutablePathInfo[]> {
+		return this.store.querySubstitutablePathInfos(
 			paths.map((path) => this.toStorePath(path))
 		);
 	}

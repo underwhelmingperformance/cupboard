@@ -7,6 +7,7 @@ import type { Command } from 'commander';
 
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { InvalidMeasureTargetsFileError } from '../errors.ts';
+import { reportUnknownSettings } from '../nix/settings.ts';
 import {
 	measurePlanInputSchema,
 	type ParsedMeasureTarget
@@ -85,6 +86,8 @@ export function registerPlanMeasureCommand(
 				})
 			};
 			const nix = Nix.openForAvailability(undefined, storeSelection);
+
+			reportUnknownSettings(reporter, nix.unknownSettings);
 
 			await runPlanMeasure(
 				{

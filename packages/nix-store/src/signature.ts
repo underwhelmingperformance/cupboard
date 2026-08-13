@@ -23,11 +23,21 @@ export class NixSignature extends NamedMaterial {
 	 */
 	static parseAll(values: readonly string[]): readonly NixSignature[] {
 		return values
-			.filter((value) => parseNamedMaterial(value) !== undefined)
+			.filter((value) => isNixSignature(value))
 			.map((value) => new NixSignature(value));
 	}
 
 	constructor(value: string) {
 		super(value, (invalid) => new InvalidNixSignatureError(invalid));
 	}
+}
+
+/**
+ * Whether the value is a signature Nix reads: a key name, a colon, and base64
+ * material that decodes. Nix refuses a whole narinfo over a `Sig` line it
+ * cannot read, so a reader deciding what a substituter holds reads a line the
+ * same way a verifier does.
+ */
+export function isNixSignature(value: string): boolean {
+	return parseNamedMaterial(value) !== undefined;
 }

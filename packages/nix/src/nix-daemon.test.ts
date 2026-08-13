@@ -289,6 +289,42 @@ describe('NixDaemonStoreClient', () => {
 		expect(transport?.closed).toBe(true);
 	});
 
+	// Nix counts the silent time in a signed width, so a configuration stating
+	// a negative sends one, and the daemon reads back the number it was sent.
+	it('writes a negative silent time as the daemon reads one', async () => {
+		const client = new NixDaemonStoreClient({
+			setOptions: { maxSilentTime: -1 },
+			connect: () =>
+				Promise.resolve(
+					new FakeDaemonTransport(
+						{
+							[appPath]: {
+								hash: appHash,
+								narSize: 123,
+								references: [],
+								signatures: []
+							}
+						},
+						{
+							expectedSetOptions: {
+								keepFailed: false,
+								keepGoing: false,
+								tryFallback: false,
+								maxBuildJobs: 1,
+								maxSilentTime: -1,
+								buildCores: 0,
+								useSubstitutes: true
+							}
+						}
+					)
+				)
+		});
+
+		await expect(client.queryPathInfo(appPath)).resolves.toStrictEqual(
+			pathInfo(appPath, appHash, 123, [])
+		);
+	});
+
 	it('writes configured dedicated SetOptions fields', async () => {
 		const client = new NixDaemonStoreClient({
 			setOptions: {
@@ -741,6 +777,10 @@ describe('NixDaemonStoreClient', () => {
 		expect(connections).toBe(0);
 	});
 
+	// This one reassembles 150 kilobytes of NAR across a dozen frames, where
+	// every other test here moves a few hundred bytes, so under a full parallel
+	// check it lands either side of the 5 second default. It gets the budget
+	// the server's suites get, leaving every other test on the default.
 	it('streams a NAR reassembled across daemon frames in order', async () => {
 		const bigContent = 'x'.repeat(150_000);
 		const contentFrame = narFrame(bigContent);
@@ -774,7 +814,7 @@ describe('NixDaemonStoreClient', () => {
 
 		expect(Buffer.concat(chunks)).toStrictEqual(Buffer.concat(frames));
 		expect(transport?.closed).toBe(true);
-	});
+	}, 30_000);
 
 	it('reads a derivation out of the single regular file its NAR holds', async () => {
 		const aterm = 'Derive([],[],[],"aarch64-linux","builder",[],[])';

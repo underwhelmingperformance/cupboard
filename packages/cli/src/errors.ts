@@ -549,6 +549,19 @@ export class ReceiptFileRequiresStoreError extends CliUsageError {
 	}
 }
 
+export class BuildStoreRequiresAlreadyHeldError extends CliUsageError {
+	constructor() {
+		super(
+			'--store with --receipt-file requires --already-held (repeated for ' +
+				'each path, or --no-already-held for none): a receipt attributes a ' +
+				'subject to this run only when the build store did not already ' +
+				'hold it, and a push that never names what it held cannot tell one ' +
+				'from the other'
+		);
+		this.name = 'BuildStoreRequiresAlreadyHeldError';
+	}
+}
+
 export class OidcRetentionChoiceRequiredError extends CliUsageError {
 	constructor() {
 		super(

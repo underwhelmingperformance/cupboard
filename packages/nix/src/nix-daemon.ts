@@ -1518,9 +1518,12 @@ class NixDaemonConnection {
 class NixDaemonWriter {
 	private readonly chunks: Buffer[] = [];
 
+	// The protocol carries every number in eight bytes, and reads some of them
+	// back into a signed width, so a negative goes out as the bytes that width
+	// reads it from.
 	writeInteger(value: number): void {
 		const bytes = Buffer.alloc(8);
-		bytes.writeBigUInt64LE(BigInt(value));
+		bytes.writeBigUInt64LE(BigInt.asUintN(64, BigInt(value)));
 		this.chunks.push(bytes);
 	}
 

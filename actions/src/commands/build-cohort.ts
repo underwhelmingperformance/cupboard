@@ -780,7 +780,9 @@ export function cohortReceiptPushArguments(
 		inputs.store,
 		'--receipt-file',
 		inputs.receiptFile,
-		...alreadyHeld.flatMap((storePath) => ['--already-held', storePath])
+		...(alreadyHeld.length === 0
+			? ['--no-already-held']
+			: alreadyHeld.flatMap((storePath) => ['--already-held', storePath]))
 	];
 
 	if (inputs.audience !== '') {

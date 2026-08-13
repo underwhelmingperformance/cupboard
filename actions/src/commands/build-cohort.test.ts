@@ -985,7 +985,7 @@ describe('cohortReceiptPushArguments', () => {
 				runRootTtl: ''
 			},
 			alreadyHeld: [],
-			held: [],
+			held: ['--no-already-held'],
 			extra: []
 		},
 		{
@@ -1019,7 +1019,7 @@ describe('cohortReceiptPushArguments', () => {
 				'2d'
 			],
 			alreadyHeld: [],
-			held: []
+			held: ['--no-already-held']
 		}
 	])('$name', ({ inputs, alreadyHeld, held, extra }) => {
 		expect(

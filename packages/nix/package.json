@@ -3,7 +3,8 @@
 	"version": "0.0.0",
 	"dependencies": {
 		"@cupboard/nix-store": "workspace:*",
-		"@cupboard/shared": "workspace:*"
+		"@cupboard/shared": "workspace:*",
+		"undici": "^7.24.6"
 	},
 	"devDependencies": {
 		"@types/node": "^25.9.1",

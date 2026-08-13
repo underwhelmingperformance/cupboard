@@ -134,6 +134,12 @@ export type LeftUpstreamRejection = Exclude<
 
 export type CeilingSource = 'configured' | 'untrusted-fallback';
 
+/** What substituting one path would cost, as an answer measured it. */
+export interface SubstitutablePathSize {
+	readonly downloadSize: number;
+	readonly narSize: number;
+}
+
 /**
  * How a re-query of the unknown paths settled. `answered` carries what the
  * fresh look found; `already-fresh` says the first answer was uncached, so
@@ -141,7 +147,17 @@ export type CeilingSource = 'configured' | 'untrusted-fallback';
  * give a fresh answer, which is what puts the plan on its fallback ceiling.
  */
 export type UnknownRequeryOutcome =
-	| { readonly kind: 'answered'; readonly partition: NixMissingPartition }
+	| {
+			readonly kind: 'answered';
+			readonly partition: NixMissingPartition;
+			/**
+			 * What each path the fresh answer settled as substitutable would
+			 * cost. A partition states one total over the paths it settled, and
+			 * the first answer settled some of these already, so the bytes of a
+			 * path both settled are read from here and counted once.
+			 */
+			readonly sizes: ReadonlyMap<StorePathString, SubstitutablePathSize>;
+	  }
 	| { readonly kind: 'already-fresh' }
 	| { readonly kind: 'refused'; readonly reason: string };
 
@@ -551,15 +567,66 @@ async function settleUnknowns(
 	}
 
 	const requery = outcome.partition;
+	const toBuild = eachOnce(missing.willBuild, requery.willBuild);
+	const toSubstitute = eachOnce(missing.willSubstitute, requery.willSubstitute);
+	const settled = new Set([...toBuild, ...toSubstitute]);
+	const twice = bytesSettledTwice(missing, requery, outcome.sizes);
 
 	return {
 		partition: {
-			willBuild: [...missing.willBuild, ...requery.willBuild],
-			willSubstitute: [...missing.willSubstitute, ...requery.willSubstitute],
-			unknown: requery.unknown,
-			downloadSize: missing.downloadSize + requery.downloadSize,
-			narSize: missing.narSize + requery.narSize
+			willBuild: toBuild,
+			willSubstitute: toSubstitute,
+			// The fresh answer walks the closures of the paths it resolved, which
+			// reaches paths the first answer settled by another route. One
+			// settled either way is settled, whichever answer left it unknown.
+			unknown: requery.unknown.filter((storePath) => !settled.has(storePath)),
+			downloadSize:
+				missing.downloadSize + requery.downloadSize - twice.downloadSize,
+			narSize: missing.narSize + requery.narSize - twice.narSize
 		},
 		ceiling: configured
 	};
+}
+
+/**
+ * The bytes both answers counted: what each states is one total over the paths
+ * it settled, so a path both settled is in both totals and belongs in the
+ * merged one once.
+ *
+ * The fresh answer's per-path figures are enough to take it out exactly. A
+ * path in both totals is by definition one the fresh answer settled, so its
+ * figures are always the ones that came back with it, and the first answer
+ * needs none of its own. A path whose figures did not come back stays in both
+ * totals, since the merged total is read as the bytes substitution would
+ * fetch and guessing at one would put that under what it is.
+ */
+function bytesSettledTwice(
+	missing: SettledMissing,
+	requery: NixMissingPartition,
+	sizes: ReadonlyMap<StorePathString, SubstitutablePathSize>
+): SubstitutablePathSize {
+	const freshlySettled = new Set(requery.willSubstitute);
+	const settledTwice = new Set(
+		missing.willSubstitute.filter((storePath) => freshlySettled.has(storePath))
+	);
+	let downloadSize = 0;
+	let narSize = 0;
+
+	for (const storePath of settledTwice) {
+		const size = sizes.get(storePath);
+
+		downloadSize += size?.downloadSize ?? 0;
+		narSize += size?.narSize ?? 0;
+	}
+
+	return { downloadSize, narSize };
+}
+
+// The paths both answers name, each named once, keeping the order they were
+// first named in.
+function eachOnce(
+	first: readonly StorePathString[],
+	second: readonly StorePathString[]
+): readonly StorePathString[] {
+	return [...new Set([...first, ...second])];
 }

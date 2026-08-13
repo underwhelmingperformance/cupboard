@@ -14,6 +14,7 @@ import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
 
 import {
+	BuildStoreRequiresAlreadyHeldError,
 	InvalidStoreUriError,
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
@@ -165,10 +166,20 @@ describe('receiptBuildStore', () => {
 			expected: undefined
 		},
 		{
-			name: 'a receipt file alongside a selected store',
+			name: 'a receipt file alongside a selected store, nothing already held',
 			options: {
 				receiptFile: '/runner/temp/receipt.json',
-				store: 'ssh-ng://builder.example'
+				store: 'ssh-ng://builder.example',
+				alreadyHeld: false as const
+			},
+			expected: 'ssh-ng://builder.example'
+		},
+		{
+			name: 'a receipt file alongside a selected store, paths already held',
+			options: {
+				receiptFile: '/runner/temp/receipt.json',
+				store: 'ssh-ng://builder.example',
+				alreadyHeld: ['/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-app']
 			},
 			expected: 'ssh-ng://builder.example'
 		}
@@ -180,6 +191,15 @@ describe('receiptBuildStore', () => {
 		expect(() =>
 			receiptBuildStore({ receiptFile: '/runner/temp/receipt.json' })
 		).toThrow(ReceiptFileRequiresStoreError);
+	});
+
+	it('refuses a selected build store that never states what it already held', () => {
+		expect(() =>
+			receiptBuildStore({
+				receiptFile: '/runner/temp/receipt.json',
+				store: 'ssh-ng://builder.example'
+			})
+		).toThrow(BuildStoreRequiresAlreadyHeldError);
 	});
 });
 

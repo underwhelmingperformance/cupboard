@@ -32,6 +32,7 @@ import {
 	InvalidCohortTargetsFileError,
 	ReadCredentialPairError
 } from '../errors.ts';
+import { reportUnknownSettings } from '../nix/settings.ts';
 import {
 	type AvailabilityCeiling,
 	type AvailabilityCeilingConfig,
@@ -92,7 +93,7 @@ const negativeNarinfoCacheBypass = { 'narinfo-cache-negative-ttl': '0' };
  */
 export async function requeryUnknownWith(
 	store: Pick<Nix, 'cachesSubstituterAnswers' | 'honoursSubstituterSettings'>,
-	openBypass: () => Pick<Nix, 'queryMissing'>,
+	openBypass: () => Pick<Nix, 'queryMissing' | 'querySubstitutablePathInfos'>,
 	storePaths: readonly StorePathString[]
 ): Promise<UnknownRequeryOutcome> {
 	if (!store.cachesSubstituterAnswers) {
@@ -108,9 +109,25 @@ export async function requeryUnknownWith(
 		};
 	}
 
+	// One bypass answers both questions: what the paths settle as, and what
+	// each of the substitutable ones would cost. The sizes are asked of the
+	// same client for the same reason the partition is, since the store's own
+	// answers about these paths are the ones being looked past.
+	const bypass = openBypass();
+	const partition = await bypass.queryMissing(storePaths);
+	const offers = await bypass.querySubstitutablePathInfos(
+		partition.willSubstitute
+	);
+
 	return {
 		kind: 'answered',
-		partition: await openBypass().queryMissing(storePaths)
+		partition,
+		sizes: new Map(
+			offers.map((offer) => [
+				offer.storePath,
+				{ downloadSize: offer.downloadSize, narSize: offer.narSize }
+			])
+		)
 	};
 }
 
@@ -351,6 +368,8 @@ export function registerPlanCommands(
 				})
 			};
 			const nix = Nix.openForAvailability(undefined, storeSelection);
+
+			reportUnknownSettings(reporter, nix.unknownSettings);
 			const answers = destinationAnswersFor({
 				baseUrl: url,
 				cache: storedCacheFor(options.cache),

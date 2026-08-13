@@ -3,7 +3,11 @@ import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import type { Nix, NixMissingPartition } from '@cupboard/nix';
+import type {
+	Nix,
+	NixMissingPartition,
+	NixSubstitutablePathInfo
+} from '@cupboard/nix';
 import {
 	rootNameSchema,
 	storePathSchema,
@@ -95,7 +99,8 @@ function missingStore(
 function requeryAnswering(
 	missing: NixMissingPartition
 ): () => Promise<UnknownRequeryOutcome> {
-	return () => Promise.resolve({ kind: 'answered', partition: missing });
+	return () =>
+		Promise.resolve({ kind: 'answered', partition: missing, sizes: new Map() });
 }
 
 function rejectingRootClient(): Pick<RootClient, 'ensure'> {
@@ -529,11 +534,28 @@ describe('requeryUnknownWith', () => {
 		willSubstitute: [appPath]
 	};
 
-	function bypassAnswering(opened: string[]): () => Pick<Nix, 'queryMissing'> {
+	const appOffer: NixSubstitutablePathInfo = {
+		source: 'daemon',
+		storePath: appPath,
+		references: [],
+		downloadSize: 40,
+		narSize: 90
+	};
+
+	function bypassAnswering(
+		opened: string[]
+	): () => Pick<Nix, 'queryMissing' | 'querySubstitutablePathInfos'> {
 		return () => {
 			opened.push('opened');
 
-			return { queryMissing: () => Promise.resolve(requeried) };
+			return {
+				queryMissing: () => Promise.resolve(requeried),
+				querySubstitutablePathInfos: (paths) => {
+					opened.push(`sizes:${paths.join(',')}`);
+
+					return Promise.resolve([appOffer]);
+				}
+			};
 		};
 	}
 
@@ -568,9 +590,15 @@ describe('requeryUnknownWith', () => {
 			[appPath]
 		);
 
+		// The sizes are asked of the same bypass the partition came from, for
+		// the paths that answer settled as substitutable.
 		expect({ outcome, opened }).toStrictEqual({
-			outcome: { kind: 'answered', partition: requeried },
-			opened: ['opened']
+			outcome: {
+				kind: 'answered',
+				partition: requeried,
+				sizes: new Map([[appPath, { downloadSize: 40, narSize: 90 }]])
+			},
+			opened: ['opened', `sizes:${appPath}`]
 		});
 	});
 

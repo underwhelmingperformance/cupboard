@@ -99,6 +99,12 @@ jobs:
 
       - run: pnpm --config.verify-deps-before-run=false check:e2e
 
+      # The conformance suite compares our Nix client against the `nix` the
+      # flake pins, so it needs the same working Nix the suite above does. It
+      # runs on ubuntu only, which leaves the darwin-only configuration cases to
+      # developer machines.
+      - run: pnpm --config.verify-deps-before-run=false check:conformance
+
   action-e2e:
     name: action e2e
     runs-on: ubuntu-24.04

@@ -8,6 +8,7 @@
 		"eslint.config.ts",
 		".syncpackrc.ts",
 		"scripts/**/*.ts",
+		"tests/conformance/**/*.ts",
 		"tests/e2e/**/*.ts",
 		"tests/fixtures/**/*.ts",
 		"tests/support/**/*.ts"

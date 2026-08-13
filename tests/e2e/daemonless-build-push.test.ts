@@ -130,6 +130,7 @@ function daemonlessStoreDependencies(): Parameters<typeof Nix.open>[0] {
 		},
 		readFile: noConfigFile,
 		homeDirectory: noConfigFile,
+		workingDirectory: () => process.cwd(),
 		currentSystem: () => nixSystem(),
 		probes: {
 			canReadWrite: () => false,

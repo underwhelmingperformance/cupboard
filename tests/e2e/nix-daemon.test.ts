@@ -206,7 +206,7 @@ describe.skipIf(!existsSync(socketPath))('nix daemon end to end', () => {
 		const infos = await withDaemon(
 			context,
 			(daemon) => daemon.querySubstitutablePathInfos([executable]),
-			{ substituters: '', 'extra-substituters': '' }
+			{ substituters: '' }
 		);
 
 		expect(infos).toStrictEqual([]);
@@ -219,7 +219,7 @@ describe.skipIf(!existsSync(socketPath))('nix daemon end to end', () => {
 	it('refuses a closure whose root no permitted substituter offers', async (context) => {
 		const executable = requireExecutableStorePath(context);
 		const nix = Nix.openForAvailability(undefined, {
-			overrides: { substituters: '', 'extra-substituters': '' }
+			overrides: { substituters: '' }
 		});
 		const verdict = await skippingPermissionDenied(context, () =>
 			nix.resolveSubstitutableClosure(executable)

@@ -1,0 +1,256 @@
+import { NixNetrcSyntaxError } from './nix-store.ts';
+
+/** What a netrc names for a host, as HTTP Basic credentials. */
+export interface NetrcCredential {
+	readonly login: string;
+	readonly password: string;
+}
+
+/**
+ * The credentials a netrc names for a host, or nothing when it names none.
+ *
+ * Nix hands the file to libcurl rather than reading it itself, so what a netrc
+ * means is what libcurl makes of it: whitespace-separated tokens, a line whose
+ * first non-blank character is `#` dropped whole, and `machine`, `default`,
+ * `login`, `password` and `macdef` recognised whatever their case. Tokens run
+ * on across lines, so an entry is a run of tokens rather than a run of lines.
+ *
+ * The first entry naming this host answers, and a `default` entry answers for
+ * any host, so a `default` written before the machine entries answers ahead of
+ * all of them. An entry naming a login and no password is read as that login
+ * with an empty password, and one naming a password and no login as that
+ * password under an empty login.
+ */
+export function netrcCredentialFor(
+	source: string,
+	host: string
+): NetrcCredential | undefined {
+	const wanted = withoutBrackets(host).toLowerCase();
+	const reader = new NetrcReader(withoutCommentLines(source));
+	let state: LookupState = 'nothing';
+	let keyword: Keyword = 'none';
+	let entry: PartialCredential = {};
+
+	for (;;) {
+		const token = reader.next();
+
+		if (token === undefined) {
+			return finish(entry);
+		}
+
+		if (state === 'macdef') {
+			// Every token of a macro's body is passed over, up to the blank line
+			// that ends the definition.
+			state = token.endsLine ? 'nothing' : 'macdef';
+			continue;
+		}
+
+		if (token.endsLine) {
+			continue;
+		}
+
+		const { text } = token;
+
+		if (state === 'nothing') {
+			if (isKeyword(text, 'macdef')) {
+				state = 'macdef';
+			} else if (isKeyword(text, 'machine')) {
+				state = 'host-found';
+				entry = {};
+			} else if (isKeyword(text, 'default')) {
+				state = 'host-valid';
+			}
+
+			continue;
+		}
+
+		if (state === 'host-found') {
+			state = text.toLowerCase() === wanted ? 'host-valid' : 'nothing';
+			continue;
+		}
+
+		if (keyword === 'login') {
+			entry = { ...entry, login: text };
+			keyword = 'none';
+		} else if (keyword === 'password') {
+			entry = { ...entry, password: text };
+			keyword = 'none';
+		} else if (isKeyword(text, 'login')) {
+			keyword = 'login';
+		} else if (isKeyword(text, 'password')) {
+			keyword = 'password';
+		} else if (isKeyword(text, 'machine')) {
+			// An entry that named a password answers, and one that named no
+			// password is left behind for whatever the rest of the file names.
+			if (entry.password !== undefined) {
+				return finish(entry);
+			}
+
+			state = 'host-found';
+			keyword = 'none';
+			entry = {};
+		} else if (isKeyword(text, 'default')) {
+			keyword = 'none';
+			entry = {};
+		}
+
+		if (entry.login !== undefined && entry.password !== undefined) {
+			return finish(entry);
+		}
+	}
+}
+
+/** What an entry named so far, before the defaults fill the rest in. */
+interface PartialCredential {
+	readonly login?: string;
+	readonly password?: string;
+}
+
+// A matched entry answers as long as it named either half of a credential.
+function finish(entry: PartialCredential): NetrcCredential | undefined {
+	if (entry.login === undefined && entry.password === undefined) {
+		return;
+	}
+
+	return { login: entry.login ?? '', password: entry.password ?? '' };
+}
+
+/** Where the reader is between the `machine` line and the credentials. */
+type LookupState = 'nothing' | 'host-found' | 'host-valid' | 'macdef';
+
+/** Which half of a credential the next token states. */
+type Keyword = 'none' | 'login' | 'password';
+
+// The keywords are matched whatever their case, as libcurl compares them.
+function isKeyword(token: string, keyword: string): boolean {
+	return token.toLowerCase() === keyword;
+}
+
+/**
+ * The host as a netrc names one. A URL states an IPv6 address inside brackets
+ * and a netrc entry names it without them.
+ */
+function withoutBrackets(host: string): string {
+	return host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+}
+
+/**
+ * The file with its comments gone. A line is a comment when its first non-blank
+ * character is `#`, which is the whole of the comment syntax: a `#` anywhere
+ * else is an ordinary character of the token it sits in.
+ */
+function withoutCommentLines(source: string): string {
+	return source
+		.split('\n')
+		.filter((line) => !line.replace(/^[\t ]+/u, '').startsWith('#'))
+		.join('\n');
+}
+
+/** One token, or the end of a line with no token on it. */
+type NetrcToken =
+	| { readonly endsLine: true }
+	| { readonly endsLine: false; readonly text: string };
+
+// The characters that separate one token from the next, which are the only two
+// libcurl passes over between them.
+const blanks = new Set([' ', '\t']);
+
+/** Reads a netrc's tokens in order, raising over a line it cannot read. */
+class NetrcReader {
+	private at = 0;
+
+	constructor(private readonly source: string) {}
+
+	private passBlanks(): void {
+		while (blanks.has(this.source.charAt(this.at))) {
+			this.at += 1;
+		}
+	}
+
+	/**
+	 * A token that runs to the next character no token may hold. Every character
+	 * above a space belongs to it, so a carriage return ends it as a newline
+	 * does and a line ending in one names nothing where a token was expected.
+	 */
+	private plainToken(): string {
+		const start = this.at;
+
+		while (this.source.charAt(this.at) > ' ') {
+			this.at += 1;
+		}
+
+		if (this.at === start) {
+			throw new NixNetrcSyntaxError('a token holding no characters');
+		}
+
+		return this.source.slice(start, this.at);
+	}
+
+	/**
+	 * A token wrapped in double quotes, which is how a value carrying a blank is
+	 * written. A backslash escapes the character after it, and `\n`, `\r` and
+	 * `\t` name the three characters no token can hold directly.
+	 */
+	private quotedToken(): string {
+		// The opening quote is not part of the value.
+		this.at += 1;
+
+		let text = '';
+
+		for (;;) {
+			const character = this.source.charAt(this.at);
+
+			if (character === '') {
+				throw new NixNetrcSyntaxError('a quoted token that is never closed');
+			}
+
+			this.at += 1;
+
+			if (character === '"') {
+				return text;
+			}
+
+			if (character !== '\\') {
+				text += character;
+				continue;
+			}
+
+			const escaped = this.source.charAt(this.at);
+
+			if (escaped === '') {
+				throw new NixNetrcSyntaxError('a quoted token that is never closed');
+			}
+
+			this.at += 1;
+			text += escapedCharacters.get(escaped) ?? escaped;
+		}
+	}
+
+	/** The next token, or nothing once the file is read out. */
+	next(): NetrcToken | undefined {
+		this.passBlanks();
+
+		const character = this.source.charAt(this.at);
+
+		if (character === '') {
+			return;
+		}
+
+		if (character === '\n') {
+			this.at += 1;
+
+			return { endsLine: true };
+		}
+
+		return {
+			endsLine: false,
+			text: character === '"' ? this.quotedToken() : this.plainToken()
+		};
+	}
+}
+
+const escapedCharacters: ReadonlyMap<string, string> = new Map([
+	['n', '\n'],
+	['r', '\r'],
+	['t', '\t']
+]);

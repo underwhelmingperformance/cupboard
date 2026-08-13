@@ -28,6 +28,7 @@ import {
 } from '../duration.ts';
 import {
 	AttestationsDisabledError,
+	BuildStoreRequiresAlreadyHeldError,
 	InvalidUploadConcurrencyError,
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
@@ -56,7 +57,7 @@ interface PushOptions {
 	readonly cache?: string;
 	readonly store?: string;
 	readonly receiptFile?: string;
-	readonly alreadyHeld?: readonly string[];
+	readonly alreadyHeld?: readonly string[] | false;
 	readonly wait?: boolean;
 	readonly waitTimeout?: WaitTimeoutSeconds;
 	readonly attest?: boolean;
@@ -115,10 +116,13 @@ export function validateRetentionChoice(
  * The build store a push records a receipt against, or nothing when the push
  * writes no receipt. A receipt attributes every subject to the store the run
  * selected, so a push reading the store Nix itself would use has no selection
- * to record and is refused.
+ * to record and is refused. Naming a build store also commits the caller to
+ * stating what it already held, `--already-held` zero or more times or
+ * `--no-already-held` for none, so a receipt never claims a path the store
+ * realised on an earlier run.
  */
 export function receiptBuildStore(
-	options: Pick<PushOptions, 'receiptFile' | 'store'>
+	options: Pick<PushOptions, 'receiptFile' | 'store' | 'alreadyHeld'>
 ): string | undefined {
 	if (options.receiptFile === undefined) {
 		return undefined;
@@ -126,6 +130,10 @@ export function receiptBuildStore(
 
 	if (options.store === undefined) {
 		throw new ReceiptFileRequiresStoreError();
+	}
+
+	if (options.alreadyHeld === undefined) {
+		throw new BuildStoreRequiresAlreadyHeldError();
 	}
 
 	return options.store;
@@ -152,8 +160,11 @@ export function pushCommandAuthorizationDetails(
 	});
 }
 
-function collect(value: string, previous: readonly string[]): string[] {
-	return [...previous, value];
+function collect(
+	value: string,
+	previous: readonly string[] | undefined
+): string[] {
+	return [...(previous ?? []), value];
 }
 
 /**
@@ -298,8 +309,11 @@ export function registerPushCommand(
 		.option(
 			'--already-held <path>',
 			'a store path the build store held before this run built anything; a receipt claims none of them',
-			collect,
-			[]
+			collect
+		)
+		.option(
+			'--no-already-held',
+			'state that the build store held nothing before this run built anything'
 		)
 		.option(
 			'--attestation <bundle>',
@@ -452,7 +466,7 @@ export function registerPushCommand(
 				...(options.dryRun !== undefined && { dryRun: options.dryRun }),
 				...(buildStore !== undefined && { buildStore }),
 				...(options.alreadyHeld !== undefined && {
-					alreadyHeld: options.alreadyHeld
+					alreadyHeld: options.alreadyHeld === false ? [] : options.alreadyHeld
 				})
 			});
 
