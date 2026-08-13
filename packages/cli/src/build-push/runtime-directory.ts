@@ -41,6 +41,33 @@ function isWithinSunPath(socketPath: string, limitBytes: number): boolean {
 	return Buffer.byteLength(socketPath, 'utf8') < limitBytes;
 }
 
+// The bases a run prefers for its own directory, in order, before the
+// operating system's temporary directory.
+function environmentBases(
+	options: InvocationRuntimeOptions
+): readonly string[] {
+	const environment = options.environment ?? process.env;
+
+	return [environment.XDG_RUNTIME_DIR, environment.RUNNER_TEMP].flatMap(
+		(base) => (base === undefined || base === '' ? [] : [base])
+	);
+}
+
+/**
+ * Where one invocation's own directory lives when it hosts no hook endpoint:
+ * the first preferred base's `cupboard/<invocation id>`, or the operating
+ * system's temporary directory. A run with no socket to listen on has no path
+ * length to satisfy, so every base fits.
+ */
+export function planInvocationDirectory(
+	options: InvocationRuntimeOptions
+): string {
+	const [base = options.temporaryDirectory ?? tmpdir()] =
+		environmentBases(options);
+
+	return path.join(base, 'cupboard', options.invocationId);
+}
+
 /**
  * Where one invocation's hook endpoint lives: an owner-only directory holding
  * the listening socket, chosen so the socket path fits `sun_path`. Candidate
@@ -51,7 +78,6 @@ function isWithinSunPath(socketPath: string, limitBytes: number): boolean {
 export function planInvocationRuntime(
 	options: InvocationRuntimeOptions
 ): InvocationRuntimePlan {
-	const environment = options.environment ?? process.env;
 	const limitBytes = sunPathBytes(options.platform ?? process.platform);
 
 	const candidateFor = (base: string): InvocationRuntimePlan => {
@@ -60,13 +86,9 @@ export function planInvocationRuntime(
 		return { directory, socketPath: path.join(directory, socketFileName) };
 	};
 
-	const environmentBases = [
-		environment.XDG_RUNTIME_DIR,
-		environment.RUNNER_TEMP
-	].flatMap((base) => (base === undefined || base === '' ? [] : [base]));
 	const fallback = candidateFor(options.temporaryDirectory ?? tmpdir());
 	const candidates = [
-		...environmentBases.map((base) => candidateFor(base)),
+		...environmentBases(options).map((base) => candidateFor(base)),
 		fallback
 	];
 
@@ -90,19 +112,17 @@ export async function createInvocationRuntimeDirectory(
 ): Promise<InvocationRuntimePlan> {
 	const plan = planInvocationRuntime(options);
 
-	await createPlannedRuntimeDirectory(plan);
+	await createRuntimeDirectory(plan.directory);
 
 	return plan;
 }
 
-/** Creates an already planned invocation directory, owner-only. */
-export async function createPlannedRuntimeDirectory(
-	plan: InvocationRuntimePlan
-): Promise<void> {
-	await mkdir(plan.directory, { mode: 0o700, recursive: true });
+/** Creates one of a run's own directories, owner-only. */
+export async function createRuntimeDirectory(directory: string): Promise<void> {
+	await mkdir(directory, { mode: 0o700, recursive: true });
 	// The process umask masks the mode `mkdir` applies, so the owner-only mode
 	// is asserted explicitly.
-	await chmod(plan.directory, 0o700);
+	await chmod(directory, 0o700);
 }
 
 /** Removes the invocation directory and the socket inside it. */

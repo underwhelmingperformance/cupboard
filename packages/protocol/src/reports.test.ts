@@ -282,6 +282,7 @@ describe('pushSummarySchema', () => {
 describe('buildSummarySchema', () => {
 	const storePath = `/nix/store/${storePathHash}-app`;
 	const summary = {
+		mode: 'streamed',
 		store: 'ssh-ng://builder.example',
 		targetPaths: 2,
 		intermediatePaths: 5,
@@ -300,6 +301,10 @@ describe('buildSummarySchema', () => {
 		{
 			name: 'a clean run with nothing unconfirmed',
 			value: { ...summary, childExitStatus: 0, unconfirmedPaths: [] }
+		},
+		{
+			name: 'a run that built locally and published once',
+			value: { ...summary, mode: 'reconciled-local', queueDepth: 0 }
 		}
 	])('accepts $name', ({ value }) => {
 		expect(buildSummarySchema.parse(value)).toStrictEqual(value);
@@ -316,6 +321,10 @@ describe('buildSummarySchema', () => {
 		{
 			name: 'an unknown key carrying a credential',
 			value: { ...summary, accessToken: 'write-1' }
+		},
+		{
+			name: 'a mode no run takes',
+			value: { ...summary, mode: 'hooked' }
 		},
 		{
 			name: 'an empty store',

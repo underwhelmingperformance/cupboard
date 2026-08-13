@@ -347,9 +347,10 @@ export function registerBuildPushCommand(
 
 				const config = discoverNixStoreConfig();
 				const daemon = createNixDaemonStoreClient(undefined, config);
-				const nix = Nix.forStore(daemon, {
-					storeDirectory: config.storeDirectory
-				});
+				// The store Nix itself would read through: the daemon where one
+				// answers, and this process's own reader on a machine where none
+				// does, which is the machine a reconciled local run publishes from.
+				const nix = Nix.open();
 				// A multi-cohort run aggregates its receipts itself, so only the
 				// single-cohort form hands the receipt file to the run.
 				const perCohortReceiptFile =
@@ -424,8 +425,7 @@ export function registerBuildPushCommand(
 												nix.derivationBuildRequirements(drvPath)
 										}
 									})
-								}),
-							resolveClosure: (paths) => nix.resolveClosure(paths)
+								})
 						}
 					);
 				};

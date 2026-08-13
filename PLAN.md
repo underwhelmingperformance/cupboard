@@ -5645,9 +5645,11 @@ remaining work.
 10. Implement `cupboard build-push` for daemon-backed local stores:
     - preflight: the daemon trust flag read in-process from the handshake, a
       daemon-backed store (selected in preference to the local backend whenever
-      the daemon socket exists, refusing only truly daemonless installs), no
-      conflicting operator `post-build-hook`, and a token carrying `root:attach`
-      for the run root and `root:set` for the target roots;
+      the daemon socket exists; a daemonless install or an untrusting daemon
+      selects the reconciled local mode, which builds without the hook and
+      publishes once from the store the build populated), no conflicting
+      operator `post-build-hook`, and a token carrying `root:attach` for the run
+      root and `root:set` for the target roots;
     - invocation-scoped Nix configuration through `NIX_CONFIG` in the child
       environment;
     - child process and signal supervision;
@@ -5879,10 +5881,14 @@ Real-Nix tests cover the foreground supervisor:
   reported as uploaded, never as failed.
 - Two concurrent invocations sharing one store each receive hook events only for
   their own builds and each publish and root their own targets.
-- Preflight refuses, with distinct actionable errors, a daemonless store, an
-  untrusted daemon connection, a conflicting operator `post-build-hook`, a
-  socket path that cannot be made to fit `sun_path`, an unresolvable hook
-  helper, and a token without `root:attach` for the run root.
+- A daemonless store or an untrusted daemon connection selects the reconciled
+  local mode: the same cohort builds under the attempt loop with no hook, one
+  push publishes what the build left, and the receipt claims only the paths the
+  run resolved and queried before building, with a local rebuild claimed as a
+  verified rebuild. Preflight still refuses, with distinct actionable errors, a
+  conflicting operator `post-build-hook`, a socket path that cannot be made to
+  fit `sun_path`, an unresolvable hook helper, and a token without `root:attach`
+  for the run root.
 - A token carrying `upload:commit` without `root:attach` cannot attach, and one
   whose `root:attach` grant names a different root or prefix is refused on the
   root it does not cover.

@@ -98,8 +98,18 @@ import {
 	type ReferenceSource
 } from './reference.ts';
 
+/**
+ * The store a push reads through: which kind of backend it is, the metadata of
+ * the paths it holds, the closure behind them, and the NAR bytes a store that
+ * serves its paths elsewhere streams back.
+ */
+export type PushStore = Pick<
+	Nix,
+	'storeKind' | 'narFromPath' | 'resolveClosure' | 'queryValidPathsInfo'
+>;
+
 export interface PushDependencies {
-	readonly nix?: Nix;
+	readonly nix?: PushStore;
 	readonly client: PushClient;
 	/**
 	 * Publish the complete realised closure of the publication entries. The
@@ -155,6 +165,20 @@ export interface PushDependencies {
 	 * the first is work this run can claim provenance for.
 	 */
 	readonly alreadyHeld?: readonly string[];
+	/**
+	 * The paths this run asked the build store about before it built anything.
+	 * A published path outside them is published without a subject: nothing
+	 * established what the store held for it beforehand, so whether this run
+	 * realised it is unknown. Naming none leaves every published path
+	 * claimable.
+	 */
+	readonly claimable?: readonly string[];
+	/**
+	 * The derivations a local rebuild reproduced during this run. Their outputs
+	 * are claimed however the build store first came by them, because the
+	 * rebuild is what establishes them.
+	 */
+	readonly verifiedDerivations?: readonly string[];
 }
 
 // Each upload streams one NAR's compression into its R2 PUT, a CPU-bound zstd
@@ -360,7 +384,7 @@ export async function runPush(
 }
 
 interface PushRuntimeDependencies {
-	readonly nix?: Nix;
+	readonly nix?: PushStore;
 	readonly client: PushClient;
 	readonly retention: RetentionPlan;
 	readonly closure?: boolean;
@@ -379,6 +403,8 @@ interface PushRuntimeDependencies {
 	readonly dryRun?: boolean;
 	readonly buildStore?: string;
 	readonly alreadyHeld?: readonly string[];
+	readonly claimable?: readonly string[];
+	readonly verifiedDerivations?: readonly string[];
 }
 
 // One publication path with its metadata resolved: a local entry carries the
@@ -532,21 +558,30 @@ async function resolveReferenceEntries(
 		.map((item) => item.path);
 }
 
+/** What a run establishes about the paths it publishes, for its receipt. */
+interface ReceiptClaims {
+	readonly buildStore: string;
+	readonly alreadyHeld: ReadonlySet<string>;
+	/** Unset leaves every published path claimable. */
+	readonly claimable: ReadonlySet<string> | undefined;
+	readonly verifiedDerivations: ReadonlySet<string>;
+}
+
 /**
  * The build receipt a push writes for the build it published: the paths that
  * ended servable, and one subject per published target the build store holds a
  * deriver for and records as its own. The store answered every subject's NAR
  * hash and deriver over the connection the push already opened, so the subjects
- * are what that store realised; no build was observed here, so each subject is
- * classified as the build store's. Reference and intermediate entries are
- * nobody's build subject: a reference is republished from elsewhere and an
- * intermediate is not a target of this push.
+ * are what that store realised; no build was observed here, so a subject is
+ * classified as the build store's, or as a verified rebuild where this run
+ * reproduced it locally. Reference and intermediate entries are nobody's build
+ * subject: a reference is republished from elsewhere and an intermediate is not
+ * a target of this push.
  */
 function reconciledReceipt(
-	buildStore: string,
+	claims: ReceiptClaims,
 	resolved: readonly ResolvedPushPath[],
-	summaryPaths: readonly PushSummaryPath[],
-	alreadyHeld: ReadonlySet<string>
+	summaryPaths: readonly PushSummaryPath[]
 ): ParsedBuildReceiptV3 {
 	const servable = new Set<string>();
 	const published = new Set<string>();
@@ -577,18 +612,32 @@ function reconciledReceipt(
 				return [];
 			}
 
-			// The store marks a path ultimately trusted when it holds the path as
-			// its own. A path a substituter served during this run carries that
-			// substituter's signatures and no such mark, so the receipt claims no
-			// provenance for it.
-			if (!pathInfo.ultimate) {
+			// Nothing established what the store held for this path before the
+			// build, so whether this run realised it is unknown. It is still
+			// published, and still a path the receipt records.
+			if (
+				claims.claimable !== undefined &&
+				!claims.claimable.has(pathInfo.storePath)
+			) {
 				return [];
 			}
 
 			// The build store held this before the build, so this run did not
-			// realise it and has no provenance to claim for it. It is still
-			// published, and still a path the receipt records.
-			if (alreadyHeld.has(pathInfo.storePath)) {
+			// realise it and has no provenance to claim for it.
+			if (claims.alreadyHeld.has(pathInfo.storePath)) {
+				return [];
+			}
+
+			const isRebuilt = claims.verifiedDerivations.has(pathInfo.deriver);
+
+			// The store marks a path ultimately trusted when it holds the path as
+			// its own. A path a substituter served during this run, and one a
+			// builder realised and the store copied back, carry the signatures of
+			// whoever produced them and no such mark. A local rebuild that
+			// reproduced the outputs is this run's own evidence, so such a path
+			// is claimed as a verified rebuild and every other unmarked path is
+			// published unclaimed.
+			if (!isRebuilt && !pathInfo.ultimate) {
 				return [];
 			}
 
@@ -597,8 +646,8 @@ function reconciledReceipt(
 					storePath: pathInfo.storePath,
 					narHash: pathInfo.narHash.digestHex(),
 					derivation: pathInfo.deriver,
-					buildStore,
-					verification: 'build-store'
+					buildStore: claims.buildStore,
+					verification: isRebuilt ? 'verified-rebuild' : 'build-store'
 				}
 			];
 		})
@@ -1135,10 +1184,17 @@ async function runPushFlow(
 		return dependencies.buildStore === undefined
 			? undefined
 			: reconciledReceipt(
-					dependencies.buildStore,
+					{
+						buildStore: dependencies.buildStore,
+						alreadyHeld: new Set(dependencies.alreadyHeld),
+						claimable:
+							dependencies.claimable === undefined
+								? undefined
+								: new Set(dependencies.claimable),
+						verifiedDerivations: new Set(dependencies.verifiedDerivations)
+					},
 					resolved,
-					summaryPaths,
-					new Set(dependencies.alreadyHeld)
+					summaryPaths
 				);
 	} finally {
 		session?.close();

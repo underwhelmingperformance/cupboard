@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -28,7 +29,9 @@ import {
 	CliAbortError,
 	CupboardHttpError,
 	DaemonRequiredError,
-	publicationFailureExitCode
+	PostBuildHookConflictError,
+	publicationFailureExitCode,
+	UntrustedDaemonError
 } from '../errors.ts';
 import type { PushClient } from '../push/push.ts';
 
@@ -36,9 +39,12 @@ import {
 	type BuildInvocation,
 	type BuildPushDependencies,
 	type BuildPushRunOptions,
+	type BuildPushStore,
 	childExitCode,
 	runBuildPush
 } from './build-push.ts';
+import { buildPushModeDescription } from './mode.ts';
+import type { BuildPushPreflight } from './preflight.ts';
 import type { ChildCommand } from './supervisor.ts';
 
 const storeDirectory = storeDirectorySchema.parse('/nix/store');
@@ -49,7 +55,10 @@ const drvA = '/nix/store/8123456789abcdfghijklmnpqrsvwxyz-app.drv';
 const invocationId = invocationIdSchema.parse('invocation-under-test');
 const narHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa));
 
-function pathInfo(storePath: StorePathString): NixValidPathInfo {
+function pathInfo(
+	storePath: StorePathString,
+	isUltimate = false
+): NixValidPathInfo {
 	return {
 		storePath,
 		narHash,
@@ -57,7 +66,7 @@ function pathInfo(storePath: StorePathString): NixValidPathInfo {
 		references: [],
 		deriver: drvA,
 		signatures: [],
-		ultimate: false
+		ultimate: isUltimate
 	};
 }
 
@@ -98,6 +107,14 @@ function emptyStream(): ReadableStream<Uint8Array> {
 		}
 	});
 }
+
+// The NAR a store that serves its paths elsewhere would stream. This store
+// serves them on the filesystem, so nothing reads it.
+const emptyNar: AsyncIterable<Uint8Array> = {
+	[Symbol.asyncIterator]: () => ({
+		next: () => Promise.resolve({ done: true, value: undefined })
+	})
+};
 
 // A child that delivers one build event to the invocation's hook endpoint the
 // way the hook helper does: one newline-terminated line per connection. It
@@ -144,6 +161,9 @@ interface RecordedRun {
 	readonly phases: string[];
 	readonly results: ResultPayload[];
 	readonly warnings: { label: string; value?: string }[];
+	readonly info: string[];
+	/** What the store was asked, in order, and when the run asked it. */
+	readonly storeCalls: string[];
 }
 
 function recordingReporter(record: RecordedRun): Reporter {
@@ -206,8 +226,8 @@ function recordingReporter(record: RecordedRun): Reporter {
 			return;
 		},
 		warn: recordWarn,
-		info() {
-			return;
+		info(message) {
+			record.info.push(message);
 		},
 		success() {
 			return;
@@ -221,6 +241,8 @@ function recordingReporter(record: RecordedRun): Reporter {
 interface ConstructedFlowConfig {
 	/** The stub nix succeeds once it has run this many times. */
 	readonly succeedOn: number;
+	/** What the cohort declares; a flake attribute unless set. */
+	readonly installables?: readonly string[];
 	readonly attempts?: number;
 	readonly verifyRebuilds?: boolean;
 	/** The machine the stub's activity log attributes; empty is local. */
@@ -235,15 +257,26 @@ interface FlowConfig {
 	/** The emitting child exits without waiting for its message to be read. */
 	readonly emitDetached?: boolean;
 	readonly valid?: readonly StorePathString[];
+	/** What the store holds until the build has run; empty unless set. */
+	readonly alreadyValid?: readonly StorePathString[];
+	/** The outputs the cohort's installables resolve to before the build. */
+	readonly declaredOutputs?: readonly StorePathString[];
+	/** The paths the build leaves out-links for; the valid paths unless set. */
+	readonly outPaths?: readonly StorePathString[];
+	/** The paths the store holds as its own; none unless set. */
+	readonly ultimatePaths?: readonly StorePathString[];
 	readonly action?: UploadDecision['action'];
 	readonly uploadFailure?: Error;
 	/** Requests the receipt in a directory the run never creates. */
 	readonly unwritableReceipt?: boolean;
+	/** What preflight refuses this run with, instead of proving its endpoints. */
+	readonly preflightFailure?: Error;
 	readonly options?: Partial<BuildPushRunOptions>;
 }
 
 interface FlowRun extends RecordedRun {
 	readonly error: unknown;
+	readonly preflight: BuildPushPreflight;
 	readonly receiptFile: string;
 	readonly sleeps: readonly number[];
 	readonly attemptIdsIssued: number;
@@ -263,9 +296,9 @@ function activityLine(machine: string): string {
 }
 
 // A stand-in `nix` on the child's PATH: it writes the activity log the real
-// one would, counts its runs so an early attempt can fail, and on success
-// delivers the build event to the invocation's hook endpoint the way the hook
-// helper does.
+// one would, counts its runs so an early attempt can fail, leaves an out-link
+// per realised path where one was asked for, and, where the invocation hosts a
+// hook endpoint, delivers the build event the way the hook helper does.
 const stubNixScript = [
 	`#!${process.execPath}`,
 	"const fs = require('node:fs');",
@@ -280,6 +313,17 @@ const stubNixScript = [
 	'runs += 1;',
 	'fs.writeFileSync(process.env.STUB_COUNT_FILE, String(runs));',
 	'if (runs < Number(process.env.STUB_SUCCEED_ON)) process.exit(1);',
+	"const outLinkIndex = args.indexOf('--out-link');",
+	'if (outLinkIndex !== -1) {',
+	'\tconst outLink = args[outLinkIndex + 1];',
+	"\tconst outPaths = process.env.STUB_OUT_PATHS.split(' ').filter(Boolean);",
+	'\toutPaths.forEach((outPath, index) => {',
+	"\t\tconst link = index === 0 ? outLink : outLink + '-' + String(index);",
+	'\t\tfs.rmSync(link, { force: true });',
+	'\t\tfs.symlinkSync(outPath, link);',
+	'\t});',
+	'}',
+	'if (!process.env.STUB_SOCKET) process.exit(0);',
 	'const socket = net.connect(process.env.STUB_SOCKET, () => {',
 	"\tsocket.write(process.env.STUB_EVENT + '\\n');",
 	'});',
@@ -290,7 +334,8 @@ const stubNixScript = [
 async function stubNixEnvironment(
 	workspace: string,
 	socketPath: string,
-	constructed: ConstructedFlowConfig
+	constructed: ConstructedFlowConfig,
+	outPaths: readonly StorePathString[]
 ): Promise<Record<string, string | undefined>> {
 	const stubDirectory = path.join(workspace, 'bin');
 
@@ -303,9 +348,10 @@ async function stubNixEnvironment(
 		...process.env,
 		PATH: `${stubDirectory}:${process.env.PATH ?? ''}`,
 		STUB_LOG_LINE: activityLine(constructed.machine ?? ''),
-		STUB_COUNT_FILE: path.join(workspace, 'stub-count'),
+		STUB_COUNT_FILE: stubCountFile(workspace),
 		STUB_SUCCEED_ON: String(constructed.succeedOn),
 		STUB_SOCKET: socketPath,
+		STUB_OUT_PATHS: outPaths.join(' '),
 		STUB_EVENT: JSON.stringify({
 			version: 1,
 			invocationId,
@@ -313,6 +359,12 @@ async function stubNixEnvironment(
 			outputPaths: [pathA]
 		})
 	};
+}
+
+// The stub writes its run count as it starts, so the file's existence is what
+// the store reads to answer for the build having run.
+function stubCountFile(workspace: string): string {
+	return path.join(workspace, 'stub-count');
 }
 
 const workspaces: string[] = [];
@@ -337,14 +389,33 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 			? path.join(workspace, 'absent', 'receipt.json')
 			: path.join(workspace, 'receipt.json');
 	const valid = new Set(config.valid);
-	const record: RecordedRun = { phases: [], results: [], warnings: [] };
+	const alreadyValid = new Set(config.alreadyValid);
+	const ultimatePaths = new Set(config.ultimatePaths);
+	const record: RecordedRun = {
+		phases: [],
+		results: [],
+		warnings: [],
+		info: [],
+		storeCalls: []
+	};
 	const sleeps: number[] = [];
 	const verifications: ChildCommand[] = [];
 	let attemptIdsIssued = 0;
+	const isStreamed = config.preflightFailure === undefined;
 	const environment =
 		config.constructed === undefined
 			? undefined
-			: await stubNixEnvironment(workspace, socketPath, config.constructed);
+			: await stubNixEnvironment(
+					workspace,
+					isStreamed ? socketPath : '',
+					config.constructed,
+					config.outPaths ?? config.valid ?? []
+				);
+	const preflight: BuildPushPreflight = {
+		daemonSocketPath: path.join(workspace, 'daemon.sock'),
+		helperPath: '/bin/cat',
+		runtimePlan: { directory: runtimeDirectory, socketPath }
+	};
 
 	const client: PushClient = {
 		negotiate: (body) =>
@@ -378,18 +449,52 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 			})
 	};
 
+	// The store answers what it holds, and records what it was asked and when.
+	// The stub writes its count file as it starts, so that file is what marks
+	// the build as having run; a flow whose build is not the stub has no such
+	// division and holds the same paths throughout.
+	const hasBuilt = (): boolean =>
+		config.constructed === undefined || existsSync(stubCountFile(workspace));
+	const recordCall = (name: string): void => {
+		record.storeCalls.push(
+			`${name} ${hasBuilt() ? 'after' : 'before'} the build`
+		);
+	};
+	const held = (): ReadonlySet<StorePathString> =>
+		hasBuilt() ? valid : alreadyValid;
+	const store: BuildPushStore = {
+		storeKind: 'local-filesystem',
+		queryValidPathsInfo: (paths) => {
+			recordCall('queryValidPathsInfo');
+			const holds = held();
+
+			return Promise.resolve(
+				paths
+					.map((candidate) => storePathSchema.parse(candidate))
+					.filter((candidate) => holds.has(candidate))
+					.map((candidate) => pathInfo(candidate, ultimatePaths.has(candidate)))
+			);
+		},
+		queryValidPaths: (paths) => {
+			recordCall('queryValidPaths');
+			const holds = held();
+
+			return Promise.resolve(
+				paths.filter((candidate) => holds.has(storePathSchema.parse(candidate)))
+			);
+		},
+		queryDerivationOutputPaths: () => {
+			recordCall('queryDerivationOutputPaths');
+
+			return Promise.resolve([...(config.declaredOutputs ?? [])]);
+		},
+		resolveClosure: () => Promise.resolve([]),
+		narFromPath: () => emptyNar
+	};
+
 	const dependencies: BuildPushDependencies = {
 		client,
-		store: {
-			queryValidPathsInfo: (paths) =>
-				Promise.resolve(
-					paths
-						.map((candidate) => storePathSchema.parse(candidate))
-						.filter((candidate) => valid.has(candidate))
-						.map((candidate) => pathInfo(candidate))
-				),
-			queryDerivationOutputPaths: () => Promise.resolve([])
-		},
+		store,
 		batchStore: {
 			withConnection: (use) =>
 				use({
@@ -402,12 +507,11 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		},
 		storeDirectory,
 		invocationId,
+		runtime: { environment: {}, temporaryDirectory: workspace },
 		preflight: () =>
-			Promise.resolve({
-				daemonSocketPath: path.join(workspace, 'daemon.sock'),
-				helperPath: '/bin/cat',
-				runtimePlan: { directory: runtimeDirectory, socketPath }
-			}),
+			config.preflightFailure === undefined
+				? Promise.resolve(preflight)
+				: Promise.reject(config.preflightFailure),
 		createNarArchive: () => emptyStream(),
 		compressNar: () => ({
 			body: emptyStream(),
@@ -447,7 +551,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 			: {
 					kind: 'constructed',
 					build: {
-						installables: ['.#app'],
+						installables: config.constructed.installables ?? ['.#app'],
 						...(config.constructed.attempts !== undefined && {
 							attempts: config.constructed.attempts
 						}),
@@ -471,6 +575,7 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	return {
 		...record,
 		error: thrown,
+		preflight,
 		receiptFile,
 		sleeps,
 		attemptIdsIssued,
@@ -547,15 +652,22 @@ describe('publicationFailureExitCode', () => {
 });
 
 describe('runBuildPush', () => {
-	it('reports the build-push phases in run order and a summary result', async () => {
+	it('reports the streamed mode, the phases in run order and a summary result', async () => {
 		const run = await runFlow({});
 
 		expect({
 			error: run.error,
+			info: run.info,
 			phases: run.phases,
 			resultKinds: run.results.map((result) => result.kind)
 		}).toStrictEqual({
 			error: undefined,
+			info: [
+				buildPushModeDescription({
+					kind: 'streamed',
+					preflight: run.preflight
+				})
+			],
 			phases: [
 				'Building',
 				'Queueing completed paths',
@@ -565,6 +677,242 @@ describe('runBuildPush', () => {
 			],
 			resultKinds: ['build-summary']
 		});
+	});
+
+	it.each([
+		{
+			name: 'a store with no daemon socket',
+			failure: new DaemonRequiredError('/nix/var/nix/daemon-socket/socket')
+		},
+		{
+			name: 'a daemon that does not trust the client',
+			failure: new UntrustedDaemonError('not-trusted')
+		}
+	])(
+		// The cohort declares a flake attribute, which names no derivation to
+		// resolve, so the build's own out-links are what the run publishes.
+		'names the reconciled local mode and publishes what it built behind $name',
+		async ({ failure }) => {
+			const run = await runFlow({
+				preflightFailure: failure,
+				constructed: { succeedOn: 1 },
+				valid: [pathA]
+			});
+			const receipt: unknown = JSON.parse(
+				await readFile(run.receiptFile, 'utf8')
+			);
+
+			expect({ error: run.error, info: run.info, receipt }).toStrictEqual({
+				error: undefined,
+				info: [
+					buildPushModeDescription({
+						kind: 'reconciled-local',
+						reason: failure
+					})
+				],
+				receipt: {
+					version: 3,
+					paths: [pathA],
+					subjects: [],
+					childExitStatus: 0,
+					uploaded: []
+				}
+			});
+		}
+	);
+
+	it('asks which declared outputs the store holds before it builds', async () => {
+		const run = await runFlow({
+			preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+			constructed: { succeedOn: 1, installables: [`${drvA}^*`] },
+			declaredOutputs: [pathA],
+			valid: [pathA]
+		});
+
+		expect({ error: run.error, storeCalls: run.storeCalls }).toStrictEqual({
+			error: undefined,
+			storeCalls: [
+				'queryDerivationOutputPaths before the build',
+				'queryValidPaths before the build',
+				'queryValidPaths after the build',
+				'queryValidPathsInfo after the build'
+			]
+		});
+	});
+
+	// The receipt one reconciled local run writes over a cohort that realises
+	// exactly one path, under the facts each case establishes about it.
+	async function reconciledReceipt(config: FlowConfig): Promise<unknown> {
+		const run = await runFlow({
+			preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+			valid: [pathA],
+			...config
+		});
+
+		expect(run.error).toBeUndefined();
+
+		return JSON.parse(await readFile(run.receiptFile, 'utf8'));
+	}
+
+	function receiptOver(subjects: readonly unknown[]): unknown {
+		return {
+			version: 3,
+			paths: [pathA],
+			subjects,
+			childExitStatus: 0,
+			uploaded: []
+		};
+	}
+
+	function subjectClaimed(verification: string): unknown {
+		return {
+			storePath: pathA,
+			narHash: narHash.digestHex(),
+			derivation: drvA,
+			buildStore: 'auto',
+			verification
+		};
+	}
+
+	it.each([
+		{
+			name: 'a path this run resolved and the store then held as its own',
+			config: {
+				constructed: { succeedOn: 1, installables: [`${drvA}^*`] },
+				declaredOutputs: [pathA],
+				ultimatePaths: [pathA]
+			},
+			verification: 'build-store'
+		},
+		{
+			name: 'an output a builder realised and a local rebuild reproduced',
+			config: {
+				constructed: {
+					succeedOn: 1,
+					installables: [`${drvA}^*`],
+					verifyRebuilds: true,
+					machine: 'ssh://builder-1'
+				},
+				declaredOutputs: [pathA]
+			},
+			verification: 'verified-rebuild'
+		}
+	])('claims $name against the store the run built in', async (row) => {
+		await expect(reconciledReceipt(row.config)).resolves.toStrictEqual(
+			receiptOver([subjectClaimed(row.verification)])
+		);
+	});
+
+	it.each([
+		{
+			name: 'a path the store already held before the build',
+			config: {
+				constructed: { succeedOn: 1, installables: [`${drvA}^*`] },
+				declaredOutputs: [pathA],
+				alreadyValid: [pathA],
+				ultimatePaths: [pathA]
+			}
+		},
+		{
+			name: 'a path the store substituted rather than built',
+			config: {
+				constructed: { succeedOn: 1, installables: [`${drvA}^*`] },
+				declaredOutputs: [pathA]
+			}
+		},
+		{
+			name: 'a path no question before the build covered',
+			config: { constructed: { succeedOn: 1 }, ultimatePaths: [pathA] }
+		},
+		{
+			name: 'an output a builder realised that no rebuild reproduced',
+			config: {
+				constructed: {
+					succeedOn: 1,
+					installables: [`${drvA}^*`],
+					machine: 'ssh://builder-1'
+				},
+				declaredOutputs: [pathA]
+			}
+		}
+	])('publishes $name without claiming it', async (row) => {
+		await expect(reconciledReceipt(row.config)).resolves.toStrictEqual(
+			receiptOver([])
+		);
+	});
+
+	it('reports the reconciled local run in its summary', async () => {
+		const run = await runFlow({
+			preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+			constructed: { succeedOn: 1 },
+			declaredOutputs: [pathA],
+			valid: [pathA]
+		});
+		const summary = run.results.find(
+			(result) => result.kind === 'build-summary'
+		);
+
+		expect(summary?.data).toStrictEqual({
+			mode: 'reconciled-local',
+			store: storeDirectory,
+			targetPaths: 1,
+			intermediatePaths: 0,
+			queueDepth: 0,
+			uploadedPaths: 0,
+			skipped: 1,
+			childExitStatus: 0,
+			unconfirmedPaths: []
+		});
+	});
+
+	// A failed build leaves no out-links, and its declared outputs are not in
+	// the store, so the run has nothing to publish and touches no root.
+	it('publishes nothing and exits with its own status when the build fails', async () => {
+		const run = await runFlow({
+			preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+			constructed: {
+				succeedOn: 4,
+				attempts: 1,
+				installables: [`${drvA}^*`]
+			},
+			declaredOutputs: [pathA]
+		});
+		const { error } = run;
+		const receipt: unknown = JSON.parse(
+			await readFile(run.receiptFile, 'utf8')
+		);
+
+		expect({
+			error:
+				error instanceof BuildCommandFailedError
+					? { name: error.name, exitCode: error.exitCode }
+					: error,
+			receipt
+		}).toStrictEqual({
+			error: { name: 'BuildCommandFailedError', exitCode: 1 },
+			receipt: { version: 3, paths: [], subjects: [], childExitStatus: 1 }
+		});
+	});
+
+	it('refuses a user-supplied command with the condition that ruled streaming out', async () => {
+		const failure = new DaemonRequiredError('/run/nix/daemon.sock');
+		const run = await runFlow({ preflightFailure: failure });
+
+		expect({ error: run.error, phases: run.phases }).toStrictEqual({
+			error: failure,
+			phases: []
+		});
+	});
+
+	it('fails the run on a refusal no mode works around', async () => {
+		const failure = new PostBuildHookConflictError('/etc/nix/hook.sh');
+		const run = await runFlow({ preflightFailure: failure });
+
+		expect({
+			error: run.error,
+			info: run.info,
+			phases: run.phases
+		}).toStrictEqual({ error: failure, info: [], phases: [] });
 	});
 
 	it('streams an accepted build event and writes the receipt file', async () => {
@@ -618,6 +966,7 @@ describe('runBuildPush', () => {
 		const [summary] = run.results;
 
 		expect(summary?.data).toStrictEqual({
+			mode: 'streamed',
 			store: storeDirectory,
 			targetPaths: 1,
 			intermediatePaths: 0,
