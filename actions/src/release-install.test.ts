@@ -6,6 +6,7 @@ import {
 	mkdtemp,
 	readdir,
 	readFile,
+	rename as renameFile,
 	stat,
 	writeFile
 } from 'node:fs/promises';
@@ -36,12 +37,14 @@ import {
 	assertExpectedSourceCommit,
 	assertInstalledReleaseVersion,
 	assetNameFor,
+	assetNamesFor,
 	expectedSourceCommitFor,
 	fetchRelease,
 	normaliseVersion,
 	parseChecksums,
 	prepareReleaseExecutable,
 	publishReleaseArchive,
+	releaseAssetFor,
 	releaseWorkflowIdentityRegex,
 	splitRepository,
 	verifyReleaseAttestation
@@ -172,6 +175,38 @@ describe('publishReleaseArchive', () => {
 		});
 	});
 
+	it('passes one cancellation signal to archive and version subprocesses', async () => {
+		const installDirectory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-release-install-')
+		);
+		const archive = await releaseArchive({
+			cupboard: "#!/bin/sh\nprintf 'v1.2.3\\n'\n",
+			'cupboard-hook-relay': "#!/bin/sh\nprintf 'fresh-relay\\n'\n"
+		});
+		const controller = new AbortController();
+		const signals: (AbortSignal | undefined)[] = [];
+
+		await publishReleaseArchive(archive, installDirectory, 'v1.2.3', {
+			signal: controller.signal,
+			runCommand: (command, arguments_, options) => {
+				signals.push(options.signal);
+
+				if (command !== 'tar') {
+					return Promise.resolve({ stdout: 'v1.2.3\n' });
+				}
+
+				const result = spawnSync(command, [...arguments_]);
+				if (result.status !== 0) {
+					return Promise.reject(new Error('tar failed'));
+				}
+
+				return Promise.resolve({ stdout: '' });
+			}
+		});
+
+		expect(signals).toStrictEqual([controller.signal, controller.signal]);
+	});
+
 	it('rejects an incomplete archive even when the destination has a stale helper', async () => {
 		const installDirectory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-release-install-')
@@ -191,6 +226,47 @@ describe('publishReleaseArchive', () => {
 		expect({ helper, entries }).toStrictEqual({
 			helper: 'stale relay',
 			entries: ['cupboard-hook-relay']
+		});
+	});
+
+	it('restores both stale executables when replacing the helper fails', async () => {
+		const installDirectory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-release-install-')
+		);
+		const binaryPath = path.join(installDirectory, 'cupboard');
+		const helperPath = path.join(installDirectory, 'cupboard-hook-relay');
+		await writeFile(binaryPath, 'stale cupboard');
+		await writeFile(helperPath, 'stale relay');
+		const archive = await releaseArchive({
+			cupboard: "#!/bin/sh\nprintf 'v1.2.3\\n'\n",
+			'cupboard-hook-relay': "#!/bin/sh\nprintf 'fresh-relay\\n'\n"
+		});
+		const failure = new Error('helper replacement failed');
+
+		await expect(
+			publishReleaseArchive(archive, installDirectory, 'v1.2.3', {
+				rename: async (source, destination) => {
+					if (
+						destination === helperPath &&
+						path.basename(String(source)) === 'cupboard-hook-relay'
+					) {
+						throw failure;
+					}
+
+					await renameFile(source, destination);
+				}
+			})
+		).rejects.toBe(failure);
+		const [binary, helper, entries] = await Promise.all([
+			readFile(binaryPath, 'utf8'),
+			readFile(helperPath, 'utf8'),
+			readdir(installDirectory)
+		]);
+
+		expect({ binary, helper, entries }).toStrictEqual({
+			binary: 'stale cupboard',
+			helper: 'stale relay',
+			entries: ['cupboard', 'cupboard-hook-relay']
 		});
 	});
 });
@@ -239,23 +315,70 @@ describe('splitRepository', () => {
 
 describe('assetNameFor', () => {
 	it.each([
-		['darwin', 'arm64', 'cupboard-v1.2.3-macos-arm64.tar.gz'],
-		['darwin', 'x64', 'cupboard-v1.2.3-macos-x64.tar.gz'],
-		['linux', 'arm64', 'cupboard-v1.2.3-linux-arm64.tar.gz'],
-		['linux', 'x64', 'cupboard-v1.2.3-linux-x64.tar.gz']
+		['darwin', 'arm64', 'cupboard-macos-arm64.tar.gz'],
+		['darwin', 'x64', 'cupboard-macos-x64.tar.gz'],
+		['linux', 'arm64', 'cupboard-linux-arm64.tar.gz'],
+		['linux', 'x64', 'cupboard-linux-x64.tar.gz']
 	])(
 		'builds the asset name for %s %s',
 		(runtimePlatform, runtimeArchitecture, expected) => {
-			expect(assetNameFor('v1.2.3', runtimePlatform, runtimeArchitecture)).toBe(
-				expected
-			);
+			expect(assetNameFor(runtimePlatform, runtimeArchitecture)).toBe(expected);
 		}
 	);
 
 	it('rejects an unsupported platform', () => {
-		expect(() => assetNameFor('v1.2.3', 'sunos', 'sparc')).toThrow(
+		expect(() => assetNameFor('sunos', 'sparc')).toThrow(
 			UnsupportedPlatformError
 		);
+	});
+
+	it('prefers the stable release-scoped name and retains the legacy tag name', () => {
+		expect(assetNamesFor('channel/one', 'linux', 'x64')).toStrictEqual([
+			'cupboard-linux-x64.tar.gz',
+			'cupboard-channel/one-linux-x64.tar.gz'
+		]);
+	});
+});
+
+describe('releaseAssetFor', () => {
+	it('prefers the stable platform asset when both naming generations exist', () => {
+		expect(
+			releaseAssetFor(
+				{
+					tagName: 'channel/one',
+					assets: [
+						{
+							name: 'cupboard-channel/one-linux-x64.tar.gz',
+							url: 'legacy'
+						},
+						{ name: 'cupboard-linux-x64.tar.gz', url: 'stable' }
+					]
+				},
+				'linux',
+				'x64'
+			)
+		).toStrictEqual({ name: 'cupboard-linux-x64.tar.gz', url: 'stable' });
+	});
+
+	it('falls back to a tag-named asset from an existing release', () => {
+		expect(
+			releaseAssetFor(
+				{
+					tagName: 'v1.2.3',
+					assets: [
+						{
+							name: 'cupboard-v1.2.3-linux-x64.tar.gz',
+							url: 'legacy'
+						}
+					]
+				},
+				'linux',
+				'x64'
+			)
+		).toStrictEqual({
+			name: 'cupboard-v1.2.3-linux-x64.tar.gz',
+			url: 'legacy'
+		});
 	});
 });
 
@@ -449,6 +572,28 @@ describe('verifyReleaseAttestation', () => {
 				fetch: stubAttestationFetch([{ bundle: {} }]),
 				verify: () =>
 					Promise.resolve(verifiedAs('f'.repeat(64), attestationTagCommit))
+			})
+		);
+
+		expect(error).toBeInstanceOf(AttestationVerificationFailedError);
+
+		if (!(error instanceof AttestationVerificationFailedError)) {
+			throw error;
+		}
+
+		expect(error.cause).toBeInstanceOf(AttestationSubjectMismatchError);
+	});
+
+	it('rejects a bundle that signs the archive alongside another subject', async () => {
+		const archive = await writeArchive();
+		const error = await rejectionOf(
+			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
+				fetch: stubAttestationFetch([{ bundle: {} }]),
+				verify: () =>
+					Promise.resolve({
+						...verifiedAs(archive.digest, attestationTagCommit),
+						subjectDigests: [archive.digest, 'f'.repeat(64)]
+					})
 			})
 		);
 

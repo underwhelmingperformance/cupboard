@@ -20,13 +20,17 @@ not acknowledge grace facts. Deploying the server first makes that feature
 available immediately, but is not required to keep ordinary retained pushes
 working during a rolling release.
 
-The release workflow publishes these assets for each version tag:
+The release itself scopes these stable platform asset names to one version:
 
-- `cupboard-vX.Y.Z-linux-x64.tar.gz`
-- `cupboard-vX.Y.Z-linux-arm64.tar.gz`
-- `cupboard-vX.Y.Z-macos-x64.tar.gz`
-- `cupboard-vX.Y.Z-macos-arm64.tar.gz`
+- `cupboard-linux-x64.tar.gz`
+- `cupboard-linux-arm64.tar.gz`
+- `cupboard-macos-x64.tar.gz`
+- `cupboard-macos-arm64.tar.gz`
 - `checksums.txt`
+
+Installers prefer these stable names, so a valid release tag never has to be a
+valid filename. They retain lookup support for the older
+`cupboard-vX.Y.Z-<platform>-<arch>.tar.gz` assets.
 
 Each binary build tries the ESM path first: esbuild emits an ESM bundle, the SEA
 config sets `mainFormat: "module"`, postject injects the blob into a pinned Node

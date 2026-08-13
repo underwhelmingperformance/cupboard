@@ -121,12 +121,7 @@ class MissingOptionError extends UsageError {
 
 async function main(): Promise<void> {
 	const options = parseOptions(process.argv.slice(2));
-	const releasePlatform = supportedPlatforms.get(platform);
-	const releaseArchitecture = supportedArchitectures.get(arch);
-
-	if (releasePlatform === undefined || releaseArchitecture === undefined) {
-		throw new UnsupportedPlatformError(platform, arch);
-	}
+	const assetName = releaseAssetNameFor(platform, arch);
 
 	const require = createRequire(import.meta.url);
 	const postjectCliPath = require.resolve('postject/dist/cli.js');
@@ -138,7 +133,6 @@ async function main(): Promise<void> {
 	const embeddedPayloadPath = path.join(workDirectory, embeddedAssetKey);
 	const binaryDirectory = path.join(outputDirectory, 'package');
 	const binaryPath = path.join(binaryDirectory, 'cupboard');
-	const assetName = `cupboard-${options.version}-${releasePlatform}-${releaseArchitecture}.tar.gz`;
 	const assetPath = path.join(outputDirectory, assetName);
 
 	await mkdir(workDirectory, { recursive: true });
@@ -354,6 +348,21 @@ function parseOptions(arguments_: readonly string[]): Options {
 /** Preserve the caller's build identity after rejecting surrounding whitespace. */
 export function normaliseBuildVersion(version: string): string {
 	return version.trim();
+}
+
+/** Name a binary by platform within the release that scopes it to one version. */
+export function releaseAssetNameFor(
+	runtimePlatform: string,
+	runtimeArchitecture: string
+): string {
+	const releasePlatform = supportedPlatforms.get(runtimePlatform);
+	const releaseArchitecture = supportedArchitectures.get(runtimeArchitecture);
+
+	if (releasePlatform === undefined || releaseArchitecture === undefined) {
+		throw new UnsupportedPlatformError(runtimePlatform, runtimeArchitecture);
+	}
+
+	return `cupboard-${releasePlatform}-${releaseArchitecture}.tar.gz`;
 }
 
 if (
