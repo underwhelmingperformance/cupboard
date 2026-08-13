@@ -36,6 +36,7 @@ export function collectProcess(
 	return new Promise((resolve, reject) => {
 		const stdout: Buffer[] = [];
 		const stderr: Buffer[] = [];
+		let startError: CommandStartError | undefined;
 
 		child.stdout?.on('data', (chunk: Buffer) => {
 			stdout.push(chunk);
@@ -44,21 +45,31 @@ export function collectProcess(
 			stderr.push(chunk);
 		});
 		child.once('error', (cause) => {
-			reject(new CommandStartError(command, arguments_, cause));
+			startError = new CommandStartError(command, arguments_, cause);
 		});
-		child.once('exit', (code: number | null, signal: NodeJS.Signals | null) => {
-			const result = {
-				stdout: Buffer.concat(stdout).toString('utf8'),
-				stderr: Buffer.concat(stderr).toString('utf8')
-			};
+		child.once(
+			'close',
+			(code: number | null, signal: NodeJS.Signals | null) => {
+				if (startError !== undefined) {
+					reject(startError);
+					return;
+				}
 
-			if (code === 0) {
-				resolve(result);
-				return;
+				const result = {
+					stdout: Buffer.concat(stdout).toString('utf8'),
+					stderr: Buffer.concat(stderr).toString('utf8')
+				};
+
+				if (code === 0) {
+					resolve(result);
+					return;
+				}
+
+				reject(
+					new CommandFailedError(command, arguments_, code, signal, result)
+				);
 			}
-
-			reject(new CommandFailedError(command, arguments_, code, signal, result));
-		});
+		);
 	});
 }
 
