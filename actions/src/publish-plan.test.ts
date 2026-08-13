@@ -485,41 +485,40 @@ describe('evaluateTargetCoverage', () => {
 			name: 'every current output is in the reconciled list',
 			targetPaths: [firstPath],
 			check: { retained: true, reconciledPaths: new Set([firstPath]) },
-			leftUpstreamPaths: new Set<StorePathString>(),
 			status: 'covered' as const
 		},
 		{
-			name: 'an absent output is covered by a matching left-upstream receipt entry',
+			name: 'an output the reconciled list does not carry',
 			targetPaths: [firstPath, secondPath],
 			check: { retained: true, reconciledPaths: new Set([firstPath]) },
-			leftUpstreamPaths: new Set([secondPath]),
-			status: 'covered' as const
+			status: 'not-covered' as const
 		},
 		{
-			name: 'an absent output with no left-upstream coverage',
-			targetPaths: [firstPath, secondPath],
-			check: { retained: true, reconciledPaths: new Set([firstPath]) },
-			leftUpstreamPaths: new Set<StorePathString>(),
+			name: 'the reconciled list is empty',
+			targetPaths: [firstPath],
+			check: {
+				retained: true,
+				reconciledPaths: new Set<StorePathString>()
+			},
 			status: 'not-covered' as const
 		},
 		{
 			name: 'the reconciled list is no longer retained',
 			targetPaths: [firstPath],
 			check: { retained: false, reconciledPaths: new Set([firstPath]) },
-			leftUpstreamPaths: new Set<StorePathString>(),
 			status: 'not-covered' as const
 		},
 		{
-			name: 'a changed output the reconciled list and receipt both miss',
+			name: 'a changed output the reconciled list misses',
 			targetPaths: [secondPath],
 			check: { retained: true, reconciledPaths: new Set([firstPath]) },
-			leftUpstreamPaths: new Set([firstPath]),
 			status: 'not-covered' as const
 		}
-	])('$name', ({ targetPaths, check, leftUpstreamPaths, status }) => {
-		expect(
-			evaluateTargetCoverage(first, targetPaths, check, leftUpstreamPaths)
-		).toStrictEqual({ attr: first.attr, status });
+	])('$name', ({ targetPaths, check, status }) => {
+		expect(evaluateTargetCoverage(first, targetPaths, check)).toStrictEqual({
+			attr: first.attr,
+			status
+		});
 	});
 });
 

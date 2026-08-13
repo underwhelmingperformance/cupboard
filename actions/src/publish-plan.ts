@@ -993,11 +993,9 @@ export type TargetCoverageStatus =
 	'covered' | 'not-covered' | 'unknown-output' | 'failed';
 
 /**
- * Whether the advisory pre-filter found one target already covered: either
- * its root's last reconciled list carries every one of its current outputs,
- * or an absent one is recorded in the previous run's receipt as left
- * upstream (the store path matches, so the content is unchanged). A target
- * whose output paths are not all known before building never reaches
+ * Whether the advisory pre-filter found one target already covered: its
+ * root's last reconciled list carries every one of its current outputs. A
+ * target whose output paths are not all known before building never reaches
  * `covered`, and a failed read or ensure call never reaches `not-covered`
  * silently: both carry their own status so a cohort decision can tell "does
  * not need building" from "could not tell".
@@ -1010,9 +1008,8 @@ export interface TargetCoverage {
 
 /**
  * Decides one known-output target's coverage from facts already gathered:
- * whether its root's reconciled list, freshly re-ensured, is still valid,
- * and whether that list plus the previous receipt's left-upstream paths
- * between them name every one of its current outputs. Callers assemble
+ * whether its root's reconciled list, freshly re-ensured, is still valid, and
+ * whether that list names every one of its current outputs. Callers assemble
  * `unknown-output` and `failed` directly, since both are facts about
  * reaching the check at all, not about what it found.
  */
@@ -1022,15 +1019,14 @@ export function evaluateTargetCoverage(
 	check: {
 		readonly retained: boolean;
 		readonly reconciledPaths: ReadonlySet<StorePathString>;
-	},
-	leftUpstreamPaths: ReadonlySet<StorePathString>
+	}
 ): TargetCoverage {
 	if (!check.retained) {
 		return { attr: target.attr, status: 'not-covered' };
 	}
 
-	const isCovered = targetPaths.every(
-		(path) => check.reconciledPaths.has(path) || leftUpstreamPaths.has(path)
+	const isCovered = targetPaths.every((path) =>
+		check.reconciledPaths.has(path)
 	);
 
 	return { attr: target.attr, status: isCovered ? 'covered' : 'not-covered' };
