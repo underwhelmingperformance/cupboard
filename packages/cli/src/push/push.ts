@@ -156,7 +156,8 @@ export interface PushDependencies {
 	 * The build store that realised the pushed paths. Naming it asks the push
 	 * for a build receipt over what it publishes: the store answers each
 	 * target's NAR hash and deriver over the connection this push already
-	 * opened, which is everything a receipt subject needs.
+	 * opened, while `alreadyHeld` and `claimable` state which paths this run may
+	 * attribute to its build invocation.
 	 */
 	readonly buildStore?: string;
 	/**
@@ -166,11 +167,12 @@ export interface PushDependencies {
 	 */
 	readonly alreadyHeld?: readonly string[];
 	/**
-	 * The paths this run asked the build store about before it built anything.
-	 * A published path outside them is published without a subject: nothing
-	 * established what the store held for it beforehand, so whether this run
-	 * realised it is unknown. Naming none leaves every published path
-	 * claimable.
+	 * The paths whose realisation this build invocation established. A
+	 * published path outside them is published without a subject: its presence
+	 * in the store after the invocation does not prove that invocation realised
+	 * it. Leaving this property undefined preserves the internal default that
+	 * every published path is claimable; receipt-producing CLI callers must
+	 * state it explicitly.
 	 */
 	readonly claimable?: readonly string[];
 	/**
@@ -562,7 +564,7 @@ async function resolveReferenceEntries(
 interface ReceiptClaims {
 	readonly buildStore: string;
 	readonly alreadyHeld: ReadonlySet<string>;
-	/** Unset leaves every published path claimable. */
+	/** Unset preserves the internal default that every published path is claimable. */
 	readonly claimable: ReadonlySet<string> | undefined;
 	readonly verifiedDerivations: ReadonlySet<string>;
 }

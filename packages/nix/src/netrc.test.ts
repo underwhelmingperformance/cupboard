@@ -130,6 +130,16 @@ const cases: readonly NetrcCase[] = [
 		expected: { login: 'reader', password: 'secret' }
 	},
 	{
+		name: 'a macro body naming the requested machine',
+		source:
+			'macdef upload\n' +
+			'machine cache.example login trapped password trap\n' +
+			'echo still inside the macro\n' +
+			'\n' +
+			'machine cache.example login reader password secret\n',
+		expected: { login: 'reader', password: 'secret' }
+	},
+	{
 		name: 'an entry naming an address a URL states in brackets',
 		source: 'machine ::1 login reader password secret\n',
 		host: '[::1]',

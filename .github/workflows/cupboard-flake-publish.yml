@@ -441,22 +441,27 @@ jobs:
             needs.configure.outputs.root-prefix, github.run_id) }}
           run-root-ttl: ${{ inputs.run-root-ttl }}
 
-      # The build receipt carries the per-path NAR hashes, derivers and
-      # attribution the provenance subjects need. A streamed cohort writes it
-      # from its supervised build; a remote-store cohort reconciles it from the
-      # store the build ran in. A cohort that published nothing it built (push
-      # disabled, or nothing to build) has no receipt and nothing it can
-      # truthfully attest.
+      # The build receipt carries the per-path NAR hashes, derivers and any
+      # current-invocation evidence the provenance subjects need. A streamed
+      # cohort writes it from its supervised build. A remote-store cohort uses
+      # Nix's keyed build results to claim only queryable outputs this invocation
+      # built, then reconciles every returned path without treating substitution,
+      # already-valid paths or floating targets as build evidence. A cohort that
+      # publishes nothing has no receipt.
       - uses: ./.cupboard/actions/attest
         id: attest
         if: ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' }}
         with:
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
+          url: ${{ inputs.url }}
+          cache: ${{ needs.configure.outputs.cache }}
+          read-user: ${{ secrets.read_user }}
+          read-password: ${{ secrets.read_password }}
 
       # The provenance bundle is signed after publication, since it needs the
       # receipt's subjects, so a dedicated step files it against the paths the
       # cache already serves. Gated as the attest step is, plus the bundle
-      # itself: a cohort that built nothing locally signs nothing.
+      # itself: a receipt with no established subjects signs nothing.
       - uses: ./.cupboard/actions/attest-attach
         if:
           ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' &&
@@ -465,15 +470,18 @@ jobs:
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
           cache: ${{ needs.configure.outputs.cache }}
+          read-user: ${{ secrets.read_user }}
+          read-password: ${{ secrets.read_password }}
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           bundle: ${{ steps.attest.outputs.bundle-path }}
 
       # The cohort job is where a run of one cohort per job crosses a
-      # collection boundary. Every root has been set on the destination and
-      # the attestation steps have taken their last reading of this store, so
-      # the build's out-links have done their work; removing the directory
-      # that holds them makes the cohort's own outputs collectable here, and a
-      # later cohort job sharing the runner substitutes them from the cache.
+      # collection boundary. Every root has been set on the destination, and
+      # attestation reads the destination's committed narinfos rather than the
+      # build store, so the build's out-links have done their work. Removing
+      # the directory that holds them makes the cohort's own outputs collectable
+      # here, and a later cohort job sharing the runner substitutes them from
+      # the cache.
       # `nix store gc` then sweeps dead paths alone, leaving a user's own gc
       # roots standing, and a sweep that fails is reported without failing the
       # job. The boundary runs after a failed cohort too, where the disk it

@@ -14,6 +14,7 @@ import {
 	collectLines,
 	provided,
 	providedCache,
+	providedReadUser,
 	providedUrl
 } from '../options.ts';
 
@@ -22,6 +23,8 @@ export interface AttestAttachOptions {
 	readonly cupboardPath?: string;
 	readonly cache?: string;
 	readonly audience?: string;
+	readonly readUser?: string;
+	readonly readPassword?: string;
 	readonly receiptFile?: string;
 	readonly bundle: readonly string[];
 }
@@ -31,6 +34,8 @@ export interface AttestAttachInputs {
 	readonly cupboardPath: string;
 	readonly cache: StoredCache;
 	readonly audience: string;
+	readonly readUser: string;
+	readonly readPassword: string;
 	readonly receiptFile: string;
 	readonly bundles: readonly string[];
 }
@@ -55,6 +60,8 @@ export function registerAttestAttachCommand(
 		)
 		.option('--cache <name>', 'named cache the paths were published to')
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
+		.option('--read-user <user>', 'private-read username')
+		.option('--read-password <password>', 'private-read password')
 		.requiredOption(
 			'--receipt-file <path>',
 			'current-run receipt produced by the build action'
@@ -98,11 +105,30 @@ export function resolveAttestAttachInputs(
 		);
 	}
 
+	const readUser = providedReadUser(options.readUser);
+	const readPassword = options.readPassword ?? '';
+
+	if (readUser !== '' && readPassword === '') {
+		throw new InvalidInputError(
+			'read-password',
+			'read-password is required when read-user is supplied'
+		);
+	}
+
+	if (readPassword !== '' && readUser === '') {
+		throw new InvalidInputError(
+			'read-user',
+			'read-user is required when read-password is supplied'
+		);
+	}
+
 	return {
 		url,
 		cupboardPath,
 		cache: providedCache(options.cache),
 		audience: provided(options.audience) ?? '',
+		readUser,
+		readPassword,
 		receiptFile,
 		bundles: options.bundle
 	};
@@ -134,6 +160,15 @@ export function attestAttachArguments(
 		arguments_.push('--cache', inputs.cache);
 	}
 
+	if (inputs.readUser !== '') {
+		arguments_.push(
+			'--read-user',
+			inputs.readUser,
+			'--read-password',
+			inputs.readPassword
+		);
+	}
+
 	for (const bundle of inputs.bundles) {
 		arguments_.push('--attestation', bundle);
 	}
@@ -152,9 +187,11 @@ export async function attestAttachAction(
 		JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
 	);
 
-	if (receipt.paths.length === 0) {
+	const subjectPaths = receipt.subjects.map((subject) => subject.storePath);
+
+	if (subjectPaths.length === 0) {
 		reporter.warn(
-			'The build receipt records no published paths; nothing to attach'
+			'The build receipt records no provenance subjects; nothing to attach'
 		);
 		return;
 	}
@@ -163,7 +200,7 @@ export async function attestAttachAction(
 
 	await runCupboard(
 		inputs.cupboardPath,
-		attestAttachArguments(inputs, receipt.paths),
+		attestAttachArguments(inputs, subjectPaths),
 		environment
 	);
 }

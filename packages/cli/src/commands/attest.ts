@@ -1,6 +1,6 @@
 import { env } from 'node:process';
 
-import { selectorForCache } from '@cupboard/nix-store/scalars';
+import { selectorForCache, storePathSchema } from '@cupboard/nix-store/scalars';
 import { formatCount, type ResultRow } from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { VerifyResult, VerifyTrust } from '@cupboard/shared/sigstore';
@@ -8,6 +8,7 @@ import type { SlsaProvenanceSummary } from '@cupboard/shared/slsa';
 import type { Command } from 'commander';
 
 import {
+	readCommittedAttestationPathInfos,
 	requireAttestationAttachClient,
 	runAttestAttach
 } from '../attest/attach.ts';
@@ -89,6 +90,8 @@ interface AttachOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly cache?: string;
+	readonly readUser?: ReadUser;
+	readonly readPassword?: string;
 	readonly attestation: readonly string[];
 }
 
@@ -121,6 +124,8 @@ export function registerAttestCommands(
 			parseAudience
 		)
 		.option('--cache <name>', 'attach on a named cache rather than the default')
+		.option('--read-user <user>', 'private-read username', parseReadUser)
+		.option('--read-password <password>', 'private-read password')
 		.option(
 			'--attestation <bundle>',
 			'Sigstore DSSE bundle whose in-toto subject matches a named path',
@@ -148,6 +153,26 @@ export function registerAttestCommands(
 				signal: programOptions.signal
 			});
 			const cacheSelector = selectorForCache(storedCacheFor(options.cache));
+			const resolvedPaths = paths.map((path) =>
+				storePathSchema.parse(resolvePushPath(path))
+			);
+			const readUser =
+				options.readUser ?? parseReadUser(env.CUPBOARD_READ_USER);
+			const readPassword = options.readPassword ?? env.CUPBOARD_READ_PASSWORD;
+			const pathInfos = await readCommittedAttestationPathInfos(
+				resolvedPaths,
+				{
+					url,
+					cache: storedCacheFor(options.cache),
+					...(readUser !== undefined && { readUser }),
+					...(readPassword !== undefined && { readPassword })
+				},
+				{
+					...(programOptions.signal !== undefined && {
+						signal: programOptions.signal
+					})
+				}
+			);
 			const token = await authenticateForPush(raw, {
 				githubOidc: options.githubOidc,
 				audience: options.audience ?? audienceSchema.parse(url),
@@ -156,19 +181,16 @@ export function registerAttestCommands(
 				})
 			});
 
-			await runAttestAttach(
-				paths.map((path) => resolvePushPath(path)),
-				reporter,
-				{
-					client: requireAttestationAttachClient(
-						pushClientFor(url, token, {
-							cache: options.cache,
-							signal: programOptions.signal
-						})
-					),
-					attestations: options.attestation.map((path) => ({ path }))
-				}
-			);
+			await runAttestAttach(resolvedPaths, reporter, {
+				client: requireAttestationAttachClient(
+					pushClientFor(url, token, {
+						cache: options.cache,
+						signal: programOptions.signal
+					})
+				),
+				attestations: options.attestation.map((path) => ({ path })),
+				pathInfos
+			});
 		});
 
 	attest

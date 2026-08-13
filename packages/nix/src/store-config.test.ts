@@ -371,6 +371,15 @@ describe('discoverNixStoreConfig', () => {
 		expect(config.storeUri).toBe('local');
 	});
 
+	it('lets an empty store setting select auto over NIX_REMOTE', () => {
+		const config = discover({
+			env: { NIX_REMOTE: 'dummy://' },
+			files: { '/etc/nix/nix.conf': 'store =\n' }
+		});
+
+		expect(config.storeUri).toBe('auto');
+	});
+
 	it.each([
 		{
 			name: 'the system file',
@@ -943,6 +952,10 @@ describe('discoverNixStoreConfig', () => {
 	// anything of its own.
 	it.each([
 		{ name: 'a boolean spelling neither', line: 'keep-outputs = maybe' },
+		{
+			name: 'an experimental boolean spelling neither',
+			line: 'accept-flake-config = maybe'
+		},
 		{ name: 'a boolean given a number above one', line: 'keep-outputs = 2' },
 		{ name: 'a boolean written in another case', line: 'keep-outputs = True' },
 		{ name: 'an integer that is a word', line: 'log-lines = many' },

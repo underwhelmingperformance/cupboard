@@ -607,10 +607,11 @@ export function discoverNixStoreConfig(
 	// A configured `store` wins over `NIX_REMOTE`, which is only the default
 	// the setting starts at. Either one naming nothing names the automatic
 	// store, which is how Nix reads an empty store reference.
+	const configuredStore = settings.get('store');
 	const storeUri = canonicalStoreReference(
-		nonEmpty(settings.get('store')) ??
-			nonEmpty(dependencies.env.NIX_REMOTE) ??
-			'auto',
+		configuredStore === undefined
+			? (nonEmpty(dependencies.env.NIX_REMOTE) ?? 'auto')
+			: (nonEmpty(configuredStore) ?? 'auto'),
 		dependencies.workingDirectory()
 	);
 	const daemonSocketPath =

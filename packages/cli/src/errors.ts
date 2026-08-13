@@ -562,6 +562,20 @@ export class BuildStoreRequiresAlreadyHeldError extends CliUsageError {
 	}
 }
 
+export class BuildStoreRequiresClaimableError extends CliUsageError {
+	constructor() {
+		super(
+			'--store with --receipt-file requires --claimable (repeated for ' +
+				'each path whose realisation this invocation observed, or ' +
+				'--no-claimable for none): a receipt attributes a subject to this ' +
+				'run only with current-invocation evidence, and a push that never ' +
+				'names that evidence cannot distinguish a build from an output that ' +
+				'appeared before or during the run'
+		);
+		this.name = 'BuildStoreRequiresClaimableError';
+	}
+}
+
 export class OidcRetentionChoiceRequiredError extends CliUsageError {
 	constructor() {
 		super(

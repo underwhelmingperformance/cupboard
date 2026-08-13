@@ -91,7 +91,7 @@ function localStoreParameters(
 	const root = reference.slice(localSchemePrefix.length);
 
 	if (root !== '' && !parameters.has('root')) {
-		parameters.set('root', root);
+		parameters.set('root', decodeURIComponent(root));
 	}
 
 	return parameters;

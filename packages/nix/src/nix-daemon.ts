@@ -101,10 +101,12 @@ export interface NixDaemonStoreClientOptions {
 	readonly connect?: NixDaemonConnector;
 	readonly setOptions?: NixDaemonSetOptions;
 	readonly overrides?: NixDaemonOverrides;
+	readonly signal?: AbortSignal;
 }
 
 export type NixDaemonConnector = (
-	socketPath: string
+	socketPath: string,
+	signal?: AbortSignal
 ) => Promise<NixDaemonTransport>;
 
 export interface NixDaemonTransport {
@@ -126,6 +128,10 @@ export interface NixDaemonSession {
 	 * release.
 	 */
 	addTempRoot(storePath: StorePathString): Promise<void>;
+	/** Build targets on this session's connection, returning keyed outcomes. */
+	buildPathsWithResults(
+		targets: readonly NixDerivedPathString[]
+	): Promise<readonly NixBuildResult[]>;
 	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo>;
 	queryValidPaths(
 		storePaths: readonly StorePathString[]
@@ -257,17 +263,27 @@ export class NixDaemonStoreClient implements NixStoreClient {
 
 	private readonly overrides: NixDaemonOverrides;
 
+	private readonly signal?: AbortSignal;
+
 	constructor(options: NixDaemonStoreClientOptions = {}) {
 		this.socketPath = options.socketPath ?? defaultDaemonSocketPath;
 		this.connect = options.connect ?? connectToNixDaemon;
 		this.daemonSetOptions = options.setOptions ?? {};
 		this.overrides = options.overrides ?? {};
+		this.signal = options.signal;
 	}
 
 	private async openConnection(): Promise<NixDaemonConnection> {
-		const transport = await this.connect(this.socketPath);
+		this.signal?.throwIfAborted();
+
+		const connected = this.connect(this.socketPath, this.signal);
+		const transport = await waitForTransport(connected, this.signal);
+		const abortableTransport =
+			this.signal === undefined
+				? transport
+				: new AbortableNixDaemonTransport(transport, this.signal);
 		const connection = new NixDaemonConnection(
-			transport,
+			abortableTransport,
 			this.daemonSetOptions,
 			this.overrides
 		);
@@ -578,6 +594,12 @@ class NixDaemonConnectionSession implements NixDaemonSession {
 		return this.connection.addTempRoot(storePath);
 	}
 
+	buildPathsWithResults(
+		targets: readonly NixDerivedPathString[]
+	): Promise<readonly NixBuildResult[]> {
+		return this.connection.buildPathsWithResults(sortedUnique(targets));
+	}
+
 	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo> {
 		return this.connection.queryPathInfo(storePath);
 	}
@@ -762,20 +784,146 @@ class NixDaemonConnectionPool {
 }
 
 export async function connectToNixDaemon(
-	socketPath: string
+	socketPath: string,
+	signal?: AbortSignal
 ): Promise<NixDaemonTransport> {
-	return new Promise((resolve, reject) => {
-		const socket = createConnection(socketPath);
+	signal?.throwIfAborted();
+
+	const socket = createConnection(socketPath);
+	const connected = new Promise<NixDaemonTransport>((resolve, reject) => {
+		const cleanUp = (): void => {
+			socket.off('error', rejectConnection);
+		};
 		const rejectConnection = (error: Error): void => {
+			cleanUp();
 			reject(new NixDaemonConnectionError(socketPath, error));
 		};
 
 		socket.once('connect', () => {
-			socket.off('error', rejectConnection);
+			cleanUp();
 			resolve(new SocketNixDaemonTransport(socket));
 		});
 		socket.once('error', rejectConnection);
 	});
+
+	return signal === undefined
+		? connected
+		: runWithSignal(connected, signal, () => {
+				socket.destroy();
+			});
+}
+
+async function waitForTransport(
+	connected: Promise<NixDaemonTransport>,
+	signal?: AbortSignal
+): Promise<NixDaemonTransport> {
+	if (signal === undefined) {
+		return connected;
+	}
+
+	signal.throwIfAborted();
+
+	return runWithSignal(connected, signal, () => {
+		void closeTransportWhenConnected(connected);
+	});
+}
+
+async function closeTransportWhenConnected(
+	connected: Promise<NixDaemonTransport>
+): Promise<void> {
+	try {
+		const transport = await connected;
+		await transport.close();
+	} catch {
+		// The failed connection has no transport to close.
+	}
+}
+
+interface AbortOutcome {
+	readonly promise: Promise<{ readonly kind: 'aborted' }>;
+	removeListener(): void;
+}
+
+function abortOutcome(signal: AbortSignal): AbortOutcome {
+	let listener: () => void;
+	const abort = new Promise<{ readonly kind: 'aborted' }>((resolve) => {
+		listener = () => {
+			resolve({ kind: 'aborted' });
+		};
+		signal.addEventListener('abort', listener, { once: true });
+	});
+
+	return {
+		promise: abort,
+		removeListener: () => {
+			signal.removeEventListener('abort', listener);
+		}
+	};
+}
+
+async function completed<T>(
+	operation: Promise<T>
+): Promise<{ readonly kind: 'completed'; readonly value: T }> {
+	return { kind: 'completed', value: await operation };
+}
+
+async function runWithSignal<T>(
+	operation: Promise<T>,
+	signal: AbortSignal,
+	onAbort: () => void
+): Promise<T> {
+	signal.throwIfAborted();
+
+	const aborted = abortOutcome(signal);
+	let outcome:
+		| { readonly kind: 'completed'; readonly value: T }
+		| { readonly kind: 'aborted' };
+
+	try {
+		outcome = await Promise.race([completed(operation), aborted.promise]);
+	} finally {
+		aborted.removeListener();
+	}
+
+	if (outcome.kind === 'completed') {
+		return outcome.value;
+	}
+
+	onAbort();
+	signal.throwIfAborted();
+
+	throw new Error('Abort signal settled without being aborted');
+}
+
+class AbortableNixDaemonTransport implements NixDaemonTransport {
+	private closePromise?: Promise<void>;
+
+	constructor(
+		private readonly transport: NixDaemonTransport,
+		private readonly signal: AbortSignal
+	) {}
+
+	private async run<T>(operation: () => Promise<T>): Promise<T> {
+		this.signal.throwIfAborted();
+
+		return runWithSignal(operation(), this.signal, () => {
+			void this.close();
+		});
+	}
+
+	write(bytes: Uint8Array): Promise<void> {
+		return this.run(() => this.transport.write(bytes));
+	}
+
+	read(byteLength: number): Promise<Uint8Array> {
+		return this.run(() => this.transport.read(byteLength));
+	}
+
+	close(): Promise<void> {
+		this.closePromise ??= this.transport.close();
+
+		return this.closePromise;
+	}
 }
 
 class NixDaemonConnection {

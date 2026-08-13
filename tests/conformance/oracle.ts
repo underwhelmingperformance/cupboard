@@ -13,6 +13,7 @@ import {
 	parseFlakeLockRevision,
 	parseOracleRecord,
 	readNixVersion,
+	requiresConformanceOracle,
 	resolveConformanceNixBinary,
 	runNix
 } from '../../scripts/conformance-oracle.ts';
@@ -92,6 +93,10 @@ async function resolveOracle(): Promise<OracleResolution> {
 		binary = await resolveConformanceNixBinary(repositoryRoot);
 	} catch (error) {
 		if (error instanceof ConformanceNixUnavailableError) {
+			if (requiresConformanceOracle()) {
+				throw error;
+			}
+
 			return { kind: 'unavailable', reason: error.reason };
 		}
 

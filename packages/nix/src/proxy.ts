@@ -82,7 +82,14 @@ export function proxiedFetch(env: ProxyEnvironment): typeof fetch | undefined {
 
 	// One agent holds the connections to the proxy, so every request this run
 	// makes through it shares them.
-	const dispatcher = new EnvHttpProxyAgent(proxies);
+	// The agent otherwise falls back to `process.env` for every absent option.
+	// State each absence explicitly so an upper-case HTTP_PROXY deliberately
+	// excluded above cannot come back when the agent constructs its routes.
+	const dispatcher = new EnvHttpProxyAgent({
+		httpProxy: proxies.httpProxy ?? '',
+		httpsProxy: proxies.httpsProxy ?? '',
+		noProxy: proxies.noProxy ?? ''
+	});
 
 	return (input, init) => {
 		const routed: RoutedRequest = { ...init, dispatcher };

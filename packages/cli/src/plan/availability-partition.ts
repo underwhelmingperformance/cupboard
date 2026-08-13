@@ -114,7 +114,7 @@ export type LeftUpstreamVerdict =
 	 */
 	| {
 			readonly kind: 'closure-divergent';
-			readonly missing: StorePathString;
+			readonly storePath: StorePathString;
 			readonly held: string;
 			readonly offered: string;
 	  }
@@ -123,7 +123,7 @@ export type LeftUpstreamVerdict =
 	 * accept, so a consumer would refuse to fetch it however well the
 	 * substituter serves it.
 	 */
-	| { readonly kind: 'closure-unsigned'; readonly missing: StorePathString }
+	| { readonly kind: 'closure-unsigned'; readonly storePath: StorePathString }
 	| { readonly kind: 'closure-over-cap'; readonly maxPaths: number };
 
 /** One rejected candidate, as the partition reports it. */

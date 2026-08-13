@@ -17,6 +17,12 @@ inputs:
   audience:
     description: GitHub OIDC audience. Defaults to url.
     required: false
+  read-user:
+    description: Basic-auth username for a private destination cache.
+    required: false
+  read-password:
+    description: Basic-auth password for a private destination cache.
+    required: false
   receipt-file:
     description: Current-run receipt produced by the build action.
     required: true
@@ -76,6 +82,8 @@ runs:
         CUPBOARD_PATH: ${{ inputs.cupboard-path }}
         CACHE: ${{ inputs.cache }}
         AUDIENCE: ${{ inputs.audience }}
+        READ_USER: ${{ inputs.read-user }}
+        READ_PASSWORD: ${{ inputs.read-password }}
         RECEIPT_FILE: ${{ inputs.receipt-file }}
         BUNDLE: ${{ inputs.bundle }}
       run: |
@@ -84,6 +92,8 @@ runs:
           --cupboard-path "$CUPBOARD_PATH"
           --cache "$CACHE"
           --audience "$AUDIENCE"
+          --read-user "$READ_USER"
+          --read-password "$READ_PASSWORD"
           --receipt-file "$RECEIPT_FILE"
           --bundle "$BUNDLE")
         node --experimental-transform-types \

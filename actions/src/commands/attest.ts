@@ -2,26 +2,48 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
 
-import { Nix, type NixValidPathInfo } from '@cupboard/nix';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
+import {
+	type StoredCache,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
+import { StorePath } from '@cupboard/nix-store/store-path';
+import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	buildReceiptSchema,
 	type BuildReceiptV2,
 	type BuildReceiptV3,
 	type BuildSubjectV3,
-	type ParsedBuildReceipt,
-	type SubjectVerification
+	type ParsedBuildReceipt
 } from '@cupboard/protocol/build';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import {
+	basicAuthHeader,
+	type BasicCredential,
+	type ReadUser
+} from '@cupboard/shared/http';
+import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
 
+import { fetchWithProbeDeadline } from '../cache-probe.ts';
 import {
+	CommittedSubjectInvalidError,
+	CommittedSubjectUnavailableError,
 	InvalidInputError,
 	SubjectDeriverMovedError,
 	SubjectNarHashMovedError,
 	SubjectNotHeldError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
-import { provided } from '../options.ts';
+import {
+	provided,
+	providedCache,
+	providedReadUser,
+	providedUrl
+} from '../options.ts';
+import { cacheUrlFor } from '../substituters.ts';
 
 interface StorePathDigest {
 	readonly storePath: string;
@@ -31,11 +53,26 @@ interface StorePathDigest {
 export interface AttestOptions {
 	readonly receiptFile?: string;
 	readonly checksumsFile?: string;
+	readonly url?: string;
+	readonly cache?: string;
+	readonly readUser?: string;
+	readonly readPassword?: string;
 }
 
 export interface AttestInputs {
 	readonly receiptFile: string;
 	readonly checksumsFile: string;
+	readonly url: URL;
+	readonly cache: StoredCache;
+	readonly readUser: ReadUser | '';
+	readonly readPassword: string;
+}
+
+/** Live metadata read from a committed destination narinfo. */
+export interface CommittedPathInfo {
+	readonly storePath: StorePathString;
+	readonly narHash: NixSha256Hash;
+	readonly deriver?: string;
 }
 
 interface AttestationSubjects {
@@ -63,7 +100,7 @@ export interface RefusedSubject {
 
 /** Partition path infos according to a current-run build receipt. */
 export function attestationSubjects(
-	infos: readonly NixValidPathInfo[],
+	infos: readonly CommittedPathInfo[],
 	receipt: BuildReceiptV2
 ): AttestationSubjects {
 	const subjects: StorePathDigest[] = [];
@@ -79,21 +116,11 @@ export function attestationSubjects(
 		if (built === undefined) {
 			continue;
 		}
-		const digest = info.narHash.digestHex();
-		if (digest !== built.narHash) {
-			throw new Error(
-				`NAR hash for ${info.storePath} changed after the build receipt was written`
-			);
-		}
-		if (info.deriver !== built.derivation) {
-			throw new Error(
-				`Deriver for ${info.storePath} changed after the build receipt was written`
-			);
-		}
+		requireUnmoved(info, built.narHash, built.derivation);
 
 		subjects.push({
 			storePath: info.storePath,
-			sha256: digest
+			sha256: info.narHash.digestHex()
 		});
 	}
 
@@ -101,29 +128,26 @@ export function attestationSubjects(
 }
 
 /**
- * What this run holds for each subject a receipt names, keyed by store path. A
- * path this machine does not hold has no entry.
+ * What the destination cache has committed for each subject a receipt names,
+ * keyed by store path. An uncommitted path has no entry.
  */
-export type LocalPathInfos = ReadonlyMap<string, NixValidPathInfo>;
+export type SelectedPathInfos = ReadonlyMap<string, CommittedPathInfo>;
 
 /**
  * What a receipt carrying provenance lets this run attest.
  *
- * A subject is signed under this repository's identity, so what this machine
- * can check for itself, it checks. A subject this run built or reproduced must
- * be in this store, under the NAR hash and deriver the receipt recorded: an
- * absent path fails the run, as does one whose hash or deriver has moved since
- * the receipt was written.
+ * A subject is signed under this repository's identity, so the destination
+ * cache must serve every verified subject under the NAR hash and deriver the
+ * receipt recorded. An absent path fails the run, as does one whose hash or
+ * deriver has moved since the receipt was written.
  *
- * A subject the selected build store realised is on that store, so this store
- * may hold it or not. Held, it is checked the same way; absent, its checksum
- * comes from the receipt, which is what the run established about it. A subject
- * nothing verified is refused, because it was produced on a machine the run
- * never established anything about.
+ * The build store may already have collected the path: its receipt selects no
+ * trusted metadata source. A subject nothing verified is refused because it
+ * was produced on a machine the run never established anything about.
  */
 export function provenancedSubjects(
 	receipt: BuildReceiptV3,
-	held: LocalPathInfos
+	held: SelectedPathInfos
 ): ResolvedAttestation {
 	const subjects: StorePathDigest[] = [];
 	const refused: RefusedSubject[] = [];
@@ -147,38 +171,23 @@ export function provenancedSubjects(
 	return { subjects, skipped, refused };
 }
 
-// Which verifications name a build this machine ran, whose output its own
-// store therefore holds. A path the selected build store realised lives on
-// that store, and an unverified path was produced somewhere this run never
-// looked.
-const realisedHere: Record<SubjectVerification, boolean> = {
-	local: true,
-	'verified-rebuild': true,
-	'build-store': false,
-	unverified: false
-};
-
-// What a subject's checksum rests on must be in front of the run: the path
-// itself where this machine realised it, and the receipt where a build store
-// did.
+// What a subject's checksum rests on must be live in the committed destination;
+// the receipt alone is never a source of bytes to sign.
 function requireBacked(
 	subject: BuildSubjectV3,
-	info: NixValidPathInfo | undefined
+	info: CommittedPathInfo | undefined
 ): void {
-	if (info !== undefined) {
-		requireUnmoved(info, subject.narHash, subject.derivation);
-		return;
-	}
-
-	if (realisedHere[subject.verification]) {
+	if (info === undefined) {
 		throw new SubjectNotHeldError(subject.storePath, subject.verification);
 	}
+
+	requireUnmoved(info, subject.narHash, subject.derivation);
 }
 
-// A subject whose path this store holds is one this run can check for itself,
-// and a checksum signed under this repository's identity is worth the read.
+// A subject whose path the destination serves is one this run can check before
+// signing a checksum under the repository's identity.
 function requireUnmoved(
-	info: NixValidPathInfo,
+	info: CommittedPathInfo,
 	narHash: string,
 	derivation: string
 ): void {
@@ -211,7 +220,7 @@ export function registerAttestCommand(
 	program
 		.command('attest')
 		.description(
-			'Resolve the attestation subjects for the given store paths this machine built.'
+			'Resolve the provenance subjects established by a current-run build receipt.'
 		)
 		.requiredOption(
 			'--receipt-file <path>',
@@ -221,6 +230,10 @@ export function registerAttestCommand(
 			'--checksums-file <path>',
 			'where to write the generated subject checksums file'
 		)
+		.requiredOption('--url <url>', 'destination cupboard tenant URL')
+		.option('--cache <name>', 'destination named cache')
+		.option('--read-user <user>', 'private-read username')
+		.option('--read-password <password>', 'private-read password')
 		.action((options: AttestOptions) => attestAction(options, environment));
 }
 
@@ -232,9 +245,35 @@ export function resolveAttestInputs(
 	if (receiptFile === undefined) {
 		throw new InvalidInputError('receipt-file', 'receipt-file is required');
 	}
+	const url = providedUrl('url', options.url);
+
+	if (url === undefined) {
+		throw new InvalidInputError('url', 'url is required');
+	}
+
+	const readUser = providedReadUser(options.readUser);
+	const readPassword = options.readPassword ?? '';
+
+	if (readUser !== '' && readPassword === '') {
+		throw new InvalidInputError(
+			'read-password',
+			'read-password is required when read-user is supplied'
+		);
+	}
+
+	if (readPassword !== '' && readUser === '') {
+		throw new InvalidInputError(
+			'read-user',
+			'read-user is required when read-password is supplied'
+		);
+	}
 
 	return {
 		receiptFile,
+		url,
+		cache: providedCache(options.cache),
+		readUser,
+		readPassword,
 		checksumsFile:
 			provided(options.checksumsFile) ??
 			path.join(
@@ -245,49 +284,120 @@ export function resolveAttestInputs(
 	};
 }
 
-// What the receipt at hand lets this run attest. Both shapes are checked
-// against the local store: a receipt whose subjects carry no provenance is a
-// record of paths this machine built, and one that carries provenance may name
-// paths this machine built alongside paths another store did.
+export interface AttestDependencies {
+	readonly fetch?: typeof fetch;
+}
+
+function readCredential(inputs: AttestInputs): BasicCredential | undefined {
+	return inputs.readUser === ''
+		? undefined
+		: { user: inputs.readUser, password: inputs.readPassword };
+}
+
+// What the receipt at hand lets this run attest is checked exclusively against
+// the destination's committed narinfos. The build store may already have
+// collected every output; the receipt alone is never a source of bytes to sign.
 async function resolveAttestation(
-	receipt: ParsedBuildReceipt
+	receipt: ParsedBuildReceipt,
+	inputs: AttestInputs,
+	dependencies: AttestDependencies
 ): Promise<ResolvedAttestation> {
-	const nix = Nix.open();
+	const paths =
+		receipt.version === 3
+			? receipt.subjects.map((subject) => subject.storePath)
+			: receipt.paths;
+	const infos = await committedPathInfos(paths, inputs, dependencies);
 
 	if (receipt.version === 3) {
-		return provenancedSubjects(receipt, await heldLocally(nix, receipt));
+		return provenancedSubjects(
+			receipt,
+			new Map(infos.map((info) => [info.storePath, info]))
+		);
 	}
-
-	const infos = await Promise.all(
-		receipt.paths.map((storePath) => nix.queryPathInfo(storePath))
-	);
 
 	return { ...attestationSubjects(infos, receipt), refused: [] };
 }
 
-// The subjects this machine holds, which are the ones it can check. A subject
-// realised elsewhere is simply absent.
-async function heldLocally(
-	nix: Nix,
-	receipt: BuildReceiptV3
-): Promise<LocalPathInfos> {
-	const infos = await nix.queryValidPathsInfo(
-		receipt.subjects.map((subject) => subject.storePath)
-	);
+const committedPathConcurrency = 6;
 
-	return new Map(infos.map((info) => [info.storePath, info]));
+async function committedPathInfos(
+	paths: readonly StorePathString[],
+	inputs: AttestInputs,
+	dependencies: AttestDependencies
+): Promise<readonly CommittedPathInfo[]> {
+	const fetcher = retryingFetcher(dependencies.fetch ?? fetch);
+	const base = canonicalHref(cacheUrlFor(inputs.url, inputs.cache));
+	const credential = readCredential(inputs);
+
+	return mapWithConcurrency(paths, committedPathConcurrency, (storePath) =>
+		fetchCommittedPathInfo(fetcher, base, storePath, credential)
+	);
+}
+
+async function fetchCommittedPathInfo(
+	fetcher: typeof fetch,
+	base: string,
+	storePath: StorePathString,
+	credential: BasicCredential | undefined
+): Promise<CommittedPathInfo> {
+	const target = `${base}/${StorePath.hash(storePath)}.narinfo`;
+	const source = await fetchWithProbeDeadline(
+		fetcher,
+		target,
+		{
+			headers: {
+				accept: 'text/x-nix-narinfo',
+				...(credential !== undefined && basicAuthHeader(credential))
+			}
+		},
+		async (response) => {
+			if (!response.ok) {
+				await response.body?.cancel();
+				throw new CommittedSubjectUnavailableError(storePath, response.status);
+			}
+
+			return response.text();
+		}
+	);
+	let narInfo: NarInfo;
+
+	try {
+		narInfo = NarInfo.parse(source);
+	} catch (error) {
+		throw new CommittedSubjectInvalidError(storePath, error);
+	}
+
+	if (narInfo.storePath.value !== storePath) {
+		throw new CommittedSubjectInvalidError(
+			storePath,
+			new Error(`narinfo names ${narInfo.storePath.value}`)
+		);
+	}
+
+	return {
+		storePath,
+		narHash: narInfo.narHash,
+		...(narInfo.deriver !== undefined && {
+			deriver: `${narInfo.storePath.storeDirectory}/${narInfo.deriver}`
+		})
+	};
 }
 
 export async function attestAction(
 	options: AttestOptions,
 	environment: Environment = env,
-	reporter: Reporter = createGithubReporter()
+	reporter: Reporter = createGithubReporter(),
+	dependencies: AttestDependencies = {}
 ): Promise<void> {
 	const inputs = resolveAttestInputs(options, environment);
 	const receipt = buildReceiptSchema.parse(
 		JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
 	);
-	const { subjects, skipped, refused } = await resolveAttestation(receipt);
+	const { subjects, skipped, refused } = await resolveAttestation(
+		receipt,
+		inputs,
+		dependencies
+	);
 
 	for (const storePath of skipped) {
 		reporter.warn(

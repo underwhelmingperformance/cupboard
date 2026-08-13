@@ -220,7 +220,7 @@ describe('resolveSubstitutableClosure', () => {
 				accepts: (candidate) =>
 					Promise.resolve(candidate.storePath !== libraryPath)
 			})
-		).resolves.toStrictEqual({ kind: 'unsigned', storePath: libraryPath });
+		).resolves.toStrictEqual({ kind: 'refused', storePath: libraryPath });
 	});
 
 	it('takes every offer when the caller states no policy', async () => {

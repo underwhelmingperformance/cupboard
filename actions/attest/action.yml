@@ -1,17 +1,31 @@
 name: Attest cupboard store paths
 description:
   Produce a Sigstore build-provenance bundle whose in-toto subjects are the NAR
-  hashes of the given Nix store paths, ready to attach with the push action.
-  Only paths recorded by actions/build-paths during this workflow run become
-  subjects.
+  hashes established by a current-run build receipt, ready to attach with the
+  push action. Every subject is checked against the destination cache's live,
+  committed narinfo before signing; the build store need no longer exist.
 inputs:
   receipt-file:
-    description: Current-run receipt produced by actions/build-paths.
+    description: Current-run receipt produced by a cupboard build action.
     required: true
   checksums-file:
     description:
       Where to write the generated subject checksums file. Defaults to a
       runner-local path under RUNNER_TEMP.
+    required: false
+  url:
+    description:
+      Destination cupboard tenant URL whose committed narinfos verify every
+      subject before signing.
+    required: true
+  cache:
+    description: Named destination cache. Empty selects the default cache.
+    required: false
+  read-user:
+    description: Basic-auth username for a private destination cache.
+    required: false
+  read-password:
+    description: Basic-auth password for a private destination cache.
     required: false
   github-token:
     description: GitHub token used by the attestation step.
@@ -19,16 +33,16 @@ inputs:
 outputs:
   bundle-path:
     description:
-      Path to the generated Sigstore attestation bundle. Empty when no given
-      path was built by this machine, in which case nothing is signed.
+      Path to the generated Sigstore attestation bundle. Empty when the receipt
+      establishes no provenance subjects, in which case nothing is signed.
     value: ${{ steps.attest.outputs.bundle-path }}
   checksums-file:
     description: Path to the generated subject checksums file.
     value: ${{ steps.subjects.outputs.checksums-file }}
   subject-count:
     description:
-      Number of store paths recorded as attestation subjects. Counts only the
-      paths this machine built.
+      Number of store paths whose provenance the receipt establishes and the
+      action accepts as attestation subjects.
     value: ${{ steps.subjects.outputs.subject-count }}
 runs:
   using: composite
@@ -82,15 +96,23 @@ runs:
       env:
         RECEIPT_FILE: ${{ inputs.receipt-file }}
         CHECKSUMS_FILE: ${{ inputs.checksums-file }}
+        URL: ${{ inputs.url }}
+        CACHE: ${{ inputs.cache }}
+        READ_USER: ${{ inputs.read-user }}
+        READ_PASSWORD: ${{ inputs.read-password }}
       run: |
         node --experimental-transform-types \
           --disable-warning=ExperimentalWarning \
           "$GITHUB_ACTION_PATH/../src/main.ts" attest \
           --receipt-file "$RECEIPT_FILE" \
-          --checksums-file "$CHECKSUMS_FILE"
+          --checksums-file "$CHECKSUMS_FILE" \
+          --url "$URL" \
+          --cache "$CACHE" \
+          --read-user "$READ_USER" \
+          --read-password "$READ_PASSWORD"
 
-    # A run with no locally built path has nothing it can truthfully attest,
-    # and the provenance action rejects an empty subject list.
+    # A receipt with no established provenance subject has nothing this run can
+    # truthfully attest, and the provenance action rejects an empty subject list.
     - name: Attest subjects
       id: attest
       if: ${{ steps.subjects.outputs.subject-count != '0' }}

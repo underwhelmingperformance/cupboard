@@ -34,7 +34,17 @@ async function writeReceipt(paths: readonly string[]): Promise<string> {
 	const receiptFile = path.join(directory, 'receipt.json');
 	await writeFile(
 		receiptFile,
-		JSON.stringify({ version: 2, paths, subjects: [] })
+		JSON.stringify({
+			version: 2,
+			paths,
+			subjects: paths.map((storePath, index) => ({
+				storePath,
+				narHash: String(index + 1).repeat(64),
+				derivation: `${storePath}.drv`,
+				attempt: 1,
+				attemptId: 'one'
+			}))
+		})
 	);
 
 	return receiptFile;
@@ -113,13 +123,20 @@ describe('resolveAttestAttachInputs', () => {
 	it('resolves the provided inputs', () => {
 		expect(
 			resolveAttestAttachInputs(
-				options({ cache: 'pr-1', audience: 'https://audience.test' })
+				options({
+					cache: 'pr-1',
+					audience: 'https://audience.test',
+					readUser: 'reader',
+					readPassword: 'secret'
+				})
 			)
 		).toStrictEqual({
 			url: new URL('https://cache.example.workers.dev/t/acme'),
 			cupboardPath: '/opt/cupboard/cupboard',
 			cache: 'pr-1',
 			audience: 'https://audience.test',
+			readUser: 'reader',
+			readPassword: 'secret',
 			receiptFile: '/tmp/receipt.json',
 			bundles: ['/tmp/bundle.sigstore.json']
 		});
@@ -157,12 +174,26 @@ describe('resolveAttestAttachInputs', () => {
 
 		expect(thrown).toBeInstanceOf(expected);
 	});
+
+	it.each([
+		{ name: 'read-user alone', overrides: { readUser: 'reader' } },
+		{ name: 'read-password alone', overrides: { readPassword: 'secret' } }
+	])('refuses $name', ({ overrides }) => {
+		expect(() => resolveAttestAttachInputs(options(overrides))).toThrow(
+			InvalidInputError
+		);
+	});
 });
 
 describe('attestAttachArguments', () => {
 	it('builds the attach argv for the receipt paths', () => {
 		const inputs = resolveAttestAttachInputs(
-			options({ cache: 'pr-1', audience: 'https://audience.test' })
+			options({
+				cache: 'pr-1',
+				audience: 'https://audience.test',
+				readUser: 'reader',
+				readPassword: 'secret'
+			})
 		);
 
 		expect(attestAttachArguments(inputs, [appPath, runtimePath])).toStrictEqual(
@@ -178,6 +209,10 @@ describe('attestAttachArguments', () => {
 				'https://audience.test',
 				'--cache',
 				'pr-1',
+				'--read-user',
+				'reader',
+				'--read-password',
+				'secret',
 				'--attestation',
 				'/tmp/bundle.sigstore.json'
 			]
@@ -209,7 +244,7 @@ describe('attestAttachAction', () => {
 		}[] = [];
 
 		await attestAttachAction(
-			options({ receiptFile }),
+			options({ receiptFile, readUser: 'reader', readPassword: 'secret' }),
 			{},
 			recordingReporter([]),
 			{
@@ -232,6 +267,10 @@ describe('attestAttachAction', () => {
 					appPath,
 					runtimePath,
 					'--github-oidc',
+					'--read-user',
+					'reader',
+					'--read-password',
+					'secret',
 					'--attestation',
 					'/tmp/bundle.sigstore.json'
 				]

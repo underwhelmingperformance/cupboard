@@ -3,7 +3,21 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
 
-import { rootNameSchema, storePathSchema } from '@cupboard/nix-store/scalars';
+import {
+	Nix,
+	type NixBuildResult,
+	type NixDaemonSession,
+	type NixDaemonSetOptions,
+	type NixDerivedPathString
+} from '@cupboard/nix';
+import {
+	rootNameSchema,
+	type StorePathBasename,
+	storePathBasenameSchema,
+	storePathSchema,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
+import { storePathBasename } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
 	createGithubReporter,
@@ -25,7 +39,10 @@ import {
 	CommandFailedError,
 	CupboardReportedError,
 	InvalidInputError,
-	MissingInputError
+	MissingInputError,
+	RemoteCohortBuildFailedError,
+	type RemoteCohortBuildFailure,
+	RemoteCohortEvaluationDriftError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import {
@@ -34,6 +51,24 @@ import {
 	providedReadUser,
 	providedUrl
 } from '../options.ts';
+
+function isNixDerivedPathString(value: unknown): value is NixDerivedPathString {
+	if (typeof value !== 'string') {
+		return false;
+	}
+
+	const selection = value.indexOf('^');
+	const storePath = selection === -1 ? value : value.slice(0, selection);
+
+	return storePathSchema.safeParse(storePath).success;
+}
+
+const nixDerivedPathSchema = z.custom<NixDerivedPathString>(
+	isNixDerivedPathString,
+	'Derived path must name a Nix store path, optionally followed by an output selection'
+);
+
+const maxNixBuildJobs = 4_294_967_295n;
 
 // The shape `cohortMatrix` (in plan.ts) emits for one surviving cohort: every
 // array is parallel, indexed the same as `attrs`. `queryInstallables` and
@@ -45,7 +80,7 @@ const cohortMatrixEntrySchema = z
 		key: z.string().min(1),
 		attrs: z.array(z.string().min(1)),
 		installables: z.array(z.string().min(1)),
-		queryInstallables: z.array(z.string().min(1).nullable()),
+		queryInstallables: z.array(nixDerivedPathSchema.nullable()),
 		expectedPaths: z.array(storePathSchema.nullable()),
 		roots: z.array(rootNameSchema),
 		system: z.string().min(1),
@@ -112,7 +147,7 @@ const partitionSchema = z.object({
 	publishByReference: z.array(z.string()),
 	leftUpstream: z.array(z.string()),
 	alreadyValid: z.array(z.string()),
-	buildSet: z.array(z.string()),
+	buildSet: z.array(nixDerivedPathSchema),
 	counts: z.object({
 		willBuild: z.number(),
 		willSubstitute: z.number(),
@@ -137,7 +172,7 @@ const withdrawnTargetSchema = z.object({
 });
 
 const planReprobeResultDataSchema = z.object({
-	buildSet: z.array(z.string().min(1)),
+	buildSet: z.array(nixDerivedPathSchema),
 	withdrawn: z.array(withdrawnTargetSchema)
 });
 
@@ -259,9 +294,9 @@ export interface BuildCohortInputs {
 	readonly referencePathsFile: string;
 	readonly leftUpstreamFile: string;
 	readonly countsFile: string;
-	// Where the build's out-links live. They root the targets' reference
-	// closures for as long as the directory stands, so the job that owns it
-	// decides when those paths become collectable again.
+	// Where a local build's out-links live. They root the targets' reference
+	// closures for as long as the directory stands; a remote publication uses
+	// daemon temporary roots instead and reports no out-link directory.
 	readonly outLinkDirectory: string;
 }
 
@@ -326,10 +361,13 @@ export function resolveBuildCohortInputs(
 
 	const maxJobs = provided(options.maxJobs) ?? '';
 
-	if (maxJobs !== '' && !/^\d+$/u.test(maxJobs)) {
+	if (
+		maxJobs !== '' &&
+		(!/^\d+$/u.test(maxJobs) || BigInt(maxJobs) > maxNixBuildJobs)
+	) {
 		throw new InvalidInputError(
 			'max-jobs',
-			'max-jobs must be a non-negative integer'
+			'max-jobs must be a non-negative 32-bit integer'
 		);
 	}
 
@@ -473,8 +511,12 @@ export function registerBuildCohortCommand(
 export interface BuildCohortDependencies {
 	readonly runCupboard?: typeof defaultRunCupboard;
 	readonly runNixBuild?: typeof runNixBuild;
+	readonly runNixBuildWithResults?: typeof runNixBuildWithResults;
+	readonly runNixCopy?: typeof runNixCopy;
+	readonly runNixDerivationShow?: typeof runNixDerivationShow;
 	readonly cupboardRunDependencies?: CupboardRunDependencies;
 	readonly reporter?: Reporter;
+	readonly signal?: AbortSignal;
 }
 
 export async function buildCohortAction(
@@ -491,8 +533,20 @@ export async function buildCohortAction(
 		(member) => member.queryInstallable === undefined
 	);
 
+	if (inputs.push && inputs.store !== '' && unqueryable.length > 0) {
+		throw new InvalidInputError(
+			'cohort-json',
+			`Remote publication requires a daemon derived path for every build target; the plan did not resolve ${unqueryable.map((member) => member.attr).join(', ')}. Re-run planning with evaluable locked outputs or publish from the local store.`
+		);
+	}
+
 	const runCupboard = dependencies.runCupboard ?? defaultRunCupboard;
 	const runNix = dependencies.runNixBuild ?? runNixBuild;
+	const runNixWithResults =
+		dependencies.runNixBuildWithResults ?? runNixBuildWithResults;
+	const runCopy = dependencies.runNixCopy ?? runNixCopy;
+	const runDerivationShow =
+		dependencies.runNixDerivationShow ?? runNixDerivationShow;
 	const reporter = dependencies.reporter ?? createGithubReporter();
 
 	const result =
@@ -532,9 +586,9 @@ export async function buildCohortAction(
 		...unqueryable.map((member) => member.installable)
 	];
 
-	// Streaming supervision runs through the local daemon's post-build hook,
-	// so a remote-store cohort keeps its plain remote build and publishes once
-	// the build is over.
+	// Streaming supervision runs through the local daemon's post-build hook.
+	// A remote-store cohort instead keeps one daemon connection open from its
+	// keyed build results through receipt and root publication.
 	const isStreamed =
 		inputs.push && inputs.store === '' && buildInstallables.length > 0;
 
@@ -548,9 +602,71 @@ export async function buildCohortAction(
 		);
 	}
 
+	const context: SettleCohortBuildContext = {
+		inputs,
+		members,
+		partition,
+		result,
+		reprobe,
+		isStreamed,
+		environment,
+		runCupboard,
+		cupboardRunDependencies: dependencies.cupboardRunDependencies
+	};
+
+	if (inputs.push && inputs.store !== '') {
+		const remoteTargets = partition?.buildSet ?? [];
+
+		if (remoteTargets.length === 0) {
+			await settleCohortBuild(context, [], []);
+			return;
+		}
+
+		const localInstallables = localInstallablesForRemoteTargets(
+			members,
+			remoteTargets
+		);
+		const plannedDerivations = remoteTargets.map((target) =>
+			derivationPathOf(target)
+		);
+		const evaluatedDerivations = await runDerivationShow(
+			localInstallables,
+			dependencies.signal
+		);
+		const evaluated = new Set<string>(evaluatedDerivations);
+		const missing = plannedDerivations.filter((derivation) => {
+			if (evaluated.has(derivation)) {
+				return false;
+			}
+
+			const basename = storePathBasename(derivation);
+
+			return basename === undefined || !evaluated.has(basename);
+		});
+
+		if (missing.length > 0) {
+			throw new RemoteCohortEvaluationDriftError(missing, evaluatedDerivations);
+		}
+
+		await runCopy(plannedDerivations, inputs.store, dependencies.signal);
+		await runNixWithResults(
+			remoteTargets,
+			inputs.maxJobs,
+			inputs.store,
+			(results) =>
+				settleCohortBuild(
+					context,
+					requireBuildResultOutputs(remoteTargets, results),
+					results
+				),
+			dependencies.signal
+		);
+		return;
+	}
+
 	// For a streamed cohort the build is already realised, so this invocation
-	// resolves the targets' own output paths and pins them with out-links until
-	// the roots are set; for an unstreamed cohort it is the build itself.
+	// resolves the targets' own output paths and pins them with local out-links
+	// until the roots are set; for an unstreamed cohort it is the build itself.
 	const built =
 		buildInstallables.length === 0
 			? []
@@ -560,6 +676,43 @@ export async function buildCohortAction(
 					inputs.store,
 					inputs.outLinkDirectory
 				);
+
+	await settleCohortBuild(context, built, []);
+}
+
+interface SettleCohortBuildContext {
+	readonly inputs: BuildCohortInputs;
+	readonly members: readonly CohortMember[];
+	readonly partition: PartitionData | undefined;
+	readonly result: PlanCohortResultData | undefined;
+	readonly reprobe: PlanReprobeResultData | undefined;
+	readonly isStreamed: boolean;
+	readonly environment: Environment;
+	readonly runCupboard: typeof defaultRunCupboard;
+	readonly cupboardRunDependencies: CupboardRunDependencies | undefined;
+}
+
+// Settles every artifact and publication that reads realised paths. A remote
+// caller runs this whole function inside the daemon session holding those
+// paths' temporary roots, so both the receipt push and every target-root push
+// finish before closing the connection releases them.
+async function settleCohortBuild(
+	context: SettleCohortBuildContext,
+	built: readonly string[],
+	resultBuilds: readonly NixBuildResult[]
+): Promise<void> {
+	const {
+		inputs,
+		members,
+		partition,
+		result,
+		reprobe,
+		isStreamed,
+		environment,
+		runCupboard,
+		cupboardRunDependencies
+	} = context;
+	const claimable = claimableOutputPaths(resultBuilds);
 
 	// Every path a plain, single-invocation `nix build` prints belongs to one
 	// of this cohort's own requested installables: there is nothing else it
@@ -600,18 +753,25 @@ export async function buildCohortAction(
 
 	// A remote-store cohort has no post-build hook to stream, so its receipt is
 	// reconciled from the store the build ran in: one push over exactly the
-	// paths the build produced publishes them and reads back each one's NAR hash
-	// and deriver, which is all a receipt subject needs. The per-root pushes
-	// that follow negotiate those paths as already-present skips, exactly as
-	// they do behind a streamed build.
+	// paths the keyed daemon results report publishes them and reads back each
+	// one's NAR hash and deriver. Those results also prove which outputs this
+	// invocation built; substituted and already-valid results, including a path
+	// that appeared after planning, remain unclaimed. The per-root pushes that
+	// follow negotiate these paths as already-present skips, exactly as they do
+	// behind a streamed build.
 	const isReconciled = inputs.push && inputs.store !== '' && built.length > 0;
 
 	if (isReconciled) {
 		await runCupboard(
 			inputs.cupboardPath,
-			cohortReceiptPushArguments(inputs, built, partition?.alreadyValid ?? []),
+			cohortReceiptPushArguments(
+				inputs,
+				built,
+				partition?.alreadyValid ?? [],
+				claimable
+			),
 			environment,
-			dependencies.cupboardRunDependencies
+			cupboardRunDependencies
 		);
 	}
 
@@ -622,7 +782,7 @@ export async function buildCohortAction(
 			{ targetPaths, intermediatePaths, referencePaths },
 			environment,
 			runCupboard,
-			dependencies.cupboardRunDependencies
+			cupboardRunDependencies
 		);
 	}
 
@@ -642,7 +802,11 @@ export async function buildCohortAction(
 	await setOutput(environment, 'left-upstream-file', inputs.leftUpstreamFile);
 	await setOutput(environment, 'counts-file', inputs.countsFile);
 	await setOutput(environment, 'receipt-file', receiptFile);
-	await setOutput(environment, 'out-link-directory', inputs.outLinkDirectory);
+	await setOutput(
+		environment,
+		'out-link-directory',
+		inputs.store === '' ? inputs.outLinkDirectory : ''
+	);
 }
 
 /**
@@ -749,11 +913,13 @@ async function runBuildPushCohort(
 }
 
 /**
- * The `cupboard push` argv that publishes a remote-store cohort's built paths
+ * The `cupboard push` argv that publishes a remote-store cohort's result paths
  * and writes its receipt. The paths are published unretained: the per-root
  * pushes that follow declare each root over its full target list, so this one
- * exists to publish what the build produced and to record what the selected
- * store realised.
+ * exists to publish what Nix returned and record what the selected store
+ * now holds. The keyed daemon results name which resolved outputs this
+ * invocation built, including outputs whose path planning could not predict;
+ * substituted and already-valid outputs remain publishable but unclaimed.
  */
 export function cohortReceiptPushArguments(
 	inputs: Pick<
@@ -767,7 +933,8 @@ export function cohortReceiptPushArguments(
 		| 'receiptFile'
 	>,
 	paths: readonly string[],
-	alreadyHeld: readonly string[]
+	alreadyHeld: readonly string[],
+	claimable: readonly string[]
 ): readonly string[] {
 	const arguments_ = [
 		'--no-colour',
@@ -782,7 +949,10 @@ export function cohortReceiptPushArguments(
 		inputs.receiptFile,
 		...(alreadyHeld.length === 0
 			? ['--no-already-held']
-			: alreadyHeld.flatMap((storePath) => ['--already-held', storePath]))
+			: alreadyHeld.flatMap((storePath) => ['--already-held', storePath])),
+		...(claimable.length === 0
+			? ['--no-claimable']
+			: claimable.flatMap((storePath) => ['--claimable', storePath]))
 	];
 
 	if (inputs.audience !== '') {
@@ -1336,11 +1506,11 @@ function planCohortResult(
 }
 
 /**
- * Runs `nix build --keep-going` over the given installables, out-links kept
- * under a directory this invocation owns: the out-link protects the built
- * closure until the subsequent push reads it, per the interim workflow's
- * collection-window design, and naming the directory gives the job one place
- * to remove when it is done with those paths. A cohort with one failing
+ * Runs `nix build --keep-going` over the given installables. A local build's
+ * out-links are kept under a directory this invocation owns, protecting its
+ * closure until publication finishes. A remote non-publishing build also
+ * receives the argument, but its out-link exists only in the local filesystem
+ * and is not treated as a remote GC root. A cohort with one failing
  * derivation still reports whatever `--print-out-paths` prints for the
  * survivors; only a catastrophic failure that printed nothing at all is
  * treated as this command's own failure. A configured remote store owns the
@@ -1373,6 +1543,294 @@ export function nixBuildArguments(
 	arguments_.push('--', ...installables);
 
 	return arguments_;
+}
+
+function localInstallablesForRemoteTargets(
+	members: readonly CohortMember[],
+	targets: readonly NixDerivedPathString[]
+): readonly string[] {
+	const installableByTarget = new Map(
+		members.flatMap((member) =>
+			member.queryInstallable === undefined
+				? []
+				: [[member.queryInstallable, member.installable] as const]
+		)
+	);
+
+	return targets.map((target) => {
+		const installable = installableByTarget.get(target);
+
+		if (installable === undefined) {
+			throw new InvalidInputError(
+				'cohort-json',
+				`Remote build target ${target} has no matching local installable. Re-run planning so the cohort's evaluated targets remain aligned.`
+			);
+		}
+
+		return installable;
+	});
+}
+
+function derivationPathOf(target: NixDerivedPathString): StorePathString {
+	const selection = target.indexOf('^');
+	const storePath = selection === -1 ? target : target.slice(0, selection);
+
+	if (!storePath.endsWith('.drv')) {
+		throw new InvalidInputError(
+			'cohort-json',
+			`Remote build target ${target} does not name a derivation. Re-run planning so every remote target has a daemon derived path.`
+		);
+	}
+
+	return storePathSchema.parse(storePath);
+}
+
+/** Local derivation-graph evaluation argv for the cohort's flake installables. */
+export function nixDerivationShowArguments(
+	installables: readonly string[]
+): readonly string[] {
+	return [
+		'derivation',
+		'show',
+		'--recursive',
+		'--eval-store',
+		'auto',
+		'--no-pretty',
+		'--',
+		...installables
+	];
+}
+
+const nixDerivationShowEnvelopeSchema = z.looseObject({
+	version: z.literal(4),
+	derivations: z.record(z.string(), z.unknown())
+});
+
+/** Parse derivation paths from the pinned Nix v4 or legacy flat JSON shape. */
+export function parseNixDerivationShow(
+	stdout: string
+): readonly (StorePathBasename | StorePathString)[] {
+	let graph: unknown;
+
+	try {
+		graph = JSON.parse(stdout);
+	} catch (error) {
+		throw new CommandFailedError(
+			'nix derivation show',
+			0,
+			'the command returned invalid JSON',
+			{ cause: error }
+		);
+	}
+
+	if (typeof graph !== 'object' || graph === null || Array.isArray(graph)) {
+		throw new CommandFailedError(
+			'nix derivation show',
+			0,
+			'the command returned a non-object derivation graph'
+		);
+	}
+
+	const envelope = nixDerivationShowEnvelopeSchema.safeParse(graph);
+	const derivations = envelope.success ? envelope.data.derivations : graph;
+
+	return Object.keys(derivations).map((reported) => {
+		const derivation = envelope.success
+			? storePathBasenameSchema.safeParse(reported)
+			: storePathSchema.safeParse(reported);
+
+		if (!derivation.success || !derivation.data.endsWith('.drv')) {
+			throw new CommandFailedError(
+				'nix derivation show',
+				0,
+				`the command reported a non-derivation path: ${reported}`
+			);
+		}
+
+		return derivation.data;
+	});
+}
+
+/** Evaluate and materialise a cohort's complete derivation graph locally. */
+export async function runNixDerivationShow(
+	installables: readonly string[],
+	signal?: AbortSignal
+): Promise<readonly (StorePathBasename | StorePathString)[]> {
+	signal?.throwIfAborted();
+
+	const { status, stdout } = await new Promise<{
+		readonly status: number | null;
+		readonly stdout: string;
+	}>((resolve, reject) => {
+		const child = spawn('nix', nixDerivationShowArguments(installables), {
+			stdio: ['ignore', 'pipe', 'inherit'],
+			...(signal !== undefined && { signal })
+		});
+		let output = '';
+
+		child.stdout.setEncoding('utf8');
+		child.stdout.on('data', (chunk: string) => {
+			output += chunk;
+		});
+		child.once('error', reject);
+		child.once('close', (code) => {
+			resolve({ status: code, stdout: output });
+		});
+	});
+
+	if (status !== 0) {
+		throw new CommandFailedError('nix derivation show', status);
+	}
+
+	return parseNixDerivationShow(stdout);
+}
+
+/**
+ * Native Nix copy argv for the complete closure of each locally materialised
+ * planned derivation, preserving the selected remote store verbatim.
+ */
+export function nixCopyArguments(
+	derivations: readonly StorePathString[],
+	store: string
+): readonly string[] {
+	return ['copy', '--to', store, '--', ...derivations];
+}
+
+/** Copy the locally evaluated derivation closures to the remote build store. */
+export async function runNixCopy(
+	derivations: readonly StorePathString[],
+	store: string,
+	signal?: AbortSignal
+): Promise<void> {
+	signal?.throwIfAborted();
+
+	const status = await new Promise<number | null>((resolve, reject) => {
+		const child = spawn('nix', nixCopyArguments(derivations, store), {
+			stdio: 'inherit',
+			...(signal !== undefined && { signal })
+		});
+
+		child.once('error', reject);
+		child.once('close', resolve);
+	});
+
+	if (status !== 0) {
+		throw new CommandFailedError('nix copy', status);
+	}
+}
+
+/** Daemon settings shared by every queryable target in a remote cohort. */
+export function remoteBuildSetOptions(maxJobs: string): NixDaemonSetOptions {
+	return {
+		keepGoing: true,
+		...(maxJobs !== '' && { maxBuildJobs: Number(maxJobs) })
+	};
+}
+
+/**
+ * Builds the queryable targets through one selected remote-store connection,
+ * roots every settled output on that connection, and runs publication before
+ * closing it. The keyed result is the current invocation's evidence: unlike
+ * `--print-out-paths`, it distinguishes a build from substitution and a path
+ * that became valid before Nix asked for it.
+ */
+export async function runNixBuildWithResults(
+	installables: readonly NixDerivedPathString[],
+	maxJobs: string,
+	store: string,
+	publish: (results: readonly NixBuildResult[]) => Promise<void>,
+	signal?: AbortSignal
+): Promise<void> {
+	const nix = Nix.openForAvailability(undefined, {
+		storeUri: store,
+		setOptions: remoteBuildSetOptions(maxJobs),
+		...(signal !== undefined && { signal })
+	});
+
+	await nix.withConnection(async (session) => {
+		await buildAndRootNixResults(session, installables, publish);
+	});
+}
+
+/** Build, then root every output before handing the results to publication. */
+export async function buildAndRootNixResults(
+	session: Pick<NixDaemonSession, 'addTempRoot' | 'buildPathsWithResults'>,
+	installables: readonly NixDerivedPathString[],
+	publish: (results: readonly NixBuildResult[]) => Promise<void>
+): Promise<void> {
+	const results = await session.buildPathsWithResults(installables);
+	const outputs = requireBuildResultOutputs(installables, results);
+
+	for (const output of outputs) {
+		await session.addTempRoot(output);
+	}
+
+	await publish(results);
+}
+
+function requireBuildResultOutputs(
+	installables: readonly NixDerivedPathString[],
+	results: readonly NixBuildResult[]
+): readonly StorePathString[] {
+	const outputs = buildResultOutputPaths(results);
+
+	if (outputs.length === 0) {
+		throw new RemoteCohortBuildFailedError(
+			remoteBuildFailures(installables, results)
+		);
+	}
+
+	return outputs;
+}
+
+function remoteBuildFailures(
+	installables: readonly NixDerivedPathString[],
+	results: readonly NixBuildResult[]
+): readonly RemoteCohortBuildFailure[] {
+	if (results.length === 0) {
+		return installables.map((target) => ({
+			target,
+			outcome: 'no-result',
+			message: 'the daemon returned no result for this target'
+		}));
+	}
+
+	return results.map((result) => ({
+		target: result.target,
+		outcome: result.outcome.kind,
+		message:
+			'message' in result.outcome
+				? result.outcome.message
+				: 'the daemon reported no outputs for this settled target'
+	}));
+}
+
+/** Every settled output path the keyed results report, once and sorted. */
+export function buildResultOutputPaths(
+	results: readonly NixBuildResult[]
+): readonly StorePathString[] {
+	return [
+		...new Set(
+			results.flatMap((result) =>
+				'outputs' in result.outcome ? Object.values(result.outcome.outputs) : []
+			)
+		)
+	].toSorted((left, right) => left.localeCompare(right));
+}
+
+/** Outputs this invocation's keyed daemon results say it actually built. */
+export function claimableOutputPaths(
+	results: readonly NixBuildResult[]
+): readonly string[] {
+	return [
+		...new Set(
+			results.flatMap((result) =>
+				result.outcome.kind === 'built'
+					? Object.values(result.outcome.outputs)
+					: []
+			)
+		)
+	].toSorted((left, right) => left.localeCompare(right));
 }
 
 export async function runNixBuild(

@@ -333,6 +333,21 @@ describe('Nix.toStorePath', () => {
 });
 
 describe('Nix.open', () => {
+	it('normalises paths with the store directory named by a local URI', () => {
+		const storePath =
+			'/named/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-app' as const;
+		const nix = Nix.open(
+			openDependencies({
+				env: {
+					NIX_REMOTE:
+						'local?store=/named/store&state=/named/state&real=/named/real'
+				}
+			})
+		);
+
+		expect(nix.toStorePath(`${storePath}/bin/app`)).toBe(storePath);
+	});
+
 	it('refuses a configured store directory that could hold no store path', () => {
 		const noConfigurationFiles: Record<string, string> = {};
 

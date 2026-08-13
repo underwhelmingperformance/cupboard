@@ -1,5 +1,8 @@
 import { narFingerprint } from '@cupboard/nix-store/narinfo';
-import { storePathBasenameSchema } from '@cupboard/nix-store/scalars';
+import {
+	type NixFingerprint,
+	storePathBasenameSchema
+} from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { NixTrustedKeys, publicKeyOfSecret } from '@cupboard/nix-store/verify';
 
@@ -65,9 +68,7 @@ function publishedHalves(
 
 // The fingerprint a signature is made over, which commits to the uncompressed
 // NAR and the references.
-function offerFingerprint(
-	offer: NixSubstituterOffer
-): ReturnType<typeof narFingerprint> {
+function offerFingerprint(offer: NixSubstituterOffer): NixFingerprint {
 	return narFingerprint(
 		new StorePath(offer.storePath),
 		offer.narHash.toString(),

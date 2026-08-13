@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { NixMissingPartition, NixSubstituterOffer } from './nix-store.ts';
 import {
+	EmptyOutputSelectionError,
 	FloatingOutputUnsupportedError,
 	queryMissingOver,
 	type RealisationPartitionSource,
@@ -296,18 +297,24 @@ describe('queryMissingOver', () => {
 	it.each([
 		{
 			name: 'an output the derivation does not declare',
-			target: `${appDrv}^typo` as const
+			target: `${appDrv}^typo` as const,
+			expected: UndeclaredOutputError
 		},
-		{ name: 'no output at all', target: `${appDrv}^` as const }
-	])('refuses a target naming $name', async ({ target }) => {
+		{
+			// A caller that wrote the separator and stopped asked for nothing,
+			// which is a different mistake from asking for something that is not
+			// there, and reads as one.
+			name: 'no output at all',
+			target: `${appDrv}^` as const,
+			expected: EmptyOutputSelectionError
+		}
+	])('refuses a target naming $name', async ({ target, expected }) => {
 		const built = source({
 			valid: [appDrv],
 			derivations: stored([appDrv, derivation({ outputs: [['out', appPath]] })])
 		});
 
-		await expect(queryMissingOver([target], built)).rejects.toThrow(
-			UndeclaredOutputError
-		);
+		await expect(queryMissingOver([target], built)).rejects.toThrow(expected);
 	});
 
 	it('reports a derivation the store does not hold as unknown', async () => {

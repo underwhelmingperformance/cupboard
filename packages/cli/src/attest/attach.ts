@@ -1,10 +1,12 @@
 import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 
-import { Nix, type NixValidPathInfo } from '@cupboard/nix';
+import { cacheUrl } from '@cupboard/nix-store/cache-url';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
+	type StoredCache,
 	type StorePathHash,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
@@ -28,6 +30,7 @@ import {
 	type StepLog
 } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import type { ReadUser } from '@cupboard/shared/http';
 import { ORPCError } from '@orpc/client';
 import { z } from 'zod';
 
@@ -36,9 +39,14 @@ import {
 	AttestationDivergedPathError,
 	AttestationSubjectNotPushedError,
 	AttestationUploadUnavailableError,
+	ReferencePathMismatchError,
 	UnexpectedAttestationDecisionError
 } from '../errors.ts';
 import { byteStream } from '../io/byte-stream.ts';
+import {
+	fetchReferenceMetadata,
+	type ReferenceFetchDependencies
+} from '../push/reference.ts';
 
 /** A local Sigstore DSSE bundle file whose subjects name store paths. */
 export interface AttestationBundleSource {
@@ -109,6 +117,54 @@ export interface PrepareAttestationBundlesOptions {
 	readonly divergent: ReadonlyMap<StorePathHash, DivergentSkip>;
 }
 
+/** The committed path identity needed to match a bundle subject. */
+export interface AttestationPathInfo {
+	readonly storePath: StorePathString;
+	readonly narHash: NixSha256Hash;
+}
+
+// Cache reads and bundle uploads share the same bounded fan-out.
+const bundleConcurrency = 6;
+
+export interface CommittedAttestationSource {
+	readonly url: URL;
+	readonly cache: StoredCache;
+	readonly readUser?: ReadUser;
+	readonly readPassword?: string;
+}
+
+/** Read the bundle-matching identities from the destination's live narinfos. */
+export async function readCommittedAttestationPathInfos(
+	paths: readonly StorePathString[],
+	source: CommittedAttestationSource,
+	dependencies: ReferenceFetchDependencies = {}
+): Promise<readonly AttestationPathInfo[]> {
+	const reference = {
+		url: cacheUrl(source.url, source.cache),
+		...(source.readUser !== undefined && { readUser: source.readUser }),
+		...(source.readPassword !== undefined && {
+			readPassword: source.readPassword
+		})
+	};
+
+	return mapWithConcurrency(paths, bundleConcurrency, async (storePath) => {
+		const metadata = await fetchReferenceMetadata(
+			reference,
+			StorePath.hash(storePath),
+			dependencies
+		);
+
+		if (metadata.storePath !== storePath) {
+			throw new ReferencePathMismatchError(storePath, metadata.storePath);
+		}
+
+		return {
+			storePath,
+			narHash: NixSha256Hash.parse(metadata.narHash)
+		};
+	});
+}
+
 /**
  * Reads and parses the bundle sources, matching each bundle's in-toto subject
  * digests against the given paths' NAR hashes. A bundle whose subjects match
@@ -116,7 +172,7 @@ export interface PrepareAttestationBundlesOptions {
  * from the local bytes; duplicate (path, bundle) pairs collapse to one entry.
  */
 export async function prepareAttestationBundles(
-	pathInfos: readonly NixValidPathInfo[],
+	pathInfos: readonly AttestationPathInfo[],
 	options: PrepareAttestationBundlesOptions
 ): Promise<readonly PreparedAttestationBundle[]> {
 	const byNarHash = new Map(
@@ -165,7 +221,7 @@ export async function prepareAttestationBundles(
 }
 
 function recordPreparedBundle(
-	pathInfo: NixValidPathInfo,
+	pathInfo: AttestationPathInfo,
 	digest: string,
 	bytes: Uint8Array,
 	seen: Set<string>,
@@ -181,11 +237,6 @@ function recordPreparedBundle(
 	seen.add(key);
 	prepared.push({ storePathHash, digest, bytes });
 }
-
-// The bundles all address the same tenant, so they upload under the same
-// bound as blob uploads; sending them one at a time pays a round-trip per
-// bundle.
-const bundleConcurrency = 6;
 
 export interface AttestationAttachmentOptions {
 	readonly client: AttestationAttachClient;
@@ -335,16 +386,16 @@ export async function runAttestationAttachment(
 
 export interface AttestAttachDependencies {
 	readonly client: AttestationAttachClient;
-	/** The local store the named paths' NAR hashes are read from. */
-	readonly nix?: Nix;
+	/** Live committed path identities read from the destination cache. */
+	readonly pathInfos: readonly AttestationPathInfo[];
 	readonly attestations: readonly AttestationBundleSource[];
 	readonly readAttestationBundle?: ReadAttestationBundle;
 }
 
 /**
  * Attaches attestation bundles to already-published store paths: the named
- * paths' NAR hashes come from the local store, each bundle's subjects match
- * against them, and the bundles drive through the ordinary attestation
+ * paths' NAR hashes come from the destination's committed narinfos, each
+ * bundle's subjects match against them, and the bundles drive through the
  * conversation. A path the cache does not serve is a typed `unservable`
  * outcome in the summary, never a run failure: the rest of the bundles still
  * attach.
@@ -354,19 +405,18 @@ export async function runAttestAttach(
 	reporter: Reporter,
 	dependencies: AttestAttachDependencies
 ): Promise<void> {
-	const nix = dependencies.nix ?? Nix.open();
 	const readBundle =
 		dependencies.readAttestationBundle ?? defaultReadAttestationBundle;
 
-	const pathInfos = await reporter.phase(
-		'Resolving store paths',
-		async (ctx) => {
-			const infos = await nix.queryValidPathsInfo([...paths]);
-			ctx.fact('paths', formatCount(infos.length));
+	const pathInfos = await reporter.phase('Resolving store paths', (ctx) => {
+		const named = new Set(paths);
+		const infos = dependencies.pathInfos.filter((info) =>
+			named.has(info.storePath)
+		);
+		ctx.fact('paths', formatCount(infos.length));
 
-			return infos;
-		}
-	);
+		return infos;
+	});
 
 	const { prepared, outcome } = await reporter.steps(
 		'Attestations',

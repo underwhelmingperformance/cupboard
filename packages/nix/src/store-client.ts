@@ -105,16 +105,38 @@ export function createNixStoreClient(
 	dependencies: StoreClientEnvironment = defaultStoreClientEnvironment,
 	config: NixStoreConfig = discoverNixStoreConfig(dependencies)
 ): NixStoreClient {
+	const backend = resolveStoreBackend(config, dependencies);
+	const directories = storeDirectoriesOf(backend, config);
+
 	return storeClientForBackend(
-		resolveStoreBackend(config, dependencies),
+		backend,
 		config,
 		substituterClientOver(
-			config,
+			directories,
 			config.substitution,
 			config.fileTransfer,
 			dependencies
 		)
 	);
+}
+
+/** The named and state directories a resolved store reads with. */
+export function storeDirectoriesOf(
+	backend: StoreBackend,
+	configured: ConfiguredStoreDirectories
+): ConfiguredStoreDirectories {
+	if (backend.backend === 'local') {
+		return backend;
+	}
+
+	if (
+		backend.backend !== 'ssh-ng' ||
+		backend.remote.remoteStore === undefined
+	) {
+		return configured;
+	}
+
+	return localStoreOfUri(backend.remote.remoteStore, configured) ?? configured;
 }
 
 /**
@@ -262,7 +284,8 @@ export function createNixDaemonStoreClient(
 		return new NixDaemonStoreClient({
 			connect: options.connect ?? createSshNixDaemonConnector(sshRemote),
 			setOptions: { ...config.daemonSetOptions, ...options.setOptions },
-			overrides: { ...config.daemonOverrides, ...options.overrides }
+			overrides: { ...config.daemonOverrides, ...options.overrides },
+			signal: options.signal
 		});
 	}
 
@@ -276,7 +299,8 @@ export function createNixDaemonStoreClient(
 		socketPath,
 		connect: options.connect,
 		setOptions: { ...config.daemonSetOptions, ...options.setOptions },
-		overrides: { ...config.daemonOverrides, ...options.overrides }
+		overrides: { ...config.daemonOverrides, ...options.overrides },
+		signal: options.signal
 	});
 }
 
@@ -284,6 +308,7 @@ export function createNixDaemonStoreClient(
 export interface AvailabilityStore {
 	readonly client: NixStoreClient;
 	readonly kind: NixStoreKind;
+	readonly storeDirectory: ConfiguredStoreDirectories['storeDirectory'];
 	/**
 	 * The substituters the settings this store was opened with name, asked
 	 * directly whatever backend the store itself reads through.
@@ -324,45 +349,61 @@ export function createAvailabilityStoreClient(
 		...config.daemonOverrides,
 		...options.overrides
 	});
+	const backend = resolveStoreBackend({ ...config, storeUri }, dependencies);
+	const directories = storeDirectoriesOf(backend, config);
 	const substituters = substituterClientOver(
-		config,
+		directories,
 		substitution,
 		config.fileTransfer,
 		dependencies,
 		options.signal
 	);
-	const backend = resolveStoreBackend({ ...config, storeUri }, dependencies);
 
 	if (backend.backend === 'ssh-ng') {
 		return {
 			client: createNixDaemonStoreClient(dependencies, config, options),
 			kind: 'ssh-ng',
+			storeDirectory: directories.storeDirectory,
 			substituters
 		};
 	}
 
-	const socketPath =
-		backend.backend === 'daemon' ? backend.socketPath : config.daemonSocketPath;
-
-	// A daemon holds the substituter configuration and asks them for its
-	// clients, so it answers these questions whenever its socket is there.
-	if (dependencies.socketExists(socketPath)) {
+	// Availability opens the daemon for an automatic store whenever it is
+	// present, because the daemon can answer substitutability and missing-path
+	// queries that the local reader cannot. An explicitly local URI still names
+	// the local store and must not be replaced by this availability preference.
+	if (
+		backend.backend === 'local' &&
+		(storeUri === 'auto' || storeUri === '') &&
+		dependencies.socketExists(config.daemonSocketPath)
+	) {
 		return {
 			client: createNixDaemonStoreClient(dependencies, config, options),
 			kind: 'daemon',
+			storeDirectory: directories.storeDirectory,
 			substituters
 		};
 	}
 
-	// A store URI naming the daemon asked for that daemon, so a missing socket
-	// is the answer to the caller's question.
 	if (backend.backend === 'daemon') {
-		throw new NixDaemonUnavailableError(socketPath);
+		const { socketPath } = backend;
+
+		if (!dependencies.socketExists(socketPath)) {
+			throw new NixDaemonUnavailableError(socketPath);
+		}
+
+		return {
+			client: createNixDaemonStoreClient(dependencies, config, options),
+			kind: 'daemon',
+			storeDirectory: directories.storeDirectory,
+			substituters
+		};
 	}
 
 	return {
 		client: localStoreOver(backend, substituters, substitution, options.signal),
 		kind: 'local-filesystem',
+		storeDirectory: directories.storeDirectory,
 		substituters
 	};
 }

@@ -107,31 +107,27 @@ export function derivationsRequiringVerification(
 }
 
 /**
- * The successful attempt's attribution once a verification pass has rebuilt
- * the given derivations locally: each verified derivation is marked as
- * reproduced, keeping the machine its log named so the receipt still records
- * where the outputs first came from. A derivation an earlier attempt built has
- * no activity in this attempt, so it is recorded with no machine.
+ * The attempts' attribution once a verification pass has rebuilt the given
+ * derivations locally: each derivation's first recorded activity is marked as
+ * reproduced, preserving the attempt and machine that first produced it. A
+ * derivation no attempt recorded is left unattributed.
  */
 export function verifiedAttribution(
-	attempt: BuildAttempt,
+	attempts: readonly BuildAttempt[],
 	verified: readonly string[]
-): BuildAttempt {
-	const activities = new Map(
-		attempt.activities.map((activity) => [activity.derivation, activity])
-	);
+): readonly BuildAttempt[] {
+	const pending = new Set(verified);
 
-	for (const derivation of verified) {
-		const activity = activities.get(derivation);
+	return attempts.map((attempt) => ({
+		...attempt,
+		activities: attempt.activities.map((activity) => {
+			if (!pending.delete(activity.derivation)) {
+				return activity;
+			}
 
-		activities.set(derivation, {
-			derivation,
-			machine: activity?.machine ?? '',
-			verified: true
-		});
-	}
-
-	return { ...attempt, activities: activities.values().toArray() };
+			return { ...activity, verified: true };
+		})
+	}));
 }
 
 // How far a build activity establishes that its outputs are this run's. A local

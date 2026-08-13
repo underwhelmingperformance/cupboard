@@ -177,7 +177,10 @@ describe('resolveStoreBackend', () => {
 			probes: {},
 			expected: {
 				backend: 'ssh-ng',
-				remote: { destination: 'build@example.test' }
+				remote: {
+					destination: 'build@example.test',
+					host: 'example.test'
+				}
 			}
 		},
 		{
@@ -188,7 +191,8 @@ describe('resolveStoreBackend', () => {
 				backend: 'ssh-ng',
 				remote: {
 					destination: 'example.test',
-					remoteProgram: '/opt/nix/bin/nix-daemon'
+					host: 'example.test',
+					remoteProgram: ['/opt/nix/bin/nix-daemon']
 				}
 			}
 		}
@@ -230,6 +234,16 @@ describe('resolveStoreBackend', () => {
 				stateDirectory: '/rooted/nix/var/nix',
 				storeDirectory: storeDirectorySchema.parse('/nix/store'),
 				realStoreDirectory: '/rooted/nix/store'
+			}
+		},
+		{
+			name: 'a percent-encoded root in the URI',
+			uri: 'local:///rooted%20store',
+			expected: {
+				backend: 'local',
+				stateDirectory: '/rooted store/nix/var/nix',
+				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				realStoreDirectory: '/rooted store/nix/store'
 			}
 		},
 		{
@@ -514,6 +528,41 @@ describe('createNixStoreClient', () => {
 // the same way: Nix accepts three spellings for each of a setting's two
 // values, and refuses the rest.
 describe('createAvailabilityStoreClient', () => {
+	it('keeps an explicitly local store local when the daemon socket exists', () => {
+		const store = createAvailabilityStoreClient(
+			daemonEnvironment({ canWrite: true, socket: true }),
+			baseConfig,
+			{ storeUri: 'local' }
+		);
+
+		expect(store.kind).toBe('local-filesystem');
+	});
+
+	it('carries a local URI store directory into the opened store', () => {
+		const store = createAvailabilityStoreClient(
+			daemonEnvironment({ canWrite: true, socket: false }),
+			baseConfig,
+			{
+				storeUri: 'local?store=/named/store&state=/named/state&real=/named/real'
+			}
+		);
+
+		expect(store.storeDirectory).toBe('/named/store');
+	});
+
+	it('carries an ssh remote-store directory into the opened store', () => {
+		const store = createAvailabilityStoreClient(
+			daemonEnvironment({ canWrite: true, socket: false }),
+			baseConfig,
+			{
+				storeUri:
+					'ssh-ng://build@example.test?remote-store=local%3Fstore%3D%2Fremote%2Fstore'
+			}
+		);
+
+		expect(store.storeDirectory).toBe('/remote/store');
+	});
+
 	it('refuses an override Nix would not read as a setting value', () => {
 		expect(() => localWithSubstitute('off')).toThrow(NixConfigSettingError);
 	});
@@ -647,6 +696,36 @@ function daemonEnvironment(probes: Probes): StoreClientEnvironment {
 }
 
 describe('createNixDaemonStoreClient', () => {
+	it.each([
+		{ name: 'a local daemon', storeUri: 'daemon', socket: true },
+		{
+			name: 'an ssh daemon',
+			storeUri: 'ssh-ng://build@example.test',
+			socket: false
+		}
+	])(
+		'raises an abort reason before connecting to $name',
+		async ({ storeUri, socket }) => {
+			const reason = new Error('stop opening the store');
+			let connections = 0;
+			const client = createNixDaemonStoreClient(
+				daemonEnvironment({ socket }),
+				baseConfig,
+				{
+					storeUri,
+					signal: AbortSignal.abort(reason),
+					connect: () => {
+						connections += 1;
+						return Promise.resolve(new FakeDaemonTransport({}));
+					}
+				}
+			);
+
+			await expect(client.queryValidPaths([])).rejects.toBe(reason);
+			expect(connections).toBe(0);
+		}
+	);
+
 	it.each([
 		{ name: 'a writable state directory', canWrite: true },
 		{ name: 'a read-only state directory', canWrite: false }

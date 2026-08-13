@@ -41,7 +41,7 @@ const booleanValues = new Set(['true', 'yes', '1', 'false', 'no', '0']);
  * that width and refuses a number it could not hold, so the width is what
  * bounds the setting.
  */
-export type NixIntegerWidth = 'uint32' | 'int64' | 'uint64';
+export type NixIntegerWidth = 'int32' | 'uint32' | 'int64' | 'uint64';
 
 // Nix reads an integer as a sign, then digits, then an optional binary unit.
 // Nothing else states one, so a fraction, another base, and digits with
@@ -63,6 +63,7 @@ interface IntegerBounds {
 }
 
 const integerBounds: Readonly<Record<NixIntegerWidth, IntegerBounds>> = {
+	int32: { least: -(2n ** 31n), greatest: 2n ** 31n - 1n },
 	uint32: { least: 0n, greatest: 2n ** 32n - 1n },
 	int64: { least: -(2n ** 63n), greatest: 2n ** 63n - 1n },
 	uint64: { least: 0n, greatest: 2n ** 64n - 1n }
@@ -83,6 +84,14 @@ const integerBounds: Readonly<Record<NixIntegerWidth, IntegerBounds>> = {
  * from the table is a name nix has no setting for.
  */
 export function nixInteger(name: string, value: string): bigint | undefined {
+	return nixIntegerOfWidth(value, nixIntegerWidths[name] ?? 'uint64');
+}
+
+/** The integer a Nix setting of the declared width reads. */
+export function nixIntegerOfWidth(
+	value: string,
+	width: NixIntegerWidth
+): bigint | undefined {
 	const matched = integerPattern.exec(value);
 
 	if (matched?.groups === undefined) {
@@ -90,7 +99,7 @@ export function nixInteger(name: string, value: string): bigint | undefined {
 	}
 
 	const { digits = '', unit = '' } = matched.groups;
-	const bounds = integerBounds[nixIntegerWidths[name] ?? 'uint64'];
+	const bounds = integerBounds[width];
 	const read = BigInt(digits);
 
 	if (read < bounds.least || read > bounds.greatest) {

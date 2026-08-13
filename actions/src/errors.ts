@@ -137,9 +137,7 @@ export class AttestationVerificationFailedError extends CodedError {
 }
 
 /**
- * A receipt subject whose path this store holds, but whose recorded NAR hash
- * is not the one the store holds now. Signing the receipt's checksum would
- * attest to bytes this machine cannot show.
+ * A receipt subject whose committed NAR hash differs from the destination's.
  */
 export class SubjectNarHashMovedError extends CodedError {
 	constructor(
@@ -148,16 +146,14 @@ export class SubjectNarHashMovedError extends CodedError {
 		public readonly held: string
 	) {
 		super(
-			`${storePath} was recorded with NAR hash ${recorded}, but this store holds ${held}`
+			`${storePath} was recorded with NAR hash ${recorded}, but the destination cache serves ${held}`
 		);
 		this.name = 'SubjectNarHashMovedError';
 	}
 }
 
 /**
- * A receipt subject whose path this store holds under a deriver other than
- * the one the receipt recorded, so the run cannot claim it built the path the
- * receipt attributes to it.
+ * A receipt subject whose committed deriver differs from the destination's.
  */
 export class SubjectDeriverMovedError extends CodedError {
 	constructor(
@@ -166,16 +162,14 @@ export class SubjectDeriverMovedError extends CodedError {
 		public readonly held: string | undefined
 	) {
 		super(
-			`${storePath} was recorded with deriver ${recorded}, but this store holds ${held ?? 'none'}`
+			`${storePath} was recorded with deriver ${recorded}, but the destination cache serves ${held ?? 'none'}`
 		);
 		this.name = 'SubjectDeriverMovedError';
 	}
 }
 
 /**
- * A receipt subject this machine realised, whose path its store does not hold.
- * The receipt's checksum is all that is left to sign, and nothing present
- * backs it, so the run refuses rather than attest a build it cannot show.
+ * A receipt subject for which no committed destination metadata was supplied.
  */
 export class SubjectNotHeldError extends CodedError {
 	constructor(
@@ -183,9 +177,36 @@ export class SubjectNotHeldError extends CodedError {
 		public readonly verification: SubjectVerification
 	) {
 		super(
-			`${storePath} was recorded as ${verification}, but this store does not hold it`
+			`${storePath} was recorded as ${verification}, but the destination cache does not serve it`
 		);
 		this.name = 'SubjectNotHeldError';
+	}
+}
+
+/** A committed narinfo could not be read from the destination cache. */
+export class CommittedSubjectUnavailableError extends CodedError {
+	constructor(
+		public readonly storePath: string,
+		public readonly status: number
+	) {
+		super(
+			`Could not read committed metadata for ${storePath} from the destination cache: HTTP ${String(status)}`
+		);
+		this.name = 'CommittedSubjectUnavailableError';
+	}
+}
+
+/** A destination response was not a valid narinfo for the requested subject. */
+export class CommittedSubjectInvalidError extends CodedError {
+	constructor(
+		public readonly storePath: string,
+		public override readonly cause: unknown
+	) {
+		super(
+			`The destination cache returned invalid committed metadata for ${storePath}`,
+			withCause(cause)
+		);
+		this.name = 'CommittedSubjectInvalidError';
 	}
 }
 
@@ -609,6 +630,35 @@ export class CommandFailedError extends CodedError {
 			withCause(options.cause)
 		);
 		this.name = 'CommandFailedError';
+	}
+}
+
+export interface RemoteCohortBuildFailure {
+	readonly target: string;
+	readonly outcome: string;
+	readonly message: string;
+}
+
+/** A remote keep-going build settled without producing any publishable output. */
+export class RemoteCohortBuildFailedError extends CodedError {
+	constructor(public readonly failures: readonly RemoteCohortBuildFailure[]) {
+		super(
+			`Remote Nix build produced no outputs. Fix the failed targets before publishing this cohort: ${failures.map((failure) => `${failure.target} (${failure.outcome}: ${failure.message})`).join('; ')}`
+		);
+		this.name = 'RemoteCohortBuildFailedError';
+	}
+}
+
+/** Locally evaluating a cohort no longer produced the derivations its plan named. */
+export class RemoteCohortEvaluationDriftError extends CodedError {
+	constructor(
+		public readonly missing: readonly string[],
+		public readonly evaluated: readonly string[]
+	) {
+		super(
+			`Remote cohort evaluation no longer contains its planned derivations: ${missing.join(', ')}. Re-run planning against the current locked source before publishing.`
+		);
+		this.name = 'RemoteCohortEvaluationDriftError';
 	}
 }
 

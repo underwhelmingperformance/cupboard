@@ -420,8 +420,8 @@ function rebuildVerificationCommand(
 // The receipt subjects a successful constructed build attributes: the built
 // paths joined with the attempts' activity logs. The verification pass, when
 // requested, locally rebuilds what the successful attempt did not build
-// locally and attributes the verified derivations to that attempt; without
-// it, each path keeps the earliest attempt that built it. A hook event only
+// locally and marks each verified derivation's earliest activity as
+// reproduced; without it, that activity remains unverified. A hook event only
 // fires for an executed build, so a path that was valid before the run never
 // appears here.
 async function attributeSubjects(
@@ -464,7 +464,7 @@ async function attributeSubjects(
 	);
 
 	return receiptSubjects(
-		[verifiedAttribution(successful, derivations)],
+		verifiedAttribution(observed, derivations),
 		infos,
 		new Set(),
 		autoBuildStore

@@ -44,6 +44,17 @@ export const settingTypesFilePath = `packages/nix/src/${settingTypesFileName}`;
 /** The flake output holding the `nix` the suite runs. */
 export const conformanceNixOutput = '.#conformanceNix';
 
+/** Environment switch that makes an unavailable conformance oracle fatal. */
+export const requireConformanceOracleEnvironment =
+	'CUPBOARD_REQUIRE_CONFORMANCE_ORACLE';
+
+/** Whether this run requires the pinned Nix rather than allowing skipped suites. */
+export function requiresConformanceOracle(
+	environment: Readonly<Record<string, string | undefined>> = process.env
+): boolean {
+	return environment[requireConformanceOracleEnvironment] === '1';
+}
+
 /** The command that rebuilds the record, as an error names it. */
 const updateCommand = 'pnpm update:conformance-oracle';
 
@@ -359,8 +370,8 @@ export function renderSettingTypes(
 		'// nix has.',
 		'//',
 		'// Every setting that nix reads for itself, with the kind of value it holds.',
-		'// A setting behind an experimental feature is absent, since nix ignores one',
-		'// whose feature is not enabled rather than reading its value.',
+		'// This includes settings behind experimental features: their reported',
+		'// defaults state the value kind nix validates when the feature is enabled.',
 		'',
 		"import type { NixIntegerWidth, NixSettingValueType } from './setting-types.ts';",
 		'',
@@ -443,9 +454,9 @@ function settingValueType(value: unknown): NixSettingValueType | undefined {
 
 /**
  * The settings a `nix config show --json` document reports, by the kind of
- * value each holds. A setting whose experimental feature is named is left out:
- * nix ignores such a setting rather than reading its value, so nothing about
- * the value can be settled from the table.
+ * value each holds. The table includes settings gated by experimental features:
+ * their reported defaults still state the value kind Nix validates once the
+ * corresponding feature is enabled.
  */
 export function parseSettingTypes(document: string): NixSettingTypes {
 	let parsed: unknown;
@@ -470,9 +481,7 @@ export function parseSettingTypes(document: string): NixSettingTypes {
 
 	for (const [name, setting] of Object.entries(settings.data)) {
 		const type = settingValueType(setting.value);
-		const feature = setting.experimentalFeature ?? undefined;
-
-		if (type !== undefined && feature === undefined) {
+		if (type !== undefined) {
 			types[name] = type;
 		}
 	}

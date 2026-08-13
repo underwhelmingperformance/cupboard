@@ -294,7 +294,7 @@ describe('cupboard cohort collection boundary', () => {
 });
 
 describe('cupboard build provenance', () => {
-	it('feeds every bundled attest action a current-run build receipt', async () => {
+	it('verifies every provenance subject against its committed destination', async () => {
 		const workflows = await Promise.all(
 			[flakeWorkflow, publishWorkflow].map(async (file) => {
 				const contents = await readFile(file, 'utf8');
@@ -317,16 +317,31 @@ describe('cupboard build provenance', () => {
 				file,
 				receipt: step
 					.map((line) => line.trim())
-					.find((line) => line.startsWith('receipt-file:'))
+					.find((line) => line.startsWith('receipt-file:')),
+				url: step
+					.map((line) => line.trim())
+					.find((line) => line.startsWith('url:')),
+				cache: step
+					.map((line) => line.trim())
+					.find((line) => line.startsWith('cache:')),
+				readUser: step
+					.map((line) => line.trim())
+					.find((line) => line.startsWith('read-user:'))
 			}))
 		).toStrictEqual([
 			{
 				file: 'cupboard-flake-publish.yml',
-				receipt: 'receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}'
+				receipt: 'receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}',
+				url: 'url: ${{ inputs.url }}',
+				cache: 'cache: ${{ needs.configure.outputs.cache }}',
+				readUser: 'read-user: ${{ secrets.read_user }}'
 			},
 			{
 				file: 'cupboard-publish.yml',
-				receipt: 'receipt-file: ${{ steps.build.outputs.receipt-file }}'
+				receipt: 'receipt-file: ${{ steps.build.outputs.receipt-file }}',
+				url: 'url: ${{ inputs.url }}',
+				cache: 'cache: ${{ inputs.cache }}',
+				readUser: undefined
 			}
 		]);
 	});
@@ -366,6 +381,11 @@ describe('cupboard build provenance', () => {
 				'cupboard-path: ${{ steps.setup.outputs.cupboard-path }}'
 			),
 			cache: trimmed.includes('cache: ${{ needs.configure.outputs.cache }}'),
+			readUser: trimmed.includes('read-user: ${{ secrets.read_user }}'),
+			readPassword: trimmed.includes(
+				'read-password: ${{ secrets.read_password }}'
+			),
+			remoteStore: trimmed.some((line) => line.startsWith('store:')),
 			receipt: trimmed.includes(
 				'receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}'
 			),
@@ -379,8 +399,32 @@ describe('cupboard build provenance', () => {
 			url: true,
 			cupboardPath: true,
 			cache: true,
+			readUser: true,
+			readPassword: true,
+			remoteStore: false,
 			receipt: true,
 			bundle: true
+		});
+	});
+
+	it('publishes before signing and attaches the resulting bundle in the simple workflow', async () => {
+		const contents = await readFile(publishWorkflow, 'utf8');
+		const push = contents.indexOf('- uses: ./.cupboard/actions/push');
+		const attest = contents.indexOf('uses: ./.cupboard/actions/attest\n');
+		const attach = contents.indexOf(
+			'- uses: ./.cupboard/actions/attest-attach'
+		);
+
+		expect({
+			pushBeforeAttest: push !== -1 && push < attest,
+			attestBeforeAttach: attest !== -1 && attest < attach,
+			pushDoesNotReceiveAnUnsignedBundle: !contents.includes(
+				'attestations: ${{ steps.attest.outputs.bundle-path'
+			)
+		}).toStrictEqual({
+			pushBeforeAttest: true,
+			attestBeforeAttach: true,
+			pushDoesNotReceiveAnUnsignedBundle: true
 		});
 	});
 });

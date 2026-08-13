@@ -1,7 +1,10 @@
 import { Command, CommanderError } from 'commander';
 import { describe, expect, it } from 'vitest';
 
-import { AttestAttachBundleRequiredError } from '../errors.ts';
+import {
+	AttestAttachBundleRequiredError,
+	ReadCredentialPairError
+} from '../errors.ts';
 
 import {
 	InvalidVerifierThresholdError,
@@ -103,6 +106,26 @@ describe('attest attach command', () => {
 		}
 
 		expect(result).toBeInstanceOf(AttestAttachBundleRequiredError);
+	});
+
+	it('refuses an incomplete private-read credential before authenticating', async () => {
+		const program = silentProgram();
+
+		await expect(
+			program.parseAsync(
+				[
+					'attest',
+					'attach',
+					'https://cache.example.workers.dev/t/acme',
+					'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+					'--read-user',
+					'reader',
+					'--attestation',
+					'bundle.json'
+				],
+				{ from: 'user' }
+			)
+		).rejects.toBeInstanceOf(ReadCredentialPairError);
 	});
 });
 

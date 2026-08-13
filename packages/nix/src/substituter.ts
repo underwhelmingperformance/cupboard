@@ -39,6 +39,7 @@ import {
 	type NixSubstituterOffer,
 	type UnreachableSubstituter
 } from './nix-store.ts';
+import { nixIntegerOfWidth } from './setting-types.ts';
 import {
 	defaultFileTransferSettings,
 	isEnabledSettingValue,
@@ -57,7 +58,7 @@ export const maxSubstituterAnswerByteLength = 1024 * 1024;
  * bound on them. Each question is one request, so something has to keep a
  * query over a whole closure from opening a connection per path.
  */
-export const unboundedSubstituterConcurrency = 64;
+export const maxSubstituterConcurrency = 64;
 
 /**
  * The longest this waits before asking a substituter again. A substituter that
@@ -115,9 +116,7 @@ function queriedStoreDirectory(
 function requestConcurrency(dependencies: SubstituterEnvironment): number {
 	const { httpConnections } = transferSettings(dependencies);
 
-	return httpConnections === 0
-		? unboundedSubstituterConcurrency
-		: httpConnections;
+	return httpConnections === 0 ? maxSubstituterConcurrency : httpConnections;
 }
 
 /** A substituter that failed to answer, named so a caller can say which. */
@@ -623,7 +622,6 @@ export class SubstituterClient {
 		const found = new Set<StorePathString>();
 		const substituters = await this.opened();
 		let remaining = [...new Set(storePaths)];
-		let failure: SubstituterFailure | undefined;
 
 		for (const substituter of substituters) {
 			if (remaining.length === 0) {
@@ -634,10 +632,6 @@ export class SubstituterClient {
 				continue;
 			}
 
-			// A failure the next substituter gets a chance to answer past is
-			// left behind, so only the last one asked can settle the query.
-			failure = undefined;
-
 			const answers = await mapWithConcurrency(
 				remaining,
 				requestConcurrency(this.options),
@@ -647,20 +641,19 @@ export class SubstituterClient {
 			for (const [index, storePath] of remaining.entries()) {
 				const answer = answers[index];
 
-				if (answer?.kind === 'held') {
-					found.add(storePath);
+				// Nix calls this substituter's mass query as one operation. A
+				// failure escapes that operation directly: `fallback` belongs to
+				// realising/building after a substitute fails, not to this query.
+				if (answer?.kind === 'failed') {
+					throw answer.error;
 				}
 
-				if (answer?.kind === 'failed') {
-					failure = answer.error;
+				if (answer?.kind === 'held') {
+					found.add(storePath);
 				}
 			}
 
 			remaining = remaining.filter((storePath) => !found.has(storePath));
-		}
-
-		if (remaining.length > 0) {
-			this.raiseIfLastFailed(failure);
 		}
 
 		return [...found].toSorted(byCodeUnit);
@@ -868,9 +861,9 @@ function retryDelayMs(
 	settings: NixFileTransferSettings,
 	spread: () => number
 ): number | undefined {
-	const floor = retryAfterMs ?? 0;
+	const minimumDelayMs = retryAfterMs ?? 0;
 
-	if (floor > maxRetryWaitMs) {
+	if (minimumDelayMs > maxRetryWaitMs) {
 		return;
 	}
 
@@ -883,8 +876,8 @@ function retryDelayMs(
 	);
 
 	return settings.retryJitter
-		? floor + Math.round(spread() * backoff)
-		: Math.max(floor, backoff);
+		? minimumDelayMs + Math.round(spread() * backoff)
+		: Math.max(minimumDelayMs, backoff);
 }
 
 /**
@@ -987,18 +980,27 @@ class OversizedSubstituterAnswerError extends NixStoreError {
 	}
 }
 
-// Nix reads a priority with a signed conversion, which takes the digits it
-// starts with and stops at the first character that is not one.
-function leadingInteger(value: string): number | undefined {
-	const digits = /^\s*(-?\d+)/u.exec(value);
+// `BinaryCacheStore::init()` gives the advertised value to `std::stoi`: leading
+// whitespace and either sign are accepted, conversion stops after the decimal
+// digits, and a missing or out-of-range integer refuses the cache info.
+function cacheInfoPriority(value: string): number {
+	const digits = /^\s*([+-]?\d+)/u.exec(value);
+	const parsed = digits === null ? undefined : Number(digits[1]);
 
-	if (digits === null) {
-		return;
+	if (
+		parsed === undefined ||
+		!Number.isSafeInteger(parsed) ||
+		parsed < minPriority ||
+		parsed > maxPriority
+	) {
+		throw new NixConfigSettingError(
+			'Priority',
+			value,
+			'a signed 32-bit integer prefix'
+		);
 	}
 
-	const parsed = Number(digits[1]);
-
-	return Number.isSafeInteger(parsed) ? parsed : undefined;
+	return parsed;
 }
 
 /**
@@ -1397,42 +1399,20 @@ function configuredDescription(query: string): Partial<SubstituterDescription> {
  * URI naming one this reader will not invent.
  */
 function settingPriority(value: string): number {
-	const suffix = value.slice(-1);
-	const multiplier = binaryUnits.get(suffix.toUpperCase());
-	const number = multiplier === undefined ? value : value.slice(0, -1);
+	const priority = nixIntegerOfWidth(value, 'int32');
 
-	if (
-		(multiplier === undefined && /^\p{Letter}$/u.test(suffix)) ||
-		!/^[+-]?\d+$/u.test(number)
-	) {
+	if (priority === undefined) {
 		throw new NixConfigSettingError('priority', value, priorityExpectation);
 	}
 
-	const parsed = Number(number);
-
-	if (parsed < minPriority || parsed > maxPriority) {
-		throw new NixConfigSettingError('priority', value, priorityExpectation);
-	}
-
-	return parsed * (multiplier ?? 1);
+	return Number(priority);
 }
-
-// The units Nix multiplies an integer setting by, named by the letter each
-// value may end with.
-const binaryUnits: ReadonlyMap<string, number> = new Map([
-	['K', 1024],
-	['M', 1024 ** 2],
-	['G', 1024 ** 3],
-	['T', 1024 ** 4]
-]);
-
-// Nix declares the priority as a signed 32-bit setting, and reads the number
-// into that width before any unit multiplies it.
-const minPriority = -(2 ** 31);
-const maxPriority = 2 ** 31 - 1;
 
 const priorityExpectation =
 	'a 32-bit integer, optionally followed by K, M, G or T';
+
+const minPriority = -(2 ** 31);
+const maxPriority = 2 ** 31 - 1;
 
 // Nix reads the document line by line and applies its own default to every
 // field the document leaves out, so a cache publishing a partial one is
@@ -1469,7 +1449,7 @@ function parseCacheInfo(
 		}
 
 		if (name === 'Priority') {
-			priority = leadingInteger(value) ?? priority;
+			priority = cacheInfoPriority(value);
 		}
 	}
 

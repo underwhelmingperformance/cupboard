@@ -126,15 +126,15 @@ const closureRefusalCases: readonly ClosureRefusalCase[] = [
 		},
 		expected: {
 			kind: 'closure-divergent',
-			missing: missingPath,
+			storePath: missingPath,
 			held: `sha256:${'1'.repeat(52)}`,
 			offered: `sha256:${'2'.repeat(52)}`
 		}
 	},
 	{
 		name: 'a reference carrying no signature this configuration accepts',
-		closure: { kind: 'unsigned', storePath: missingPath },
-		expected: { kind: 'closure-unsigned', missing: missingPath }
+		closure: { kind: 'refused', storePath: missingPath },
+		expected: { kind: 'closure-unsigned', storePath: missingPath }
 	},
 	{
 		name: 'a closure larger than the walk allows',
