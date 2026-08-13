@@ -117,6 +117,27 @@ export class ReleaseAssetNotFoundError extends CodedError {
 	}
 }
 
+/** A release archive's executable does not identify as the selected tag. */
+export class InstalledReleaseVersionMismatchError extends CodedError {
+	constructor(
+		public readonly expected: string,
+		public readonly actual: string
+	) {
+		super(
+			`release ${expected} installed an executable reporting version '${actual}'`
+		);
+		this.name = 'InstalledReleaseVersionMismatchError';
+	}
+}
+
+/** A supplied executable succeeded but did not identify its version. */
+export class CupboardVersionOutputMissingError extends CodedError {
+	constructor(public readonly binaryPath: string) {
+		super(`${binaryPath} --version produced no output`);
+		this.name = 'CupboardVersionOutputMissingError';
+	}
+}
+
 export class InvalidChecksumLineError extends CodedError {
 	constructor(public readonly line: string) {
 		super(`invalid checksum line: ${line}`);

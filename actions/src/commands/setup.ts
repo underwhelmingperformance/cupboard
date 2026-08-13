@@ -21,6 +21,12 @@ import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
 
 import { fetchWithProbeDeadline } from '../cache-probe.ts';
+import { acquireCupboard } from '../cupboard-acquisition.ts';
+import {
+	parseResolvedCupboard,
+	type ResolvedCupboard,
+	serialiseResolvedCupboard
+} from '../cupboard-resolution.ts';
 import {
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
@@ -54,6 +60,7 @@ import {
 } from '../substituters.ts';
 
 export interface SetupOptions {
+	readonly cupboard?: string;
 	readonly cupboardVersion?: string;
 	readonly includePrereleases?: string;
 	readonly githubToken?: string;
@@ -68,9 +75,11 @@ export interface SetupOptions {
 	readonly readUser?: string;
 	readonly readPassword?: string;
 	readonly nixConfigFile?: string;
+	readonly checkoutDir?: string;
 }
 
 export interface SetupInputs {
+	readonly cupboard: ResolvedCupboard | undefined;
 	readonly version: string;
 	readonly includePrereleases: boolean;
 	readonly githubToken: string;
@@ -85,6 +94,7 @@ export interface SetupInputs {
 	readonly readUser: ReadUser | '';
 	readonly readPassword: string;
 	readonly nixConfigFile: string;
+	readonly checkoutDirectory: string;
 }
 
 interface ConfigureNixInputs extends SetupInputs {
@@ -108,6 +118,7 @@ export function registerSetupCommand(
 		.description(
 			'Install cupboard and optionally export Nix binary cache configuration.'
 		)
+		.option('--cupboard <json>', 'canonical cupboard acquisition JSON')
 		.option(
 			'--cupboard-version <version>',
 			'cupboard version to install: latest or an exact version such as 1.2.3'
@@ -149,6 +160,10 @@ export function registerSetupCommand(
 		.option('--read-user <user>', 'username for private cache reads')
 		.option('--read-password <password>', 'password for private cache reads')
 		.option('--nix-config-file <path>', 'Nix config file to append to')
+		.option(
+			'--checkout-dir <directory>',
+			'workflow source checkout used for source acquisition'
+		)
 		.action((options: SetupOptions) => setupAction(options, environment));
 }
 
@@ -177,7 +192,30 @@ export function resolveSetupInputs(
 
 	const cacheUrl = providedUrl('cache-url', options.cacheUrl);
 
+	const cupboardValue = provided(options.cupboard);
+	const cupboard =
+		cupboardValue === undefined
+			? undefined
+			: parseResolvedCupboard(cupboardValue);
+	const releaseSelectors = [
+		options.cupboardVersion,
+		options.includePrereleases,
+		options.releaseRepository,
+		options.expectedSourceCommit
+	];
+
+	if (
+		cupboard !== undefined &&
+		releaseSelectors.some((value) => provided(value) !== undefined)
+	) {
+		throw new InvalidInputError(
+			'cupboard',
+			'cupboard cannot be combined with release selection inputs'
+		);
+	}
+
 	return {
+		cupboard,
 		version: normaliseVersion(provided(options.cupboardVersion) ?? 'latest'),
 		includePrereleases: isEnabled(
 			'include-prereleases',
@@ -201,7 +239,15 @@ export function resolveSetupInputs(
 		trustedPublicKey: provided(options.trustedPublicKey) ?? '',
 		readUser,
 		readPassword,
-		nixConfigFile: provided(options.nixConfigFile) ?? ''
+		nixConfigFile: provided(options.nixConfigFile) ?? '',
+		checkoutDirectory:
+			provided(options.checkoutDir) ??
+			(cupboard?.kind === 'source'
+				? path.resolve(
+						requireEnvironment(environment, 'GITHUB_ACTION_PATH'),
+						'../..'
+					)
+				: '')
 	};
 }
 
@@ -215,7 +261,59 @@ export async function setupAction(
 
 	await mkdir(installDirectory, { recursive: true });
 
-	const installedCupboard = await installCupboard(
+	const acquired =
+		inputs.cupboard === undefined
+			? await installReleasedCupboard(
+					inputs,
+					installDirectory,
+					environment,
+					reporter
+				)
+			: await acquireCupboard(
+					{
+						cupboard: inputs.cupboard,
+						installDirectory,
+						checkoutDirectory: inputs.checkoutDirectory,
+						githubToken: inputs.githubToken,
+						environment
+					},
+					reporter
+				);
+
+	if (inputs.addToPath) {
+		await appendEnvironmentFile(
+			environment.GITHUB_PATH,
+			`${installDirectory}\n`
+		);
+	}
+
+	await setOutput(environment, 'cupboard-path', acquired.binaryPath);
+	await setOutput(
+		environment,
+		'cupboard',
+		serialiseResolvedCupboard(acquired.cupboard)
+	);
+
+	if (inputs.cacheUrl === undefined) {
+		return;
+	}
+
+	await configureNix(
+		{ ...inputs, cacheUrl: inputs.cacheUrl, environment },
+		reporter
+	);
+}
+
+async function installReleasedCupboard(
+	inputs: SetupInputs,
+	installDirectory: string,
+	environment: Environment,
+	reporter: Reporter
+): Promise<{
+	readonly binaryPath: string;
+	readonly cupboard: ResolvedCupboard;
+}> {
+	const installed = await installCupboard(
 		{
 			installDirectory,
 			releaseRepository: inputs.releaseRepository,
@@ -230,24 +328,15 @@ export async function setupAction(
 		reporter
 	);
 
-	if (inputs.addToPath) {
-		await appendEnvironmentFile(
-			environment.GITHUB_PATH,
-			`${installDirectory}\n`
-		);
-	}
-
-	await setOutput(environment, 'cupboard-path', installedCupboard.binaryPath);
-	await setOutput(environment, 'cupboard-version', installedCupboard.version);
-
-	if (inputs.cacheUrl === undefined) {
-		return;
-	}
-
-	await configureNix(
-		{ ...inputs, cacheUrl: inputs.cacheUrl, environment },
-		reporter
-	);
+	return {
+		binaryPath: installed.binaryPath,
+		cupboard: {
+			kind: 'release',
+			repository: inputs.releaseRepository,
+			tag: installed.version,
+			sourceCommit: installed.sourceCommit
+		}
+	};
 }
 
 interface CacheInfoFetchDependencies {

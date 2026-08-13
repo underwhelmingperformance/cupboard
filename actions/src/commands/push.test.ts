@@ -1,12 +1,18 @@
+import { chmod, mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import { storedCacheSchema } from '@cupboard/nix-store/scalars';
 import {
 	type ParsedPushSummary,
 	type PushSummary,
 	pushSummarySchema
 } from '@cupboard/protocol/reports';
+import { createGithubReporter } from '@cupboard/reporter';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+	CupboardVersionOutputMissingError,
 	InvalidInputError,
 	LegacyPushSummaryError,
 	MissingInputError,
@@ -15,9 +21,11 @@ import {
 } from '../errors.ts';
 
 import {
+	acquirePushCupboard,
 	aggregatePushSummaries,
 	buildPushArguments,
 	hasUngracedPath,
+	inspectCupboardVersion,
 	pathsMissingGraceDeadline,
 	pushArgumentsForInvocations,
 	type PushInputs,
@@ -165,6 +173,7 @@ describe('resolvePushInputs', () => {
 	};
 
 	const defaults = {
+		cupboardPath: '',
 		version: 'latest',
 		includePrereleases: true,
 		githubToken: '',
@@ -271,6 +280,15 @@ describe('resolvePushInputs', () => {
 			'wait is not true or false',
 			{ ...baseOptions, wait: 'flase' },
 			InvalidInputError
+		],
+		[
+			'cupboard-path is combined with a release selector',
+			{
+				...baseOptions,
+				cupboardPath: '/opt/cupboard',
+				cupboardVersion: 'v1.2.3'
+			},
+			InvalidInputError
 		]
 	])('rejects when %s', (_name, options, error) => {
 		expect(() => resolvePushInputs(options, environment)).toThrow(error);
@@ -296,6 +314,71 @@ describe('resolvePushInputs', () => {
 			)
 		);
 		expect((failure as Error).message).not.toContain(secret);
+	});
+});
+
+describe('acquirePushCupboard', () => {
+	const reporter = createGithubReporter();
+	const inputs = {
+		cupboardPath: '/nix/store/cupboard/bin/cupboard',
+		installDirectory: '/runner/temp/cupboard-bin',
+		releaseRepository: 'owner/cupboard',
+		version: 'latest',
+		includePrereleases: true,
+		githubToken: 'token',
+		expectedSourceCommit: ''
+	};
+
+	it('uses and inspects a pre-acquired executable without installing', async () => {
+		const install = vi.fn();
+
+		await expect(
+			acquirePushCupboard(inputs, {}, reporter, {
+				install,
+				inspectVersion: (binaryPath) => `cupboard source (${binaryPath})`
+			})
+		).resolves.toStrictEqual({
+			binaryPath: '/nix/store/cupboard/bin/cupboard',
+			version: 'cupboard source (/nix/store/cupboard/bin/cupboard)'
+		});
+		expect(install).not.toHaveBeenCalled();
+	});
+
+	it('retains released installation when no path is supplied', async () => {
+		const installDirectory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-push-install-')
+		);
+		const installed = {
+			binaryPath: '/runner/temp/cupboard-bin/cupboard',
+			version: 'v1.2.3',
+			sourceCommit: 'a'.repeat(40)
+		};
+		const install = vi.fn(() => Promise.resolve(installed));
+		const inspectVersion = vi.fn();
+
+		await expect(
+			acquirePushCupboard(
+				{ ...inputs, cupboardPath: '', installDirectory },
+				{},
+				reporter,
+				{ install, inspectVersion }
+			)
+		).resolves.toStrictEqual(installed);
+		expect(inspectVersion).not.toHaveBeenCalled();
+	});
+
+	it('rejects a supplied executable with an empty version response', async () => {
+		const directory = await mkdtemp(
+			path.join(tmpdir(), 'cupboard-version-empty-')
+		);
+		const binaryPath = path.join(directory, 'cupboard');
+
+		await writeFile(binaryPath, '#!/bin/sh\nexit 0\n');
+		await chmod(binaryPath, 0o755);
+
+		expect(() => inspectCupboardVersion(binaryPath)).toThrow(
+			CupboardVersionOutputMissingError
+		);
 	});
 });
 

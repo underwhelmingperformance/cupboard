@@ -2,18 +2,20 @@ name: Set up cupboard
 description:
   Install cupboard and optionally export Nix binary cache configuration.
 inputs:
+  cupboard:
+    description:
+      Canonical release or source acquisition JSON from resolve-cupboard.
+    required: false
   cupboard-version:
     description:
       cupboard version to install. Use latest or an exact version such as 1.2.3
       or v1.2.3.
     required: false
-    default: latest
   include-prereleases:
     description:
       When resolving latest, consider prereleases and install the newest release
       of any kind.
     required: false
-    default: 'true'
   github-token:
     description: GitHub token used for release API calls.
     required: false
@@ -60,9 +62,9 @@ outputs:
   cupboard-path:
     description: Path to the installed cupboard binary.
     value: ${{ steps.setup.outputs.cupboard-path }}
-  cupboard-version:
-    description: Resolved cupboard release tag.
-    value: ${{ steps.setup.outputs.cupboard-version }}
+  cupboard:
+    description: Canonical release or source acquisition as validated JSON.
+    value: ${{ steps.setup.outputs.cupboard }}
   nix-config-file:
     description: Path to the generated runner-local Nix config file.
     value: ${{ steps.setup.outputs.nix-config-file }}
@@ -116,6 +118,7 @@ runs:
       id: setup
       shell: bash
       env:
+        CUPBOARD: ${{ inputs.cupboard }}
         CUPBOARD_VERSION: ${{ inputs.cupboard-version }}
         INCLUDE_PRERELEASES: ${{ inputs.include-prereleases }}
         GH_TOKEN: ${{ inputs.github-token || github.token }}
@@ -131,8 +134,10 @@ runs:
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
         NIX_CONFIG_FILE: ${{ inputs.nix-config-file }}
+        CHECKOUT_DIR: ${{ github.action_path }}/../..
       run: |
         args=(setup
+          --cupboard "$CUPBOARD"
           --cupboard-version "$CUPBOARD_VERSION"
           --include-prereleases "$INCLUDE_PRERELEASES"
           --github-token "$GH_TOKEN"
@@ -146,7 +151,8 @@ runs:
           --trusted-public-key "$TRUSTED_PUBLIC_KEY"
           --read-user "$READ_USER"
           --read-password "$READ_PASSWORD"
-          --nix-config-file "$NIX_CONFIG_FILE")
+          --nix-config-file "$NIX_CONFIG_FILE"
+          --checkout-dir "$CHECKOUT_DIR")
         node --experimental-transform-types \
           --disable-warning=ExperimentalWarning \
           "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"

@@ -25,6 +25,7 @@ import {
 	ChecksumMismatchError,
 	CommandFailedError,
 	GithubApiError,
+	InstalledReleaseVersionMismatchError,
 	InvalidChecksumLineError,
 	InvalidInputError,
 	MalformedReleaseResponseError,
@@ -59,6 +60,7 @@ export interface InstallCupboardOptions {
 export interface InstalledCupboard {
 	readonly binaryPath: string;
 	readonly version: string;
+	readonly sourceCommit: string;
 }
 
 export const fallbackReleaseRepository = 'cupboard/cupboard';
@@ -263,30 +265,69 @@ export async function installCupboard(
 		await verifyChecksum(archivePath, expectedChecksum);
 	});
 
-	await reporter.phase('Verify release attestation', async (phase) => {
-		const builtFrom = await verifyReleaseAttestation(
-			options,
-			archivePath,
-			release.tagName
-		);
-		assertExpectedSourceCommit(
-			release.tagName,
-			builtFrom,
-			expectedSourceCommit
-		);
-		phase.fact('Built from', builtFrom);
-	});
+	const sourceCommit = await reporter.phase(
+		'Verify release attestation',
+		async (phase) => {
+			const builtFrom = await verifyReleaseAttestation(
+				options,
+				archivePath,
+				release.tagName
+			);
+			assertExpectedSourceCommit(
+				release.tagName,
+				builtFrom,
+				expectedSourceCommit
+			);
+			phase.fact('Built from', builtFrom);
+
+			return builtFrom;
+		}
+	);
 
 	await reporter.phase('Install cupboard binary', async () => {
 		run('tar', ['-xzf', archivePath, '-C', options.installDirectory]);
 		await chmod(binaryPath, 0o755);
-		run(binaryPath, ['--version']);
+		assertInstalledReleaseVersion(
+			release.tagName,
+			readInstalledCupboardVersion(binaryPath)
+		);
 	});
 
 	return {
 		binaryPath,
-		version: release.tagName
+		version: release.tagName,
+		sourceCommit
 	};
+}
+
+/** Require a release executable to report the exact selected release tag. */
+export function assertInstalledReleaseVersion(
+	expected: string,
+	actual: string
+): void {
+	if (actual === expected) {
+		return;
+	}
+
+	throw new InstalledReleaseVersionMismatchError(expected, actual);
+}
+
+function readInstalledCupboardVersion(binaryPath: string): string {
+	const result = spawnSync(binaryPath, ['--version'], { encoding: 'utf8' });
+
+	if (result.error !== undefined) {
+		throw new CommandFailedError(
+			binaryPath,
+			result.status,
+			result.error.message
+		);
+	}
+
+	if (result.status !== 0) {
+		throw new CommandFailedError(binaryPath, result.status);
+	}
+
+	return result.stdout.trim();
 }
 
 export async function fetchRelease(

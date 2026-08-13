@@ -1,10 +1,10 @@
-import type { Reporter } from '@cupboard/reporter';
+import { createGithubReporter } from '@cupboard/reporter';
 import { describe, expect, it, vi } from 'vitest';
 
 import { acquireCupboard } from './cupboard-acquisition.ts';
 import type { ResolvedCupboard } from './cupboard-resolution.ts';
 
-const reporter = {} as Reporter;
+const reporter = createGithubReporter();
 const baseOptions = {
 	installDirectory: '/runner/temp/cupboard-bin',
 	checkoutDirectory: '/workspace/.cupboard',
@@ -23,7 +23,8 @@ describe('acquireCupboard', () => {
 		const installRelease = vi.fn(() =>
 			Promise.resolve({
 				binaryPath: '/runner/temp/cupboard-bin/cupboard',
-				version: 'v1.2.3'
+				version: 'v1.2.3',
+				sourceCommit: 'a'.repeat(40)
 			})
 		);
 		const installSource = vi.fn();

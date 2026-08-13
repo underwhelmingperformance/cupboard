@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
@@ -25,6 +26,8 @@ import {
 	runCupboardWithProtocol
 } from '../cupboard-run.ts';
 import {
+	CommandFailedError,
+	CupboardVersionOutputMissingError,
 	GraceDeadlineMissingError,
 	GracePolicyMissingError,
 	InvalidInputError,
@@ -65,6 +68,7 @@ const rootGroupsSchema = z.array(rootGroupSchema);
 export interface PushOptions {
 	readonly url?: string;
 	readonly paths: readonly string[];
+	readonly cupboardPath?: string;
 	readonly cupboardVersion?: string;
 	readonly includePrereleases?: string;
 	readonly githubToken?: string;
@@ -90,6 +94,7 @@ export interface PushOptions {
 }
 
 export interface PushInputs {
+	readonly cupboardPath: string;
 	readonly version: string;
 	readonly includePrereleases: boolean;
 	readonly githubToken: string;
@@ -168,6 +173,10 @@ export function registerPushCommand(
 			'local Nix store path, derivation or installable to push (repeatable, or newline-delimited)',
 			collectLines,
 			[]
+		)
+		.option(
+			'--cupboard-path <path>',
+			'pre-acquired cupboard executable; skips release installation'
 		)
 		.option(
 			'--cupboard-version <version>',
@@ -337,7 +346,26 @@ export function resolvePushInputs(
 		);
 	}
 
+	const cupboardPath = provided(options.cupboardPath) ?? '';
+	const releaseSelectors = [
+		options.cupboardVersion,
+		options.includePrereleases,
+		options.releaseRepository,
+		options.expectedSourceCommit
+	];
+
+	if (
+		cupboardPath !== '' &&
+		releaseSelectors.some((value) => provided(value) !== undefined)
+	) {
+		throw new InvalidInputError(
+			'cupboard-path',
+			'cupboard-path cannot be combined with release selection inputs'
+		);
+	}
+
 	return {
+		cupboardPath,
 		version: normaliseVersion(provided(options.cupboardVersion) ?? 'latest'),
 		includePrereleases: isEnabled(
 			'include-prereleases',
@@ -424,22 +452,9 @@ export async function pushAction(
 	reporter: Reporter = createGithubReporter()
 ): Promise<void> {
 	const inputs = resolvePushInputs(options, environment);
-	const installDirectory = path.resolve(inputs.installDirectory);
-
-	await mkdir(installDirectory, { recursive: true });
-
-	const installedCupboard = await installCupboard(
-		{
-			installDirectory,
-			releaseRepository: inputs.releaseRepository,
-			version: inputs.version,
-			includePrereleases: inputs.includePrereleases,
-			githubToken: inputs.githubToken,
-			environment,
-			...(inputs.expectedSourceCommit !== '' && {
-				expectedSourceCommit: inputs.expectedSourceCommit
-			})
-		},
+	const installedCupboard = await acquirePushCupboard(
+		inputs,
+		environment,
 		reporter
 	);
 
@@ -453,7 +468,6 @@ export async function pushAction(
 			: [{ root: inputs.root, paths: resolveStorePaths(nix, inputs.paths) }];
 
 	await setOutput(environment, 'cupboard-path', installedCupboard.binaryPath);
-	await setOutput(environment, 'cupboard-version', installedCupboard.version);
 
 	const argumentsPerPush = pushArgumentsForInvocations(inputs, pushes);
 	const summaries: ParsedPushSummary[] = [];
@@ -488,6 +502,90 @@ export async function pushAction(
 			throw new GraceDeadlineMissingError(missing);
 		}
 	}
+}
+
+export interface PushCupboard {
+	readonly binaryPath: string;
+	readonly version: string;
+}
+
+interface AcquirePushCupboardDependencies {
+	readonly install: typeof installCupboard;
+	readonly inspectVersion: (binaryPath: string) => string;
+}
+
+const defaultAcquirePushCupboardDependencies: AcquirePushCupboardDependencies =
+	{
+		install: installCupboard,
+		inspectVersion: inspectCupboardVersion
+	};
+
+export async function acquirePushCupboard(
+	inputs: Pick<
+		PushInputs,
+		| 'cupboardPath'
+		| 'installDirectory'
+		| 'releaseRepository'
+		| 'version'
+		| 'includePrereleases'
+		| 'githubToken'
+		| 'expectedSourceCommit'
+	>,
+	environment: Environment,
+	reporter: Reporter,
+	dependencies: AcquirePushCupboardDependencies = defaultAcquirePushCupboardDependencies
+): Promise<PushCupboard> {
+	if (inputs.cupboardPath !== '') {
+		const binaryPath = path.resolve(inputs.cupboardPath);
+
+		return {
+			binaryPath,
+			version: dependencies.inspectVersion(binaryPath)
+		};
+	}
+
+	const installDirectory = path.resolve(inputs.installDirectory);
+
+	await mkdir(installDirectory, { recursive: true });
+
+	return dependencies.install(
+		{
+			installDirectory,
+			releaseRepository: inputs.releaseRepository,
+			version: inputs.version,
+			includePrereleases: inputs.includePrereleases,
+			githubToken: inputs.githubToken,
+			environment,
+			...(inputs.expectedSourceCommit !== '' && {
+				expectedSourceCommit: inputs.expectedSourceCommit
+			})
+		},
+		reporter
+	);
+}
+
+export function inspectCupboardVersion(binaryPath: string): string {
+	const result = spawnSync(binaryPath, ['--version'], { encoding: 'utf8' });
+
+	if (result.error !== undefined) {
+		throw new CommandFailedError(
+			binaryPath,
+			result.status,
+			result.error.message
+		);
+	}
+
+	if (result.status !== 0) {
+		throw new CommandFailedError(binaryPath, result.status);
+	}
+
+	const version = result.stdout.trim();
+
+	if (version === '') {
+		throw new CupboardVersionOutputMissingError(binaryPath);
+	}
+
+	return version;
 }
 
 /**

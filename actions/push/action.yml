@@ -9,18 +9,21 @@ inputs:
       Newline-delimited local Nix store paths, derivations, or installables to
       push. Required unless root-groups is given.
     required: false
+  cupboard-path:
+    description:
+      Pre-acquired cupboard executable from actions/setup. Skips release
+      installation.
+    required: false
   cupboard-version:
     description:
       cupboard version to install. Use latest or an exact version such as 1.2.3
       or v1.2.3.
     required: false
-    default: latest
   include-prereleases:
     description:
       When resolving latest, consider prereleases and install the newest release
       of any kind.
     required: false
-    default: 'true'
   github-token:
     description: GitHub token used for release API calls.
     required: false
@@ -110,9 +113,6 @@ outputs:
   cupboard-path:
     description: Path to the installed cupboard binary.
     value: ${{ steps.push.outputs.cupboard-path }}
-  cupboard-version:
-    description: Resolved cupboard release tag.
-    value: ${{ steps.push.outputs.cupboard-version }}
   uploaded-paths:
     description: Number of store paths uploaded to the cache.
     value: ${{ steps.push.outputs.uploaded-paths }}
@@ -177,6 +177,7 @@ runs:
       env:
         URL: ${{ inputs.url }}
         PATHS: ${{ inputs.paths }}
+        CUPBOARD_PATH: ${{ inputs.cupboard-path }}
         CUPBOARD_VERSION: ${{ inputs.cupboard-version }}
         INCLUDE_PRERELEASES: ${{ inputs.include-prereleases }}
         GH_TOKEN: ${{ inputs.github-token || github.token }}
@@ -209,6 +210,7 @@ runs:
         args=(push
           --url "$URL"
           --paths "$PATHS"
+          --cupboard-path "$CUPBOARD_PATH"
           --cupboard-version "$CUPBOARD_VERSION"
           --include-prereleases "$INCLUDE_PRERELEASES"
           --github-token "$GH_TOKEN"
