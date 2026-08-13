@@ -25,6 +25,7 @@ import {
 	type NixDaemonSetOptions,
 	type NixStoreConfig
 } from './store-config.ts';
+import { openSubstituters, SubstituterClient } from './substituter.ts';
 
 /** Probes Nix uses to resolve an `auto` store, injected so selection is testable. */
 export interface StoreClientEnvironment extends NixConfigEnvironment {
@@ -110,7 +111,21 @@ export function storeClientForBackend(
 
 	return new NixLocalStoreClient(
 		() => openLocalStoreDatabase(backend.stateDirectory),
-		backend.storeDirectory
+		{
+			storeDirectory: backend.storeDirectory,
+			substituters: new SubstituterClient(
+				() => openSubstituters(config.substitution.substituters),
+				{
+					storeDirectory: backend.storeDirectory,
+					substitute: config.substitution.substitute,
+					fallback: config.substitution.fallback
+				}
+			),
+			substitution: {
+				substitute: config.substitution.substitute,
+				alwaysAllowSubstitutes: config.substitution.alwaysAllowSubstitutes
+			}
+		}
 	);
 }
 
@@ -162,6 +177,116 @@ export function createNixDaemonStoreClient(
 		setOptions: { ...config.daemonSetOptions, ...options.setOptions },
 		overrides: { ...config.daemonOverrides, ...options.overrides }
 	});
+}
+
+/**
+ * A store that can answer what is available elsewhere: which paths the
+ * substituters offer, what they offer for one, and what realising a target
+ * would require.
+ *
+ * Both backends answer. A daemon holds the substituter configuration and makes
+ * those requests for its clients, so it answers whenever its socket is there.
+ * Without one the store is this process's own, and the questions are answered
+ * the way libstore answers them in a single-user install: reading the store
+ * database directly and asking the substituters over HTTP.
+ *
+ * An `ssh-ng` store names a remote daemon, which answers for the remote store.
+ * A store URI naming a daemon that is not running is refused with
+ * {@link NixDaemonUnavailableError}.
+ */
+export function createAvailabilityStoreClient(
+	dependencies: StoreClientEnvironment = defaultStoreClientEnvironment,
+	config: NixStoreConfig = discoverNixStoreConfig(dependencies),
+	options: NixDaemonClientOptions = {}
+): { readonly client: NixStoreClient; readonly kind: NixStoreKind } {
+	const storeUri = options.storeUri ?? config.storeUri;
+	const sshRemote = parseSshNgStoreUri(storeUri);
+
+	if (sshRemote !== undefined) {
+		return {
+			client: createNixDaemonStoreClient(dependencies, config, options),
+			kind: 'ssh-ng'
+		};
+	}
+
+	const socketPath = configuredDaemonSocketPath(config, storeUri);
+
+	if (dependencies.socketExists(socketPath)) {
+		return {
+			client: createNixDaemonStoreClient(dependencies, config, options),
+			kind: 'daemon'
+		};
+	}
+
+	// A store URI naming the daemon asked for that daemon, so a missing socket
+	// is the answer to the caller's question.
+	if (isDaemonStoreUri(storeUri)) {
+		throw new NixDaemonUnavailableError(socketPath);
+	}
+
+	const overrides = { ...config.daemonOverrides, ...options.overrides };
+	const substitution = {
+		...config.substitution,
+		...overriddenSubstitution(config, overrides)
+	};
+
+	return {
+		client: new NixLocalStoreClient(
+			() => openLocalStoreDatabase(config.stateDirectory),
+			{
+				storeDirectory: config.storeDirectory,
+				substituters: new SubstituterClient(
+					() => openSubstituters(substitution.substituters),
+					{
+						storeDirectory: config.storeDirectory,
+						substitute: substitution.substitute,
+						fallback: substitution.fallback
+					}
+				),
+				substitution: {
+					substitute: substitution.substitute,
+					alwaysAllowSubstitutes: substitution.alwaysAllowSubstitutes
+				}
+			}
+		),
+		kind: 'local-filesystem'
+	};
+}
+
+// A daemon takes its substituter list from the settings a client sends it. The
+// list is this client's own, so the same overrides select which substituters
+// it opens.
+function overriddenSubstitution(
+	config: NixStoreConfig,
+	overrides: NixDaemonOverrides
+): { readonly substitute: boolean; readonly substituters: readonly string[] } {
+	const assigned = overrides.substituters;
+	const appended = overrides['extra-substituters'];
+	const base =
+		assigned === undefined
+			? config.substitution.substituters
+			: listOf(assigned);
+	const substitute = overrides.substitute;
+
+	return {
+		substitute:
+			substitute === undefined
+				? config.substitution.substitute
+				: substitute !== 'false',
+		substituters: [
+			...new Set([...base, ...(appended === undefined ? [] : listOf(appended))])
+		]
+	};
+}
+
+function listOf(value: string): readonly string[] {
+	return value.split(/\s+/u).filter(Boolean);
+}
+
+const daemonStoreUris = new Set(['daemon', 'unix://']);
+
+function isDaemonStoreUri(storeUri: string): boolean {
+	return daemonStoreUris.has(storeUri) || storeUri.startsWith(unixScheme);
 }
 
 // A `unix://` store URI names the daemon socket directly; every other

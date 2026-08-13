@@ -20,6 +20,7 @@ import {
 	type NixValidPathInfo,
 	UnsupportedNixStoreOperationError
 } from './nix-store.ts';
+import { openSubstituters, SubstituterClient } from './substituter.ts';
 
 const pathA = storePathSchema.parse(
 	'/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-a'
@@ -165,12 +166,12 @@ describe('NixLocalStoreClient', () => {
 
 	it.each([
 		{
-			name: 'substituters',
+			name: 'substituters, with none configured',
 			operation: 'substitutable-path queries',
 			query: () => client.querySubstitutablePaths([pathA])
 		},
 		{
-			name: 'the realisation partition',
+			name: 'a realisation partition, with no substituters configured',
 			operation: 'missing-path queries',
 			query: () => client.queryMissing([pathA])
 		},
@@ -179,7 +180,7 @@ describe('NixLocalStoreClient', () => {
 			operation: 'build requests',
 			query: () => client.buildPathsWithResults([pathA])
 		}
-	])('cannot query $name without a daemon', async ({ operation, query }) => {
+	])('cannot answer for $name here', async ({ operation, query }) => {
 		let outcome:
 			{ value: unknown } | { error: { name: string; operation: string } };
 		try {
@@ -247,11 +248,10 @@ describe('NixLocalStoreClient', () => {
 	it('reads a derivation from the file the store directory holds', async () => {
 		const aterm = 'Derive([],[],[],"aarch64-linux","builder",[],[])';
 		const read = vi.fn(() => Promise.resolve(aterm));
-		const client = new NixLocalStoreClient(
-			() => emptyDatabase(),
-			storeDirectorySchema.parse('/nix/store'),
-			read
-		);
+		const client = new NixLocalStoreClient(() => emptyDatabase(), {
+			storeDirectory: storeDirectorySchema.parse('/nix/store'),
+			readStoreFile: read
+		});
 
 		const contents = await client.readDerivation(deriverA);
 
@@ -262,17 +262,94 @@ describe('NixLocalStoreClient', () => {
 	});
 
 	it('refuses a derivation the store directory does not hold', async () => {
-		const client = new NixLocalStoreClient(
-			() => emptyDatabase(),
-			storeDirectorySchema.parse('/nix/store'),
-			() => Promise.reject(new Error('ENOENT'))
-		);
+		const client = new NixLocalStoreClient(() => emptyDatabase(), {
+			storeDirectory: storeDirectorySchema.parse('/nix/store'),
+			readStoreFile: () => Promise.reject(new Error('ENOENT'))
+		});
 
 		await expect(client.readDerivation(missingDrvPath)).rejects.toThrow(
 			NixStorePathNotFoundError
 		);
 	});
 });
+
+// Configured substituters are what the availability questions are asked of,
+// so a store given them answers all three the way a daemon-backed one does.
+describe('NixLocalStoreClient with substituters', () => {
+	const cacheInfo = 'StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\n';
+	const narInfo = [
+		`StorePath: ${pathB}`,
+		'URL: nar/bbbb.nar.xz',
+		'Compression: xz',
+		`FileHash: sha256:${'11'.repeat(32)}`,
+		'FileSize: 400',
+		`NarHash: ${hashB}`,
+		'NarSize: 50',
+		'References: '
+	].join('\n');
+
+	const served = servedBy(cacheInfo, narInfo);
+
+	function clientOver(): NixLocalStoreClient {
+		const substituters = new SubstituterClient(
+			() => openSubstituters(['https://cache.example'], { fetch: served }),
+			{
+				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				substitute: true,
+				fallback: false,
+				fetch: served
+			}
+		);
+
+		return new NixLocalStoreClient(() => emptyDatabase(), { substituters });
+	}
+
+	it('reports which paths the substituters offer', async () => {
+		await expect(
+			clientOver().querySubstitutablePaths([pathA, pathB])
+		).resolves.toStrictEqual([pathB]);
+	});
+
+	it('reports what the substituters offer for a path', async () => {
+		await expect(
+			clientOver().querySubstitutablePathInfos([pathB])
+		).resolves.toStrictEqual([
+			{
+				storePath: pathB,
+				references: [],
+				downloadSize: 400,
+				narSize: 50
+			}
+		]);
+	});
+
+	it('partitions a realisation over what the substituters hold', async () => {
+		await expect(clientOver().queryMissing([pathB])).resolves.toStrictEqual({
+			willBuild: [],
+			willSubstitute: [pathB],
+			unknown: [],
+			downloadSize: 400,
+			narSize: 50
+		});
+	});
+});
+
+/** A cache serving the given `nix-cache-info` and one narinfo. */
+function servedBy(cacheInfo: string, narInfo: string): typeof fetch {
+	return (input) => {
+		const url = new URL(input instanceof Request ? input.url : String(input));
+
+		if (url.pathname === '/nix-cache-info') {
+			return Promise.resolve(new Response(cacheInfo));
+		}
+
+		return Promise.resolve(
+			url.pathname === `/${'b'.repeat(32)}.narinfo`
+				? new Response(narInfo)
+				: new Response('', { status: 404 })
+		);
+	};
+}
 
 function emptyDatabase(): NixStoreDatabase {
 	return {

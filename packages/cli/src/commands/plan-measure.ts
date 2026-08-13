@@ -78,7 +78,7 @@ export function registerPlanMeasureCommand(
 			const targets = await readMeasureTargets(options.targetsFile);
 			const storeSelection =
 				options.store === undefined ? {} : { storeUri: options.store };
-			const nix = Nix.openDaemon(undefined, storeSelection);
+			const nix = Nix.openForAvailability(undefined, storeSelection);
 
 			await runPlanMeasure(
 				{

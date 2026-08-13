@@ -57,6 +57,7 @@ const unnamedMachine = new Map<string, string>();
 const defaultSubstitution: NixSubstitutionSettings = {
 	substitute: true,
 	alwaysAllowSubstitutes: false,
+	fallback: false,
 	substituters: ['https://cache.nixos.org/']
 };
 

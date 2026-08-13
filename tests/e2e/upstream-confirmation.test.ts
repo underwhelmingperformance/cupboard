@@ -62,6 +62,7 @@ describe.skipIf(!existsSync(socketPath))('left-upstream confirmation', () => {
 			const substitution: NixSubstitutionSettings = {
 				substitute: true,
 				alwaysAllowSubstitutes: false,
+				fallback: false,
 				substituters: [substituter.url]
 			};
 			const seeding = new NixDaemonStoreClient({

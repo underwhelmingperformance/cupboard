@@ -410,7 +410,7 @@ export function registerPushCommand(
 					signal: programOptions.signal
 				}),
 				...(options.store !== undefined && {
-					nix: Nix.openDaemon(undefined, { storeUri: options.store })
+					nix: Nix.openForAvailability(undefined, { storeUri: options.store })
 				}),
 				...(options.closure !== undefined && { closure: options.closure }),
 				...(options.referenceSource !== undefined && {

@@ -85,7 +85,7 @@ export function registerPlanReprobeCommand(
 				options.store === undefined ? {} : { storeUri: options.store };
 
 			await runPlanReprobe({ targets }, reporter, {
-				store: Nix.openDaemon(undefined, storeSelection),
+				store: Nix.openForAvailability(undefined, storeSelection),
 				destinationAnswers: destinationAnswersFor({
 					baseUrl: url,
 					cache: storedCacheFor(options.cache),
