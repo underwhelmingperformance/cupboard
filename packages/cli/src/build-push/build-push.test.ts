@@ -576,7 +576,7 @@ describe('runBuildPush', () => {
 		expect({ error: run.error, receipt }).toStrictEqual({
 			error: undefined,
 			receipt: {
-				version: 2,
+				version: 3,
 				paths: [pathA],
 				subjects: [],
 				outcomes: [{ outcome: 'destination-served', storePath: pathA }],
@@ -601,7 +601,7 @@ describe('runBuildPush', () => {
 		expect({ error: run.error, receipt }).toStrictEqual({
 			error: undefined,
 			receipt: {
-				version: 2,
+				version: 3,
 				paths: [pathA],
 				subjects: [],
 				outcomes: [{ outcome: 'destination-served', storePath: pathA }],
@@ -664,7 +664,7 @@ describe('runBuildPush', () => {
 			sleeps: [15_000],
 			verifications: [],
 			receipt: {
-				version: 2,
+				version: 3,
 				paths: [pathA],
 				subjects: [
 					{
@@ -672,7 +672,9 @@ describe('runBuildPush', () => {
 						narHash: narHash.digestHex(),
 						derivation: drvA,
 						attempt: 1,
-						attemptId: 'attempt-1'
+						attemptId: 'attempt-1',
+						buildStore: 'auto',
+						verification: 'local'
 					}
 				],
 				outcomes: [{ outcome: 'destination-served', storePath: pathA }],
@@ -717,7 +719,7 @@ describe('runBuildPush', () => {
 				]
 			],
 			receipt: {
-				version: 2,
+				version: 3,
 				paths: [pathA],
 				subjects: [
 					{
@@ -725,7 +727,10 @@ describe('runBuildPush', () => {
 						narHash: narHash.digestHex(),
 						derivation: drvA,
 						attempt: 1,
-						attemptId: 'attempt-1'
+						attemptId: 'attempt-1',
+						buildStore: 'auto',
+						machine: 'ssh://builder-1',
+						verification: 'verified-rebuild'
 					}
 				],
 				outcomes: [{ outcome: 'destination-served', storePath: pathA }],
@@ -856,7 +861,7 @@ describe('runBuildPush', () => {
 			isBuildFailure: true,
 			exitCode: 7,
 			receipt: {
-				version: 2,
+				version: 3,
 				paths: [],
 				subjects: [],
 				outcomes: [

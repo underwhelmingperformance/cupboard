@@ -17,6 +17,7 @@ import {
 	InvalidStoreUriError,
 	NoRetainConflictError,
 	OidcRetentionChoiceRequiredError,
+	ReceiptFileRequiresStoreError,
 	ReferenceSourcePairError,
 	RunRootTtlWithoutRunRootError
 } from '../errors.ts';
@@ -24,6 +25,7 @@ import {
 import {
 	parsePathFile,
 	pushCommandAuthorizationDetails,
+	receiptBuildStore,
 	registerPushCommand,
 	resolvePushPath,
 	validateRetentionChoice
@@ -152,6 +154,32 @@ describe('validateRetentionChoice', () => {
 		expect(() => {
 			validateRetentionChoice(options);
 		}).not.toThrow();
+	});
+});
+
+describe('receiptBuildStore', () => {
+	it.each([
+		{
+			name: 'no receipt file',
+			options: { store: 'ssh-ng://builder.example' },
+			expected: undefined
+		},
+		{
+			name: 'a receipt file alongside a selected store',
+			options: {
+				receiptFile: '/runner/temp/receipt.json',
+				store: 'ssh-ng://builder.example'
+			},
+			expected: 'ssh-ng://builder.example'
+		}
+	])('resolves $name', ({ options, expected }) => {
+		expect(receiptBuildStore(options)).toBe(expected);
+	});
+
+	it('refuses a receipt file with no selected store', () => {
+		expect(() =>
+			receiptBuildStore({ receiptFile: '/runner/temp/receipt.json' })
+		).toThrow(ReceiptFileRequiresStoreError);
 	});
 });
 

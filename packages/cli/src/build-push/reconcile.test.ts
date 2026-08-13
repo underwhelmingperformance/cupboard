@@ -293,7 +293,7 @@ describe('reconcileBuild', () => {
 			},
 			expected: {
 				receipt: {
-					version: 2,
+					version: 3,
 					paths: [pathA, pathB],
 					subjects: [],
 					outcomes: [
@@ -346,7 +346,7 @@ describe('reconcileBuild', () => {
 			},
 			expected: {
 				receipt: {
-					version: 2,
+					version: 3,
 					paths: [pathA],
 					subjects: [],
 					outcomes: [
@@ -379,7 +379,7 @@ describe('reconcileBuild', () => {
 			},
 			expected: {
 				receipt: {
-					version: 2,
+					version: 3,
 					paths: [pathC],
 					subjects: [],
 					outcomes: [{ outcome: 'built', storePath: pathC }],
@@ -407,7 +407,7 @@ describe('reconcileBuild', () => {
 			},
 			expected: {
 				receipt: {
-					version: 2,
+					version: 3,
 					paths: [],
 					subjects: [],
 					outcomes: [{ outcome: 'left-upstream', storePath: pathD }],
@@ -445,7 +445,7 @@ describe('reconcileBuild', () => {
 			},
 			expected: {
 				receipt: {
-					version: 2,
+					version: 3,
 					paths: [pathA],
 					subjects: [],
 					outcomes: [
@@ -490,7 +490,7 @@ describe('reconcileBuild', () => {
 			},
 			expected: {
 				receipt: {
-					version: 2,
+					version: 3,
 					paths: [],
 					subjects: [],
 					outcomes: [
@@ -530,7 +530,7 @@ describe('reconcileBuild', () => {
 			},
 			expected: {
 				receipt: {
-					version: 2,
+					version: 3,
 					paths: [pathB],
 					subjects: [],
 					outcomes: [{ outcome: 'built', storePath: pathB }],
@@ -552,7 +552,7 @@ describe('reconcileBuild', () => {
 			},
 			expected: {
 				receipt: {
-					version: 2,
+					version: 3,
 					paths: [],
 					subjects: [],
 					outcomes: [
@@ -580,7 +580,7 @@ describe('reconcileBuild', () => {
 			},
 			expected: {
 				receipt: {
-					version: 2,
+					version: 3,
 					paths: [pathA],
 					subjects: [],
 					outcomes: [{ outcome: 'built', storePath: pathA }],

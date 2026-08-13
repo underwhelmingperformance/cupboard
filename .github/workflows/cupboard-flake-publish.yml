@@ -441,10 +441,12 @@ jobs:
             needs.configure.outputs.root-prefix, github.run_id) }}
           run-root-ttl: ${{ inputs.run-root-ttl }}
 
-      # The build-push receipt carries the per-path NAR hashes, derivers and
-      # attempt attribution the provenance subjects need. A cohort that
-      # streamed no build (push disabled, a remote store, or nothing to
-      # build) has no receipt and nothing it can truthfully attest.
+      # The build receipt carries the per-path NAR hashes, derivers and
+      # attribution the provenance subjects need. A streamed cohort writes it
+      # from its supervised build; a remote-store cohort reconciles it from the
+      # store the build ran in. A cohort that published nothing it built (push
+      # disabled, or nothing to build) has no receipt and nothing it can
+      # truthfully attest.
       - uses: ./.cupboard/actions/attest
         id: attest
         if: ${{ inputs.push && steps.build-cohort.outputs.receipt-file != '' }}

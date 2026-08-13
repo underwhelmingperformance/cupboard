@@ -13,10 +13,10 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import {
-	buildReceiptSchema,
-	type BuildSubject,
+	buildReceiptV3Schema,
+	type BuildSubjectV3,
 	type DerivationPath,
-	type ParsedBuildReceipt,
+	type ParsedBuildReceiptV3,
 	type TargetFailureReason,
 	type TargetOutcome
 } from '@cupboard/protocol/build';
@@ -108,7 +108,7 @@ export interface ReconcileOptions {
 	readonly compressNar?: CompressNar;
 	readonly uploadConcurrency?: number;
 	readonly childExitStatus?: number;
-	readonly subjects?: readonly BuildSubject[];
+	readonly subjects?: readonly BuildSubjectV3[];
 }
 
 /** One declared target root's reconciliation: replaced, or left untouched. */
@@ -129,7 +129,7 @@ export interface ReconcileFailure {
 }
 
 export interface ReconcileResult {
-	readonly receipt: ParsedBuildReceipt;
+	readonly receipt: ParsedBuildReceiptV3;
 	readonly roots: readonly ReconciledRoot[];
 	readonly failures: readonly ReconcileFailure[];
 }
@@ -709,8 +709,8 @@ export async function reconcileBuild(
 
 	const roots = await applyTargetRoots(resolvedTargets, options, ledger);
 	const partition = options.partition;
-	const receipt = buildReceiptSchema.parse({
-		version: 2,
+	const receipt = buildReceiptV3Schema.parse({
+		version: 3,
 		paths: [...ledger.servable].toSorted(byCodeUnit),
 		subjects: [...(options.subjects ?? [])],
 		outcomes: resolvedTargets.map((resolved) =>

@@ -9,10 +9,11 @@ import type {
 	StorePathString,
 	TtlSeconds
 } from '@cupboard/nix-store/scalars';
-import type {
-	BuildSubject,
-	InvocationId,
-	ParsedBuildReceipt
+import {
+	autoBuildStore,
+	type BuildSubjectV3,
+	type InvocationId,
+	type ParsedBuildReceiptV3
 } from '@cupboard/protocol/build';
 import {
 	type BuildSummary,
@@ -192,7 +193,7 @@ export async function runBuildPush(
 	options: BuildPushRunOptions,
 	reporter: Reporter,
 	dependencies: BuildPushDependencies
-): Promise<ParsedBuildReceipt> {
+): Promise<ParsedBuildReceiptV3> {
 	const preflight = await dependencies.preflight();
 	const plan = preflight.runtimePlan;
 
@@ -373,7 +374,7 @@ async function attributeSubjects(
 	attempts: readonly SupervisedAttempt[],
 	eventPaths: readonly StorePathString[],
 	exit: ChildExit
-): Promise<readonly BuildSubject[]> {
+): Promise<readonly BuildSubjectV3[]> {
 	if (
 		invocation.kind !== 'constructed' ||
 		exit.status !== 0 ||
@@ -396,7 +397,7 @@ async function attributeSubjects(
 	const infos = await dependencies.store.queryValidPathsInfo(eventPaths);
 
 	if (invocation.build.verifyRebuilds !== true) {
-		return receiptSubjects(observed, infos, new Set());
+		return receiptSubjects(observed, infos, new Set(), autoBuildStore);
 	}
 
 	const derivations = derivationsRequiringVerification(
@@ -423,7 +424,8 @@ async function attributeSubjects(
 	return receiptSubjects(
 		[verifiedAttribution(successful, derivations)],
 		infos,
-		new Set()
+		new Set(),
+		autoBuildStore
 	);
 }
 
@@ -432,7 +434,7 @@ interface RunFacts {
 	readonly batcher: BuildOutputBatcher;
 	readonly maxQueueDepth: number;
 	readonly eventPaths: readonly StorePathString[];
-	readonly subjects: readonly BuildSubject[];
+	readonly subjects: readonly BuildSubjectV3[];
 }
 
 // The phases after the child exits: drain, reconcile, receipt, exit contract.
@@ -444,7 +446,7 @@ async function settleRun(
 	reporter: Reporter,
 	dependencies: BuildPushDependencies,
 	facts: RunFacts
-): Promise<ParsedBuildReceipt> {
+): Promise<ParsedBuildReceiptV3> {
 	const { exit, batcher } = facts;
 
 	try {

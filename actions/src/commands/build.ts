@@ -5,7 +5,7 @@ import path from 'node:path';
 import { env } from 'node:process';
 
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
-import type { BuildReceipt } from '@cupboard/protocol/build';
+import type { BuildReceiptV2 } from '@cupboard/protocol/build';
 import type { Command } from 'commander';
 import { z } from 'zod';
 
@@ -166,7 +166,7 @@ export function receiptSubjects(
 	attempts: readonly BuildAttempt[],
 	finalInfos: readonly NixValidPathInfo[],
 	preExisting: ReadonlySet<string>
-): BuildReceipt['subjects'] {
+): BuildReceiptV2['subjects'] {
 	const firstBuild = new Map<string, Omit<BuildAttempt, 'activities'>>();
 
 	for (const attempt of attempts) {
@@ -443,7 +443,7 @@ export async function buildAction(
 		finalPaths.map((storePath) => nix.queryPathInfo(storePath))
 	);
 	const subjects = receiptSubjects(attributed, finalInfos, preExisting);
-	const receipt: BuildReceipt = { version: 2, paths: finalPaths, subjects };
+	const receipt: BuildReceiptV2 = { version: 2, paths: finalPaths, subjects };
 	await mkdir(path.dirname(pathsFile), { recursive: true });
 	await writeFile(
 		pathsFile,

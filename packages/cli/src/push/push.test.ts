@@ -16,6 +16,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import type { AttestationNegotiateRequest } from '@cupboard/protocol/attestations';
+import type { ParsedBuildReceiptV3 } from '@cupboard/protocol/build';
 import { pushSummaryResultKind } from '@cupboard/protocol/reports';
 import {
 	type RootSetBody,
@@ -3788,6 +3789,99 @@ describe('runPush', () => {
 	});
 });
 
+// A push whose target is uploaded and committed while its intermediate is
+// already served, so both are servable and only the target is a subject.
+function receiptPush(
+	appInfo: NixValidPathInfo,
+	dependencies: Pick<PushDependencies, 'buildStore'>
+): Promise<ParsedBuildReceiptV3 | undefined> {
+	return runPush(publication([appPath], [runtimePath]), reporter([]), {
+		retain: false,
+		client: {
+			preview: unexpectedPreviewCall,
+			negotiate: () =>
+				Promise.resolve(
+					uploadNegotiateResponseSchema.parse({
+						uploads: [
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								uploadId: 'upload-app',
+								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							},
+							{
+								action: 'skip',
+								storePathHash: StorePath.hash(runtimePath),
+								narHash: runtimeDigest.narHash.toString()
+							}
+						]
+					})
+				),
+			uploadNar: () => Promise.resolve(),
+			commit: () => Promise.resolve(fallbackCommitResponse()),
+			setRoot: unexpectedSetRootCall
+		} satisfies PushClient,
+		nix: nixStore({
+			[appPath]: appInfo,
+			[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+		}),
+		createNarArchive: () => new FakeNarArchive(appDigest),
+		compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar)),
+		...dependencies
+	});
+}
+
+describe('the build receipt a push writes', () => {
+	const appDrv = '/nix/store/8123456789abcdfghijklmnpqrsvwxyz-app.drv';
+	const buildStore = 'ssh-ng://builder.example';
+
+	it('records each published target the build store holds a deriver for', async () => {
+		const receipt = await receiptPush(
+			pathInfo(appPath, appDigest, [], appDrv),
+			{ buildStore }
+		);
+
+		expect(receipt).toStrictEqual({
+			version: 3,
+			paths: [appPath, runtimePath],
+			subjects: [
+				{
+					storePath: appPath,
+					narHash: appDigest.narHash.digestHex(),
+					derivation: appDrv,
+					buildStore,
+					verification: 'coordinating-store'
+				}
+			],
+			uploaded: [appPath]
+		});
+	});
+
+	it('publishes a target with no deriver without claiming it as a subject', async () => {
+		const receipt = await receiptPush(pathInfo(appPath, appDigest, []), {
+			buildStore
+		});
+
+		expect(receipt).toStrictEqual({
+			version: 3,
+			paths: [appPath, runtimePath],
+			subjects: [],
+			uploaded: [appPath]
+		});
+	});
+
+	it('writes no receipt when the push names no build store', async () => {
+		const receipt = await receiptPush(
+			pathInfo(appPath, appDigest, [], appDrv),
+			{}
+		);
+
+		expect(receipt).toBeUndefined();
+	});
+});
+
 function deferredUpload(
 	events: string[]
 ): Pick<PushClient, 'negotiate' | 'uploadNar' | 'commit'> {
@@ -3969,7 +4063,8 @@ function sha256Hex(bytes: Uint8Array): string {
 function pathInfo(
 	storePath: StorePathString,
 	narDigest: NarDigest,
-	references: readonly StorePathString[]
+	references: readonly StorePathString[],
+	deriver?: string
 ): NixValidPathInfo {
 	return {
 		storePath,
@@ -3977,7 +4072,8 @@ function pathInfo(
 		narSize: narDigest.narSize,
 		references,
 		signatures: [],
-		ultimate: true
+		ultimate: true,
+		...(deriver !== undefined && { deriver })
 	};
 }
 
