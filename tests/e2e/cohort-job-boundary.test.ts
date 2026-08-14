@@ -13,6 +13,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import {
 	buildCohortAction,
+	materialiseDerivationGraph,
 	runNixDerivationShow
 } from '../../actions/src/commands/build-cohort.ts';
 import type { runCupboard } from '../../actions/src/cupboard-run.ts';
@@ -234,6 +235,10 @@ describe.skipIf(!isNixPresent)('cohort job store isolation', () => {
 				runCupboard: runCupboardMock,
 				runNixDerivationShow: (installables, signal, isRecursive) =>
 					runNixDerivationShow(installables, signal, isRecursive, {
+						evalStore: `local?root=${prepared.cohortStoreRoot}`
+					}),
+				materialiseDerivationGraph: (installables, signal) =>
+					materialiseDerivationGraph(installables, signal, {
 						evalStore: `local?root=${prepared.cohortStoreRoot}`
 					}),
 				// The default derivation-root store opens the host's Nix daemon.

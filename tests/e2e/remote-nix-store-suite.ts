@@ -23,6 +23,7 @@ import { attestAction } from '../../actions/src/commands/attest.ts';
 import { attestAttachAction } from '../../actions/src/commands/attest-attach.ts';
 import {
 	buildCohortAction,
+	materialiseDerivationGraph,
 	runNixBuildWithResults,
 	runNixCopy,
 	runNixDerivationShow,
@@ -138,6 +139,14 @@ const runFixtureNixDerivationShow: typeof runNixDerivationShow = (
 	isRecursive
 ) =>
 	runNixDerivationShow(installables, signal, isRecursive, {
+		evalStore: fixtureLocalStoreUri()
+	});
+
+const fixtureMaterialiseDerivationGraph: typeof materialiseDerivationGraph = (
+	installables,
+	signal
+) =>
+	materialiseDerivationGraph(installables, signal, {
 		evalStore: fixtureLocalStoreUri()
 	});
 
@@ -755,6 +764,7 @@ async function runCancelledBuildCohort(
 							runCupboard: publicationCupboard(plan),
 							withLocalDerivationRoots: withFixtureLocalDerivationRoots,
 							runNixDerivationShow: runFixtureNixDerivationShow,
+							materialiseDerivationGraph: fixtureMaterialiseDerivationGraph,
 							signal: controller.signal
 						}
 					)
@@ -912,6 +922,7 @@ async function runAlreadyValidPublication(
 							runCupboard: publicationCupboard(plan),
 							withLocalDerivationRoots: withFixtureLocalDerivationRoots,
 							runNixDerivationShow: runFixtureNixDerivationShow,
+							materialiseDerivationGraph: fixtureMaterialiseDerivationGraph,
 							runNixCopy: (paths, storeUri, signal) =>
 								withSshOptions(store.environment.NIX_SSHOPTS, () =>
 									runNixCopy(paths, storeUri, signal)
@@ -1007,6 +1018,7 @@ async function runAlreadyValidPublication(
 							runCupboard: publicationCupboard(provenancePlan),
 							withLocalDerivationRoots: withFixtureLocalDerivationRoots,
 							runNixDerivationShow: runFixtureNixDerivationShow,
+							materialiseDerivationGraph: fixtureMaterialiseDerivationGraph,
 							runNixCopy: (paths, storeUri, signal) =>
 								withSshOptions(store.environment.NIX_SSHOPTS, () =>
 									runNixCopy(paths, storeUri, signal)
@@ -1171,6 +1183,7 @@ async function runAlreadyValidPublication(
 							runCupboard: publicationCupboard(provenancePlan),
 							withLocalDerivationRoots: withFixtureLocalDerivationRoots,
 							runNixDerivationShow: runFixtureNixDerivationShow,
+							materialiseDerivationGraph: fixtureMaterialiseDerivationGraph,
 							runNixCopy: (paths, storeUri, signal) =>
 								withSshOptions(store.environment.NIX_SSHOPTS, () =>
 									runNixCopy(paths, storeUri, signal)
@@ -1363,6 +1376,7 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 							runCupboard: publicationCupboard(plan),
 							withLocalDerivationRoots: withFixtureLocalDerivationRoots,
 							runNixDerivationShow: runFixtureNixDerivationShow,
+							materialiseDerivationGraph: fixtureMaterialiseDerivationGraph,
 							runNixCopy: async (derivations, storeUri, signal) => {
 								await runCommand('nix', ['store', 'gc']);
 								didCollectLocalBeforeCopy = true;
@@ -1684,6 +1698,7 @@ async function runRemotePublication(store: NixSshStoreFixture): Promise<void> {
 								runCupboard: publicationCupboard(plan, planning),
 								withLocalDerivationRoots: withFixtureLocalDerivationRoots,
 								runNixDerivationShow: runFixtureNixDerivationShow,
+								materialiseDerivationGraph: fixtureMaterialiseDerivationGraph,
 								runNixCopy: (paths, storeUri, signal) =>
 									withSshOptions(store.environment.NIX_SSHOPTS, () =>
 										runNixCopy(paths, storeUri, signal)
@@ -1911,6 +1926,7 @@ async function runSixTargetRemotePublication(
 							runCupboard: publicationCupboard(plan, planning),
 							withLocalDerivationRoots: withFixtureLocalDerivationRoots,
 							runNixDerivationShow: runFixtureNixDerivationShow,
+							materialiseDerivationGraph: fixtureMaterialiseDerivationGraph,
 							runNixCopy: (paths, storeUri, signal) =>
 								withSshOptions(store.environment.NIX_SSHOPTS, () =>
 									runNixCopy(paths, storeUri, signal)

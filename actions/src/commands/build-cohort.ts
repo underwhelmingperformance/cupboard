@@ -594,6 +594,7 @@ export interface BuildCohortDependencies {
 	readonly runNixBuildWithResults?: typeof runNixBuildWithResults;
 	readonly runNixCopy?: typeof runNixCopy;
 	readonly runNixDerivationShow?: typeof runNixDerivationShow;
+	readonly materialiseDerivationGraph?: typeof materialiseDerivationGraph;
 	readonly withLocalDerivationRoots?: WithLocalDerivationRoots;
 	readonly cupboardRunDependencies?: CupboardRunDependencies;
 	readonly reporter?: Reporter;
@@ -634,6 +635,8 @@ export async function buildCohortAction(
 	const runCopy = dependencies.runNixCopy ?? runNixCopy;
 	const runDerivationShow =
 		dependencies.runNixDerivationShow ?? runNixDerivationShow;
+	const materialiseGraph =
+		dependencies.materialiseDerivationGraph ?? materialiseDerivationGraph;
 	const withLocalDerivationRoots =
 		dependencies.withLocalDerivationRoots ?? runWithLocalDerivationRoots;
 	const reporter = dependencies.reporter ?? createGithubReporter();
@@ -787,6 +790,7 @@ export async function buildCohortAction(
 							members,
 							selectedTargets,
 							runDerivationShow,
+							materialiseGraph,
 							dependencies.signal
 						);
 
@@ -962,6 +966,7 @@ export async function buildCohortAction(
 					queryable,
 					targets,
 					runDerivationShow,
+					materialiseGraph,
 					dependencies.signal
 				);
 				await planAndBuild();
@@ -2338,6 +2343,7 @@ async function materialisePlannedDerivations(
 	members: readonly CohortMember[],
 	targets: readonly NixDerivedPathString[],
 	runDerivationShow: typeof runNixDerivationShow,
+	materialiseGraph: typeof materialiseDerivationGraph,
 	signal?: AbortSignal
 ): Promise<readonly PlannedTargetBinding[]> {
 	const bindings = plannedTargetBindings(members, targets);
@@ -2350,9 +2356,10 @@ async function materialisePlannedDerivations(
 		...new Set(bindings.flatMap((binding) => binding.installables))
 	];
 
-	// The recursive graph materialises every derivation needed by `nix copy`,
-	// while the individual evaluations preserve the one-to-one drift check.
-	await runDerivationShow(installables, signal, true);
+	// Materialising the graph writes every derivation the build and `nix
+	// copy` need into the store; the individual evaluations preserve the
+	// one-to-one drift check.
+	await materialiseGraph(installables, signal);
 	const evaluations = await mapWithConcurrency(
 		bindings.flatMap((binding) =>
 			binding.installables.map((installable) => ({ binding, installable }))
@@ -2631,6 +2638,62 @@ export async function runNixDerivationShow(
 	}
 
 	return parseNixDerivationShow(stdout);
+}
+
+/**
+ * The evaluation store and process launcher for
+ * {@link materialiseDerivationGraph}.
+ */
+export interface MaterialiseDerivationGraphDependencies {
+	readonly evalStore?: string;
+	readonly start?: (
+		arguments_: readonly string[],
+		signal: AbortSignal | undefined
+	) => AbortableChildProcessLifecycle;
+}
+
+function startDiscardedNixProcess(
+	arguments_: readonly string[],
+	_signal: AbortSignal | undefined
+): AbortableChildProcessLifecycle {
+	const child = spawn('nix', arguments_, {
+		stdio: ['ignore', 'ignore', 'inherit']
+	});
+
+	return observeChildProcess(child);
+}
+
+/**
+ * Evaluates a cohort's complete derivation graph so the store holds every
+ * derivation in it. The graph's JSON grows with the closure and nothing here
+ * reads it, so the command's stdout goes to /dev/null.
+ */
+export async function materialiseDerivationGraph(
+	installables: readonly string[],
+	signal?: AbortSignal,
+	dependencies: MaterialiseDerivationGraphDependencies = {}
+): Promise<void> {
+	signal?.throwIfAborted();
+
+	const result = await waitForAbortableChildProcess(
+		(dependencies.start ?? startDiscardedNixProcess)(
+			nixDerivationShowArguments(
+				installables,
+				true,
+				dependencies.evalStore ?? 'auto'
+			),
+			signal
+		),
+		signal
+	);
+
+	if (result.error !== undefined) {
+		throw result.error;
+	}
+
+	if (result.status !== 0) {
+		throw new CommandFailedError('nix derivation show', result.status);
+	}
 }
 
 export type WithLocalDerivationRoots = <T>(

@@ -59,6 +59,7 @@ import {
 	type CapturedNixProcess,
 	cohortPushArguments,
 	cohortReceiptPushArguments,
+	materialiseDerivationGraph,
 	nixBuildArguments,
 	nixCopyArguments,
 	nixDerivationShowArguments,
@@ -121,6 +122,7 @@ function buildCohortAction(
 	return productionBuildCohortAction(options, environment, {
 		runNixDerivationShow: (installables) =>
 			Promise.resolve(evaluatedDerivations(installables)),
+		materialiseDerivationGraph: () => Promise.resolve(),
 		withLocalDerivationRoots: withoutLocalDerivationRoots,
 		...dependencies
 	});
@@ -721,6 +723,56 @@ describe('runNixCopy', () => {
 		process.emitClose(0);
 
 		await expect(copy).rejects.toBe(reason);
+	});
+});
+
+describe('materialiseDerivationGraph', () => {
+	it('evaluates the whole graph in the selected store and reads none of the output', async () => {
+		const process = new ControlledNixProcess();
+		const start = vi.fn(() => process);
+		const materialise = materialiseDerivationGraph(
+			['.#packages.x86_64-linux.app^out'],
+			undefined,
+			{ start, evalStore: 'local?root=/work/store' }
+		);
+
+		process.emitClose(0);
+
+		await materialise;
+
+		// The launcher is given no stdout listener, so this path cannot
+		// buffer the graph, however large the closure grows.
+		expect(start.mock.calls).toStrictEqual([
+			[
+				[
+					'derivation',
+					'show',
+					'--recursive',
+					'--eval-store',
+					'local?root=/work/store',
+					'--no-pretty',
+					'--',
+					'.#packages.x86_64-linux.app^out'
+				],
+				undefined
+			]
+		]);
+	});
+
+	it('fails when the evaluation exits non-zero', async () => {
+		const process = new ControlledNixProcess();
+		const materialise = materialiseDerivationGraph(
+			['.#packages.x86_64-linux.app^out'],
+			undefined,
+			{ start: () => process }
+		);
+
+		process.emitClose(1);
+
+		await expect(materialise).rejects.toMatchObject({
+			name: 'CommandFailedError',
+			command: 'nix derivation show'
+		});
 	});
 });
 
@@ -1972,6 +2024,13 @@ describe('buildCohortAction', () => {
 					return Promise.resolve(evaluatedDerivations(installables));
 				}
 			);
+			const materialiseGraph = (
+				installables: readonly string[]
+			): Promise<void> => {
+				sequence.push(`materialise ${installables.join(',')}`);
+
+				return Promise.resolve();
+			};
 			const withLocalDerivationRoots: WithLocalDerivationRoots = async (
 				derivations,
 				use
@@ -2001,6 +2060,7 @@ describe('buildCohortAction', () => {
 				{
 					runCupboard: runCupboardMock,
 					runNixDerivationShow,
+					materialiseDerivationGraph: materialiseGraph,
 					withLocalDerivationRoots
 				}
 			);
@@ -2010,7 +2070,7 @@ describe('buildCohortAction', () => {
 			// before they are used.
 			expect(sequence).toStrictEqual([
 				'root /nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv',
-				'evaluate recursive .#packages.x86_64-linux.app^out',
+				'materialise .#packages.x86_64-linux.app^out',
 				'evaluate root .#packages.x86_64-linux.app^out',
 				'plan cohort',
 				'unroot'
@@ -2388,18 +2448,15 @@ describe('buildCohortAction', () => {
 	});
 
 	// Every non-publishing cohort materialises the planned derivations in
-	// the runner's local store before planning: the whole graph recursively,
-	// then each root for the drift check. A remote cohort needs them there
-	// too, because `nix build` reads the build set's derivations from the
-	// local store and copies them to the remote store itself.
+	// the runner's local store before planning: first the whole graph, with
+	// its output discarded, then each root for the drift check. A remote
+	// cohort needs them there too, because `nix build` reads the build
+	// set's derivations from the local store and copies them to the remote
+	// store itself.
+	const prePlanMaterialisations = [
+		['.#packages.x86_64-linux.app^out', '.#packages.x86_64-linux.lib^out']
+	];
 	const prePlanEvaluations = [
-		{
-			installables: [
-				'.#packages.x86_64-linux.app^out',
-				'.#packages.x86_64-linux.lib^out'
-			],
-			isRecursive: true
-		},
 		{
 			installables: ['.#packages.x86_64-linux.app^out'],
 			isRecursive: false
@@ -2448,6 +2505,14 @@ describe('buildCohortAction', () => {
 
 			return Promise.resolve(evaluatedDerivations(installables));
 		};
+		const materialised: (readonly string[])[] = [];
+		const materialiseGraph = (
+			installables: readonly string[]
+		): Promise<void> => {
+			materialised.push(installables);
+
+			return Promise.resolve();
+		};
 		const options: BuildCohortOptions = {
 			...baseOptions(),
 			...(store !== undefined && { store })
@@ -2457,10 +2522,14 @@ describe('buildCohortAction', () => {
 			runCupboard: runCupboardMock,
 			runNixBuild,
 			runNixDerivationShow,
+			materialiseDerivationGraph: materialiseGraph,
 			runNixCopy: vi.fn(() => Promise.resolve())
 		});
 
-		expect(evaluated).toStrictEqual(prePlanEvaluations);
+		expect({ materialised, evaluated }).toStrictEqual({
+			materialised: prePlanMaterialisations,
+			evaluated: prePlanEvaluations
+		});
 
 		const call = runCupboardMock.mock.calls[0];
 
@@ -3853,6 +3922,13 @@ describe('buildCohortAction publication', () => {
 				);
 			}
 		);
+		const materialiseGraph = (
+			_installables: readonly string[]
+		): Promise<void> => {
+			sequence.push('materialise');
+
+			return Promise.resolve();
+		};
 		let didCopyReceiveSignal = false;
 		const runNixCopy = vi.fn(
 			(
@@ -3953,6 +4029,7 @@ describe('buildCohortAction publication', () => {
 			runNixBuild,
 			runNixBuildWithResults,
 			runNixDerivationShow,
+			materialiseDerivationGraph: materialiseGraph,
 			runNixCopy,
 			withLocalDerivationRoots,
 			reporter: recordingReporter(warnings),
@@ -4410,6 +4487,7 @@ describe('buildCohortAction publication', () => {
 
 	it('does not evaluate, copy, or open a remote store for an all-no-build partition', async () => {
 		const runNixDerivationShow = vi.fn(() => Promise.resolve([]));
+		const materialiseGraphMock = vi.fn(() => Promise.resolve());
 		const runNixCopy = vi.fn(() => Promise.resolve());
 		const runNixBuildWithResults = vi.fn(() => Promise.resolve());
 		const runCupboardMock = vi.fn<typeof runCupboard>(
@@ -4430,6 +4508,7 @@ describe('buildCohortAction publication', () => {
 			{
 				runCupboard: runCupboardMock,
 				runNixDerivationShow,
+				materialiseDerivationGraph: materialiseGraphMock,
 				runNixCopy,
 				runNixBuildWithResults,
 				withLocalDerivationRoots: withoutLocalDerivationRoots
@@ -4437,10 +4516,12 @@ describe('buildCohortAction publication', () => {
 		);
 
 		expect({
+			materialiseCalls: materialiseGraphMock.mock.calls,
 			evaluationCalls: runNixDerivationShow.mock.calls,
 			copyCalls: runNixCopy.mock.calls,
 			buildCalls: runNixBuildWithResults.mock.calls
 		}).toStrictEqual({
+			materialiseCalls: [],
 			evaluationCalls: [],
 			copyCalls: [],
 			buildCalls: []
@@ -4532,6 +4613,7 @@ describe('buildCohortAction publication', () => {
 				)
 			])
 		);
+		const materialiseGraphMock = vi.fn(() => Promise.resolve());
 		const runNixCopy = vi.fn(() => Promise.reject(reason));
 		const runNixBuildWithResults = vi.fn(() => Promise.resolve());
 		const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
@@ -4548,6 +4630,7 @@ describe('buildCohortAction publication', () => {
 				{
 					runCupboard: runCupboardMock,
 					runNixDerivationShow,
+					materialiseDerivationGraph: materialiseGraphMock,
 					runNixCopy,
 					runNixBuildWithResults,
 					withLocalDerivationRoots: withoutLocalDerivationRoots,
@@ -4556,10 +4639,12 @@ describe('buildCohortAction publication', () => {
 			)
 		).rejects.toBe(reason);
 		expect({
+			materialiseCalls: materialiseGraphMock.mock.calls,
 			evaluationCalls: runNixDerivationShow.mock.calls,
 			copyCalls: runNixCopy.mock.calls,
 			buildCalls: runNixBuildWithResults.mock.calls
 		}).toStrictEqual({
+			materialiseCalls: [],
 			evaluationCalls: [],
 			copyCalls: [],
 			buildCalls: []
@@ -4571,6 +4656,7 @@ describe('buildCohortAction publication', () => {
 			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-other.drv'
 		);
 		const runNixDerivationShow = vi.fn(() => Promise.resolve([evaluated]));
+		const materialiseGraphMock = vi.fn(() => Promise.resolve());
 		const runNixCopy = vi.fn(() => Promise.resolve());
 		const runNixBuildWithResults = vi.fn(() => Promise.resolve());
 		const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
@@ -4587,6 +4673,7 @@ describe('buildCohortAction publication', () => {
 				{
 					runCupboard: runCupboardMock,
 					runNixDerivationShow,
+					materialiseDerivationGraph: materialiseGraphMock,
 					runNixCopy,
 					runNixBuildWithResults,
 					withLocalDerivationRoots: withoutLocalDerivationRoots
@@ -4598,12 +4685,13 @@ describe('buildCohortAction publication', () => {
 			evaluated: [evaluated]
 		});
 		expect({
+			materialiseCalls: materialiseGraphMock.mock.calls,
 			evaluationCalls: runNixDerivationShow.mock.calls,
 			copyCalls: runNixCopy.mock.calls,
 			buildCalls: runNixBuildWithResults.mock.calls
 		}).toStrictEqual({
+			materialiseCalls: [[['.#packages.x86_64-linux.lib^out'], undefined]],
 			evaluationCalls: [
-				[['.#packages.x86_64-linux.lib^out'], undefined, true],
 				[['.#packages.x86_64-linux.lib^out'], undefined, false]
 			],
 			copyCalls: [],
@@ -4626,23 +4714,14 @@ describe('buildCohortAction publication', () => {
 				reprobe: planReprobeSuccess([], [libraryQueryInstallable])
 			})
 		);
-		const runNixDerivationShow = vi.fn(
-			(
-				installables: readonly string[],
-				_signal?: AbortSignal,
-				isRecursive = true
-			) => {
-				if (isRecursive) {
-					return Promise.resolve([planned]);
-				}
-
-				return Promise.resolve(
-					installables.map((installable) =>
-						installable === latestInstallable ? drifted : planned
-					)
-				);
-			}
+		const runNixDerivationShow = vi.fn((installables: readonly string[]) =>
+			Promise.resolve(
+				installables.map((installable) =>
+					installable === latestInstallable ? drifted : planned
+				)
+			)
 		);
+		const materialiseGraphMock = vi.fn(() => Promise.resolve());
 		const runNixCopy = vi.fn(() => Promise.resolve());
 		const runNixBuildWithResults = vi.fn(() => Promise.resolve());
 
@@ -4667,6 +4746,7 @@ describe('buildCohortAction publication', () => {
 				{
 					runCupboard: runCupboardMock,
 					runNixDerivationShow,
+					materialiseDerivationGraph: materialiseGraphMock,
 					runNixCopy,
 					runNixBuildWithResults,
 					withLocalDerivationRoots: withoutLocalDerivationRoots
@@ -4683,12 +4763,13 @@ describe('buildCohortAction publication', () => {
 			]
 		});
 		expect({
+			materialiseCalls: materialiseGraphMock.mock.calls,
 			evaluationCalls: runNixDerivationShow.mock.calls,
 			copyCalls: runNixCopy.mock.calls,
 			buildCalls: runNixBuildWithResults.mock.calls
 		}).toStrictEqual({
+			materialiseCalls: [[[stableInstallable, latestInstallable], undefined]],
 			evaluationCalls: [
-				[[stableInstallable, latestInstallable], undefined, true],
 				[[stableInstallable], undefined, false],
 				[[latestInstallable], undefined, false]
 			],
@@ -4750,31 +4831,10 @@ describe('buildCohortAction publication', () => {
 				reprobe: planReprobeSuccess([], targets)
 			})
 		);
-		const runNixDerivationShow = vi.fn(
-			(
-				installables: readonly string[],
-				_signal?: AbortSignal,
-				isRecursive = true
-			) => {
-				if (isRecursive) {
-					return Promise.resolve([
-						storePathSchema.parse(
-							'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
-						),
-						storePathSchema.parse(
-							'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'
-						),
-						storePathSchema.parse(
-							'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv'
-						)
-					]);
-				}
-
-				return Promise.resolve(
-					installables.map((installable) => rootFor(installable))
-				);
-			}
+		const runNixDerivationShow = vi.fn((installables: readonly string[]) =>
+			Promise.resolve(installables.map((installable) => rootFor(installable)))
 		);
+		const materialiseGraphMock = vi.fn(() => Promise.resolve());
 		const runNixCopy = vi.fn(() => Promise.resolve());
 		const runNixBuildWithResults = vi.fn(() => Promise.resolve());
 
@@ -4790,6 +4850,7 @@ describe('buildCohortAction publication', () => {
 				{
 					runCupboard: runCupboardMock,
 					runNixDerivationShow,
+					materialiseDerivationGraph: materialiseGraphMock,
 					runNixCopy,
 					runNixBuildWithResults,
 					withLocalDerivationRoots: withoutLocalDerivationRoots
@@ -4800,19 +4861,21 @@ describe('buildCohortAction publication', () => {
 			mismatches: expected
 		});
 		expect({
+			materialiseCalls: materialiseGraphMock.mock.calls,
 			evaluationCalls: runNixDerivationShow.mock.calls,
 			copyCalls: runNixCopy.mock.calls,
 			buildCalls: runNixBuildWithResults.mock.calls
 		}).toStrictEqual({
-			evaluationCalls: [
+			materialiseCalls: [
 				[
 					[
 						'.#packages.x86_64-linux.app^out',
 						'.#packages.x86_64-linux.lib^out'
 					],
-					undefined,
-					true
-				],
+					undefined
+				]
+			],
+			evaluationCalls: [
 				[['.#packages.x86_64-linux.app^out'], undefined, false],
 				[['.#packages.x86_64-linux.lib^out'], undefined, false]
 			],
@@ -5253,7 +5316,7 @@ describe('buildCohortAction publication', () => {
 					'plan',
 					'local session',
 					'local root /nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
-					'evaluate',
+					'materialise',
 					'evaluate',
 					'session',
 					'copy',
@@ -5262,10 +5325,7 @@ describe('buildCohortAction publication', () => {
 					'closed',
 					'local closed'
 				],
-				evaluationCalls: [
-					[['.#packages.x86_64-linux.lib^out']],
-					[['.#packages.x86_64-linux.lib^out']]
-				],
+				evaluationCalls: [[['.#packages.x86_64-linux.lib^out']]],
 				copyCalls: [
 					[
 						['/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'],
