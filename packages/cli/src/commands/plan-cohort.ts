@@ -4,7 +4,6 @@ import { readFile, statfs, writeFile } from 'node:fs/promises';
 import {
 	discoverNixStoreConfig,
 	Nix,
-	type NixStoreKind,
 	offerAcceptance,
 	type ReadKeyFile
 } from '@cupboard/nix';
@@ -14,6 +13,11 @@ import {
 	type StorePathString,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
+import {
+	describeUnknownPath,
+	type PlanStore,
+	type UnknownPathDetail
+} from '@cupboard/protocol/plan';
 import type { ParsedRootEnsureResponse } from '@cupboard/protocol/retention';
 import type { Reporter } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
@@ -103,8 +107,8 @@ export async function requeryUnknownWith(
 	if (!settings.isHonoured) {
 		const reason =
 			settings.reason === 'daemon-options-preserved'
-				? 'the transport preserves the remote daemon options, so it does not send the narinfo-cache-negative-ttl override'
-				: `the daemon connection is ${settings.trust}, so its narinfo-cache-negative-ttl override cannot be relied on to take effect`;
+				? 'the remote transport does not pass per-command settings to the Nix daemon'
+				: 'Cupboard cannot confirm the Nix daemon applied its per-command settings on this connection';
 
 		return {
 			kind: 'refused',
@@ -177,6 +181,9 @@ export type PlanCohortRefusal =
 	| {
 			readonly reason: 'unknown-paths-ceiling';
 			readonly unknownCount: number;
+			readonly unknownPaths: readonly UnknownPathDetail[];
+			readonly store: PlanStore;
+			readonly unreachableSubstituters: readonly string[];
 			readonly ceiling: AvailabilityCeiling;
 			readonly downloadSize: number;
 			readonly narSize: number;
@@ -224,8 +231,8 @@ export interface PlanCohortRunOptions {
 	readonly targets: readonly ParsedCohortTarget[];
 	readonly cacheName: string;
 	readonly ttlSeconds?: TtlSeconds;
-	/** The kind of store the selected client reads through. */
-	readonly storeKind: NixStoreKind;
+	/** The kind and URI of the selected store, for refusal diagnostics. */
+	readonly storeIdentity: PlanStore;
 	readonly storePath: string;
 	readonly planFile: string;
 	readonly ceiling: AvailabilityCeilingConfig;
@@ -390,7 +397,10 @@ export function registerPlanCommands(
 					targets,
 					cacheName,
 					...(options.ttl !== undefined && { ttlSeconds: options.ttl }),
-					storeKind: nix.storeKind,
+					storeIdentity: {
+						kind: nix.storeKind,
+						...(options.store !== undefined && { uri: options.store })
+					},
 					storePath: options.storePath ?? defaultStorePath,
 					planFile: options.planFile ?? defaultPlanFile(),
 					ceiling: {
@@ -481,6 +491,7 @@ export async function runPlanCohort(
 	);
 	const availabilityTargets: AvailabilityTarget[] = options.targets.map(
 		(target) => ({
+			attr: target.attr,
 			installable: target.installable,
 			...(target.plannedLocalDerivation !== undefined && {
 				plannedLocalDerivation: target.plannedLocalDerivation
@@ -506,6 +517,7 @@ export async function runPlanCohort(
 						viewServed: dependencies.viewServed
 					},
 					rootEnsureResults,
+					storeIdentity: options.storeIdentity,
 					requeryUnknown: dependencies.requeryUnknown,
 					confirmLeftUpstream: dependencies.confirmLeftUpstream,
 					ceiling: options.ceiling
@@ -516,6 +528,9 @@ export async function runPlanCohort(
 			const refusal: PlanCohortRefusal = {
 				reason: 'unknown-paths-ceiling',
 				unknownCount: error.unknownCount,
+				unknownPaths: error.unknownPaths,
+				store: error.store,
+				unreachableSubstituters: error.unreachableSubstituters,
 				ceiling: error.ceiling,
 				downloadSize: error.downloadSize,
 				narSize: error.narSize
@@ -525,9 +540,32 @@ export async function runPlanCohort(
 				kind: 'plan-cohort-refusal',
 				data: refusal,
 				rows: [
-					{ label: 'Refusal', value: 'unknown paths over ceiling' },
-					{ label: 'Unknown count', value: String(error.unknownCount) },
-					{ label: 'Ceiling', value: String(error.ceiling.value) }
+					{
+						label: 'Refusal',
+						value: 'One or more required store paths are unavailable to Nix'
+					},
+					{ label: 'Unavailable paths', value: String(error.unknownCount) },
+					{ label: 'Limit', value: String(error.ceiling.value) },
+					...(error.ceiling.fallbackReason === undefined
+						? []
+						: [
+								{
+									label: 'Limit applied because',
+									value: error.ceiling.fallbackReason
+								}
+							]),
+					...error.unknownPaths.map((detail) => ({
+						label: 'Unavailable path',
+						value: describeUnknownPath(detail, error.store)
+					})),
+					...(error.unreachableSubstituters.length === 0
+						? []
+						: [
+								{
+									label: 'Substituters not reached',
+									value: error.unreachableSubstituters.join(' ')
+								}
+							])
 				]
 			});
 		}
@@ -539,7 +577,7 @@ export async function runPlanCohort(
 	// cannot statfs the remote one, so the capacity preflight only applies to
 	// a store on this machine; a remote plan records the skip.
 	const capacity: PlanCohortResult['capacity'] =
-		options.storeKind === 'ssh-ng'
+		options.storeIdentity.kind === 'ssh-ng'
 			? { skipped: 'remote-store' }
 			: await checkLocalCapacity(options, partition, reporter, dependencies);
 

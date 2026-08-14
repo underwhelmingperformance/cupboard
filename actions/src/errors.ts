@@ -983,24 +983,22 @@ export class RemoteCohortProtocolError extends CodedError {
 	}
 }
 
-export interface RemoteCohortEvaluationMismatch {
+export interface CohortEvaluationMismatch {
 	readonly installable: string;
 	readonly planned: string;
 	readonly evaluated: readonly string[];
 }
 
 /** A local installable no longer evaluates to its planned derivation. */
-export class RemoteCohortEvaluationDriftError extends CodedError {
+export class CohortEvaluationDriftError extends CodedError {
 	public readonly missing: readonly string[];
 	public readonly evaluated: readonly string[];
 
-	constructor(
-		public readonly mismatches: readonly RemoteCohortEvaluationMismatch[]
-	) {
+	constructor(public readonly mismatches: readonly CohortEvaluationMismatch[]) {
 		super(
-			`Remote cohort installables no longer evaluate to their planned derivations: ${mismatches.map((mismatch) => `${mismatch.installable} planned ${mismatch.planned}, evaluated ${mismatch.evaluated.length === 0 ? 'no derivation' : mismatch.evaluated.join(', ')}`).join('; ')}. Re-run planning against the current locked source before publishing.`
+			`Cohort installables no longer evaluate to their planned derivations: ${mismatches.map((mismatch) => `${mismatch.installable} planned ${mismatch.planned}, evaluated ${mismatch.evaluated.length === 0 ? 'no derivation' : mismatch.evaluated.join(', ')}`).join('; ')}. Re-run planning against the current locked source.`
 		);
-		this.name = 'RemoteCohortEvaluationDriftError';
+		this.name = 'CohortEvaluationDriftError';
 		this.missing = mismatches.map((mismatch) => mismatch.planned);
 		this.evaluated = [
 			...new Set(mismatches.flatMap((mismatch) => mismatch.evaluated))

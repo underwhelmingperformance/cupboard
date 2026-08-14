@@ -38,6 +38,7 @@ function target(
 	overrides: Partial<AvailabilityTarget> = {}
 ): AvailabilityTarget {
 	return {
+		attr: 'packages.x86_64-linux.app',
 		installable: path('11111111111111111111111111111111-app'),
 		expectedPath: path('11111111111111111111111111111111-app'),
 		root: root('github:owner/repo/main/app'),
@@ -156,6 +157,7 @@ function baseOptions(
 ): AvailabilityPartitionOptions {
 	return {
 		targets: [],
+		storeIdentity: { kind: 'daemon' },
 		store: new RecordingStore(),
 		destinationAnswers: noAnswers(),
 		rootEnsureResults: new Map(),
@@ -551,10 +553,13 @@ describe('partitionAvailability', () => {
 		}
 	);
 
-	it('throws a typed error carrying the counts and sizes when the final unknown count exceeds the ceiling', async () => {
-		const unknownPath = path('33333333333333333333333333333333-unknown');
+	it('throws a typed error carrying the details, ceiling, sizes and store when the final unknown count exceeds the ceiling', async () => {
+		const unknownDerivation = path(
+			'33333333333333333333333333333333-unknown.drv'
+		);
+		const installable: NixDerivedPathString = `${unknownDerivation}^out`;
 		const store = new RecordingStore(
-			missingWith({ unknown: [unknownPath], downloadSize: 1, narSize: 2 })
+			missingWith({ unknown: [unknownDerivation], downloadSize: 1, narSize: 2 })
 		);
 
 		let thrown: unknown;
@@ -562,9 +567,7 @@ describe('partitionAvailability', () => {
 		try {
 			await partitionAvailability(
 				baseOptions({
-					targets: [
-						target({ expectedPath: unknownPath, installable: unknownPath })
-					],
+					targets: [target({ installable })],
 					store,
 					requeryUnknown: () =>
 						Promise.resolve({ kind: 'refused', reason: 'not trusted' }),
@@ -575,20 +578,37 @@ describe('partitionAvailability', () => {
 			thrown = error;
 		}
 
-		expect(thrown).toBeInstanceOf(UnknownPathsCeilingError);
-
 		if (!(thrown instanceof UnknownPathsCeilingError)) {
-			return;
+			expect.unreachable(
+				'the partition must refuse with UnknownPathsCeilingError'
+			);
 		}
 
+		// The target is attributed through its installable's store path, with
+		// the output selection stripped.
 		expect({
 			unknownCount: thrown.unknownCount,
+			unknownPaths: thrown.unknownPaths,
 			ceiling: thrown.ceiling,
 			downloadSize: thrown.downloadSize,
 			narSize: thrown.narSize,
-			exitCode: thrown.exitCode
+			exitCode: thrown.exitCode,
+			store: thrown.store,
+			unreachableSubstituters: thrown.unreachableSubstituters
 		}).toStrictEqual({
 			unknownCount: 1,
+			unknownPaths: [
+				{
+					path: unknownDerivation,
+					cause: { kind: 'missing-derivation' },
+					targets: [
+						{
+							attr: 'packages.x86_64-linux.app',
+							installable
+						}
+					]
+				}
+			],
 			ceiling: {
 				value: 0,
 				source: 'untrusted-fallback',
@@ -596,8 +616,114 @@ describe('partitionAvailability', () => {
 			},
 			downloadSize: 1,
 			narSize: 2,
-			exitCode: 75
+			exitCode: 75,
+			store: { kind: 'daemon' },
+			unreachableSubstituters: []
 		});
+	});
+
+	it.each([
+		{
+			name: 'a derivation path as missing even when the re-query was refused',
+			basename: '33333333333333333333333333333333-unknown.drv',
+			requery: { kind: 'refused' as const, reason: 'not trusted' },
+			expectedCause: { kind: 'missing-derivation' }
+		},
+		{
+			name: 'an output path with a refused re-query to the unrefreshed substituter result',
+			basename: '44444444444444444444444444444444-unknown',
+			requery: { kind: 'refused' as const, reason: 'not trusted' },
+			expectedCause: {
+				kind: 'substituter-result-not-refreshed',
+				reason: 'not trusted'
+			}
+		},
+		{
+			name: 'an output path that a fresh answer still left unknown to no substituter holding it',
+			basename: '44444444444444444444444444444444-unknown',
+			requery: undefined,
+			expectedCause: { kind: 'not-in-store-or-substituters' }
+		}
+	])('attributes $name', async ({ basename, requery, expectedCause }) => {
+		const unknownPath = path(basename);
+		const store = new RecordingStore(missingWith({ unknown: [unknownPath] }));
+
+		let thrown: unknown;
+
+		try {
+			await partitionAvailability(
+				baseOptions({
+					targets: [target({ installable: unknownPath })],
+					store,
+					requeryUnknown: () =>
+						Promise.resolve(
+							requery ?? {
+								kind: 'answered',
+								partition: missingWith({ unknown: [unknownPath] }),
+								sizes: new Map()
+							}
+						),
+					ceiling: { value: 0, untrustedFallback: 0 }
+				})
+			);
+		} catch (error) {
+			thrown = error;
+		}
+
+		if (!(thrown instanceof UnknownPathsCeilingError)) {
+			expect.unreachable(
+				'the partition must refuse with UnknownPathsCeilingError'
+			);
+		}
+
+		expect(thrown.unknownPaths).toStrictEqual([
+			{
+				path: unknownPath,
+				cause: expectedCause,
+				targets: [
+					{
+						attr: 'packages.x86_64-linux.app',
+						installable: unknownPath
+					}
+				]
+			}
+		]);
+	});
+
+	it('carries the substituters the plan could not query into the refusal', async () => {
+		const unknownPath = path('44444444444444444444444444444444-unknown');
+		const store = new RecordingStore(
+			missingWith({ unknown: [unknownPath] }),
+			[],
+			[],
+			[{ uri: 'https://cache.example.test', reason: 'no-cache-info' }]
+		);
+
+		let thrown: unknown;
+
+		try {
+			await partitionAvailability(
+				baseOptions({
+					targets: [target({ installable: unknownPath })],
+					store,
+					requeryUnknown: () =>
+						Promise.resolve({ kind: 'refused', reason: 'not trusted' }),
+					ceiling: { value: 0, untrustedFallback: 0 }
+				})
+			);
+		} catch (error) {
+			thrown = error;
+		}
+
+		if (!(thrown instanceof UnknownPathsCeilingError)) {
+			expect.unreachable(
+				'the partition must refuse with UnknownPathsCeilingError'
+			);
+		}
+
+		expect(thrown.unreachableSubstituters).toStrictEqual([
+			'https://cache.example.test'
+		]);
 	});
 
 	it('accounts locally copyable derivations as build work instead of unknown availability', async () => {

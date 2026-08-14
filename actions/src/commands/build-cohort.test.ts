@@ -20,6 +20,10 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import {
+	describeUnknownPathsRefusal,
+	unknownPathsCeilingRefusalSchema
+} from '@cupboard/protocol/plan';
 import type { Reporter, ReporterResultEvent } from '@cupboard/reporter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -46,7 +50,8 @@ import type { Environment } from '../inputs.ts';
 
 import {
 	buildAndRootNixResults,
-	buildCohortAction,
+	buildCohortAction as productionBuildCohortAction,
+	type BuildCohortDependencies,
 	type BuildCohortInputs,
 	type BuildCohortOptions,
 	buildPushCohortsFile,
@@ -96,7 +101,7 @@ function evaluatedDerivations(
 		storePathSchema.parse(
 			installable.includes('.app')
 				? '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
-				: installable.includes('.lib')
+				: installable.includes('.lib') || installable.includes('.multi')
 					? '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'
 					: '/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv'
 		)
@@ -107,6 +112,19 @@ const withoutLocalDerivationRoots: WithLocalDerivationRoots = (
 	_derivations,
 	use
 ) => use();
+
+function buildCohortAction(
+	options: BuildCohortOptions,
+	environment: Environment,
+	dependencies: BuildCohortDependencies = {}
+): Promise<void> {
+	return productionBuildCohortAction(options, environment, {
+		runNixDerivationShow: (installables) =>
+			Promise.resolve(evaluatedDerivations(installables)),
+		withLocalDerivationRoots: withoutLocalDerivationRoots,
+		...dependencies
+	});
+}
 
 function derivedPath(value: string): NixDerivedPathString {
 	const selection = value.indexOf('^');
@@ -1920,6 +1938,86 @@ describe('buildCohortAction', () => {
 		await rm(directory, { recursive: true, force: true });
 	});
 
+	it.each([
+		{ name: 'the local store', store: undefined },
+		{
+			name: 'a non-publishing remote store',
+			store: 'ssh-ng://build@example.test'
+		}
+	])(
+		'materialises planned derivations under temp roots before planning against $name',
+		async ({ store }) => {
+			const sequence: string[] = [];
+			const plan = cupboardStub({
+				plan: planCohortSuccess(measuredCapacity, []),
+				reprobe: planReprobeSuccess([], [])
+			});
+			const runCupboardMock = vi.fn<typeof runCupboard>(
+				(binaryPath, arguments_, passedEnvironment, dependencies) => {
+					sequence.push(`plan ${arguments_[2] ?? ''}`);
+
+					return plan(binaryPath, arguments_, passedEnvironment, dependencies);
+				}
+			);
+			const runNixDerivationShow = vi.fn(
+				(
+					installables: readonly string[],
+					_signal?: AbortSignal,
+					isRecursive = true
+				) => {
+					sequence.push(
+						`evaluate ${isRecursive ? 'recursive' : 'root'} ${installables.join(',')}`
+					);
+
+					return Promise.resolve(evaluatedDerivations(installables));
+				}
+			);
+			const withLocalDerivationRoots: WithLocalDerivationRoots = async (
+				derivations,
+				use
+			) => {
+				sequence.push(`root ${derivations.join(',')}`);
+
+				const result = await use();
+
+				sequence.push('unroot');
+
+				return result;
+			};
+
+			await buildCohortAction(
+				{
+					...baseOptions(),
+					cohortJson: cohortJson({
+						attrs: ['.#packages.x86_64-linux.app'],
+						installables: ['.#packages.x86_64-linux.app^out'],
+						queryInstallables: [appQueryInstallable],
+						expectedPaths: [appPath],
+						roots: ['github:owner/repo/main/app']
+					}),
+					...(store !== undefined && { store })
+				},
+				environment,
+				{
+					runCupboard: runCupboardMock,
+					runNixDerivationShow,
+					withLocalDerivationRoots
+				}
+			);
+
+			// The roots must span planning and the build: a daemon running
+			// automatic GC may otherwise collect the materialised derivations
+			// before they are used.
+			expect(sequence).toStrictEqual([
+				'root /nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv',
+				'evaluate recursive .#packages.x86_64-linux.app^out',
+				'evaluate root .#packages.x86_64-linux.app^out',
+				'plan cohort',
+				'unroot'
+			]);
+		}
+	);
+
 	it('drives the partition from a single plan-cohort invocation and writes structural outputs', async () => {
 		const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
 		const runNixBuild = vi.fn((_installables: readonly string[]) =>
@@ -2289,6 +2387,29 @@ describe('buildCohortAction', () => {
 		});
 	});
 
+	// Every non-publishing cohort materialises the planned derivations in
+	// the runner's local store before planning: the whole graph recursively,
+	// then each root for the drift check. A remote cohort needs them there
+	// too, because `nix build` reads the build set's derivations from the
+	// local store and copies them to the remote store itself.
+	const prePlanEvaluations = [
+		{
+			installables: [
+				'.#packages.x86_64-linux.app^out',
+				'.#packages.x86_64-linux.lib^out'
+			],
+			isRecursive: true
+		},
+		{
+			installables: ['.#packages.x86_64-linux.app^out'],
+			isRecursive: false
+		},
+		{
+			installables: ['.#packages.x86_64-linux.lib^out'],
+			isRecursive: false
+		}
+	];
+
 	it.each([
 		{
 			name: "no store keeps the plan and the build in this runner's store",
@@ -2314,6 +2435,19 @@ describe('buildCohortAction', () => {
 				status: 0
 			})
 		);
+		const evaluated: {
+			installables: readonly string[];
+			isRecursive: boolean;
+		}[] = [];
+		const runNixDerivationShow = (
+			installables: readonly string[],
+			_signal?: AbortSignal,
+			isRecursive = true
+		): Promise<readonly StorePathString[]> => {
+			evaluated.push({ installables, isRecursive });
+
+			return Promise.resolve(evaluatedDerivations(installables));
+		};
 		const options: BuildCohortOptions = {
 			...baseOptions(),
 			...(store !== undefined && { store })
@@ -2322,11 +2456,11 @@ describe('buildCohortAction', () => {
 		await buildCohortAction(options, environment, {
 			runCupboard: runCupboardMock,
 			runNixBuild,
-			runNixDerivationShow: vi.fn((installables: readonly string[]) =>
-				Promise.resolve(evaluatedDerivations(installables))
-			),
+			runNixDerivationShow,
 			runNixCopy: vi.fn(() => Promise.resolve())
 		});
+
+		expect(evaluated).toStrictEqual(prePlanEvaluations);
 
 		const call = runCupboardMock.mock.calls[0];
 
@@ -2400,25 +2534,44 @@ describe('buildCohortAction', () => {
 		);
 	});
 
-	it('propagates a ceiling refusal with the reported numbers', async () => {
-		const refusalEvents: readonly ReporterResultEvent[] = [
-			{
-				kind: 'plan-cohort-refusal',
-				data: {
-					reason: 'unknown-paths-ceiling',
-					unknownCount: 7,
-					ceiling: { value: 5, source: 'configured' },
-					downloadSize: 111,
-					narSize: 222
+	it('propagates a ceiling refusal, rendering the detail with the store the plan reported', async () => {
+		const unknownPath =
+			'/nix/store/5123456789abcdfghijklmnpqrsvwxyz-unknown.drv';
+		const refusalData = {
+			reason: 'unknown-paths-ceiling',
+			unknownCount: 1,
+			unknownPaths: [
+				{
+					path: unknownPath,
+					cause: { kind: 'missing-derivation' },
+					targets: [
+						{
+							attr: '.#packages.x86_64-linux.app',
+							installable: appQueryInstallable
+						}
+					]
 				}
-			}
+			],
+			store: { kind: 'daemon' },
+			unreachableSubstituters: [],
+			ceiling: { value: 0, source: 'configured' },
+			downloadSize: 111,
+			narSize: 222
+		};
+		const refusalEvents: readonly ReporterResultEvent[] = [
+			{ kind: 'plan-cohort-refusal', data: refusalData }
 		];
 		const runCupboardMock = vi.fn<typeof runCupboard>(() =>
 			Promise.reject(
 				new CupboardReportedError(75, refusalEvents, undefined, true)
 			)
 		);
-		const runNixBuild = vi.fn(() => Promise.resolve({ paths: [], status: 0 }));
+		const buildRuns: (readonly string[])[] = [];
+		const runNixBuild = (installables: readonly string[]) => {
+			buildRuns.push(installables);
+
+			return Promise.resolve({ paths: [], status: 0 });
+		};
 
 		let error: unknown;
 
@@ -2431,22 +2584,70 @@ describe('buildCohortAction', () => {
 			error = error_;
 		}
 
-		expect(error).toBeInstanceOf(CohortPlanRefusedError);
-
 		if (!(error instanceof CohortPlanRefusedError)) {
-			return;
+			expect.unreachable('the refusal must surface as CohortPlanRefusedError');
 		}
 
 		expect({
 			exitCode: error.exitCode,
-			message: error.message
+			message: error.message,
+			buildRuns
 		}).toStrictEqual({
 			exitCode: 75,
-			message:
-				'7 path(s) have unknown availability, over the configured ceiling ' +
-				'of 5 (111 download byte(s), 222 NAR byte(s))'
+			message: describeUnknownPathsRefusal(
+				unknownPathsCeilingRefusalSchema.parse(refusalData)
+			),
+			buildRuns: []
 		});
-		expect(runNixBuild).not.toHaveBeenCalled();
+	});
+
+	it('recognises a refusal from an older cupboard that reports no per-path detail', async () => {
+		const refusalEvents: readonly ReporterResultEvent[] = [
+			{
+				kind: 'plan-cohort-refusal',
+				data: {
+					reason: 'unknown-paths-ceiling',
+					unknownCount: 2,
+					ceiling: { value: 0, source: 'configured' },
+					downloadSize: 111,
+					narSize: 222
+				}
+			}
+		];
+		const runCupboardMock = vi.fn<typeof runCupboard>(() =>
+			Promise.reject(
+				new CupboardReportedError(75, refusalEvents, undefined, true)
+			)
+		);
+		const buildRuns: (readonly string[])[] = [];
+		const runNixBuild = (installables: readonly string[]) => {
+			buildRuns.push(installables);
+
+			return Promise.resolve({ paths: [], status: 0 });
+		};
+
+		let error: unknown;
+
+		try {
+			await buildCohortAction(baseOptions(), environment, {
+				runCupboard: runCupboardMock,
+				runNixBuild
+			});
+		} catch (error_: unknown) {
+			error = error_;
+		}
+
+		// The refusal classification, and with it the transient exit code,
+		// must survive running against a cupboard that predates the per-path
+		// detail.
+		if (!(error instanceof CohortPlanRefusedError)) {
+			expect.unreachable('the refusal must surface as CohortPlanRefusedError');
+		}
+
+		expect({
+			exitCode: error.exitCode,
+			buildRuns
+		}).toStrictEqual({ exitCode: 75, buildRuns: [] });
 	});
 
 	it('propagates a store-capacity refusal with the measured numbers', async () => {
@@ -3644,7 +3845,7 @@ describe('buildCohortAction publication', () => {
 						storePathSchema.parse(
 							installable.includes('.app')
 								? '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
-								: installable.includes('.lib')
+								: installable.includes('.lib') || installable.includes('.multi')
 									? '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'
 									: '/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv'
 						)
@@ -4380,7 +4581,7 @@ describe('buildCohortAction publication', () => {
 				}
 			)
 		).rejects.toMatchObject({
-			name: 'RemoteCohortEvaluationDriftError',
+			name: 'CohortEvaluationDriftError',
 			missing: ['/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'],
 			evaluated: [evaluated]
 		});
@@ -4460,7 +4661,7 @@ describe('buildCohortAction publication', () => {
 				}
 			)
 		).rejects.toMatchObject({
-			name: 'RemoteCohortEvaluationDriftError',
+			name: 'CohortEvaluationDriftError',
 			mismatches: [
 				{
 					installable: latestInstallable,
@@ -4583,7 +4784,7 @@ describe('buildCohortAction publication', () => {
 				}
 			)
 		).rejects.toMatchObject({
-			name: 'RemoteCohortEvaluationDriftError',
+			name: 'CohortEvaluationDriftError',
 			mismatches: expected
 		});
 		expect({

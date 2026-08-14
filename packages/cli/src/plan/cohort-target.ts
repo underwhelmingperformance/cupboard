@@ -1,10 +1,26 @@
 import type { NixDerivedPathString } from '@cupboard/nix';
-import { rootNameSchema, storePathSchema } from '@cupboard/nix-store/scalars';
+import {
+	hasControlCharacter,
+	rootNameSchema,
+	storePathSchema
+} from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
+
+// A target's attr identifies it in operator diagnostics, so a control
+// character in it could forge log lines or runner workflow commands.
+const attributeSchema = z
+	.string()
+	.min(1)
+	.refine(
+		(value) => !hasControlCharacter(value),
+		'attr must not contain control characters'
+	);
 
 // The daemon wire protocol names a realisation target as a store path
 // optionally followed by `^` and the outputs to realise; a cohort's
-// installable travels through the targets file in that same shape.
+// installable travels through the targets file in that same shape. The
+// output selection is rendered into diagnostics like the attr, so the same
+// control-character rule applies to it.
 function parseInstallable(
 	value: string,
 	ctx: z.RefinementCtx
@@ -26,7 +42,18 @@ function parseInstallable(
 		return parsedBase.data;
 	}
 
-	return `${parsedBase.data}^${value.slice(separator + 1)}`;
+	const outputs = value.slice(separator + 1);
+
+	if (outputs === '' || hasControlCharacter(outputs)) {
+		ctx.addIssue({
+			code: 'custom',
+			message: 'not a valid installable (output selection)'
+		});
+
+		return z.NEVER;
+	}
+
+	return `${parsedBase.data}^${outputs}`;
 }
 
 export const cohortInstallableSchema = z
@@ -43,7 +70,7 @@ export const cohortInstallableSchema = z
 // consumes.
 export const cohortTargetSchema = z
 	.strictObject({
-		attr: z.string().min(1),
+		attr: attributeSchema,
 		installable: cohortInstallableSchema,
 		expectedPath: storePathSchema.optional(),
 		// The action will materialise and copy this planned derivation closure
@@ -87,7 +114,7 @@ export type ParsedCohortPlanInput = z.output<typeof cohortPlanInputSchema>;
 // root: measurement asks the store what realising the installable would
 // require, nothing about retention or the destination.
 export const measureTargetSchema = z.strictObject({
-	attr: z.string().min(1),
+	attr: attributeSchema,
 	installable: cohortInstallableSchema
 });
 export type ParsedMeasureTarget = z.output<typeof measureTargetSchema>;
