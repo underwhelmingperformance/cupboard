@@ -100,6 +100,7 @@ export async function runPlanReprobe(
 		async (context) => {
 			const answer = await reprobeAvailability({
 				targets: options.targets.map((target) => ({
+					attr: target.attr,
 					installable: target.installable,
 					...(target.expectedPath !== undefined && {
 						expectedPath: target.expectedPath

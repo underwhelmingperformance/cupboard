@@ -27,6 +27,7 @@
 		"./oidc": "./src/oidc.ts",
 		"./oidc-issuer": "./src/oidc-issuer.ts",
 		"./oidc-trust-match": "./src/oidc-trust-match.ts",
+		"./plan": "./src/plan.ts",
 		"./reports": "./src/reports.ts",
 		"./retention": "./src/retention.ts",
 		"./reuse-views": "./src/reuse-views.ts",

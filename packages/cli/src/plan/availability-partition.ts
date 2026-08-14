@@ -11,6 +11,12 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import {
+	describeUnknownPathsRefusal,
+	type PlanStore,
+	type UnknownPathCause,
+	type UnknownPathDetail
+} from '@cupboard/protocol/plan';
 import type { ParsedRootEnsureResponse } from '@cupboard/protocol/retention';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
@@ -26,6 +32,8 @@ import { CliError, transientExitCode } from '../errors.ts';
  * joins the build set.
  */
 export interface AvailabilityTarget {
+	/** The manifest attribute that identifies this target to the operator. */
+	readonly attr: string;
 	readonly installable: NixDerivedPathString;
 	readonly expectedPath?: StorePathString;
 	/** A planned derivation closure the caller will copy before realisation. */
@@ -164,6 +172,8 @@ export interface AvailabilityCeiling {
 
 export interface AvailabilityPartitionOptions {
 	readonly targets: readonly AvailabilityTarget[];
+	/** The kind and URI of the selected store, for refusal diagnostics. */
+	readonly storeIdentity: PlanStore;
 	/** The selected store's own availability queries; no override applied. */
 	readonly store: Pick<
 		Nix,
@@ -237,26 +247,30 @@ export interface AvailabilityPartition {
 }
 
 /**
- * Raised when the final unknown count, after a trusted re-query has had its
- * chance to resolve as many as it can, still exceeds the effective ceiling.
- * A loud plan failure: an unresolved path's availability is a genuine
- * unknown, not a routine transient the run should build through silently.
+ * Raised when the final availability check leaves more unresolved paths than
+ * the configured limit permits.
  */
 export class UnknownPathsCeilingError extends CliError {
+	public readonly unknownCount: number;
+
 	constructor(
-		public readonly unknownCount: number,
+		public readonly unknownPaths: readonly UnknownPathDetail[],
 		public readonly ceiling: AvailabilityCeiling,
 		public readonly downloadSize: number,
-		public readonly narSize: number
+		public readonly narSize: number,
+		public readonly store: PlanStore,
+		public readonly unreachableSubstituters: readonly string[]
 	) {
 		super(
-			`${String(unknownCount)} path(s) have unknown availability, over the ` +
-				`${ceiling.source} ceiling of ${String(ceiling.value)}` +
-				(ceiling.fallbackReason === undefined
-					? ''
-					: ` (${ceiling.fallbackReason})`)
+			describeUnknownPathsRefusal({
+				unknownPaths,
+				ceiling,
+				store,
+				unreachableSubstituters
+			})
 		);
 		this.name = 'UnknownPathsCeilingError';
+		this.unknownCount = unknownPaths.length;
 	}
 
 	// A different attempt, a trusted connection, or a cleared narinfo
@@ -310,13 +324,16 @@ export async function partitionAvailability(
 		missing,
 		options
 	);
+	const unreachableSubstituters = await options.store.unreachableSubstituters();
 
 	if (settled.unknown.length > ceiling.value) {
 		throw new UnknownPathsCeilingError(
-			settled.unknown.length,
+			unknownPathDetails(settled.unknown, options.targets, ceiling),
 			ceiling,
 			settled.downloadSize,
-			settled.narSize
+			settled.narSize,
+			options.storeIdentity,
+			unreachableSubstituters.map(({ uri }) => uri)
 		);
 	}
 
@@ -362,8 +379,59 @@ export async function partitionAvailability(
 			.toSorted(byCodeUnit),
 		unknownCount: settled.unknown.length,
 		ceiling,
-		unreachableSubstituters: await options.store.unreachableSubstituters()
+		unreachableSubstituters
 	};
+}
+
+function unknownPathDetails(
+	unknownPaths: readonly StorePathString[],
+	targets: readonly AvailabilityTarget[],
+	ceiling: AvailabilityCeiling
+): readonly UnknownPathDetail[] {
+	return [...unknownPaths].toSorted(byCodeUnit).map((unknownPath) => ({
+		path: unknownPath,
+		cause: unknownPathCause(unknownPath, ceiling),
+		targets: targets.flatMap((target) =>
+			isTargetPath(target, unknownPath)
+				? [{ attr: target.attr, installable: target.installable }]
+				: []
+		)
+	}));
+}
+
+function unknownPathCause(
+	storePath: StorePathString,
+	ceiling: AvailabilityCeiling
+): UnknownPathCause {
+	if (storePath.endsWith('.drv')) {
+		return { kind: 'missing-derivation' };
+	}
+
+	if (ceiling.fallbackReason !== undefined) {
+		return {
+			kind: 'substituter-result-not-refreshed',
+			reason: ceiling.fallbackReason
+		};
+	}
+
+	return { kind: 'not-in-store-or-substituters' };
+}
+
+function isTargetPath(
+	target: AvailabilityTarget,
+	storePath: StorePathString
+): boolean {
+	const selection = target.installable.indexOf('^');
+	const installablePath =
+		selection === -1
+			? target.installable
+			: target.installable.slice(0, selection);
+
+	return [
+		installablePath,
+		target.expectedPath,
+		target.plannedLocalDerivation
+	].includes(storePath);
 }
 
 // A remote store cannot inspect a derivation that is absent from that store,

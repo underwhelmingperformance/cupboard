@@ -26,7 +26,12 @@ describe('cohortInstallableSchema', () => {
 			name: 'a caret with no store path in front of it',
 			value: 'not-a-store-path^out'
 		},
-		{ name: 'the empty string', value: '' }
+		{ name: 'the empty string', value: '' },
+		{ name: 'an empty output selection', value: `${derivation}^` },
+		{
+			name: 'an output selection carrying a control character',
+			value: `${derivation}^out\n::error::forged`
+		}
 	])('rejects $name', ({ value }) => {
 		expect(cohortInstallableSchema.safeParse(value).success).toBe(false);
 	});
@@ -72,6 +77,15 @@ describe('cohortTargetSchema', () => {
 	it('rejects an unknown field', () => {
 		expect(
 			cohortTargetSchema.safeParse({ ...validTarget, extra: 'nope' }).success
+		).toBe(false);
+	});
+
+	it('rejects an attr carrying a control character', () => {
+		expect(
+			cohortTargetSchema.safeParse({
+				...validTarget,
+				attr: 'app\n::error::forged'
+			}).success
 		).toBe(false);
 	});
 });

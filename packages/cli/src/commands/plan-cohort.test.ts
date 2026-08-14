@@ -133,7 +133,7 @@ function runOptions(
 	return {
 		targets: [],
 		cacheName: '_default',
-		storeKind: 'daemon',
+		storeIdentity: { kind: 'daemon' },
 		storePath: '/nix/store',
 		planFile: path.join(tmpdir(), 'unused-cupboard-plan-cohort.json'),
 		ceiling: { value: 0, untrustedFallback: 0 },
@@ -362,7 +362,7 @@ describe('runPlanCohort', () => {
 							plannedLocalDerivation: derivation
 						})
 					],
-					storeKind: 'ssh-ng',
+					storeIdentity: { kind: 'ssh-ng' },
 					planFile,
 					ceiling: { value: 0, untrustedFallback: 0 }
 				}),
@@ -441,14 +441,40 @@ describe('runPlanCohort', () => {
 				data: {
 					reason: 'unknown-paths-ceiling',
 					unknownCount: 1,
+					unknownPaths: [
+						{
+							path: appPath,
+							cause: { kind: 'not-in-store-or-substituters' },
+							targets: [
+								{
+									attr: 'packages.x86_64-linux.app',
+									installable: appPath
+								}
+							]
+						}
+					],
+					store: { kind: 'daemon' },
+					unreachableSubstituters: [],
 					ceiling: { value: 0, source: 'configured' },
 					downloadSize: 10,
 					narSize: 20
 				},
 				rows: [
-					{ label: 'Refusal', value: 'unknown paths over ceiling' },
-					{ label: 'Unknown count', value: '1' },
-					{ label: 'Ceiling', value: '0' }
+					{
+						label: 'Refusal',
+						value: 'One or more required store paths are unavailable to Nix'
+					},
+					{ label: 'Unavailable paths', value: '1' },
+					{ label: 'Limit', value: '0' },
+					{
+						label: 'Unavailable path',
+						value:
+							'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app; ' +
+							'target packages.x86_64-linux.app ' +
+							'(/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app)\n' +
+							"The local Nix daemon's store does not contain this path, and " +
+							'no substituter the plan could query provided it.'
+					}
 				]
 			}
 		]);
@@ -572,7 +598,11 @@ describe('runPlanCohort', () => {
 
 		try {
 			await runPlanCohort(
-				runOptions({ targets: [target()], storeKind: 'ssh-ng', planFile }),
+				runOptions({
+					targets: [target()],
+					storeIdentity: { kind: 'ssh-ng' },
+					planFile
+				}),
 				reporter(payloads),
 				remoteDependencies
 			);
@@ -750,7 +780,7 @@ describe('requeryUnknownWith', () => {
 				trust: 'not-trusted'
 			} as const,
 			reason:
-				'the daemon connection is not-trusted, so its narinfo-cache-negative-ttl override cannot be relied on to take effect'
+				'Cupboard cannot confirm the Nix daemon applied its per-command settings on this connection'
 		},
 		{
 			name: 'unknown',
@@ -760,7 +790,7 @@ describe('requeryUnknownWith', () => {
 				trust: 'unknown'
 			} as const,
 			reason:
-				'the daemon connection is unknown, so its narinfo-cache-negative-ttl override cannot be relied on to take effect'
+				'Cupboard cannot confirm the Nix daemon applied its per-command settings on this connection'
 		},
 		{
 			name: 'preserving remote daemon options',
@@ -770,7 +800,7 @@ describe('requeryUnknownWith', () => {
 				trust: 'unknown'
 			} as const,
 			reason:
-				'the transport preserves the remote daemon options, so it does not send the narinfo-cache-negative-ttl override'
+				'the remote transport does not pass per-command settings to the Nix daemon'
 		}
 	])(
 		'refuses, without opening a bypass, when the connection is $name',

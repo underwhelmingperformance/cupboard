@@ -2301,7 +2301,7 @@ function publicationPlanResults(
 						value: 5,
 						source: 'untrusted-fallback',
 						fallbackReason:
-							'the transport preserves the remote daemon options, so it does not send the narinfo-cache-negative-ttl override'
+							'the remote transport does not pass per-command settings to the Nix daemon'
 					}
 				},
 				capacity: { skipped: 'remote-store' }

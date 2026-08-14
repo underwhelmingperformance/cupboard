@@ -32,6 +32,7 @@ function target(
 	overrides: Partial<AvailabilityTarget> = {}
 ): AvailabilityTarget {
 	return {
+		attr: 'packages.x86_64-linux.app',
 		installable: appPath,
 		expectedPath: appPath,
 		root: appRoot,
