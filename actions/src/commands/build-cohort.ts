@@ -2120,12 +2120,11 @@ async function planCohort(
 				targets: queryable.map((member) => ({
 					attr: member.attr,
 					installable: member.queryInstallable,
-					...(inputs.push &&
-						inputs.store !== '' && {
-							plannedLocalDerivation: derivationPathOf(
-								nixDerivedPathSchema.parse(member.queryInstallable)
-							)
-						}),
+					...(inputs.store !== '' && {
+						plannedLocalDerivation: derivationPathOf(
+							nixDerivedPathSchema.parse(member.queryInstallable)
+						)
+					}),
 					...(member.expectedPath !== undefined && {
 						expectedPath: member.expectedPath
 					}),

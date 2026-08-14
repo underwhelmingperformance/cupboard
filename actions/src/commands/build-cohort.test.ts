@@ -4447,67 +4447,79 @@ describe('buildCohortAction publication', () => {
 		});
 	});
 
-	it('tells a remote plan which derivations this invocation will copy locally', async () => {
-		let targetsFileContents: unknown;
-		const stub = cupboardStub({
-			plan: planCohortSuccess(measuredCapacity, []),
-			reprobe: planReprobeSuccess([], [])
-		});
-		const runCupboardMock = vi.fn<typeof runCupboard>(
-			async (binaryPath, arguments_, passedEnvironment, dependencies) => {
-				if (arguments_[1] === 'plan' && arguments_[2] === 'cohort') {
-					const targetsFile =
-						arguments_[arguments_.indexOf('--targets-file') + 1];
+	// The promise holds without publication too: the action materialises
+	// the planned derivations in the runner's store before planning, and
+	// `nix build --store` copies them to the remote store when it realises
+	// the build set.
+	it.each([{ push: 'true' }, { push: 'false' }])(
+		'promises a remote plan its planned local derivations when push is $push',
+		async ({ push }) => {
+			let targetsFileContents: unknown;
+			const stub = cupboardStub({
+				plan: planCohortSuccess(measuredCapacity, []),
+				reprobe: planReprobeSuccess([], [])
+			});
+			const runCupboardMock = vi.fn<typeof runCupboard>(
+				async (binaryPath, arguments_, passedEnvironment, dependencies) => {
+					if (arguments_[1] === 'plan' && arguments_[2] === 'cohort') {
+						const targetsFile =
+							arguments_[arguments_.indexOf('--targets-file') + 1];
 
-					if (targetsFile === undefined) {
-						throw new Error('plan cohort targets file is missing');
+						if (targetsFile === undefined) {
+							throw new Error('plan cohort targets file is missing');
+						}
+
+						targetsFileContents = JSON.parse(
+							await readFile(targetsFile, 'utf8')
+						);
 					}
 
-					targetsFileContents = JSON.parse(await readFile(targetsFile, 'utf8'));
+					return stub(binaryPath, arguments_, passedEnvironment, dependencies);
 				}
+			);
 
-				return stub(binaryPath, arguments_, passedEnvironment, dependencies);
-			}
-		);
-
-		await buildCohortAction(
-			{
-				...baseOptions(),
-				cohortJson: remotelyQueryableCohortJson(),
-				push: 'true',
-				store: 'ssh-ng://build@example.test'
-			},
-			environment,
-			{ runCupboard: runCupboardMock }
-		);
-
-		expect(targetsFileContents).toStrictEqual({
-			targets: [
+			await buildCohortAction(
 				{
-					attr: '.#packages.x86_64-linux.app',
-					installable: appQueryInstallable,
-					plannedLocalDerivation:
-						'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv',
-					expectedPath: appPath,
-					root: 'github:owner/repo/main/app'
+					...baseOptions(),
+					cohortJson: remotelyQueryableCohortJson(),
+					push,
+					store: 'ssh-ng://build@example.test'
 				},
+				environment,
 				{
-					attr: '.#packages.x86_64-linux.lib',
-					installable: libraryQueryInstallable,
-					plannedLocalDerivation:
-						'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
-					root: 'github:owner/repo/main/lib'
-				},
-				{
-					attr: '.#packages.x86_64-linux.floating',
-					installable: floatingQueryInstallable,
-					plannedLocalDerivation:
-						'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv',
-					root: 'github:owner/repo/main/floating'
+					runCupboard: runCupboardMock,
+					runNixBuild: vi.fn(() => Promise.resolve({ paths: [], status: 0 }))
 				}
-			]
-		});
-	});
+			);
+
+			expect(targetsFileContents).toStrictEqual({
+				targets: [
+					{
+						attr: '.#packages.x86_64-linux.app',
+						installable: appQueryInstallable,
+						plannedLocalDerivation:
+							'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv',
+						expectedPath: appPath,
+						root: 'github:owner/repo/main/app'
+					},
+					{
+						attr: '.#packages.x86_64-linux.lib',
+						installable: libraryQueryInstallable,
+						plannedLocalDerivation:
+							'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
+						root: 'github:owner/repo/main/lib'
+					},
+					{
+						attr: '.#packages.x86_64-linux.floating',
+						installable: floatingQueryInstallable,
+						plannedLocalDerivation:
+							'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv',
+						root: 'github:owner/repo/main/floating'
+					}
+				]
+			});
+		}
+	);
 
 	it('propagates cancellation before evaluating or opening the build session', async () => {
 		const controller = new AbortController();
