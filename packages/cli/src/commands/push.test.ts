@@ -13,9 +13,11 @@ import { rootNameSchema, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
 
+import type { ProgramOptions } from '../cli.ts';
 import {
 	BuildStoreRequiresAlreadyHeldError,
 	BuildStoreRequiresClaimableError,
+	CliAbortError,
 	EmptyPublicationError,
 	InvalidStoreUriError,
 	NoRetainConflictError,
@@ -218,7 +220,7 @@ describe('receiptBuildStore', () => {
 	});
 });
 
-function silentProgram(): Command {
+function silentProgram(programOptions: ProgramOptions): Command {
 	const program = new Command();
 
 	program.exitOverride();
@@ -230,14 +232,25 @@ function silentProgram(): Command {
 			return;
 		}
 	});
-	registerPushCommand(program);
+	registerPushCommand(program, programOptions);
 
 	return program;
 }
 
-async function parsePush(arguments_: readonly string[]): Promise<unknown> {
+// A push that gets past validation contacts the cache and the reference
+// source. The tests that check what validation accepts pass the command an
+// already-aborted signal, which is what an interrupt gives a real push. The
+// run then stops at its first remote call and makes no DNS lookup.
+const interrupted: ProgramOptions = {
+	signal: AbortSignal.abort(new CliAbortError())
+};
+
+async function parsePush(
+	arguments_: readonly string[],
+	programOptions: ProgramOptions = {}
+): Promise<unknown> {
 	try {
-		await silentProgram().parseAsync(['push', ...arguments_], {
+		await silentProgram(programOptions).parseAsync(['push', ...arguments_], {
 			from: 'user'
 		});
 
@@ -343,16 +356,21 @@ describe('push command', () => {
 		);
 
 		try {
-			const result = await parsePush([
-				'https://cache.example.workers.dev/t/acme',
-				'--reference-paths-file',
-				file,
-				'--reference-source',
-				'https://cache.example.workers.dev/t/acme/reuse/reuse',
-				'--dry-run'
-			]);
+			const result = await parsePush(
+				[
+					'https://cache.example.workers.dev/t/acme',
+					'--reference-paths-file',
+					file,
+					'--reference-source',
+					'https://cache.example.workers.dev/t/acme/reuse/reuse',
+					'--dry-run'
+				],
+				interrupted
+			);
 
-			expect(result).not.toMatchObject({ code: 'commander.missingArgument' });
+			// The run reached its first remote call, so positional parsing accepted
+			// the reference paths as a publication in their own right.
+			expect(result).toBeInstanceOf(CliAbortError);
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}
@@ -368,13 +386,14 @@ describe('push command', () => {
 	});
 
 	it('accepts an empty named-root replacement past publication validation', async () => {
-		const result = await parsePush([
-			'https://cache.example.workers.dev/t/acme',
-			'--root',
-			'main'
-		]);
+		const result = await parsePush(
+			['https://cache.example.workers.dev/t/acme', '--root', 'main'],
+			interrupted
+		);
 
-		expect(result).not.toBeInstanceOf(EmptyPublicationError);
+		// The run reached its first remote call, so a root replacement with no
+		// paths is not an empty publication.
+		expect(result).toBeInstanceOf(CliAbortError);
 	});
 
 	it('rejects --no-retain combined with --root before authenticating', async () => {
