@@ -1,22 +1,16 @@
 import { CliError, unavailableExitCode } from '../errors.ts';
 
 /**
- * The store-relative bytes a capacity preflight measures against: how much
- * of it is available for use, and the store's total capacity, which the
- * headroom's fractional component scales against. A statfs-like probe over
- * the selected store's own path, injected so the check needs no filesystem
- * access of its own.
+ * A statfs-like probe over the selected store's own path, injected so the
+ * capacity check needs no filesystem access of its own. It reports how many
+ * bytes are available for use, and the store's total capacity, which the
+ * fractional part of the headroom is computed from.
  */
 export type StoreCapacityProbe = (storePath: string) => Promise<{
 	readonly available: number;
 	readonly capacity: number;
 }>;
 
-/**
- * Both values are provisional: PLAN.md records them as unset until the
- * rollout fixture's measurements tune them, so a caller overrides either one
- * without needing to touch this module.
- */
 export const defaultHeadroomAbsoluteMinimum = 5 * 1024 ** 3;
 export const defaultHeadroomFraction = 0.1;
 
@@ -34,11 +28,11 @@ function effectiveHeadroom(config: HeadroomConfig, capacity: number): number {
 
 /**
  * What a caller has already found true of the configuration it detected,
- * carried through to a refusal untouched: this module offers no remedies of
- * its own; it only reports what the measurement found and what the caller
- * already knows is or is not on the table. A cohort split is never possible
- * for an aggregate target, so a caller checking one names that per cohort
- * rather than this module guessing from the byte counts alone.
+ * carried through to a refusal untouched. This module offers no remedies of its
+ * own: it reports what the measurement found, and which remedies the caller
+ * already knows are or are not available. A cohort split is never possible for
+ * an aggregate target, so the caller sets `cohortSplitPossible` per cohort
+ * instead of leaving this module to infer it from the byte counts.
  */
 export interface DetectedCapacityOptions {
 	readonly cohortSplitPossible: boolean;

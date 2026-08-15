@@ -782,7 +782,8 @@ async function pollDeviceToken(
 }
 
 // A token endpoint can return a non-JSON body (an HTML error page, a proxy
-// notice); parse defensively so that surfaces as an `OidcLoginError`.
+// notice); parse defensively so that such a body surfaces as an
+// `OidcLoginError`.
 async function readJson(
 	response: Response,
 	kind: OidcLoginErrorKind

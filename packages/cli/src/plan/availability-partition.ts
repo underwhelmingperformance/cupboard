@@ -93,9 +93,9 @@ export type LeftUpstreamVerdict =
 	| { readonly kind: 'derivation-unreadable'; readonly errorName: string }
 	/**
 	 * The daemon does not trust the confirmation's connection. It drops such a
-	 * client's settings, so the substituters that answered are the runner's own
+	 * client's settings, so the substituters that answered are the runner's own,
 	 * and their answers may come from a narinfo cache the confirmation asked to
-	 * bypass; neither says anything about what an upstream serves.
+	 * bypass. Neither fact shows that a consumer elsewhere could fetch the path.
 	 */
 	| {
 			readonly kind: 'connection-not-trusted';
@@ -778,8 +778,9 @@ async function settleUnknowns(
  * path in both totals is by definition one the fresh answer settled, so its
  * figures are always the ones that came back with it, and the first answer
  * needs none of its own. A path whose figures did not come back stays in both
- * totals, since the merged total is read as the bytes substitution would
- * fetch and guessing at one would put that under what it is.
+ * totals, since the merged total is read as the number of bytes that
+ * substitution would fetch, and a guessed figure could put that total below the
+ * true one.
  */
 function bytesSettledTwice(
 	missing: SettledMissing,
@@ -803,8 +804,8 @@ function bytesSettledTwice(
 	return { downloadSize, narSize };
 }
 
-// The paths both answers name, each named once, keeping the order they were
-// first named in.
+// Every path listed by either answer, included once each, in the order the
+// paths first appear.
 function eachOnce(
 	first: readonly StorePathString[],
 	second: readonly StorePathString[]

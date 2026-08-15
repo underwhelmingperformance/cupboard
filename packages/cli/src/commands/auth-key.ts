@@ -24,9 +24,9 @@ interface RetireOptions {
 }
 
 /**
- * The slice of the derived client the auth-key commands consume, in the
- * contract's input and output shapes; the real `tenantRpc(...).keys.auth`
- * satisfies it by construction.
+ * The part of the derived client that the auth-key commands use, in the
+ * contract's input and output shapes. The real `tenantRpc(...).keys.auth`
+ * satisfies this interface by construction.
  */
 export interface AuthKeyClient {
 	list(): Promise<ParsedAuthKeyListResponse>;

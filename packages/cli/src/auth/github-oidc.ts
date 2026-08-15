@@ -6,8 +6,9 @@ import { throwIfAborted } from '../abort.ts';
 import { resilientFetcher } from '../client/transport.ts';
 import { CliError } from '../errors.ts';
 
-// The OIDC token request endpoint and bearer GitHub Actions injects when a
-// workflow grants `id-token: write`. Both are required to issue a token.
+// The OIDC token request endpoint, and the bearer token that GitHub Actions
+// injects when a workflow grants `id-token: write`. Both are required to issue
+// a token.
 export interface GithubOidcEnvironment {
 	readonly requestUrl: string | undefined;
 	readonly requestToken: string | undefined;

@@ -177,8 +177,8 @@ export interface BuildPushDependencies {
 
 /**
  * The process exit code a child's ending maps to: its own status, or 128 plus
- * the number of the signal that killed it, the shell convention retry systems
- * branch on.
+ * the number of the signal that killed it, which is the shell convention that
+ * retry systems branch on.
  */
 export function childExitCode(exit: ChildExit): number {
 	if (exit.status !== undefined) {
@@ -452,10 +452,11 @@ async function attributeSubjects(
 	return receiptSubjects(observed, infos, new Set(), autoBuildStore);
 }
 
-// A singleton constructed request that reached Nix's build graph is the only
-// child failure this layer can attribute to a requested target. A command, a
-// signal, a grouped request, or a failure before any build activity remains a
-// command failure for callers to treat as fatal.
+// A child failure is attributed to a requested target only when the invocation
+// was constructed, requested a single installable, exited with a status, and
+// recorded at least one build activity. A command, a signal, a grouped
+// request, or a failure before any build activity remains a command failure
+// for callers to treat as fatal.
 function terminalFailureFor(
 	invocation: BuildInvocation,
 	attempts: readonly SupervisedAttempt[],
@@ -778,8 +779,9 @@ async function publishRealised(
 	});
 }
 
-// A lost publication as the run's exit contract states it: the sysexits
-// category the cause maps to, and the paths a push named as unfinished.
+// Creates the publication failure that the run's exit contract requires: the
+// sysexits category the cause maps to, and the paths the push reported as
+// unfinished.
 function publicationFailure(cause: unknown): BuildPublicationFailedError {
 	const failedPaths =
 		cause instanceof PushIncompleteError ? cause.failedPaths : [];

@@ -126,11 +126,11 @@ const jwtClaimsSchema = z.object({
 });
 
 // Whether a token's signed claims bind it to this target. The issuer is the
-// per-target binding: a tenant issues `iss` equal to its base URL, the control
-// plane issues `iss` equal to the bare host, so an issuer match alone rules out
-// cross-target reuse. The audience must also admit the target: a tenant token's
-// audience is the target URL, while a control token's audience is a configured
-// client id (non-URL), so a non-URL audience is accepted too.
+// per-target binding: a tenant issues `iss` equal to its base URL, whereas the
+// control plane issues `iss` equal to the bare host, so a token issued for one
+// target never matches another. The audience must also admit the target: a
+// tenant token's audience is the target URL, while a control token's audience
+// is a configured client id (non-URL), so a non-URL audience is accepted too.
 function isTokenBoundToTarget(token: string, target: string): boolean {
 	const claims = decodeJwtClaims(token);
 

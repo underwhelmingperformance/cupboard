@@ -205,8 +205,8 @@ export class CupboardClient {
 		return result.data;
 	}
 
-	// The route renders the key set with a trailing newline; the keys
-	// themselves carry none, so it is returned without it.
+	// The route renders the key set with a trailing newline; the keys themselves
+	// carry none, so the newline is trimmed before the key set is returned.
 	publicKey(): Promise<string> {
 		return this.fetchText('/pubkey');
 	}

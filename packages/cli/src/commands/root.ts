@@ -56,10 +56,10 @@ interface RootListingOptions extends RootOptions {
 }
 
 /**
- * The authority a listing command's token exchange requests: cache-wide for
- * `root list`, narrowed to the one root `root targets` reads. Exported so the
- * exact grant a CI read requests is provable without driving the command
- * itself.
+ * The authority requested by a listing command's token exchange: cache-wide for
+ * `root list`, and narrowed to the single root that `root targets` reads.
+ * Exported so a test can check the grant a CI read requests without running the
+ * command.
  */
 export function rootListingAuthorizationDetails(
 	cacheSelector: string,
@@ -72,9 +72,9 @@ export function rootListingAuthorizationDetails(
 }
 
 /**
- * The slice of the derived client the root commands consume, in the
- * contract's input and output shapes; the real `tenantRpc(...).roots`
- * satisfies it by construction.
+ * The part of the derived client that the root commands use, in the contract's
+ * input and output shapes. The real `tenantRpc(...).roots` satisfies this
+ * interface by construction.
  */
 export interface RootClient {
 	set(input: {
@@ -109,15 +109,13 @@ export function registerRootCommands(
 ): void {
 	const root = program
 		.command('root')
-		.description(
-			'Manage retention roots: named channels of store paths to keep.'
-		);
+		.description('Manage retention roots: named sets of store paths to keep.');
 
 	root
 		.command('ensure')
 		.description(
 			'Retain targets already present in the cache, or report that a build is required. ' +
-				'Both outcomes exit 0; the reported status says which happened.'
+				'Both outcomes exit 0; the reported status is either retained or build required.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'root name, e.g. github:owner/repo/main', parseRootName)
@@ -382,8 +380,6 @@ export async function runRootList(
 	reporter: Reporter,
 	client: Pick<RootClient, 'list'>
 ): Promise<void> {
-	// The server pages the listing, so a tenant with many roots is read in
-	// bounded requests; the human listing still shows the whole set.
 	const roots = await reporter.phase('Listing retention roots', async () => {
 		const entries: ParsedRootListEntry[] = [];
 		let cursor: string | undefined;
@@ -415,8 +411,8 @@ export async function runRootTargets(
 	reporter: Reporter,
 	client: Pick<RootClient, 'targets'>
 ): Promise<void> {
-	// The targets are paged for the same reason as the listing: a run root
-	// accretes attached paths without bound.
+	// A run root can accumulate attached paths without bound, so the targets are
+	// read page by page.
 	const targets = await reporter.phase('Listing root targets', async () => {
 		const collected: ParsedRootTarget[] = [];
 		let cursor: string | undefined;

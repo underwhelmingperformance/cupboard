@@ -253,9 +253,9 @@ export function startTimerDelay(delayMs: number): CancellableDelay {
 }
 
 // An attempt's activity log lives in the invocation runtime directory, which
-// is owner-only and removed with the run, so it is read back before the next
-// attempt can overwrite the store's state it describes. A child that failed
-// to start leaves no log to attribute.
+// is owner-only and removed with the run. The log is read back as soon as the
+// attempt's child has exited, before the next attempt can change the store
+// state it describes. A child that failed to start leaves no log to attribute.
 async function readAttemptLog(logFile: string): Promise<string> {
 	try {
 		return await readFile(logFile, 'utf8');

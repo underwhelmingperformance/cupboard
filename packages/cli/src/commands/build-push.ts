@@ -111,13 +111,15 @@ const cohortsFileSchema = z.strictObject({
 });
 
 /**
- * The collector a cohort boundary invokes when the run opted into collection:
- * `nix store gc`, which sweeps only dead paths, so live roots (a target root,
- * the run root's server-side retention, a user's own gc roots) are untouched.
- * A boundary only runs after the cohort's publication has drained, so no
- * batch temporary roots are held either. Collection is an optimisation: a
- * failed sweep surfaces as a warning and never fails a green build, while a
- * sweep killed by a signal preserves that cancellation for the sequence.
+ * Runs `nix store gc` at a cohort boundary when the run opted into collection.
+ * `nix store gc` deletes only dead paths, so anything a local gc root keeps
+ * alive survives. Paths already published are retained on the server, which a
+ * local sweep does not touch. A boundary runs only after the cohort's
+ * publication has finished, so no batch temporary roots are held either.
+ *
+ * Collection is an optimisation: a failed collection is reported as a warning
+ * and never turns a successful build into a failure, while a collection killed
+ * by a signal cancels the rest of the sequence.
  */
 export interface BetweenCohortCollectorOptions {
 	/** The enclosing CLI run's cancellation signal. */
@@ -178,9 +180,9 @@ function childCommand(parts: readonly string[]): ChildCommand {
 }
 
 /**
- * Parses a cohorts file's contents into the build invocations it names, in
- * order. The file is transport only; a body that is not JSON of the small
- * cohort shape refuses with {@link CohortsFileInvalidError}.
+ * Parses the contents of a cohorts file into build invocations, in order.
+ * Contents that are not JSON of the cohort shape are refused with
+ * {@link CohortsFileInvalidError}.
  */
 export function parseCohortsFile(contents: string): readonly BuildInvocation[] {
 	let json: unknown;
@@ -342,9 +344,10 @@ function parseUploadConcurrency(value: string): number {
 }
 
 /**
- * Opens the daemon used by build-push preflight and batched publication. The
- * command signal owns the client, so cancellation also abandons a daemon
- * connection that is waiting on a protocol operation.
+ * Opens the Nix daemon connection used by build-push preflight and batched
+ * publication. The connection is bound to the command's abort signal, so
+ * cancelling the command also abandons a connection that is waiting on a daemon
+ * protocol operation.
  */
 export function createBuildPushDaemon(
 	config: NixStoreConfig,
@@ -353,8 +356,8 @@ export function createBuildPushDaemon(
 	return createNixDaemonStoreClient(undefined, config, options);
 }
 
-// The path file is transport only; every line must name a store path before
-// any token is requested.
+// Every line must parse as a store path. Checking here rejects a bad line
+// before any token is requested.
 function parseStorePathFile(contents: string): readonly StorePathString[] {
 	return parsePathFile(contents).map((line) => {
 		const parsed = storePathSchema.safeParse(line);
@@ -395,7 +398,7 @@ export function registerBuildPushCommand(
 		)
 		.option(
 			'--root <name>',
-			'replace this named root with the built targets once every one is confirmed servable',
+			'replace this named root with the built targets once every target is confirmed servable',
 			parseRootName
 		)
 		.option(
@@ -450,7 +453,7 @@ export function registerBuildPushCommand(
 		)
 		.option(
 			'--cohorts-file <path>',
-			'JSON file naming the cohorts to build in order, each {"command": [...]} or {"installables": [...]}; replaces the -- build command'
+			'JSON file listing the cohorts to build, in order, each {"command": [...]} or {"installables": [...]}; replaces the -- build command'
 		)
 		.option(
 			'--gc-between-cohorts',
@@ -466,9 +469,9 @@ export function registerBuildPushCommand(
 				'',
 				'The build command runs with its output and exit status untouched: a',
 				'failed build exits with the build command status. A successful',
-				'build with failed publication or retention exits with the sysexits',
-				'vocabulary: 77 authentication, 75 transient, 69 unavailable, and 74',
-				'for a publication failure not otherwise classified.',
+				'build with failed publication or retention exits with a sysexits',
+				'code: 77 authentication, 75 transient, 69 unavailable, or 74 for a',
+				'publication failure not otherwise classified.',
 				'',
 				'Examples:',
 				'  # Build and stream the outputs to a tenant, replacing a named root',

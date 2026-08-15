@@ -15,9 +15,9 @@ import {
 	InvalidWaitTimeoutError
 } from './errors.ts';
 
-// How long a push waits for deferred blobs to become servable. A CLI-only
-// duration with no retention bounds, so it carries its own brand and cannot
-// cross with a root TTL or a grace window.
+// How long a push waits for deferred blobs to become servable. It is a CLI-only
+// duration with no retention bounds, so it has its own brand and cannot be
+// used where a root TTL or a grace window is expected.
 export const waitTimeoutSecondsSchema = z
 	.number()
 	.int()

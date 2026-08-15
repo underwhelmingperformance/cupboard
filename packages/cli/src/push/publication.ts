@@ -109,7 +109,7 @@ export class PublicationCollection {
 		return this.entries.map((entry) => entry.storePath);
 	}
 
-	/** The declared targets, the only paths retention names. */
+	/** The declared targets, which are the only paths a push retains. */
 	get targetPaths(): readonly StorePathString[] {
 		return this.entries
 			.filter((entry) => entry.kind === 'target')

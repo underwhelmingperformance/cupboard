@@ -40,10 +40,10 @@ export interface AvailabilityReprobe {
 const noRootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse> =
 	new Map();
 
-// Leaving a target upstream stays with the partition's confirmation, which
-// proves a consumer could fetch exactly what this run holds before anyone is
-// sent to a substituter for it, so the re-probe offers no substitutability of
-// its own.
+// Only the partition's confirmation may leave a target upstream: it proves a
+// consumer could fetch exactly what this run holds before anyone is sent to a
+// substituter for it. The re-probe therefore passes an empty substitutable
+// set, so it never leaves a target upstream itself.
 const noSubstitutableExternal: ReadonlySet<StorePathString> = new Set();
 
 /**

@@ -54,9 +54,9 @@ export interface UpstreamConfirmationOptions {
  * settings, Nix has to be willing to substitute the target, and the permitted
  * substituters have to hold the whole closure this store recorded for it.
  *
- * The walk reads each path's narinfo from the substituter serving it, so every
- * path of that closure is offered under the NAR hash this store holds and
- * signed by a key the configuration trusts.
+ * The walk reads each path's narinfo from the substituter serving it and checks
+ * that every path of that closure is offered under the NAR hash this store
+ * holds and signed by a key the configuration trusts.
  */
 export function confirmLeftUpstreamWith(
 	options: UpstreamConfirmationOptions

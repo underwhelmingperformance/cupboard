@@ -14,9 +14,10 @@ export interface PushGrantIntent {
 	readonly root?: RootName;
 	/**
 	 * The run root the push binds at negotiate. Attaching retains paths under
-	 * a name, so it needs its own explicit grant on its own root selector: the
-	 * request carries a second cache grant on the same cache for it, since a
-	 * run root and a target root are different roots with different lifetimes.
+	 * a name, so the run root needs its own explicit grant on its own root
+	 * selector: the request carries a second cache grant on the same cache,
+	 * scoped to the run root, since a run root and a target root are different
+	 * roots with different lifetimes.
 	 */
 	readonly runRoot?: RootName;
 }
@@ -89,12 +90,12 @@ export function pushAuthorizationDetails(
 }
 
 /**
- * The authority `attest attach` requests: the attestation conversation on the
- * target cache, plus `upload:negotiate`, which issues the push credential the
- * bundle bytes stage under and the signed push id the attestation negotiate
- * names. No commit, status or root operation travels with it, so the
- * exchanged token can file bundles against served paths but never publish a
- * path or touch retention.
+ * The authority `attest attach` requests: `attestation:negotiate` and
+ * `attestation:attach` on the target cache, plus `upload:negotiate`, which
+ * issues the credential the bundle bytes are staged under and the signed push
+ * id the attestation negotiate names. No commit, status or root operation
+ * travels with it, so the exchanged token can attach bundles to served paths
+ * but never publish a path or touch retention.
  */
 export function attestAttachAuthorizationDetails(
 	intent: AttestAttachGrantIntent
@@ -123,10 +124,10 @@ export function rootEnsureAuthorizationDetails(
 }
 
 /**
- * The read-only authority a CI read of a cache's roots, or one root's
- * targets, needs: exactly `root:list`, never `root:set`, so a plan job's
- * exchanged token can read a root's reconciled list and refresh nothing it
- * does not already hold `root:set` for separately.
+ * The read-only authority needed by a CI read of a cache's roots, or of one
+ * root's targets: exactly `root:list`, never `root:set`, so a plan job's
+ * exchanged token can read a root's reconciled list but cannot refresh
+ * retention unless it separately holds `root:set`.
  */
 export function rootListAuthorizationDetails(
 	intent: RootListGrantIntent

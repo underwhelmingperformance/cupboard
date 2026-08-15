@@ -165,8 +165,9 @@ function bucketNameOf(config: DeploymentConfig): string {
 
 /**
  * Why the server refused the admin claim, by status class: an ownership or
- * claim-secret mismatch, a server-side fault to read in the logs, or (the one
- * case re-running signs in again for) a likely-stale login.
+ * claim-secret mismatch, a server-side fault to read in the logs, or a
+ * likely-stale login, which is the only case where re-running `cupboard init`
+ * signs in again.
  */
 export type ClaimRefusalReason =
 	'ownership-or-secret' | 'server-error' | 'stale-login';
@@ -686,7 +687,10 @@ export type R2Settlement =
 export type R2KeyCreation =
 	| {
 			readonly kind: 'available';
-			/** Whether the bucket already exists, so the offer tells no lies. */
+			/**
+			 * Whether the bucket already exists, so the menu hint can say whether
+			 * creating the key creates the bucket too.
+			 */
 			readonly bucketExists: boolean;
 			readonly create: () => Promise<R2Credentials>;
 	  }
@@ -1190,7 +1194,7 @@ async function deployFlow(
 						},
 						{
 							label: 'Why',
-							value: 'a different one cannot unwrap existing data'
+							value: 'a different wrapping secret cannot unwrap existing data'
 						},
 						{ label: 'Value', value: generatedWrapSecret }
 					]);
@@ -1265,7 +1269,7 @@ async function deployFlow(
 	if (cliOptions.yes === true && initialOwner.kind === 'none') {
 		ui.warn(
 			'No admin is bound: the signup gate stays closed, so nobody can ' +
-				'claim this deployment or create tenants until one is configured.'
+				'claim this deployment or create tenants until an admin is configured.'
 		);
 	}
 
@@ -1499,8 +1503,8 @@ async function deployFlow(
 		}
 
 		case 'unreachable': {
-			// A status means the host answered, so it is reachable and erroring,
-			// not absent: surface it as a server fault.
+			// A status means the host answered, so the host is reachable and
+			// erroring, not absent: surface the answer as a server fault.
 			if (
 				outcome.lastStatus !== undefined &&
 				outcome.lastStatus >= serverError
@@ -1534,8 +1538,8 @@ async function deployFlow(
 
 		case 'no-admin': {
 			ui.warn(
-				'Nobody was made admin, so this deployment cannot hold any ' +
-					'caches yet. Re-run `cupboard init` and pick an admin to ' +
+				'Nobody was made admin, so no caches can be created in this ' +
+					'deployment yet. Re-run `cupboard init` and pick an admin to ' +
 					'finish setting up.'
 			);
 			ui.outro('Deployed.');
@@ -1545,7 +1549,7 @@ async function deployFlow(
 		case 'admin-elsewhere': {
 			ui.info(
 				`${outcome.owner.subject} is the admin of this deployment, so ` +
-					'creating its first cache is theirs to do.'
+					'only they can create its first cache.'
 			);
 			ui.outro('Deployed.');
 			return;
@@ -1554,9 +1558,9 @@ async function deployFlow(
 		case 'identity-unproven': {
 			ui.warn(
 				`The plan makes ${outcome.owner.subject} the admin, but this ` +
-					'session used a raw API token, which carries no identity to ' +
-					'prove that is you. Re-run `cupboard init` and log in through ' +
-					'the browser to finish setting up.'
+					'session used a raw API token, which carries no identity, so ' +
+					'it cannot prove that you are them. Re-run `cupboard init` and ' +
+					'log in through the browser to finish setting up.'
 			);
 			ui.outro('Deployed.');
 			return;

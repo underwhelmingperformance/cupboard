@@ -97,9 +97,9 @@ function bindingsFor(
  * Build the multipart upload metadata for a Worker from its config, the resolved
  * resource ids, and the Durable Object migration to apply (if any). `vars`
  * become `plain_text` bindings; `keep_bindings` preserves secrets and
- * variables set out of band across content uploads, the deploy-side half of
- * the worker configurations' `keep_vars` (a binding this metadata names
- * still deploys from here).
+ * variables set out of band across content uploads, which is what
+ * `keep_vars: true` in both wrangler configs asks of wrangler. A binding that
+ * this metadata lists is still deployed from here.
  */
 export function buildScriptMetadata(
 	worker: WorkerConfig,

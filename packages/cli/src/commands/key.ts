@@ -20,9 +20,9 @@ interface RetireOptions {
 }
 
 /**
- * The slice of the derived client the key commands consume, in the
- * contract's input and output shapes; the real `tenantRpc(...).keys.signing`
- * satisfies it by construction.
+ * The part of the derived client that the key commands use, in the
+ * contract's input and output shapes. The real `tenantRpc(...).keys.signing`
+ * satisfies this interface by construction.
  */
 export interface KeyClient {
 	list(): Promise<ParsedKeyListResponse>;

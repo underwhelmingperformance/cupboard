@@ -73,9 +73,9 @@ export type OnboardAdmin =
 /**
  * The admin binding as the onboarding sees it: claimable right now when the
  * agreed binding is the deployer's own identity and the login carried an
- * id_token to prove it; someone else's when it names a different identity;
- * unproven when the session's credential carries no identity at all; or
- * nobody's.
+ * id_token to prove it; someone else's when the binding is a different
+ * identity; unproven when the session's credential carries no identity at
+ * all; or nobody's.
  */
 export function onboardAdminFor(
 	choice: OwnerChoice,
@@ -363,8 +363,8 @@ export async function onboardDeployment(
 		};
 	}
 
-	// Read before creating: a re-run against an initialised deployment has
-	// nothing to prompt for, and several caches mean there is no "first".
+	// Read before creating: a re-run against an initialised deployment must
+	// skip the slug prompt, and several caches mean there is no "first".
 	const existing = await ui
 		.reporter()
 		.phase('Checking existing caches', async () => {
@@ -373,8 +373,8 @@ export async function onboardDeployment(
 			return listed.tenants.filter((tenant) => tenant.status !== 'offboarded');
 		});
 
-	// Existing tenants were provisioned by an earlier build, whose admission
-	// representation a deploy can change, leaving them inadmissible until the
+	// Existing tenants were provisioned by an earlier build, and a deploy can
+	// change how admission is represented, leaving them inadmissible until the
 	// hourly cron reasserts the gate. Reassert it now from the registry so they
 	// stay reachable. A fresh deploy has none yet; the create below establishes
 	// the first tenant's gate itself.
@@ -555,8 +555,8 @@ function describeR2Check(check: ParsedR2CredentialCheck): string {
  * pair is prompted for, checked against R2 directly before anything changes,
  * set as the tenant script's secrets, and the deployment re-probed until the
  * new pair is what answers. Nothing here fails the onboarding: a cache with
- * bad credentials still serves reads, so problems are said out loud and left
- * fixable by a re-run.
+ * bad credentials still serves reads, so problems are reported as warnings and
+ * left for a re-run to fix.
  */
 async function ensureWorkerR2(dependencies: {
 	readonly ui: DeployUi;

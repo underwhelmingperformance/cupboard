@@ -35,9 +35,9 @@ interface ConfirmOptions {
 }
 
 /**
- * The slice of the derived client the confirm command consumes, in the
- * contract's input and output shapes; the real `tenantRpc(...).uploads`
- * satisfies it by construction.
+ * The part of the derived client that the confirm command uses, in the
+ * contract's input and output shapes. The real `tenantRpc(...).uploads`
+ * satisfies this interface by construction.
  */
 export interface ConfirmClient {
 	confirm(input: {
@@ -115,10 +115,11 @@ export async function runConfirm(
 	const storePathsByHash = new Map<StorePathHash, string>(
 		storePaths.map((storePath) => [StorePath.hash(storePath), storePath])
 	);
-	// The server bounds one confirm request, so a closure larger than the
-	// bound is split across sequential requests. The extensions a batch
-	// applied are server-side facts whether or not a later batch's request
-	// fails, so what confirmed is reported either way.
+	// The server limits how many paths one confirm request may carry, so a
+	// larger closure is split across sequential requests. A batch that succeeded
+	// has already extended the retention deadlines of its paths on the server,
+	// even when a later batch fails, so the confirmed paths are reported either
+	// way.
 	const paths: ParsedUploadConfirmResponse['paths'] = [];
 	const totalBatches = Math.ceil(
 		storePathHashes.length / uploadConfirmMaxPaths

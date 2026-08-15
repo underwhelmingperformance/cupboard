@@ -32,9 +32,9 @@ interface ConfirmableOptions {
 }
 
 /**
- * The slice of the derived client the reuse-view commands consume, in the
- * contract's input and output shapes; the real `tenantRpc(...).reuseViews`
- * satisfies it by construction.
+ * The part of the derived client that the reuse-view commands use, in the
+ * contract's input and output shapes. The real `tenantRpc(...).reuseViews`
+ * satisfies this interface by construction.
  */
 export interface ReuseViewClient {
 	list(): Promise<ParsedReuseViewListResponse>;
