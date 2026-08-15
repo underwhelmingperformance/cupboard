@@ -472,7 +472,19 @@ The action outputs `bundle-path` and `origin-bundle-path`, the two signed
 bundles covering every qualifying path, alongside `checksums-file` and
 `subject-count`. `id-token: write` lets the action obtain its Sigstore signing
 certificate, and `attestations: write` records the attestations on the
-repository.
+repository, so `gh attestation verify` finds them as before.
+
+The action signs both statements itself. A `uses:` step cannot be retried, and
+neither `actions/attest-build-provenance` nor `actions/attest` takes a retry
+input, so under those actions a transparency log that stops answering after the
+signature is made fails the whole publication. Signing here gives each statement
+up to four attempts with exponential back-off between them. Each attempt signs
+from the beginning, with a new key, certificate and log entry. Only a call to
+Fulcio or to a witness that received no answer, or that was answered with 408,
+429 or a 5xx status, is attempted again; an OIDC token that cannot be read or
+decoded, and a certificate Fulcio refuses, fail the step at once. When the
+attempts run out the step still fails, so a publication never proceeds with a
+missing bundle.
 
 The two bundles state different things about the same subjects. The SLSA
 build-provenance bundle states how this workflow ran: the repository, the

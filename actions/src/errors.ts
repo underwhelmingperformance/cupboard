@@ -493,6 +493,39 @@ export class AttestationChecksumsMismatchError extends CodedError {
 	}
 }
 
+/**
+ * Signing a statement failed for a reason the action does not retry, or failed
+ * on every attempt it made. `attempts` counts the attempts, so a value of one
+ * means the first failure was classified as final.
+ */
+export class AttestationSigningError extends CodedError {
+	constructor(
+		public readonly predicateType: string,
+		public readonly attempts: number,
+		options: { readonly cause: unknown }
+	) {
+		super(
+			`Could not sign the ${predicateType} attestation after ${String(attempts)} attempt(s)`,
+			withCause(options.cause)
+		);
+		this.name = 'AttestationSigningError';
+	}
+}
+
+/** The build-origin predicate file does not hold a JSON object to sign. */
+export class AttestationPredicateFileError extends CodedError {
+	constructor(
+		public readonly predicateFile: string,
+		options: { readonly cause: unknown }
+	) {
+		super(
+			`${predicateFile} does not contain a JSON object to sign`,
+			withCause(options.cause)
+		);
+		this.name = 'AttestationPredicateFileError';
+	}
+}
+
 export class AttestationSourceMismatchError extends CodedError {
 	constructor(
 		public readonly tagName: string,

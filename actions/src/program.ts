@@ -13,6 +13,7 @@ import { Command, CommanderError } from 'commander';
 
 import { registerAttestCommand } from './commands/attest.ts';
 import { registerAttestAttachCommand } from './commands/attest-attach.ts';
+import { registerAttestSignCommand } from './commands/attest-sign.ts';
 import { registerBuildCommand } from './commands/build.ts';
 import { registerBuildCohortCommand } from './commands/build-cohort.ts';
 import { registerPlanCommand } from './commands/plan.ts';
@@ -69,6 +70,7 @@ export function buildProgram(
 	registerPushCommand(program, environment, signal);
 	registerResolveCupboardCommand(program, environment);
 	registerAttestCommand(program, environment);
+	registerAttestSignCommand(program, environment);
 	registerAttestAttachCommand(program, environment, signal);
 	registerBuildCommand(program, environment, signal);
 	registerBuildCohortCommand(program, environment, signal);
