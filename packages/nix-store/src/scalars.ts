@@ -13,9 +13,9 @@ export const storePathBasenamePattern =
 // serves cannot be evaded.
 export const storeDirectoryPattern =
 	/^(?:\/(?!\.{1,2}(?:\/|$))[0-9A-Za-z+._?=-]+)+$/;
-// A store path is a store directory, a separator, then the basename. The
-// pattern caps the name at 211 characters independently of the store directory,
-// so the cap applies whatever the store directory's length is.
+// A store path is a store directory, a separator, then the basename. Like Nix,
+// the pattern caps the name at 211 characters on its own; the store directory
+// in front of it does not count towards that cap.
 export const storePathPattern =
 	/^(?:\/(?!\.{1,2}(?:\/|$))[0-9A-Za-z+._?=-]+)+\/[0-9a-df-np-sv-z]{32}-[0-9A-Za-z+._?=-]{1,211}$/;
 

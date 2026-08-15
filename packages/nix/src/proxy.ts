@@ -13,7 +13,7 @@ export interface NamedProxies {
 	readonly noProxy?: string;
 }
 
-/** An environment as this reads one: variable names to their values. */
+/** An environment as this module reads one: variable names to their values. */
 export type ProxyEnvironment = Readonly<Record<string, string | undefined>>;
 
 /**
@@ -21,8 +21,9 @@ export type ProxyEnvironment = Readonly<Record<string, string | undefined>>;
  * falls back to `all_proxy`, taking the first non-empty value.
  *
  * `http_proxy` is read in lower case alone. A CGI script runs with the request
- * headers in its environment, so a request carrying a `Proxy:` header would
- * otherwise name the proxy for every transfer that script made.
+ * headers in its environment as `HTTP_*` variables, so a request carrying a
+ * `Proxy:` header would otherwise choose the proxy for every transfer that
+ * script made.
  */
 export function proxiesNamedBy(env: ProxyEnvironment): NamedProxies {
 	const httpProxy = firstNamed(env, ['http_proxy', 'all_proxy', 'ALL_PROXY']);

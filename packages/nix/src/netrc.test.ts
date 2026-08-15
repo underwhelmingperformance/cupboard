@@ -165,8 +165,9 @@ describe('netrcCredentialFor', () => {
 	});
 
 	// libcurl reads a token as every character above a space, so a carriage
-	// return sits where a token was expected and the file names nothing a
-	// transfer can be made with.
+	// return sits where a token was expected. Each of these sources leaves the
+	// reader part-way through a token, which is a syntax error rather than a
+	// file that supplies no credentials.
 	it.each([
 		{ name: 'a line ending in a carriage return', source: 'machine a\r\n' },
 		{

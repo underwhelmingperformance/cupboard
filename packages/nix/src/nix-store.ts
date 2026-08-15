@@ -30,7 +30,7 @@ export type UnreachableSubstituterCause =
 	/**
 	 * The substituter, or a proxy standing in front of it, asked for a
 	 * credential unavailable to this run. The client cannot determine which
-	 * paths it has.
+	 * paths that substituter has.
 	 */
 	| { readonly reason: 'needs-credentials' }
 	| {
@@ -244,9 +244,8 @@ export interface NixStoreClient {
 	 */
 	narFromPath(storePath: StorePathString): AsyncIterable<Uint8Array>;
 	/**
-	 * Build the given targets and report each result: exact
-	 * per-target outcomes, with the realised outputs where the store reports
-	 * them.
+	 * Build the given targets and report the outcome of each one, with the
+	 * realised outputs where the store reports them.
 	 */
 	buildPathsWithResults(
 		targets: readonly NixDerivedPathString[],
@@ -425,7 +424,7 @@ export class NixConfigSyntaxError extends NixStoreError {
  */
 export class NixNetrcSyntaxError extends NixStoreError {
 	constructor(public readonly found: string) {
-		super(`The netrc file could not be read: it holds ${found}`);
+		super(`The netrc file could not be read: it contains ${found}`);
 		this.name = 'NixNetrcSyntaxError';
 	}
 }
@@ -508,7 +507,7 @@ export class InvalidNixStoreParameterError extends NixStoreError {
 export class UnsupportedNixStoreError extends NixStoreError {
 	constructor(public readonly storeUri: string) {
 		super(
-			`Cannot read path information from the Nix store '${storeUri}': only the local store and the daemon are supported`
+			`Cannot read path information from the Nix store '${storeUri}': only the local store, the daemon and an ssh-ng remote are supported`
 		);
 		this.name = 'UnsupportedNixStoreError';
 	}

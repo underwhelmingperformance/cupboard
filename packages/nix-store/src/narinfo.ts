@@ -61,9 +61,9 @@ function single<S extends z.ZodType>(value: S) {
 
 /**
  * The size given by a narinfo `FileSize` or `NarSize` field, or `undefined`
- * when the value is not a size. Nix converts the whole value, so a value
- * containing any character other than a digit, or one larger than an exact
- * integer can hold, is not a size.
+ * when the value is not a size. Nix converts the whole value, so any character
+ * other than a digit makes it invalid. A value above `Number.MAX_SAFE_INTEGER`
+ * is rejected too, since this reader counts sizes in JavaScript numbers.
  */
 export function narInfoSize(value: string): number | undefined {
 	if (!/^\d+$/u.test(value)) {

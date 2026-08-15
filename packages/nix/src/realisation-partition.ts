@@ -381,8 +381,8 @@ class RealisationWalk {
 	}
 }
 
-// Either a plain store path or a derivation with the outputs wanted from it,
-// which is what a target names and what every edge of the walk is.
+// Either a plain store path or a derivation with the outputs wanted from it.
+// A target and every edge of the walk take this form.
 type DerivedPath =
 	| { readonly kind: 'opaque'; readonly storePath: StorePathString }
 	| ({ readonly kind: 'built' } & BuiltTarget);

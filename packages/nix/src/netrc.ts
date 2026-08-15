@@ -118,7 +118,7 @@ function finish(entry: PartialCredential): NetrcCredential | undefined {
 /** Where the reader is between the `machine` line and the credentials. */
 type LookupState = 'nothing' | 'host-found' | 'host-valid' | 'macdef';
 
-/** Which half of a credential the next token states. */
+/** Which half of a credential the next token supplies. */
 type Keyword = 'none' | 'login' | 'password';
 
 // The keywords are matched whatever their case, as libcurl compares them.
@@ -151,8 +151,8 @@ type NetrcToken =
 	| { readonly endsLine: true; readonly isBlank: boolean }
 	| { readonly endsLine: false; readonly text: string };
 
-// The characters that separate one token from the next, which are the only two
-// libcurl passes over between them.
+// The characters that separate one token from the next. libcurl skips only
+// these two between tokens.
 const blanks = new Set([' ', '\t']);
 
 /** Reads a netrc's tokens in order, raising over a line it cannot read. */
@@ -170,8 +170,9 @@ class NetrcReader {
 
 	/**
 	 * A token that runs to the next character a token cannot contain: every
-	 * character greater than a space belongs to the token. A carriage return
-	 * terminates the token and is also treated as a line ending.
+	 * character above a space belongs to the token. A carriage return is not
+	 * above a space, so it ends the token. The next read then finds a character
+	 * that cannot start a token and raises {@link NixNetrcSyntaxError}.
 	 */
 	private plainToken(): string {
 		const start = this.at;
@@ -181,16 +182,19 @@ class NetrcReader {
 		}
 
 		if (this.at === start) {
-			throw new NixNetrcSyntaxError('a token holding no characters');
+			throw new NixNetrcSyntaxError(
+				'a control character where a token was expected'
+			);
 		}
 
 		return this.source.slice(start, this.at);
 	}
 
 	/**
-	 * A token wrapped in double quotes, which is how a value carrying a blank is
-	 * written. A backslash escapes the character after it, and `\n`, `\r` and
-	 * `\t` name the three characters no token can hold directly.
+	 * A token wrapped in double quotes, which is how a value containing a space
+	 * or a tab is written. A backslash escapes the character after it, and
+	 * `\n`, `\r` and `\t` stand for the three characters a token cannot contain
+	 * literally.
 	 */
 	private quotedToken(): string {
 		// The opening quote is not part of the value.

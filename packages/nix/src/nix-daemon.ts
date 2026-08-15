@@ -314,9 +314,9 @@ export class UnsupportedNixDaemonOperationError extends NixDaemonError {
 }
 
 // Raised when the pool shuts down while a query still needs a connection: an
-// acquire after shutdown, a parked waiter, or a connection that finishes
-// opening after the closure walk aborted. The abandoned query settles on a
-// closed-pool error without using a dead socket.
+// acquire after shutdown, a query already waiting for a free connection, or a
+// connection that finishes opening after the closure walk aborted. The
+// abandoned query fails with this error instead of using a dead socket.
 export class NixDaemonConnectionPoolClosedError extends NixDaemonError {
 	constructor() {
 		super('Nix daemon connection pool closed during closure walk');

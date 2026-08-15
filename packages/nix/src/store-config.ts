@@ -650,9 +650,8 @@ function resolveStoreDirectory(
 	return defaultStoreDirectory;
 }
 
-// Nix canonicalises the directory before use, so equivalent spellings refer to
-// the same store: a trailing slash, a
-// doubled one, or a `.` or `..` component.
+// Nix canonicalises the directory before use, so a trailing slash, a doubled
+// slash, or a `.` or `..` component all refer to the same store.
 function parseStoreDirectory(
 	value: string,
 	source: NixStoreDirectorySource
@@ -1042,10 +1041,10 @@ class EffectiveSettings {
 	}
 
 	// The list settings whose resolved value this client forwards. Nix forwards
-	// what a setting resolved to across every source it read, which for these
-	// is the merged value: a system-wide assignment a user
-	// configuration appends to is part of the value, and the compiled-in
-	// default is the initial value when no source assigns the setting.
+	// what a setting resolved to across every source it read, which for these is
+	// the merged value: it includes a system-wide assignment that a user
+	// configuration appends to, and it starts from the compiled-in default when
+	// no source assigns the setting.
 	private settledLists(): ReadonlyMap<string, readonly string[]> {
 		const substitution = this.substituting.values();
 		const signatures = this.signing.values();
@@ -1190,9 +1189,9 @@ export class EffectiveList {
 	}
 
 	/**
-	 * The explicitly assigned value followed by later appends. Returns
-	 * `undefined` when the configuration only appends because the base default
-	 * has not been supplied here.
+	 * The explicitly assigned value followed by later appends, or `undefined`
+	 * when the configuration only appends. This class is not given the base
+	 * default, so there is no complete value to report in that case.
 	 */
 	assignedValue(): readonly string[] | undefined {
 		return this.assigned === undefined
@@ -1653,7 +1652,10 @@ function pinnedSettingName(name: string): string {
 	return forwardedSettingName(canonicalSettingName(name));
 }
 
-/** The setting an assignment names, and whether it appends to what it holds. */
+/**
+ * The setting an assignment names, and whether the assignment appends to the
+ * setting's current value.
+ */
 interface NamedSetting {
 	readonly pinnedName: string;
 	readonly type: NixSettingValueType;
