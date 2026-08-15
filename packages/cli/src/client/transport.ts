@@ -23,7 +23,7 @@ export function resilientFetcher(fetcher: typeof fetch = fetch): typeof fetch {
 
 /**
  * Parse a Worker URL, turning a malformed value into a typed usage error that
- * naming the offending input.
+ * names the offending input.
  */
 export function parseWorkerUrl(value: string | URL): URL {
 	let url: URL;

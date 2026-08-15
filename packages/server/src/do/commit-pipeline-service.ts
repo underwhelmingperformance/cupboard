@@ -1281,8 +1281,6 @@ export class CommitPipelineService {
 		}
 	}
 
-	// Answers a commit that lost its narinfo to a concurrent winner: ensures the
-	// winner's object is materialised, reclaims this upload's staging object, and
 	/**
 	 * The tenant's advisory publish status and quota basis, for a batch caller
 	 * that reads the account once and passes it into each entry's commit. The
@@ -1319,10 +1317,12 @@ export class CommitPipelineService {
 			.run();
 	}
 
-	// reports already-present with the winner's narHash. Any blob this upload
-	// promoted but no edge now references is left for the reaper to collect.
-	// When no committed winner exists yet (the winning upload is still verifying),
-	// the upload stays live so the verify pass can settle it.
+	// Answers a commit that lost its narinfo to a concurrent winner: ensures the
+	// winner's object is materialised, reclaims this upload's staging object,
+	// and reports already-present with the winner's narHash. Any blob this
+	// upload promoted that no edge now references is left for the reaper to
+	// collect. When no committed winner exists yet (the winning upload is still
+	// verifying), the upload stays live so the verify pass can settle it.
 	async concedeToWinner(
 		logger: Logger,
 		cache: StoredCache,
