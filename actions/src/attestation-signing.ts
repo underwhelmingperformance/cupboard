@@ -7,23 +7,33 @@ import { z } from 'zod';
 
 import { AttestationSigningError } from './errors.ts';
 
-/** An in-toto subject: a store path's base name and its NAR hash digest. */
+/**
+An in-toto subject: a store path's base name and its NAR hash digest.
+*/
 export interface AttestationSubject {
 	readonly name: string;
 	readonly sha256: string;
 }
 
-/** The predicate half of an in-toto statement. The signer adds the subjects. */
+/**
+The predicate half of an in-toto statement. The signer adds the subjects.
+*/
 export interface AttestationStatement {
 	readonly predicateType: string;
 	readonly predicate: object;
 }
 
-/** The outcome of signing one statement. */
+/**
+The outcome of signing one statement.
+*/
 export interface SignedAttestation {
-	/** The Sigstore bundle, as the text of a `.sigstore.json` document. */
+	/**
+	The Sigstore bundle, as the text of a `.sigstore.json` document.
+	*/
 	readonly bundle: string;
-	/** The identifier the GitHub API returns for the record it stored. */
+	/**
+	The identifier the GitHub API returns for the record it stored.
+	*/
 	readonly attestationId?: string;
 }
 
@@ -98,11 +108,15 @@ export function isTransientSigningFailure(error: unknown): boolean {
 	return retryableSigningStatuses.has(http.data.statusCode);
 }
 
-/** The most attempts one statement gets before the step fails. */
+/**
+The most attempts one statement gets before the step fails.
+*/
 export const maxSigningAttempts = 4;
 
 export interface SigningDependencies {
-	/** Waits before the next attempt. Tests pass a wait that returns at once. */
+	/**
+	Waits before the next attempt. Tests pass a wait that returns at once.
+	*/
 	readonly delay?: (attempt: number) => Promise<void>;
 }
 

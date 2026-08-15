@@ -109,7 +109,9 @@ export function attestAttachAuthorizationDetails(
 	]);
 }
 
-/** The root-scoped authority a CI preflight needs to retain an existing path. */
+/**
+The root-scoped authority a CI preflight needs to retain an existing path.
+*/
 export function rootEnsureAuthorizationDetails(
 	intent: RootEnsureGrantIntent
 ): AuthorizationDetails {

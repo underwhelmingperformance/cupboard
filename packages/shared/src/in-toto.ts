@@ -45,7 +45,9 @@ interface InTotoStatement {
 
 type SigstoreBundle = ReturnType<typeof bundleFromJSON>;
 
-/** An in-toto Statement payload that is malformed or fails its schema. */
+/**
+An in-toto Statement payload that is malformed or fails its schema.
+*/
 export class InTotoStatementError extends Error {
 	constructor(public readonly detail: string) {
 		super(`in-toto statement ${detail}`);
@@ -53,7 +55,9 @@ export class InTotoStatementError extends Error {
 	}
 }
 
-/** A Sigstore bundle whose in-toto Statement could not be decoded. */
+/**
+A Sigstore bundle whose in-toto Statement could not be decoded.
+*/
 export class DsseDecodeError extends Error {
 	constructor(
 		public readonly detail: string,

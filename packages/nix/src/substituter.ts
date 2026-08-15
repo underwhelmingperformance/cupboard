@@ -83,7 +83,9 @@ function isTransientStatus(status: number): boolean {
 	return status >= 500 && ![501, 505, 511].includes(status);
 }
 
-/** The default for a substituter that advertises no priority. */
+/**
+The default for a substituter that advertises no priority.
+*/
 const defaultPriority = 0;
 
 const cacheInfoFile = 'nix-cache-info';
@@ -112,9 +114,13 @@ function requestConcurrency(dependencies: SubstituterEnvironment): number {
 	return httpConnections === 0 ? maxSubstituterConcurrency : httpConnections;
 }
 
-/** A substituter that could not respond to a query. */
+/**
+A substituter that could not respond to a query.
+*/
 export class SubstituterUnreachableError extends NixStoreError {
-	/** The delay requested by the substituter, if provided. */
+	/**
+	The delay requested by the substituter, if provided.
+	*/
 	readonly retryAfterMs?: number;
 
 	constructor(
@@ -136,7 +142,9 @@ export class SubstituterUnreachableError extends NixStoreError {
 	}
 }
 
-/** A substituter that returned a malformed response. */
+/**
+A substituter that returned a malformed response.
+*/
 export class SubstituterAnswerUnreadableError extends NixStoreError {
 	constructor(
 		public readonly substituter: string,
@@ -153,13 +161,17 @@ export class SubstituterAnswerUnreadableError extends NixStoreError {
  * priority zero and disables mass queries.
  */
 export interface SubstituterDescription {
-	/** The store directory this substituter serves paths for. */
+	/**
+	The store directory this substituter serves paths for.
+	*/
 	readonly storeDirectory: StoreDirectory;
 	/**
 	 * Whether the substituter accepts batch availability queries.
 	 */
 	readonly hasMassQuery: boolean;
-	/** Query priority. Lower-numbered substituters are queried first. */
+	/**
+	Query priority. Lower-numbered substituters are queried first.
+	*/
 	readonly priority: number;
 	/**
 	 * Whether paths from this substituter may be accepted without a signature.
@@ -191,11 +203,17 @@ export type SubstituterLocation =
 	  }
 	| { readonly kind: 'file'; readonly directory: string };
 
-/** A configured substituter ready to query. */
+/**
+A configured substituter ready to query.
+*/
 export interface Substituter extends SubstituterDescription {
-	/** The configured URI used to identify the substituter in errors. */
+	/**
+	The configured URI used to identify the substituter in errors.
+	*/
 	readonly uri: string;
-	/** Where each of its documents is read from. */
+	/**
+	Where each of its documents is read from.
+	*/
 	readonly location: SubstituterLocation;
 }
 
@@ -206,7 +224,9 @@ export interface SubstituterEnvironment {
 	 * Retry settings from the effective Nix configuration.
 	 */
 	readonly transfer?: NixFileTransferSettings;
-	/** Retry delay implementation, injected to avoid waiting in tests. */
+	/**
+	Retry delay implementation, injected to avoid waiting in tests.
+	*/
 	readonly delay?: (
 		milliseconds: number,
 		signal: AbortSignal | undefined
@@ -223,7 +243,9 @@ export interface SubstituterEnvironment {
 	 * The state directory for a local store that does not specify its own root.
 	 */
 	readonly stateDirectory?: string;
-	/** Opens a local store database, injected for tests. */
+	/**
+	Opens a local store database, injected for tests.
+	*/
 	readonly openStore?: (stateDirectory: string) => NixStoreDatabase;
 	/**
 	 * Parsed netrc credentials. Requests use the credentials for their host.
@@ -231,7 +253,9 @@ export interface SubstituterEnvironment {
 	readonly netrc?: string;
 }
 
-/** The reachable and unreachable configured substituters. */
+/**
+The reachable and unreachable configured substituters.
+*/
 export interface OpenedSubstituters {
 	/**
 	 * Ordered the way Nix orders them: by ascending priority, ties keeping
@@ -332,11 +356,17 @@ type OpenOutcome =
 export type SubstituterSource =
 	readonly Substituter[] | (() => Promise<OpenedSubstituters>);
 
-/** Store-wide settings used by substituter queries. */
+/**
+Store-wide settings used by substituter queries.
+*/
 export interface SubstituterClientOptions extends SubstituterEnvironment {
-	/** The store directory for which availability is being queried. */
+	/**
+	The store directory for which availability is being queried.
+	*/
 	readonly storeDirectory: StoreDirectory;
-	/** The `substitute` setting. When disabled, no paths are substitutable. */
+	/**
+	The `substitute` setting. When disabled, no paths are substitutable.
+	*/
 	readonly substitute: boolean;
 	/**
 	 * The `fallback` setting. By default, a failed substituter makes the result
@@ -648,12 +678,16 @@ export class SubstituterClient {
 	}
 }
 
-/** The result from one substituter for one path. */
+/**
+The result from one substituter for one path.
+*/
 type SubstituterOffer = NarInfoOffer & {
 	readonly fromTrustedSubstituter: boolean;
 };
 
-/** A substituter that failed before reporting whether it has a path. */
+/**
+A substituter that failed before reporting whether it has a path.
+*/
 type SubstituterFailure =
 	SubstituterUnreachableError | SubstituterAnswerUnreadableError;
 
@@ -674,7 +708,9 @@ type SubstituterOutcome =
  */
 const absentStatuses = new Set([403, 404, 410]);
 
-/** The complete result of one request attempt. */
+/**
+The complete result of one request attempt.
+*/
 type DocumentOutcome =
 	| { readonly kind: 'answered'; readonly document: string }
 	| { readonly kind: 'absent' }
@@ -699,7 +735,10 @@ async function fetchDocument(
 	let failure: SubstituterUnreachableError | undefined;
 
 	for (let attempt = 0; attempt < settings.attempts; attempt += 1) {
-		if (attempt > 0 && !(await waitToRetry(attempt, failure, dependencies))) {
+		if (
+			attempt > 0 &&
+			!(await shouldWaitToRetry(attempt, failure, dependencies))
+		) {
 			break;
 		}
 
@@ -780,7 +819,7 @@ async function fetchDocument(
  * The operation stops retrying if the server's requested delay exceeds the
  * maximum wait.
  */
-async function waitToRetry(
+async function shouldWaitToRetry(
 	attempt: number,
 	failure: SubstituterUnreachableError | undefined,
 	dependencies: SubstituterEnvironment
@@ -915,12 +954,16 @@ function sleep(
 	});
 }
 
-/** Cancels an unread response body so its connection can be reused promptly. */
+/**
+Cancels an unread response body so its connection can be reused promptly.
+*/
 async function discard(response: Response): Promise<void> {
 	await response.body?.cancel();
 }
 
-/** A substituter response that exceeds the configured size limit. */
+/**
+A substituter response that exceeds the configured size limit.
+*/
 class OversizedSubstituterDocumentError extends NixStoreError {
 	constructor(public readonly maxByteLength: number) {
 		super(
@@ -1270,7 +1313,9 @@ async function describeSubstituter(
 	}
 }
 
-/** Metadata parsed from a substituter's own document. */
+/**
+Metadata parsed from a substituter's own document.
+*/
 type CacheInfoOutcome =
 	| { readonly kind: 'described'; readonly description: SubstituterDescription }
 	| {

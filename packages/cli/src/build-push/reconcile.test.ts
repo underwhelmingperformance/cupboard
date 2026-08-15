@@ -159,7 +159,9 @@ function emptyStream(): ReadableStream<Uint8Array> {
 
 interface HarnessOptions {
 	readonly valid?: readonly StorePathString[];
-	/** Paths the store fetched from a substituter. */
+	/**
+	Paths the store fetched from a substituter.
+	*/
 	readonly substituted?: readonly StorePathString[];
 	readonly actions?: ReadonlyMap<StorePathString, UploadDecision['action']>;
 	readonly failUploads?: ReadonlySet<StorePathString>;

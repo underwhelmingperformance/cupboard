@@ -8,7 +8,9 @@ import {
 	payloadToArtifact
 } from './artifact.ts';
 
-/** The SEA asset key the release build stores the embedded payload under. */
+/**
+The SEA asset key the release build stores the embedded payload under.
+*/
 export const embeddedAssetKey = 'embedded-workers.json';
 
 const workerBundleSchema = z.object({

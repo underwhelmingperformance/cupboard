@@ -9,13 +9,13 @@ import {
 	expectSingleUploadDecision,
 	fetchNarInfo,
 	fetchPath,
+	isNarInfoSignatureValid,
 	narBytes,
 	negotiateUploads,
 	putNarBytes,
 	resetTestServer,
 	seedSigningKeys,
-	uploadMetadata,
-	verifyNarInfoSignature
+	uploadMetadata
 } from '../test-support.ts';
 
 function namedBytesName(value: string): string {
@@ -64,7 +64,7 @@ describe('signing with a key set', () => {
 			.map((sig) => namedBytesName(sig))
 			.toSorted(byCodeUnit);
 		const verifiesUnderEachKey = await Promise.all(
-			seeded.map((key) => verifyNarInfoSignature(narInfo, key.publicKey))
+			seeded.map((key) => isNarInfoSignatureValid(narInfo, key.publicKey))
 		);
 		const pubkey = await fetchPath('/pubkey');
 

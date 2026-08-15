@@ -2,8 +2,8 @@ import { readUserSchema } from '@cupboard/shared/http';
 import { describe, expect, it } from 'vitest';
 
 import {
-	authoriseRead,
 	hashReadPassword,
+	isReadAuthorised,
 	readPasswordSaltSchema,
 	type ReadVerifier
 } from './read-auth.ts';
@@ -29,7 +29,7 @@ async function verifierFor(password: string): Promise<ReadVerifier> {
 	};
 }
 
-describe('authoriseRead', () => {
+describe('isReadAuthorised', () => {
 	it.each([
 		{
 			name: 'matching credentials, password split on the first colon',
@@ -64,7 +64,7 @@ describe('authoriseRead', () => {
 	])('rejects/accepts $name', async ({ authorization, expected }) => {
 		const verifier = await verifierFor('p:a:ss');
 
-		expect(await authoriseRead(request(authorization), verifier)).toBe(
+		expect(await isReadAuthorised(request(authorization), verifier)).toBe(
 			expected
 		);
 	});
@@ -72,6 +72,6 @@ describe('authoriseRead', () => {
 	it('rejects a request with no Authorization header', async () => {
 		const verifier = await verifierFor('p:a:ss');
 
-		expect(await authoriseRead(request(), verifier)).toBe(false);
+		expect(await isReadAuthorised(request(), verifier)).toBe(false);
 	});
 });

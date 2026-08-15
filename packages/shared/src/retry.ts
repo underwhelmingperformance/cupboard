@@ -20,7 +20,9 @@ const retryableStatuses = new Set<number>([
 	StatusCodes.GATEWAY_TIMEOUT
 ]);
 
-/** Whether a wire response is a transient server failure worth retrying. */
+/**
+Whether a wire response is a transient server failure worth retrying.
+*/
 export function isTransientResponse(response: Response): boolean {
 	return retryableStatuses.has(response.status);
 }

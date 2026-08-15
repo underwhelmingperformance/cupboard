@@ -25,7 +25,9 @@ import { z } from 'zod';
  */
 export const oracleFileName = 'oracle.json';
 
-/** The record's path relative to the repository root. */
+/**
+The record's path relative to the repository root.
+*/
 export const oracleFilePath = `tests/conformance/${oracleFileName}`;
 
 /**
@@ -35,13 +37,19 @@ export const oracleFilePath = `tests/conformance/${oracleFileName}`;
  */
 export const settingTypesFileName = 'setting-types.generated.ts';
 
-/** The table's path relative to the repository root. */
+/**
+The table's path relative to the repository root.
+*/
 export const settingTypesFilePath = `packages/nix/src/${settingTypesFileName}`;
 
-/** The flake output containing the `nix` binary used by the suite. */
+/**
+The flake output containing the `nix` binary used by the suite.
+*/
 export const conformanceNixOutput = '.#conformanceNix';
 
-/** The command that regenerates the record and settings table. */
+/**
+The command that regenerates the record and settings table.
+*/
 const updateCommand = 'pnpm update:conformance-oracle';
 
 const nixVersionSchema = z.string().regex(/^nix \(Nix\) \S+$/u);
@@ -52,7 +60,9 @@ const oracleRecordSchema = z.object({
 	version: nixVersionSchema
 });
 
-/** Which `nix` the conformance suite expects to find behind the flake output. */
+/**
+Which `nix` the conformance suite expects to find behind the flake output.
+*/
 export type OracleRecord = z.infer<typeof oracleRecordSchema>;
 
 const lockedInputSchema = z.object({
@@ -63,7 +73,9 @@ const flakeLockSchema = z.object({
 	nodes: z.object({ nixpkgs: lockedInputSchema })
 });
 
-/** Reads and writes the files the record is derived from and stored in. */
+/**
+Reads and writes the files the record is derived from and stored in.
+*/
 export interface OracleWorkspace {
 	readFlakeLock(): string;
 	readOracleFile(): string;
@@ -71,11 +83,15 @@ export interface OracleWorkspace {
 	writeSettingTypesFile(text: string): void;
 }
 
-/** A setting value type reported by `nix config show --json`. */
+/**
+A setting value type reported by `nix config show --json`.
+*/
 export type NixSettingValueType =
 	'boolean' | 'integer' | 'list' | 'map' | 'string';
 
-/** Every setting recognised by the pinned `nix`, with its value type. */
+/**
+Every setting recognised by the pinned `nix`, with its value type.
+*/
 export type NixSettingTypes = Readonly<Record<string, NixSettingValueType>>;
 
 /**
@@ -86,7 +102,9 @@ export type NixIntegerWidth = 'uint32' | 'int64' | 'uint64';
 
 export type NixIntegerWidths = Readonly<Record<string, NixIntegerWidth>>;
 
-/** The generated setting types and integer widths for the pinned Nix. */
+/**
+The generated setting types and integer widths for the pinned Nix.
+*/
 export interface NixSettingTable {
 	readonly types: NixSettingTypes;
 	readonly integerWidths: NixIntegerWidths;
@@ -102,7 +120,9 @@ export const integerWidthProbes = {
 	unsignedSixtyFour: '18446744073709551615'
 } as const;
 
-/** Which {@link integerWidthProbes} values a setting accepted. */
+/**
+Which {@link integerWidthProbes} values a setting accepted.
+*/
 export interface AcceptedWidthProbes {
 	readonly negative: boolean;
 	readonly unsignedThirtyTwo: boolean;
@@ -163,13 +183,17 @@ export function integerWidthOf(
 	throw new UnknownIntegerWidthError(setting, accepted);
 }
 
-/** The Nix build from which the settings table was generated. */
+/**
+The Nix build from which the settings table was generated.
+*/
 export interface GeneratedSettingTypes {
 	readonly nixpkgsRevision: string;
 	readonly version: string;
 }
 
-/** Resolves the version and the settings the pinned flake output builds to. */
+/**
+Resolves the version and the settings the pinned flake output builds to.
+*/
 export interface OracleNix {
 	readVersion(): Promise<string>;
 	readSettingTable(): Promise<NixSettingTable>;
@@ -286,7 +310,9 @@ export function serialiseOracleRecord(record: OracleRecord): string {
 	return `${JSON.stringify(record, undefined, '\t')}\n`;
 }
 
-/** The nixpkgs revision the lockfile pins, which the flake output builds from. */
+/**
+The nixpkgs revision the lockfile pins, which the flake output builds from.
+*/
 export function parseFlakeLockRevision(text: string): string {
 	let parsed: unknown;
 
@@ -481,7 +507,9 @@ function recordedOrNothing(
 	}
 }
 
-/** What a `nix` invocation produced, whether or not it succeeded. */
+/**
+What a `nix` invocation produced, whether or not it succeeded.
+*/
 export interface NixResult {
 	readonly status: number | null;
 	readonly stdout: string;
@@ -580,7 +608,9 @@ export async function resolveConformanceNixBinary(
 	return path.join(output, 'bin', 'nix');
 }
 
-/** The version string reported by a `nix` binary. */
+/**
+The version string reported by a `nix` binary.
+*/
 export async function readNixVersion(
 	binary: string,
 	environment?: NodeJS.ProcessEnv
@@ -644,7 +674,12 @@ async function readIntegerWidth(
 		const accepted: Record<string, boolean> = {};
 
 		for (const [probe, value] of Object.entries(integerWidthProbes)) {
-			accepted[probe] = await acceptsSettingValue(binary, home, setting, value);
+			accepted[probe] = await willAcceptSettingValue(
+				binary,
+				home,
+				setting,
+				value
+			);
 		}
 
 		return integerWidthOf(setting, {
@@ -659,7 +694,7 @@ async function readIntegerWidth(
 }
 
 // Whether the pinned Nix accepts a value for the setting.
-async function acceptsSettingValue(
+async function willAcceptSettingValue(
 	binary: string,
 	home: string,
 	setting: string,
@@ -676,7 +711,9 @@ async function acceptsSettingValue(
 	return printed.status === 0;
 }
 
-/** Reads every setting recognised by the pinned Nix and its value type. */
+/**
+Reads every setting recognised by the pinned Nix and its value type.
+*/
 async function readNixSettingTypes(binary: string): Promise<NixSettingTypes> {
 	const home = mkdtempSync(path.join(tmpdir(), 'cupboard-oracle-settings-'));
 

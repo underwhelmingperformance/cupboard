@@ -29,17 +29,23 @@ const dependenciesHashesSchema = z.object({
 
 export type DependenciesHashes = z.infer<typeof dependenciesHashesSchema>;
 
-/** Reads and writes the files the hash pair is derived from and stored in. */
+/**
+Reads and writes the files the hash pair is derived from and stored in.
+*/
 export interface Workspace {
 	readLockfile(): Uint8Array;
 	readHashesFile(): string;
 	writeHashesFile(text: string): void;
 }
 
-/** Which of the update's two fetches is running. */
+/**
+Which of the update's two fetches is running.
+*/
 export type FetchPurpose = 'resolve' | 'confirm';
 
-/** Resolves the store hash for the workspace's current lockfile. */
+/**
+Resolves the store hash for the workspace's current lockfile.
+*/
 export interface StoreFetcher {
 	/**
 	 * Fetch the store against the recorded hash, returning the corrected hash
@@ -116,7 +122,9 @@ export class FakeHashMatchedError extends CodedError {
 	}
 }
 
-/** Digest file bytes in the SRI form Nix uses for `sha256` hashes. */
+/**
+Digest file bytes in the SRI form Nix uses for `sha256` hashes.
+*/
 export function sriSha256(bytes: Uint8Array): string {
 	return `sha256-${createHash('sha256').update(bytes).digest('base64')}`;
 }
@@ -163,7 +171,9 @@ export type UpdateOutcome =
 	| { kind: 'store-unchanged'; store: string }
 	| { kind: 'store-updated'; store: string };
 
-/** A hash no fetch can produce, forcing Nix to report the real one. */
+/**
+A hash no fetch can produce, forcing Nix to report the real one.
+*/
 export const fakeStoreHash = `sha256-${'A'.repeat(43)}=`;
 
 // The fetch runs against the fake hash: building against the recorded hash

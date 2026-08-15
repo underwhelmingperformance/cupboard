@@ -42,7 +42,9 @@ export function compilePattern(pattern: string): RE2JS {
 	}
 }
 
-/** Whether a pattern is an anchored expression RE2 can compile. */
+/**
+Whether a pattern is an anchored expression RE2 can compile.
+*/
 export function isAnchoredRe2(pattern: string): boolean {
 	try {
 		compilePattern(pattern);
@@ -83,12 +85,16 @@ export function compileCapture(pattern: string): RE2JS {
 	return compiled;
 }
 
-/** The named groups a capture pattern defines. */
+/**
+The named groups a capture pattern defines.
+*/
 export function captureGroups(pattern: string): string[] {
 	return Object.keys(compileCapture(pattern).namedGroups());
 }
 
-/** Quote text for literal interpolation into an RE2 pattern. */
+/**
+Quote text for literal interpolation into an RE2 pattern.
+*/
 export function quotePatternLiteral(value: string): string {
 	return RE2JS.quote(value);
 }

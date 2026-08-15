@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process';
 import { platform } from 'node:process';
 
-/** Where {@link openBrowser} writes its messages; any reporter satisfies it. */
+/**
+Where {@link openBrowser} writes its messages; any reporter satisfies it.
+*/
 export interface BrowserMessages {
 	info(message: string): void;
 	warn(message: string): void;

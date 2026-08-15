@@ -32,11 +32,15 @@ import { CliError, transientExitCode } from '../errors.ts';
  * joins the build set.
  */
 export interface AvailabilityTarget {
-	/** The manifest attribute that identifies this target to the operator. */
+	/**
+	The manifest attribute that identifies this target to the operator.
+	*/
 	readonly attr: string;
 	readonly installable: NixDerivedPathString;
 	readonly expectedPath?: StorePathString;
-	/** A planned derivation closure the caller will copy before realisation. */
+	/**
+	A planned derivation closure the caller will copy before realisation.
+	*/
 	readonly plannedLocalDerivation?: StorePathString;
 	readonly root: RootName;
 }
@@ -85,11 +89,17 @@ export interface LeftUpstreamCandidate {
  */
 export type LeftUpstreamVerdict =
 	| { readonly kind: 'confirmed' }
-	/** The `substitute` setting is off, so Nix would not fetch the path. */
+	/**
+	The `substitute` setting is off, so Nix would not fetch the path.
+	*/
 	| { readonly kind: 'substitution-disabled' }
-	/** The derivation disables substitutes and no setting overrides it. */
+	/**
+	The derivation disables substitutes and no setting overrides it.
+	*/
 	| { readonly kind: 'substitutes-not-allowed' }
-	/** The derivation could not be read, so its option is unknown. */
+	/**
+	The derivation could not be read, so its option is unknown.
+	*/
 	| { readonly kind: 'derivation-unreadable'; readonly errorName: string }
 	/**
 	 * The daemon does not trust the confirmation's connection. It drops such a
@@ -133,7 +143,9 @@ export type LeftUpstreamVerdict =
 	| { readonly kind: 'closure-unsigned'; readonly storePath: StorePathString }
 	| { readonly kind: 'closure-over-cap'; readonly maxPaths: number };
 
-/** One rejected candidate, as the partition reports it. */
+/**
+One rejected candidate, as the partition reports it.
+*/
 export type LeftUpstreamRejection = Exclude<
 	LeftUpstreamVerdict,
 	{ readonly kind: 'confirmed' }
@@ -141,7 +153,9 @@ export type LeftUpstreamRejection = Exclude<
 
 export type CeilingSource = 'configured' | 'untrusted-fallback';
 
-/** What substituting one path would cost, as the store reported it. */
+/**
+What substituting one path would cost, as the store reported it.
+*/
 export interface SubstitutablePathSize {
 	readonly downloadSize: number;
 	readonly narSize: number;
@@ -173,9 +187,13 @@ export interface AvailabilityCeiling {
 
 export interface AvailabilityPartitionOptions {
 	readonly targets: readonly AvailabilityTarget[];
-	/** The kind and URI of the selected store, for refusal diagnostics. */
+	/**
+	The kind and URI of the selected store, for refusal diagnostics.
+	*/
 	readonly storeIdentity: PlanStore;
-	/** The selected store's own availability queries; no override applied. */
+	/**
+	The selected store's own availability queries; no override applied.
+	*/
 	readonly store: Pick<
 		Nix,
 		| 'queryMissing'
@@ -194,7 +212,9 @@ export interface AvailabilityPartitionOptions {
 	readonly attestedServed?: (
 		paths: readonly StorePathString[]
 	) => Promise<ReadonlySet<StorePathString>>;
-	/** One `roots.ensure` result per target root, keyed by root name. */
+	/**
+	One `roots.ensure` result per target root, keyed by root name.
+	*/
 	readonly rootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse>;
 	/**
 	 * Re-queries paths whose availability remained unknown, bypassing any cache
@@ -253,7 +273,9 @@ export interface AvailabilityPartition {
 	 * what the run built claims none of these.
 	 */
 	readonly alreadyValid: readonly StorePathString[];
-	/** Equal to `counts.unknown`, flattened for a capacity preflight to read directly. */
+	/**
+	Equal to `counts.unknown`, flattened for a capacity preflight to read directly.
+	*/
 	readonly unknownCount: number;
 	readonly ceiling: AvailabilityCeiling;
 	/**

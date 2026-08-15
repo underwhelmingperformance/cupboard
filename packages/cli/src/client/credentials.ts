@@ -9,7 +9,9 @@ export interface TokenProvider {
 	refresh(): Promise<string>;
 }
 
-/** Either a fixed bearer token or a provider that can refresh one. */
+/**
+Either a fixed bearer token or a provider that can refresh one.
+*/
 export type AccessCredential = string | TokenProvider;
 
 export function isTokenProvider(

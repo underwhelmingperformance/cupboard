@@ -63,7 +63,9 @@ export async function runCupboard(
 	return run.results;
 }
 
-/** Run cupboard using a result protocol that the caller has already detected. */
+/**
+Run cupboard using a result protocol that the caller has already detected.
+*/
 export async function runCupboardWithProtocol(
 	binaryPath: string,
 	arguments_: readonly string[],

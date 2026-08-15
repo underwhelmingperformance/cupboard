@@ -15,7 +15,9 @@ export type ResourceLocation =
 	| { readonly field: string }
 	| { readonly pending: true; readonly missingDenies?: boolean };
 
-/** The resources a procedure's operation is scoped by, and where each lives. */
+/**
+The resources a procedure's operation is scoped by, and where each lives.
+*/
 export interface ResourceSpec {
 	readonly cache?: ResourceLocation;
 	readonly root?: ResourceLocation;

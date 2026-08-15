@@ -38,7 +38,9 @@ describe('describeNarOutcome', () => {
 const storePathHash = '0123456789abcdfghijklmnpqrsvwxyz';
 const storePath = `/nix/store/${storePathHash}-app`;
 
-/** A delete client that records its calls and reports the path as present. */
+/**
+A delete client that records its calls and reports the path as present.
+*/
 function recordingClient(): {
 	client: DeleteClient;
 	calls: { cacheName: string; hash: string }[];

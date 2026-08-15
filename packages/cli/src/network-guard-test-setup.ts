@@ -175,7 +175,9 @@ function readStringTarget(target: string, second: unknown): Destination {
 	return { kind: 'host', host: readHost(second), port };
 }
 
-/** The host argument, which Node defaults to `localhost` when it is absent. */
+/**
+The host argument, which Node defaults to `localhost` when it is absent.
+*/
 function readHost(second: unknown): string {
 	return typeof second === 'string' ? second : loopbackHost;
 }

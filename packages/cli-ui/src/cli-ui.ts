@@ -38,7 +38,9 @@ import pc from 'picocolors';
 
 import { type BrowserMessages, openBrowser } from './open-browser.ts';
 
-/** A picocolors palette with its colour enablement fixed at creation. */
+/**
+A picocolors palette with its colour enablement fixed at creation.
+*/
 type Colours = ReturnType<typeof pc.createColors>;
 
 export { clackSink } from './clack-sink.ts';
@@ -83,21 +85,27 @@ export function terminalLink(text: string, url: string): string {
 	return `${OSC8}${url}${BEL}${text}${OSC8}${BEL}`;
 }
 
-/** One choice in a menu prompt. */
+/**
+One choice in a menu prompt.
+*/
 export interface MenuEntry<T extends string> {
 	readonly value: T;
 	readonly label: string;
 	readonly hint?: string;
 }
 
-/** The choices and defaults for a multiple-choice prompt. */
+/**
+The choices and defaults for a multiple-choice prompt.
+*/
 export interface MultiSelectOptions<T extends string> {
 	readonly message: string;
 	readonly entries: readonly MenuEntry<T>[];
 	readonly initialValues?: readonly T[];
 }
 
-/** The outcome of a text edit. */
+/**
+The outcome of a text edit.
+*/
 export type TextEdit =
 	| { readonly kind: 'set'; readonly value: string }
 	| { readonly kind: 'clear' }
@@ -107,26 +115,38 @@ export interface TextEditOptions {
 	readonly message: string;
 	readonly initial?: string;
 	readonly placeholder?: string;
-	/** When true an empty answer means "clear"; otherwise it must validate. */
+	/**
+	When true an empty answer means "clear"; otherwise it must validate.
+	*/
 	readonly emptyClears?: boolean;
-	/** Why the value is unacceptable, or undefined when it is fine. */
+	/**
+	Why the value is unacceptable, or undefined when it is fine.
+	*/
 	readonly problem?: (value: string) => string | undefined;
 }
 
 export interface PrefixedTextOptions {
 	readonly message: string;
-	/** Rendered dimmed, immediately before the editable value. */
+	/**
+	Rendered dimmed, immediately before the editable value.
+	*/
 	readonly prefix: string;
-	/** Why the value is unacceptable, or undefined when it is fine. */
+	/**
+	Why the value is unacceptable, or undefined when it is fine.
+	*/
 	readonly problem: (value: string) => string | undefined;
 }
 
-/** The user's answer to a confirmation. */
+/**
+The user's answer to a confirmation.
+*/
 export type ConfirmOutcome = 'yes' | 'no' | 'cancelled';
 
 export interface ConfirmOptions {
 	readonly message: string;
-	/** Extra context shown above the prompt, e.g. what is about to be removed. */
+	/**
+	Extra context shown above the prompt, e.g. what is about to be removed.
+	*/
 	readonly detail?: string;
 	/**
 	 * Proceed without asking. A non-interactive run resolves `yes` only when this
@@ -165,7 +185,9 @@ async function confirmInteractive(
 	return answer ? 'yes' : 'no';
 }
 
-/** A stream's terminal status; both `process.stdin` and `process.stdout` fit. */
+/**
+A stream's terminal status; both `process.stdin` and `process.stdout` fit.
+*/
 interface TtyStream {
 	readonly isTTY?: boolean;
 }
@@ -196,39 +218,57 @@ export function isInteractive(streams: {
  * {@link CliUi.reporter}.
  */
 export interface CliUi {
-	/** Whether {@link CliUi.confirm} and the prompts can interact with the user. */
+	/**
+	Whether {@link CliUi.confirm} and the prompts can interact with the user.
+	*/
 	readonly interactive: boolean;
 	intro(title: string): void;
 	outro(message: string): void;
 	cancelled(message: string): void;
 	info(message: string): void;
-	/** Reports a step that completed its work. */
+	/**
+	Reports a step that completed its work.
+	*/
 	success(message: string): void;
-	/** Reports a step skipped because there was nothing to do. */
+	/**
+	Reports a step skipped because there was nothing to do.
+	*/
 	step(message: string): void;
 	warn(message: string): void;
 	note(title: string, rows: readonly ResultRow[]): void;
-	/** Writes a payload to stdout; delegates to {@link Reporter.data}. */
+	/**
+	Writes a payload to stdout; delegates to {@link Reporter.data}.
+	*/
 	data(text: string): void;
-	/** Ask the user to confirm a (typically destructive) action. */
+	/**
+	Ask the user to confirm a (typically destructive) action.
+	*/
 	confirm(options: ConfirmOptions): Promise<ConfirmOutcome>;
-	/** Pick from a menu; undefined when cancelled or non-interactive. */
+	/**
+	Pick from a menu; undefined when cancelled or non-interactive.
+	*/
 	menu<T extends string>(
 		message: string,
 		entries: readonly MenuEntry<T>[]
 	): Promise<T | undefined>;
-	/** Pick any number of entries; undefined when cancelled or non-interactive. */
+	/**
+	Pick any number of entries; undefined when cancelled or non-interactive.
+	*/
 	multiSelect<T extends string>(
 		options: MultiSelectOptions<T>
 	): Promise<readonly T[] | undefined>;
-	/** Edit a single text value. */
+	/**
+	Edit a single text value.
+	*/
 	editText(options: TextEditOptions): Promise<TextEdit>;
 	/**
 	 * Ask for a value typed inline after a fixed prefix (a URL the value
 	 * completes, say). There is no default; undefined when cancelled.
 	 */
 	prefixedText(options: PrefixedTextOptions): Promise<string | undefined>;
-	/** Ask for a secret value, masked; undefined when cancelled. */
+	/**
+	Ask for a secret value, masked; undefined when cancelled.
+	*/
 	secret(
 		message: string,
 		problem: (value: string) => string | undefined
@@ -248,16 +288,22 @@ export interface CliUiOptions {
 	 * picocolors' own detection over `NO_COLOR`, `FORCE_COLOR` and the TTY.
 	 */
 	readonly colour?: boolean;
-	/** Treat confirmations as already accepted (the `--yes` flag). */
+	/**
+	Treat confirmations as already accepted (the `--yes` flag).
+	*/
 	readonly assumeYes?: boolean;
 	/**
 	 * Override the computed interactivity. Defaults to {@link isInteractive} over
 	 * the process streams; tests pass it explicitly.
 	 */
 	readonly interactive?: boolean;
-	/** Where progress and diagnostics go; defaults to `process.stderr`. */
+	/**
+	Where progress and diagnostics go; defaults to `process.stderr`.
+	*/
 	readonly stream?: NodeJS.WritableStream;
-	/** Where `data` payloads go; defaults to `process.stdout`. */
+	/**
+	Where `data` payloads go; defaults to `process.stdout`.
+	*/
 	readonly out?: NodeJS.WritableStream;
 	/**
 	 * An absolute path to append one JSONL result event to per result, in every
@@ -536,7 +582,9 @@ export function createCliUi(options: CliUiOptions): CliUi {
 // (`oidc-trust-rules` becomes `OIDC trust rules`, not `Oidc trust rules`).
 const titleAcronyms = new Set(['oidc']);
 
-/** A result `kind` slug as a heading: `tenant-list` becomes `Tenant list`. */
+/**
+A result `kind` slug as a heading: `tenant-list` becomes `Tenant list`.
+*/
 export function resultTitle(kind: string): string {
 	const words = kind.replaceAll(/[-_]+/g, ' ').trim().split(' ');
 	const [first, ...rest] = words;

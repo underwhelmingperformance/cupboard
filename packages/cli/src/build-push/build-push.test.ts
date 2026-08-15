@@ -193,7 +193,9 @@ interface RecordedRun {
 	readonly results: ResultPayload[];
 	readonly warnings: { label: string; value?: string }[];
 	readonly info: string[];
-	/** What the store was asked, in order, and when the run asked it. */
+	/**
+	What the store was asked, in order, and when the run asked it.
+	*/
 	readonly storeCalls: string[];
 }
 
@@ -270,16 +272,24 @@ function recordingReporter(record: RecordedRun): Reporter {
 }
 
 interface ConstructedFlowConfig {
-	/** The stub nix succeeds once it has run this many times. */
+	/**
+	The stub nix succeeds once it has run this many times.
+	*/
 	readonly succeedOn: number;
-	/** What the cohort declares; a flake attribute unless set. */
+	/**
+	What the cohort declares; a flake attribute unless set.
+	*/
 	readonly installables?: readonly string[];
 	readonly attempts?: number;
 	readonly rebuild?: boolean;
 	readonly requireProvenance?: boolean;
-	/** Simulates a helper delivery failure after Nix completed the build. */
+	/**
+	Simulates a helper delivery failure after Nix completed the build.
+	*/
 	readonly suppressEvent?: boolean;
-	/** The machine the stub's activity log attributes; empty is local. */
+	/**
+	The machine the stub's activity log attributes; empty is local.
+	*/
 	readonly machine?: string;
 }
 
@@ -288,22 +298,36 @@ interface FlowConfig {
 	readonly constructed?: ConstructedFlowConfig;
 	readonly emitEvent?: boolean;
 	readonly emitExitStatus?: number;
-	/** The emitting child exits without waiting for its message to be read. */
+	/**
+	The emitting child exits without waiting for its message to be read.
+	*/
 	readonly emitDetached?: boolean;
 	readonly valid?: readonly StorePathString[];
-	/** What the store holds until the build has run; empty unless set. */
+	/**
+	What the store holds until the build has run; empty unless set.
+	*/
 	readonly alreadyValid?: readonly StorePathString[];
-	/** The outputs the cohort's installables resolve to before the build. */
+	/**
+	The outputs the cohort's installables resolve to before the build.
+	*/
 	readonly declaredOutputs?: readonly StorePathString[];
-	/** The paths the build leaves out-links for; the valid paths unless set. */
+	/**
+	The paths the build leaves out-links for; the valid paths unless set.
+	*/
 	readonly outPaths?: readonly StorePathString[];
-	/** The paths the store holds as its own; none unless set. */
+	/**
+	The paths the store holds as its own; none unless set.
+	*/
 	readonly ultimatePaths?: readonly StorePathString[];
 	readonly action?: UploadDecision['action'];
 	readonly uploadFailure?: Error;
-	/** Requests the receipt in a directory the run never creates. */
+	/**
+	Requests the receipt in a directory the run never creates.
+	*/
 	readonly unwritableReceipt?: boolean;
-	/** What preflight refuses this run with, instead of proving its endpoints. */
+	/**
+	What preflight refuses this run with, instead of proving its endpoints.
+	*/
 	readonly preflightFailure?: Error;
 	readonly options?: Partial<BuildPushRunOptions>;
 }

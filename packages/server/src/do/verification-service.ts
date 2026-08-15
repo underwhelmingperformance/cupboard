@@ -80,7 +80,7 @@ function reconcileCandidates(
 		.filter(
 			(observation): observation is RowObservation =>
 				observation !== undefined &&
-				(!observation.narPresent || !observation.objectPresent)
+				(!observation.isNarPresent || !observation.objectPresent)
 		)
 		.map((observation) => observation.row);
 }
@@ -91,7 +91,7 @@ function reconcileCandidates(
 // acting on it.
 interface RowObservation {
 	readonly row: NarInfoRow;
-	readonly narPresent: boolean;
+	readonly isNarPresent: boolean;
 	readonly objectPresent: boolean;
 }
 
@@ -911,7 +911,7 @@ export class VerificationService {
 
 			return {
 				row,
-				narPresent: isNarPresent,
+				isNarPresent: isNarPresent,
 				objectPresent: isNarPresent && (await isObjectPresent(row))
 			};
 		} catch (error) {
@@ -1086,7 +1086,7 @@ export class VerificationService {
 	): Promise<ReconcileOutcome> {
 		const {
 			row,
-			narPresent: isNarPresent,
+			isNarPresent: isNarPresent,
 			objectPresent: isObjectPresent
 		} = observation;
 		const current = this.narInfoRow(row.cache, row.storePathHash);

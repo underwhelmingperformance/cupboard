@@ -55,7 +55,7 @@ async function teardownPending(cache: string): Promise<unknown> {
 	);
 }
 
-async function narInfoObjectPresent(
+async function isNarInfoObjectPresent(
 	storePathHash: StorePathHash,
 	cache?: string
 ): Promise<boolean> {
@@ -104,7 +104,7 @@ describe('cache teardown', () => {
 			status: response.status,
 			removed,
 			rows: await rowsRemaining(paths),
-			object: await narInfoObjectPresent(first.storePathHash, 'builds'),
+			object: await isNarInfoObjectPresent(first.storePathHash, 'builds'),
 			pending: await teardownPending('builds')
 		}).toStrictEqual({
 			status: StatusCodes.OK,
@@ -136,7 +136,9 @@ describe('cache teardown', () => {
 		await vi.waitFor(async () => {
 			await currentServer().resumeCacheTeardown(1);
 			const present = await Promise.all(
-				paths.map((path) => narInfoObjectPresent(path.storePathHash, 'builds'))
+				paths.map((path) =>
+					isNarInfoObjectPresent(path.storePathHash, 'builds')
+				)
 			);
 			expect({
 				objectsLeft: present.filter(Boolean).length,
@@ -247,7 +249,7 @@ describe('cache teardown', () => {
 				edges: await blobReferenceRows(),
 				presence: await tenantBlobRows(),
 				pending: await teardownPending('builds'),
-				object: await narInfoObjectPresent(path.storePathHash, 'builds'),
+				object: await isNarInfoObjectPresent(path.storePathHash, 'builds'),
 				usage: {
 					bytes: usage?.bytes,
 					narinfos: usage?.narinfos,
@@ -360,7 +362,7 @@ describe('cache teardown', () => {
 			status: response.status,
 			recommittedGeneration,
 			generation: await narInfoGeneration(path.storePathHash),
-			object: await narInfoObjectPresent(path.storePathHash),
+			object: await isNarInfoObjectPresent(path.storePathHash),
 			queued: await narInfoDeletionRows()
 		}).toStrictEqual({
 			status: StatusCodes.OK,

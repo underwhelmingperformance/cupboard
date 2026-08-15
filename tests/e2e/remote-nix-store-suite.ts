@@ -176,7 +176,9 @@ async function withHostEnvironment<T>(run: () => Promise<T>): Promise<T> {
 	}
 }
 
-/** Declares the real SSH-backed remote-store cases. */
+/**
+Declares the real SSH-backed remote-store cases.
+*/
 export function describeRemoteNixStore(): void {
 	describe('remote Nix store end to end', () => {
 		beforeAll(async () => {

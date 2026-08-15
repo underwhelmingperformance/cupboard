@@ -18,10 +18,14 @@ import {
 const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 const sha256DigestBytes = 32;
 
-/** A hash algorithm supported by Nix. */
+/**
+A hash algorithm supported by Nix.
+*/
 export type NixHashAlgorithm = 'md5' | 'sha1' | 'sha256' | 'sha512';
 
-/** A hash parsed from a Nix value. */
+/**
+A hash parsed from a Nix value.
+*/
 export interface NixHash {
 	readonly algorithm: NixHashAlgorithm;
 	readonly bytes: Uint8Array;
@@ -229,7 +233,9 @@ export class NixSha256Hash {
 		return bytesToBase64(this.bytes);
 	}
 
-	/** The raw digest as lowercase hex, the form an in-toto subject uses. */
+	/**
+	The raw digest as lowercase hex, the form an in-toto subject uses.
+	*/
 	digestHex(): Sha256HexDigest {
 		return sha256HexDigestSchema.parse(bytesToHex(this.bytes));
 	}

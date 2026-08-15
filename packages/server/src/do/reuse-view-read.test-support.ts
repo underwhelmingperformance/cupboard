@@ -24,7 +24,9 @@ export interface ReuseSelector {
 	readonly pattern: string;
 }
 
-/** Defines or replaces the fixture tenant's `reuse` view through the admin API. */
+/**
+Defines or replaces the fixture tenant's `reuse` view through the admin API.
+*/
 export async function setView(
 	selectors: readonly ReuseSelector[]
 ): Promise<void> {
@@ -38,7 +40,9 @@ export async function setView(
 	expect(response.status).toBe(StatusCodes.OK);
 }
 
-/** The tenant-relative read path of a reuse-view narinfo lookup. */
+/**
+The tenant-relative read path of a reuse-view narinfo lookup.
+*/
 export function lookupPath(storePathHash: string, view = 'reuse'): string {
 	return `/reuse/${view}/${storePathHash}.narinfo`;
 }

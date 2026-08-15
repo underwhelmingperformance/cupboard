@@ -159,7 +159,9 @@ export function claimMismatches(
 		});
 }
 
-/** The first entry of {@link claimMismatches}, for a single-claim report. */
+/**
+The first entry of {@link claimMismatches}, for a single-claim report.
+*/
 export function firstClaimMismatch(
 	rule: OidcTrustRule,
 	claims: OidcClaims

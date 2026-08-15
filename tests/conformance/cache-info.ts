@@ -16,31 +16,47 @@ import {
 } from './narinfo.ts';
 import type { Oracle } from './oracle.ts';
 
-/** The on-disk cache fixture opened by both clients. */
+/**
+The on-disk cache fixture opened by both clients.
+*/
 export type CacheFixture = {
-	/** The store URI parameters both sides configure the cache with. */
+	/**
+	The store URI parameters both sides configure the cache with.
+	*/
 	readonly parameters?: string;
 } & (
 	| {
 			readonly kind: 'directory';
-			/** The served `nix-cache-info`, or `undefined` to omit it. */
+			/**
+			The served `nix-cache-info`, or `undefined` to omit it.
+			*/
 			readonly cacheInfo?: string;
 	  }
-	/** A store URI naming a regular file, which has no cache under it at all. */
+	/**
+	A store URI naming a regular file, which has no cache under it at all.
+	*/
 	| { readonly kind: 'file' }
 );
 
-/** One client's result for the cache directory. */
+/**
+One client's result for the cache directory.
+*/
 export interface CacheOutcome {
 	readonly oracle: {
-		/** Whether Nix opened the cache and queried the path. */
+		/**
+		Whether Nix opened the cache and queried the path.
+		*/
 		readonly opened: boolean;
 		readonly offer: OfferFields | undefined;
-		/** Why nix refused to open it, for a case that reports the refusal. */
+		/**
+		Why nix refused to open it, for a case that reports the refusal.
+		*/
 		readonly stderr: string;
 	};
 	readonly client: {
-		/** The cache as our client was configured with it. */
+		/**
+		The cache as our client was configured with it.
+		*/
 		readonly uri: string;
 		readonly offer: OfferFields | undefined;
 		readonly unreachable: readonly UnreachableSubstituter[];

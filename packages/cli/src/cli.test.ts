@@ -187,7 +187,9 @@ describe('buildProgram', () => {
 });
 
 const noop = (): void => {
-	/* a reporter method the funnel does not exercise */
+	/*
+	a reporter method the funnel does not exercise
+	*/
 };
 
 function fakeReporter(): { readonly reporter: Reporter; errors: unknown[] } {

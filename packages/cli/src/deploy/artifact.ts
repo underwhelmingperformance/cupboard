@@ -17,7 +17,9 @@ export interface DeploymentArtifact {
 	readonly controlBundle: WorkerBundle;
 	readonly tenantBundle: WorkerBundle;
 	readonly d1Migrations: readonly D1Migration[];
-	/** The version the bundled Workers answer on `/_version`. */
+	/**
+	The version the bundled Workers answer on `/_version`.
+	*/
 	readonly buildVersion: string;
 }
 

@@ -32,7 +32,9 @@ import { bridgedError } from './error-bridge.ts';
 const noPendingCache = (): Promise<StoredCache | undefined> =>
 	Promise.resolve(undefined);
 
-/** What a control procedure needs: the request (for auth and the public origin), the Worker env, and the request logger. */
+/**
+What a control procedure needs: the request (for auth and the public origin), the Worker env, and the request logger.
+*/
 export interface ControlOrpcContext {
 	readonly request: Request;
 	readonly env: Env;

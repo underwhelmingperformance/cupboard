@@ -38,7 +38,9 @@ import {
 	type TenantIdentityService
 } from './tenant-identity-service.ts';
 
-/** The RFC 8414 document a tenant advertises for its token endpoint. */
+/**
+The RFC 8414 document a tenant advertises for its token endpoint.
+*/
 export interface AuthorizationServerMetadata {
 	issuer: string;
 	token_endpoint: string;

@@ -105,7 +105,9 @@ const bucketName = resourceName('R2 bucket name', 63).min(
 const databaseName = resourceName('D1 database name', 63);
 const queueName = resourceName('queue name', 63);
 
-/** What a deploy-time edit can rename; KV titles are derived, not edited. */
+/**
+What a deploy-time edit can rename; KV titles are derived, not edited.
+*/
 export type EditableResourceKind = 'bucket' | 'database' | 'queue';
 
 const editableSchemas: Record<EditableResourceKind, () => z.ZodString> = {
@@ -128,7 +130,9 @@ export function resourceNameProblem(
 	return parsed.success ? undefined : parsed.error.issues[0]?.message;
 }
 
-/** Why `value` cannot be a cron trigger, or undefined when it can. */
+/**
+Why `value` cannot be a cron trigger, or undefined when it can.
+*/
 export function cronProblem(value: string): string | undefined {
 	const parsed = cronExpression.safeParse(value);
 

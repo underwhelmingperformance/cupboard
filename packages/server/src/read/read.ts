@@ -33,11 +33,13 @@ import {
 } from '../http/http.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 
-import { authoriseRead, unauthorisedResponse } from './read-auth.ts';
+import { isReadAuthorised, unauthorisedResponse } from './read-auth.ts';
 
 const cacheInfoBody = new TextBody(CacheInfo.default.render());
 
-/** The slice of the execution context the read path needs: deferred work. */
+/**
+The slice of the execution context the read path needs: deferred work.
+*/
 export interface ReadContext {
 	waitUntil(promise: Promise<unknown>): void;
 }
@@ -90,7 +92,7 @@ export async function guardRead(
 
 	const verifier = entry.readVerifier;
 
-	if (verifier !== undefined && (await authoriseRead(request, verifier))) {
+	if (verifier !== undefined && (await isReadAuthorised(request, verifier))) {
 		return undefined;
 	}
 
@@ -122,7 +124,7 @@ export function serveNar(
 		narCacheKey(tenant, narHash),
 		narHeaders,
 		!isPrivate,
-		() => tenantReferencesNar(env, tenant, narHash)
+		() => hasTenantNarReference(env, tenant, narHash)
 	);
 }
 
@@ -130,7 +132,7 @@ export function serveNar(
 // `tenant_blob` ownership check `findReusableBlob` uses on the negotiate path.
 // The read gets one bounded retry; a persistent fault refuses retryably, since
 // answering it as a miss would tell the client the path does not exist.
-async function tenantReferencesNar(
+async function hasTenantNarReference(
 	env: Env,
 	tenant: TenantId,
 	narHash: NixSha256HashString
@@ -246,7 +248,7 @@ function narCacheKey(
 	return edgeCacheKeySchema.parse(cacheKeyUrl.href);
 }
 
-// `authorize`, when provided, gates access to a shared object. It runs before
+// `isAuthorised`, when provided, gates access to a shared object. It runs before
 // any uncached read or existence probe, never on an edge-cache hit: a cached
 // entry is keyed per tenant, so a hit already proves this tenant was authorised
 // when it populated the cache. A false verdict reads as a 404.
@@ -258,10 +260,10 @@ async function serveR2(
 	cacheKey: EdgeCacheKey,
 	headersFor: (object: R2Object) => Headers,
 	isPublicCache: boolean,
-	authorize?: () => Promise<boolean>
+	isAuthorised?: () => Promise<boolean>
 ): Promise<Response> {
 	if (request.method === 'HEAD') {
-		if (authorize !== undefined && !(await authorize())) {
+		if (isAuthorised !== undefined && !(await isAuthorised())) {
 			return notFoundResponse();
 		}
 
@@ -290,7 +292,7 @@ async function serveR2(
 		}
 	}
 
-	if (authorize !== undefined && !(await authorize())) {
+	if (isAuthorised !== undefined && !(await isAuthorised())) {
 		return notFoundResponse();
 	}
 

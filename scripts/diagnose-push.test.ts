@@ -262,7 +262,9 @@ describe('parseSpanEvent', () => {
 
 const noSleep = (): Promise<void> => Promise.resolve();
 const noProgress = (): void => {
-	/* progress unobserved */
+	/*
+	progress unobserved
+	*/
 };
 const timestampRowSchema = z.object({ timestamp: z.unknown() });
 const timestampOf = (row: unknown): number | undefined => {

@@ -26,12 +26,18 @@ import {
 interface Fixture {
 	readonly env?: Readonly<Record<string, string | undefined>>;
 	readonly files?: Readonly<Record<string, string>>;
-	/** Files that are there and that this process may not read. */
+	/**
+	Files that are there and that this process may not read.
+	*/
 	readonly unreadable?: readonly string[];
 	readonly home?: string;
-	/** The directory the fixture runs in. A relative path resolves against it. */
+	/**
+	The directory the fixture runs in. A relative path resolves against it.
+	*/
 	readonly workingDirectory?: string;
-	/** The machine the fixture discovers on, defaulting to an Apple silicon one. */
+	/**
+	The machine the fixture discovers on, defaulting to an Apple silicon one.
+	*/
 	readonly currentSystem?: () => string | undefined;
 	/**
 	 * What that machine offers a build. The default offers nothing beyond the
@@ -40,7 +46,9 @@ interface Fixture {
 	readonly probes?: Partial<NixMachineProbes>;
 }
 
-/** The directory a fixture runs in by default. */
+/**
+The directory a fixture runs in by default.
+*/
 const defaultWorkingDirectory = '/work/dir';
 
 // Nix reads a store reference in one of three ways: as a URI, as a word that
@@ -140,16 +148,20 @@ const storeReferenceCases = [
 	{ name: 'the local store', written: 'local', resolved: 'local' }
 ];
 
-/** A machine offering nothing a build can ask for beyond the portable names. */
+/**
+A machine offering nothing a build can ask for beyond the portable names.
+*/
 const bareMachine: NixMachineProbes = {
 	canReadWrite: () => false,
-	fileExists: () => false,
+	isFilePresent: () => false,
 	hasHardwareVirtualisation: () => false,
 	isWsl1: () => false,
 	microarchitectureLevels: () => []
 };
 
-/** What the filesystem raises for a file this process may not read. */
+/**
+What the filesystem raises for a file this process may not read.
+*/
 function permissionDenied(filePath: string): Error {
 	return Object.assign(new Error(`EACCES: permission denied, ${filePath}`), {
 		code: 'EACCES'
@@ -195,7 +207,9 @@ function includeFailure(thrown: unknown): unknown {
 		: thrown;
 }
 
-/** What a machine file failure states, on the same terms. */
+/**
+What a machine file failure states, on the same terms.
+*/
 function machineFileFailure(thrown: unknown): unknown {
 	return thrown instanceof NixMachineFileError
 		? { name: thrown.name, source: thrown.source, reason: thrown.reason }
@@ -223,9 +237,11 @@ const defaultBuilding: NixBuildSettings = {
 	features: ['nixos-test', 'benchmark', 'big-parallel']
 };
 
-/** A machine with Rosetta 2 installed, which Nix reads from that one file. */
+/**
+A machine with Rosetta 2 installed, which Nix reads from that one file.
+*/
 const rosettaInstalled = {
-	fileExists: (filePath: string) =>
+	isFilePresent: (filePath: string) =>
 		filePath === '/Library/Apple/usr/libexec/oah/libRosettaRuntime'
 };
 

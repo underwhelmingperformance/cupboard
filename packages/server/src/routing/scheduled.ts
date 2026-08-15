@@ -547,7 +547,11 @@ async function drainTenant(
 		const { drained: isDrained } = await tenantServer(env, id).runOffboard(
 			drainLimit
 		);
-		const hasRemainingObjects = await deleteTenantObjects(env, id, drainLimit);
+		const hasRemainingObjects = await hasRemainingTenantObjects(
+			env,
+			id,
+			drainLimit
+		);
 
 		if (isDrained && !hasRemainingObjects) {
 			await finaliseTenant(env, id);
@@ -559,7 +563,7 @@ async function drainTenant(
 // Deletes a bounded batch of a tenant's namespaced R2 objects, returning whether
 // more remain so the drain runs again next tick. Listing from the prefix each tick
 // (the deleted keys gone) makes progress without a persisted cursor.
-async function deleteTenantObjects(
+async function hasRemainingTenantObjects(
 	env: Env,
 	id: TenantId,
 	limit: number
@@ -1112,7 +1116,7 @@ async function executeTenantMaintenanceMessage(
 ): Promise<MaintenanceQueueDecision> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
-	if (!(await tenantMaintenanceIsDue(database, tenant))) {
+	if (!(await isTenantMaintenanceDue(database, tenant))) {
 		return { action: 'ack' };
 	}
 
@@ -1209,7 +1213,7 @@ function overdueActiveTenants(
 		.all();
 }
 
-async function tenantMaintenanceIsDue(
+async function isTenantMaintenanceDue(
 	database: CronDatabase,
 	tenant: TenantId
 ): Promise<boolean> {

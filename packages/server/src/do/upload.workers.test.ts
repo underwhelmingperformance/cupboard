@@ -71,6 +71,7 @@ import {
 	handlerFetch,
 	initialise,
 	initialiseViaWorker,
+	isNarInfoSignatureValid,
 	issueServerSignedToken,
 	listRoots,
 	markUploadCommitting,
@@ -100,7 +101,6 @@ import {
 	verifiableNar,
 	verifiableNarStored,
 	verifiablePath,
-	verifyNarInfoSignature,
 	workerFetch
 } from '../test-support.ts';
 
@@ -440,7 +440,7 @@ describe('upload flow', () => {
 			sigs: [signature]
 		});
 		expect({
-			signatureVerified: await verifyNarInfoSignature(narInfo, init.publicKey)
+			signatureVerified: await isNarInfoSignatureValid(narInfo, init.publicKey)
 		}).toStrictEqual({ signatureVerified: true });
 		await expectTextResponse(
 			`/${metadata.storePathHash}.narinfo`,
@@ -2622,7 +2622,7 @@ describe('upload flow', () => {
 			}
 		});
 		expect({
-			signatureVerified: await verifyNarInfoSignature(parsed, init.publicKey)
+			signatureVerified: await isNarInfoSignatureValid(parsed, init.publicKey)
 		}).toStrictEqual({ signatureVerified: true });
 
 		const recommit = await commitUpload(init.token, second.uploadId);
@@ -2650,7 +2650,7 @@ describe('upload flow', () => {
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
 
 		expect({
-			signatureVerified: await verifyNarInfoSignature(narInfo, init.publicKey)
+			signatureVerified: await isNarInfoSignatureValid(narInfo, init.publicKey)
 		}).toStrictEqual({ signatureVerified: true });
 	});
 

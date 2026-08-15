@@ -54,7 +54,7 @@ async function deferredUpload(): Promise<{
 	};
 }
 
-async function narInfoObjectPresent(
+async function isNarInfoObjectPresent(
 	storePathHash: StorePathHash
 ): Promise<boolean> {
 	const object = await env.BLOBS.head(
@@ -97,7 +97,7 @@ describe('terminal verdicts against straggling verifications', () => {
 		expect({
 			row: await pendingUploadSnapshot(upload.uploadId),
 			generation: await narInfoGeneration(upload.storePathHash),
-			object: await narInfoObjectPresent(upload.storePathHash)
+			object: await isNarInfoObjectPresent(upload.storePathHash)
 		}).toStrictEqual({
 			row: settled,
 			generation: undefined,
@@ -181,7 +181,7 @@ describe('terminal verdicts against straggling verifications', () => {
 		expect({
 			row: await pendingUploadSnapshot(upload.uploadId),
 			generation: await narInfoGeneration(upload.storePathHash),
-			object: await narInfoObjectPresent(upload.storePathHash)
+			object: await isNarInfoObjectPresent(upload.storePathHash)
 		}).toStrictEqual({
 			row: settled,
 			generation: undefined,

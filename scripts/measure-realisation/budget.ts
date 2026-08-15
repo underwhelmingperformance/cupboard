@@ -10,7 +10,9 @@ import {
 	type RealisationReport
 } from './measurement.ts';
 
-/** A misuse of the gate: a baseline or tolerance it cannot work from. */
+/**
+A misuse of the gate: a baseline or tolerance it cannot work from.
+*/
 export abstract class BudgetError extends UsageError {}
 
 export class BaselineJsonError extends BudgetError {
@@ -75,7 +77,9 @@ export function parseBaseline(source: string): RealisationBaseline {
 	return parsed.data;
 }
 
-/** The share by which a measurement may exceed its budget and still pass. */
+/**
+The share by which a measurement may exceed its budget and still pass.
+*/
 export const defaultTolerance = 0.05;
 
 export function parseTolerance(value: string): number {
@@ -89,7 +93,9 @@ export function parseTolerance(value: string): number {
 	return tolerance;
 }
 
-/** Which part of a report a budget entry belongs to. */
+/**
+Which part of a report a budget entry belongs to.
+*/
 export type BudgetScope = 'target' | 'group' | 'combined';
 
 export interface BudgetBreach {
@@ -102,7 +108,9 @@ export interface BudgetBreach {
 	readonly excess: number;
 }
 
-/** A measurement the baseline sets no budget for, such as a new target. */
+/**
+A measurement the baseline sets no budget for, such as a new target.
+*/
 export interface UnbudgetedMeasurement {
 	readonly scope: BudgetScope;
 	readonly key: string;
@@ -226,7 +234,9 @@ function allowanceFor(expected: number, tolerance: number): number {
 // catch-all a crash in the fixture itself would produce.
 export const budgetExitCode = 65;
 
-/** Raised when a gate run measured more than a baseline allows. */
+/**
+Raised when a gate run measured more than a baseline allows.
+*/
 export class BudgetBreachError extends CodedError {
 	constructor(readonly breaches: readonly BudgetBreach[]) {
 		super(

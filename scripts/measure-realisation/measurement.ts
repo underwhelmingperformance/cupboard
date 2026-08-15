@@ -39,10 +39,14 @@ export const budgetedMetrics = [
 ] as const;
 export type BudgetedMetric = (typeof budgetedMetrics)[number];
 
-/** The difference between two measurements, metric by metric. */
+/**
+The difference between two measurements, metric by metric.
+*/
 export type MeasurementDelta = Readonly<Record<BudgetedMetric, number>>;
 
-/** The derivation a target's attr evaluates to, and what evaluating cost. */
+/**
+The derivation a target's attr evaluates to, and what evaluating cost.
+*/
 export interface ResolvedDerivation {
 	readonly drvPath: StorePathString;
 	readonly evaluationTimeMs: number;
@@ -54,20 +58,26 @@ export interface ResolvedDerivation {
  * store and no network.
  */
 export interface RealisationPlanner {
-	/** The derivation this target's attr names, evaluated if need be. */
+	/**
+	The derivation this target's attr names, evaluated if need be.
+	*/
 	resolve(target: PublishTarget): Promise<ResolvedDerivation>;
 	/**
 	 * Put the given derivations within the store's reach, so it can plan
 	 * against them. A store with no derivations cannot plan at all.
 	 */
 	seed(drvPaths: readonly StorePathString[]): Promise<void>;
-	/** What realising the given installables would require. */
+	/**
+	What realising the given installables would require.
+	*/
 	plan(
 		installables: readonly NixDerivedPathString[]
 	): Promise<NixMissingPartition>;
 }
 
-/** A monotonic millisecond reading, injected so timings are testable. */
+/**
+A monotonic millisecond reading, injected so timings are testable.
+*/
 export type Clock = () => number;
 
 export interface TargetTimings {
@@ -125,7 +135,9 @@ export interface MeasureOptions {
 
 const defaultClock: Clock = () => performance.now();
 
-/** The key the whole manifest is reported under when measured as one group. */
+/**
+The key the whole manifest is reported under when measured as one group.
+*/
 export const combinedGroupKey = 'all-targets';
 
 /**
@@ -248,7 +260,9 @@ async function timedPlan(
 	};
 }
 
-/** The report's measurement of a partition the store answered with. */
+/**
+The report's measurement of a partition the store answered with.
+*/
 export function measurementFrom(
 	partition: NixMissingPartition
 ): RealisationMeasurement {
@@ -261,7 +275,9 @@ export function measurementFrom(
 	});
 }
 
-/** The derived path naming a target's outputs on its evaluated derivation. */
+/**
+The derived path naming a target's outputs on its evaluated derivation.
+*/
 export function installableFor(
 	target: PublishTarget,
 	resolution: ResolvedDerivation

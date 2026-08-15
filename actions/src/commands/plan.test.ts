@@ -1820,7 +1820,9 @@ function packingRunner(options: {
 }
 
 function noop(): void {
-	/* test double: nothing to record */
+	/*
+	test double: nothing to record
+	*/
 }
 
 const neverMeasuresRunner: EnsureRunner = () =>

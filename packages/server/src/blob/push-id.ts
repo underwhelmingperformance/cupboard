@@ -75,7 +75,9 @@ export async function issuePushId(
 	);
 }
 
-/** Signs a push id over a fresh random nonce. */
+/**
+Signs a push id over a fresh random nonce.
+*/
 export async function createPushId(secret: PushIdSigningKey): Promise<PushId> {
 	return issuePushId(
 		secret,
@@ -83,8 +85,10 @@ export async function createPushId(secret: PushIdSigningKey): Promise<PushId> {
 	);
 }
 
-/** Whether the push id carries a tag this secret would have produced. */
-export async function verifyPushId(
+/**
+Whether the push id carries a tag this secret would have produced.
+*/
+export async function isPushIdValid(
 	secret: PushIdSigningKey,
 	pushId: string
 ): Promise<boolean> {

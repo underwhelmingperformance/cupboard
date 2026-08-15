@@ -69,7 +69,9 @@ class DiagnoseError extends CodedError {
 	}
 }
 
-/** A log line a Worker emitted, normalised to the fields the report needs. */
+/**
+A log line a Worker emitted, normalised to the fields the report needs.
+*/
 export interface WorkerLog {
 	readonly requestId: string | undefined;
 	readonly timestamp: number;
@@ -80,11 +82,15 @@ export interface WorkerLog {
 	readonly status: number | undefined;
 	readonly rowsRead: number;
 	readonly rowsWritten: number;
-	/** The operation bucket this line rolls up into. */
+	/**
+	The operation bucket this line rolls up into.
+	*/
 	readonly bucket: string;
 }
 
-/** One distributed trace: a single invocation with its total duration. */
+/**
+One distributed trace: a single invocation with its total duration.
+*/
 export interface TraceSummary {
 	readonly traceId: string;
 	readonly bucket: string;
@@ -94,7 +100,9 @@ export interface TraceSummary {
 	readonly errored: boolean;
 }
 
-/** One span: a unit of work inside a trace (a D1 query, an R2 op, ...). */
+/**
+One span: a unit of work inside a trace (a D1 query, an R2 op, ...).
+*/
 export interface SpanEvent {
 	readonly traceId: string;
 	readonly spanId: string | undefined;
@@ -116,7 +124,9 @@ export interface SpanStat {
 	readonly busyMs: number;
 }
 
-/** Per-operation rollup: timing from traces, row cost from logs. */
+/**
+Per-operation rollup: timing from traces, row cost from logs.
+*/
 export interface OperationStat {
 	readonly bucket: string;
 	readonly group: string;
@@ -129,15 +139,23 @@ export interface OperationStat {
 	readonly rowsRead: number;
 	readonly rowsWritten: number;
 	readonly errors: number;
-	/** Total spans across this operation's traces, from the trace summaries. */
+	/**
+	Total spans across this operation's traces, from the trace summaries.
+	*/
 	readonly spanCount: number;
-	/** Wall time not inside any traced subrequest: idle, blocked, or compute. */
+	/**
+	Wall time not inside any traced subrequest: idle, blocked, or compute.
+	*/
 	readonly unaccountedMs: number;
-	/** The operation's span kinds, busiest first (from the span events). */
+	/**
+	The operation's span kinds, busiest first (from the span events).
+	*/
 	readonly spans: readonly SpanStat[];
 }
 
-/** Every operation sharing a trigger kind, with the group's own totals. */
+/**
+Every operation sharing a trigger kind, with the group's own totals.
+*/
 export interface OperationGroup {
 	readonly group: string;
 	readonly tracedServerMs: number;
@@ -273,7 +291,9 @@ export function canonicalPath(rawPathOrUrl: string): string {
 	return normalisePath(stripTenantPrefix(pathOfUrl(rawPathOrUrl)));
 }
 
-/** The operation bucket for a log line: HTTP route, RPC method, or message. */
+/**
+The operation bucket for a log line: HTTP route, RPC method, or message.
+*/
 export function bucketForLog(
 	httpMethod: string | undefined,
 	rpcMethod: string | undefined,
@@ -291,7 +311,9 @@ export function bucketForLog(
 	return message;
 }
 
-/** The operation bucket for a trace, parsed from its root transaction name. */
+/**
+The operation bucket for a trace, parsed from its root transaction name.
+*/
 export function bucketForTrace(rootTransactionName: string): string {
 	const firstSpace = rootTransactionName.indexOf(' ');
 
@@ -815,7 +837,9 @@ export function analyse(
 	};
 }
 
-/** Collects operations by trigger group, each group most server time first. */
+/**
+Collects operations by trigger group, each group most server time first.
+*/
 export function groupOperations(
 	operations: readonly OperationStat[]
 ): OperationGroup[] {
@@ -908,7 +932,9 @@ export function buildVerdict(
 	return `${lead}: most time (${formatMs(top.totalMs)} over ${formatCount(top.traceCount)} calls, ${String(share)}% of ${group.group}) is ${top.bucket}, ${dominantCost(top)}.`;
 }
 
-/** The result card: the window, the headline verdict and the run totals. */
+/**
+The result card: the window, the headline verdict and the run totals.
+*/
 export function summaryRows(analysis: Analysis): ResultRow[] {
 	const from = new Date(analysis.window.from).toISOString();
 	const to = new Date(analysis.window.to).toISOString();
@@ -982,7 +1008,9 @@ export function operationRows(
 	});
 }
 
-/** The slowest individual invocations, longest first. */
+/**
+The slowest individual invocations, longest first.
+*/
 export function slowestRows(analysis: Analysis): ResultRow[] {
 	return analysis.slowest.map((trace) => ({
 		label: formatMs(trace.durationMs),
@@ -1318,16 +1346,22 @@ function serviceFilter(worker: string): {
 	};
 }
 
-/** Reports the number of rows in each page as it arrives. */
+/**
+Reports the number of rows in each page as it arrives.
+*/
 type PageProgress = (pageRows: number) => void;
 
-/** One page of a telemetry view, as the SDK's query returns it. */
+/**
+One page of a telemetry view, as the SDK's query returns it.
+*/
 export interface TelemetryPageResponse {
 	readonly events?: { readonly events?: unknown[] | null } | null;
 	readonly traces?: unknown[] | null;
 }
 
-/** The telemetry query as the pager consumes it: just the page parameters. */
+/**
+The telemetry query as the pager consumes it: just the page parameters.
+*/
 export type TelemetryQuery = (parameters: {
 	readonly view: 'events' | 'traces';
 	readonly limit: number;
@@ -1730,7 +1764,9 @@ export async function fetchPaged(
 	return rows;
 }
 
-/** Splits a window into up to `maxSlices` slices of about `sliceTargetMinutes`. */
+/**
+Splits a window into up to `maxSlices` slices of about `sliceTargetMinutes`.
+*/
 export function sliceWindow(window: TimeWindow): TimeWindow[] {
 	const span = window.to - window.from;
 
@@ -1762,7 +1798,9 @@ export function sliceWindow(window: TimeWindow): TimeWindow[] {
 	return slices;
 }
 
-/** Runs `task` over `items`, at most `limit` in flight, preserving order. */
+/**
+Runs `task` over `items`, at most `limit` in flight, preserving order.
+*/
 async function mapWithConcurrency<T, R>(
 	items: readonly T[],
 	limit: number,

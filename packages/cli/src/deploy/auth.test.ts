@@ -34,7 +34,9 @@ interface ChainCalls {
 	readonly logins: number;
 }
 
-/** What the fake chain's world contains; anything not given is absent. */
+/**
+What the fake chain's world contains; anything not given is absent.
+*/
 interface ChainWorld {
 	readonly env?: Readonly<Record<string, string | undefined>>;
 	readonly storedGrant?: CloudflareGrant;
@@ -355,7 +357,9 @@ describe('resolveCredential', () => {
 	});
 });
 
-/** An unsigned id_token whose payload carries the given expiry (seconds). */
+/**
+An unsigned id_token whose payload carries the given expiry (seconds).
+*/
 function tokenExpiringAt(expSeconds: number): string {
 	const header = Buffer.from(JSON.stringify({ alg: 'RS256' })).toString(
 		'base64url'

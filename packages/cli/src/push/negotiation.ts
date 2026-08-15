@@ -1,6 +1,8 @@
 import { UploadNegotiationMismatchError } from '../errors.ts';
 
-/** The identity shared by one requested path and the decision answering it. */
+/**
+The identity shared by one requested path and the decision answering it.
+*/
 export interface UploadNegotiationIdentity {
 	readonly storePathHash: string;
 	readonly narHash: string;

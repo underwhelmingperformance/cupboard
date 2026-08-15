@@ -22,14 +22,18 @@ export { getLogger } from '@logtape/logtape';
 // operation-scoped loggers extend it with `.with(fields)`.
 export const loggerCategory = ['cupboard'] as const;
 
-/** Options for {@link configureLogging}. */
+/**
+Options for {@link configureLogging}.
+*/
 export interface LoggingOptions {
 	/**
 	 * Where records are written; one of the sinks from `@cupboard/logger/sinks`.
 	 * Omit it to have {@link resolveSink} choose from the environment.
 	 */
 	readonly sink?: Sink;
-	/** The lowest level to emit; defaults to `debug`. */
+	/**
+	The lowest level to emit; defaults to `debug`.
+	*/
 	readonly lowestLevel?: LogLevel;
 }
 

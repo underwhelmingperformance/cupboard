@@ -75,7 +75,7 @@ function storeFile(root: string, storePath: StorePathString): string {
 	return path.join(root, storePath);
 }
 
-async function exists(file: string): Promise<boolean> {
+async function isPresent(file: string): Promise<boolean> {
 	try {
 		await access(file);
 		return true;
@@ -176,7 +176,7 @@ describe.skipIf(!isNixPresent)('cohort job store isolation', () => {
 			prepared.cohortStoreRoot,
 			derivation
 		);
-		expect(await exists(cohortDerivationFile)).toBe(false);
+		expect(await isPresent(cohortDerivationFile)).toBe(false);
 
 		replaceProcessEnvironment(prepared.cohortEnvironment);
 		let wasMaterialisedWhenPlanned = false;
@@ -201,7 +201,7 @@ describe.skipIf(!isNixPresent)('cohort job store isolation', () => {
 			}
 		];
 		const runCupboardMock: typeof runCupboard = async () => {
-			wasMaterialisedWhenPlanned = await exists(cohortDerivationFile);
+			wasMaterialisedWhenPlanned = await isPresent(cohortDerivationFile);
 
 			return planResult;
 		};
@@ -250,7 +250,7 @@ describe.skipIf(!isNixPresent)('cohort job store isolation', () => {
 
 		expect({
 			wasMaterialisedWhenPlanned,
-			cohortDerivationExists: await exists(cohortDerivationFile)
+			cohortDerivationExists: await isPresent(cohortDerivationFile)
 		}).toStrictEqual({
 			wasMaterialisedWhenPlanned: true,
 			cohortDerivationExists: true

@@ -19,7 +19,9 @@ export type PublicationKind = 'target' | 'intermediate';
  */
 export type PublicationMetadataSource = 'local' | 'reference';
 
-/** One path a push publishes, tagged with what it is declared as. */
+/**
+One path a push publishes, tagged with what it is declared as.
+*/
 export interface PublicationEntry {
 	readonly storePath: StorePathString;
 	readonly kind: PublicationKind;
@@ -27,9 +29,13 @@ export interface PublicationEntry {
 }
 
 export interface PublicationInput {
-	/** The paths the push retains under its declared root or pins. */
+	/**
+	The paths the push retains under its declared root or pins.
+	*/
 	readonly targets: readonly string[];
-	/** Paths published alongside the targets, never retained as targets. */
+	/**
+	Paths published alongside the targets, never retained as targets.
+	*/
 	readonly intermediatePaths?: readonly string[];
 	/**
 	 * Targets the tenant already holds, published from the reference source's
@@ -104,24 +110,32 @@ export class PublicationCollection {
 		return this.#kinds.get(storePath) ?? 'intermediate';
 	}
 
-	/** Every entry's store path, deduplicated, declared targets first. */
+	/**
+	Every entry's store path, deduplicated, declared targets first.
+	*/
 	get storePaths(): readonly StorePathString[] {
 		return this.entries.map((entry) => entry.storePath);
 	}
 
-	/** The declared targets, which are the only paths a push retains. */
+	/**
+	The declared targets, which are the only paths a push retains.
+	*/
 	get targetPaths(): readonly StorePathString[] {
 		return this.entries
 			.filter((entry) => entry.kind === 'target')
 			.map((entry) => entry.storePath);
 	}
 
-	/** The entries the local Nix store resolves. */
+	/**
+	The entries the local Nix store resolves.
+	*/
 	get localEntries(): readonly PublicationEntry[] {
 		return this.entries.filter((entry) => entry.source === 'local');
 	}
 
-	/** The entries the reference source's served metadata resolves. */
+	/**
+	The entries the reference source's served metadata resolves.
+	*/
 	get referenceEntries(): readonly PublicationEntry[] {
 		return this.entries.filter((entry) => entry.source === 'reference');
 	}

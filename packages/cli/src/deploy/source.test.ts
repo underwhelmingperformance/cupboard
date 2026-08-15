@@ -50,7 +50,7 @@ function environment(overrides: Partial<RunEnvironment>): RunEnvironment {
 		isSea: false,
 		cwd: '/repo/packages/cli',
 		fromTree: false,
-		fileExists: isInCheckout,
+		isFilePresent: isInCheckout,
 		...overrides
 	};
 }
@@ -70,7 +70,7 @@ describe('planWorkerSource', () => {
 			.parse(
 				thrownBy(() =>
 					planWorkerSource(
-						environment({ isSea: false, fileExists: hasNoCheckout })
+						environment({ isSea: false, isFilePresent: hasNoCheckout })
 					)
 				)
 			);
@@ -83,7 +83,9 @@ describe('planWorkerSource', () => {
 
 	it('deploys embedded bundles from the released binary outside a checkout', () => {
 		expect(
-			planWorkerSource(environment({ isSea: true, fileExists: hasNoCheckout }))
+			planWorkerSource(
+				environment({ isSea: true, isFilePresent: hasNoCheckout })
+			)
 		).toStrictEqual({
 			mode: 'embedded',
 			checkoutRoot: undefined,

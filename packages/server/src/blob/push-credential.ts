@@ -7,9 +7,9 @@ import { stagingPushPrefix } from '../http/http.ts';
 import type { R2PresignerConfiguration } from './presign.ts';
 import {
 	createPushId,
+	isPushIdValid,
 	type PushIdSigningKey,
-	pushIdSigningKeySchema,
-	verifyPushId
+	pushIdSigningKeySchema
 } from './push-id.ts';
 import {
 	createR2TemporaryCredentials,
@@ -95,6 +95,6 @@ export class PushCredentialIssuer {
 	}
 
 	verify(pushId: PushId): Promise<boolean> {
-		return verifyPushId(this.signingKey, pushId);
+		return isPushIdValid(this.signingKey, pushId);
 	}
 }

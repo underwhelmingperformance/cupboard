@@ -95,7 +95,9 @@ describe('loginScopeForClient', () => {
 
 const now = 1_700_000_000_000;
 
-/** An unsigned id_token whose payload carries the given expiry (seconds). */
+/**
+An unsigned id_token whose payload carries the given expiry (seconds).
+*/
 function tokenExpiringAt(expSeconds: number): string {
 	const header = Buffer.from(JSON.stringify({ alg: 'RS256' })).toString(
 		'base64url'

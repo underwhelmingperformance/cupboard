@@ -77,8 +77,8 @@ import {
 	controlKeySummaries,
 	type ControlKeySummary,
 	controlVerificationKeys,
+	didRetireControlKey,
 	ensureControlKey,
-	retireControlKey,
 	rotateControlKey
 } from './control-key-store.ts';
 import {
@@ -288,7 +288,9 @@ async function verifyControlInbound(
 	}
 }
 
-/** The key set verifying control-issued admin tokens, as a JWKS document. */
+/**
+The key set verifying control-issued admin tokens, as a JWKS document.
+*/
 export async function controlJwks(env: Env): Promise<{
 	keys: (JsonWebKey & { kid: string; alg: string; use: string })[];
 }> {
@@ -424,7 +426,7 @@ export async function controlKeyRetire(
 	kid: AuthKeyId
 ): Promise<{ kid: AuthKeyId; retired: boolean }> {
 	const now = new Date();
-	const isRetired = await retireControlKey(
+	const isRetired = await didRetireControlKey(
 		controlDatabase(env),
 		kid,
 		isoTimestamp(now)
@@ -505,7 +507,7 @@ export async function controlTenantCreate(
 	await writeTenantMember(env.TENANT_CACHE, summary.id);
 	await invalidateTenantRow(summary.id);
 
-	// Publish the rebuilt filter so the new tenant is admittable within the filter
+	// Publish the rebuilt filter so the new tenant is isAdmittable within the filter
 	// cache TTL. A filter negative is definitive, so the create must not report
 	// success while leaving the tenant inadmissible until the hourly cron: if the
 	// filter cannot publish, the create fails and the caller retries. The row and
@@ -577,7 +579,7 @@ export async function controlTenantOffboard(
 	await invalidateTenantRow(id);
 
 	// The membership marker is left in place: an offboarding tenant is still
-	// `status != 'offboarded'`, so it stays admittable to the authoritative status
+	// `status != 'offboarded'`, so it stays isAdmittable to the authoritative status
 	// read, which stops its writes and 404s its reads. Finalisation deletes the
 	// marker once the drain completes.
 	//

@@ -77,7 +77,9 @@ interface Repository {
 
 interface PublishInputs {
 	readonly version: string;
-	/** The cache the release's builds are pushed to, named after the tag. */
+	/**
+	The cache the release's builds are pushed to, named after the tag.
+	*/
 	readonly cache: CacheName;
 	readonly githubToken: string;
 	readonly repository: Repository;
@@ -199,7 +201,9 @@ type FetchLike = (
 	url: string
 ) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
 
-/** The cache signing key the deployment serves at `/pubkey`. */
+/**
+The cache signing key the deployment serves at `/pubkey`.
+*/
 export async function fetchCachePublicKey(
 	baseUrl: URL,
 	fetchLike: FetchLike = fetch

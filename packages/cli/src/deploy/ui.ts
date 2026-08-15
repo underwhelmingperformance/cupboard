@@ -10,7 +10,9 @@ export { type MenuEntry, terminalLink, type TextEdit } from '@cupboard/cli-ui';
  * picking the Cloudflare account the deploy targets.
  */
 export interface DeployUi extends CliUi {
-	/** Undefined when cancelled. */
+	/**
+	Undefined when cancelled.
+	*/
 	chooseAccount(
 		accounts: readonly AccountSummary[]
 	): Promise<CloudflareAccountId | undefined>;
@@ -18,7 +20,9 @@ export interface DeployUi extends CliUi {
 
 export interface DeployUiOptions {
 	readonly signal?: AbortSignal;
-	/** ANSI colour preference from `--colour`/`--no-colour`. */
+	/**
+	ANSI colour preference from `--colour`/`--no-colour`.
+	*/
 	readonly colour?: boolean;
 }
 

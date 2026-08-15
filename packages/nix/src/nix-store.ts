@@ -21,10 +21,14 @@ export type UnreachableSubstituter = {
 	readonly uri: string;
 } & UnreachableSubstituterCause;
 
-/** Why a substituter could not be queried. */
+/**
+Why a substituter could not be queried.
+*/
 export type UnreachableSubstituterCause =
 	| { readonly reason: 'unreadable-uri' }
-	/** A store this reader does not open, such as `s3://` or `ssh://`. */
+	/**
+	A store this reader does not open, such as `s3://` or `ssh://`.
+	*/
 	| { readonly reason: 'unsupported-scheme' }
 	| { readonly reason: 'no-cache-info' }
 	/**
@@ -38,9 +42,13 @@ export type UnreachableSubstituterCause =
 			 * The substituter serves paths for a different store directory.
 			 */
 			readonly reason: 'store-directory-mismatch';
-			/** The store directory the substituter serves paths for. */
+			/**
+			The store directory the substituter serves paths for.
+			*/
 			readonly servesStoreDirectory: StoreDirectory;
-			/** The requested store directory. */
+			/**
+			The requested store directory.
+			*/
 			readonly queriedStoreDirectory: StoreDirectory;
 	  };
 
@@ -72,7 +80,9 @@ interface NixOfferedPath {
 	 * The uncompressed NAR size included in the signed fingerprint.
 	 */
 	readonly narSize: number;
-	/** Bytes the fetch would transfer; zero when unavailable. */
+	/**
+	Bytes the fetch would transfer; zero when unavailable.
+	*/
 	readonly downloadSize: number;
 }
 
@@ -91,9 +101,13 @@ export interface NixDaemonOffer extends NixOfferedPath {
  */
 export interface NixSubstituterOffer extends NixOfferedPath {
 	readonly source: 'substituter';
-	/** The NAR hash the substituter would serve the path under. */
+	/**
+	The NAR hash the substituter would serve the path under.
+	*/
 	readonly narHash: NixSha256Hash;
-	/** The signatures the substituter published for the path. */
+	/**
+	The signatures the substituter published for the path.
+	*/
 	readonly signatures: readonly string[];
 	/**
 	 * Whether the substituter that made this offer is configured as trusted. Nix
@@ -157,7 +171,9 @@ export type NixBuildOutcome =
 			readonly message: string;
 	  };
 
-/** One build result keyed by its derived path. */
+/**
+One build result keyed by its derived path.
+*/
 export interface NixBuildResult {
 	readonly target: NixDerivedPathString;
 	readonly outcome: NixBuildOutcome;
@@ -167,12 +183,18 @@ export interface NixBuildResult {
 	readonly stopTime: number;
 }
 
-/** How the daemon should realise a requested derivation. */
+/**
+How the daemon should realise a requested derivation.
+*/
 export type NixBuildMode = 'normal' | 'check';
 
-/** Operations provided by a selected Nix store backend. */
+/**
+Operations provided by a selected Nix store backend.
+*/
 export interface NixStoreClient {
-	/** Whether this transport deliberately omits per-connection SetOptions. */
+	/**
+	Whether this transport deliberately omits per-connection SetOptions.
+	*/
 	readonly preservesDaemonOptions?: boolean;
 	/**
 	 * The stores each path was copied from, in the order the store reported
@@ -377,7 +399,9 @@ export class InvalidNixStorePathError extends NixStoreError {
 	}
 }
 
-/** Why an `include` line could not be followed. */
+/**
+Why an `include` line could not be followed.
+*/
 export type NixConfigIncludeFailure =
 	| 'too-many-nested-includes'
 	| 'file-does-not-exist'
@@ -434,7 +458,9 @@ export class NixNetrcSyntaxError extends NixStoreError {
 	}
 }
 
-/** Why a `builders` value's `@file` entries could not be expanded. */
+/**
+Why a `builders` value's `@file` entries could not be expanded.
+*/
 export type NixMachineFileFailure =
 	'too-many-nested-machine-files' | 'file-could-not-be-read';
 
@@ -451,7 +477,9 @@ const machineFileFailureDescriptions: Readonly<
  */
 export class NixMachineFileError extends NixStoreError {
 	constructor(
-		/** The builders value, or the machines file, the failure is about. */
+		/**
+		The builders value, or the machines file, the failure is about.
+		*/
 		public readonly source: string,
 		public readonly reason: NixMachineFileFailure,
 		options?: ErrorOptions
@@ -477,7 +505,9 @@ export class NixConfigSettingError extends NixStoreError {
 	}
 }
 
-/** The setting a discovered store directory came from. */
+/**
+The setting a discovered store directory came from.
+*/
 export type NixStoreDirectorySource = 'NIX_STORE_DIR' | 'NIX_STORE';
 
 export class InvalidNixStoreDirectoryError extends NixStoreError {

@@ -32,7 +32,9 @@ const sourceReferencePath = path('k', 'source-reference');
 const unavailableSourcePath = path('l', 'unavailable-source');
 const heldSourcePath = path('m', 'held-source');
 
-/** A derivation naming the outputs it produces and the ones it builds from. */
+/**
+A derivation naming the outputs it produces and the ones it builds from.
+*/
 function derivation(options: {
 	readonly outputs: readonly (readonly [string, StorePathString | ''])[];
 	readonly inputs?: readonly (readonly [StorePathString, readonly string[]])[];
@@ -58,14 +60,18 @@ function quoted(names: readonly string[]): string {
 	return names.map((name) => `"${name}"`).join(',');
 }
 
-/** The derivations a store holds, by the path each one sits at. */
+/**
+The derivations a store holds, by the path each one sits at.
+*/
 function stored(
 	...entries: readonly (readonly [StorePathString, Derivation])[]
 ): ReadonlyMap<StorePathString, Derivation> {
 	return new Map(entries);
 }
 
-/** What the substituters offer, as a store path to the references it brings. */
+/**
+What the substituters offer, as a store path to the references it brings.
+*/
 function offers(
 	...entries: readonly (readonly [
 		StorePathString,
@@ -95,9 +101,13 @@ function offer(
 }
 
 interface SourceOptions {
-	/** The paths this store already holds. */
+	/**
+	The paths this store already holds.
+	*/
 	readonly valid?: readonly StorePathString[];
-	/** The derivation at each path the store holds. */
+	/**
+	The derivation at each path the store holds.
+	*/
 	readonly derivations?: ReadonlyMap<StorePathString, Derivation>;
 	readonly offered?: ReadonlyMap<StorePathString, readonly StorePathString[]>;
 	readonly substitute?: boolean;
@@ -105,7 +115,9 @@ interface SourceOptions {
 }
 
 interface RecordingSource extends RealisationPartitionSource {
-	/** Each batch of paths the substituters were asked about. */
+	/**
+	Each batch of paths the substituters were asked about.
+	*/
 	readonly substituterBatches: StorePathString[][];
 }
 

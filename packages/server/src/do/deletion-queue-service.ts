@@ -279,7 +279,9 @@ export class DeletionQueueService {
 		try {
 			await this.context.cache.delete(key);
 		} catch {
-			/* edge purge is best-effort */
+			/*
+			edge purge is best-effort
+			*/
 		}
 	}
 

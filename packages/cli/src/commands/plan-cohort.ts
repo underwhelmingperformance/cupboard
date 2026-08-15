@@ -166,7 +166,9 @@ export interface RemoteStoreCapacitySkip {
 	readonly skipped: 'remote-store';
 }
 
-/** The realisation and publication partition {@link runPlanCohort} reports. */
+/**
+The realisation and publication partition {@link runPlanCohort} reports.
+*/
 export interface PlanCohortResult {
 	readonly partition: AvailabilityPartition;
 	readonly capacity: CapacityCheckResult | RemoteStoreCapacitySkip;
@@ -234,7 +236,9 @@ export interface PlanCohortRunOptions {
 	readonly targets: readonly ParsedCohortTarget[];
 	readonly cacheName: string;
 	readonly ttlSeconds?: TtlSeconds;
-	/** The kind and URI of the selected store, for refusal diagnostics. */
+	/**
+	The kind and URI of the selected store, for refusal diagnostics.
+	*/
 	readonly storeIdentity: PlanStore;
 	readonly storePath: string;
 	readonly planFile: string;
@@ -777,7 +781,9 @@ export async function readCohortTargets(
 	return parsed.data.targets;
 }
 
-/** The read-credential options a private cache's own probes are given. */
+/**
+The read-credential options a private cache's own probes are given.
+*/
 export interface ReadCredentialOptions {
 	readonly readUser?: ReadUser;
 	readonly readPassword?: string;

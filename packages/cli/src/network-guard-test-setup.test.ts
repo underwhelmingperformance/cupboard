@@ -45,7 +45,9 @@ function guardFacts(failure: unknown): unknown {
 	};
 }
 
-/** Makes a fetch request and returns what it rejected with. */
+/**
+Makes a fetch request and returns what it rejected with.
+*/
 async function fetchFailure(url: string): Promise<unknown> {
 	try {
 		await fetch(url);

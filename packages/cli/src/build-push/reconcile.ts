@@ -89,24 +89,36 @@ export interface DerivationSnapshot {
 export interface ReconcileOptions {
 	readonly targets: readonly ReconcileTarget[];
 	readonly partition?: ReconcilePartition;
-	/** The streaming session's terminal per-path outcomes. */
+	/**
+	The streaming session's terminal per-path outcomes.
+	*/
 	readonly outcomes: ReadonlyMap<StorePathString, BatchPathOutcome>;
-	/** The paths whose streaming publication failed, awaiting reconciliation. */
+	/**
+	The paths whose streaming publication failed, awaiting reconciliation.
+	*/
 	readonly candidates: readonly StorePathString[];
 	readonly snapshot: DerivationSnapshot;
-	/** Exact per-target results when the run drove the build itself. */
+	/**
+	Exact per-target results when the run drove the build itself.
+	*/
 	readonly buildResults?: readonly NixBuildResult[];
-	/** Paths published alongside the targets without joining any target root. */
+	/**
+	Paths published alongside the targets without joining any target root.
+	*/
 	readonly intermediatePaths?: readonly StorePathString[];
 	readonly store: Pick<
 		Nix,
 		'queryValidPathsInfo' | 'queryDerivationOutputPaths'
 	>;
 	readonly client: PushClient;
-	/** The run root re-driven publications bind at negotiate, exactly as a flush does. */
+	/**
+	The run root re-driven publications bind at negotiate, exactly as a flush does.
+	*/
 	readonly runRoot?: UploadAttachRoot;
 	readonly ttlSeconds?: TtlSeconds;
-	/** Whether deferred verification verdicts are awaited; defaults to true. */
+	/**
+	Whether deferred verification verdicts are awaited; defaults to true.
+	*/
 	readonly wait?: boolean;
 	readonly commitOptions?: CommitOptions;
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
@@ -119,11 +131,15 @@ export interface ReconcileOptions {
 	 * every other published path from that path's store metadata.
 	 */
 	readonly subjects?: readonly BuildSubjectV3[];
-	/** The stores the run watched each path being copied from. */
+	/**
+	The stores the run watched each path being copied from.
+	*/
 	readonly copiedFrom?: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 }
 
-/** One declared target root's reconciliation: replaced, or left untouched. */
+/**
+One declared target root's reconciliation: replaced, or left untouched.
+*/
 export interface ReconciledRoot {
 	readonly root: RootName;
 	readonly applied: boolean;

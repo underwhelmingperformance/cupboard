@@ -10,7 +10,9 @@ import type { NixSubstituterOffer } from './nix-store.ts';
 import type { NixSignatureSettings } from './store-config.ts';
 import type { AcceptsOffer } from './substitutable-closure.ts';
 
-/** Reads a configured secret key file, or returns `undefined` on failure. */
+/**
+Reads a configured secret key file, or returns `undefined` on failure.
+*/
 export type ReadKeyFile = (filePath: string) => string | undefined;
 
 /**
@@ -49,7 +51,7 @@ export function offerAcceptance(
 			return Promise.resolve(true);
 		}
 
-		return trusted.verifies(offerFingerprint(offer), offer.signatures);
+		return trusted.hasValidSignature(offerFingerprint(offer), offer.signatures);
 	};
 }
 

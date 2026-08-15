@@ -21,7 +21,9 @@ interface SigningKey {
 	readonly name: NixKeyName;
 	readonly published: NixPublicKey;
 	sign(over: NixFingerprint): Promise<NixSignature>;
-	/** The key file Nix writes, whose last 32 bytes are the public half. */
+	/**
+	The key file Nix writes, whose last 32 bytes are the public half.
+	*/
 	secretFile(): Promise<string>;
 }
 
@@ -74,7 +76,7 @@ describe('NixTrustedKeys', () => {
 		const trusted = NixTrustedKeys.of([key.published.value]);
 
 		await expect(
-			trusted.verifies(fingerprint, [signature.value])
+			trusted.hasValidSignature(fingerprint, [signature.value])
 		).resolves.toBe(true);
 	});
 
@@ -85,7 +87,7 @@ describe('NixTrustedKeys', () => {
 		const trusted = NixTrustedKeys.of([other.published.value]);
 
 		await expect(
-			trusted.verifies(fingerprint, [signature.value])
+			trusted.hasValidSignature(fingerprint, [signature.value])
 		).resolves.toBe(false);
 	});
 
@@ -98,7 +100,7 @@ describe('NixTrustedKeys', () => {
 		const trusted = NixTrustedKeys.of([signing.published.value]);
 
 		await expect(
-			trusted.verifies(fingerprint, [signature.value])
+			trusted.hasValidSignature(fingerprint, [signature.value])
 		).resolves.toBe(false);
 	});
 
@@ -108,9 +110,10 @@ describe('NixTrustedKeys', () => {
 		const trusted = NixTrustedKeys.of([key.published.value]);
 
 		await expect(
-			trusted.verifies(nixFingerprintSchema.parse(`${fingerprint}/other`), [
-				signature.value
-			])
+			trusted.hasValidSignature(
+				nixFingerprintSchema.parse(`${fingerprint}/other`),
+				[signature.value]
+			)
 		).resolves.toBe(false);
 	});
 
@@ -122,7 +125,7 @@ describe('NixTrustedKeys', () => {
 		const trusted = NixTrustedKeys.of([key.published.value]);
 
 		await expect(
-			trusted.verifies(fingerprint, [
+			trusted.hasValidSignature(fingerprint, [
 				'not a signature',
 				'other-1:AAAA',
 				signature.value
@@ -137,7 +140,10 @@ describe('NixTrustedKeys', () => {
 		const key = await signingKey('cache-1');
 
 		await expect(
-			NixTrustedKeys.of([key.published.value]).verifies(fingerprint, signatures)
+			NixTrustedKeys.of([key.published.value]).hasValidSignature(
+				fingerprint,
+				signatures
+			)
 		).resolves.toBe(false);
 	});
 
@@ -157,7 +163,7 @@ describe('NixTrustedKeys', () => {
 		const signature = await second.sign(fingerprint);
 
 		await expect(
-			trusted.verifies(fingerprint, [signature.value])
+			trusted.hasValidSignature(fingerprint, [signature.value])
 		).resolves.toBe(false);
 	});
 });
@@ -177,9 +183,10 @@ describe('publicKeyOfSecret', () => {
 		const signature = await key.sign(fingerprint);
 
 		await expect(
-			NixTrustedKeys.of([published?.value ?? '']).verifies(fingerprint, [
-				signature.value
-			])
+			NixTrustedKeys.of([published?.value ?? '']).hasValidSignature(
+				fingerprint,
+				[signature.value]
+			)
 		).resolves.toBe(true);
 	});
 

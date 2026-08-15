@@ -73,7 +73,9 @@ export class UnexpectedSettingShapeError extends Error {
 	}
 }
 
-/** The settings `nix config show` resolved, read in the shapes Nix gives them. */
+/**
+The settings `nix config show` resolved, read in the shapes Nix gives them.
+*/
 export class OracleSettings {
 	static parse(output: string): OracleSettings {
 		let parsed: unknown;
@@ -138,10 +140,14 @@ export class OracleSettings {
 	}
 }
 
-/** A value either side resolves a configuration field to. */
+/**
+A value either side resolves a configuration field to.
+*/
 type FieldValue = string | number | boolean | readonly string[] | undefined;
 
-/** Resolved fields keyed by the names in {@link fieldAdapters}. */
+/**
+Resolved fields keyed by the names in {@link fieldAdapters}.
+*/
 export type FieldValues = Readonly<Record<string, FieldValue>>;
 
 /**
@@ -150,9 +156,13 @@ export type FieldValues = Readonly<Record<string, FieldValue>>;
  * adapter states the arithmetic and the shape that brings the two together.
  */
 interface FieldAdapter {
-	/** How the comparison names the field. */
+	/**
+	How the comparison names the field.
+	*/
 	readonly field: string;
-	/** The `nix config show` settings used to derive the oracle value. */
+	/**
+	The `nix config show` settings used to derive the oracle value.
+	*/
 	readonly settings: readonly string[];
 	readonly fromOracle: (settings: OracleSettings) => FieldValue;
 	readonly fromClient: (config: NixStoreConfig) => FieldValue;
@@ -274,7 +284,9 @@ const fieldAdapters: readonly FieldAdapter[] = [
 	}
 ];
 
-/** Settings consumed by the adapter table. */
+/**
+Settings consumed by the adapter table.
+*/
 export const mappedSettings: readonly string[] = sorted([
 	...new Set(fieldAdapters.flatMap((adapter) => adapter.settings))
 ]);
@@ -351,7 +363,9 @@ export const settingsAbsentFromTheOracle: readonly string[] = [
 	'filetransfer-retry-max-delay'
 ];
 
-/** In-scope settings the four groups do not model, reported by the suite. */
+/**
+In-scope settings the four groups do not model, reported by the suite.
+*/
 export function unmodelledSettings(
 	settings: OracleSettings
 ): readonly string[] {
@@ -362,7 +376,9 @@ export function unmodelledSettings(
 	);
 }
 
-/** In-scope settings the pinned oracle does not report at all. */
+/**
+In-scope settings the pinned oracle does not report at all.
+*/
 export function settingsMissingFromOracle(
 	settings: OracleSettings
 ): readonly string[] {
@@ -431,13 +447,21 @@ function readFileOrEmpty(filePath: string): string {
 	}
 }
 
-/** One configuration for both sides to resolve. */
+/**
+One configuration for both sides to resolve.
+*/
 export interface ConfigurationFixture {
-	/** The contents of the `nix.conf` the fixture points Nix at. */
+	/**
+	The contents of the `nix.conf` the fixture points Nix at.
+	*/
 	readonly nixConf: string;
-	/** A machines file written beside it, for a `builders` setting naming one. */
+	/**
+	A machines file written beside it, for a `builders` setting naming one.
+	*/
 	readonly machines?: string;
-	/** Set as `NIX_CONFIG`, which both sides apply over the files. */
+	/**
+	Set as `NIX_CONFIG`, which both sides apply over the files.
+	*/
 	readonly inlineConfig?: string;
 	/**
 	 * A configuration directory below the fixture home, selected through
@@ -447,20 +471,28 @@ export interface ConfigurationFixture {
 	readonly configDirectory?: string;
 }
 
-/** Every mapped field resolved by both clients. */
+/**
+Every mapped field resolved by both clients.
+*/
 export interface FieldComparison {
 	readonly oracle: FieldValues;
 	readonly client: FieldValues;
 }
 
-/** What both sides made of one fixture. */
+/**
+What both sides made of one fixture.
+*/
 export interface ResolvedFixture {
 	readonly oracleAccepted: boolean;
 	readonly oracleStderr: string;
-	/** The oracle's settings, absent when it rejected the configuration. */
+	/**
+	The oracle's settings, absent when it rejected the configuration.
+	*/
 	readonly settings: OracleSettings | undefined;
 	readonly clientAccepted: boolean;
-	/** What our client threw, absent when it accepted the configuration. */
+	/**
+	What our client threw, absent when it accepted the configuration.
+	*/
 	readonly clientError: unknown;
 	/**
 	 * Both sides' fields, absent when either rejected the configuration. They
@@ -483,7 +515,9 @@ function fixtureEnvironment(
 	};
 }
 
-/** Puts one fixture to the oracle and to our client, in one environment. */
+/**
+Puts one fixture to the oracle and to our client, in one environment.
+*/
 export async function resolveFixture(
 	oracle: Oracle,
 	fixture: ConfigurationFixture
@@ -592,7 +626,9 @@ export class FixtureRejectedError extends Error {
 	}
 }
 
-/** The settings the oracle resolved, for a fixture it was meant to accept. */
+/**
+The settings the oracle resolved, for a fixture it was meant to accept.
+*/
 export function settingsOf(resolved: ResolvedFixture): OracleSettings {
 	if (resolved.settings === undefined) {
 		throw new FixtureRejectedError(resolved, 'the oracle');
@@ -601,7 +637,9 @@ export function settingsOf(resolved: ResolvedFixture): OracleSettings {
 	return resolved.settings;
 }
 
-/** Normalised mapped fields from both clients, ready for comparison. */
+/**
+Normalised mapped fields from both clients, ready for comparison.
+*/
 export function comparisonOf(resolved: ResolvedFixture): FieldComparison {
 	if (resolved.fields === undefined) {
 		throw new FixtureRejectedError(resolved, rejectedBy(resolved));
@@ -620,7 +658,9 @@ function rejectedBy(
 	return resolved.oracleAccepted ? 'our client' : 'the oracle';
 }
 
-/** Whether each side took the configuration at all. */
+/**
+Whether each side took the configuration at all.
+*/
 export function acceptanceOf(resolved: ResolvedFixture): {
 	oracleAccepted: boolean;
 	clientAccepted: boolean;

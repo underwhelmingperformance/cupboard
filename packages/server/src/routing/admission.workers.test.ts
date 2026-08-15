@@ -122,7 +122,7 @@ describe('layered admission gate', () => {
 		expect(await refreshTenantMembership(env)).toBe(1);
 	});
 
-	it('keeps a suspended tenant admittable, carrying its status for the caller to gate', async () => {
+	it('keeps a suspended tenant isAdmittable, carrying its status for the caller to gate', async () => {
 		await ensureTenant(database(), createBody('acme'), now);
 		await refreshTenantMembership(env);
 		await setTenantStatus(
@@ -155,7 +155,7 @@ describe('layered admission gate', () => {
 		const seeded = await admit('acme');
 
 		// Creating another tenant through the control path rebuilds the filter, so it
-		// is admittable at once.
+		// is isAdmittable at once.
 		await controlTenantCreate(env, createBody('beta'), 'https://cupboard.test');
 		const created = await admit('beta');
 

@@ -76,7 +76,9 @@ function absentString(): string | undefined {
 	return undefined;
 }
 
-/** A {@link DeployUi} whose account picker answers with `choice` (or cancels). */
+/**
+A {@link DeployUi} whose account picker answers with `choice` (or cancels).
+*/
 function pickerUi(choice?: string, uiCalls: UiCall[] = []): DeployUi {
 	return {
 		interactive: true,
@@ -696,7 +698,7 @@ describe('R2 credential settlement', () => {
 			bucketName: 'cupboard-blobs',
 			creation: {
 				kind: 'available',
-				bucketExists: true,
+				isBucketPresent: true,
 				create: () => {
 					creates.push('create');
 
@@ -725,7 +727,7 @@ describe('R2 credential settlement', () => {
 				bucketName: 'cupboard-blobs',
 				creation: {
 					kind: 'available',
-					bucketExists: true,
+					isBucketPresent: true,
 					create: () =>
 						Promise.reject(
 							new TokenManagementNotPermittedError({ cause: undefined })
@@ -749,7 +751,7 @@ describe('R2 credential settlement', () => {
 			bucketName: 'cupboard-blobs',
 			creation: {
 				kind: 'available',
-				bucketExists: true,
+				isBucketPresent: true,
 				create: () => {
 					creates.push('create');
 
@@ -778,7 +780,7 @@ describe('R2 credential settlement', () => {
 			bucketName: 'pantry',
 			creation: {
 				kind: 'available',
-				bucketExists: false,
+				isBucketPresent: false,
 				create: () => {
 					creates.push('create');
 
@@ -834,7 +836,7 @@ describe('R2 credential settlement', () => {
 			bucketName: 'cupboard-blobs',
 			creation: {
 				kind: 'available',
-				bucketExists: true,
+				isBucketPresent: true,
 				create: () => {
 					creates.push('create');
 

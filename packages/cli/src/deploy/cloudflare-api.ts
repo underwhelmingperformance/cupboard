@@ -51,20 +51,28 @@ export interface TokenPolicyInput {
 
 export interface CreatedApiToken {
 	readonly id: string;
-	/** The token's secret value; only ever returned at creation or roll. */
+	/**
+	The token's secret value; only ever returned at creation or roll.
+	*/
 	readonly value: string;
 }
 
-/** A full-text query over a Worker's recent log events. */
+/**
+A full-text query over a Worker's recent log events.
+*/
 export interface WorkerLogQuery {
-	/** The text to match across each event (e.g. a request's cf-ray). */
+	/**
+	The text to match across each event (e.g. a request's cf-ray).
+	*/
 	readonly needle: string;
 	readonly fromMs: number;
 	readonly toMs: number;
 	readonly limit: number;
 }
 
-/** One matched log event, reduced to the fields a deploy surfaces. */
+/**
+One matched log event, reduced to the fields a deploy surfaces.
+*/
 export interface WorkerLogEvent {
 	readonly message: string | undefined;
 	readonly error: string | undefined;
@@ -96,7 +104,9 @@ export interface CloudflareApi {
 	d1QueryRows(databaseId: DatabaseId, sql: string): Promise<string[]>;
 
 	getScriptMigrationTag(scriptName: ScriptName): Promise<string | undefined>;
-	/** The script's live bindings, or undefined when it is not deployed. */
+	/**
+	The script's live bindings, or undefined when it is not deployed.
+	*/
 	getScriptBindings(
 		scriptName: ScriptName
 	): Promise<readonly unknown[] | undefined>;
@@ -119,7 +129,9 @@ export interface CloudflareApi {
 	listScriptSecrets(scriptName: ScriptName): Promise<string[]>;
 
 	findZoneId(name: string): Promise<ZoneId | undefined>;
-	/** The custom domain currently routed to the script, when one is. */
+	/**
+	The custom domain currently routed to the script, when one is.
+	*/
 	findCustomDomain(scriptName: ScriptName): Promise<string | undefined>;
 	ensureCustomDomain(
 		scriptName: ScriptName,
@@ -133,10 +145,14 @@ export interface CloudflareApi {
 		name: string,
 		policy: TokenPolicyInput
 	): Promise<CreatedApiToken>;
-	/** Rolls the token's secret, returning the new value. */
+	/**
+	Rolls the token's secret, returning the new value.
+	*/
 	rollApiTokenSecret(tokenId: string): Promise<string>;
 
-	/** The account's workers.dev subdomain, or undefined when unregistered. */
+	/**
+	The account's workers.dev subdomain, or undefined when unregistered.
+	*/
 	getWorkersDevSubdomain(): Promise<string | undefined>;
 	enableWorkersDevRoute(scriptName: ScriptName): Promise<void>;
 
@@ -285,7 +301,7 @@ export function createCloudflareApi(
 ): CloudflareApi {
 	const account = { account_id: accountId };
 
-	const bucketExists = async (name: string): Promise<boolean> => {
+	const isBucketPresent = async (name: string): Promise<boolean> => {
 		const list = await client.r2.buckets.list(account);
 
 		return (list.buckets ?? []).some((bucket) => bucket.name === name);
@@ -305,10 +321,10 @@ export function createCloudflareApi(
 			return accounts;
 		},
 
-		r2BucketExists: bucketExists,
+		r2BucketExists: isBucketPresent,
 
 		async ensureR2Bucket(name) {
-			if (await bucketExists(name)) {
+			if (await isBucketPresent(name)) {
 				return;
 			}
 

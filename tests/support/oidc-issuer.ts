@@ -43,7 +43,9 @@ export class StubOidcIssuer {
 		private readonly privateKey: KeyObject
 	) {}
 
-	/** Signs an RS256 JWT from this issuer; `iss` and timestamps are filled in. */
+	/**
+	Signs an RS256 JWT from this issuer; `iss` and timestamps are filled in.
+	*/
 	sign(claims: Readonly<Record<string, unknown>>): string {
 		const issuedAt = Math.floor(Date.now() / 1000);
 		const header = base64url(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid }));

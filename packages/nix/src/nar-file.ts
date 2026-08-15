@@ -139,7 +139,9 @@ class NarReader {
 		}
 	}
 
-	/** Tells the stream this reader is finished with it. */
+	/**
+	Tells the stream this reader is finished with it.
+	*/
 	async release(): Promise<void> {
 		await this.iterator.return?.();
 	}

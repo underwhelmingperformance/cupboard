@@ -117,7 +117,9 @@ export async function createInvocationRuntimeDirectory(
 	return plan;
 }
 
-/** Creates one of a run's own directories, owner-only. */
+/**
+Creates one of a run's own directories, owner-only.
+*/
 export async function createRuntimeDirectory(directory: string): Promise<void> {
 	await mkdir(directory, { mode: 0o700, recursive: true });
 	// The process umask masks the mode `mkdir` applies, so the owner-only mode
@@ -125,7 +127,9 @@ export async function createRuntimeDirectory(directory: string): Promise<void> {
 	await chmod(directory, 0o700);
 }
 
-/** Removes the invocation directory and the socket inside it. */
+/**
+Removes the invocation directory and the socket inside it.
+*/
 export async function removeInvocationRuntimeDirectory(
 	directory: string
 ): Promise<void> {

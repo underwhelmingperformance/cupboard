@@ -53,7 +53,9 @@ export async function makeWritable(target: string): Promise<void> {
 	);
 }
 
-/** Resolves once a file exists, using filesystem events instead of polling. */
+/**
+Resolves once a file exists, using filesystem events instead of polling.
+*/
 export async function waitForFile(
 	filePath: string,
 	signal?: AbortSignal

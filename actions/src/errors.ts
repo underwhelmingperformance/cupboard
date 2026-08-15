@@ -34,7 +34,9 @@ export class UnsupportedPlatformError extends UsageError {
 	}
 }
 
-/** Builds `Error`'s options bag, omitting `cause` entirely when none was given. */
+/**
+Builds `Error`'s options bag, omitting `cause` entirely when none was given.
+*/
 function withCause(cause: unknown): ErrorOptions | undefined {
 	return cause === undefined ? undefined : { cause };
 }
@@ -77,7 +79,9 @@ export class NoReleaseFoundError extends CodedError {
 	}
 }
 
-/** A canonical cupboard coordinate could not be decoded from the job output. */
+/**
+A canonical cupboard coordinate could not be decoded from the job output.
+*/
 export class CupboardResolutionJsonError extends UsageError {
 	constructor(public override readonly cause: unknown) {
 		super('resolved-cupboard is not valid canonical JSON', { cause });
@@ -85,7 +89,9 @@ export class CupboardResolutionJsonError extends UsageError {
 	}
 }
 
-/** GitHub returned a release-discovery page outside its declared schema. */
+/**
+GitHub returned a release-discovery page outside its declared schema.
+*/
 export class MalformedReleaseDiscoveryResponseError extends CodedError {
 	constructor(options: { readonly cause?: unknown } = {}) {
 		super(
@@ -96,7 +102,9 @@ export class MalformedReleaseDiscoveryResponseError extends CodedError {
 	}
 }
 
-/** Release discovery exceeded the bounded response and pagination policy. */
+/**
+Release discovery exceeded the bounded response and pagination policy.
+*/
 export class ReleaseDiscoverySearchTooLargeError extends CodedError {
 	constructor(
 		public readonly maximumPageEntries: number,
@@ -123,7 +131,9 @@ export class ReleaseAssetNotFoundError extends CodedError {
 	}
 }
 
-/** A release asset URL is unsafe for an authenticated GitHub API request. */
+/**
+A release asset URL is unsafe for an authenticated GitHub API request.
+*/
 export class InvalidReleaseAssetUrlError extends CodedError {
 	constructor(
 		public readonly assetName: string,
@@ -136,7 +146,9 @@ export class InvalidReleaseAssetUrlError extends CodedError {
 	}
 }
 
-/** A release asset exceeded the bounded size accepted by the action. */
+/**
+A release asset exceeded the bounded size accepted by the action.
+*/
 export class DownloadAssetTooLargeError extends CodedError {
 	constructor(
 		public readonly assetName: string,
@@ -150,7 +162,9 @@ export class DownloadAssetTooLargeError extends CodedError {
 	}
 }
 
-/** A release attestation bundle exceeded the action's bounded input size. */
+/**
+A release attestation bundle exceeded the action's bounded input size.
+*/
 export class ReleaseAttestationBundleTooLargeError extends CodedError {
 	constructor(
 		public readonly maximumBytes: number,
@@ -163,7 +177,9 @@ export class ReleaseAttestationBundleTooLargeError extends CodedError {
 	}
 }
 
-/** An attestation lookup exceeded the bounded candidate or page policy. */
+/**
+An attestation lookup exceeded the bounded candidate or page policy.
+*/
 export class ReleaseAttestationSearchTooLargeError extends CodedError {
 	constructor(
 		public readonly maximumCandidates: number,
@@ -178,7 +194,9 @@ export class ReleaseAttestationSearchTooLargeError extends CodedError {
 	}
 }
 
-/** A historical release cannot satisfy the current action's runtime contract. */
+/**
+A historical release cannot satisfy the current action's runtime contract.
+*/
 export class ReleaseCompatibilityError extends CodedError {
 	constructor(
 		public readonly tag: string,
@@ -191,7 +209,9 @@ export class ReleaseCompatibilityError extends CodedError {
 	}
 }
 
-/** A release archive's executable does not identify as the selected tag. */
+/**
+A release archive's executable does not identify as the selected tag.
+*/
 export class InstalledReleaseVersionMismatchError extends CodedError {
 	constructor(
 		public readonly expected: string,
@@ -204,7 +224,9 @@ export class InstalledReleaseVersionMismatchError extends CodedError {
 	}
 }
 
-/** A verified release archive omitted an executable required at runtime. */
+/**
+A verified release archive omitted an executable required at runtime.
+*/
 export class ReleaseInstallationIncompleteError extends CodedError {
 	constructor(
 		public readonly path: string,
@@ -218,7 +240,9 @@ export class ReleaseInstallationIncompleteError extends CodedError {
 	}
 }
 
-/** An installed executable no longer has the bytes in its verified archive. */
+/**
+An installed executable no longer has the bytes in its verified archive.
+*/
 export class ReleaseInstallationIntegrityError extends CodedError {
 	constructor(
 		public readonly generationDirectory: string,
@@ -231,7 +255,9 @@ export class ReleaseInstallationIntegrityError extends CodedError {
 	}
 }
 
-/** Persisted installation state cannot be trusted for recovery. */
+/**
+Persisted installation state cannot be trusted for recovery.
+*/
 export class ReleaseInstallationStateError extends CodedError {
 	constructor(
 		public readonly statePath: string,
@@ -245,7 +271,9 @@ export class ReleaseInstallationStateError extends CodedError {
 	}
 }
 
-/** A persisted installation lock is corrupt or from an unsupported installer. */
+/**
+A persisted installation lock is corrupt or from an unsupported installer.
+*/
 export class ReleaseInstallationLockStateError extends CodedError {
 	constructor(public readonly lockPath: string) {
 		super(
@@ -255,7 +283,9 @@ export class ReleaseInstallationLockStateError extends CodedError {
 	}
 }
 
-/** The installer could not identify a process strongly enough to fence its lock. */
+/**
+The installer could not identify a process strongly enough to fence its lock.
+*/
 export class ReleaseInstallationProcessIdentityError extends CodedError {
 	constructor(
 		public readonly pid: number,
@@ -269,7 +299,9 @@ export class ReleaseInstallationProcessIdentityError extends CodedError {
 	}
 }
 
-/** The installer was fenced out before it could commit its release. */
+/**
+The installer was fenced out before it could commit its release.
+*/
 export class ReleaseInstallationLockLostError extends CodedError {
 	constructor(
 		public readonly lockPath: string,
@@ -283,7 +315,9 @@ export class ReleaseInstallationLockLostError extends CodedError {
 	}
 }
 
-/** An expired lease still names the same process that acquired the lock. */
+/**
+An expired lease still names the same process that acquired the lock.
+*/
 export class ReleaseInstallationLockOwnerAliveError extends CodedError {
 	constructor(
 		public readonly lockPath: string,
@@ -298,7 +332,9 @@ export class ReleaseInstallationLockOwnerAliveError extends CodedError {
 	}
 }
 
-/** A release failed to publish and its previous installation was not fully restored. */
+/**
+A release failed to publish and its previous installation was not fully restored.
+*/
 export class ReleaseInstallationRollbackError extends CodedError {
 	constructor(
 		public readonly transactionPath: string,
@@ -312,7 +348,9 @@ export class ReleaseInstallationRollbackError extends CodedError {
 	}
 }
 
-/** A supplied executable succeeded but did not identify its version. */
+/**
+A supplied executable succeeded but did not identify its version.
+*/
 export class CupboardVersionOutputMissingError extends CodedError {
 	constructor(public readonly binaryPath: string) {
 		super(`${binaryPath} --version produced no output`);
@@ -420,7 +458,9 @@ export class SubjectNotHeldError extends CodedError {
 	}
 }
 
-/** A committed narinfo could not be read from the destination cache. */
+/**
+A committed narinfo could not be read from the destination cache.
+*/
 export class CommittedSubjectUnavailableError extends CodedError {
 	constructor(
 		public readonly storePath: string,
@@ -433,7 +473,9 @@ export class CommittedSubjectUnavailableError extends CodedError {
 	}
 }
 
-/** A destination response was not a valid narinfo for the requested subject. */
+/**
+A destination response was not a valid narinfo for the requested subject.
+*/
 export class CommittedSubjectInvalidError extends CodedError {
 	constructor(
 		public readonly storePath: string,
@@ -447,7 +489,9 @@ export class CommittedSubjectInvalidError extends CodedError {
 	}
 }
 
-/** Realised outputs for which a current-run provenance receipt cannot be made. */
+/**
+Realised outputs for which a current-run provenance receipt cannot be made.
+*/
 export class ProvenanceSubjectsIncompleteError extends CodedError {
 	constructor(public readonly storePaths: readonly string[]) {
 		super(
@@ -457,7 +501,9 @@ export class ProvenanceSubjectsIncompleteError extends CodedError {
 	}
 }
 
-/** The installed CLI emitted no valid attachment result. */
+/**
+The installed CLI emitted no valid attachment result.
+*/
 export class AttestationAttachmentResultError extends CodedError {
 	constructor(message: string, options: { readonly cause?: unknown } = {}) {
 		super(message, withCause(options.cause));
@@ -465,7 +511,9 @@ export class AttestationAttachmentResultError extends CodedError {
 	}
 }
 
-/** Signed receipt subjects without a completed attachment. */
+/**
+Signed receipt subjects without a completed attachment.
+*/
 export class AttestationAttachmentIncompleteError extends CodedError {
 	constructor(public readonly storePaths: readonly string[]) {
 		super(
@@ -475,7 +523,9 @@ export class AttestationAttachmentIncompleteError extends CodedError {
 	}
 }
 
-/** Receipt subjects whose signed checksum is absent or no longer exact. */
+/**
+Receipt subjects whose signed checksum is absent or no longer exact.
+*/
 export class AttestationChecksumsMismatchError extends CodedError {
 	constructor(
 		public readonly storePaths: readonly string[],
@@ -512,7 +562,9 @@ export class AttestationSigningError extends CodedError {
 	}
 }
 
-/** The build-origin predicate file is not readable as a JSON object to sign. */
+/**
+The build-origin predicate file is not readable as a JSON object to sign.
+*/
 export class AttestationPredicateFileError extends CodedError {
 	constructor(
 		public readonly predicateFile: string,
@@ -950,7 +1002,9 @@ export class CacheAvailabilityResponseUnexpectedHashError extends CodedError {
 	}
 }
 
-/** A captured command exceeded the memory budget for its standard output. */
+/**
+A captured command exceeded the memory budget for its standard output.
+*/
 export class CommandOutputTooLargeError extends CodedError {
 	constructor(
 		public readonly command: string,
@@ -996,7 +1050,9 @@ export interface RemoteCohortBuildFailure {
 	readonly message: string;
 }
 
-/** A remote keep-going build did not report one final result per target. */
+/**
+A remote keep-going build did not report one final result per target.
+*/
 export class RemoteCohortBuildFailedError extends CodedError {
 	constructor(public readonly failures: readonly RemoteCohortBuildFailure[]) {
 		super(
@@ -1006,7 +1062,9 @@ export class RemoteCohortBuildFailedError extends CodedError {
 	}
 }
 
-/** A remote daemon returned a malformed keyed result batch. */
+/**
+A remote daemon returned a malformed keyed result batch.
+*/
 export class RemoteCohortProtocolError extends CodedError {
 	constructor(public readonly failures: readonly RemoteCohortBuildFailure[]) {
 		super(
@@ -1022,7 +1080,9 @@ export interface CohortEvaluationMismatch {
 	readonly evaluated: readonly string[];
 }
 
-/** A local installable no longer evaluates to its planned derivation. */
+/**
+A local installable no longer evaluates to its planned derivation.
+*/
 export class CohortEvaluationDriftError extends CodedError {
 	public readonly missing: readonly string[];
 	public readonly evaluated: readonly string[];

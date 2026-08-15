@@ -154,14 +154,20 @@ const signed: SignedAttestation = { bundle: '{"mediaType":"test"}\n' };
 
 interface SigningRun {
 	readonly signer: StatementSigner;
-	/** The statement passed to the signer, recorded once per attempt. */
+	/**
+	The statement passed to the signer, recorded once per attempt.
+	*/
 	readonly attempted: AttestationStatement[];
-	/** The attempt number passed to each wait. */
+	/**
+	The attempt number passed to each wait.
+	*/
 	readonly delays: number[];
 	readonly delay: (attempt: number) => Promise<void>;
 }
 
-/** A signer that fails with each listed error in turn, then succeeds. */
+/**
+A signer that fails with each listed error in turn, then succeeds.
+*/
 function signingRun(failures: readonly Error[]): SigningRun {
 	const attempted: AttestationStatement[] = [];
 	const delays: number[] = [];

@@ -22,7 +22,9 @@ export class FakeDaemonTransport implements NixDaemonTransport {
 
 	readonly temporaryRoots: string[] = [];
 
-	/** The store paths each substitutable-info request asked about, in order. */
+	/**
+	The store paths each substitutable-info request asked about, in order.
+	*/
 	readonly substitutablePathInfoRequests: (readonly string[])[] = [];
 
 	constructor(
@@ -188,7 +190,9 @@ export interface FakeBuilds {
 }
 
 export interface FakeBuildResult {
-	/** The derived path in its wire spelling, with `!` before outputs. */
+	/**
+	The derived path in its wire spelling, with `!` before outputs.
+	*/
 	readonly target: string;
 	readonly status: number;
 	readonly errorMessage: string;
@@ -629,7 +633,9 @@ function readSetOptionsRequest(request: Buffer): {
 	};
 }
 
-/** The requests a fake daemon records for a test to assert against. */
+/**
+The requests a fake daemon records for a test to assert against.
+*/
 interface FakeDaemonRecordings {
 	readonly temporaryRoots: string[];
 	readonly substitutablePathInfoRequests: (readonly string[])[];

@@ -46,7 +46,9 @@ const derivedPathStringSchema = z.string().refine((value) => {
 	);
 }, 'must name a Nix store path, optionally followed by a non-empty output selection');
 
-/** One cohort target that refers to an unknown store path directly. */
+/**
+One cohort target that refers to an unknown store path directly.
+*/
 export const unknownPathTargetSchema = z.object({
 	attr: attributeSchema,
 	installable: derivedPathStringSchema
@@ -111,7 +113,9 @@ export type ParsedUnknownPathsCeilingRefusal = z.output<
 	typeof unknownPathsCeilingRefusalSchema
 >;
 
-/** The information the rendered refusal message draws on. */
+/**
+The information the rendered refusal message draws on.
+*/
 export interface UnknownPathsRefusalDescription {
 	readonly unknownPaths: readonly UnknownPathDetail[];
 	readonly ceiling: {

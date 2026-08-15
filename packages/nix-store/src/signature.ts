@@ -9,7 +9,9 @@ import { type NixKeyName } from './scalars.ts';
  * used for verification.
  */
 export class NixSignature extends NamedMaterial {
-	/** The signature a named key produced over a fingerprint. */
+	/**
+	The signature a named key produced over a fingerprint.
+	*/
 	static of(name: NixKeyName, signature: Uint8Array): NixSignature {
 		return new NixSignature(`${name}:${bytesToBase64(signature)}`);
 	}

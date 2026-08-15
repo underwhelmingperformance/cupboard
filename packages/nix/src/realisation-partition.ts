@@ -13,7 +13,9 @@ import {
 	type NixSubstitutablePathInfo
 } from './nix-store.ts';
 
-/** Maximum number of derivations read concurrently within one level. */
+/**
+Maximum number of derivations read concurrently within one level.
+*/
 export const defaultDerivationReadConcurrency = 16;
 
 /**
@@ -35,7 +37,9 @@ export class RealisationWalkOverCapError extends NixStoreError {
 	}
 }
 
-/** A target whose `^` is followed by no output names at all. */
+/**
+A target whose `^` is followed by no output names at all.
+*/
 export class EmptyOutputSelectionError extends NixStoreError {
 	constructor(public readonly drvPath: StorePathString) {
 		super(`${drvPath} names no outputs to realise`);
@@ -43,7 +47,9 @@ export class EmptyOutputSelectionError extends NixStoreError {
 	}
 }
 
-/** A target naming an output its derivation does not produce. */
+/**
+A target naming an output its derivation does not produce.
+*/
 export class UndeclaredOutputError extends NixStoreError {
 	constructor(
 		public readonly drvPath: StorePathString,
@@ -70,26 +76,38 @@ export class FloatingOutputUnsupportedError extends NixStoreError {
 	}
 }
 
-/** Store and substituter operations used by the walk. */
+/**
+Store and substituter operations used by the walk.
+*/
 export interface RealisationPartitionSource {
-	/** Which of the given paths are valid in this store. */
+	/**
+	Which of the given paths are valid in this store.
+	*/
 	validPaths(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]>;
-	/** The derivation at the given path, which the store holds as a file. */
+	/**
+	The derivation at the given path, which the store holds as a file.
+	*/
 	readDerivation(drvPath: StorePathString): Promise<Derivation>;
-	/** The substituter offers for the given paths. */
+	/**
+	The substituter offers for the given paths.
+	*/
 	substitutablePathInfos(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly NixSubstitutablePathInfo[]>;
-	/** The `substitute` setting: with it off, everything invalid is built. */
+	/**
+	The `substitute` setting: with it off, everything invalid is built.
+	*/
 	readonly substitute: boolean;
 	/**
 	 * How many derived paths the walk may visit (default:
 	 * {@link defaultRealisationWalkCap}).
 	 */
 	readonly maxPaths?: number;
-	/** Abandons the walk between levels, raising the signal's reason. */
+	/**
+	Abandons the walk between levels, raising the signal's reason.
+	*/
 	readonly signal?: AbortSignal;
 	/**
 	 * The `always-allow-substitutes` setting, which overrules a derivation's
@@ -119,10 +137,14 @@ export async function queryMissingOver(
 	return walk.partition();
 }
 
-/** A derivation target and its requested outputs. */
+/**
+A derivation target and its requested outputs.
+*/
 interface BuiltTarget {
 	readonly drvPath: StorePathString;
-	/** The output names wanted, or `undefined` for every one the derivation has. */
+	/**
+	The output names wanted, or `undefined` for every one the derivation has.
+	*/
 	readonly outputNames?: ReadonlySet<string>;
 }
 
@@ -171,7 +193,9 @@ class RealisationWalk {
 		return true;
 	}
 
-	/** The given targets this walk has not reached, now claimed for it. */
+	/**
+	The given targets this walk has not reached, now claimed for it.
+	*/
 	private claimed(targets: readonly DerivedPath[]): readonly DerivedPath[] {
 		return targets.filter((target) => this.claim(target));
 	}

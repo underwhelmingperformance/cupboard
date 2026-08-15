@@ -26,7 +26,9 @@ export interface ReadVerifier {
 	readonly passwordSalt: ReadPasswordSalt;
 }
 
-/** Hashes a read password the same way the verifier stores it, for comparison. */
+/**
+Hashes a read password the same way the verifier stores it, for comparison.
+*/
 export async function hashReadPassword(
 	password: string,
 	salt: ReadPasswordSalt
@@ -51,7 +53,7 @@ export function generateReadPasswordSalt(): ReadPasswordSalt {
  * unconditionally, so a mismatch in the user does not short-circuit the password
  * comparison.
  */
-export async function authoriseRead(
+export async function isReadAuthorised(
 	request: Request,
 	verifier: ReadVerifier
 ): Promise<boolean> {

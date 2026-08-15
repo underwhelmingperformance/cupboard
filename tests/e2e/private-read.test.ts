@@ -168,7 +168,9 @@ describe('Nix substitution from a private-read cache', () => {
 		));
 });
 
-/** What our substituter client made of the cache, given a netrc to read. */
+/**
+What our substituter client made of the cache, given a netrc to read.
+*/
 async function askAsClient(
 	netrcFile: string,
 	server: CupboardTestServer,

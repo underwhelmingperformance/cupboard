@@ -20,12 +20,16 @@ import { isolatedEnvironment } from '../support/nix.ts';
 
 const repositoryRoot = path.resolve(import.meta.dirname, '..', '..');
 
-/** The recorded Nix version, loaded once for test assertions. */
+/**
+The recorded Nix version, loaded once for test assertions.
+*/
 export const recordedOracle: OracleRecord = parseOracleRecord(
 	readFileSync(path.join(import.meta.dirname, oracleFileName), 'utf8')
 );
 
-/** The nixpkgs revision the lockfile pins, which the oracle is built from. */
+/**
+The nixpkgs revision the lockfile pins, which the oracle is built from.
+*/
 export const lockedNixpkgsRevision: string = parseFlakeLockRevision(
 	readFileSync(path.join(repositoryRoot, 'flake.lock'), 'utf8')
 );

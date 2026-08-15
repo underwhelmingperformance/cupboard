@@ -338,7 +338,9 @@ describe('NixLocalStoreClient with substituters', () => {
 	});
 });
 
-/** A cache serving the given `nix-cache-info` and one narinfo. */
+/**
+A cache serving the given `nix-cache-info` and one narinfo.
+*/
 function servedBy(cacheInfo: string, narInfo: string): typeof fetch {
 	return (input) => {
 		const url = new URL(input instanceof Request ? input.url : String(input));

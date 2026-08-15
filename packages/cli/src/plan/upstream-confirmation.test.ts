@@ -97,7 +97,7 @@ function storeDouble(
 
 // The acceptance policy is exercised where it lives; these cases are about
 // what the confirmation does with the verdict it gets back.
-const acceptsEveryOffer: AcceptsOffer = () => Promise.resolve(true);
+const acceptEveryOffer: AcceptsOffer = () => Promise.resolve(true);
 
 interface ClosureRefusalCase {
 	readonly name: string;
@@ -150,7 +150,7 @@ describe('confirmLeftUpstreamWith', () => {
 		const verdict = await confirmLeftUpstreamWith({
 			substitution: defaultSubstitution,
 			store,
-			accepts: acceptsEveryOffer
+			accepts: acceptEveryOffer
 		})({ installable: `${drvPath}^out`, storePath: appPath });
 
 		expect({
@@ -171,7 +171,7 @@ describe('confirmLeftUpstreamWith', () => {
 		const confirm = confirmLeftUpstreamWith({
 			substitution: defaultSubstitution,
 			store,
-			accepts: acceptsEveryOffer
+			accepts: acceptEveryOffer
 		});
 
 		const verdicts = [
@@ -197,7 +197,7 @@ describe('confirmLeftUpstreamWith', () => {
 		const verdict = await confirmLeftUpstreamWith({
 			substitution: defaultSubstitution,
 			store,
-			accepts: acceptsEveryOffer
+			accepts: acceptEveryOffer
 		})({ installable: `${drvPath}^out`, storePath: appPath });
 
 		expect({
@@ -217,7 +217,7 @@ describe('confirmLeftUpstreamWith', () => {
 			const verdict = await confirmLeftUpstreamWith({
 				substitution: defaultSubstitution,
 				store: storeDouble({ closure }),
-				accepts: acceptsEveryOffer
+				accepts: acceptEveryOffer
 			})({ installable: `${drvPath}^out`, storePath: appPath });
 
 			expect(verdict).toStrictEqual(expected);
@@ -265,7 +265,7 @@ describe('confirmLeftUpstreamWith', () => {
 			const verdict = await confirmLeftUpstreamWith({
 				substitution,
 				store,
-				accepts: acceptsEveryOffer
+				accepts: acceptEveryOffer
 			})({
 				installable: `${drvPath}^out`,
 				storePath: appPath
@@ -283,7 +283,7 @@ describe('confirmLeftUpstreamWith', () => {
 		const verdict = await confirmLeftUpstreamWith({
 			substitution: defaultSubstitution,
 			store: storeDouble({ derivationFails: true }),
-			accepts: acceptsEveryOffer
+			accepts: acceptEveryOffer
 		})({ installable: `${drvPath}^out`, storePath: appPath });
 
 		expect(verdict).toStrictEqual({
@@ -300,7 +300,7 @@ describe('confirmLeftUpstreamWith', () => {
 		const verdict = await confirmLeftUpstreamWith({
 			substitution: defaultSubstitution,
 			store,
-			accepts: acceptsEveryOffer
+			accepts: acceptEveryOffer
 		})({ installable: appPath, storePath: appPath });
 
 		expect({ verdict, derivationsRead: store.derivationsRead }).toStrictEqual({

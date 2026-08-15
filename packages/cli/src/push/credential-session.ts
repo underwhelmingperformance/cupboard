@@ -13,18 +13,26 @@ export type IssuePushCredential = (
 ) => Promise<ParsedPushCredential>;
 
 export interface CredentialSessionOptions {
-	/** Re-issue once the credential is within this long of expiry. */
+	/**
+	Re-issue once the credential is within this long of expiry.
+	*/
 	readonly refreshMarginMs?: number;
-	/** Clock, injectable for tests. */
+	/**
+	Clock, injectable for tests.
+	*/
 	readonly now?: () => number;
 }
 
 // The credential lifecycle for one push: a stable signed push id and a renewing
 // R2 credential bound to it.
 export interface CredentialSession {
-	/** The signed push id every negotiate names, issued on first use. */
+	/**
+	The signed push id every negotiate names, issued on first use.
+	*/
 	pushId(): Promise<PushId>;
-	/** The provider the uploader signs with; re-issues as the credential expires. */
+	/**
+	The provider the uploader signs with; re-issues as the credential expires.
+	*/
 	readonly provider: CredentialProvider;
 }
 

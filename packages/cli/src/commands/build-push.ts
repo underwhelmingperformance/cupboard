@@ -123,9 +123,13 @@ const cohortsFileSchema = z.strictObject({
  * by a signal cancels the rest of the sequence.
  */
 export interface BetweenCohortCollectorOptions {
-	/** The enclosing CLI run's cancellation signal. */
+	/**
+	The enclosing CLI run's cancellation signal.
+	*/
 	readonly signal?: AbortSignal;
-	/** Runs the collector child; injectable for tests. */
+	/**
+	Runs the collector child; injectable for tests.
+	*/
 	readonly runCollector?: (options: RunChildOptions) => Promise<ChildExit>;
 }
 
@@ -220,7 +224,9 @@ export function parseCohortsFile(contents: string): readonly BuildInvocation[] {
 	});
 }
 
-/** Successful cohort targets retained by one aggregate multi-cohort root. */
+/**
+Successful cohort targets retained by one aggregate multi-cohort root.
+*/
 export function aggregateCohortTargets(
 	cohorts: readonly (readonly StorePathString[])[]
 ): readonly StorePathString[] {
@@ -250,7 +256,9 @@ function recordAggregateSubject(
 	subjects.set(subject.storePath, subject);
 }
 
-/** One schema-valid receipt over every settled cohort in a sequence. */
+/**
+One schema-valid receipt over every settled cohort in a sequence.
+*/
 export function aggregateBuildReceipts(
 	receipts: readonly ParsedBuildReceipt[]
 ): ParsedBuildReceiptV3 {
@@ -295,7 +303,9 @@ export function aggregateBuildReceipts(
 	});
 }
 
-/** The stable public multi-cohort envelope, or the action's explicit V3 view. */
+/**
+The stable public multi-cohort envelope, or the action's explicit V3 view.
+*/
 export function multiCohortReceiptDocument(
 	receipts: readonly ParsedBuildReceipt[],
 	shouldAggregateReceiptV3: boolean
@@ -313,7 +323,9 @@ interface AggregateCohortRootOptions {
 	readonly ttlSeconds?: TtlSeconds;
 }
 
-/** Replaces a multi-cohort root once, and only after every cohort succeeded. */
+/**
+Replaces a multi-cohort root once, and only after every cohort succeeded.
+*/
 export async function updateAggregateCohortRoot(
 	options: AggregateCohortRootOptions,
 	setRoot: (root: RootName, body: RootSetBody) => Promise<void>

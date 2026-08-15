@@ -19,13 +19,17 @@ export const readUserInputSchema = z
 	.refine((value) => !value.includes(':'))
 	.brand('ReadUser');
 
-/** The plaintext credential an HTTP Basic header carries. */
+/**
+The plaintext credential an HTTP Basic header carries.
+*/
 export interface BasicCredential {
 	readonly user: ReadUser;
 	readonly password: string;
 }
 
-/** Why an `authorization` header carries no Basic credential. */
+/**
+Why an `authorization` header carries no Basic credential.
+*/
 export type BasicCredentialRejection =
 	'not-basic' | 'undecodable' | 'malformed';
 

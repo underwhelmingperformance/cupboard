@@ -34,6 +34,7 @@ import {
 	cacheWriteGrants,
 	clearBlobStorage,
 	issueTokenForTenant,
+	isTenantUsagePresent,
 	offboardTenant,
 	provisionNamedTenant,
 	pushPathToTenant,
@@ -41,7 +42,6 @@ import {
 	tenantBlobRows,
 	tenantObjectKeys,
 	tenantRow,
-	tenantUsagePresent,
 	testBase,
 	testServerFor,
 	uploadMetadata,
@@ -61,7 +61,7 @@ import { runBlobReaper, runCronTick, runOffboardBatch } from './scheduled.ts';
 const tenantCounter = { next: 0 };
 const defaultCache: StoredCache = DEFAULT_CACHE;
 
-async function admittable(slug: string): Promise<boolean> {
+async function isAdmittable(slug: string): Promise<boolean> {
 	const ctx = createExecutionContext();
 	const entry = await admitTenant(env, ctx, tenantIdSchema.parse(slug));
 	await waitOnExecutionContext(ctx);
@@ -167,7 +167,7 @@ describe('offboarding drain', () => {
 			presence: await tenantPresence(id),
 			objects: await tenantObjectKeys(id),
 			row: await tenantRow(id),
-			usage: await tenantUsagePresent(id),
+			usage: await isTenantUsagePresent(id),
 			// The shared blob is now unreferenced but not yet reaped.
 			blobState: await blobStateNarHashes()
 		};
@@ -242,7 +242,7 @@ describe('offboarding drain', () => {
 				edges: await tenantEdges(id),
 				presence: await tenantPresence(id),
 				objects: await tenantObjectKeys(id),
-				usage: await tenantUsagePresent(id)
+				usage: await isTenantUsagePresent(id)
 			}
 		}).toStrictEqual({
 			midDrain: {
@@ -392,10 +392,10 @@ describe('offboarding drain', () => {
 		);
 		// The row read fails closed on the tombstone, so the slug 404s at once despite
 		// the stale filter; the next rebuild then drops it from the filter too.
-		const isBefore = await admittable(id);
+		const isBefore = await isAdmittable(id);
 
 		await refreshTenantMembership(env);
-		const isAfter = await admittable(id);
+		const isAfter = await isAdmittable(id);
 
 		expect({ before: isBefore, after: isAfter }).toStrictEqual({
 			before: false,

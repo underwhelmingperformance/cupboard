@@ -59,7 +59,9 @@ export interface DeployOptions {
 	readonly domain: string | undefined;
 	readonly dryRun: boolean;
 	readonly secrets: DeploySecrets;
-	/** What `/_version` answered before this deploy, when reachable. */
+	/**
+	What `/_version` answered before this deploy, when reachable.
+	*/
 	readonly liveBuild: string | undefined;
 }
 

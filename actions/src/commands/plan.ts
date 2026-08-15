@@ -248,7 +248,9 @@ export interface PlanInputs {
 	// The remote ssh-ng store used by cohort builds. Empty uses each runner's
 	// store. Packing measures missing bytes in the selected build store.
 	readonly store: string;
-	/** Keep cached targets runnable so their final derivations execute again. */
+	/**
+	Keep cached targets runnable so their final derivations execute again.
+	*/
 	readonly requireProvenance: boolean;
 }
 
@@ -664,7 +666,9 @@ async function retainedRootsFor(
 	);
 }
 
-/** Refuses remote publication unless every target's selected paths are known. */
+/**
+Refuses remote publication unless every target's selected paths are known.
+*/
 export function validateRemoteOutputPredictability(
 	store: string,
 	evaluations: readonly TargetEvaluation[],

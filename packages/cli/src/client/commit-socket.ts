@@ -25,12 +25,16 @@ import {
 	UploadWaitTimeoutError
 } from '../errors.ts';
 
-/** A received frame or body chunk; `ws` hands these over as `Buffer`s. */
+/**
+A received frame or body chunk; `ws` hands these over as `Buffer`s.
+*/
 export interface CommitSocketData {
 	toString(): string;
 }
 
-/** The HTTP response a refused upgrade carries (a `ws` `IncomingMessage`). */
+/**
+The HTTP response a refused upgrade carries (a `ws` `IncomingMessage`).
+*/
 export interface UpgradeFailure {
 	readonly statusCode?: number;
 	on(event: 'data', listener: (chunk: CommitSocketData) => void): unknown;
@@ -66,7 +70,9 @@ export interface CommitSocket {
 	close(): void;
 }
 
-/** Opens a commit WebSocket carrying the bearer token on the upgrade request. */
+/**
+Opens a commit WebSocket carrying the bearer token on the upgrade request.
+*/
 export type CommitSocketConnect = (
 	url: URL,
 	headers: Readonly<Record<string, string>>
@@ -97,15 +103,23 @@ export type CapabilityAttributes = Readonly<Record<string, string>>;
 export type AdvertisedCapabilities = ReadonlyMap<string, CapabilityAttributes>;
 
 export interface CommitSessionOptions {
-	/** The route path the socket was opened on, for error messages. */
+	/**
+	The route path the socket was opened on, for error messages.
+	*/
 	readonly path: string;
-	/** Bounds how long a deferred upload's `settled` waits for its verdict. */
+	/**
+	Bounds how long a deferred upload's `settled` waits for its verdict.
+	*/
 	readonly timeoutSeconds: number;
 	readonly signal?: AbortSignal;
 	readonly keepaliveMs?: number;
-	/** How many times a dropped socket is re-established before the push fails. */
+	/**
+	How many times a dropped socket is re-established before the push fails.
+	*/
 	readonly maxReconnects?: number;
-	/** Base back-off before the first reconnect; doubles, jittered, then capped. */
+	/**
+	Base back-off before the first reconnect; doubles, jittered, then capped.
+	*/
 	readonly reconnectBackoffMs?: number;
 	/**
 	 * Called on each connection with the capabilities the server advertised in
@@ -135,10 +149,14 @@ export interface CommitOutcome {
 	readonly verdictGrace?: () => ParsedUploadGraceFact | undefined;
 }
 
-/** A push's commit session: many paths commit over one socket. */
+/**
+A push's commit session: many paths commit over one socket.
+*/
 export interface CommitSession {
 	commit(target: CommitSessionTarget): Promise<CommitOutcome>;
-	/** Closes the socket; safe once every commit has settled. */
+	/**
+	Closes the socket; safe once every commit has settled.
+	*/
 	close(): void;
 }
 

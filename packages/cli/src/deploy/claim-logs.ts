@@ -10,7 +10,9 @@ const eventLimit = 20;
 
 export interface ClaimLogDependencies {
 	readonly api: Pick<CloudflareApi, 'queryWorkerLogs'>;
-	/** The cf-ray of the refused request, matched against each event. */
+	/**
+	The cf-ray of the refused request, matched against each event.
+	*/
 	readonly ray: string;
 	readonly now: () => number;
 	readonly sleep: (ms: number) => Promise<void>;

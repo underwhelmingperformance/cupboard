@@ -75,7 +75,9 @@ export class FakeCommitSocket
 	}
 }
 
-/** The HTTP response of a refused upgrade, scripted the same way. */
+/**
+The HTTP response of a refused upgrade, scripted the same way.
+*/
 export class FakeUpgradeFailure
 	extends FakeEmitter<UpgradeFailureEvents>
 	implements UpgradeFailure

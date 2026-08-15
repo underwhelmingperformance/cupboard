@@ -69,11 +69,17 @@ export interface AttestOptions {
 
 export interface AttestInputs {
 	readonly receiptFile: string;
-	/** Where the checksums of every path the receipt describes are written. */
+	/**
+	Where the checksums of every path the receipt describes are written.
+	*/
 	readonly checksumsFile: string;
-	/** Where the checksums of the paths this run built are written. */
+	/**
+	Where the checksums of the paths this run built are written.
+	*/
 	readonly builtChecksumsFile: string;
-	/** Where the build-origin predicate is written for the signing step. */
+	/**
+	Where the build-origin predicate is written for the signing step.
+	*/
 	readonly predicateFile: string;
 	readonly url: URL;
 	readonly cache: StoredCache;
@@ -81,7 +87,9 @@ export interface AttestInputs {
 	readonly readPassword: string;
 }
 
-/** Live metadata read from a committed destination narinfo. */
+/**
+Live metadata read from a committed destination narinfo.
+*/
 export interface CommittedPathInfo {
 	readonly storePath: StorePathString;
 	readonly narHash: NixSha256Hash;
@@ -102,7 +110,9 @@ interface AttestationSubjects {
 	readonly skipped: readonly string[];
 }
 
-/** Partition path infos according to a current-run build receipt. */
+/**
+Partition path infos according to a current-run build receipt.
+*/
 export function attestationSubjects(
 	infos: readonly CommittedPathInfo[],
 	receipt: BuildReceiptV2

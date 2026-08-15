@@ -11,7 +11,9 @@ import { z } from 'zod';
 export const isoTimestampSchema = z.string().brand('IsoTimestamp');
 export type IsoTimestamp = z.infer<typeof isoTimestampSchema>;
 
-/** The ISO-8601 rendering of an instant. */
+/**
+The ISO-8601 rendering of an instant.
+*/
 export function isoTimestamp(instant: Date): IsoTimestamp {
 	return isoTimestampSchema.parse(instant.toISOString());
 }

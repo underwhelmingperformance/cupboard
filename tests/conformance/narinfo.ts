@@ -47,16 +47,22 @@ export function pathInfoArguments(
 	];
 }
 
-/** The store directory served by the fixture cache and configured on both sides. */
+/**
+The store directory served by the fixture cache and configured on both sides.
+*/
 export const servedStoreDirectory: StoreDirectory =
 	storeDirectorySchema.parse('/nix/store');
 
-/** The path every fixture describes. */
+/**
+The path every fixture describes.
+*/
 export const fixtureStorePath: StorePathString = storePathSchema.parse(
 	'/nix/store/00000000000000000000000000000000-conformance-1.0'
 );
 
-/** The file a cache serves the fixture path's narinfo as. */
+/**
+The file a cache serves the fixture path's narinfo as.
+*/
 export const fixtureNarinfoFile = '00000000000000000000000000000000.narinfo';
 
 // Nix writes a sha256 digest in its own base32 in a narinfo, and reports it
@@ -86,18 +92,26 @@ const wellFormedFields: readonly (readonly [string, string])[] = [
 	['Sig', fixtureSignature]
 ];
 
-/** Changes applied to the valid narinfo for one test case. */
+/**
+Changes applied to the valid narinfo for one test case.
+*/
 export interface NarinfoFixture {
 	/**
 	 * Values replacing the well-formed document's, keyed by field name.
 	 * `undefined` drops the field.
 	 */
 	readonly fields?: Readonly<Record<string, string | undefined>>;
-	/** Whole lines added after the document, for a field written twice. */
+	/**
+	Whole lines added after the document, for a field written twice.
+	*/
 	readonly extraLines?: readonly string[];
-	/** Whether the cache serves a document for the path at all. */
+	/**
+	Whether the cache serves a document for the path at all.
+	*/
 	readonly served?: boolean;
-	/** Whether the document ends with a newline, which Nix requires. */
+	/**
+	Whether the document ends with a newline, which Nix requires.
+	*/
 	readonly endsWithNewline?: boolean;
 }
 
@@ -124,10 +138,14 @@ export function narinfoDocument(fixture: NarinfoFixture): string {
 	return fixture.endsWithNewline === false ? document : `${document}\n`;
 }
 
-/** What one side made of a narinfo. */
+/**
+What one side made of a narinfo.
+*/
 export type NarinfoVerdict = 'accepted' | 'absent' | 'rejected';
 
-/** The fields both sides state for a path they accepted. */
+/**
+The fields both sides state for a path they accepted.
+*/
 export interface OfferFields {
 	readonly narHash: string;
 	readonly narSize: number;
@@ -137,15 +155,23 @@ export interface OfferFields {
 	readonly signatures: readonly string[];
 }
 
-/** What both sides made of one narinfo. */
+/**
+What both sides made of one narinfo.
+*/
 export interface NarinfoOutcome {
 	readonly oracle: NarinfoVerdict;
 	readonly client: NarinfoVerdict;
-	/** Why the oracle refused it, for a case that reports the refusal. */
+	/**
+	Why the oracle refused it, for a case that reports the refusal.
+	*/
 	readonly oracleStderr: string;
-	/** Both sides' fields, present when both accepted the document. */
+	/**
+	Both sides' fields, present when both accepted the document.
+	*/
 	readonly fields: { oracle: OfferFields; client: OfferFields } | undefined;
-	/** What our client threw, for a document it refused. */
+	/**
+	What our client threw, for a document it refused.
+	*/
 	readonly clientError: unknown;
 }
 
@@ -234,11 +260,17 @@ function sorted(values: readonly string[]): readonly string[] {
 	return values.toSorted(compareStrings);
 }
 
-/** Our client's result for the fixture cache and path. */
+/**
+Our client's result for the fixture cache and path.
+*/
 export interface ClientAnswer {
-	/** What the cache offered for the path, in the oracle's shapes. */
+	/**
+	What the cache offered for the path, in the oracle's shapes.
+	*/
 	readonly offer: OfferFields | undefined;
-	/** The configured caches the client could not query. */
+	/**
+	The configured caches the client could not query.
+	*/
 	readonly unreachable: readonly UnreachableSubstituter[];
 }
 
@@ -307,7 +339,9 @@ async function readAsClient(directory: string): Promise<ClientOutcome> {
 	}
 }
 
-/** Serves one narinfo from a `file://` cache and queries it through both clients. */
+/**
+Serves one narinfo from a `file://` cache and queries it through both clients.
+*/
 export async function readNarinfo(
 	oracle: Oracle,
 	fixture: NarinfoFixture
@@ -386,7 +420,9 @@ export class NarinfoNotComparedError extends Error {
 	}
 }
 
-/** Both sides' fields, for a document they both accepted. */
+/**
+Both sides' fields, for a document they both accepted.
+*/
 export function comparedFields(outcome: NarinfoOutcome): {
 	oracle: OfferFields;
 	client: OfferFields;

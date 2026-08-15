@@ -134,7 +134,7 @@ function daemonlessStoreDependencies(): Parameters<typeof Nix.open>[0] {
 		currentSystem: () => nixSystem(),
 		probes: {
 			canReadWrite: () => false,
-			fileExists: () => false,
+			isFilePresent: () => false,
 			hasHardwareVirtualisation: () => false,
 			isWsl1: () => false,
 			microarchitectureLevels: () => []

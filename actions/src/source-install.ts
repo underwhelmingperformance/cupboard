@@ -17,13 +17,17 @@ export type ResolvedSourceCupboard = Extract<
 	{ readonly kind: 'source' }
 >;
 
-/** The Nix-built executable and the immutable source coordinate that produced it. */
+/**
+The Nix-built executable and the immutable source coordinate that produced it.
+*/
 export interface AcquiredSourceCupboard {
 	readonly binaryPath: string;
 	readonly cupboard: ResolvedSourceCupboard;
 }
 
-/** A checked-out workflow source tree to acquire as a Nix-built Cupboard. */
+/**
+A checked-out workflow source tree to acquire as a Nix-built Cupboard.
+*/
 export interface AcquireSourceCupboardOptions {
 	readonly checkoutDirectory: string;
 	readonly installDirectory: string;
@@ -31,7 +35,9 @@ export interface AcquireSourceCupboardOptions {
 	readonly signal?: AbortSignal;
 }
 
-/** The captured command contract needed to verify and build a source checkout. */
+/**
+The captured command contract needed to verify and build a source checkout.
+*/
 export type SourceCommandRunner = (
 	command: string,
 	arguments_: readonly string[],

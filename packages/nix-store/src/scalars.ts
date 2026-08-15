@@ -192,7 +192,9 @@ export const cacheNamePrefixPattern = /^([a-z0-9][a-z0-9._-]*)?$/;
 // `/_version` convention for non-content names.
 export const WIRE_DEFAULT_CACHE = '_default';
 
-/** A cache named in a contract URL: a real cache name or the default alias. */
+/**
+A cache named in a contract URL: a real cache name or the default alias.
+*/
 export const cacheSelectorSchema = z.union([
 	z.literal(WIRE_DEFAULT_CACHE),
 	cacheNameSchema
@@ -212,12 +214,16 @@ export const storedCacheSchema = z.union([
 ]);
 export type StoredCache = z.output<typeof storedCacheSchema>;
 
-/** The stored cache name a wire selector addresses. */
+/**
+The stored cache name a wire selector addresses.
+*/
 export function cacheFromSelector(selector: CacheSelector): StoredCache {
 	return selector === WIRE_DEFAULT_CACHE ? DEFAULT_CACHE : selector;
 }
 
-/** The wire selector addressing a stored cache name. */
+/**
+The wire selector addressing a stored cache name.
+*/
 export function selectorForCache(cache: StoredCache): CacheSelector {
 	return cache === DEFAULT_CACHE ? WIRE_DEFAULT_CACHE : cache;
 }

@@ -7,21 +7,27 @@
 export const genericExitCode = 1;
 export const usageExitCode = 2;
 
-/** An error that carries the process exit code its failure should produce. */
+/**
+An error that carries the process exit code its failure should produce.
+*/
 export abstract class CodedError extends Error {
 	get exitCode(): number {
 		return genericExitCode;
 	}
 }
 
-/** A misuse: a bad argument value or an unsupported combination of them. */
+/**
+A misuse: a bad argument value or an unsupported combination of them.
+*/
 export abstract class UsageError extends CodedError {
 	override get exitCode(): number {
 		return usageExitCode;
 	}
 }
 
-/** How many levels of a `cause` chain a diagnostic shows. */
+/**
+How many levels of a `cause` chain a diagnostic shows.
+*/
 const maxRenderedCauses = 5;
 
 /**

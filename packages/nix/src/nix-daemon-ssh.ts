@@ -16,29 +16,53 @@ import { isEnabledSettingValue } from './store-config.ts';
 const sshNgScheme = 'ssh-ng://';
 const defaultRemoteProgram = ['nix-daemon'] as const;
 
-/** The remote daemon an `ssh-ng` store URI names. */
+/**
+The remote daemon an `ssh-ng` store URI names.
+*/
 export interface NixSshStoreSpec {
-	/** The ssh destination: `host` or `user@host`. */
+	/**
+	The ssh destination: `host` or `user@host`.
+	*/
 	readonly destination: string;
-	/** Whether Nix normalises the URI authority to exactly `localhost`. */
+	/**
+	Whether Nix normalises the URI authority to exactly `localhost`.
+	*/
 	readonly isNativeLocalhost?: true;
-	/** The host, without a user or port. */
+	/**
+	The host, without a user or port.
+	*/
 	readonly host?: string;
-	/** The SSH port stated by the authority. */
+	/**
+	The SSH port stated by the authority.
+	*/
 	readonly port?: number;
-	/** The private key named by the store. */
+	/**
+	The private key named by the store.
+	*/
 	readonly sshKey?: string;
-	/** The decoded public host key named by the store. */
+	/**
+	The decoded public host key named by the store.
+	*/
 	readonly sshPublicHostKey?: string;
-	/** Whether SSH transport compression is enabled. */
+	/**
+	Whether SSH transport compression is enabled.
+	*/
 	readonly compress?: boolean;
-	/** The greatest number of concurrent daemon connections. */
+	/**
+	The greatest number of concurrent daemon connections.
+	*/
 	readonly maxConnections?: number;
-	/** The maximum age in seconds at which an idle connection is reused. */
+	/**
+	The maximum age in seconds at which an idle connection is reused.
+	*/
 	readonly maxConnectionAge?: number;
-	/** The daemon command started on the remote host. */
+	/**
+	The daemon command started on the remote host.
+	*/
 	readonly remoteProgram?: readonly string[];
-	/** The store reference the remote daemon opens. */
+	/**
+	The store reference the remote daemon opens.
+	*/
 	readonly remoteStore?: string;
 }
 

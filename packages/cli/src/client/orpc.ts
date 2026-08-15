@@ -40,7 +40,9 @@ export type TenantRpc = JsonifiedClient<
 export interface TenantRpcOptions {
 	readonly credential?: AccessCredential;
 	readonly signal?: AbortSignal;
-	/** Test hook standing in for global fetch. */
+	/**
+	Test hook standing in for global fetch.
+	*/
 	readonly fetcher?: typeof fetch;
 }
 

@@ -19,7 +19,9 @@ export interface R2Credentials {
 	readonly secretAccessKey: R2SecretAccessKey;
 }
 
-/** Prompt for an existing pair; undefined when cancelled. */
+/**
+Prompt for an existing pair; undefined when cancelled.
+*/
 export async function promptR2CredentialPair(
 	ui: DeployUi,
 	accountId: CloudflareAccountId
@@ -54,7 +56,9 @@ export async function promptR2CredentialPair(
 	};
 }
 
-/** The verdict of probing R2 with a credential pair. */
+/**
+The verdict of probing R2 with a credential pair.
+*/
 export type R2CredentialCheck =
 	| { readonly kind: 'valid' }
 	| { readonly kind: 'rejected'; readonly status: number }
@@ -62,7 +66,9 @@ export type R2CredentialCheck =
 
 export type R2AccessKeyIdProblem = 'invalid-hex32';
 
-/** The access key id is the Cloudflare API token id: 32 hex characters. */
+/**
+The access key id is the Cloudflare API token id: 32 hex characters.
+*/
 export function accessKeyIdProblem(
 	value: string
 ): R2AccessKeyIdProblem | undefined {
@@ -87,7 +93,9 @@ function accessKeyIdProblemText(value: string): string | undefined {
 
 export type R2SecretAccessKeyProblem = 'invalid-hex64';
 
-/** The secret is the hex SHA-256 of the token value: 64 hex characters. */
+/**
+The secret is the hex SHA-256 of the token value: 64 hex characters.
+*/
 export function secretAccessKeyProblem(
 	value: string
 ): R2SecretAccessKeyProblem | undefined {

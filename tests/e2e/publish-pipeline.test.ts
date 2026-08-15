@@ -110,7 +110,9 @@ interface Fixture {
 	readonly runner: StubRunnerTokenEndpoint;
 	readonly cupboard: CupboardCommand;
 	readonly system: string;
-	/** Whether a local build streams; see {@link streamsThroughDaemon}. */
+	/**
+	Whether a local build streams; see {@link canStreamThroughDaemon}.
+	*/
 	readonly streams: boolean;
 }
 
@@ -163,7 +165,7 @@ function system(): string {
  * daemon builds first and reconciles the store afterwards, so the store's own
  * report is the evidence its receipt carries. Both publish the same paths.
  */
-async function streamsThroughDaemon(): Promise<boolean> {
+async function canStreamThroughDaemon(): Promise<boolean> {
 	const config = discoverNixStoreConfig();
 
 	if (!existsSync(config.daemonSocketPath)) {
@@ -295,13 +297,17 @@ async function runNix(arguments_: readonly string[]): Promise<string> {
 const cohortEntrySchema = z.looseObject({ key: z.string() });
 const matrixSchema = z.object({ include: z.array(cohortEntrySchema) });
 
-/** One composite action step: its exit status and the outputs it recorded. */
+/**
+One composite action step: its exit status and the outputs it recorded.
+*/
 interface StepResult {
 	readonly status: number;
 	readonly outputs: Readonly<Record<string, string>>;
 }
 
-/** One publication run: a runner temporary directory its steps share. */
+/**
+One publication run: a runner temporary directory its steps share.
+*/
 interface PublishJob {
 	readonly runnerTemporary: string;
 	readonly runId: string;
@@ -407,7 +413,9 @@ function planArguments(options: {
 	];
 }
 
-/** The argv `actions/build-cohort` builds for one cohort-matrix entry. */
+/**
+The argv `actions/build-cohort` builds for one cohort-matrix entry.
+*/
 function buildCohortArguments(options: {
 	readonly cohortJson: string;
 	readonly url: string;
@@ -533,7 +541,9 @@ interface PublishOptions {
 	readonly flakeDirectory: string;
 	readonly requireProvenance: boolean;
 	readonly store: string;
-	/** Every root this run writes nests under this prefix. */
+	/**
+	Every root this run writes nests under this prefix.
+	*/
 	readonly rootPrefix?: string;
 	/**
 	 * The `cupboard` executable every step of the run invokes. Defaults to the
@@ -793,9 +803,13 @@ function localAttribution(): Attribution {
 }
 
 interface PublicationPaths {
-	/** Every path a build of the cohort produces. */
+	/**
+	Every path a build of the cohort produces.
+	*/
 	readonly built: readonly PublishedPath[];
-	/** The cohort's own targets, a subset of {@link built}. */
+	/**
+	The cohort's own targets, a subset of {@link built}.
+	*/
 	readonly targets: readonly PublishedPath[];
 	readonly attribution: Attribution;
 }
@@ -812,7 +826,9 @@ function claimedPaths(options: PublicationPaths): readonly PublishedPath[] {
 		: options.targets;
 }
 
-/** The receipt a cohort writes for the paths it published and claimed. */
+/**
+The receipt a cohort writes for the paths it published and claimed.
+*/
 function expectedReceipt(
 	options: PublicationPaths & {
 		/**
@@ -880,7 +896,9 @@ function isBuildPushCohort(store: string): boolean {
 	return store === '';
 }
 
-/** The checksums file the attest step writes for a receipt's subjects. */
+/**
+The checksums file the attest step writes for a receipt's subjects.
+*/
 function expectedChecksums(claimed: readonly PublishedPath[]): string {
 	return claimed
 		.toSorted(byStorePath)
@@ -1034,7 +1052,7 @@ describe.skipIf(!isTierEnabled || !isNixPresent)(
 				runner,
 				cupboard,
 				system: system(),
-				streams: await streamsThroughDaemon()
+				streams: await canStreamThroughDaemon()
 			};
 		}, 600_000);
 

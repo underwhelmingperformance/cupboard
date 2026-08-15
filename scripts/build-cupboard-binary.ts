@@ -345,12 +345,16 @@ function parseOptions(arguments_: readonly string[]): Options {
 	};
 }
 
-/** Preserve the caller's build identity after rejecting surrounding whitespace. */
+/**
+Preserve the caller's build identity after rejecting surrounding whitespace.
+*/
 export function normaliseBuildVersion(version: string): string {
 	return version.trim();
 }
 
-/** Name a binary by platform within the release that scopes it to one version. */
+/**
+Name a binary by platform within the release that scopes it to one version.
+*/
 export function releaseAssetNameFor(
 	runtimePlatform: string,
 	runtimeArchitecture: string
