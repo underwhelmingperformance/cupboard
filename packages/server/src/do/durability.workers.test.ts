@@ -13,14 +13,14 @@ import {
 	bootstrap,
 	currentOrigin,
 	defaultCacheStatsPath,
+	isNarInfoSignatureValid,
 	narBytes,
 	pushPath,
 	readStoredNarInfo,
 	resetTestServer,
 	testServerFor,
 	uploadMetadata,
-	useTestServer,
-	verifyNarInfoSignature
+	useTestServer
 } from '../test-support.ts';
 
 import { storedSignaturesSchema } from './signing-keys.ts';
@@ -131,7 +131,7 @@ describe('durable object state', () => {
 		const stats = await authorisedFetch(defaultCacheStatsPath, second.token);
 
 		const stored = await readStoredNarInfo(metadata.storePathHash);
-		const isCommittedVerified = await verifyNarInfoSignature(
+		const isCommittedVerified = await isNarInfoSignatureValid(
 			NarInfo.parse(stored.body),
 			init.publicKey
 		);

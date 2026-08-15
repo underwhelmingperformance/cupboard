@@ -45,7 +45,9 @@ export interface BuildEventListenerOptions {
 	readonly storeDirectory: StoreDirectory;
 	readonly onEvent: (event: ParsedBuildEvent) => void;
 	readonly onRejected: (error: BuildEventRejectedError) => void;
-	/** Bounds the drain wait on a connection that never settles. */
+	/**
+	Bounds the drain wait on a connection that never settles.
+	*/
 	readonly drainTimeoutMs?: number;
 }
 

@@ -37,7 +37,9 @@ interface LoginOptions {
 	readonly headless?: boolean;
 }
 
-/** The issuer refused the device grant for cupboard's own OAuth client. */
+/**
+The issuer refused the device grant for cupboard's own OAuth client.
+*/
 export class DeviceGrantNotEnabledError extends CliError {
 	constructor(options: { readonly cause: unknown }) {
 		super(
@@ -95,7 +97,9 @@ function deviceLoginInstruction(verification: {
 	);
 }
 
-/** A fresh Cloudflare login answered without an id_token to present. */
+/**
+A fresh Cloudflare login answered without an id_token to present.
+*/
 export class LoginIdTokenMissingError extends CliError {
 	constructor() {
 		super(

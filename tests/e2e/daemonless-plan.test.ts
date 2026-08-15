@@ -26,13 +26,21 @@ interface DaemonlessStore {
 	readonly storeDirectory: string;
 	readonly stateDirectory: string;
 	readonly substituter: FakeSubstituter;
-	/** A path registered as valid in the store database. */
+	/**
+	A path registered as valid in the store database.
+	*/
 	readonly heldPath: StorePathString;
-	/** A path available only from the substituter. */
+	/**
+	A path available only from the substituter.
+	*/
 	readonly offeredPath: StorePathString;
-	/** A derivation present in the store whose output has not been built. */
+	/**
+	A derivation present in the store whose output has not been built.
+	*/
 	readonly derivationPath: StorePathString;
-	/** The derivation output served only by the substituter. */
+	/**
+	The derivation output served only by the substituter.
+	*/
 	readonly offeredOutput: StorePathString;
 }
 
@@ -155,7 +163,7 @@ function openStore(overrides: Readonly<Record<string, string>> = {}): Nix {
 			// machine running the test offers a build has no bearing on it.
 			probes: {
 				canReadWrite: () => false,
-				fileExists: () => false,
+				isFilePresent: () => false,
 				hasHardwareVirtualisation: () => false,
 				isWsl1: () => false,
 				microarchitectureLevels: () => []

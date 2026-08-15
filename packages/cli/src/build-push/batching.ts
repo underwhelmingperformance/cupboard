@@ -25,7 +25,9 @@ import type { CompressNar, PushClient, PushNarArchive } from '../push/push.ts';
 // order.
 export const flushMaxWaitMs = 500;
 
-/** The daemon operations one flush performs over its own connection. */
+/**
+The daemon operations one flush performs over its own connection.
+*/
 export interface BatchSession {
 	addTempRoot(storePath: StorePathString): Promise<void>;
 	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo>;
@@ -62,7 +64,9 @@ export interface BatchPathFailure {
 export interface BuildOutputBatcherOptions {
 	readonly store: BatchStore;
 	readonly client: PushClient;
-	/** The run root every flush's negotiation binds, exactly as a push does. */
+	/**
+	The run root every flush's negotiation binds, exactly as a push does.
+	*/
 	readonly runRoot?: UploadAttachRoot;
 	readonly commitOptions?: CommitOptions;
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
@@ -302,12 +306,16 @@ export class BuildOutputBatcher {
 		}
 	}
 
-	/** The terminal per-path outcomes recorded so far. */
+	/**
+	The terminal per-path outcomes recorded so far.
+	*/
 	get outcomes(): ReadonlyMap<StorePathString, BatchPathOutcome> {
 		return this.recorded;
 	}
 
-	/** The paths awaiting a flush, including any returned by a failure. */
+	/**
+	The paths awaiting a flush, including any returned by a failure.
+	*/
 	get candidates(): readonly StorePathString[] {
 		return [...this.waiting];
 	}
@@ -339,7 +347,9 @@ export class BuildOutputBatcher {
 		}, this.options.maxWaitMs ?? flushMaxWaitMs);
 	}
 
-	/** Resolves once every flush started so far has finished. */
+	/**
+	Resolves once every flush started so far has finished.
+	*/
 	async settled(): Promise<void> {
 		await this.chain;
 	}

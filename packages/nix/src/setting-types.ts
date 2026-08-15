@@ -80,7 +80,9 @@ export function nixInteger(name: string, value: string): bigint | undefined {
 	return nixIntegerOfWidth(value, nixIntegerWidths[name] ?? 'uint64');
 }
 
-/** The integer Nix reads from the value for a setting of the given width. */
+/**
+The integer Nix reads from the value for a setting of the given width.
+*/
 export function nixIntegerOfWidth(
 	value: string,
 	width: NixIntegerWidth
@@ -169,7 +171,9 @@ export function isSettingValue(
 	return true;
 }
 
-/** A whitespace-separated setting value, as Nix reads its list settings. */
+/**
+A whitespace-separated setting value, as Nix reads its list settings.
+*/
 export function listOf(value: string): readonly string[] {
 	return value.split(/\s+/u).filter(Boolean);
 }
@@ -236,7 +240,9 @@ function isPathReference(reference: string): boolean {
 	);
 }
 
-/** A human-readable description of the values accepted by a setting. */
+/**
+A human-readable description of the values accepted by a setting.
+*/
 export function settingValueExpectation(
 	name: string,
 	type: NixSettingValueType

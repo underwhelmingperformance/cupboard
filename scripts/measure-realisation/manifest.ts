@@ -7,7 +7,9 @@ import {
 	publishTargetsSchema
 } from '../../actions/src/publish-plan.ts';
 
-/** A misuse of the fixture: a manifest it cannot read or measure. */
+/**
+A misuse of the fixture: a manifest it cannot read or measure.
+*/
 export abstract class ManifestError extends UsageError {}
 
 export class ManifestJsonError extends ManifestError {
@@ -88,7 +90,9 @@ function assertDistinctAttributes(targets: readonly PublishTarget[]): void {
 	}
 }
 
-/** The targets one `cohort` label puts in a single job. */
+/**
+The targets one `cohort` label puts in a single job.
+*/
 export interface TargetGroup {
 	readonly key: string;
 	readonly attrs: readonly string[];

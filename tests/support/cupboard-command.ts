@@ -25,7 +25,9 @@ const hookHelperSource = path.join(
 );
 const objectKeyHeader = 'x-cupboard-object-key';
 
-/** Writes uploaded blob bytes where the worker verifies them. */
+/**
+Writes uploaded blob bytes where the worker verifies them.
+*/
 export type StageObject = (key: string, bytes: Uint8Array) => Promise<void>;
 
 /**
@@ -45,7 +47,9 @@ export type StageObject = (key: string, bytes: Uint8Array) => Promise<void>;
  */
 export class CupboardCommand {
 	static async start(options: {
-		/** Where this installation's files are written. */
+		/**
+		Where this installation's files are written.
+		*/
 		readonly directory: string;
 		readonly stage: StageObject;
 	}): Promise<CupboardCommand> {
@@ -84,7 +88,9 @@ export class CupboardCommand {
 	}
 
 	private constructor(
-		/** The `cupboard-path` input an action receives. */
+		/**
+		The `cupboard-path` input an action receives.
+		*/
 		readonly path: string,
 		private readonly bridge: Server
 	) {}

@@ -2,7 +2,9 @@ import { ProbeTimeoutError } from './errors.ts';
 
 export const probeDeadlineMs = 30_000;
 
-/** Fetch and consume a cache endpoint within the action's probe deadline. */
+/**
+Fetch and consume a cache endpoint within the action's probe deadline.
+*/
 export async function fetchWithProbeDeadline<Result>(
 	fetcher: typeof fetch,
 	url: string,

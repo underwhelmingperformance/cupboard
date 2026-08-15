@@ -2,9 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	createPushId,
+	isPushIdValid,
 	issuePushId,
-	pushIdSigningKeySchema,
-	verifyPushId
+	pushIdSigningKeySchema
 } from './push-id.ts';
 
 const secret = pushIdSigningKeySchema.parse('parent-secret');
@@ -38,15 +38,15 @@ describe('push id', () => {
 		const tamperedNonce = `${pushId.at(0) === '0' ? '1' : '0'}${pushId.slice(1)}`;
 
 		expect({
-			genuine: await verifyPushId(secret, pushId),
-			tamperedTag: await verifyPushId(secret, tamperedTag),
-			tamperedNonce: await verifyPushId(secret, tamperedNonce),
-			wrongSecret: await verifyPushId(
+			genuine: await isPushIdValid(secret, pushId),
+			tamperedTag: await isPushIdValid(secret, tamperedTag),
+			tamperedNonce: await isPushIdValid(secret, tamperedNonce),
+			wrongSecret: await isPushIdValid(
 				pushIdSigningKeySchema.parse('other-secret'),
 				pushId
 			),
-			tooShort: await verifyPushId(secret, pushId.slice(0, -1)),
-			notHex: await verifyPushId(secret, `Z${pushId.slice(1)}`)
+			tooShort: await isPushIdValid(secret, pushId.slice(0, -1)),
+			notHex: await isPushIdValid(secret, `Z${pushId.slice(1)}`)
 		}).toStrictEqual({
 			genuine: true,
 			tamperedTag: false,
@@ -63,8 +63,8 @@ describe('push id', () => {
 
 		expect({
 			distinct: first !== second,
-			firstValid: await verifyPushId(secret, first),
-			secondValid: await verifyPushId(secret, second)
+			firstValid: await isPushIdValid(secret, first),
+			secondValid: await isPushIdValid(secret, second)
 		}).toStrictEqual({ distinct: true, firstValid: true, secondValid: true });
 	});
 });

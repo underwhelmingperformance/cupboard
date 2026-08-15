@@ -26,7 +26,9 @@ export function formatBytes(bytes: number): string {
 	return `${sign}${remaining.toFixed(digits)} ${binaryUnits[unit] ?? 'B'}`;
 }
 
-/** The report as lines a person reads, one table of targets then the groups. */
+/**
+The report as lines a person reads, one table of targets then the groups.
+*/
 export function renderSummary(report: RealisationReport): string {
 	const lines = [
 		`Realising ${report.flake} against an empty store`,
@@ -73,7 +75,9 @@ function groupLines(key: string, group: GroupMeasurement): readonly string[] {
 	];
 }
 
-/** The gate's verdict as lines a person reads. */
+/**
+The gate's verdict as lines a person reads.
+*/
 export function renderBudgetResult(result: BudgetResult): string {
 	const lines = [
 		`Gate: tolerance ${(result.tolerance * 100).toFixed(1)}%`,

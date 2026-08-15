@@ -87,7 +87,9 @@ export function renameResource(
 	};
 }
 
-/** Replaces the control Worker's cron triggers (the tenant has none). */
+/**
+Replaces the control Worker's cron triggers (the tenant has none).
+*/
 export function withCrons(
 	config: DeploymentConfig,
 	crons: readonly string[]

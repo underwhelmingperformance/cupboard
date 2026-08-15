@@ -81,7 +81,9 @@ function flakeLock(revision: string): string {
 	});
 }
 
-/** A workspace holding the given lockfile and record, recording every write. */
+/**
+A workspace holding the given lockfile and record, recording every write.
+*/
 function fakeWorkspace(
 	revision: string,
 	record: OracleRecord | undefined

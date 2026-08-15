@@ -26,7 +26,9 @@ export interface PlanReprobeOptions {
 }
 
 export interface PlanReprobeRunOptions {
-	/** The build set as it stands, one entry per target Nix is about to realise. */
+	/**
+	The build set as it stands, one entry per target Nix is about to realise.
+	*/
 	readonly targets: readonly ParsedCohortTarget[];
 }
 

@@ -199,7 +199,7 @@ export async function rotateControlKey(
 // requires that *another* live key still exists, evaluated within the statement,
 // and D1 serialises writers, so the second retirement re-reads the reduced set
 // and changes nothing.
-export async function retireControlKey(
+export async function didRetireControlKey(
 	database: Database,
 	kid: AuthKeyId,
 	now: IsoTimestamp
@@ -272,7 +272,7 @@ export async function retireScheduledControlKeys(
 
 	for (const key of due) {
 		try {
-			if (await retireControlKey(database, key.kid, now)) {
+			if (await didRetireControlKey(database, key.kid, now)) {
 				retired += 1;
 			}
 		} catch (error) {

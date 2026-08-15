@@ -30,12 +30,16 @@ export function tenantUrl(baseUrl: URL, tenant: string): URL {
 	return appendPathSegments(baseUrl, 't', tenant);
 }
 
-/** The URL that serves a named reuse view under a cache base URL. */
+/**
+The URL that serves a named reuse view under a cache base URL.
+*/
 export function reuseViewUrl(baseUrl: URL, view: string): URL {
 	return appendPathSegments(baseUrl, 'reuse', view);
 }
 
-/** The URL that serves a cache's narinfo signing keys. */
+/**
+The URL that serves a cache's narinfo signing keys.
+*/
 export function publicKeyUrl(baseUrl: URL): URL {
 	return appendPathSegments(baseUrl, 'pubkey');
 }

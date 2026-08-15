@@ -49,7 +49,9 @@ function offer(
 interface SigningKey {
 	readonly published: string;
 	sign(over: NixSubstituterOffer): Promise<string>;
-	/** The key file Nix writes, whose last 32 bytes are the public half. */
+	/**
+	The key file Nix writes, whose last 32 bytes are the public half.
+	*/
 	secretFile(): Promise<string>;
 }
 
@@ -104,7 +106,9 @@ function fingerprintOf(info: NixSubstituterOffer): string {
 	);
 }
 
-/** A machine holding none of the configured secret key files. */
+/**
+A machine holding none of the configured secret key files.
+*/
 const missingKeyFiles = new Map<string, string>();
 const noKeyFiles: ReadKeyFile = (filePath) => missingKeyFiles.get(filePath);
 

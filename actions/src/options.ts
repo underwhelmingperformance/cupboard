@@ -23,7 +23,9 @@ function hasControlCharacter(value: string): boolean {
 	return false;
 }
 
-/** Whether a value is safe to pass to Nix as a positional argument. */
+/**
+Whether a value is safe to pass to Nix as a positional argument.
+*/
 export function isNixPositionalArgument(value: string): boolean {
 	return !value.startsWith('-') && !hasControlCharacter(value);
 }

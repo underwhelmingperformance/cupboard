@@ -81,9 +81,13 @@ export interface PublishedSubjectsOptions {
 	 * from another cache.
 	 */
 	readonly described: ReadonlyMap<string, BuildSubjectV3>;
-	/** Store metadata for the paths the push read from the build store. */
+	/**
+	Store metadata for the paths the push read from the build store.
+	*/
 	readonly infos: readonly NixValidPathInfo[];
-	/** The paths the destination ends up serving because of this run. */
+	/**
+	The paths the destination ends up serving because of this run.
+	*/
 	readonly servable: ReadonlySet<string>;
 	readonly buildStore: string;
 	/**

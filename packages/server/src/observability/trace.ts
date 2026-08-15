@@ -1,4 +1,6 @@
-/** The trace-context fields available to stamp on a request logger. */
+/**
+The trace-context fields available to stamp on a request logger.
+*/
 export interface TraceContext {
 	readonly traceId?: string;
 	readonly spanId?: string;

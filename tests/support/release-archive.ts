@@ -5,11 +5,17 @@ import { byCodeUnit } from '@cupboard/nix-store/store-path';
 
 import { runCommand } from './process.ts';
 
-/** A cupboard installation unpacked from a release archive. */
+/**
+A cupboard installation unpacked from a release archive.
+*/
 export interface ReleaseInstallation {
-	/** The `cupboard-path` input an action receives. */
+	/**
+	The `cupboard-path` input an action receives.
+	*/
 	readonly commandPath: string;
-	/** Every member of the archive, in a stable order. */
+	/**
+	Every member of the archive, in a stable order.
+	*/
 	readonly entries: readonly string[];
 }
 

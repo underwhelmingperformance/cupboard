@@ -1,7 +1,9 @@
 import { sql } from 'drizzle-orm';
 import type { DrizzleSqliteDODatabase } from 'drizzle-orm/durable-sqlite';
 
-/** One record from `drizzle/meta/_journal.json` for a generated migration. */
+/**
+One record from `drizzle/meta/_journal.json` for a generated migration.
+*/
 interface JournalEntry {
 	readonly idx: number;
 	readonly when: number;
@@ -98,7 +100,9 @@ type MigrationDatabase<TSchema extends Record<string, unknown>> =
 
 interface TrackingState {
 	readonly appliedTags: ReadonlySet<string>;
-	/** The highest `created_at` already recorded, or `-Infinity` when none. */
+	/**
+	The highest `created_at` already recorded, or `-Infinity` when none.
+	*/
 	readonly threshold: number;
 }
 

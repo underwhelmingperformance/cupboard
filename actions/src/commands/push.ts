@@ -57,7 +57,9 @@ import {
 
 const legacyPushSummarySchema = pushSummarySchema.omit({ paths: true });
 
-/** One root group's own target paths, from a cohort declaring several roots. */
+/**
+One root group's own target paths, from a cohort declaring several roots.
+*/
 export interface RootGroup {
 	readonly root: string;
 	readonly paths: readonly string[];

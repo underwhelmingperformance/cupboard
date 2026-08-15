@@ -95,7 +95,9 @@ import {
 
 export const hookScriptFileName = 'post-build-hook.sh';
 
-/** Maximum attempts a constructed build invocation runs. */
+/**
+Maximum attempts a constructed build invocation runs.
+*/
 export const defaultBuildAttempts = 3;
 
 /**
@@ -106,11 +108,17 @@ export const defaultBuildAttempts = 3;
  */
 export interface ConstructedBuild {
 	readonly installables: readonly string[];
-	/** Maximum build attempts; defaults to {@link defaultBuildAttempts}. */
+	/**
+	Maximum build attempts; defaults to {@link defaultBuildAttempts}.
+	*/
 	readonly attempts?: number;
-	/** Execute every selected derivation even when its outputs are already valid. */
+	/**
+	Execute every selected derivation even when its outputs are already valid.
+	*/
 	readonly rebuild?: boolean;
-	/** Fail unless the receipt claims every selected final output. */
+	/**
+	Fail unless the receipt claims every selected final output.
+	*/
 	readonly requireProvenance?: boolean;
 	readonly keepGoing?: boolean;
 	readonly maxJobs?: number;
@@ -127,16 +135,26 @@ export type BuildInvocation =
 
 export interface BuildPushRunOptions {
 	readonly invocation: BuildInvocation;
-	/** The target root reconciliation replaces once every target confirms. */
+	/**
+	The target root reconciliation replaces once every target confirms.
+	*/
 	readonly root?: RootName;
 	readonly ttlSeconds?: TtlSeconds;
-	/** The run root every streamed and re-driven commit binds at negotiate. */
+	/**
+	The run root every streamed and re-driven commit binds at negotiate.
+	*/
 	readonly runRoot?: UploadAttachRoot;
-	/** Publish the complete realised closure of the built targets. */
+	/**
+	Publish the complete realised closure of the built targets.
+	*/
 	readonly closure?: boolean;
-	/** Paths published alongside the targets without being retained as targets. */
+	/**
+	Paths published alongside the targets without being retained as targets.
+	*/
 	readonly intermediatePaths?: readonly StorePathString[];
-	/** Where the build receipt is written, as JSON. */
+	/**
+	Where the build receipt is written, as JSON.
+	*/
 	readonly receiptFile?: string;
 	readonly wait?: boolean;
 	readonly waitTimeoutSeconds?: WaitTimeoutSeconds;
@@ -155,23 +173,35 @@ export type BuildPushStore = ReconcileOptions['store'] &
 export interface BuildPushDependencies {
 	readonly client: PushClient;
 	readonly store: BuildPushStore;
-	/** The connection-scoped store the streaming batcher pins batches on. */
+	/**
+	The connection-scoped store the streaming batcher pins batches on.
+	*/
 	readonly batchStore: BatchStore;
 	readonly storeDirectory: StoreDirectory;
 	readonly invocationId: InvocationId;
-	/** Proves the run can work and returns the endpoints it builds on. */
+	/**
+	Proves the run can work and returns the endpoints it builds on.
+	*/
 	readonly preflight: () => Promise<BuildPushPreflight>;
-	/** Where a run that hosts no hook endpoint keeps its own directory. */
+	/**
+	Where a run that hosts no hook endpoint keeps its own directory.
+	*/
 	readonly runtime?: Omit<InvocationRuntimeOptions, 'invocationId'>;
 	readonly environment?: ChildEnvironment;
 	readonly signalSource?: SignalSource;
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
 	readonly compressNar?: CompressNar;
-	/** Generates identifiers for a constructed invocation's attempts. */
+	/**
+	Generates identifiers for a constructed invocation's attempts.
+	*/
 	readonly nextAttemptId?: () => string;
-	/** Starts the cancellable wait between attempts; injectable for tests. */
+	/**
+	Starts the cancellable wait between attempts; injectable for tests.
+	*/
 	readonly startDelay?: StartDelay;
-	/** Receives the successfully published targets before this run returns. */
+	/**
+	Receives the successfully published targets before this run returns.
+	*/
 	readonly settledTargets?: (
 		targets: readonly StorePathString[]
 	) => Promise<void> | void;
@@ -705,9 +735,13 @@ interface RealisedBuild {
 	readonly realised: readonly string[];
 	readonly declared: readonly string[];
 	readonly alreadyHeld: readonly string[];
-	/** The builder for each delegated derivation, taken from the activity logs. */
+	/**
+	The builder for each delegated derivation, taken from the activity logs.
+	*/
 	readonly delegated: ReadonlyMap<string, string>;
-	/** The stores each copied path came from, read from the activity logs. */
+	/**
+	The stores each copied path came from, read from the activity logs.
+	*/
 	readonly copiedFrom: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 	readonly exit: ChildExit;
 	readonly terminalFailure?: TerminalBuildFailure;
@@ -824,7 +858,9 @@ interface RunFacts {
 	readonly maxQueueDepth: number;
 	readonly eventPaths: readonly StorePathString[];
 	readonly subjects: readonly BuildSubjectV3[];
-	/** The stores the run watched each path being copied from. */
+	/**
+	The stores the run watched each path being copied from.
+	*/
 	readonly copiedFrom: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 	readonly selectedTargetPaths?: readonly StorePathString[];
 	readonly terminalFailure?: TerminalBuildFailure;

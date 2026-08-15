@@ -34,11 +34,11 @@ export class NixTrustedKeys {
 	}
 
 	/**
-	 * Whether any of the signatures verifies against a trusted key over this
-	 * fingerprint. Nix counts the signatures it can verify and accepts a path
+	 * Whether at least one signature over this fingerprint is valid under a
+	 * trusted key. Nix counts the signatures it can verify and accepts a path
 	 * with at least one. Signatures from unknown keys do not affect the result.
 	 */
-	async verifies(
+	async hasValidSignature(
 		fingerprint: NixFingerprint,
 		signatures: readonly string[]
 	): Promise<boolean> {
@@ -47,7 +47,10 @@ export class NixTrustedKeys {
 		for (const signature of NixSignature.parseAll(signatures)) {
 			const key = this.keys.get(signature.name);
 
-			if (key !== undefined && (await verifies(key, signature, signed))) {
+			if (
+				key !== undefined &&
+				(await isSignatureValid(key, signature, signed))
+			) {
 				return true;
 			}
 		}
@@ -97,7 +100,7 @@ function parseKey(value: string): NixPublicKey | undefined {
 	}
 }
 
-async function verifies(
+async function isSignatureValid(
 	key: NixPublicKey,
 	signature: NixSignature,
 	signed: Uint8Array

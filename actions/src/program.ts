@@ -30,7 +30,9 @@ interface ActionSignalSource {
 	removeListener(signal: 'SIGINT' | 'SIGTERM', listener: () => void): unknown;
 }
 
-/** A runner signal whose conventional shell exit status the action preserves. */
+/**
+A runner signal whose conventional shell exit status the action preserves.
+*/
 export class ActionSignalError extends CodedError {
 	constructor(public readonly signal: 'SIGINT' | 'SIGTERM') {
 		super(`Action cancelled by ${signal}`);

@@ -30,7 +30,9 @@ const cachedSessionSchema = z.object({
 });
 export type CachedSession = z.output<typeof cachedSessionSchema>;
 
-/** Maps a token endpoint's response to the session shape the cache holds. */
+/**
+Maps a token endpoint's response to the session shape the cache holds.
+*/
 export function sessionFromTokenResponse(
 	response: Pick<ParsedTokenResponse, 'access_token' | 'refresh_token'>
 ): CachedSession {

@@ -22,7 +22,9 @@ import {
 	cloudflareAccountIdSchema
 } from './identifiers.ts';
 
-/** The resolved credential can see no Cloudflare accounts at all. */
+/**
+The resolved credential can see no Cloudflare accounts at all.
+*/
 export class NoCloudflareAccountsError extends CliError {
 	constructor() {
 		super('The credential has access to no accounts.');
@@ -36,9 +38,13 @@ export type CredentialSource =
 export interface CloudflareCredential {
 	readonly token: string;
 	readonly source: CredentialSource;
-	/** The Cloudflare user behind an OAuth grant; undefined for raw tokens. */
+	/**
+	The Cloudflare user behind an OAuth grant; undefined for raw tokens.
+	*/
 	readonly subject: string | undefined;
-	/** The grant's raw id_token, presentable to a cupboard server's signup. */
+	/**
+	The grant's raw id_token, presentable to a cupboard server's signup.
+	*/
 	readonly idToken: string | undefined;
 }
 
@@ -53,7 +59,9 @@ export interface CredentialChain {
 	readonly refreshGrant: (
 		previous: CloudflareGrant
 	) => Promise<CloudflareGrant | undefined>;
-	/** Absent when a logged-in wrangler's stored token must not be used. */
+	/**
+	Absent when a logged-in wrangler's stored token must not be used.
+	*/
 	readonly readWranglerToken?: () => Promise<string | undefined>;
 	readonly login: () => Promise<CloudflareGrant>;
 	/**
@@ -70,14 +78,20 @@ export interface CredentialChain {
 
 export interface CredentialChainOptions {
 	readonly openBrowser: (url: string) => void | Promise<void>;
-	/** Whether a logged-in wrangler's stored token may be used. */
+	/**
+	Whether a logged-in wrangler's stored token may be used.
+	*/
 	readonly wrangler: boolean;
-	/** Whether a browser is available to upgrade an identity-less grant. */
+	/**
+	Whether a browser is available to upgrade an identity-less grant.
+	*/
 	readonly interactive: boolean;
 	readonly signal?: AbortSignal;
 }
 
-/** The production {@link CredentialChain}: real store, endpoints and browser. */
+/**
+The production {@link CredentialChain}: real store, endpoints and browser.
+*/
 export function defaultCredentialChain(
 	options: CredentialChainOptions
 ): CredentialChain {
@@ -311,9 +325,13 @@ export interface ResolvedAccount {
 	readonly api: CloudflareApi;
 	readonly accountId: CloudflareAccountId;
 	readonly credentialSource: CredentialSource;
-	/** The Cloudflare user behind an OAuth grant; undefined for raw tokens. */
+	/**
+	The Cloudflare user behind an OAuth grant; undefined for raw tokens.
+	*/
 	readonly subject: string | undefined;
-	/** The grant's raw id_token, presentable to a cupboard server's signup. */
+	/**
+	The grant's raw id_token, presentable to a cupboard server's signup.
+	*/
 	readonly idToken: string | undefined;
 }
 

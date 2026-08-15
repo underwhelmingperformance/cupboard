@@ -44,7 +44,7 @@ export interface RunEnvironment {
 	readonly isSea: boolean;
 	readonly cwd: string;
 	readonly fromTree: boolean;
-	readonly fileExists: (filePath: string) => boolean;
+	readonly isFilePresent: (filePath: string) => boolean;
 }
 
 export class NoCheckoutError extends Error {
@@ -98,7 +98,7 @@ export function planWorkerSource(
 ): WorkerSourcePlan {
 	const checkoutRoot = findCheckoutRoot(
 		environment.cwd,
-		environment.fileExists
+		environment.isFilePresent
 	);
 
 	if (!environment.isSea) {

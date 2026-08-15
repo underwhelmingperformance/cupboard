@@ -23,12 +23,12 @@ import {
 	stageDeferredForTenant,
 	suspendTenant,
 	tenantBlobRows,
-	tenantMaintained,
 	tenantUploadStatus,
 	testBase,
 	testServerFor,
 	uploadMetadata,
-	verifiableNar
+	verifiableNar,
+	wasTenantMaintained
 } from '../test-support.ts';
 
 import {
@@ -291,8 +291,8 @@ describe('multi-tenant writes', () => {
 			acme: await servedAt('acme'),
 			beta: await servedAt('beta'),
 			gamma: await servedAt('gamma'),
-			acmeStamped: await tenantMaintained('acme'),
-			gammaStamped: await tenantMaintained('gamma')
+			acmeStamped: await wasTenantMaintained('acme'),
+			gammaStamped: await wasTenantMaintained('gamma')
 		};
 
 		// The second tick: gamma is now the most overdue (still NULL, while acme and
@@ -303,7 +303,7 @@ describe('multi-tenant writes', () => {
 		expect({
 			afterFirst,
 			gammaAfterSecond,
-			gammaStampedAfterSecond: await tenantMaintained('gamma')
+			gammaStampedAfterSecond: await wasTenantMaintained('gamma')
 		}).toStrictEqual({
 			afterFirst: {
 				acme: StatusCodes.OK,

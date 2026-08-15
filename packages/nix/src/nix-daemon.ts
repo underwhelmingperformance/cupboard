@@ -117,10 +117,14 @@ const stderrStartActivity = 0x53_54_52_54;
 // after it has checked that the destination does not already hold the path.
 const copyPathActivity = 100;
 
-/** One field of a logger message: an integer or a string, as Nix encodes it. */
+/**
+One field of a logger message: an integer or a string, as Nix encodes it.
+*/
 type NixLoggerField = number | string;
 
-/** One copy the daemon reported: the store path, and the store it came from. */
+/**
+One copy the daemon reported: the store path, and the store it came from.
+*/
 export interface NixCopyRecord {
 	readonly storePath: StorePathString;
 	readonly source: string;
@@ -137,12 +141,16 @@ interface NixDaemonStoreClientConnectionOptions {
 	readonly signal?: AbortSignal;
 }
 
-/** How a daemon client configures a connection after its handshake. */
+/**
+How a daemon client configures a connection after its handshake.
+*/
 export type NixDaemonStoreClientOptions =
 	NixDaemonStoreClientConnectionOptions &
 		(
 			| {
-					/** Preserve the daemon's settings by omitting SetOptions. */
+					/**
+					Preserve the daemon's settings by omitting SetOptions.
+					*/
 					readonly shouldPreserveDaemonOptions: true;
 					readonly setOptions?: never;
 					readonly overrides?: never;
@@ -178,14 +186,20 @@ export interface NixDaemonSession {
 	 * release.
 	 */
 	addTempRoot(storePath: StorePathString): Promise<void>;
-	/** Build targets on this session's connection, returning keyed outcomes. */
+	/**
+	Build targets on this session's connection, returning keyed outcomes.
+	*/
 	buildPathsWithResults(
 		targets: readonly NixDerivedPathString[],
 		mode?: NixBuildMode
 	): Promise<readonly NixBuildResult[]>;
-	/** Read one derivation through this session's selected store. */
+	/**
+	Read one derivation through this session's selected store.
+	*/
 	readDerivation(drvPath: StorePathString): Promise<string>;
-	/** Resolve path metadata for a closure on this session's connection. */
+	/**
+	Resolve path metadata for a closure on this session's connection.
+	*/
 	resolveClosure(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly NixValidPathInfo[]>;
@@ -373,7 +387,9 @@ export class NixDaemonStoreClient implements NixStoreClient {
 
 	private readonly copies = new Map<StorePathString, string[]>();
 
-	/** Whether this client deliberately omits SetOptions on every connection. */
+	/**
+	Whether this client deliberately omits SetOptions on every connection.
+	*/
 	readonly preservesDaemonOptions: boolean;
 
 	constructor(options: NixDaemonStoreClientOptions = {}) {
@@ -2352,7 +2368,9 @@ class SocketNixDaemonTransport implements NixDaemonTransport {
 	}
 }
 
-/** The events a byte source emits for {@link ByteStreamReader} to buffer it. */
+/**
+The events a byte source emits for {@link ByteStreamReader} to buffer it.
+*/
 export interface ByteStreamSource {
 	on(event: 'data', listener: (chunk: Buffer) => void): unknown;
 	once(

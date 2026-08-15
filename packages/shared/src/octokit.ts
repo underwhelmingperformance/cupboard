@@ -29,7 +29,9 @@ type OctokitClientConstructorOptions = NonNullable<
 
 export interface OctokitClientOptions {
 	readonly auth?: string;
-	/** Date-based GitHub REST API version sent on every REST request. */
+	/**
+	Date-based GitHub REST API version sent on every REST request.
+	*/
 	readonly apiVersion?: string;
 	readonly baseUrl?: string;
 	readonly request?: OctokitClientConstructorOptions['request'];

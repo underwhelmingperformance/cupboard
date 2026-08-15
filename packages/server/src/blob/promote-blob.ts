@@ -10,7 +10,9 @@ import { type CanonicalBlob, canonicalBlobOf } from '../do/upload-metadata.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
-/** The verified upload a promotion binds to its canonical object. */
+/**
+The verified upload a promotion binds to its canonical object.
+*/
 export interface PromotionTarget {
 	readonly narHash: NixSha256HashString;
 	readonly narSize: number;

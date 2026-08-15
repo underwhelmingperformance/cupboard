@@ -17,7 +17,9 @@ import type {
 	TextEditOptions
 } from './cli-ui.ts';
 
-/** Everything a {@link FakeCliUi} recorded, for structural assertions. */
+/**
+Everything a {@link FakeCliUi} recorded, for structural assertions.
+*/
 export interface CliUiCapture {
 	readonly intros: string[];
 	readonly outros: string[];
@@ -55,7 +57,9 @@ export interface FakeCliUi {
 }
 
 const noop = (): void => {
-	/* the fake does not record phase facts or sub-step narration */
+	/*
+	the fake does not record phase facts or sub-step narration
+	*/
 };
 
 // A `StepLog` whose every call is inert: tests run a `steps` body for its

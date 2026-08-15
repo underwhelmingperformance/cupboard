@@ -6,9 +6,13 @@ import { BuildCommandFailedError } from '../errors.ts';
 import type { BuildInvocation } from './build-push.ts';
 
 export interface CohortSequenceOptions {
-	/** The cohorts to build, in order; each finishes before the next starts. */
+	/**
+	The cohorts to build, in order; each finishes before the next starts.
+	*/
 	readonly cohorts: readonly BuildInvocation[];
-	/** The enclosing CLI run's cancellation signal. */
+	/**
+	The enclosing CLI run's cancellation signal.
+	*/
 	readonly signal?: AbortSignal;
 	/**
 	 * Collect the local store at cohort boundaries, so the next cohort
@@ -16,7 +20,9 @@ export interface CohortSequenceOptions {
 	 * run never deletes the user's paths by default.
 	 */
 	readonly collectBetweenCohorts?: boolean;
-	/** Also collect once the final cohort has finished; off unless set. */
+	/**
+	Also collect once the final cohort has finished; off unless set.
+	*/
 	readonly collectAfterLast?: boolean;
 	/**
 	 * Continue after an ordinary cohort failure; aborts and signalled children
@@ -25,14 +31,18 @@ export interface CohortSequenceOptions {
 	readonly keepGoingCohorts?: boolean;
 }
 
-/** One cohort's failure: its position in the run, starting at 1. */
+/**
+One cohort's failure: its position in the run, starting at 1.
+*/
 export interface CohortFailure {
 	readonly cohort: number;
 	readonly error: unknown;
 }
 
 export interface CohortSequenceResult {
-	/** The finished cohorts' receipts, in run order. */
+	/**
+	The finished cohorts' receipts, in run order.
+	*/
 	readonly receipts: readonly ParsedBuildReceipt[];
 	/**
 	 * The failed cohorts, in run order. The first entry carries the error the
@@ -58,7 +68,9 @@ export interface CohortSequenceDependencies {
 		error: unknown,
 		cohort: number
 	) => Promise<ParsedBuildReceipt | undefined>;
-	/** Collects the local store; only called at an opted-in cohort boundary. */
+	/**
+	Collects the local store; only called at an opted-in cohort boundary.
+	*/
 	readonly collect?: () => Promise<void>;
 }
 

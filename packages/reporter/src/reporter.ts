@@ -7,14 +7,18 @@ import { z } from 'zod';
 
 const reportedErrors = new WeakSet<object>();
 
-/** Records that a diagnostic for an error has already been emitted. */
+/**
+Records that a diagnostic for an error has already been emitted.
+*/
 export function markErrorReported(error: unknown): void {
 	if (typeof error === 'object' && error !== null) {
 		reportedErrors.add(error);
 	}
 }
 
-/** Whether a reporter has already emitted a diagnostic for an error. */
+/**
+Whether a reporter has already emitted a diagnostic for an error.
+*/
 export function wasErrorReported(error: unknown): boolean {
 	return (
 		typeof error === 'object' && error !== null && reportedErrors.has(error)
@@ -32,33 +36,49 @@ export interface PhaseContext {
 	warn(label: string, value?: string): void;
 }
 
-/** Drives a quantitative progress bar over a known total. */
+/**
+Drives a quantitative progress bar over a known total.
+*/
 export interface ProgressHandle {
-	/** Advance the bar by `step` units (default 1), optionally retitling it. */
+	/**
+	Advance the bar by `step` units (default 1), optionally retitling it.
+	*/
 	advance(step?: number, message?: string): void;
-	/** Annotate the bar with a live key/value, like {@link PhaseContext.fact}. */
+	/**
+	Annotate the bar with a live key/value, like {@link PhaseContext.fact}.
+	*/
 	fact(label: string, value: string | number): void;
-	/** Raise a durable warning that belongs to this unit; see {@link PhaseContext.warn}. */
+	/**
+	Raise a durable warning that belongs to this unit; see {@link PhaseContext.warn}.
+	*/
 	warn(label: string, value?: string): void;
 }
 
 export interface ProgressOptions {
-	/** The value the bar reaches when the work is complete. */
+	/**
+	The value the bar reaches when the work is complete.
+	*/
 	readonly total: number;
 }
 
-/** One named group of sub-steps within a {@link StepLog}. */
+/**
+One named group of sub-steps within a {@link StepLog}.
+*/
 export interface StepGroup {
 	message(message: string): void;
 	success(message: string): void;
 	error(message: string): void;
 }
 
-/** A task whose body reports grouped sub-steps as it runs. */
+/**
+A task whose body reports grouped sub-steps as it runs.
+*/
 export interface StepLog {
 	message(message: string): void;
 	group(name: string): StepGroup;
-	/** Raise a durable warning that belongs to this task; see {@link PhaseContext.warn}. */
+	/**
+	Raise a durable warning that belongs to this task; see {@link PhaseContext.warn}.
+	*/
 	warn(label: string, value?: string): void;
 }
 
@@ -86,18 +106,24 @@ export interface ResultPayload<T = unknown> {
 }
 
 export interface Reporter {
-	/** A unit of work shown as a spinner with live qualitative facts. */
+	/**
+	A unit of work shown as a spinner with live qualitative facts.
+	*/
 	phase<T>(
 		label: string,
 		body: (context: PhaseContext) => Promise<T> | T
 	): Promise<T>;
-	/** A unit of work shown as a progress bar over a known total. */
+	/**
+	A unit of work shown as a progress bar over a known total.
+	*/
 	progress<T>(
 		label: string,
 		options: ProgressOptions,
 		body: (bar: ProgressHandle) => Promise<T> | T
 	): Promise<T>;
-	/** A unit of work shown as a task with grouped sub-steps. */
+	/**
+	A unit of work shown as a task with grouped sub-steps.
+	*/
 	steps<T>(label: string, body: (log: StepLog) => Promise<T> | T): Promise<T>;
 	result(payload: ResultPayload): void;
 	/**
@@ -129,7 +155,9 @@ export interface Reporter {
 	error(error: unknown): void;
 }
 
-/** Terminal (clack), line-delimited JSON, or GitHub Actions output. */
+/**
+Terminal (clack), line-delimited JSON, or GitHub Actions output.
+*/
 export type ReporterMode = 'terminal' | 'json' | 'github';
 
 /**
@@ -160,7 +188,9 @@ export interface ReporterOptions {
 	 * output. Tests can pass an in-memory stream to assert on it.
 	 */
 	readonly out?: NodeJS.WritableStream;
-	/** The clock used for durations and progress throttling; defaults to `Date.now`. */
+	/**
+	The clock used for durations and progress throttling; defaults to `Date.now`.
+	*/
 	readonly now?: () => number;
 	/**
 	 * An absolute path to append one JSONL result event to for every
@@ -170,7 +200,9 @@ export interface ReporterOptions {
 	readonly resultFile?: string;
 }
 
-/** One result event as persisted to a `--result-file`, carrying its machine payload. */
+/**
+One result event as persisted to a `--result-file`, carrying its machine payload.
+*/
 export const reporterResultEventSchema = z.strictObject({
 	kind: z.string(),
 	data: z.unknown()
@@ -178,7 +210,9 @@ export const reporterResultEventSchema = z.strictObject({
 
 export type ReporterResultEvent = z.infer<typeof reporterResultEventSchema>;
 
-/** Thrown by {@link parseReporterResults} for a line that is not a valid result event. */
+/**
+Thrown by {@link parseReporterResults} for a line that is not a valid result event.
+*/
 export class MalformedResultLineError extends Error {
 	constructor(readonly line: string) {
 		super('reporter result line is not a valid result event');
@@ -249,7 +283,9 @@ export function appendResultEvent(
 function resultAppender(resultFile?: string): (payload: ResultPayload) => void {
 	if (resultFile === undefined) {
 		return () => {
-			/* no result file: nothing to persist */
+			/*
+			no result file: nothing to persist
+			*/
 		};
 	}
 

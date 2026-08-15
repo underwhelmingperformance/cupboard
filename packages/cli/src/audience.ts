@@ -16,7 +16,9 @@ export const audienceSchema = z
 	.brand('Audience');
 export type Audience = z.infer<typeof audienceSchema>;
 
-/** The `--audience` option parser: a typed refusal instead of a raw ZodError. */
+/**
+The `--audience` option parser: a typed refusal instead of a raw ZodError.
+*/
 export function parseAudience(value: string): Audience {
 	const parsed = audienceSchema.safeParse(value);
 

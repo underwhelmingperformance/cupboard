@@ -10,7 +10,9 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-/** A fetcher no test using it expects to be called. */
+/**
+A fetcher no test using it expects to be called.
+*/
 const never: typeof fetch = () => {
 	throw new Error('no request was expected here');
 };
@@ -29,10 +31,14 @@ import {
 	SubstituterUnreachableError
 } from './substituter.ts';
 
-/** Opens a local store's database, as a substituter naming one needs. */
+/**
+Opens a local store's database, as a substituter naming one needs.
+*/
 type OpenStore = (stateDirectory: string) => NixStoreDatabase;
 
-/** A store whose database this process cannot open. */
+/**
+A store whose database this process cannot open.
+*/
 const unopenableStore: OpenStore = () => {
 	throw new Error('no database here');
 };
@@ -48,7 +54,9 @@ const deriverPath = storePathSchema.parse(
 	'/nix/store/cccccccccccccccccccccccccccccccc-app.drv'
 );
 
-/** The narinfo a cache serves, in the shape and order Nix writes it. */
+/**
+The narinfo a cache serves, in the shape and order Nix writes it.
+*/
 // The NAR hash the fixture narinfo names, which an offer carries so a walk
 // can compare it with what the store holds.
 const offeredNarHash = NixSha256Hash.parsePrefixed(`sha256:${'22'.repeat(32)}`);
@@ -70,7 +78,9 @@ function narInfo(
 	};
 }
 
-/** A narinfo as a cache serves one: every line ends, including the last. */
+/**
+A narinfo as a cache serves one: every line ends, including the last.
+*/
 function rendered(fields: Readonly<Record<string, string>>): string {
 	return Object.entries(fields)
 		.map(([name, value]) => `${name}: ${value}\n`)
@@ -78,20 +88,30 @@ function rendered(fields: Readonly<Record<string, string>>): string {
 }
 
 interface CacheContents {
-	/** The `nix-cache-info` this cache serves, or absent to serve none. */
+	/**
+	The `nix-cache-info` this cache serves, or absent to serve none.
+	*/
 	readonly cacheInfo?: string;
-	/** The narinfo body per store path hash. */
+	/**
+	The narinfo body per store path hash.
+	*/
 	readonly narInfos?: Readonly<Record<string, string>>;
-	/** A status the cache answers with for every narinfo request. */
+	/**
+	A status the cache answers with for every narinfo request.
+	*/
 	readonly status?: number;
 }
 
 interface FakeCaches {
 	readonly fetch: typeof fetch;
 	readonly requests: string[];
-	/** The method each request was made with, in the same order. */
+	/**
+	The method each request was made with, in the same order.
+	*/
 	readonly methods: string[];
-	/** What each request stated it was, in the same order. */
+	/**
+	What each request stated it was, in the same order.
+	*/
 	readonly credentials: (string | undefined)[];
 }
 
@@ -141,7 +161,9 @@ function caches(contents: Readonly<Record<string, CacheContents>>): FakeCaches {
 	};
 }
 
-/** A body that stops part-way through, as a dropped connection leaves one. */
+/**
+A body that stops part-way through, as a dropped connection leaves one.
+*/
 function brokenBody(): ReadableStream<Uint8Array> {
 	return new ReadableStream({
 		start(controller) {
@@ -151,7 +173,9 @@ function brokenBody(): ReadableStream<Uint8Array> {
 	});
 }
 
-/** A cache whose body never ends. */
+/**
+A cache whose body never ends.
+*/
 const endless: typeof fetch = () =>
 	Promise.resolve(
 		new Response(
@@ -163,7 +187,9 @@ const endless: typeof fetch = () =>
 		)
 	);
 
-/** A cache whose `nix-cache-info` never ends. */
+/**
+A cache whose `nix-cache-info` never ends.
+*/
 const flooding: typeof fetch = (input) => {
 	const url = new URL(input instanceof Request ? input.url : String(input));
 
@@ -180,7 +206,9 @@ const flooding: typeof fetch = (input) => {
 		: Promise.resolve(new Response('StoreDir: /nix/store\n'));
 };
 
-/** A cache asking to be left alone for the given number of seconds. */
+/**
+A cache asking to be left alone for the given number of seconds.
+*/
 function askingToWait(seconds: string): typeof fetch {
 	return () =>
 		Promise.resolve(
@@ -188,13 +216,19 @@ function askingToWait(seconds: string): typeof fetch {
 		);
 }
 
-/** A cache asking to be left alone for a day. */
+/**
+A cache asking to be left alone for a day.
+*/
 const askingForADay = askingToWait('86400');
 
-/** A cache asking for a wait this query is willing to make. */
+/**
+A cache asking for a wait this query is willing to make.
+*/
 const askingForAMinute = askingToWait('55');
 
-/** A cache that accepts the connection and never answers on it. */
+/**
+A cache that accepts the connection and never answers on it.
+*/
 const silent: typeof fetch = (_input, init) =>
 	new Promise((_resolve, reject) => {
 		init?.signal?.addEventListener('abort', () => {
@@ -236,7 +270,9 @@ function clientOver(
 	});
 }
 
-/** The compiled-in transfer settings with the fixture's own values over them. */
+/**
+The compiled-in transfer settings with the fixture's own values over them.
+*/
 function transferring(
 	overrides: Partial<NixFileTransferSettings> = {}
 ): NixFileTransferSettings {

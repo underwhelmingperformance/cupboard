@@ -118,9 +118,13 @@ function canSubstituteStructured(
 	return value;
 }
 
-/** The machine requirements for building a derivation. */
+/**
+The machine requirements for building a derivation.
+*/
 export interface DerivationBuildRequirements {
-	/** The derivation's platform: the system its builder runs on. */
+	/**
+	The derivation's platform: the system its builder runs on.
+	*/
 	readonly system: string;
 	/**
 	 * The `requiredSystemFeatures` the building machine must offer, in the

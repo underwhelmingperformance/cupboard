@@ -41,7 +41,9 @@ export interface AttestSignInputs {
 	 * describes.
 	 */
 	readonly checksumsFile: string;
-	/** The subjects of the build-provenance statement: the paths the run built. */
+	/**
+	The subjects of the build-provenance statement: the paths the run built.
+	*/
 	readonly builtChecksumsFile: string;
 	/**
 	 * Path to the build-origin predicate. An empty path signs the provenance
@@ -63,7 +65,9 @@ export interface AttestSignDependencies extends SigningDependencies {
 		subjects: readonly AttestationSubject[],
 		githubToken: string
 	) => StatementSigner;
-	/** Produces this run's SLSA build provenance statement. */
+	/**
+	Produces this run's SLSA build provenance statement.
+	*/
 	readonly provenanceStatement?: () => Promise<AttestationStatement>;
 }
 

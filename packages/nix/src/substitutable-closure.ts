@@ -14,7 +14,9 @@ import {
 export const defaultSubstitutableClosureCap = 10_000;
 
 export interface SubstitutableClosureOptions {
-	/** Paths the walk may visit (default: {@link defaultSubstitutableClosureCap}). */
+	/**
+	Paths the walk may visit (default: {@link defaultSubstitutableClosureCap}).
+	*/
 	readonly maxPaths?: number;
 	/**
 	 * Abandons the walk between rounds using the signal's reason. In-flight
@@ -71,12 +73,16 @@ export type QuerySubstitutablePathInfos = (
 	storePaths: readonly StorePathString[]
 ) => Promise<readonly NixSubstituterOffer[]>;
 
-/** Reads validity and metadata for a batch of local store paths. */
+/**
+Reads validity and metadata for a batch of local store paths.
+*/
 export type QueryHeldPathInfos = (
 	storePaths: readonly StorePathString[]
 ) => Promise<readonly NixValidPathInfo[]>;
 
-/** Whether a consumer would accept what a substituter offers for a path. */
+/**
+Whether a consumer would accept what a substituter offers for a path.
+*/
 export type AcceptsOffer = (offer: NixSubstituterOffer) => Promise<boolean>;
 
 export interface SubstitutableClosureQueries {
@@ -151,7 +157,7 @@ export async function resolveSubstitutableClosure(
 				return divergent;
 			}
 
-			if (!(await (options.accepts ?? acceptsEveryOffer)(offer))) {
+			if (!(await (options.accepts ?? willAcceptEveryOffer)(offer))) {
 				return { kind: 'refused', storePath };
 			}
 
@@ -166,7 +172,7 @@ export async function resolveSubstitutableClosure(
 	return { kind: 'served', pathCount: claimed.size, downloadSize, narSize };
 }
 
-const acceptsEveryOffer: AcceptsOffer = () => Promise.resolve(true);
+const willAcceptEveryOffer: AcceptsOffer = () => Promise.resolve(true);
 
 function narHashMismatch(
 	storePath: StorePathString,

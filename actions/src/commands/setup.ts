@@ -334,7 +334,9 @@ export async function setupAction(
 	);
 }
 
-/** Render the PATH entry for either a downloaded or immutable Nix binary. */
+/**
+Render the PATH entry for either a downloaded or immutable Nix binary.
+*/
 export function cupboardPathEntry(binaryPath: string): string {
 	return `${path.dirname(binaryPath)}\n`;
 }
@@ -571,7 +573,9 @@ async function fetchTrustedPublicKey(
 	return trimmedPublicKey;
 }
 
-/** Fetch and validate the signing key returned by a cache's public-key endpoint. */
+/**
+Fetch and validate the signing key returned by a cache's public-key endpoint.
+*/
 export async function fetchCachePublicKeyAt(
 	endpoint: URL,
 	fetcher: typeof fetch = fetch,

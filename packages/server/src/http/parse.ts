@@ -57,7 +57,9 @@ export async function parseFormBody<S extends z.ZodType>(
 	return result.data;
 }
 
-/** Validates a value taken from the request path or query string. */
+/**
+Validates a value taken from the request path or query string.
+*/
 export function parseRequestValue<S extends z.ZodType>(
 	schema: S,
 	value: unknown
@@ -91,7 +93,9 @@ export function parseStored<S extends z.ZodType>(
 	return result.data;
 }
 
-/** Parses stored JSON text, mapping a syntax error to a typed fault. */
+/**
+Parses stored JSON text, mapping a syntax error to a typed fault.
+*/
 export function parseStoredJson(
 	source: string,
 	onInvalid: (cause: Error) => ServerHttpError

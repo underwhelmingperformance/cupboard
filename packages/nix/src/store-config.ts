@@ -34,7 +34,9 @@ import {
  * only what store selection needs.
  */
 export interface NixStoreConfig {
-	/** The `store` setting: a URI, `auto`, `daemon`, `local`, or a store path. */
+	/**
+	The `store` setting: a URI, `auto`, `daemon`, `local`, or a store path.
+	*/
 	readonly storeUri: string;
 	/**
 	 * The directory that prefixes every store path. `NIX_STORE_DIR` configures
@@ -44,17 +46,29 @@ export interface NixStoreConfig {
 	readonly storeDirectory: StoreDirectory;
 	readonly stateDirectory: string;
 	readonly daemonSocketPath: string;
-	/** The discovered settings the daemon's SetOptions frame carries directly. */
+	/**
+	The discovered settings the daemon's SetOptions frame carries directly.
+	*/
 	readonly daemonSetOptions: NixDaemonSetOptions;
-	/** The discovered settings a daemon connection forwards as overrides. */
+	/**
+	The discovered settings a daemon connection forwards as overrides.
+	*/
 	readonly daemonOverrides: NixDaemonOverrides;
-	/** The discovered settings that decide what may be substituted, and from where. */
+	/**
+	The discovered settings that decide what may be substituted, and from where.
+	*/
 	readonly substitution: NixSubstitutionSettings;
-	/** The discovered settings that decide where a derivation is built. */
+	/**
+	The discovered settings that decide where a derivation is built.
+	*/
 	readonly building: NixBuildSettings;
-	/** The discovered settings that decide how a transfer is attempted. */
+	/**
+	The discovered settings that decide how a transfer is attempted.
+	*/
 	readonly fileTransfer: NixFileTransferSettings;
-	/** The discovered settings that decide whose signature Nix accepts. */
+	/**
+	The discovered settings that decide whose signature Nix accepts.
+	*/
 	readonly signatures: NixSignatureSettings;
 	/**
 	 * Configuration setting names unknown to this client. Nix warns about
@@ -69,7 +83,9 @@ export interface NixStoreConfig {
 	readonly postBuildHook?: string;
 }
 
-/** The settings the daemon protocol's SetOptions frame carries as fields. */
+/**
+The settings the daemon protocol's SetOptions frame carries as fields.
+*/
 export interface NixDaemonSetOptions {
 	readonly keepFailed?: boolean;
 	readonly keepGoing?: boolean;
@@ -80,7 +96,9 @@ export interface NixDaemonSetOptions {
 	readonly useSubstitutes?: boolean;
 }
 
-/** Named settings a daemon connection forwards in its SetOptions frame. */
+/**
+Named settings a daemon connection forwards in its SetOptions frame.
+*/
 export type NixDaemonOverrides = Readonly<Record<string, string>>;
 
 /**
@@ -91,7 +109,9 @@ export type NixDaemonOverrides = Readonly<Record<string, string>>;
  * `alwaysAllowSubstitutes` overrules it.
  */
 export interface NixSubstitutionSettings {
-	/** The `substitute` setting: whether Nix substitutes at all. */
+	/**
+	The `substitute` setting: whether Nix substitutes at all.
+	*/
 	readonly substitute: boolean;
 	/**
 	 * The `always-allow-substitutes` setting: whether a derivation's own
@@ -123,9 +143,13 @@ export interface NixBuildSettings {
 	 * every `extra-platforms` entry. Empty when the host system is unknown.
 	 */
 	readonly systems: readonly string[];
-	/** The `system-features` setting: what a derivation may require here. */
+	/**
+	The `system-features` setting: what a derivation may require here.
+	*/
 	readonly features: readonly string[];
-	/** The `builders` setting, absent when the configuration assigns none. */
+	/**
+	The `builders` setting, absent when the configuration assigns none.
+	*/
 	readonly builders?: string;
 }
 
@@ -137,9 +161,13 @@ export interface NixBuildSettings {
  * response do not all return at the same moment.
  */
 export interface NixFileTransferSettings {
-	/** The `filetransfer-retry-attempts` setting: tries before giving up. */
+	/**
+	The `filetransfer-retry-attempts` setting: tries before giving up.
+	*/
 	readonly attempts: number;
-	/** The `filetransfer-retry-delay` setting, in milliseconds. */
+	/**
+	The `filetransfer-retry-delay` setting, in milliseconds.
+	*/
 	readonly retryDelayMs: number;
 	/**
 	 * The `filetransfer-retry-delay-rate-limited` setting, in milliseconds: the
@@ -147,9 +175,13 @@ export interface NixFileTransferSettings {
 	 * is overloaded.
 	 */
 	readonly rateLimitedRetryDelayMs: number;
-	/** The `filetransfer-retry-max-delay` setting: the ceiling on the backoff. */
+	/**
+	The `filetransfer-retry-max-delay` setting: the ceiling on the backoff.
+	*/
 	readonly maxRetryDelayMs: number;
-	/** The `filetransfer-retry-jitter` setting: whether a wait is spread. */
+	/**
+	The `filetransfer-retry-jitter` setting: whether a wait is spread.
+	*/
 	readonly retryJitter: boolean;
 	/**
 	 * The `stalled-download-timeout` setting, in milliseconds: how long a
@@ -165,7 +197,9 @@ export interface NixFileTransferSettings {
 	 * response approaching the megabyte limit. These documents are much smaller.
 	 */
 	readonly stalledTransferTimeoutMs: number;
-	/** The `http-connections` setting: requests in flight at once, 0 for no limit. */
+	/**
+	The `http-connections` setting: requests in flight at once, 0 for no limit.
+	*/
 	readonly httpConnections: number;
 	/**
 	 * The `netrc-file` setting: the file containing private-cache credentials.
@@ -185,9 +219,13 @@ const defaultSubstituters = ['https://cache.nixos.org/'];
  * trusts, and with `require-sigs` off takes one however it is signed.
  */
 export interface NixSignatureSettings {
-	/** The `require-sigs` setting: whether a signature is needed at all. */
+	/**
+	The `require-sigs` setting: whether a signature is needed at all.
+	*/
 	readonly requireSignatures: boolean;
-	/** The `trusted-public-keys` list, each `<name>:<base64>`. */
+	/**
+	The `trusted-public-keys` list, each `<name>:<base64>`.
+	*/
 	readonly trustedPublicKeys: readonly string[];
 	/**
 	 * The `secret-key-files` list. Nix trusts the published half of every key
@@ -203,7 +241,9 @@ const defaultTrustedPublicKeys = [
 	'cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY='
 ];
 
-/** The compiled-in signature-acceptance defaults. */
+/**
+The compiled-in signature-acceptance defaults.
+*/
 export const defaultSignatureSettings: NixSignatureSettings = {
 	requireSignatures: true,
 	trustedPublicKeys: defaultTrustedPublicKeys,
@@ -212,7 +252,9 @@ export const defaultSignatureSettings: NixSignatureSettings = {
 
 const defaultSystemConfigDirectory = '/etc/nix';
 
-/** The compiled-in file-transfer defaults. */
+/**
+The compiled-in file-transfer defaults.
+*/
 export const defaultFileTransferSettings: NixFileTransferSettings = {
 	attempts: 5,
 	retryDelayMs: 100,
@@ -237,15 +279,19 @@ function netrcFileIn(configDirectory: string): string {
  * deterministic.
  */
 export interface NixMachineProbes {
-	/** Whether the path is readable and writable, as the `access` check is. */
+	/**
+	Whether the path is readable and writable, as the `access` check is.
+	*/
 	canReadWrite(path: string): boolean;
-	fileExists(path: string): boolean;
+	isFilePresent(path: string): boolean;
 	/**
 	 * Whether this machine offers hardware virtualisation to a guest: the
 	 * kernel supports it and this is not itself a guest.
 	 */
 	hasHardwareVirtualisation(): boolean;
-	/** Whether this is WSL 1, whose kernel does not run i686 binaries. */
+	/**
+	Whether this is WSL 1, whose kernel does not run i686 binaries.
+	*/
 	isWsl1(): boolean;
 	/**
 	 * The x86-64 psABI microarchitecture levels this CPU supports, lowest
@@ -292,7 +338,7 @@ function defaultExtraPlatforms(
 
 	if (kernel === 'darwin') {
 		return machineSystem === 'aarch64-darwin' &&
-			probes.fileExists(rosettaRuntime)
+			probes.isFilePresent(rosettaRuntime)
 			? ['x86_64-darwin']
 			: [];
 	}
@@ -363,7 +409,9 @@ function nixSystemOf(architecture: string, kernel: string): string | undefined {
 		: `${cpu}-${named}`;
 }
 
-/** Filesystem and environment access, injected so discovery is testable. */
+/**
+Filesystem and environment access, injected so discovery is testable.
+*/
 export interface NixConfigEnvironment {
 	readonly env: Readonly<Record<string, string | undefined>>;
 	/**
@@ -383,7 +431,9 @@ export interface NixConfigEnvironment {
 	 * `undefined` when it cannot be determined.
 	 */
 	readonly currentSystem: () => string | undefined;
-	/** What this machine offers a build, which Nix probes for. */
+	/**
+	What this machine offers a build, which Nix probes for.
+	*/
 	readonly probes: NixMachineProbes;
 }
 
@@ -391,7 +441,9 @@ const defaultStoreDirectory = storeDirectorySchema.parse('/nix/store');
 const defaultStateDirectory = '/nix/var/nix';
 const maxIncludeDepth = 16;
 
-/** What an error names as the source of an inline `NIX_CONFIG` line. */
+/**
+What an error names as the source of an inline `NIX_CONFIG` line.
+*/
 const inlineConfigSource = 'NIX_CONFIG';
 
 /**
@@ -427,7 +479,7 @@ export const defaultMachineProbes: NixMachineProbes = {
 			return false;
 		}
 	},
-	fileExists: (filePath) => existsSync(filePath),
+	isFilePresent: (filePath) => existsSync(filePath),
 	// A guest reports the kernel's support as its host's, so Nix asks whether
 	// this machine is itself a guest first and answers no when it is.
 	hasHardwareVirtualisation: () =>
@@ -1164,7 +1216,9 @@ export class EffectiveList {
 
 	private appended: readonly string[] = [];
 
-	/** Appends the value for an `extra-` assignment, and assigns it for a plain one. */
+	/**
+	Appends the value for an `extra-` assignment, and assigns it for a plain one.
+	*/
 	apply(value: string, isAppend: boolean): void {
 		if (isAppend) {
 			this.append(value);
@@ -1199,7 +1253,9 @@ export class EffectiveList {
 			: this.resolve(this.assigned);
 	}
 
-	/** The values the `extra-` assignments appended, in the order they came. */
+	/**
+	The values the `extra-` assignments appended, in the order they came.
+	*/
 	appends(): readonly string[] {
 		return this.appended;
 	}

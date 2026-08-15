@@ -2,7 +2,9 @@
 // available in both Node and workerd. Looping over the bytes keeps them safe
 // for inputs of any length.
 
-/** Encode bytes as standard (padded) base64. */
+/**
+Encode bytes as standard (padded) base64.
+*/
 export function bytesToBase64(bytes: Uint8Array): string {
 	let binary = '';
 
@@ -13,7 +15,9 @@ export function bytesToBase64(bytes: Uint8Array): string {
 	return btoa(binary);
 }
 
-/** Decode standard base64 into bytes. */
+/**
+Decode standard base64 into bytes.
+*/
 export function base64ToBytes(value: string): Uint8Array {
 	return Uint8Array.from(
 		atob(value),
@@ -21,7 +25,9 @@ export function base64ToBytes(value: string): Uint8Array {
 	);
 }
 
-/** Encode bytes as URL-safe base64 without padding. */
+/**
+Encode bytes as URL-safe base64 without padding.
+*/
 export function bytesToBase64Url(bytes: Uint8Array): string {
 	return bytesToBase64(bytes)
 		.replaceAll('+', '-')
@@ -29,7 +35,9 @@ export function bytesToBase64Url(bytes: Uint8Array): string {
 		.replace(/=+$/u, '');
 }
 
-/** Encode bytes as lowercase hex. */
+/**
+Encode bytes as lowercase hex.
+*/
 export function bytesToHex(bytes: Uint8Array): string {
 	let hex = '';
 
@@ -40,7 +48,9 @@ export function bytesToHex(bytes: Uint8Array): string {
 	return hex;
 }
 
-/** Decode a hex string into bytes; throws `RangeError` on malformed input. */
+/**
+Decode a hex string into bytes; throws `RangeError` on malformed input.
+*/
 export function hexToBytes(value: string): Uint8Array {
 	if (value.length % 2 !== 0 || /[^\da-f]/iu.test(value)) {
 		throw new RangeError(`not a valid hex string: ${value}`);

@@ -39,7 +39,9 @@ import type { SubstituterClient } from './substituter.ts';
 export interface NixStoreDatabase {
 	pathRow(storePath: string): NixStoreRow | undefined;
 	references(id: number): readonly string[];
-	/** The subset of the given paths registered as valid, in database order. */
+	/**
+	The subset of the given paths registered as valid, in database order.
+	*/
 	validPaths(storePaths: readonly string[]): readonly string[];
 	/**
 	 * The registered output paths of the given derivations, deduplicated and
@@ -49,7 +51,9 @@ export interface NixStoreDatabase {
 	close(): void;
 }
 
-/** Reads a store file, injected for tests. */
+/**
+Reads a store file, injected for tests.
+*/
 export type ReadStoreFile = (filePath: string) => Promise<string>;
 
 const defaultReadStoreFile: ReadStoreFile = async (filePath) => {
@@ -68,7 +72,9 @@ const defaultReadStoreFile: ReadStoreFile = async (filePath) => {
 	}
 };
 
-/** A store file larger than a derivation can be. */
+/**
+A store file larger than a derivation can be.
+*/
 export class StoreFileTooLargeError extends NixStoreError {
 	constructor(
 		public readonly filePath: string,
@@ -86,7 +92,9 @@ const defaultStoreDirectory = storeDirectorySchema.parse('/nix/store');
 
 export interface NixStoreRow {
 	readonly id: number;
-	/** The NAR hash as stored: `sha256:` followed by a base16 digest. */
+	/**
+	The NAR hash as stored: `sha256:` followed by a base16 digest.
+	*/
 	readonly hash: string;
 	readonly narSize: number;
 	readonly deriver: string | undefined;
@@ -95,9 +103,13 @@ export interface NixStoreRow {
 	readonly ca: string | undefined;
 }
 
-/** What a local store reads beyond its database. */
+/**
+What a local store reads beyond its database.
+*/
 export interface NixLocalStoreOptions {
-	/** The directory the store's paths are named under. */
+	/**
+	The directory the store's paths are named under.
+	*/
 	readonly storeDirectory?: StoreDirectory;
 	/**
 	 * The physical store directory used to read derivations. A rooted store
@@ -110,9 +122,13 @@ export interface NixLocalStoreOptions {
 	 * require substituter availability are unsupported.
 	 */
 	readonly substituters?: SubstituterClient;
-	/** Abandons a walk between levels, raising the signal's reason. */
+	/**
+	Abandons a walk between levels, raising the signal's reason.
+	*/
 	readonly signal?: AbortSignal;
-	/** The `substitute` and `always-allow-substitutes` settings. */
+	/**
+	The `substitute` and `always-allow-substitutes` settings.
+	*/
 	readonly substitution?: {
 		readonly substitute: boolean;
 		readonly alwaysAllowSubstitutes: boolean;
@@ -395,7 +411,9 @@ export function openLocalStoreDatabase(
 	);
 }
 
-/** Adapt an open `node:sqlite` database to the queries the local store needs. */
+/**
+Adapt an open `node:sqlite` database to the queries the local store needs.
+*/
 export function nixStoreDatabaseFromSqlite(
 	database: DatabaseSync
 ): NixStoreDatabase {

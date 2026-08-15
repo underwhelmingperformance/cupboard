@@ -289,7 +289,7 @@ async function readTenantEntry(
 }
 
 // Resolves a tenant slug through the layered gate, returning its authoritative
-// entry or `undefined` for a slug that is not an admittable tenant. Reads only KV
+// entry or `undefined` for a slug that is not an isAdmittable tenant. Reads only KV
 // for known-absent and most present slugs; the D1 row is consulted on a filter
 // positive with a present marker, or whenever a KV fault forces fail-open.
 export async function admitTenant(
@@ -331,7 +331,7 @@ export async function refreshTenantMembership(env: Env): Promise<number> {
 
 // Rebuilds and republishes just the membership filter from the live registry, the
 // sole writer of the filter key. The control plane calls this after a create so a
-// new tenant is admittable within the filter cache TTL, not blocked on the
+// new tenant is isAdmittable within the filter cache TTL, not blocked on the
 // hourly cron, without rewriting every marker. A filter negative is definitive, so
 // a tenant absent from the filter 404s at tier 1 until a rebuild includes it.
 export async function rebuildMembershipFilter(env: Env): Promise<void> {

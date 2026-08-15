@@ -15,8 +15,8 @@ import {
 	resetTestServer,
 	scheduledController,
 	suspendTenant,
-	tenantMaintained,
-	tenantMaintenanceFailureRow
+	tenantMaintenanceFailureRow,
+	wasTenantMaintained
 } from '../test-support.ts';
 import worker from '../worker.ts';
 
@@ -125,7 +125,7 @@ describe('scheduled tenant pass failure records', () => {
 				'retiring',
 				'offboard'
 			),
-			acmeMaintained: await tenantMaintained('acme')
+			acmeMaintained: await wasTenantMaintained('acme')
 		}).toStrictEqual({
 			messages: [
 				{ kind: 'tenant-maintenance', tenant: tenantIdSchema.parse('acme') },
@@ -312,7 +312,7 @@ describe('scheduled tenant pass failure records', () => {
 			decision,
 			seen,
 			outcome: await tenantMaintenanceFailureRow('acme', 'maintenance'),
-			maintained: await tenantMaintained('acme')
+			maintained: await wasTenantMaintained('acme')
 		}).toStrictEqual({
 			decision: { action: 'ack' },
 			seen: [],
@@ -386,7 +386,7 @@ describe('scheduled tenant pass failure records', () => {
 		expect({
 			decision,
 			outcome,
-			maintained: await tenantMaintained('acme')
+			maintained: await wasTenantMaintained('acme')
 		}).toStrictEqual({
 			decision: { action: 'ack' },
 			outcome: {
@@ -590,9 +590,9 @@ describe('scheduled tenant pass failure records', () => {
 
 		expect({
 			seen,
-			acme: await tenantMaintained('acme'),
-			beta: await tenantMaintained('beta'),
-			fixture: await tenantMaintained('v1')
+			acme: await wasTenantMaintained('acme'),
+			beta: await wasTenantMaintained('beta'),
+			fixture: await wasTenantMaintained('v1')
 		}).toStrictEqual({
 			seen: [],
 			acme: false,
@@ -698,8 +698,8 @@ describe('scheduled tenant pass failure records', () => {
 		const afterFailure = {
 			acme: await tenantMaintenanceFailureRow('acme', 'maintenance'),
 			beta: await tenantMaintenanceFailureRow('beta', 'maintenance'),
-			acmeMaintained: await tenantMaintained('acme'),
-			betaMaintained: await tenantMaintained('beta')
+			acmeMaintained: await wasTenantMaintained('acme'),
+			betaMaintained: await wasTenantMaintained('beta')
 		};
 
 		await runWithClock('2026-01-03T00:00:00.000Z', () =>

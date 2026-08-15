@@ -27,10 +27,12 @@ import {
 import type { NixMachineProbes } from './store-config.ts';
 import type { QuerySubstitutablePathInfos } from './substitutable-closure.ts';
 
-/** A machine offering nothing a build can ask for beyond the portable names. */
+/**
+A machine offering nothing a build can ask for beyond the portable names.
+*/
 const bareMachine: NixMachineProbes = {
 	canReadWrite: () => false,
-	fileExists: () => false,
+	isFilePresent: () => false,
 	hasHardwareVirtualisation: () => false,
 	isWsl1: () => false,
 	microarchitectureLevels: () => []
@@ -76,19 +78,27 @@ interface RecordingStore extends NixStoreClient {
 }
 
 interface RecordingStoreOptions {
-	/** What the substituters offer, as a store path to its references. */
+	/**
+	What the substituters offer, as a store path to its references.
+	*/
 	readonly substitutableOffers?: ReadonlyMap<
 		StorePathString,
 		readonly StorePathString[]
 	>;
-	/** The references this store records, which a closure walk follows. */
+	/**
+	The references this store records, which a closure walk follows.
+	*/
 	readonly localReferences?: ReadonlyMap<
 		StorePathString,
 		readonly StorePathString[]
 	>;
-	/** The bytes `narFromPath` streams for every path. */
+	/**
+	The bytes `narFromPath` streams for every path.
+	*/
 	readonly narBytes?: Uint8Array;
-	/** The text `readDerivation` answers for every derivation. */
+	/**
+	The text `readDerivation` answers for every derivation.
+	*/
 	readonly derivationText?: string;
 }
 
@@ -214,7 +224,9 @@ function recordingStore(options: RecordingStoreOptions = {}): RecordingStore {
 }
 
 interface RecordingSubstituters {
-	/** Each batch of paths the substituters were asked about. */
+	/**
+	Each batch of paths the substituters were asked about.
+	*/
 	readonly batches: string[][];
 	readonly querySubstitutablePathInfos: QuerySubstitutablePathInfos;
 }
@@ -372,7 +384,9 @@ describe('Nix.open', () => {
 
 const noFiles = new Map<string, string>();
 
-/** The directory these fixtures run in. A relative path resolves against it. */
+/**
+The directory these fixtures run in. A relative path resolves against it.
+*/
 const workingDirectory = '/work/dir';
 
 function daemonDependencies(hasSocket: boolean): NixDependencies {

@@ -50,7 +50,9 @@ import {
 	type ReferenceFetchDependencies
 } from '../push/reference.ts';
 
-/** A local Sigstore DSSE bundle file whose subjects name store paths. */
+/**
+A local Sigstore DSSE bundle file whose subjects name store paths.
+*/
 export interface AttestationBundleSource {
 	readonly path: string;
 }
@@ -119,7 +121,9 @@ export interface PrepareAttestationBundlesOptions {
 	readonly divergent: ReadonlyMap<StorePathHash, DivergentSkip>;
 }
 
-/** The committed path identity needed to match a bundle subject. */
+/**
+The committed path identity needed to match a bundle subject.
+*/
 export interface AttestationPathInfo {
 	readonly storePath: StorePathString;
 	readonly narHash: NixSha256Hash;
@@ -140,7 +144,9 @@ export interface CommittedAttestationSource {
 	readonly readPassword?: string;
 }
 
-/** Read the bundle-matching identities from the destination's live narinfos. */
+/**
+Read the bundle-matching identities from the destination's live narinfos.
+*/
 export async function readCommittedAttestationPathInfos(
 	paths: readonly StorePathString[],
 	source: CommittedAttestationSource,
@@ -283,7 +289,9 @@ export interface AttestationAttachmentOptions {
 	readonly skipUnservable?: boolean;
 }
 
-/** One bundle's terminal state in the attachment conversation. */
+/**
+One bundle's terminal state in the attachment conversation.
+*/
 export interface AttestationBundleOutcome {
 	readonly storePathHash: StorePathHash;
 	readonly digest: string;
@@ -291,12 +299,18 @@ export interface AttestationBundleOutcome {
 }
 
 export interface AttestationAttachOutcome {
-	/** Bundles uploaded and attached. */
+	/**
+	Bundles uploaded and attached.
+	*/
 	readonly attached: number;
-	/** Bundles the cache already held for their paths. */
+	/**
+	Bundles the cache already held for their paths.
+	*/
 	readonly reused: number;
 	readonly uploadedBytes: number;
-	/** Paths whose attach the server refused for want of a committed copy. */
+	/**
+	Paths whose attach the server refused for want of a committed copy.
+	*/
 	readonly unservableStorePathHashes: ReadonlySet<StorePathHash>;
 	readonly bundles: readonly AttestationBundleOutcome[];
 }
@@ -513,7 +527,9 @@ export async function runAttestationAttachment(
 
 export interface AttestAttachDependencies {
 	readonly client: AttestationAttachClient;
-	/** Live committed path identities read from the destination cache. */
+	/**
+	Live committed path identities read from the destination cache.
+	*/
 	readonly pathInfos: readonly AttestationPathInfo[];
 	readonly attestations: readonly AttestationBundleSource[];
 	readonly readAttestationBundle?: ReadAttestationBundle;

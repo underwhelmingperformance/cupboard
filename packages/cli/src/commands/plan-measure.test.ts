@@ -19,7 +19,9 @@ import { registerPlanCommands } from './plan-cohort.ts';
 import { type PlanMeasureResult, runPlanMeasure } from './plan-measure.ts';
 
 function noop(): void {
-	/* test double: nothing to record */
+	/*
+	test double: nothing to record
+	*/
 }
 
 const appPath = storePathSchema.parse(

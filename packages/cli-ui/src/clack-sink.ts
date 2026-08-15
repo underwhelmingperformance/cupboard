@@ -2,10 +2,14 @@ import { log } from '@clack/prompts';
 import type { LogLevel, LogRecord, Sink } from '@cupboard/logger';
 import pc from 'picocolors';
 
-/** A picocolors palette with its colour enablement fixed at creation. */
+/**
+A picocolors palette with its colour enablement fixed at creation.
+*/
 type Colours = ReturnType<typeof pc.createColors>;
 
-/** The clack `log` method a LogTape level renders through. */
+/**
+The clack `log` method a LogTape level renders through.
+*/
 type ClackMethod = 'error' | 'info' | 'message' | 'warn';
 
 // Which clack call a level uses. Warnings and errors get their own channels;

@@ -25,7 +25,9 @@ import {
 } from '../../packages/nix/src/store-config.ts';
 import { FakeSubstituter } from '../support/substituter.ts';
 
-/** A machine holding none of the configured secret key files. */
+/**
+A machine holding none of the configured secret key files.
+*/
 const missingKeyFiles = new Map<string, string>();
 const readNoKeyFile = (filePath: string): string | undefined =>
 	missingKeyFiles.get(filePath);

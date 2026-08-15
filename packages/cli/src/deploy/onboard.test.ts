@@ -76,7 +76,9 @@ afterEach(() => {
 	unscriptedInteractiveCalls.length = 0;
 });
 
-/** A UI whose prompts answer from the script and which records what it says. */
+/**
+A UI whose prompts answer from the script and which records what it says.
+*/
 function scriptedUi(script: UiScript = {}): ScriptedUi {
 	const remainingMenuChoices = [...(script.menuChoices ?? [])];
 	const remainingSlugs = [...(script.slugs ?? [])];
@@ -407,7 +409,9 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 	};
 }
 
-/** A subdomain lookup; called with no argument it finds none registered. */
+/**
+A subdomain lookup; called with no argument it finds none registered.
+*/
 const subdomainOf = (value?: string) => (): Promise<string | undefined> =>
 	Promise.resolve(value);
 
@@ -432,7 +436,9 @@ function tenantSummary(id: string): ParsedTenantSummary {
 	};
 }
 
-/** One scripted answer: a value, an HTTP status to fail with, or no route. */
+/**
+One scripted answer: a value, an HTTP status to fail with, or no route.
+*/
 type Scripted<T> = T | number | 'offline';
 
 function answer<T>(
@@ -470,10 +476,14 @@ function orpcRejection(status: number): Error {
 }
 
 interface ClientScript {
-	/** What `/_version` answers; the deployed build is `v-new`. */
+	/**
+	What `/_version` answers; the deployed build is `v-new`.
+	*/
 	readonly versions?: Scripted<string>[];
 	readonly signup?: Scripted<ParsedSignupResponse>[];
-	/** What listing tenants answers; the claim flow always lists first. */
+	/**
+	What listing tenants answers; the claim flow always lists first.
+	*/
 	readonly lists?: Scripted<ParsedTenantSummary[]>[];
 	readonly creates?: Scripted<ParsedTenantSummary>[];
 	readonly rebuilds?: Scripted<ParsedMembershipRebuildResponse>[];
@@ -567,7 +577,9 @@ const claimedSignup = {
 	claimed: true
 };
 
-/** The options every test starts from; spread and override per case. */
+/**
+The options every test starts from; spread and override per case.
+*/
 function baseOptions(ui: DeployUi, client: ScriptedClient): OnboardOptions {
 	return {
 		api: baseApi(defaultApiCalls),

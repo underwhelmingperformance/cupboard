@@ -15,7 +15,9 @@ import { isNixSignature } from './signature.ts';
 // deriver.
 const unknownDeriver = 'unknown-deriver';
 
-/** What one narinfo document offers for the store path it describes. */
+/**
+What one narinfo document offers for the store path it describes.
+*/
 export interface NarInfoOffer {
 	readonly source: 'substituter';
 	readonly references: readonly StorePathString[];

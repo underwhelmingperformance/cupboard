@@ -120,9 +120,13 @@ export interface PushDependencies {
 	 * default resolves metadata for exactly the entries, with no closure walk.
 	 */
 	readonly closure?: boolean;
-	/** Where reference entries' served narinfo metadata is read from. */
+	/**
+	Where reference entries' served narinfo metadata is read from.
+	*/
 	readonly referenceSource?: ReferenceSource;
-	/** Reads one reference entry's served metadata; injectable for tests. */
+	/**
+	Reads one reference entry's served metadata; injectable for tests.
+	*/
 	readonly fetchReferenceMetadata?: typeof fetchReferenceMetadataFromSource;
 	readonly root?: RootName;
 	readonly ttlSeconds?: TtlSeconds;
@@ -153,9 +157,13 @@ export interface PushDependencies {
 	 */
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
 	readonly compressNar?: CompressNar;
-	/** How many NARs compress and upload at once; defaults to {@link defaultUploadConcurrency}. */
+	/**
+	How many NARs compress and upload at once; defaults to {@link defaultUploadConcurrency}.
+	*/
 	readonly uploadConcurrency?: number;
-	/** Report what a push would do, without uploading or committing anything. */
+	/**
+	Report what a push would do, without uploading or committing anything.
+	*/
 	readonly dryRun?: boolean;
 	/**
 	 * The build store that realised the pushed paths. Naming it asks the push
@@ -337,7 +345,7 @@ async function previewUpload(
 					probeError instanceof ORPCError &&
 					probeError.status === notFoundStatus &&
 					!probeError.defined &&
-					(await tenantAnswers(client))
+					(await canTenantAnswer(client))
 				) {
 					throw new UploadGraceFactsUnsupportedError(error);
 				}
@@ -351,7 +359,7 @@ async function previewUpload(
 // Whether the tenant answers at all, for the too-old diagnosis above. A probe
 // failure is inconclusive, so it reads as not answering and the original
 // rejection surfaces instead of a misdiagnosis.
-async function tenantAnswers(client: PushClient): Promise<boolean> {
+async function canTenantAnswer(client: PushClient): Promise<boolean> {
 	if (client.tenantServes === undefined) {
 		return true;
 	}
@@ -586,17 +594,27 @@ async function resolveReferenceEntries(
 		.map((item) => item.path);
 }
 
-/** What a run establishes about the paths it publishes, for its receipt. */
+/**
+What a run establishes about the paths it publishes, for its receipt.
+*/
 interface ReceiptClaims {
 	readonly buildStore: string;
 	readonly alreadyHeld: ReadonlySet<string>;
-	/** Unset preserves the internal default that every published path is claimable. */
+	/**
+	Unset preserves the internal default that every published path is claimable.
+	*/
 	readonly claimable: ReadonlySet<string> | undefined;
-	/** The builder for each delegated derivation, keyed by derivation path. */
+	/**
+	The builder for each delegated derivation, keyed by derivation path.
+	*/
 	readonly delegated: ReadonlyMap<string, string>;
-	/** The stores this run watched each path being copied from. */
+	/**
+	The stores this run watched each path being copied from.
+	*/
 	readonly copiedFrom: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
-	/** The cache a reference entry's served metadata was read from. */
+	/**
+	The cache a reference entry's served metadata was read from.
+	*/
 	readonly referenceSource: string | undefined;
 }
 

@@ -31,7 +31,7 @@ import {
 
 const alice = readUserInputSchema.parse('alice');
 
-async function pathExists(candidate: string): Promise<boolean> {
+async function isPathPresent(candidate: string): Promise<boolean> {
 	try {
 		await access(candidate);
 
@@ -766,8 +766,8 @@ describe('setupAction cancellation', () => {
 
 		await expect(pending).rejects.toBe(reason);
 		expect({
-			environmentFile: await pathExists(environmentFile),
-			configFile: await pathExists(path.join(directory, 'cupboard-nix.conf'))
+			environmentFile: await isPathPresent(environmentFile),
+			configFile: await isPathPresent(path.join(directory, 'cupboard-nix.conf'))
 		}).toStrictEqual({ environmentFile: false, configFile: false });
 	});
 });

@@ -12,7 +12,9 @@ import {
 	ReadCredentialPairError
 } from '../errors.ts';
 
-/** A served cache endpoint that path metadata is read from. */
+/**
+A served cache endpoint that path metadata is read from.
+*/
 export interface ReferenceSource {
 	readonly url: URL;
 	readonly readUser?: ReadUser;

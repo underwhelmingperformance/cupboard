@@ -114,7 +114,9 @@ export class StoredControlTrustInvalidError extends ServerHttpError {
 	}
 }
 
-/** A control trust rule was submitted without a pinned subject. */
+/**
+A control trust rule was submitted without a pinned subject.
+*/
 export class ControlTrustSubjectRequiredError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 
@@ -383,13 +385,17 @@ export abstract class OAuthError extends ServerHttpError {
 	readonly detail?: Readonly<Record<string, string>>;
 }
 
-/** `invalid_request`: the request is malformed or missing a parameter. */
+/**
+`invalid_request`: the request is malformed or missing a parameter.
+*/
 export abstract class InvalidRequestError extends OAuthError {
 	readonly status = StatusCodes.BAD_REQUEST;
 	readonly error = 'invalid_request';
 }
 
-/** A token-exchange request omitted the required `subject_token`. */
+/**
+A token-exchange request omitted the required `subject_token`.
+*/
 export class SubjectTokenRequiredError extends InvalidRequestError {
 	readonly problem = 'subject-token-required';
 
@@ -399,7 +405,9 @@ export class SubjectTokenRequiredError extends InvalidRequestError {
 	}
 }
 
-/** A token request carried a `subject_token_type` the server does not accept. */
+/**
+A token request carried a `subject_token_type` the server does not accept.
+*/
 export class UnsupportedSubjectTokenTypeError extends InvalidRequestError {
 	readonly problem = 'unsupported-subject-token-type';
 
@@ -409,7 +417,9 @@ export class UnsupportedSubjectTokenTypeError extends InvalidRequestError {
 	}
 }
 
-/** A refresh-token grant omitted the required `refresh_token`. */
+/**
+A refresh-token grant omitted the required `refresh_token`.
+*/
 export class RefreshTokenRequiredError extends InvalidRequestError {
 	readonly problem = 'refresh-token-required';
 
@@ -419,7 +429,9 @@ export class RefreshTokenRequiredError extends InvalidRequestError {
 	}
 }
 
-/** A token request body failed schema validation. */
+/**
+A token request body failed schema validation.
+*/
 export class TokenRequestBodyInvalidError extends InvalidRequestError {
 	readonly problem = 'schema-mismatch';
 
@@ -460,7 +472,9 @@ export class InvalidAuthorizationDetailsError extends OAuthError {
 	}
 }
 
-/** `invalid_grant`: the supplied grant or token is invalid, expired, or untrusted. */
+/**
+`invalid_grant`: the supplied grant or token is invalid, expired, or untrusted.
+*/
 export abstract class InvalidGrantError extends OAuthError {
 	readonly status = StatusCodes.BAD_REQUEST;
 	readonly error = 'invalid_grant';
@@ -480,12 +494,16 @@ export class StaleRefreshTokenError extends InvalidGrantError {
 	}
 }
 
-/** A subject token was structurally or cryptographically unusable. */
+/**
+A subject token was structurally or cryptographically unusable.
+*/
 export abstract class SubjectTokenInvalidError extends InvalidGrantError {
 	readonly problem = 'subject-token-invalid';
 }
 
-/** The subject token was not a well-formed JWT. */
+/**
+The subject token was not a well-formed JWT.
+*/
 export class SubjectTokenNotJwtError extends SubjectTokenInvalidError {
 	constructor() {
 		super('Subject token is not a JWT');
@@ -493,7 +511,9 @@ export class SubjectTokenNotJwtError extends SubjectTokenInvalidError {
 	}
 }
 
-/** The subject token's signature or claims failed verification. */
+/**
+The subject token's signature or claims failed verification.
+*/
 export class SubjectTokenVerificationFailedError extends SubjectTokenInvalidError {
 	constructor() {
 		super('Subject token failed verification');
@@ -501,7 +521,9 @@ export class SubjectTokenVerificationFailedError extends SubjectTokenInvalidErro
 	}
 }
 
-/** The subject token carried no subject claim. */
+/**
+The subject token carried no subject claim.
+*/
 export class SubjectTokenSubjectMissingError extends SubjectTokenInvalidError {
 	constructor() {
 		super('Subject token has no subject');
@@ -509,12 +531,16 @@ export class SubjectTokenSubjectMissingError extends SubjectTokenInvalidError {
 	}
 }
 
-/** No enabled trust rule matched the subject token. */
+/**
+No enabled trust rule matched the subject token.
+*/
 export abstract class SubjectTokenUntrustedError extends InvalidGrantError {
 	override readonly problem: string = 'subject-token-untrusted';
 }
 
-/** No tenant trust rule matched the subject token. */
+/**
+No tenant trust rule matched the subject token.
+*/
 export class TenantSubjectTokenUntrustedError extends SubjectTokenUntrustedError {
 	constructor() {
 		super('No trust rule matches the subject token');
@@ -547,7 +573,9 @@ export class TenantSubjectTokenClaimMismatchError extends SubjectTokenUntrustedE
 	}
 }
 
-/** No control trust rule matched the subject token. */
+/**
+No control trust rule matched the subject token.
+*/
 export class ControlSubjectTokenUntrustedError extends SubjectTokenUntrustedError {
 	constructor() {
 		super('No control trust rule matches the subject token');

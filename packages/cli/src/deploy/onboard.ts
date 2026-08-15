@@ -35,13 +35,17 @@ import {
 } from './r2-credentials.ts';
 import type { DeployUi } from './ui.ts';
 
-/** What a single probe of the deployment concluded. */
+/**
+What a single probe of the deployment concluded.
+*/
 type Probe<T> =
 	| { readonly kind: 'ready'; readonly value: T }
 	| {
 			readonly kind: 'retry';
 			readonly detail: string;
-			/** The HTTP status the host answered, when it answered at all. */
+			/**
+			The HTTP status the host answered, when it answered at all.
+			*/
 			readonly status?: number;
 			readonly ray?: string;
 	  }
@@ -54,17 +58,23 @@ type Probe<T> =
 			readonly ray?: string;
 	  };
 
-/** How the agreed admin binding relates to the person deploying. */
+/**
+How the agreed admin binding relates to the person deploying.
+*/
 export type OnboardAdmin =
 	| {
 			readonly kind: 'claimable';
 			readonly owner: OwnerBinding;
-			/** The deployer's id_token, the proof the server checks. */
+			/**
+			The deployer's id_token, the proof the server checks.
+			*/
 			readonly idToken: string;
 	  }
 	| { readonly kind: 'other'; readonly owner: OwnerBinding }
 	| {
-			/** The session's credential carries no identity to prove a match. */
+			/**
+			The session's credential carries no identity to prove a match.
+			*/
 			readonly kind: 'unproven';
 			readonly owner: OwnerBinding;
 	  }
@@ -103,10 +113,14 @@ export function onboardAdminFor(
 export type OnboardOutcome =
 	| {
 			readonly kind: 'ready';
-			/** The deployment's base URL (the control plane). */
+			/**
+			The deployment's base URL (the control plane).
+			*/
 			readonly url: string;
 			readonly slug: string;
-			/** The cache URL Nix talks to: `<url>/t/<slug>`. */
+			/**
+			The cache URL Nix talks to: `<url>/t/<slug>`.
+			*/
 			readonly cacheUrl: URL;
 			readonly publicKey: string;
 	  }
@@ -125,15 +139,21 @@ export type OnboardOutcome =
 			readonly kind: 'claim-refused';
 			readonly url: string;
 			readonly status: number;
-			/** The failing call and the server's own words. */
+			/**
+			The failing call and the server's own words.
+			*/
 			readonly detail: string;
-			/** Cloudflare's ray id for the failed request, when present. */
+			/**
+			Cloudflare's ray id for the failed request, when present.
+			*/
 			readonly ray?: string;
 	  }
 	| { readonly kind: 'claim-cancelled'; readonly url: string }
 	| { readonly kind: 'cancelled'; readonly url: string }
 	| {
-			/** Several caches already exist, so there is no "first" to create. */
+			/**
+			Several caches already exist, so there is no "first" to create.
+			*/
 			readonly kind: 'already-initialised';
 			readonly url: string;
 			readonly slugs: readonly string[];
@@ -141,12 +161,18 @@ export type OnboardOutcome =
 	| {
 			readonly kind: 'unreachable';
 			readonly url: string;
-			/** What the final probe saw, e.g. `HTTP 404` or `unreachable`. */
+			/**
+			What the final probe saw, e.g. `HTTP 404` or `unreachable`.
+			*/
 			readonly lastProbe: string;
-			/** The status the host answered, when it answered at all (vs DNS). */
+			/**
+			The status the host answered, when it answered at all (vs DNS).
+			*/
 			readonly lastStatus?: number;
 			readonly lastRay?: string;
-			/** The Worker script behind `url`, for pointing at its logs. */
+			/**
+			The Worker script behind `url`, for pointing at its logs.
+			*/
 			readonly worker: string;
 	  }
 	| { readonly kind: 'no-subdomain' };
@@ -198,13 +224,19 @@ export type ClaimSecret =
 export interface OnboardOptions {
 	readonly api: CloudflareApi;
 	readonly ui: DeployUi;
-	/** The control Worker's script name, which serves the control plane. */
+	/**
+	The control Worker's script name, which serves the control plane.
+	*/
 	readonly controlScriptName: ScriptName;
-	/** The tenant script's name, which holds the R2 credential secrets. */
+	/**
+	The tenant script's name, which holds the R2 credential secrets.
+	*/
 	readonly tenantScriptName: ScriptName;
 	readonly domain: string | undefined;
 	readonly admin: OnboardAdmin;
-	/** The version the uploaded Workers answer on `/_version`. */
+	/**
+	The version the uploaded Workers answer on `/_version`.
+	*/
 	readonly buildVersion: string;
 	readonly claimSecret: ClaimSecret;
 	readonly r2: OnboardR2;
@@ -231,7 +263,9 @@ const conflictStatusCode = 409;
 
 export type SlugProblem = 'empty' | 'invalid-format';
 
-/** Why `value` cannot be a tenant slug, or undefined when it can. */
+/**
+Why `value` cannot be a tenant slug, or undefined when it can.
+*/
 export function slugProblem(value: string): SlugProblem | undefined {
 	if (value === '') {
 		return 'empty';
@@ -862,7 +896,9 @@ async function pollProbe<T>(
 	| {
 			readonly kind: 'gave-up';
 			readonly lastProbe: string;
-			/** The status the host last answered, undefined if it never did. */
+			/**
+			The status the host last answered, undefined if it never did.
+			*/
 			readonly lastStatus: number | undefined;
 			readonly lastRay: string | undefined;
 	  }

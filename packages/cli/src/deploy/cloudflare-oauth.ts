@@ -6,7 +6,9 @@ import { obtainAuthorizationCode, postForm } from '../auth/oidc-login.ts';
 import { resilientFetcher } from '../client/transport.ts';
 import { CliError } from '../errors.ts';
 
-/** Base of every failure mode of the Cloudflare browser login. */
+/**
+Base of every failure mode of the Cloudflare browser login.
+*/
 export abstract class CloudflareLoginError extends CliError {}
 
 export class CloudflareTokenRequestError extends CloudflareLoginError {
@@ -16,7 +18,9 @@ export class CloudflareTokenRequestError extends CloudflareLoginError {
 	}
 }
 
-/** Base of the malformed-token-response failures. */
+/**
+Base of the malformed-token-response failures.
+*/
 export abstract class CloudflareTokenResponseError extends CloudflareLoginError {}
 
 export class CloudflareTokenResponseNotJsonError extends CloudflareTokenResponseError {
@@ -48,7 +52,9 @@ const tokenEndpoint = 'https://dash.cloudflare.com/oauth2/token';
 const callbackPorts: readonly number[] = [8377, 8378, 8379];
 const callbackPath = '/oauth/callback';
 
-/** The loopback redirect exactly as registered on cupboard's OAuth client. */
+/**
+The loopback redirect exactly as registered on cupboard's OAuth client.
+*/
 export const cloudflareLoopback = {
 	ports: callbackPorts,
 	host: 'localhost',
@@ -77,15 +83,23 @@ export const deployScopes: readonly string[] = [
 
 const defaultAccessTokenLifetimeSeconds = 3600;
 
-/** An issued Cloudflare grant: a Bearer token, and the means to renew it. */
+/**
+An issued Cloudflare grant: a Bearer token, and the means to renew it.
+*/
 export interface CloudflareGrant {
 	readonly accessToken: string;
 	readonly refreshToken: string | undefined;
-	/** Epoch milliseconds after which `accessToken` must not be used. */
+	/**
+	Epoch milliseconds after which `accessToken` must not be used.
+	*/
 	readonly expiresAt: number;
-	/** The Cloudflare user the grant belongs to (the id_token `sub`). */
+	/**
+	The Cloudflare user the grant belongs to (the id_token `sub`).
+	*/
 	readonly subject: string | undefined;
-	/** The raw id_token, presentable as a subject token to a cupboard server. */
+	/**
+	The raw id_token, presentable as a subject token to a cupboard server.
+	*/
 	readonly idToken: string | undefined;
 }
 

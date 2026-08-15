@@ -101,7 +101,9 @@ function isNixDerivedPathString(value: unknown): value is NixDerivedPathString {
 	);
 }
 
-/** The canonical spelling of a derived path's unordered named-output set. */
+/**
+The canonical spelling of a derived path's unordered named-output set.
+*/
 export function canonicalNixDerivedPath(
 	value: NixDerivedPathString
 ): NixDerivedPathString {
@@ -180,7 +182,9 @@ type CohortMatrixEntry = z.output<typeof cohortMatrixEntrySchema>;
 
 export interface CohortMember {
 	readonly attr: string;
-	/** The flake-reference form `nix build` resolves directly. */
+	/**
+	The flake-reference form `nix build` resolves directly.
+	*/
 	readonly installable: string;
 	/**
 	 * The derivation-store-path form the daemon's availability queries
@@ -1110,7 +1114,9 @@ async function settleCohortBuild(
 		readonly localBuilds?: readonly CohortOwnedBuild[];
 		readonly incompleteRoots?: ReadonlySet<string>;
 		readonly terminalFailure?: ParsedTerminalBuildFailure;
-		/** The stores each path was copied from, keyed by store path. */
+		/**
+		The stores each path was copied from, keyed by store path.
+		*/
 		readonly copiedFrom?: ReadonlyMap<string, readonly string[]>;
 	}
 ): Promise<void> {
@@ -1475,7 +1481,9 @@ export function cohortReceiptPushArguments(
 	return arguments_;
 }
 
-/** One root group's own target paths, from a cohort declaring several roots. */
+/**
+One root group's own target paths, from a cohort declaring several roots.
+*/
 export interface CohortRootGroup {
 	readonly root: string;
 	readonly paths: readonly string[];
@@ -1911,7 +1919,9 @@ export function withdrawFromPartition(
 	};
 }
 
-/** Targets already obtainable before this run need explicit rebuild mode. */
+/**
+Targets already obtainable before this run need explicit rebuild mode.
+*/
 export function provenanceRebuildInstallables(
 	partition: PartitionData,
 	queryable: readonly CohortMember[]
@@ -1990,7 +2000,9 @@ async function reprobeCohort(
 	return planReprobeResult(results, reporter);
 }
 
-/** One build-set member in the confirmation targets file. */
+/**
+One build-set member in the confirmation targets file.
+*/
 interface ReprobeTargetEntry {
 	readonly attr: string;
 	readonly installable: string;
@@ -2438,7 +2450,9 @@ function isMatchingDerivation(
 	return evaluated === storePathBasename(planned);
 }
 
-/** Local derivation-graph evaluation argv for the cohort's flake installables. */
+/**
+Local derivation-graph evaluation argv for the cohort's flake installables.
+*/
 export function nixDerivationShowArguments(
 	installables: readonly string[],
 	isRecursive = true,
@@ -2461,12 +2475,16 @@ const nixDerivationShowEnvelopeSchema = z.looseObject({
 	derivations: z.record(z.string(), z.unknown())
 });
 
-/** A Nix child whose stdout is captured until the complete process closes. */
+/**
+A Nix child whose stdout is captured until the complete process closes.
+*/
 export interface CapturedNixProcess extends AbortableChildProcessLifecycle {
 	onStdout(listener: (chunk: string) => void): void;
 }
 
-/** The injectable process launcher shared by captured-output Nix commands. */
+/**
+The injectable process launcher shared by captured-output Nix commands.
+*/
 export interface CapturedNixProcessDependencies {
 	readonly start: (
 		arguments_: readonly string[],
@@ -2483,7 +2501,9 @@ export interface NixDerivationShowDependencies {
 	readonly scheduler?: ChildProcessEscalationScheduler;
 }
 
-/** Maximum stdout retained from a Nix derivation or build subprocess. */
+/**
+Maximum stdout retained from a Nix derivation or build subprocess.
+*/
 const maximumCapturedNixStdoutBytes = 16 * 1024 * 1024;
 
 function startCapturedNixProcess(
@@ -2565,7 +2585,9 @@ async function runCapturedNixProcess(
 	return { signal: result.signal, status: result.status, stdout };
 }
 
-/** Parse derivation paths from the pinned Nix v4 or legacy flat JSON shape. */
+/**
+Parse derivation paths from the pinned Nix v4 or legacy flat JSON shape.
+*/
 export function parseNixDerivationShow(
 	stdout: string
 ): readonly (StorePathBasename | StorePathString)[] {
@@ -2610,7 +2632,9 @@ export function parseNixDerivationShow(
 	});
 }
 
-/** Evaluate and materialise a cohort's complete derivation graph locally. */
+/**
+Evaluate and materialise a cohort's complete derivation graph locally.
+*/
 export async function runNixDerivationShow(
 	installables: readonly string[],
 	signal?: AbortSignal,
@@ -2847,7 +2871,9 @@ const defaultRunNixCopyDependencies: RunNixCopyDependencies = {
 	start: startNixCopy
 };
 
-/** Copy the locally evaluated derivation closures to the remote build store. */
+/**
+Copy the locally evaluated derivation closures to the remote build store.
+*/
 export async function runNixCopy(
 	derivations: readonly StorePathString[],
 	store: string,
@@ -2870,7 +2896,9 @@ export async function runNixCopy(
 	}
 }
 
-/** Daemon settings shared by every queryable target in a remote cohort. */
+/**
+Daemon settings shared by every queryable target in a remote cohort.
+*/
 export function remoteBuildSetOptions(maxJobs: string): NixDaemonSetOptions {
 	return maxJobs === '' ? {} : { maxBuildJobs: Number(maxJobs) };
 }
@@ -2934,15 +2962,23 @@ export async function runNixBuildWithResults(
  * realised outputs stay protected until publication has finished.
  */
 export interface RemoteDerivationPreparation {
-	/** Top-level derivations whose copied closures the session must protect. */
+	/**
+	Top-level derivations whose copied closures the session must protect.
+	*/
 	readonly derivations: readonly StorePathString[];
-	/** Copies those derivation closures after their temporary roots exist. */
+	/**
+	Copies those derivation closures after their temporary roots exist.
+	*/
 	copy(): Promise<void>;
-	/** Require every successful target to have current-run build evidence. */
+	/**
+	Require every successful target to have current-run build evidence.
+	*/
 	readonly requireProvenance?: boolean;
 }
 
-/** Root every predictable output, then build and publish on the same session. */
+/**
+Root every predictable output, then build and publish on the same session.
+*/
 export async function buildAndRootNixResults(
 	session: Pick<
 		NixDaemonSession,
@@ -3283,7 +3319,9 @@ function formatRemoteOutputEntries(
 		.join(', ');
 }
 
-/** Every final output path in the keyed results, deduplicated and sorted. */
+/**
+Every final output path in the keyed results, deduplicated and sorted.
+*/
 export function buildResultOutputPaths(
 	results: readonly NixBuildResult[]
 ): readonly StorePathString[] {
@@ -3299,7 +3337,9 @@ export function buildResultOutputPaths(
 export interface NixBuildCommandResult {
 	readonly paths: readonly string[];
 	readonly status: number | null;
-	/** The stores each path was copied from, keyed by store path. */
+	/**
+	The stores each path was copied from, keyed by store path.
+	*/
 	readonly copiedFrom: ReadonlyMap<StorePathString, readonly string[]>;
 }
 
@@ -3417,7 +3457,9 @@ export function receiptAlreadyHeldPaths(
 	return alreadyValid.filter((storePath) => !claimed.has(storePath));
 }
 
-/** Outputs this invocation's keyed daemon results say it actually built. */
+/**
+Outputs this invocation's keyed daemon results say it actually built.
+*/
 export function claimableOutputPaths(
 	results: readonly NixBuildResult[],
 	provenanceRebuilds: ReadonlySet<string> = new Set()

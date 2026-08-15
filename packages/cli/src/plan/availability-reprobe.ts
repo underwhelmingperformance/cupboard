@@ -8,7 +8,9 @@ import {
 	type DestinationProbes
 } from './availability-partition.ts';
 
-/** The bucket a withdrawn target moved into, named as the partition names it. */
+/**
+The bucket a withdrawn target moved into, named as the partition names it.
+*/
 export type WithdrawnOutcome = 'attachOnly' | 'publishByReference';
 
 /**
@@ -23,12 +25,16 @@ export interface WithdrawnTarget {
 }
 
 export interface AvailabilityReprobeOptions {
-	/** The build set as it stands, one entry per target Nix is about to realise. */
+	/**
+	The build set as it stands, one entry per target Nix is about to realise.
+	*/
 	readonly targets: readonly AvailabilityTarget[];
 	readonly destinationProbes: DestinationProbes;
 }
 
-/** The build set as the re-probe leaves it, with what it took out of it. */
+/**
+The build set as the re-probe leaves it, with what it took out of it.
+*/
 export interface AvailabilityReprobe {
 	readonly buildSet: readonly NixDerivedPathString[];
 	readonly withdrawn: readonly WithdrawnTarget[];

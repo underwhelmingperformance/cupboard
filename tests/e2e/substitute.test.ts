@@ -27,7 +27,7 @@ import {
 const root = path.resolve(import.meta.dirname, '../..');
 const contentAddressedFixture = path.join(root, 'tests/fixtures/simple/source');
 
-async function fileExists(file: string): Promise<boolean> {
+async function isFilePresent(file: string): Promise<boolean> {
 	try {
 		await readFile(file);
 		return true;
@@ -157,7 +157,9 @@ describe('Nix substitution', () => {
 			} catch {
 				outcome = {
 					realised: false,
-					targetPresent: await fileExists(harness.target.physicalPath(referrer))
+					targetPresent: await isFilePresent(
+						harness.target.physicalPath(referrer)
+					)
 				};
 			}
 

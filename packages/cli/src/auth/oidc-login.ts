@@ -65,9 +65,13 @@ export class OidcLoginError extends CliError {
 	}
 }
 
-/** Base: the authorization server declined the login. */
+/**
+Base: the authorization server declined the login.
+*/
 export abstract class AuthorizationDeclinedError extends OidcLoginError {
-	/** The specific error for an RFC 6749 authorize-endpoint error code. */
+	/**
+	The specific error for an RFC 6749 authorize-endpoint error code.
+	*/
 	static fromProviderCode(code: string): AuthorizationDeclinedError {
 		switch (code) {
 			case 'access_denied': {
@@ -90,7 +94,9 @@ export abstract class AuthorizationDeclinedError extends OidcLoginError {
 	}
 }
 
-/** The user (or a policy) refused consent. */
+/**
+The user (or a policy) refused consent.
+*/
 export class AuthorizationAccessDeniedError extends AuthorizationDeclinedError {
 	constructor() {
 		super('access_denied');
@@ -98,7 +104,9 @@ export class AuthorizationAccessDeniedError extends AuthorizationDeclinedError {
 	}
 }
 
-/** The client's registration does not allow a requested scope. */
+/**
+The client's registration does not allow a requested scope.
+*/
 export class AuthorizationInvalidScopeError extends AuthorizationDeclinedError {
 	constructor() {
 		super('invalid_scope');
@@ -106,7 +114,9 @@ export class AuthorizationInvalidScopeError extends AuthorizationDeclinedError {
 	}
 }
 
-/** Any other RFC 6749 error code, carried verbatim. */
+/**
+Any other RFC 6749 error code, carried verbatim.
+*/
 export class AuthorizationProviderError extends AuthorizationDeclinedError {
 	constructor(providerError: string) {
 		super(providerError);
@@ -114,7 +124,9 @@ export class AuthorizationProviderError extends AuthorizationDeclinedError {
 	}
 }
 
-/** The browser never completed the login within the bounded wait. */
+/**
+The browser never completed the login within the bounded wait.
+*/
 export class LoginTimeoutError extends OidcLoginError {
 	constructor() {
 		super('Timed out waiting for the browser to complete login', {
@@ -124,7 +136,9 @@ export class LoginTimeoutError extends OidcLoginError {
 	}
 }
 
-/** The issuer refused to start a device authorization (RFC 8628). */
+/**
+The issuer refused to start a device authorization (RFC 8628).
+*/
 export class DeviceAuthorizationRequestError extends OidcLoginError {
 	constructor(public readonly status: number) {
 		super(`Device authorization request failed with HTTP ${String(status)}`, {
@@ -135,7 +149,9 @@ export class DeviceAuthorizationRequestError extends OidcLoginError {
 	}
 }
 
-/** None of the loopback redirect ports could be bound. */
+/**
+None of the loopback redirect ports could be bound.
+*/
 export class LoopbackBindError extends OidcLoginError {
 	constructor(
 		public readonly ports: readonly number[],
@@ -154,7 +170,9 @@ export interface Pkce {
 	readonly challenge: string;
 }
 
-/** A PKCE verifier and its S256 challenge (RFC 7636). */
+/**
+A PKCE verifier and its S256 challenge (RFC 7636).
+*/
 export function createPkce(): Pkce {
 	const verifier = randomBytes(32).toString('base64url');
 	const challenge = createHash('sha256').update(verifier).digest('base64url');
@@ -289,7 +307,9 @@ export interface LoopbackLoginOptions {
 	readonly fetcher?: typeof fetch;
 	readonly timeoutMs?: number;
 	readonly signal?: AbortSignal;
-	/** Fixed redirect registration, for providers with exact-match URLs. */
+	/**
+	Fixed redirect registration, for providers with exact-match URLs.
+	*/
 	readonly loopback?: LoopbackOptions;
 }
 
@@ -338,7 +358,9 @@ export interface AuthorizeUrlParameters {
 	readonly scope: string;
 }
 
-/** The authorization-endpoint URL for a PKCE authorization code request. */
+/**
+The authorization-endpoint URL for a PKCE authorization code request.
+*/
 export function buildAuthorizeUrl(parameters: AuthorizeUrlParameters): string {
 	const url = new URL(parameters.endpoint);
 	url.searchParams.set('response_type', 'code');
@@ -352,9 +374,13 @@ export function buildAuthorizeUrl(parameters: AuthorizeUrlParameters): string {
 	return url.href;
 }
 
-/** Where the loopback redirect is served; defaults match the tenant login. */
+/**
+Where the loopback redirect is served; defaults match the tenant login.
+*/
 export interface LoopbackOptions {
-	/** Ports to try in order; `[0]` (an ephemeral port) when not given. */
+	/**
+	Ports to try in order; `[0]` (an ephemeral port) when not given.
+	*/
 	readonly ports?: readonly number[];
 	readonly host?: string;
 	readonly path?: string;
@@ -372,9 +398,13 @@ export interface AuthorizationCodeOptions {
 
 export interface ObtainedAuthorizationCode {
 	readonly code: string;
-	/** The exact redirect URI used; the token exchange must repeat it. */
+	/**
+	The exact redirect URI used; the token exchange must repeat it.
+	*/
 	readonly redirectUri: string;
-	/** The PKCE verifier whose challenge the code is bound to. */
+	/**
+	The PKCE verifier whose challenge the code is bound to.
+	*/
 	readonly codeVerifier: string;
 }
 
@@ -596,7 +626,9 @@ export interface DeviceLoginOptions {
 	readonly prompt: (verification: {
 		readonly userCode: string;
 		readonly verificationUri: string;
-		/** The verification URL with the code already filled in, when the issuer sends one. */
+		/**
+		The verification URL with the code already filled in, when the issuer sends one.
+		*/
 		readonly verificationUriComplete?: string;
 	}) => void;
 	readonly fetcher?: typeof fetch;
@@ -829,7 +861,9 @@ async function exchangeCode(
 	return parsed.data.id_token;
 }
 
-/** A `application/x-www-form-urlencoded` POST, as token endpoints expect. */
+/**
+A `application/x-www-form-urlencoded` POST, as token endpoints expect.
+*/
 export function postForm(
 	form: Readonly<Record<string, string>>,
 	signal?: AbortSignal

@@ -38,15 +38,23 @@ import {
 } from './store-config.ts';
 import { openSubstituters, SubstituterClient } from './substituter.ts';
 
-/** Probes Nix uses to resolve an `auto` store, injected so selection is testable. */
+/**
+Probes Nix uses to resolve an `auto` store, injected so selection is testable.
+*/
 export interface StoreClientEnvironment extends NixConfigEnvironment {
-	/** Whether the state directory is readable and writable by this process. */
+	/**
+	Whether the state directory is readable and writable by this process.
+	*/
 	canWriteStateDirectory(stateDirectory: string): boolean;
 	socketExists(socketPath: string): boolean;
 	directoryExists(directoryPath: string): boolean;
-	/** Whether this process runs as the superuser, which owns `/nix`. */
+	/**
+	Whether this process runs as the superuser, which owns `/nix`.
+	*/
 	isSuperuser(): boolean;
-	/** Creates the directory and every parent of it, reporting whether it now exists. */
+	/**
+	Creates the directory and every parent of it, reporting whether it now exists.
+	*/
 	createDirectory(directoryPath: string): boolean;
 }
 
@@ -88,7 +96,9 @@ export type StoreBackend =
  */
 export type NixStoreKind = 'local-filesystem' | 'daemon' | 'ssh-ng';
 
-/** The store kind of a resolved backend. */
+/**
+The store kind of a resolved backend.
+*/
 export function storeKindOf(backend: StoreBackend): NixStoreKind {
 	return backend.backend === 'local' ? 'local-filesystem' : backend.backend;
 }
@@ -120,7 +130,9 @@ export function createNixStoreClient(
 	);
 }
 
-/** The logical store directory and state directory of a resolved store. */
+/**
+The logical store directory and state directory of a resolved store.
+*/
 export function storeDirectoriesOf(
 	backend: StoreBackend,
 	configured: ConfiguredStoreDirectories
@@ -228,7 +240,9 @@ function netrcContents(
 	}
 }
 
-/** Opens a local store with the given directories and substituter queries. */
+/**
+Opens a local store with the given directories and substituter queries.
+*/
 function localStoreOver(
 	directories: LocalStoreDirectories,
 	substituters: SubstituterClient,
@@ -252,9 +266,13 @@ function localStoreOver(
 	);
 }
 
-/** Per-call adjustments for an explicitly daemon-backed client. */
+/**
+Per-call adjustments for an explicitly daemon-backed client.
+*/
 export interface NixDaemonClientOptions {
-	/** The store URI this client opens (default: the discovered `store` setting). */
+	/**
+	The store URI this client opens (default: the discovered `store` setting).
+	*/
 	readonly storeUri?: string;
 	/**
 	 * Merged over the discovered SetOptions fields for a local daemon, this value
@@ -267,7 +285,9 @@ export interface NixDaemonClientOptions {
 	 */
 	readonly overrides?: NixDaemonOverrides;
 	readonly connect?: NixDaemonConnector;
-	/** Abandons the work this client is doing, raising the signal's reason. */
+	/**
+	Abandons the work this client is doing, raising the signal's reason.
+	*/
 	readonly signal?: AbortSignal;
 }
 
@@ -321,7 +341,9 @@ export function createNixDaemonStoreClient(
 	});
 }
 
-/** A store opened with support for external availability queries. */
+/**
+A store opened with support for external availability queries.
+*/
 export interface AvailabilityStore {
 	readonly client: NixStoreClient;
 	readonly kind: NixStoreKind;

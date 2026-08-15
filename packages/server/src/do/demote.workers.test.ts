@@ -70,7 +70,7 @@ async function committedTenantPath(seed: string) {
 	return { tenant, token, metadata, nar, narHash: nar.narHash };
 }
 
-async function narInfoPresent(
+async function isNarInfoPresent(
 	tenant: TenantId,
 	storePathHash: StorePathHash
 ): Promise<boolean> {
@@ -79,7 +79,7 @@ async function narInfoPresent(
 	return object !== null;
 }
 
-async function narPresent(narHash: NixSha256HashString): Promise<boolean> {
+async function isNarPresent(narHash: NixSha256HashString): Promise<boolean> {
 	const object = await env.BLOBS.head(narObjectKey(narHash));
 
 	return object !== null;
@@ -109,13 +109,13 @@ describe('reaper demote pass', () => {
 		await env.BLOBS.delete(narObjectKey(narHash));
 
 		expect({
-			narPresent: await narPresent(narHash),
-			narInfoPresent: await narInfoPresent(tenant, metadata.storePathHash),
+			isNarPresent: await isNarPresent(narHash),
+			isNarInfoPresent: await isNarInfoPresent(tenant, metadata.storePathHash),
 			blobState: await blobStateNarHashes(),
 			edges: await edgeCount()
 		}).toStrictEqual({
-			narPresent: false,
-			narInfoPresent: true,
+			isNarPresent: false,
+			isNarInfoPresent: true,
 			blobState: [{ narHash }],
 			edges: 1
 		});
@@ -128,12 +128,12 @@ describe('reaper demote pass', () => {
 		expect({
 			demoted,
 			blobState: await blobStateNarHashes(),
-			narInfoPresent: await narInfoPresent(tenant, metadata.storePathHash),
+			isNarInfoPresent: await isNarInfoPresent(tenant, metadata.storePathHash),
 			edges: await edgeCount()
 		}).toStrictEqual({
 			demoted: 1,
 			blobState: [],
-			narInfoPresent: false,
+			isNarInfoPresent: false,
 			edges: 1
 		});
 	});
@@ -162,11 +162,11 @@ describe('reaper demote pass', () => {
 		expect({
 			demoted,
 			blobState: await blobStateNarHashes(),
-			firstNarInfo: await narInfoPresent(
+			firstNarInfo: await isNarInfoPresent(
 				first.tenant,
 				first.metadata.storePathHash
 			),
-			secondNarInfo: await narInfoPresent(
+			secondNarInfo: await isNarInfoPresent(
 				second.tenant,
 				second.metadata.storePathHash
 			),
@@ -189,13 +189,13 @@ describe('reaper demote pass', () => {
 		expect({
 			demoted,
 			blobState: await blobStateNarHashes(),
-			narInfoPresent: await narInfoPresent(tenant, metadata.storePathHash),
-			narPresent: await narPresent(narHash)
+			isNarInfoPresent: await isNarInfoPresent(tenant, metadata.storePathHash),
+			isNarPresent: await isNarPresent(narHash)
 		}).toStrictEqual({
 			demoted: 0,
 			blobState: [{ narHash }],
-			narInfoPresent: true,
-			narPresent: true
+			isNarInfoPresent: true,
+			isNarPresent: true
 		});
 	});
 
@@ -212,12 +212,12 @@ describe('reaper demote pass', () => {
 
 		expect({
 			blobState: await blobStateNarHashes(),
-			narInfoPresent: await narInfoPresent(tenant, metadata.storePathHash),
-			narPresent: await narPresent(narHash)
+			isNarInfoPresent: await isNarInfoPresent(tenant, metadata.storePathHash),
+			isNarPresent: await isNarPresent(narHash)
 		}).toStrictEqual({
 			blobState: [{ narHash }],
-			narInfoPresent: true,
-			narPresent: true
+			isNarInfoPresent: true,
+			isNarPresent: true
 		});
 	});
 });

@@ -22,7 +22,9 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 const narInfoSuffix = '.narinfo';
 const cacheInfoPath = '/nix-cache-info';
 const priority = cachePrioritySchema.parse(41);
-/** The size this cache advertises for every path it serves. */
+/**
+The size this cache advertises for every path it serves.
+*/
 export const servedNarSize = 4096;
 
 /**
@@ -105,12 +107,16 @@ export class FakeSubstituter {
 		send(response, 200, narInfo.render());
 	}
 
-	/** The URL to use in Nix's `substituters` setting. */
+	/**
+	The URL to use in Nix's `substituters` setting.
+	*/
 	get url(): string {
 		return this.origin;
 	}
 
-	/** Narinfo hash parts requested since `forgetRequests` was last called. */
+	/**
+	Narinfo hash parts requested since `forgetRequests` was last called.
+	*/
 	get narInfoRequests(): readonly string[] {
 		return [...this.requestedHashes];
 	}
@@ -162,7 +168,9 @@ export class FakeSubstituter {
 		return digest;
 	}
 
-	/** Stops serving a path, which simulates an upstream removing it. */
+	/**
+	Stops serving a path, which simulates an upstream removing it.
+	*/
 	withdraw(storePath: StorePathString): void {
 		this.served.delete(StorePath.hash(storePath));
 	}

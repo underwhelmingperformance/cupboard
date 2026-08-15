@@ -20,8 +20,8 @@ import {
 	activeControlKey,
 	controlKeySummaries,
 	controlVerificationKeys,
+	didRetireControlKey,
 	ensureControlKey,
-	retireControlKey,
 	retireScheduledControlKeys,
 	rotateControlKey
 } from './control-key-store.ts';
@@ -174,7 +174,7 @@ describe('control key store', () => {
 		const second = await rotateControlKey(database, secret, t1);
 		const secondKid = second.kid;
 
-		await retireControlKey(database, firstKid, t2);
+		await didRetireControlKey(database, firstKid, t2);
 
 		const verificationKeys = await controlVerificationKeys(database);
 		const remaining = verificationKeys.map((key) => key.kid);
@@ -186,7 +186,7 @@ describe('control key store', () => {
 		});
 		let error: unknown;
 		try {
-			await retireControlKey(database, secondKid, t2);
+			await didRetireControlKey(database, secondKid, t2);
 			error = { kind: 'retired' };
 		} catch (error_: unknown) {
 			error = error_;
@@ -222,7 +222,7 @@ describe('control key store', () => {
 			const second = await rotateControlKey(database, secret, t1);
 			const secondKid = second.kid;
 
-			await retireControlKey(database, firstKid, t2);
+			await didRetireControlKey(database, firstKid, t2);
 
 			// Only `secondKid` is live now. Retiring the already-retired `firstKid` (or
 			// an unknown key) must resolve quietly: the post-update read finds it not
@@ -231,7 +231,7 @@ describe('control key store', () => {
 			const kid =
 				target === 'retired' ? firstKid : authKeyIdSchema.parse('nonexistent');
 
-			await expect(retireControlKey(database, kid, t2)).resolves.toBe(false);
+			await expect(didRetireControlKey(database, kid, t2)).resolves.toBe(false);
 
 			const liveKeys = await controlVerificationKeys(database);
 			const liveKids = liveKeys.map((key) => key.kid);

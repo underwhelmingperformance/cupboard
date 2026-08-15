@@ -48,7 +48,9 @@ const agreedCases: readonly NarinfoCase[] = [
 	}))
 ];
 
-/** Documents that both Nix and our client must reject. */
+/**
+Documents that both Nix and our client must reject.
+*/
 const refusedCases: readonly NarinfoCase[] = [
 	...['StorePath', 'URL', 'NarHash', 'NarSize'].map((field) => ({
 		name: `a narinfo carrying no ${field}`,

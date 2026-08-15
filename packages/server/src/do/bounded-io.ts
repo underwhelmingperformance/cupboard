@@ -76,7 +76,9 @@ export function boundedBlobs(bucket: R2Bucket): R2Bucket {
 	});
 }
 
-/** A {@link Cache} whose match/put/delete calls are bounded. */
+/**
+A {@link Cache} whose match/put/delete calls are bounded.
+*/
 export function boundedCache(cache: Cache): Cache {
 	return new Proxy(cache, {
 		get(target, property) {

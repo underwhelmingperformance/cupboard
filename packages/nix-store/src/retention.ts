@@ -11,7 +11,9 @@ export function implicitPinName(storePathHash: string): string {
 	return `${implicitPinPrefix}${storePathHash}`;
 }
 
-/** Whether a root name is an implicit pin produced by a plain push. */
+/**
+Whether a root name is an implicit pin produced by a plain push.
+*/
 export function isImplicitPinName(name: string): boolean {
 	return (
 		name.startsWith(implicitPinPrefix) &&

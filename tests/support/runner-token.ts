@@ -56,7 +56,9 @@ export class StubRunnerTokenEndpoint {
 		private readonly server: Server
 	) {}
 
-	/** The two variables a runner sets for a job holding the OIDC permission. */
+	/**
+	The two variables a runner sets for a job holding the OIDC permission.
+	*/
 	get environment(): RunnerTokenEnvironment {
 		return {
 			ACTIONS_ID_TOKEN_REQUEST_URL: this.url,
@@ -64,7 +66,9 @@ export class StubRunnerTokenEndpoint {
 		};
 	}
 
-	/** Every audience requested so far, in request order. */
+	/**
+	Every audience requested so far, in request order.
+	*/
 	get audiences(): readonly string[] {
 		return [...this.requestedAudiences];
 	}

@@ -232,7 +232,9 @@ export class CupboardTestServer {
 		return new URL(`/t/${fixtureTenant}`, this.url);
 	}
 
-	/** Resolves a tenant-relative path (e.g. `/x.narinfo`) under {@link tenantUrl}. */
+	/**
+	Resolves a tenant-relative path (e.g. `/x.narinfo`) under {@link tenantUrl}.
+	*/
 	tenantPath(path: string): URL {
 		const url = this.tenantUrl;
 		url.pathname = `${url.pathname}${path}`;
@@ -301,14 +303,18 @@ export class CupboardTestServer {
 		};
 	}
 
-	/** Writes bytes to a staging key, the bucket the worker verifies against. */
+	/**
+	Writes bytes to a staging key, the bucket the worker verifies against.
+	*/
 	async stageObject(r2Key: string, bytes: Uint8Array): Promise<void> {
 		await this.bucket.put(r2Key, bytes, {
 			sha256: createHash('sha256').update(bytes).digest()
 		});
 	}
 
-	/** An owner admin token, obtained the real way: an owner id_token exchanged at `/token`. */
+	/**
+	An owner admin token, obtained the real way: an owner id_token exchanged at `/token`.
+	*/
 	ownerAdminToken(): Promise<string> {
 		return this.exchangeIdToken(
 			this.issuer.sign({ aud: ownerAudience, sub: ownerSubject })

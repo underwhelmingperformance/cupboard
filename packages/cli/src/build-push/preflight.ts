@@ -29,19 +29,29 @@ export interface BuildPushPreflightOptions {
 	readonly socketExists: (socketPath: string) => boolean;
 	readonly daemonTrust: () => Promise<NixDaemonTrust>;
 	readonly invocationId: InvocationId;
-	/** The authorization_details the token exchange actually granted. */
+	/**
+	The authorization_details the token exchange actually granted.
+	*/
 	readonly grants: readonly AuthorizationDetail[];
-	/** The cache the run publishes to, as its wire selector. */
+	/**
+	The cache the run publishes to, as its wire selector.
+	*/
 	readonly cache: CacheSelector;
-	/** The run root every streamed commit attaches to, when the run binds one. */
+	/**
+	The run root every streamed commit attaches to, when the run binds one.
+	*/
 	readonly runRoot?: RootName;
-	/** The target roots reconciliation will set, when the run declares any. */
+	/**
+	The target roots reconciliation will set, when the run declares any.
+	*/
 	readonly targetRoots?: readonly RootName[];
 	readonly helper?: HelperResolutionOptions;
 	readonly runtime?: Omit<InvocationRuntimeOptions, 'invocationId'>;
 }
 
-/** What preflight proved: the endpoints a streaming run builds on. */
+/**
+What preflight proved: the endpoints a streaming run builds on.
+*/
 export interface BuildPushPreflight {
 	readonly daemonSocketPath: string;
 	readonly helperPath: string;

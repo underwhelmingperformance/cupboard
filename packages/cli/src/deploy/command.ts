@@ -84,7 +84,9 @@ import {
 import { planWorkerSource } from './source.ts';
 import { createDeployUi, type DeployUi, type MenuEntry } from './ui.ts';
 
-/** The user backed out of a prompt; the deploy stops without error output. */
+/**
+The user backed out of a prompt; the deploy stops without error output.
+*/
 export class DeployCancelledError extends CliError {
 	constructor() {
 		super('Deploy cancelled');
@@ -92,7 +94,9 @@ export class DeployCancelledError extends CliError {
 	}
 }
 
-/** A confirmation is needed but there is no terminal to ask on. */
+/**
+A confirmation is needed but there is no terminal to ask on.
+*/
 export class ConfirmationRequiredError extends CliError {
 	constructor() {
 		super('Not running in a terminal: pass --yes to deploy without prompts.');
@@ -100,7 +104,9 @@ export class ConfirmationRequiredError extends CliError {
 	}
 }
 
-/** An account must be chosen but there is no terminal to ask on. */
+/**
+An account must be chosen but there is no terminal to ask on.
+*/
 export class AccountOptionRequiredError extends CliError {
 	constructor(public readonly accounts: readonly AccountSummary[]) {
 		super(
@@ -111,7 +117,9 @@ export class AccountOptionRequiredError extends CliError {
 	}
 }
 
-/** R2 credentials are needed but there is no terminal to ask on. */
+/**
+R2 credentials are needed but there is no terminal to ask on.
+*/
 export class R2CredentialsRequiredError extends CliError {
 	constructor() {
 		super(
@@ -123,7 +131,9 @@ export class R2CredentialsRequiredError extends CliError {
 	}
 }
 
-/** R2 could not be reached to probe the credential pair. */
+/**
+R2 could not be reached to probe the credential pair.
+*/
 export class R2UnreachableError extends CliError {
 	constructor(options: { readonly cause: unknown }) {
 		super('Could not reach R2 to check the credentials', options);
@@ -131,7 +141,9 @@ export class R2UnreachableError extends CliError {
 	}
 }
 
-/** R2 rejected the credential pair when probed. */
+/**
+R2 rejected the credential pair when probed.
+*/
 export class R2CredentialsRejectedError extends CliError {
 	constructor(public readonly status: number) {
 		super(
@@ -149,13 +161,17 @@ export interface DeployCliOptions {
 	readonly dryRun?: boolean;
 	readonly fromTree?: boolean;
 	readonly yes?: boolean;
-	/** False when `--no-wrangler` was passed; absent means allowed. */
+	/**
+	False when `--no-wrangler` was passed; absent means allowed.
+	*/
 	readonly wrangler?: boolean;
 }
 
 export interface DeployRuntimeOptions {
 	readonly signal?: AbortSignal;
-	/** ANSI colour preference from `--colour`/`--no-colour`. */
+	/**
+	ANSI colour preference from `--colour`/`--no-colour`.
+	*/
 	readonly colour?: boolean;
 }
 
@@ -262,7 +278,7 @@ async function resolveArtifact(
 		isSea: isSea(),
 		cwd: process.cwd(),
 		fromTree: isFromTree,
-		fileExists: existsSync
+		isFilePresent: existsSync
 	});
 
 	if (plan.mode === 'embedded') {
@@ -303,13 +319,17 @@ export async function chooseDeployAccount(
 	return chosen;
 }
 
-/** The deploy-time choices the user may tweak while reviewing the plan. */
+/**
+The deploy-time choices the user may tweak while reviewing the plan.
+*/
 export interface PlanState {
 	readonly accountId: CloudflareAccountId;
 	readonly domain: string | undefined;
 	readonly config: DeploymentConfig;
 	readonly owner: OwnerChoice;
-	/** Replace the R2 credentials the Worker already holds with a new pair. */
+	/**
+	Replace the R2 credentials the Worker already holds with a new pair.
+	*/
 	readonly replaceR2Credentials?: boolean;
 }
 
@@ -404,9 +424,13 @@ export interface PlanReviewWorld {
 	readonly ui: DeployUi;
 	readonly render: (state: PlanState) => Promise<void>;
 	readonly accounts: () => Promise<readonly AccountSummary[]>;
-	/** The deployer's identity, when the credential carries one. */
+	/**
+	The deployer's identity, when the credential carries one.
+	*/
 	readonly deployer: OwnerBinding | undefined;
-	/** True when `--yes` accepted the plan up front. */
+	/**
+	True when `--yes` accepted the plan up front.
+	*/
 	readonly skipReview: boolean;
 	/**
 	 * Whether replacing the R2 credentials the Worker already holds is worth
@@ -644,7 +668,9 @@ export async function reviewPlan(
 	}
 }
 
-/** The R2 pair from the environment, when both parts are present. */
+/**
+The R2 pair from the environment, when both parts are present.
+*/
 export function envR2Credentials(
 	env: Readonly<Record<string, string | undefined>>
 ): R2Credentials | undefined {
@@ -667,15 +693,21 @@ export function envR2Credentials(
 	};
 }
 
-/** How the R2 credential question was resolved. */
+/**
+How the R2 credential question was resolved.
+*/
 export type R2Settlement =
 	| {
 			readonly kind: 'settled';
 			readonly credentials: R2Credentials;
-			/** True when the key was created just now and may not have propagated. */
+			/**
+			True when the key was created just now and may not have propagated.
+			*/
 			readonly created: boolean;
 	  }
-	/** The pair already on the Worker stays as it is. */
+	/**
+	The pair already on the Worker stays as it is.
+	*/
 	| { readonly kind: 'keep' }
 	| { readonly kind: 'cancelled' };
 
@@ -691,7 +723,7 @@ export type R2KeyCreation =
 			 * Whether the bucket already exists, so the menu hint can say whether
 			 * creating the key creates the bucket too.
 			 */
-			readonly bucketExists: boolean;
+			readonly isBucketPresent: boolean;
 			readonly create: () => Promise<R2Credentials>;
 	  }
 	| { readonly kind: 'unavailable' };
@@ -708,7 +740,9 @@ export async function obtainR2Credentials(options: {
 	readonly accountId: CloudflareAccountId;
 	readonly bucketName: string;
 	readonly creation: R2KeyCreation;
-	/** Set when the Worker holds a pair that was scoped to another bucket. */
+	/**
+	Set when the Worker holds a pair that was scoped to another bucket.
+	*/
 	readonly keep?: { readonly previousBucket: string };
 }): Promise<R2Settlement> {
 	const { ui, bucketName, creation } = options;
@@ -733,7 +767,7 @@ export async function obtainR2Credentials(options: {
 					{
 						value: 'create',
 						label: `Create a key scoped to ${bucketName}`,
-						hint: creation.bucketExists
+						hint: creation.isBucketPresent
 							? 'recommended; rotated on each deploy'
 							: 'creates the bucket too; rotated on each deploy'
 					} as const
@@ -809,7 +843,7 @@ async function r2KeyCreationFor(options: {
 
 	return {
 		kind: 'available',
-		bucketExists: hasBucket,
+		isBucketPresent: hasBucket,
 		create: async () => {
 			if (!hasBucket) {
 				await ui
@@ -845,7 +879,9 @@ export async function verifyR2Credentials(options: {
 	readonly bucketName: string;
 	readonly initial: R2Credentials;
 	readonly signal?: AbortSignal;
-	/** Probe attempts before giving up; more for a just-created token. */
+	/**
+	Probe attempts before giving up; more for a just-created token.
+	*/
 	readonly attempts?: number;
 	readonly check?: typeof checkR2Credentials;
 	readonly sleep?: (ms: number) => Promise<void>;
@@ -1135,7 +1171,7 @@ async function deployFlow(
 	// The pair the tenant Worker already holds survives a re-deploy untouched,
 	// so it only needs settling when neither the environment nor the Worker
 	// has it. The values cannot be read back, only their presence.
-	const r2AlreadySetFor = async (state: PlanState): Promise<boolean> => {
+	const isR2AlreadySetFor = async (state: PlanState): Promise<boolean> => {
 		const { tenant } = await existingSecretsFor(state.accountId);
 
 		return [...r2SecretNames].every((name) => tenant.includes(name));
@@ -1167,7 +1203,7 @@ async function deployFlow(
 		const annotated =
 			pendingR2.length === 0
 				? []
-				: (await r2AlreadySetFor(state))
+				: (await isR2AlreadySetFor(state))
 					? pendingR2.map((name) => `${name} (already set)`)
 					: pendingR2.map((name) => `${name} (pending)`);
 		let missing = assembled.missing.filter((name) => !r2SecretNames.has(name));
@@ -1303,7 +1339,7 @@ async function deployFlow(
 			// Replacing is only a choice when the environment did not supply a pair
 			// (which already deploys as given) and the Worker already holds one.
 			canReplaceR2Credentials: async (state) =>
-				r2Credentials === undefined && (await r2AlreadySetFor(state))
+				r2Credentials === undefined && (await isR2AlreadySetFor(state))
 		}
 	);
 
@@ -1317,7 +1353,7 @@ async function deployFlow(
 	let wasCreatedNow = false;
 
 	if (r2Credentials === undefined) {
-		const isAlreadySet = await r2AlreadySetFor(agreed);
+		const isAlreadySet = await isR2AlreadySetFor(agreed);
 		const isReplaceRequested = agreed.replaceR2Credentials === true;
 
 		if (isAlreadySet && !isBucketRenamed && !isReplaceRequested) {

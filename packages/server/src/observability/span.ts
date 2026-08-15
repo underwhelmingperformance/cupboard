@@ -1,6 +1,8 @@
 import { tracing } from 'cloudflare:workers';
 
-/** Attribute values a span accepts; `undefined` entries are skipped. */
+/**
+Attribute values a span accepts; `undefined` entries are skipped.
+*/
 export type SpanAttributes = Readonly<
 	Record<string, boolean | number | string | undefined>
 >;

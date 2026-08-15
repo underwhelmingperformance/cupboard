@@ -195,7 +195,9 @@ export function assertExpectedSourceCommit(
 	}
 }
 
-/** Reject known historical archive layouts before downloading their assets. */
+/**
+Reject known historical archive layouts before downloading their assets.
+*/
 export function assertReleaseCompatible(tagName: string): void {
 	const version = semverValid(tagName);
 
@@ -220,7 +222,9 @@ export function assetNameFor(
 	return `cupboard-${releasePlatform}-${releaseArchitecture}.tar.gz`;
 }
 
-/** Prefer release-scoped names while retaining compatibility with old releases. */
+/**
+Prefer release-scoped names while retaining compatibility with old releases.
+*/
 export function assetNamesFor(
 	tagName: string,
 	runtimePlatform: string = platform,
@@ -232,7 +236,9 @@ export function assetNamesFor(
 	return [stableName, `cupboard-${tagName}-${suffix}`];
 }
 
-/** Select the stable platform asset, falling back to a legacy tag-named asset. */
+/**
+Select the stable platform asset, falling back to a legacy tag-named asset.
+*/
 export function releaseAssetFor(
 	release: Release,
 	runtimePlatform: string = platform,
@@ -338,14 +344,18 @@ interface PublishReleaseDependencies {
 	readonly processIdentity?: ReleaseProcessIdentity;
 	readonly signal?: AbortSignal;
 	readonly publicationHook?: (stage: ReleasePublicationStage) => Promise<void>;
-	/** Already verified archive digest; direct callers may omit it to hash locally. */
+	/**
+	Already verified archive digest; direct callers may omit it to hash locally.
+	*/
 	readonly archiveSha256?: string;
 }
 
 export type ReleasePublicationStage =
 	'contended' | 'locked' | 'prepared' | 'activated';
 
-/** The dependencies injected while downloading a release asset. */
+/**
+The dependencies injected while downloading a release asset.
+*/
 export interface DownloadAssetDependencies {
 	readonly fetch?: typeof fetch;
 	readonly githubApiOrigin?: string;
@@ -556,7 +566,9 @@ export async function installCupboard(
 	}
 }
 
-/** Validate a release in isolation before replacing the installed executables. */
+/**
+Validate a release in isolation before replacing the installed executables.
+*/
 export async function publishReleaseArchive(
 	archivePath: string,
 	installDirectory: string,
@@ -613,7 +625,7 @@ export async function publishReleaseArchive(
 		);
 
 		try {
-			if (await releaseGenerationExists(generationDirectory)) {
+			if (await isReleaseGenerationPresent(generationDirectory)) {
 				try {
 					await validateReleaseGenerationAgainstCandidate(
 						generationDirectory,
@@ -623,7 +635,7 @@ export async function publishReleaseArchive(
 				} catch (error) {
 					if (
 						activeGeneration === path.resolve(generationDirectory) ||
-						(await releaseGenerationWasActivated(generationDirectory))
+						(await wasReleaseGenerationActivated(generationDirectory))
 					) {
 						throw error;
 					}
@@ -632,7 +644,7 @@ export async function publishReleaseArchive(
 				}
 			}
 
-			if (!(await releaseGenerationExists(generationDirectory))) {
+			if (!(await isReleaseGenerationPresent(generationDirectory))) {
 				dependencies.signal?.throwIfAborted();
 				await installReleaseGenerationCandidate(
 					stagingDirectory,
@@ -734,7 +746,7 @@ function assertArchiveSha256(value: string): void {
 	);
 }
 
-async function releaseGenerationExists(candidate: string): Promise<boolean> {
+async function isReleaseGenerationPresent(candidate: string): Promise<boolean> {
 	try {
 		await lstat(candidate);
 		return true;
@@ -747,10 +759,10 @@ async function releaseGenerationExists(candidate: string): Promise<boolean> {
 	}
 }
 
-async function releaseGenerationWasActivated(
+async function wasReleaseGenerationActivated(
 	generationDirectory: string
 ): Promise<boolean> {
-	return releaseGenerationExists(
+	return isReleaseGenerationPresent(
 		path.join(generationDirectory, releaseActivatedMarkerName)
 	);
 }
@@ -1048,14 +1060,14 @@ async function acquireReleaseInstallationLock(
 							});
 						}
 
-						if (!(await pathsShareInode(candidate, paths.lock))) {
+						if (!(await arePathsSameInode(candidate, paths.lock))) {
 							throw new ReleaseInstallationLockLostError(paths.lock);
 						}
 					},
 					async release() {
 						clearInterval(heartbeat);
 						try {
-							await removeLockIfMatches(candidate, paths.lock);
+							await didRemoveLockIfMatches(candidate, paths.lock);
 						} finally {
 							await Promise.all([
 								rm(candidate, { force: true }),
@@ -1070,7 +1082,9 @@ async function acquireReleaseInstallationLock(
 				}
 			}
 
-			if (await removeStaleReleaseLock(paths.lock, processIdentity, signal)) {
+			if (
+				await didRemoveStaleReleaseLock(paths.lock, processIdentity, signal)
+			) {
 				continue;
 			}
 
@@ -1092,7 +1106,7 @@ async function acquireReleaseInstallationLock(
 	}
 }
 
-async function removeStaleReleaseLock(
+async function didRemoveStaleReleaseLock(
 	lockPath: string,
 	processIdentity: ReleaseProcessIdentity,
 	signal?: AbortSignal
@@ -1154,7 +1168,7 @@ async function removeStaleReleaseLock(
 	}
 
 	try {
-		if (!(await pathsShareInode(reaperPath, lockPath))) {
+		if (!(await arePathsSameInode(reaperPath, lockPath))) {
 			return false;
 		}
 
@@ -1168,7 +1182,7 @@ async function removeStaleReleaseLock(
 			reaperOwner.data.pid !== owner.pid ||
 			reaperOwner.data.instanceId !== owner.instanceId ||
 			reaperOwner.data.leaseId !== owner.leaseId ||
-			!(await releaseLeaseExpired(leasePath))
+			!(await hasReleaseLeaseExpired(leasePath))
 		) {
 			return false;
 		}
@@ -1179,7 +1193,7 @@ async function removeStaleReleaseLock(
 			throw new ReleaseInstallationLockOwnerAliveError(lockPath, owner.pid);
 		}
 
-		const wasRemoved = await removeLockIfMatches(reaperPath, lockPath);
+		const wasRemoved = await didRemoveLockIfMatches(reaperPath, lockPath);
 		if (wasRemoved) {
 			await rm(leasePath, { force: true });
 		}
@@ -1190,7 +1204,7 @@ async function removeStaleReleaseLock(
 	}
 }
 
-async function releaseLeaseExpired(leasePath: string): Promise<boolean> {
+async function hasReleaseLeaseExpired(leasePath: string): Promise<boolean> {
 	try {
 		const lease = await stat(leasePath);
 		return Date.now() - lease.mtimeMs > releaseLockLeaseDurationMs;
@@ -1220,11 +1234,11 @@ async function cleanupOrphanReleaseReapers(
 	);
 }
 
-async function removeLockIfMatches(
+async function didRemoveLockIfMatches(
 	referencePath: string,
 	lockPath: string
 ): Promise<boolean> {
-	if (!(await pathsShareInode(referencePath, lockPath))) {
+	if (!(await arePathsSameInode(referencePath, lockPath))) {
 		return false;
 	}
 
@@ -1236,7 +1250,7 @@ async function removeLockIfMatches(
 	}
 }
 
-async function pathsShareInode(
+async function arePathsSameInode(
 	leftPath: string,
 	rightPath: string
 ): Promise<boolean> {
@@ -1563,7 +1577,9 @@ function isPathError(error: unknown, code: string): boolean {
 	);
 }
 
-/** Require a release archive member to be a runnable regular file. */
+/**
+Require a release archive member to be a runnable regular file.
+*/
 export async function prepareReleaseExecutable(
 	candidate: string
 ): Promise<void> {
@@ -1603,7 +1619,9 @@ async function validateReleaseExecutable(candidate: string): Promise<void> {
 	}
 }
 
-/** Require a release executable to report the exact selected release tag. */
+/**
+Require a release executable to report the exact selected release tag.
+*/
 export function assertInstalledReleaseVersion(
 	expected: string,
 	actual: string
@@ -1770,7 +1788,9 @@ function findFirstReleaseAsset(
 	throw new ReleaseAssetNotFoundError(release.tagName, names.join(' or '));
 }
 
-/** Download one release asset while honouring the setup invocation's cancellation. */
+/**
+Download one release asset while honouring the setup invocation's cancellation.
+*/
 export async function downloadAsset(
 	asset: ReleaseAsset,
 	destination: string,

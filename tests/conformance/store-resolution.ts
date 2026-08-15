@@ -46,7 +46,9 @@ export class StoreNotResolvedError extends Error {
 	}
 }
 
-/** The selected store in the common representation used by both clients. */
+/**
+The selected store in the common representation used by both clients.
+*/
 export interface ResolvedStore {
 	readonly kind: 'daemon' | 'local' | 'ssh-ng' | 'other';
 }
@@ -76,23 +78,33 @@ function resolvedStoreOfBackend(backend: StoreBackend): ResolvedStore {
 	return { kind: backend.backend };
 }
 
-/** Filesystem paths reserved for one fixture. */
+/**
+Filesystem paths reserved for one fixture.
+*/
 export interface FixtureDirectories {
 	readonly home: string;
 	readonly storeDirectory: string;
 	readonly stateDirectory: string;
-	/** An unused socket path for a `unix://` store. */
+	/**
+	An unused socket path for a `unix://` store.
+	*/
 	readonly socketPath: string;
-	/** A data home for the store Nix falls back to where one is called for. */
+	/**
+	A data home for the store Nix falls back to where one is called for.
+	*/
 	readonly dataHome: string;
 }
 
-/** The environment variables a case adds over the isolated ones. */
+/**
+The environment variables a case adds over the isolated ones.
+*/
 export type StoreEnvironment = (
 	directories: FixtureDirectories
 ) => Readonly<Record<string, string>>;
 
-/** Puts one environment to both sides and reports the store each selected. */
+/**
+Puts one environment to both sides and reports the store each selected.
+*/
 export async function resolvedStores(
 	oracle: Oracle,
 	environmentFor: StoreEnvironment

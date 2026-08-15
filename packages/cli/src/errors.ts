@@ -19,7 +19,9 @@ export const publicationExitCode = 74;
 
 export abstract class CliError extends CodedError {}
 
-/** A misuse of the CLI: a bad flag value or an unsupported combination. */
+/**
+A misuse of the CLI: a bad flag value or an unsupported combination.
+*/
 export abstract class CliUsageError extends CliError {
 	override get exitCode(): number {
 		return usageExitCode;
@@ -357,7 +359,9 @@ export class UnexpectedUploadDecisionError extends CliError {
 
 export type UploadNegotiationMismatch = 'missing' | 'duplicate' | 'unexpected';
 
-/** A negotiate or preview response that does not match its request. */
+/**
+A negotiate or preview response that does not match its request.
+*/
 export class UploadNegotiationMismatchError extends CliError {
 	constructor(
 		public readonly mismatch: UploadNegotiationMismatch,
@@ -537,7 +541,9 @@ export class UnexpectedAttestationDecisionError extends CliError {
 export type AttestationNegotiationMismatch =
 	'missing' | 'duplicate' | 'unexpected';
 
-/** An attestation negotiate response that does not match its request. */
+/**
+An attestation negotiate response that does not match its request.
+*/
 export class AttestationNegotiationMismatchError extends CliError {
 	constructor(
 		public readonly mismatch: AttestationNegotiationMismatch,
@@ -791,7 +797,9 @@ export class ReferenceUploadRequiredError extends CliError {
 	}
 }
 
-/** The reference source served metadata for a different store path. */
+/**
+The reference source served metadata for a different store path.
+*/
 export class ReferencePathMismatchError extends CliError {
 	constructor(
 		public readonly requestedStorePath: string,
@@ -805,7 +813,9 @@ export class ReferencePathMismatchError extends CliError {
 	}
 }
 
-/** The reference source did not serve the requested narinfo. */
+/**
+The reference source did not serve the requested narinfo.
+*/
 export class NarInfoUnavailableError extends CliError {
 	constructor(
 		public readonly target: URL,
@@ -816,7 +826,9 @@ export class NarInfoUnavailableError extends CliError {
 	}
 }
 
-/** The reference source served a body that does not parse as a narinfo. */
+/**
+The reference source served a body that does not parse as a narinfo.
+*/
 export class NarInfoUnparsableError extends CliError {
 	constructor(
 		public readonly target: URL,
@@ -942,7 +954,9 @@ export class GithubSetupOwnerRuleConflictError extends CliUsageError {
 	}
 }
 
-/** Basic read credentials come as a pair; half a pair is a mistake. */
+/**
+Basic read credentials come as a pair; half a pair is a mistake.
+*/
 export class ReadCredentialPairError extends CliUsageError {
 	constructor() {
 		super('--read-user and --read-password must be supplied together');
@@ -990,7 +1004,9 @@ export class SocketPathTooLongError extends CliError {
 	}
 }
 
-/** A build event the invocation listener refused to accept. */
+/**
+A build event the invocation listener refused to accept.
+*/
 export abstract class BuildEventRejectedError extends CliError {}
 
 export type BuildEventMalformedKind =
@@ -1003,7 +1019,9 @@ export class BuildEventMalformedError extends BuildEventRejectedError {
 	}
 }
 
-/** A hook connection exceeded the fixed build-event wire-size bound. */
+/**
+A hook connection exceeded the fixed build-event wire-size bound.
+*/
 export class BuildEventTooLargeError extends BuildEventRejectedError {
 	constructor(
 		public readonly maximumBytes: number,
@@ -1153,7 +1171,9 @@ export class BuildCommandFailedError extends CliError {
 	}
 }
 
-/** A build-push run takes exactly one build input. */
+/**
+A build-push run takes exactly one build input.
+*/
 export class CohortInputError extends CliUsageError {
 	constructor() {
 		super('pass a build command after -- or --cohorts-file, and not both');
@@ -1161,7 +1181,9 @@ export class CohortInputError extends CliUsageError {
 	}
 }
 
-/** A push must name at least one local, intermediate, or reference path. */
+/**
+A push must name at least one local, intermediate, or reference path.
+*/
 export class EmptyPublicationError extends CliUsageError {
 	constructor() {
 		super(
@@ -1171,7 +1193,9 @@ export class EmptyPublicationError extends CliUsageError {
 	}
 }
 
-/** The cohorts file did not parse into the typed cohort schema. */
+/**
+The cohorts file did not parse into the typed cohort schema.
+*/
 export class CohortsFileInvalidError extends CliUsageError {
 	constructor(options?: { readonly cause: unknown }) {
 		super(
@@ -1183,7 +1207,9 @@ export class CohortsFileInvalidError extends CliUsageError {
 	}
 }
 
-/** A provenance-required build did not claim every selected final output. */
+/**
+A provenance-required build did not claim every selected final output.
+*/
 export class BuildProvenanceIncompleteError extends Error {
 	constructor(public readonly missingPaths: readonly string[]) {
 		super(

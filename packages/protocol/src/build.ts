@@ -57,7 +57,9 @@ export type ParsedBuildSubjectV2 = z.output<typeof buildSubjectV2Schema>;
 export const buildStoreSchema = z.string().min(1).brand('BuildStore');
 export type BuildStore = z.output<typeof buildStoreSchema>;
 
-/** The value recorded when Nix selects the store. */
+/**
+The value recorded when Nix selects the store.
+*/
 export const autoBuildStore = 'auto';
 
 // What a `built` subject rests on: which producer built the path, and how the

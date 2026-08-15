@@ -48,7 +48,9 @@ export interface OwnerSessionDependencies {
 		target: URL
 	) => Promise<void>;
 	readonly now?: () => number;
-	/** Aborts the token fetch the provider makes, so Ctrl-C is prompt. */
+	/**
+	Aborts the token fetch the provider makes, so Ctrl-C is prompt.
+	*/
 	readonly signal?: AbortSignal;
 }
 
@@ -183,7 +185,9 @@ export async function authenticateGithubOidc(
 	options: {
 		readonly environment?: GithubOidcEnvironment;
 		readonly authorizationDetails?: AuthorizationDetails;
-		/** Clock, injectable for tests. */
+		/**
+		Clock, injectable for tests.
+		*/
 		readonly now?: () => number;
 	} = {}
 ): Promise<TokenProvider> {

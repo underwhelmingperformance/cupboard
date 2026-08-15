@@ -43,7 +43,9 @@ export class GithubRateLimitError extends CliError {
 	}
 }
 
-/** GitHub rejected credentials or denied access to the requested resource. */
+/**
+GitHub rejected credentials or denied access to the requested resource.
+*/
 export class GithubPermissionError extends CliError {
 	constructor(public readonly resource: string) {
 		super(
@@ -65,7 +67,9 @@ export interface LookupRepositoryOptions {
 	readonly signal?: AbortSignal;
 }
 
-/** Builds the authenticated, cached GitHub client shared by CLI lookups. */
+/**
+Builds the authenticated, cached GitHub client shared by CLI lookups.
+*/
 export function githubApi(
 	options: LookupRepositoryOptions = {}
 ): ReturnType<typeof createOctokitClient> {
@@ -140,7 +144,9 @@ export async function lookupRepository(
 	}
 }
 
-/** Whether GitHub reports a rate limit through its status or response metadata. */
+/**
+Whether GitHub reports a rate limit through its status or response metadata.
+*/
 export function isGithubRateLimitResponse(error: unknown): boolean {
 	if (isStatus(error, StatusCodes.TOO_MANY_REQUESTS)) {
 		return true;

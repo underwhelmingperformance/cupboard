@@ -45,7 +45,9 @@ const reconciledLocalPublication =
 	'so the build runs without the post-build hook and one push publishes ' +
 	'what it leaves in the store.';
 
-/** The line the reporter shows for the mode a run took, and why. */
+/**
+The line the reporter shows for the mode a run took, and why.
+*/
 export function buildPushModeDescription(mode: BuildPushMode): string {
 	if (mode.kind === 'streamed') {
 		return (

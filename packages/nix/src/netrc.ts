@@ -1,6 +1,8 @@
 import { NixNetrcSyntaxError } from './nix-store.ts';
 
-/** HTTP Basic credentials selected from a netrc entry. */
+/**
+HTTP Basic credentials selected from a netrc entry.
+*/
 export interface NetrcCredential {
 	readonly login: string;
 	readonly password: string;
@@ -100,7 +102,9 @@ export function netrcCredentialFor(
 	}
 }
 
-/** Credentials parsed from the current entry before defaults are applied. */
+/**
+Credentials parsed from the current entry before defaults are applied.
+*/
 interface PartialCredential {
 	readonly login?: string;
 	readonly password?: string;
@@ -115,10 +119,14 @@ function finish(entry: PartialCredential): NetrcCredential | undefined {
 	return { login: entry.login ?? '', password: entry.password ?? '' };
 }
 
-/** Where the reader is between the `machine` line and the credentials. */
+/**
+Where the reader is between the `machine` line and the credentials.
+*/
 type LookupState = 'nothing' | 'host-found' | 'host-valid' | 'macdef';
 
-/** Which half of a credential the next token supplies. */
+/**
+Which half of a credential the next token supplies.
+*/
 type Keyword = 'none' | 'login' | 'password';
 
 // The keywords are matched whatever their case, as libcurl compares them.
@@ -146,7 +154,9 @@ function withoutCommentLines(source: string): string {
 		.join('\n');
 }
 
-/** One token, or the end of a line with no token on it. */
+/**
+One token, or the end of a line with no token on it.
+*/
 type NetrcToken =
 	| { readonly endsLine: true; readonly isBlank: boolean }
 	| { readonly endsLine: false; readonly text: string };
@@ -155,7 +165,9 @@ type NetrcToken =
 // these two between tokens.
 const blanks = new Set([' ', '\t']);
 
-/** Reads a netrc's tokens in order, raising over a line it cannot read. */
+/**
+Reads a netrc's tokens in order, raising over a line it cannot read.
+*/
 class NetrcReader {
 	private at = 0;
 	private lineHasToken = false;
@@ -231,7 +243,9 @@ class NetrcReader {
 		}
 	}
 
-	/** The next token, or `undefined` at the end of the file. */
+	/**
+	The next token, or `undefined` at the end of the file.
+	*/
 	next(): NetrcToken | undefined {
 		this.passBlanks();
 

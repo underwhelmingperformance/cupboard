@@ -10,7 +10,9 @@ import { type NixKeyName } from './scalars.ts';
  * travel together.
  */
 export class NixPublicKey extends NamedMaterial {
-	/** The published key for a signing key's name and its raw public bytes. */
+	/**
+	The published key for a signing key's name and its raw public bytes.
+	*/
 	static of(name: NixKeyName, publicRaw: Uint8Array): NixPublicKey {
 		return new NixPublicKey(`${name}:${bytesToBase64(publicRaw)}`);
 	}

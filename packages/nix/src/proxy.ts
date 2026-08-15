@@ -13,7 +13,9 @@ export interface ProxySettings {
 	readonly noProxy?: string;
 }
 
-/** An environment as this module reads one: variable names to their values. */
+/**
+An environment as this module reads one: variable names to their values.
+*/
 export type ProxyEnvironment = Readonly<Record<string, string | undefined>>;
 
 /**

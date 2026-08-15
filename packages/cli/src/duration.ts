@@ -33,7 +33,9 @@ const unitSeconds = new Map<string, number>([
 	['w', 604_800]
 ]);
 
-/** Parses a human duration such as `7d` or `12h` into a whole number of seconds. */
+/**
+Parses a human duration such as `7d` or `12h` into a whole number of seconds.
+*/
 function parseDurationSeconds(input: string): number {
 	const match = /^(\d+)([smhdw])$/.exec(input);
 	const amount = match?.[1];

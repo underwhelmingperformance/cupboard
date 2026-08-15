@@ -12,7 +12,7 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
 import { pushIdSigningKey } from '../blob/push-credential.ts';
-import { verifyPushId } from '../blob/push-id.ts';
+import { isPushIdValid } from '../blob/push-id.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { batchNonEmpty, chunk, maxInClauseValues } from '../do/bulk.ts';
 import { type NegotiateHints } from '../do/negotiate-hints.ts';
@@ -72,7 +72,7 @@ export async function computeNegotiateHints(
 	}
 
 	try {
-		if (!(await verifyPushId(pushIdSigningKey(env), parsed.data.pushId))) {
+		if (!(await isPushIdValid(pushIdSigningKey(env), parsed.data.pushId))) {
 			return undefined;
 		}
 	} catch {

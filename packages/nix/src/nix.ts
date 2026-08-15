@@ -60,7 +60,9 @@ export type SubstituterSettingsOutcome =
 			readonly trust: NixDaemonTrust;
 	  };
 
-/** Resolves a path's real location, injected so canonicalisation is testable. */
+/**
+Resolves a path's real location, injected so canonicalisation is testable.
+*/
 export type RealPath = (path: string) => string;
 
 export interface NixDependencies extends StoreClientEnvironment {
@@ -171,7 +173,9 @@ export class Nix {
 		private readonly offers: QuerySubstitutablePathInfos,
 		private readonly storeDirectory: StoreDirectory,
 		private readonly realpath: RealPath,
-		/** The kind of store backend this client reads through. */
+		/**
+		The kind of store backend this client reads through.
+		*/
 		public readonly storeKind: NixStoreKind,
 		/**
 		 * Setting names from the source configuration that this client does not
@@ -189,7 +193,9 @@ export class Nix {
 		}
 	}
 
-	/** Path information for the store path the argument resolves to. */
+	/**
+	Path information for the store path the argument resolves to.
+	*/
 	async queryPathInfo(path: string): Promise<NixValidPathInfo> {
 		return this.store.queryPathInfo(this.toStorePath(path));
 	}
@@ -334,7 +340,9 @@ export class Nix {
 		return this.storeKind !== 'local-filesystem';
 	}
 
-	/** Whether this transport leaves the remote daemon's options untouched. */
+	/**
+	Whether this transport leaves the remote daemon's options untouched.
+	*/
 	get preservesDaemonOptions(): boolean {
 		return this.store.preservesDaemonOptions ?? false;
 	}
@@ -369,7 +377,9 @@ export class Nix {
 			: { isHonoured: false, reason: 'daemon-trust', trust };
 	}
 
-	/** The NAR serialisation of the store path the argument resolves to. */
+	/**
+	The NAR serialisation of the store path the argument resolves to.
+	*/
 	narFromPath(path: string): AsyncIterable<Uint8Array> {
 		return this.store.narFromPath(this.toStorePath(path));
 	}
@@ -436,7 +446,9 @@ export class Nix {
 		return Derivation.parse(contents);
 	}
 
-	/** The registered output paths of the given derivations, sorted. */
+	/**
+	The registered output paths of the given derivations, sorted.
+	*/
 	async queryDerivationOutputPaths(
 		drvPaths: readonly string[]
 	): Promise<readonly string[]> {
@@ -445,7 +457,9 @@ export class Nix {
 		);
 	}
 
-	/** The closure of the given paths, sorted by store path. */
+	/**
+	The closure of the given paths, sorted by store path.
+	*/
 	async resolveClosure(
 		paths: readonly string[]
 	): Promise<readonly NixValidPathInfo[]> {

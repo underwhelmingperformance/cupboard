@@ -409,7 +409,9 @@ export interface CommitTarget {
 }
 
 export interface CommitOptions {
-	/** Bounds how long a parked upload waits for its verdict. */
+	/**
+	Bounds how long a parked upload waits for its verdict.
+	*/
 	readonly timeoutSeconds?: number;
 	/**
 	 * Called on each connection with the capabilities the server advertised in

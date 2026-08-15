@@ -7,7 +7,9 @@ import {
 	type NixDaemonTransport
 } from './nix-daemon.ts';
 
-/** The child-process pieces the transport drives, injected for tests. */
+/**
+The child-process pieces the transport drives, injected for tests.
+*/
 export interface DaemonChildProcess {
 	readonly stdin: {
 		write(chunk: Uint8Array, callback: (error?: Error | null) => void): unknown;
@@ -22,15 +24,21 @@ export type DaemonCommandRunner = (
 	commandArguments: readonly string[]
 ) => DaemonChildProcess;
 
-/** How long a daemon child has to exit after TERM before cleanup sends KILL. */
+/**
+How long a daemon child has to exit after TERM before cleanup sends KILL.
+*/
 export const daemonProcessTerminationGraceMs = 5000;
 
-/** A pending daemon-process escalation that can be cancelled after child exit. */
+/**
+A pending daemon-process escalation that can be cancelled after child exit.
+*/
 export interface ScheduledDaemonProcessKill {
 	cancel(): void;
 }
 
-/** Starts the cancellable grace period before daemon-process cleanup escalates. */
+/**
+Starts the cancellable grace period before daemon-process cleanup escalates.
+*/
 export type ScheduleDaemonProcessKill = (
 	delayMs: number,
 	onElapsed: () => void
@@ -50,7 +58,9 @@ const scheduleDaemonProcessKill: ScheduleDaemonProcessKill = (
 	};
 };
 
-/** Starts the daemon command as a child of this process. */
+/**
+Starts the daemon command as a child of this process.
+*/
 export const spawnDaemonProcess: DaemonCommandRunner = (
 	command,
 	commandArguments

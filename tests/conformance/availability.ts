@@ -19,7 +19,9 @@ import { isolatedEnvironment } from '../support/nix.ts';
 import { type OfferFields, oracleOffer } from './narinfo.ts';
 import type { Oracle } from './oracle.ts';
 
-/** The host store directory containing the fixture paths. */
+/**
+The host store directory containing the fixture paths.
+*/
 const hostStoreDirectory: StoreDirectory =
 	storeDirectorySchema.parse('/nix/store');
 
@@ -34,7 +36,9 @@ const hostStoreDirectory: StoreDirectory =
 export interface AvailabilityFixture {
 	readonly root: string;
 	readonly environment: NodeJS.ProcessEnv;
-	/** The cache offering the closure, as a substituter URI. */
+	/**
+	The cache offering the closure, as a substituter URI.
+	*/
 	readonly cacheUri: string;
 	/**
 	 * A local store containing the same closure, referenced by path. Nix reads a
@@ -42,16 +46,26 @@ export interface AvailabilityFixture {
 	 * database holds rather than documents.
 	 */
 	readonly storeSubstituter: string;
-	/** An input-addressed path, referencing {@link dependencyPath}. */
+	/**
+	An input-addressed path, referencing {@link dependencyPath}.
+	*/
 	readonly builtPath: StorePathString;
 	readonly dependencyPath: StorePathString;
-	/** A derivation in the host store whose output has no substituter offer. */
+	/**
+	A derivation in the host store whose output has no substituter offer.
+	*/
 	readonly derivationPath: StorePathString;
-	/** A path absent from every store and substituter. */
+	/**
+	A path absent from every store and substituter.
+	*/
 	readonly absentPath: StorePathString;
-	/** The key the cache's narinfos are signed with. */
+	/**
+	The key the cache's narinfos are signed with.
+	*/
 	readonly trustedPublicKey: string;
-	/** A key that did not sign any path in the cache. */
+	/**
+	A key that did not sign any path in the cache.
+	*/
 	readonly untrustedPublicKey: string;
 }
 
@@ -119,7 +133,9 @@ async function run(
 	return result.stdout.trim();
 }
 
-/** Builds the closure and signs a cache containing it. */
+/**
+Builds the closure and signs a cache containing it.
+*/
 export async function createAvailabilityFixture(
 	oracle: Oracle
 ): Promise<AvailabilityFixture> {
@@ -344,13 +360,19 @@ export async function createTargetStore(
 }
 
 export interface TargetStore {
-	/** The store as a URI, which the oracle is pointed at. */
+	/**
+	The store as a URI, which the oracle is pointed at.
+	*/
 	readonly uri: string;
-	/** Where its database sits, which our client is pointed at. */
+	/**
+	Where its database sits, which our client is pointed at.
+	*/
 	readonly stateDirectory: string;
 }
 
-/** What a consumer's signing policy trusts, as both sides are told it. */
+/**
+What a consumer's signing policy trusts, as both sides are told it.
+*/
 export interface SigningPolicy {
 	readonly requireSignatures: boolean;
 	readonly trustedPublicKeys: readonly string[];
@@ -422,7 +444,9 @@ export async function offeredThroughStore(
 	};
 }
 
-/** Opens our client over a store with the specified substituter. */
+/**
+Opens our client over a store with the specified substituter.
+*/
 function openClient(
 	fixture: AvailabilityFixture,
 	stateDirectory: string,
@@ -440,7 +464,7 @@ function openClient(
 		currentSystem: defaultNixConfigEnvironment.currentSystem,
 		probes: {
 			canReadWrite: () => false,
-			fileExists: () => false,
+			isFilePresent: () => false,
 			hasHardwareVirtualisation: () => false,
 			isWsl1: () => false,
 			microarchitectureLevels: () => []
@@ -521,7 +545,9 @@ export async function offeredPaths(
 	return { oracle: sorted(offered), client: sorted(client) };
 }
 
-/** What realising a set of targets would require, as each side partitions it. */
+/**
+What realising a set of targets would require, as each side partitions it.
+*/
 export interface RealisationPlan {
 	readonly willBuild: readonly string[];
 	readonly willFetch: readonly string[];
@@ -588,7 +614,9 @@ export function parseRealisationPlan(stderr: string): RealisationPlan {
 	};
 }
 
-/** How each side partitions the work of realising the targets. */
+/**
+How each side partitions the work of realising the targets.
+*/
 export async function realisationPlans(
 	oracle: Oracle,
 	fixture: AvailabilityFixture,
@@ -662,7 +690,9 @@ export async function closureOutcome(
 	return { realised: realise.status === 0, verdict };
 }
 
-/** Fills a store with the fixture's closure, so a walk has one to compare. */
+/**
+Fills a store with the fixture's closure, so a walk has one to compare.
+*/
 export async function fillFromCache(
 	oracle: Oracle,
 	fixture: AvailabilityFixture,

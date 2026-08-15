@@ -144,7 +144,9 @@ export const operationSchema = z.enum([
 ]);
 export type Operation = z.infer<typeof operationSchema>;
 
-/** The concrete resource a route acts on, resolved before authorisation. */
+/**
+The concrete resource a route acts on, resolved before authorisation.
+*/
 export interface ResourceRequest {
 	readonly cache?: CacheSelector;
 	readonly root?: RootName;
@@ -197,7 +199,9 @@ export type AuthorizationDetail = z.infer<typeof authorizationDetailSchema>;
 export const authorizationDetailsSchema = z.array(authorizationDetailSchema);
 export type AuthorizationDetails = z.infer<typeof authorizationDetailsSchema>;
 
-/** A requested root is within a granted root selector: exact, or prefix. */
+/**
+A requested root is within a granted root selector: exact, or prefix.
+*/
 function isRootWithin(requested: string, granted: string): boolean {
 	return granted.endsWith('/')
 		? requested.startsWith(granted)
@@ -364,7 +368,9 @@ const templatePlaceholderPattern = /\{([A-Za-z_][A-Za-z0-9_]*)\}/gu;
 
 export const templateSchema = z.string().min(1).max(templateMaxLength);
 
-/** The variable names a `{name}` template references, in order, with repeats. */
+/**
+The variable names a `{name}` template references, in order, with repeats.
+*/
 export function templateVariables(template: string): string[] {
 	const variables: string[] = [];
 

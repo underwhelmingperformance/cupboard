@@ -37,7 +37,9 @@ export type PermittedSubstituterStore = Pick<
 >;
 
 export interface UpstreamConfirmationOptions {
-	/** The effective settings deciding whether Nix would substitute at all. */
+	/**
+	The effective settings deciding whether Nix would substitute at all.
+	*/
 	readonly substitution: NixSubstitutionSettings;
 	readonly store: PermittedSubstituterStore;
 	/**

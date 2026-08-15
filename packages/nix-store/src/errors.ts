@@ -20,7 +20,9 @@ export class CorruptNarInfoError extends ProtocolError {
 	}
 }
 
-/** A narinfo that describes a path other than the requested path. */
+/**
+A narinfo that describes a path other than the requested path.
+*/
 export class MismatchedNarInfoPathError extends ProtocolError {
 	constructor(public readonly storePath: StorePathString) {
 		super(`The narinfo served does not describe ${storePath}`);

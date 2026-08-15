@@ -1,6 +1,8 @@
 import type { ChildProcess } from 'node:child_process';
 
-/** The child lifecycle events needed to wait until all stdio has closed. */
+/**
+The child lifecycle events needed to wait until all stdio has closed.
+*/
 export interface ChildProcessLifecycle {
 	onceError(listener: (error: Error) => void): void;
 	onceClose(
@@ -11,29 +13,39 @@ export interface ChildProcessLifecycle {
 	): void;
 }
 
-/** A child process that can receive explicit POSIX termination signals. */
+/**
+A child process that can receive explicit POSIX termination signals.
+*/
 export interface AbortableChildProcessLifecycle extends ChildProcessLifecycle {
 	kill(signal: NodeJS.Signals): boolean;
 }
 
-/** A cancellable delayed escalation, abstracted for deterministic tests. */
+/**
+A cancellable delayed escalation, abstracted for deterministic tests.
+*/
 export interface ScheduledChildProcessEscalation {
 	cancel(): void;
 }
 
-/** Schedules forced termination after the graceful shutdown window. */
+/**
+Schedules forced termination after the graceful shutdown window.
+*/
 export interface ChildProcessEscalationScheduler {
 	schedule(run: () => void, delayMs: number): ScheduledChildProcessEscalation;
 }
 
-/** A child result observed only after its `close` event. */
+/**
+A child result observed only after its `close` event.
+*/
 export interface ClosedChildProcess {
 	readonly error: Error | undefined;
 	readonly signal: NodeJS.Signals | undefined;
 	readonly status: number | null;
 }
 
-/** Time allowed for an aborted child to close after SIGTERM. */
+/**
+Time allowed for an aborted child to close after SIGTERM.
+*/
 export const terminationGracePeriodMs = 10_000;
 
 const defaultEscalationScheduler: ChildProcessEscalationScheduler = {
@@ -49,7 +61,9 @@ const defaultEscalationScheduler: ChildProcessEscalationScheduler = {
 	}
 };
 
-/** Adapt Node's overloaded child-process events to the lifecycle contract. */
+/**
+Adapt Node's overloaded child-process events to the lifecycle contract.
+*/
 export function observeChildProcess(
 	child: Pick<ChildProcess, 'kill' | 'once'>
 ): AbortableChildProcessLifecycle {
@@ -68,7 +82,9 @@ export function observeChildProcess(
 	};
 }
 
-/** Records a spawn error and waits for the child to close before resolving. */
+/**
+Records a spawn error and waits for the child to close before resolving.
+*/
 export function waitForChildProcess(
 	child: ChildProcessLifecycle
 ): Promise<ClosedChildProcess> {

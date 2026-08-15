@@ -68,7 +68,9 @@ export interface TenantRpcServices {
 	): Promise<VerifyReport>;
 }
 
-/** The initial oRPC context for every tenant procedure call. */
+/**
+The initial oRPC context for every tenant procedure call.
+*/
 export interface TenantOrpcContext {
 	readonly request: Request;
 	readonly services: TenantRpcServices;

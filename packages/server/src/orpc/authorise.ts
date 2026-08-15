@@ -19,7 +19,9 @@ import { z } from 'zod';
 import { type AccessClaims } from '../auth/auth.ts';
 import { InsufficientScopeError } from '../errors.ts';
 
-/** Resolves the cache a pending upload or attestation row was opened against. */
+/**
+Resolves the cache a pending upload or attestation row was opened against.
+*/
 export type PendingCacheResolver = (
 	id: string
 ) => Promise<StoredCache | undefined>;

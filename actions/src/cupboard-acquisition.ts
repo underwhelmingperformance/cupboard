@@ -29,7 +29,9 @@ const defaultDependencies: AcquireCupboardDependencies = {
 	installSource: acquireSourceCupboard
 };
 
-/** Acquire exactly one already-resolved release or source coordinate. */
+/**
+Acquire exactly one already-resolved release or source coordinate.
+*/
 export async function acquireCupboard(
 	options: AcquireCupboardOptions,
 	reporter: Reporter,

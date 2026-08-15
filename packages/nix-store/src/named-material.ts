@@ -2,7 +2,9 @@ import { base64ToBytes } from './encoding.ts';
 import { type ProtocolError } from './errors.ts';
 import { type NixKeyName, nixKeyNameSchema } from './scalars.ts';
 
-/** The two halves of a `<name>:<base64>` value, with the material decoded. */
+/**
+The two halves of a `<name>:<base64>` value, with the material decoded.
+*/
 export interface NamedMaterialParts {
 	readonly name: NixKeyName;
 	readonly material: string;

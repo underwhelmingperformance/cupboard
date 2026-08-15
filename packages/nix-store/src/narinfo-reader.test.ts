@@ -26,7 +26,9 @@ const fileDigest = Uint8Array.from({ length: 32 }, (_, index) => index * 3);
 const narHash = NixSha256Hash.fromDigest(narDigest);
 const signature = `cache.example.org-1:${bytesToBase64(new Uint8Array(64).fill(9))}`;
 
-/** The fields a cache serves, in the order and spellings Nix writes them. */
+/**
+The fields a cache serves, in the order and spellings Nix writes them.
+*/
 const wellFormedFields: readonly (readonly [string, string])[] = [
 	['StorePath', appPath],
 	['URL', 'nar/example.nar.xz'],
@@ -40,13 +42,21 @@ const wellFormedFields: readonly (readonly [string, string])[] = [
 	['Sig', signature]
 ];
 
-/** One document to read, stated as what it changes about a well-formed one. */
+/**
+One document to read, stated as what it changes about a well-formed one.
+*/
 interface NarInfoFixture {
-	/** Values replacing the well-formed ones, keyed by field name. */
+	/**
+	Values replacing the well-formed ones, keyed by field name.
+	*/
 	readonly fields?: Readonly<Record<string, string | undefined>>;
-	/** Whole lines written after the document, for a field written twice. */
+	/**
+	Whole lines written after the document, for a field written twice.
+	*/
 	readonly extraLines?: readonly string[];
-	/** Whether the last line ends the way Nix requires it to. */
+	/**
+	Whether the last line ends the way Nix requires it to.
+	*/
 	readonly endsWithNewline?: boolean;
 }
 

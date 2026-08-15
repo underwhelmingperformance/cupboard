@@ -4,7 +4,9 @@ async function runCleanup(cleanup: AsyncCleanup): Promise<void> {
 	return cleanup();
 }
 
-/** Gives one asynchronous cleanup a stable result across repeated calls. */
+/**
+Gives one asynchronous cleanup a stable result across repeated calls.
+*/
 export function onceAsync(cleanup: AsyncCleanup): AsyncCleanup {
 	let outcome: Promise<void> | undefined;
 
@@ -15,7 +17,9 @@ export function onceAsync(cleanup: AsyncCleanup): AsyncCleanup {
 	};
 }
 
-/** Runs every cleanup and surfaces one failure directly or all failures together. */
+/**
+Runs every cleanup and surfaces one failure directly or all failures together.
+*/
 export async function settleCleanups(
 	cleanups: readonly AsyncCleanup[],
 	message: string

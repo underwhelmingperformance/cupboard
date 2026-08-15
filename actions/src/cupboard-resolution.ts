@@ -55,23 +55,33 @@ export const resolvedCupboardSchema = z.discriminatedUnion('kind', [
 export type ResolvedCupboard = z.infer<typeof resolvedCupboardSchema>;
 
 export interface ResolveCupboardOptions {
-	/** An explicit published release tag or `latest`; blank resolves from the workflow. */
+	/**
+	An explicit published release tag or `latest`; blank resolves from the workflow.
+	*/
 	readonly cupboardVersion?: string;
-	/** Whether an explicit `latest` may select a prerelease. */
+	/**
+	Whether an explicit `latest` may select a prerelease.
+	*/
 	readonly includePrereleases: boolean;
 	readonly releaseRepository: string;
 	readonly githubToken: string;
 	readonly workflowSha: string;
 	readonly workflowRef: string;
-	/** REST root such as GitHub Enterprise's `https://host/api/v3`. */
+	/**
+	REST root such as GitHub Enterprise's `https://host/api/v3`.
+	*/
 	readonly githubApiUrl?: string;
-	/** Exact GraphQL endpoint supplied by the Actions `github.graphql_url` context. */
+	/**
+	Exact GraphQL endpoint supplied by the Actions `github.graphql_url` context.
+	*/
 	readonly githubGraphqlUrl?: string;
 }
 
 export interface ResolveCupboardDependencies {
 	readonly fetch?: typeof fetch;
-	/** Raw release pages supplied by tests without Octokit's request scheduler. */
+	/**
+	Raw release pages supplied by tests without Octokit's request scheduler.
+	*/
 	readonly releaseDiscoveryPage?: (cursor: string | null) => Promise<unknown>;
 }
 
@@ -219,12 +229,16 @@ function githubApiEndpoints(
 	return { rest: restValue, graphql: graphqlValue };
 }
 
-/** Encode a validated canonical coordinate for transport through a job output. */
+/**
+Encode a validated canonical coordinate for transport through a job output.
+*/
 export function serialiseResolvedCupboard(resolved: ResolvedCupboard): string {
 	return JSON.stringify(resolvedCupboardSchema.parse(resolved));
 }
 
-/** Decode a job output without accepting unknown fields or noncanonical values. */
+/**
+Decode a job output without accepting unknown fields or noncanonical values.
+*/
 export function parseResolvedCupboard(value: string): ResolvedCupboard {
 	try {
 		return resolvedCupboardSchema.parse(JSON.parse(value) as unknown);

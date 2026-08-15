@@ -111,7 +111,9 @@ export class CacheAdminService {
 		return row?.earliest ?? undefined;
 	}
 
-	/** Renders a cache's nix-cache-info body from its registry priority. */
+	/**
+	Renders a cache's nix-cache-info body from its registry priority.
+	*/
 	cacheInfoBody(cache: StoredCache): string {
 		const row = this.context.db
 			.select({ priority: schema.caches.priority })

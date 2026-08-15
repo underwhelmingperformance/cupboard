@@ -7,7 +7,9 @@ import {
 
 import { loggerCategory } from './config.ts';
 
-/** One captured record, its fields fully merged from the parent `.with()` calls. */
+/**
+One captured record, its fields fully merged from the parent `.with()` calls.
+*/
 export interface CapturedLog {
 	readonly level: LogLevel;
 	readonly category: readonly string[];
@@ -15,7 +17,9 @@ export interface CapturedLog {
 	readonly properties: Record<string, unknown>;
 }
 
-/** A sink that appends every record to `into` for assertions. */
+/**
+A sink that appends every record to `into` for assertions.
+*/
 export function capturingSink(into: CapturedLog[]): Sink {
 	return (record) => {
 		into.push({
@@ -29,7 +33,9 @@ export function capturingSink(into: CapturedLog[]): Sink {
 	};
 }
 
-/** A running capture: `logs` accumulates records until `stop()` tears it down. */
+/**
+A running capture: `logs` accumulates records until `stop()` tears it down.
+*/
 export interface Capture {
 	readonly logs: CapturedLog[];
 	stop(): void;

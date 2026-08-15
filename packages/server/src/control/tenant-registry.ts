@@ -72,11 +72,11 @@ function toSummary(row: TenantRow): ParsedTenantSummary {
 	};
 }
 
-async function sameConfig(
+async function hasSameConfig(
 	row: TenantRow,
 	body: ParsedTenantCreateBody
 ): Promise<boolean> {
-	const isReadMatching = await sameReadVerifier(row, body.read);
+	const isReadMatching = await hasSameReadVerifier(row, body.read);
 
 	return (
 		row.readMode === body.readMode &&
@@ -87,7 +87,7 @@ async function sameConfig(
 	);
 }
 
-async function sameReadVerifier(
+async function hasSameReadVerifier(
 	row: TenantRow,
 	read: ParsedTenantCreateBody['read']
 ): Promise<boolean> {
@@ -162,7 +162,7 @@ export async function ensureTenant(
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
-	if (existing === undefined || !(await sameConfig(existing, body))) {
+	if (existing === undefined || !(await hasSameConfig(existing, body))) {
 		throw new TenantAlreadyExistsError(body.id);
 	}
 

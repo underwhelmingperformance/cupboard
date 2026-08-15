@@ -19,7 +19,9 @@ export class InvalidDomainError extends CliError {
 
 const labelPattern = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i;
 
-/** Why `value` cannot be a custom domain, or undefined when it can. */
+/**
+Why `value` cannot be a custom domain, or undefined when it can.
+*/
 export function domainProblem(value: string): DomainProblem | undefined {
 	if (value.length === 0) {
 		return 'empty';
@@ -72,7 +74,9 @@ export function domainProblemText(value: string): string | undefined {
 	return problem === undefined ? undefined : domainProblemMessage(problem);
 }
 
-/** Validates a `--domain` flag value, throwing the typed error when invalid. */
+/**
+Validates a `--domain` flag value, throwing the typed error when invalid.
+*/
 export function checkDomainOption(value: string): string {
 	const problem = domainProblem(value);
 

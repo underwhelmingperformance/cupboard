@@ -36,7 +36,9 @@ export interface AttestationPolicyOptions extends IdentityPolicyOptions {
 	readonly timestampThreshold?: number;
 }
 
-/** A Rekor transparency-log entry a verified bundle was recorded in. */
+/**
+A Rekor transparency-log entry a verified bundle was recorded in.
+*/
 export interface VerifyTlogEntry {
 	readonly logIndex: string;
 	readonly integratedTime?: string;

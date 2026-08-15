@@ -104,7 +104,7 @@ export async function verifyRemoteAttestations(
 	);
 	const publicKeys = await remoteTrustKeys(options, fetcher);
 
-	if (!(await verifyNarInfoSignature(narInfo, publicKeys))) {
+	if (!(await isNarInfoSignatureValid(narInfo, publicKeys))) {
 		throw new Error('Remote narinfo signature did not verify');
 	}
 
@@ -266,7 +266,7 @@ function readAuthHeaders(options: RemoteAttestationVerifyOptions): Headers {
 	return headers;
 }
 
-async function verifyNarInfoSignature(
+async function isNarInfoSignatureValid(
 	narInfo: NarInfo,
 	publicKeys: readonly string[]
 ): Promise<boolean> {

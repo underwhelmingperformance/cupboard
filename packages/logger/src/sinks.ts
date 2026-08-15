@@ -139,7 +139,9 @@ function logObject(record: LogRecord): Record<string, unknown> {
 	};
 }
 
-/** The slice of `console` the Workers sink calls, injectable for tests. */
+/**
+The slice of `console` the Workers sink calls, injectable for tests.
+*/
 export interface ConsoleLike {
 	debug(payload: unknown): void;
 	info(payload: unknown): void;

@@ -61,7 +61,9 @@ export const negotiateHintsSchema = z.object({
 });
 export type NegotiateHints = z.infer<typeof negotiateHintsSchema>;
 
-/** Hint lookups in the shapes negotiate's decisions consume. */
+/**
+Hint lookups in the shapes negotiate's decisions consume.
+*/
 export interface NegotiateFacts {
 	readonly backedNarHashes: ReadonlySet<NixSha256HashString>;
 	readonly reusableByNarHash: ReadonlyMap<NixSha256HashString, BlobStateHint>;

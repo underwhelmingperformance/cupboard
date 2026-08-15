@@ -36,10 +36,12 @@ import {
 	type NixSubstitutionSettings
 } from './store-config.ts';
 
-/** A machine offering nothing a build can ask for beyond the portable names. */
+/**
+A machine offering nothing a build can ask for beyond the portable names.
+*/
 const bareMachine: NixMachineProbes = {
 	canReadWrite: () => false,
-	fileExists: () => false,
+	isFilePresent: () => false,
 	hasHardwareVirtualisation: () => false,
 	isWsl1: () => false,
 	microarchitectureLevels: () => []
@@ -74,10 +76,14 @@ interface Probes {
 
 const noFiles = new Map<string, string>();
 
-/** The directory these fixtures run in. A relative path resolves against it. */
+/**
+The directory these fixtures run in. A relative path resolves against it.
+*/
 const workingDirectory = '/work/dir';
 
-/** A machine that reports no home directory, as one with no passwd entry does. */
+/**
+A machine that reports no home directory, as one with no passwd entry does.
+*/
 function noHomeDirectory(): string | undefined {
 	return noFiles.get('home');
 }

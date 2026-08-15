@@ -421,7 +421,9 @@ export async function offboardTenant(id: string): Promise<void> {
 	await tenantServer(env, tenantIdSchema.parse(id)).beginOffboard();
 }
 
-/** A tenant's registry row, for asserting the offboarding lifecycle. */
+/**
+A tenant's registry row, for asserting the offboarding lifecycle.
+*/
 export async function tenantRow(id: string): Promise<
 	| undefined
 	| {
@@ -456,14 +458,18 @@ export async function tenantRow(id: string): Promise<
 	};
 }
 
-/** The R2 object keys under a tenant's namespace, sorted, for drain assertions. */
+/**
+The R2 object keys under a tenant's namespace, sorted, for drain assertions.
+*/
 export async function tenantObjectKeys(id: string): Promise<string[]> {
 	const listed = await env.BLOBS.list({ prefix: `t/${id}/` });
 
 	return listed.objects.map((object) => object.key).toSorted(byCodeUnit);
 }
 
-/** The origin the harness is currently targeting. */
+/**
+The origin the harness is currently targeting.
+*/
 export function currentOrigin(): string {
 	return harness.origin;
 }
@@ -508,7 +514,9 @@ export function testServerFor(name: string): DurableObjectStub<CupboardServer> {
 	return tenantServer(env, tenantIdSchema.parse(name));
 }
 
-/** The Durable Object stub the harness is currently targeting. */
+/**
+The Durable Object stub the harness is currently targeting.
+*/
 export function currentServer(): DurableObjectStub<CupboardServer> {
 	return harness.server;
 }
@@ -559,12 +567,16 @@ export async function bootstrap(): Promise<InitialisedServer> {
 	return { url: harness.origin, publicKey: body.trim(), token };
 }
 
-/** An admin token against the current per-test server. */
+/**
+An admin token against the current per-test server.
+*/
 export function initialise(): Promise<string> {
 	return issueServerSignedToken(adminGrants());
 }
 
-/** An admin token against the shared `v1` server the Worker routes to. */
+/**
+An admin token against the shared `v1` server the Worker routes to.
+*/
 export function initialiseViaWorker(): Promise<string> {
 	return issueServerSignedTokenFor(fixtureWorkerServer(), adminGrants());
 }
@@ -580,7 +592,9 @@ const cacheWriteActions = [
 	'attestation:attach'
 ] as const;
 
-/** The owner's grant set: a single wildcard covering every operation. */
+/**
+The owner's grant set: a single wildcard covering every operation.
+*/
 export function adminGrants(): AuthorizationDetails {
 	return [{ type: 'cupboard_wildcard' }];
 }
@@ -751,12 +765,18 @@ export async function handlerFetch(
 	return response;
 }
 
-/** What {@link flakyD1} injects: how many matching reads throw before it heals. */
+/**
+What {@link flakyD1} injects: how many matching reads throw before it heals.
+*/
 export interface FlakyD1Plan {
 	failures: number;
-	/** Restricts the faults to matching queries; every query when absent. */
+	/**
+	Restricts the faults to matching queries; every query when absent.
+	*/
 	readonly matches?: (query: string) => boolean;
-	/** The error message to throw; defaults to 'transient D1 fault'. */
+	/**
+	The error message to throw; defaults to 'transient D1 fault'.
+	*/
 	readonly message?: string;
 	/**
 	 * Runs when a matching query is prepared, before any fault is applied: a
@@ -795,7 +815,9 @@ export function flakyD1(inner: D1Database, plan: FlakyD1Plan): D1Database {
 
 export interface FlakyR2Plan {
 	failures: number;
-	/** The error message to throw; defaults to 'transient R2 fault'. */
+	/**
+	The error message to throw; defaults to 'transient R2 fault'.
+	*/
 	readonly message?: string;
 	/**
 	 * Runs when a head probe is issued, before any fault is applied: a
@@ -952,7 +974,9 @@ export async function clearBlobStorage(): Promise<void> {
 	await env.BLOBS.delete(keys);
 }
 
-/** The shared `blob_state` rows in D1, sorted by NAR hash for deterministic assertions. */
+/**
+The shared `blob_state` rows in D1, sorted by NAR hash for deterministic assertions.
+*/
 export async function blobStateNarHashes(): Promise<
 	{ narHash: NixSha256HashString }[]
 > {
@@ -966,7 +990,9 @@ export async function blobStateNarHashes(): Promise<
 	);
 }
 
-/** How many shared blobs D1 records as available. */
+/**
+How many shared blobs D1 records as available.
+*/
 export async function blobStateCount(): Promise<number> {
 	const row = await drizzleD1(env.CUPBOARD_DB, { schema: { blobState } })
 		.select({ count: count() })
@@ -980,7 +1006,9 @@ export async function blobStateCount(): Promise<number> {
 // valid hashes when a test seeds shared facts in volume.
 const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 
-/** A deterministic, syntactically valid NAR hash derived from an index. */
+/**
+A deterministic, syntactically valid NAR hash derived from an index.
+*/
 export function syntheticNarHash(index: number): NixSha256HashString {
 	let remaining = index;
 	let suffix = '';
@@ -1009,12 +1037,16 @@ export function syntheticStorePathHash(index: number): StorePathHash {
 	return storePathHashSchema.parse(`${'0'.repeat(28)}${suffix}`);
 }
 
-/** A deterministic, syntactically valid CAS digest derived from an index. */
+/**
+A deterministic, syntactically valid CAS digest derived from an index.
+*/
 export function syntheticCasDigest(index: number): Sha256HexDigest {
 	return sha256HexDigestSchema.parse(index.toString(16).padStart(64, '0'));
 }
 
-/** Seeds shared blob facts directly, for tests that need candidate volume. */
+/**
+Seeds shared blob facts directly, for tests that need candidate volume.
+*/
 export async function seedBlobStates(
 	narHashes: readonly NixSha256HashString[]
 ): Promise<void> {
@@ -1040,7 +1072,9 @@ export async function seedBlobStates(
 	}
 }
 
-/** Seeds shared CAS object facts directly, for tests that need candidate volume. */
+/**
+Seeds shared CAS object facts directly, for tests that need candidate volume.
+*/
 export async function seedCasObjects(
 	digests: readonly Sha256HexDigest[]
 ): Promise<void> {
@@ -1055,7 +1089,9 @@ export async function seedCasObjects(
 	}
 }
 
-/** Arms a shared blob's reaper grace timer directly. */
+/**
+Arms a shared blob's reaper grace timer directly.
+*/
 export async function armBlobReaperTimer(
 	narHash: NixSha256HashString,
 	graceUntil: IsoTimestamp = isoTimestamp(new Date(Date.now() + 60_000))
@@ -1067,7 +1103,9 @@ export async function armBlobReaperTimer(
 		.run();
 }
 
-/** The shared blob facts with their reaper timers, sorted by NAR hash. */
+/**
+The shared blob facts with their reaper timers, sorted by NAR hash.
+*/
 export async function blobStateArmTimes(): Promise<
 	{ narHash: NixSha256HashString; deleteAfter: string | undefined }[]
 > {
@@ -1086,7 +1124,7 @@ export async function blobStateArmTimes(): Promise<
  * pass picked up: the maintenance pass orders active tenants by `last_maintained_at`
  * (oldest first, NULL first) and stamps the batch it processes.
  */
-export async function tenantMaintained(id: string): Promise<boolean> {
+export async function wasTenantMaintained(id: string): Promise<boolean> {
 	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 		.select({ lastMaintainedAt: d1Schema.tenant.lastMaintainedAt })
 		.from(d1Schema.tenant)
@@ -1096,7 +1134,9 @@ export async function tenantMaintained(id: string): Promise<boolean> {
 	return (row?.lastMaintainedAt ?? undefined) !== undefined;
 }
 
-/** The durable cron pass record for one tenant/pass pair. */
+/**
+The durable cron pass record for one tenant/pass pair.
+*/
 export async function tenantMaintenanceFailureRow(
 	id: string,
 	pass: typeof d1Schema.tenantMaintenanceFailure.$inferSelect.pass
@@ -1139,7 +1179,9 @@ export async function tenantMaintenanceFailureRow(
 	};
 }
 
-/** The D1 reference edges, sorted for deterministic assertions. */
+/**
+The D1 reference edges, sorted for deterministic assertions.
+*/
 export async function blobReferenceRows(): Promise<
 	{
 		tenant: TenantId;
@@ -1162,7 +1204,9 @@ export async function blobReferenceRows(): Promise<
 	);
 }
 
-/** The per-tenant blob-presence rows, sorted by NAR hash. */
+/**
+The per-tenant blob-presence rows, sorted by NAR hash.
+*/
 export async function tenantBlobRows(): Promise<
 	{ tenant: TenantId; narHash: NixSha256HashString; fileSize: number }[]
 > {
@@ -1306,7 +1350,9 @@ export async function fileAttestationReference(options: {
 	return { ...measured, stagingKey };
 }
 
-/** The fixture tenant's usage counters and quota, for asserting charge and credit. */
+/**
+The fixture tenant's usage counters and quota, for asserting charge and credit.
+*/
 export async function tenantUsageRow(): Promise<
 	| undefined
 	| {
@@ -1339,8 +1385,10 @@ export async function tenantUsageRow(): Promise<
 	return { ...row, quotaBytes: row.quotaBytes ?? undefined };
 }
 
-/** Whether a tenant still has a usage row, for asserting offboard finalisation. */
-export async function tenantUsagePresent(id: string): Promise<boolean> {
+/**
+Whether a tenant still has a usage row, for asserting offboard finalisation.
+*/
+export async function isTenantUsagePresent(id: string): Promise<boolean> {
 	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 		.select({ tenant: d1Schema.tenantUsage.tenant })
 		.from(d1Schema.tenantUsage)
@@ -1513,7 +1561,9 @@ export async function deleteBlobReferenceEdge(
 		.run();
 }
 
-/** The generation stamped on a committed narinfo, or undefined if absent. */
+/**
+The generation stamped on a committed narinfo, or undefined if absent.
+*/
 export async function narInfoGeneration(
 	storePathHash: StorePathHash
 ): Promise<number | undefined> {
@@ -1542,7 +1592,9 @@ export function fixtureWorkerServer(): DurableObjectStub<CupboardServer> {
 	return tenantServer(env, fixtureTenant);
 }
 
-/** Prepends the `/cache/<selector>` prefix to a cache-scoped route. */
+/**
+Prepends the `/cache/<selector>` prefix to a cache-scoped route.
+*/
 function cacheScopedPath(cache: string, suffix: string): string {
 	return `/cache/${selectorForCache(storedCacheSchema.parse(cache))}${suffix}`;
 }
@@ -1818,7 +1870,9 @@ function tenantWorkerFetch(
 	return handlerFetch(`/t/${tenant}${path}`, { ...init, headers });
 }
 
-/** What the commit socket said when it refused the commit. */
+/**
+What the commit socket said when it refused the commit.
+*/
 export class CommitSocketError extends Error {
 	constructor(
 		public readonly status: number,
@@ -1829,7 +1883,9 @@ export class CommitSocketError extends Error {
 	}
 }
 
-/** A deferred upload's verification settled on a non-servable verdict. */
+/**
+A deferred upload's verification settled on a non-servable verdict.
+*/
 export class CommitVerdictError extends Error {
 	constructor(public readonly verdict: string) {
 		super(`Upload verification settled on ${verdict}`);
@@ -1837,7 +1893,9 @@ export class CommitVerdictError extends Error {
 	}
 }
 
-/** The commit socket conversation departed from the frame protocol. */
+/**
+The commit socket conversation departed from the frame protocol.
+*/
 export class CommitSocketProtocolError extends Error {
 	constructor(detail: string) {
 		super(`Commit socket protocol violation: ${detail}`);
@@ -1917,7 +1975,9 @@ export function commitSessionFromResponse(
 	return { socket, send, nextFrame };
 }
 
-/** Opens a push's commit session WebSocket against the Durable Object stub. */
+/**
+Opens a push's commit session WebSocket against the Durable Object stub.
+*/
 export async function openCommitSession(
 	token: string,
 	cache: string = DEFAULT_CACHE
@@ -2070,7 +2130,9 @@ export async function commitUploadRejection(
 	return result.response;
 }
 
-/** As {@link commitUpload}, routed through the Worker like a real client. */
+/**
+As {@link commitUpload}, routed through the Worker like a real client.
+*/
 export async function commitUploadViaWorker(
 	token: string,
 	uploadId: UploadId,
@@ -2170,7 +2232,9 @@ export async function listRoots(
 	return rootListResponseSchema.parse(await response.json());
 }
 
-/** One page of a root's targets, with the per-target serve probe applied. */
+/**
+One page of a root's targets, with the per-target serve probe applied.
+*/
 export async function listRootTargets(
 	token: string,
 	name: string,
@@ -2224,7 +2288,9 @@ export async function runGcResult(): Promise<GcResult> {
 	return gcResponseSchema.parse(await response.json());
 }
 
-/** Runs GC the way the cron does: through the internal origin, which cannot purge the edge cache. */
+/**
+Runs GC the way the cron does: through the internal origin, which cannot purge the edge cache.
+*/
 export async function runGcFromInternalOrigin(): Promise<void> {
 	const token = await initialise();
 	const response = await harness.server.fetch(new URL('/gc', internalOrigin), {
@@ -2578,14 +2644,18 @@ export function sigstoreBundleBytes(
 	return encoder.encode(JSON.stringify(bundle));
 }
 
-/** The lowercase hex digest of a `sha256:<base32>` NAR hash. */
+/**
+The lowercase hex digest of a `sha256:<base32>` NAR hash.
+*/
 export function narDigestHex(narHash: NixSha256HashString): string {
 	return [...NixSha256Hash.parse(narHash).digestBytes()]
 		.map((byte) => byte.toString(16).padStart(2, '0'))
 		.join('');
 }
 
-/** Decodes a lowercase hex digest into its bytes. */
+/**
+Decodes a lowercase hex digest into its bytes.
+*/
 export function hexBytes(value: string): Uint8Array {
 	const bytes = new Uint8Array(value.length / 2);
 
@@ -2687,7 +2757,9 @@ export async function pendingUploadSnapshot(
 	});
 }
 
-/** Polls a deferred upload's status the way `push --wait` does, by its uploadId. */
+/**
+Polls a deferred upload's status the way `push --wait` does, by its uploadId.
+*/
 export async function uploadStatus(
 	uploadId: UploadId
 ): Promise<UploadStatusResponse['status']> {
@@ -2927,7 +2999,7 @@ export async function corruptCommittedNarInfo(
 	});
 }
 
-export async function verifyNarInfoSignature(
+export async function isNarInfoSignatureValid(
 	narInfo: NarInfo,
 	publicKey: string
 ): Promise<boolean> {
@@ -3077,7 +3149,9 @@ export function uploadExpiryFromNow(): IsoTimestamp {
 	return isoTimestamp(new Date(Date.now() + 15 * 60 * 1000));
 }
 
-/** The highest migration index registered in `drizzle/migrations.js`. */
+/**
+The highest migration index registered in `drizzle/migrations.js`.
+*/
 export const latestMigrationIndex = Math.max(
 	...migrations.journal.entries.map((entry) => entry.idx)
 );

@@ -22,7 +22,9 @@ export interface PlanMeasureOptions {
 	readonly measureFile?: string;
 }
 
-/** One target's own substitutable size, as the store's `queryMissing` prices it. */
+/**
+One target's own substitutable size, as the store's `queryMissing` prices it.
+*/
 export interface TargetMeasurement {
 	readonly downloadSize: number;
 	readonly narSize: number;

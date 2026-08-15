@@ -30,7 +30,9 @@ export interface DestinationProbeOptions {
 	readonly fetcher?: typeof fetch;
 }
 
-/** Which of `paths` the destination cache already serves. */
+/**
+Which of `paths` the destination cache already serves.
+*/
 export function destinationServedPaths(
 	options: DestinationProbeOptions & {
 		readonly baseUrl: URL;
@@ -105,7 +107,9 @@ export interface TenantProbes extends DestinationProbes {
 	) => Promise<ReadonlySet<StorePathString>>;
 }
 
-/** The destination-side probes bound to one tenant, cache and credential. */
+/**
+The destination-side probes bound to one tenant, cache and credential.
+*/
 export function tenantProbesFor(options: TenantProbeOptions): TenantProbes {
 	const shared = {
 		baseUrl: options.baseUrl,

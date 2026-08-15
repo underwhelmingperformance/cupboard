@@ -25,7 +25,9 @@ import { fakeCliUi } from './testing.ts';
 const escape = String.fromCodePoint(27);
 const plain = pc.createColors(false);
 
-/** Collects everything written to an in-memory stream. */
+/**
+Collects everything written to an in-memory stream.
+*/
 function captureStream(): { stream: Writable; written: () => string } {
 	const chunks: string[] = [];
 	const stream = new Writable({
@@ -122,7 +124,9 @@ describe('isInteractive', () => {
 	);
 });
 
-/** A machine-mode UI whose JSON output is captured for assertions. */
+/**
+A machine-mode UI whose JSON output is captured for assertions.
+*/
 function machineUi(overrides: Partial<CliUiOptions> = {}): {
 	ui: CliUi;
 	out: () => string;

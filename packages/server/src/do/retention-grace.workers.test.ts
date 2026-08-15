@@ -477,7 +477,7 @@ async function graceDeadlineRows(
 	);
 }
 
-async function graceManagedMarker(cache: string): Promise<boolean> {
+async function hasGraceManagedMarker(cache: string): Promise<boolean> {
 	return runInDurableObject(
 		currentServer(),
 		(instance) =>
@@ -525,7 +525,7 @@ describe('retention grace transitions', () => {
 
 		expect({
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await graceManagedMarker(DEFAULT_CACHE)
+			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
 		}).toStrictEqual({
 			deadlines: [
 				{ storePathHash: released.storePathHash, retainUntil: dayAfterStart }
@@ -697,7 +697,7 @@ describe('retention grace transitions', () => {
 		expect({
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
 			path: (await narInfoGeneration(path.storePathHash)) !== undefined,
-			graceManaged: await graceManagedMarker(DEFAULT_CACHE)
+			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
 		}).toStrictEqual({
 			deadlines: [
 				{
@@ -981,7 +981,7 @@ describe('retention grace transitions', () => {
 
 		expect({
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await graceManagedMarker(DEFAULT_CACHE)
+			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
 		}).toStrictEqual({ deadlines: [], graceManaged: true });
 	});
 
@@ -1001,7 +1001,7 @@ describe('retention grace transitions', () => {
 
 		expect({
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await graceManagedMarker(DEFAULT_CACHE)
+			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
 		}).toStrictEqual({ deadlines: [], graceManaged: false });
 	});
 
@@ -1078,7 +1078,7 @@ describe('retention grace at publication', () => {
 
 		expect({
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await graceManagedMarker(DEFAULT_CACHE),
+			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE),
 			path: (await narInfoGeneration(path.storePathHash)) !== undefined
 		}).toStrictEqual({
 			deadlines: [
@@ -1199,7 +1199,7 @@ describe('retention grace at publication', () => {
 			materialised:
 				(await narInfoGeneration(metadata.storePathHash)) !== undefined,
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await graceManagedMarker(DEFAULT_CACHE)
+			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
 		}).toStrictEqual({
 			materialised: true,
 			deadlines: [],
@@ -1236,7 +1236,7 @@ describe('retention grace at publication', () => {
 
 		expect({
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await graceManagedMarker(DEFAULT_CACHE)
+			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
 		}).toStrictEqual({ deadlines: [], graceManaged: false });
 	});
 
@@ -1255,7 +1255,7 @@ describe('retention grace at publication', () => {
 
 		const beforeCollection = {
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await graceManagedMarker(DEFAULT_CACHE)
+			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
 		};
 
 		await runGc();
@@ -1284,7 +1284,7 @@ describe('retention grace at publication', () => {
 
 		expect({
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await graceManagedMarker(DEFAULT_CACHE)
+			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
 		}).toStrictEqual({ deadlines: [], graceManaged: false });
 	});
 
@@ -1459,7 +1459,7 @@ describe('retention grace at publication', () => {
 				status: loserFrame.response.status,
 				hasGraceKey: 'grace' in loserFrame,
 				grace: loserFrame.grace,
-				graceManaged: await graceManagedMarker(DEFAULT_CACHE),
+				graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE),
 				deadlines: await graceDeadlineRows(DEFAULT_CACHE)
 			}).toStrictEqual({
 				status: 'already-present',
@@ -1517,7 +1517,7 @@ describe('retention grace at publication', () => {
 
 		expect({
 			outcome,
-			graceManaged: await graceManagedMarker(DEFAULT_CACHE),
+			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE),
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
 		}).toStrictEqual({
 			outcome: {
@@ -1656,7 +1656,7 @@ describe('retention grace at publication', () => {
 
 		expect({
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
-			graceManaged: await graceManagedMarker(DEFAULT_CACHE),
+			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE),
 			verdict: await pendingUploadVerdict(upload.uploadId)
 		}).toStrictEqual({
 			deadlines: [
@@ -2958,7 +2958,7 @@ describe('grace transition atomicity', () => {
 		});
 
 		expect({
-			graceManaged: await graceManagedMarker(DEFAULT_CACHE),
+			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE),
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
 		}).toStrictEqual({
 			graceManaged: true,
@@ -2988,7 +2988,7 @@ describe('grace transition atomicity', () => {
 		});
 
 		expect({
-			graceManaged: await graceManagedMarker(DEFAULT_CACHE),
+			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE),
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
 		}).toStrictEqual({ graceManaged: false, deadlines: [] });
 	});
@@ -3059,7 +3059,7 @@ describe('grace transition atomicity', () => {
 
 		expect({
 			survivors,
-			graceManaged: await graceManagedMarker(cache),
+			graceManaged: await hasGraceManagedMarker(cache),
 			deadlines: await graceDeadlineRows(cache)
 		}).toStrictEqual({
 			survivors: {
@@ -3269,7 +3269,7 @@ describe('confirming an unretained publication', () => {
 
 		expect({
 			paths: confirmed.body.paths,
-			graceManaged: await graceManagedMarker(DEFAULT_CACHE),
+			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE),
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
 		}).toStrictEqual({
 			paths: [
@@ -3300,7 +3300,7 @@ describe('confirming an unretained publication', () => {
 
 		expect({
 			paths: confirmed.body.paths,
-			graceManaged: await graceManagedMarker(DEFAULT_CACHE)
+			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE)
 		}).toStrictEqual({
 			paths: [
 				{ storePathHash: path.storePathHash, confirmed: true, grace: {} }
@@ -3336,7 +3336,7 @@ describe('confirming an unretained publication', () => {
 
 		expect({
 			paths: confirmed.body.paths,
-			graceManaged: await graceManagedMarker(DEFAULT_CACHE),
+			graceManaged: await hasGraceManagedMarker(DEFAULT_CACHE),
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
 		}).toStrictEqual({
 			paths: [

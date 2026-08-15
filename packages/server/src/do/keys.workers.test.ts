@@ -16,12 +16,12 @@ import {
 	cacheWriteGrants,
 	fetchNarInfo,
 	fetchPath,
+	isNarInfoSignatureValid,
 	issueServerSignedToken,
 	narBytes,
 	pushPath,
 	resetTestServer,
-	uploadMetadata,
-	verifyNarInfoSignature
+	uploadMetadata
 } from '../test-support.ts';
 
 async function rotate(
@@ -92,13 +92,13 @@ describe('signing key rotation', () => {
 			publishedKeys: published.toSorted(byCodeUnit),
 			before: {
 				sigs: beforeNarInfo.sigs.length,
-				verifiesUnderOld: await verifyNarInfoSignature(beforeNarInfo, oldKey),
-				verifiesUnderNew: await verifyNarInfoSignature(beforeNarInfo, newKey)
+				verifiesUnderOld: await isNarInfoSignatureValid(beforeNarInfo, oldKey),
+				verifiesUnderNew: await isNarInfoSignatureValid(beforeNarInfo, newKey)
 			},
 			after: {
 				sigs: afterNarInfo.sigs.length,
-				verifiesUnderOld: await verifyNarInfoSignature(afterNarInfo, oldKey),
-				verifiesUnderNew: await verifyNarInfoSignature(afterNarInfo, newKey)
+				verifiesUnderOld: await isNarInfoSignatureValid(afterNarInfo, oldKey),
+				verifiesUnderNew: await isNarInfoSignatureValid(afterNarInfo, newKey)
 			}
 		}).toStrictEqual({
 			rotationStatus: StatusCodes.OK,
@@ -133,11 +133,11 @@ describe('signing key rotation', () => {
 			stages: [first.body.stage, second.body.stage, third.body.stage],
 			publishedKeys: published,
 			sigs: narInfo.sigs.length,
-			verifiesUnderRetired: await verifyNarInfoSignature(
+			verifiesUnderRetired: await isNarInfoSignatureValid(
 				narInfo,
 				init.publicKey
 			),
-			verifiesUnderSurvivor: await verifyNarInfoSignature(
+			verifiesUnderSurvivor: await isNarInfoSignatureValid(
 				narInfo,
 				rotated.publicKey
 			)
