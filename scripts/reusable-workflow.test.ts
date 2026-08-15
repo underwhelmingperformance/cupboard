@@ -733,7 +733,7 @@ describe('tag-pinned reusable-workflow documentation', () => {
 				versionOverride: example.includes('cupboard-version:')
 			})),
 			explainsOverride: prose.includes(
-				'An explicit `cupboard-version` is only needed to intentionally run a different release from the workflow pin.'
+				'Set `cupboard-version` only when you deliberately want to run a release other than the one the workflow is pinned to.'
 			)
 		}).toStrictEqual({
 			examples: [{ tagPinned: true, versionOverride: false }],
