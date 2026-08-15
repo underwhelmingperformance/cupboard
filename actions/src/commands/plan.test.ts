@@ -251,6 +251,53 @@ describe('planAction', () => {
 			)
 		).rejects.toThrow(InvalidInputError);
 	});
+
+	it.each([
+		{
+			name: 'queries the cache once when a cached target may be retained',
+			requireProvenance: 'false',
+			expectedUrls: ['https://cupboard.example/t/acme/api/v1/missing-paths']
+		},
+		{
+			name: 'does not query the cache when require-provenance keeps every target on the build set',
+			requireProvenance: 'true',
+			expectedUrls: []
+		}
+	])('$name', async ({ requireProvenance, expectedUrls }) => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+		const appStorePath = `/nix/store/${'1'.repeat(32)}-app`;
+		const evaluator: NixEvaluator = () =>
+			Promise.resolve({
+				stdout: JSON.stringify({
+					derivations: {
+						[targetRootDrvPath]: {
+							env: { out: appStorePath },
+							inputs: { drvs: {} },
+							outputs: { out: { path: `${'1'.repeat(32)}-app` } }
+						}
+					}
+				})
+			});
+		const probe = recordingFetcher();
+
+		await planAction(
+			{ ...baseOptions, optimise: 'true', requireProvenance },
+			{
+				RUNNER_TEMP: directory,
+				GITHUB_RUN_ID: '12345',
+				GITHUB_OUTPUT: path.join(directory, 'output')
+			},
+			undefined,
+			{
+				evaluator,
+				storeDirectory: storeDirectorySchema.parse('/nix/store'),
+				fetcher: probe.fetcher,
+				runner: preFilterRunner({})
+			}
+		);
+
+		expect(probe.requestedUrls).toStrictEqual(expectedUrls);
+	});
 });
 
 describe('resolvePlanInputs', () => {
@@ -1009,6 +1056,24 @@ function buildRequiredResultLine(unavailable: readonly string[]): string {
 
 const alwaysAvailableFetcher: typeof fetch = () =>
 	Promise.resolve(Response.json({ missingStorePathHashes: [] }));
+
+// Returns an empty `missingStorePathHashes` list for every request and records
+// each request URL, so a test can assert which requests the plan made.
+function recordingFetcher(): {
+	readonly requestedUrls: readonly string[];
+	readonly fetcher: typeof fetch;
+} {
+	const requestedUrls: string[] = [];
+
+	return {
+		requestedUrls,
+		fetcher: (input) => {
+			requestedUrls.push(input instanceof Request ? input.url : String(input));
+
+			return Promise.resolve(Response.json({ missingStorePathHashes: [] }));
+		}
+	};
+}
 
 // Every command the pre-filter issues carries either 'targets' or 'ensure' at
 // the same position `root ensure`'s own argument list already uses, so one

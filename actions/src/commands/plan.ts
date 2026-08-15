@@ -606,7 +606,39 @@ async function optimisedPlan(
 		);
 	}
 
-	const probePaths = cacheProbePaths(evaluations);
+	const retainedRoots = await retainedRootsFor(
+		inputs,
+		evaluations,
+		dependencies
+	);
+	const plan = planPublish({
+		evaluations,
+		retainedRoots,
+		unevaluated: unevaluated.map((failure) => failure.target)
+	});
+
+	return { plan, evaluations };
+}
+
+/**
+ * The root suffixes of the retained targets. A target is retained when the
+ * cache already serves all of its outputs and `ensureRoot` renewed its
+ * retention root.
+ *
+ * With `require-provenance` set, every target is built again and nothing can be
+ * retained. Do not move the cache probe above the early return: a failed probe
+ * fails the whole plan, and with provenance required the probe result cannot
+ * change it.
+ */
+async function retainedRootsFor(
+	inputs: PlanInputs,
+	evaluations: readonly TargetEvaluation[],
+	dependencies: PlanDependencies
+): Promise<Set<string>> {
+	if (inputs.requireProvenance) {
+		return new Set<string>();
+	}
+
 	const credentials =
 		inputs.readUser === ''
 			? {}
@@ -618,27 +650,18 @@ async function optimisedPlan(
 	const availablePaths = await availableCachePaths({
 		baseUrl: inputs.url,
 		cache: inputs.cache,
-		paths: probePaths,
+		paths: cacheProbePaths(evaluations),
 		...credentials,
 		...fetcher
 	});
 
-	const retainedRoots = inputs.requireProvenance
-		? new Set<string>()
-		: await ensureAvailableTargets(
-				inputs,
-				evaluations,
-				availablePaths,
-				dependencies.runner,
-				dependencies.signal
-			);
-	const plan = planPublish({
+	return ensureAvailableTargets(
+		inputs,
 		evaluations,
-		retainedRoots,
-		unevaluated: unevaluated.map((failure) => failure.target)
-	});
-
-	return { plan, evaluations };
+		availablePaths,
+		dependencies.runner,
+		dependencies.signal
+	);
 }
 
 /** Refuses remote publication unless every target's selected paths are known. */
