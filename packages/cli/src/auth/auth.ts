@@ -60,8 +60,9 @@ const accessTokenFreshnessMarginMs = 30 * 1000;
  * alive without a browser. A fresh cached access token is used as is; an
  * expired or refused one is renewed by rotating the cupboard refresh token,
  * falling back to exchanging a fresh `id_token` from the deploy's stored
- * Cloudflare grant. Only when neither silent path can issue does the session
- * surface as a prompt to run `cupboard login` again.
+ * Cloudflare grant. When neither silent path yields a token, the provider
+ * throws `OwnerLoginRequiredError`, whose message tells the user to run
+ * `cupboard login` again.
  */
 export function cachedOwnerProvider(
 	target: URL,
@@ -114,9 +115,9 @@ function isExpired(accessToken: string, nowMs: number): boolean {
 	return expiry !== undefined && expiry <= nowMs + accessTokenFreshnessMarginMs;
 }
 
-// Rotates the cupboard refresh token. A token the server refuses outright is
-// a stale session, answered with undefined so the caller falls back; a
-// transport or server failure propagates.
+// Rotates the cupboard refresh token. A refresh token the server refuses
+// outright means the cached session is stale, so this returns undefined and
+// the caller falls back; a transport or server failure propagates.
 async function rotateSession(
 	client: SessionTokenClient,
 	refreshToken: string

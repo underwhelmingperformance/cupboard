@@ -9,7 +9,7 @@ export type SubstituterReach = (substituter: string) => boolean;
  * has to be a binary cache served over HTTP or HTTPS, on a host that names the
  * same machine wherever the name or address is read.
  *
- * The host is settled from its own syntax and nothing is resolved, so the
+ * The host is judged from its syntax alone, with no name resolution, so the
  * answer is the same on every machine and at every moment. An address literal
  * is classified by the block it sits in, `localhost` and the names under it
  * are the loopback interface by RFC 6761, and every other name passes: which

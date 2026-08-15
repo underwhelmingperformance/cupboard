@@ -70,14 +70,14 @@ function shouldStopSequence(error: unknown): boolean {
 }
 
 /**
- * Runs the cohorts sequentially, one finishing and draining before the next
- * starts, so cupboard carries the shared work across the boundary. Collection
- * only runs at a boundary the run opted into: between cohorts when the
- * setting is on, after the last only when additionally configured, and never
- * when the setting is off. An ordinary cohort failure stops the sequence
- * unless the keep-going option is set; cancellation always stops it. Either
- * way the failures are returned alongside the settled receipts, the first
- * failure being the run's verdict.
+ * Runs the cohorts sequentially, each one finishing and draining before the
+ * next starts, so an earlier cohort's shared paths are already published by the
+ * time a later cohort needs them. Collection only runs at a boundary the run
+ * opted into: between cohorts when the setting is on, after the last only when
+ * additionally configured, and never when the setting is off. An ordinary
+ * cohort failure stops the sequence unless the keep-going option is set;
+ * cancellation always stops it. Either way the failures are returned alongside
+ * the settled receipts, the first failure being the run's verdict.
  */
 export async function runCohortSequence(
 	options: CohortSequenceOptions,

@@ -77,7 +77,6 @@ import type { RootClient } from './root.ts';
 const maximumConcurrentRootEnsures = 8;
 const defaultStorePath = '/nix/store';
 
-// These provisional values remain until rollout measurements replace them.
 // Trusted queries require every path to resolve. Untrusted queries permit a
 // small number of misses because one missing narinfo can be transient.
 const defaultUnknownCeiling = 0;
@@ -116,8 +115,8 @@ export async function requeryUnknownWith(
 		};
 	}
 
-	// Use the bypass client for both the partition and per-path costs so neither
-	// result comes from the cached responses being bypassed.
+	// Use the bypass client for both the partition and the per-path costs, so
+	// neither result comes from the negative narinfo cache.
 	const bypass = openBypass();
 	const partition = await bypass.queryMissing(storePaths);
 	const offers = await bypass.querySubstitutablePathInfos(
@@ -250,8 +249,9 @@ export interface PlanCohortRunOptions {
 }
 
 /**
- * Reads a configured secret key file. A file this process cannot read names no
- * key, which is ordinary on a machine whose keys belong to another user.
+ * Reads a configured secret key file. When the file cannot be read this returns
+ * `undefined`, which is ordinary on a machine whose keys belong to another
+ * user.
  */
 const readKeyFile: ReadKeyFile = (filePath) => {
 	try {
@@ -311,7 +311,7 @@ export function registerPlanCommands(
 		)
 		.option(
 			'--store <uri>',
-			'remote ssh-ng store whose own answers drive the partition (default: the local daemon)',
+			'remote ssh-ng store to query for path availability and sizes (default: the local daemon)',
 			parseStoreUri
 		)
 		.option(

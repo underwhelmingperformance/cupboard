@@ -69,8 +69,9 @@ export function credentialSession(
 			return Promise.resolve(cached);
 		}
 
-		// Concurrent uploads share one issue; the in-flight handle clears once it
-		// settles so the next near-expiry call issues afresh.
+		// Concurrent uploads share a single in-flight request; the handle is
+		// cleared once that request settles, so the next call made near expiry
+		// issues a fresh credential.
 		inFlight ??= issueAndCache();
 
 		return inFlight;

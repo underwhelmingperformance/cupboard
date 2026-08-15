@@ -53,9 +53,9 @@ interface ConfirmableOptions {
 }
 
 /**
- * The slice of the derived client the policy commands consume, in the
- * contract's input and output shapes; the real `tenantRpc(...).policies`
- * satisfies it by construction.
+ * The part of the derived client that the policy commands use, in the
+ * contract's input and output shapes. The real `tenantRpc(...).policies`
+ * satisfies this interface by construction.
  */
 export interface PolicyClient {
 	list(): Promise<ParsedRetentionPolicyListResponse>;
@@ -208,7 +208,7 @@ export function registerPolicyCommands(
 	policy
 		.command('grace-coverage')
 		.description(
-			'Report whether a grace policy covers a cache and the grace a publication to it would resolve.'
+			'Report whether a grace policy covers a cache, and the grace period a publication to that cache would receive.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.option(
@@ -446,9 +446,9 @@ function gracePolicyRow(policy: GracePolicySummary): ResultRow {
 	};
 }
 
-// The empty prefix covers every cache, so it renders like the reuse-view
-// selectors' empty prefix does; `(default)` stays reserved for the unnamed
-// cache itself, which the empty prefix is not.
+// The empty prefix covers every cache, and is rendered the same way as the
+// empty prefix in the reuse-view selectors. `(default)` is reserved for the
+// unnamed cache, not for a prefix that matches every cache.
 function cachePrefixLabel(cachePrefix: string): string {
 	return cachePrefix === '' ? '(all caches)' : cachePrefix;
 }

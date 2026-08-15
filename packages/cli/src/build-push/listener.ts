@@ -26,10 +26,10 @@ export const maximumBuildEventBytes = 1024 * 1024;
 // left behind it.
 const defaultDrainTimeoutMs = 3000;
 
-// Resolves with a poll phase behind it: the timer turn runs before the event
-// loop polls again, and the immediate that turn schedules runs after it, so
-// every connection already queued on a listening socket has been accepted by
-// the time the promise settles.
+// Resolves only after the event loop has run a poll phase: the timer callback
+// runs before the loop polls again, and the immediate that callback schedules
+// runs after that poll, so every connection already queued on a listening
+// socket has been accepted by the time the promise settles.
 function afterNextPoll(): Promise<void> {
 	return new Promise((resolve) => {
 		setTimeout(() => {

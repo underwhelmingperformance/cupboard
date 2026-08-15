@@ -1747,7 +1747,7 @@ describe('runPush', () => {
 		});
 	});
 
-	it('sets a named channel to the pushed paths with --root', async () => {
+	it('sets a named retention root to the pushed paths with --root', async () => {
 		const roots: SetRootCall[] = [];
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];

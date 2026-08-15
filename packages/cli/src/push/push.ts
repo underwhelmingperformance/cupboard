@@ -101,8 +101,8 @@ import {
 
 /**
  * The store a push reads through: which kind of backend it is, the metadata of
- * the paths it holds, the closure behind them, and the NAR bytes a store that
- * serves its paths elsewhere streams back.
+ * the paths it holds, the closure behind them, and the NAR bytes streamed back
+ * by a store whose paths live on another machine.
  */
 export type PushStore = Pick<
 	Nix,
@@ -421,8 +421,9 @@ interface PushRuntimeDependencies {
 
 // One publication path with its metadata resolved: a local entry carries the
 // store's path info and can read its NAR; a reference entry carries the served
-// metadata alone and never reads one. The kind travels with the path so a
-// vanished intermediate and a vanished target can part ways.
+// metadata alone and never reads one. The kind is carried alongside the path,
+// so a vanished intermediate and a vanished target can be recorded
+// differently.
 type ResolvedPushPath =
 	| {
 			readonly source: 'local';
@@ -518,8 +519,9 @@ function localPathInfos(
 }
 
 // Resolves the reference entries through the reference source, preserving
-// entry order. The source must answer for the path that was asked: served
-// metadata naming another path refuses rather than publishing it.
+// entry order. The source must return metadata for the path that was
+// requested: metadata naming a different path is refused with
+// `ReferencePathMismatchError` rather than published.
 async function resolveReferenceEntries(
 	entries: readonly PublicationEntry[],
 	dependencies: PushRuntimeDependencies
@@ -924,8 +926,8 @@ async function runPushFlow(
 			decision.action
 		])
 	);
-	// A collected intermediate published nothing, so its negotiated action
-	// leaves the summary counts.
+	// A collected intermediate published nothing, so its negotiated action is
+	// dropped from the summary counts.
 	for (const path of collected) {
 		effectiveActions.delete(path.storePathHash);
 	}
@@ -1703,9 +1705,10 @@ async function recordRetention(
 		];
 	}
 
-	// Each pin is its own root request to the same tenant, so they are sent under
-	// the same bound as blob uploads; the expiry summary folds them
-	// order-independently.
+	// Each pin is a separate root request, and the requests are independent, so
+	// they are sent concurrently under the same limit as blob uploads. The
+	// expiry summary sorts the results, so the order they arrive in does not
+	// affect it.
 	const summaries: RootSummary[] = [];
 
 	await mapWithConcurrency(
@@ -1884,10 +1887,11 @@ async function awaitDeferredVerdict(
 	}
 }
 
-// Re-drives a path whose commit slot was reaped from wherever its fresh decision
-// puts it: a reuse commits straight away; a fresh upload re-streams the NAR
-// before committing; a path the store now already holds needs nothing. The
-// reaped row took its staged bytes with it, so a fresh upload must re-send them.
+// Re-drives a path whose commit slot was reaped, following whatever its fresh
+// negotiation decides: a reuse commits straight away; a fresh upload re-streams
+// the NAR before committing; a path the destination now already holds needs
+// nothing. The reaped row took its staged bytes with it, so a fresh upload
+// must re-send them.
 async function redriveExpiredCommit(
 	decision: UploadDecisionOf<'upload' | 'commit'>,
 	context: CommitContext

@@ -76,9 +76,10 @@ export function pushClientFor(
 	);
 
 	// One credential for the whole push, renewed as it nears expiry. It carries
-	// the signed push id every negotiate names and scopes the uploader to the
-	// push's staging prefix; a renewal re-issues against the same id, so a push
-	// longer than a single credential's life keeps streaming under that prefix.
+	// the signed push id that every negotiate request includes, and scopes the
+	// uploader to the push's staging prefix; a renewal re-issues against the
+	// same id, so a push longer than a single credential's life keeps streaming
+	// under that prefix.
 	const session = credentialSession((pushId) =>
 		rpc.uploads.credential({ cacheName, pushId })
 	);

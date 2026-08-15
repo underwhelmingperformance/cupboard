@@ -56,8 +56,8 @@ function environmentBases(
 /**
  * Where one invocation's own directory lives when it hosts no hook endpoint:
  * the first preferred base's `cupboard/<invocation id>`, or the operating
- * system's temporary directory. A run with no socket to listen on has no path
- * length to satisfy, so every base fits.
+ * system's temporary directory. A run with no socket to listen on is not bound
+ * by the `sun_path` limit, so the first base is always used.
  */
 export function planInvocationDirectory(
 	options: InvocationRuntimeOptions

@@ -542,11 +542,12 @@ function targetOutcome(
 		: { outcome: 'destination-served', storePath: first };
 }
 
-// Whether a target's answer is settled, the bar a declared root must clear for
-// every one of its targets before it is replaced. A classified target was
-// answered at plan time, left-upstream included: the destination deliberately
-// does not serve it, and that is an answer, so it clears the bar without
-// joining the root's contents.
+// Whether a target is confirmed: every target of a declared root must be
+// confirmed before the root is replaced. A target the planner classified as
+// anything other than `publish` was decided before the build, so it counts as
+// confirmed without this run publishing anything for it. That includes a
+// left-upstream target, which the destination deliberately does not serve and
+// which contributes nothing to the root's contents.
 function isConfirmed(
 	resolved: ResolvedTarget,
 	ledger: PublicationLedger
@@ -562,7 +563,7 @@ function isConfirmed(
 	return resolved.resolution.paths.every((path) => ledger.servable.has(path));
 }
 
-// The paths a target answers for, whoever ends up serving them.
+// The paths a target resolves to, whichever cache ends up serving them.
 function answeredPathsOf(resolved: ResolvedTarget): readonly StorePathString[] {
 	if (resolved.resolution.kind === 'resolved') {
 		return resolved.resolution.paths;

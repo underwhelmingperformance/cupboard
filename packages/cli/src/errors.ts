@@ -12,8 +12,9 @@ export const authExitCode = 77;
 export const transientExitCode = 75;
 export const unavailableExitCode = 69;
 // A publication failure with no more specific category: a transfer that did
-// not complete. Only build-push uses it, so retry systems branching on its
-// numeric contract never see a bare 1 for a lost upload.
+// not complete. Only build-push returns it. Using this code instead of the
+// generic 1 lets a caller that retries on the exit code tell a lost upload from
+// any other failure.
 export const publicationExitCode = 74;
 
 export abstract class CliError extends CodedError {}
@@ -69,8 +70,9 @@ export class InvalidAudienceError extends CliUsageError {
 	}
 }
 
-// A Basic credential is `user:password` split on its first colon, so a read user
-// carrying one could never be read back from the header a reader presents.
+// A Basic credential is `user:password`, split on the first colon. A read user
+// containing a colon could therefore not be recovered from the Authorization
+// header a reader sends.
 export class InvalidReadUserError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(
@@ -86,7 +88,7 @@ export class InvalidStoreUriError extends CliUsageError {
 		options?: { readonly cause: unknown }
 	) {
 		super(
-			`Invalid --store (expected an ssh-ng:// URI naming a destination): ${value}`,
+			`Invalid --store (expected an ssh-ng:// URI with an SSH destination): ${value}`,
 			options
 		);
 		this.name = 'InvalidStoreUriError';
@@ -183,9 +185,10 @@ export class InvalidWorkerUrlError extends CliUsageError {
 }
 
 /**
- * A Worker URL carrying credentials, a query or a fragment. Every route
- * resolves under the base's origin and path, so honouring such a URL would
- * corrupt or missend the requests built on it.
+ * A Worker URL that includes credentials, a query string or a fragment. Each
+ * route is resolved against the base URL's origin and path, so credentials, a
+ * query string or a fragment would either be dropped or appear in the wrong
+ * place in every request built from that URL.
  */
 export class InvalidWorkerUrlBaseError extends CliUsageError {
 	constructor() {
@@ -270,8 +273,8 @@ export class CupboardHttpError extends CliError {
 		public readonly path: string,
 		public readonly status: number,
 		public readonly body: string,
-		// Cloudflare's per-request ray id from the response, when present: the
-		// handle that ties a client-side failure to its server log line.
+		// Cloudflare's per-request ray id from the response, when present. It
+		// identifies the matching server-side log entry.
 		public readonly ray?: string
 	) {
 		const rayNote = ray === undefined ? '' : ` (Cloudflare ray ${ray})`;
@@ -428,9 +431,10 @@ export class PathsNotConfirmedError extends CliError {
 }
 
 /**
- * A confirm closure larger than one request splits into sequential batches,
- * and a later request failed. Successful batches have already extended their
- * deadlines on the server. The counts show how many batches completed.
+ * A confirm closure larger than one request is split into sequential batches,
+ * and a later request failed. Each batch that succeeded has already extended
+ * the retention deadlines of its paths on the server. The counts show how many
+ * batches completed.
  */
 export class ConfirmIncompleteError extends CliError {
 	constructor(
@@ -533,7 +537,7 @@ export class UnexpectedAttestationDecisionError extends CliError {
 export type AttestationNegotiationMismatch =
 	'missing' | 'duplicate' | 'unexpected';
 
-/** An attestation negotiate response that is not an exact answer to its request. */
+/** An attestation negotiate response that does not match its request. */
 export class AttestationNegotiationMismatchError extends CliError {
 	constructor(
 		public readonly mismatch: AttestationNegotiationMismatch,
@@ -547,7 +551,10 @@ export class AttestationNegotiationMismatchError extends CliError {
 	}
 }
 
-/** An attestation attach response that answers for another bundle identity. */
+/**
+ * An attestation attach response that reports a store path hash or bundle
+ * digest other than the one in the request.
+ */
 export class AttestationAttachResponseMismatchError extends CliError {
 	constructor(
 		public readonly expectedStorePathHash: string,
@@ -631,12 +638,12 @@ export class BuildStoreRequiresClaimableError extends CliUsageError {
 export class OidcRetentionChoiceRequiredError extends CliUsageError {
 	constructor() {
 		super(
-			'A GitHub OIDC push must choose its retention. --root <name> keeps ' +
-				'the pushed paths under a named root this run owns: the choice for a ' +
-				"build's own outputs. --no-retain publishes them unretained, kept " +
-				"only by the destination cache's retention grace policy: the choice " +
-				'for grace-mode intermediates that later jobs substitute and root ' +
-				'themselves.'
+			'A GitHub OIDC push must choose its retention. Use --root <name> ' +
+				'to keep the pushed paths under a named root that this run owns; ' +
+				"choose this for a build's own outputs. Use --no-retain to publish " +
+				"them unretained, kept only by the destination cache's retention " +
+				'grace policy; choose this for intermediates that a later job will ' +
+				'substitute and root itself.'
 		);
 		this.name = 'OidcRetentionChoiceRequiredError';
 	}
@@ -732,9 +739,9 @@ export class GithubSetupDriftError extends CliError {
 	constructor(public readonly steps: readonly string[]) {
 		super(
 			`Stored tenant state differs from what github setup would write: ${steps.join(', ')}. ` +
-				'Each drift row above names the diverging fields; setup never replaces ' +
-				'stored state, so resolve each (for a trust rule, remove it with ' +
-				'`cupboard oidc-trust remove`) and re-run setup to converge.'
+				'Each drift row above lists the diverging fields. Setup never replaces ' +
+				'stored state, so resolve each drift row (for a trust rule, remove ' +
+				'it with `cupboard oidc-trust remove`) and re-run setup.'
 		);
 		this.name = 'GithubSetupDriftError';
 	}
@@ -756,7 +763,10 @@ export class GraceTooShortError extends CliUsageError {
 	}
 }
 
-/** Reference paths and their source travel together. */
+/**
+ * Neither `--reference-paths-file` nor `--reference-source` is meaningful on
+ * its own.
+ */
 export class ReferenceSourcePairError extends CliUsageError {
 	constructor() {
 		super(
@@ -767,9 +777,9 @@ export class ReferenceSourcePairError extends CliUsageError {
 }
 
 /**
- * The destination demanded an upload for a path published by reference. A
- * reference entry never reads a NAR, so the demand cannot be met; the tenant
- * was expected to hold the blob already.
+ * The destination demanded an upload for a path published by reference.
+ * Publication by reference never reads the NAR from a local store, so there are
+ * no bytes to send. The tenant was expected to hold the blob already.
  */
 export class ReferenceUploadRequiredError extends CliError {
 	constructor(public readonly storePath: string) {
@@ -820,10 +830,10 @@ export class NarInfoUnparsableError extends CliError {
 }
 
 /**
- * A `job_workflow_ref` claim without an `@<ref>` becomes a pattern matching
- * the workflow file at every ref, so edited workflow code would inherit the
- * publishing authority the rule grants; the github commands require the
- * exact claim spelling.
+ * A `job_workflow_ref` claim without an `@<ref>` becomes a pattern that matches
+ * the workflow file at every ref, so an edit to the workflow would gain the
+ * publishing authority granted by the rule. The github commands therefore
+ * require the exact claim, including its ref.
  */
 export class WorkflowReferenceUnpinnedError extends CliUsageError {
 	constructor(public readonly reference: string) {
@@ -844,9 +854,9 @@ export class WorkflowReferenceMalformedError extends CliUsageError {
 }
 
 /**
- * A mutable ref follows whatever it later names, so a trust rule pinning one
- * trusts future edits to the workflow; the github commands accept only an
- * immutable pin.
+ * A mutable ref moves to whichever commit it later points at, so a trust rule
+ * that pins a mutable ref also trusts every future edit to the workflow. The
+ * github commands accept only an immutable pin.
  */
 export class WorkflowReferenceMutableError extends CliUsageError {
 	constructor(
@@ -863,8 +873,8 @@ export class WorkflowReferenceMutableError extends CliUsageError {
 /**
  * A `*` wildcard is only meaningful in the tag part of a reference, as
  * `refs/tags/<glob>` with literal tag characters and single `*` wildcards.
- * Anywhere else there is no ref it could match, so it is refused rather than
- * stored as a rule no token satisfies.
+ * Anywhere else the wildcard cannot match any ref, so the reference is refused
+ * rather than stored as a rule that no token can satisfy.
  */
 export class WorkflowReferenceTagPatternError extends CliUsageError {
 	constructor(
@@ -949,8 +959,8 @@ export class GithubCheckFailedError extends CliError {
 
 /**
  * Some invariants could not be verified in this environment (no `gh`, no
- * evaluated manifest). Nothing failed, but a green run was not proven either,
- * so the exit is EX_UNAVAILABLE rather than success.
+ * evaluated manifest). No check failed, but the configuration was not proven
+ * correct either, so the exit code is EX_UNAVAILABLE and not success.
  */
 export class GithubCheckIncompleteError extends CliError {
 	constructor(public readonly checks: readonly string[]) {
@@ -1007,9 +1017,10 @@ export class BuildEventTooLargeError extends BuildEventRejectedError {
 }
 
 /**
- * Streaming publication needs the daemon: temporary roots exist only behind
- * it, and the daemonless local backend has no connection to hold one on. The
- * socket path names where a daemon was looked for.
+ * Streaming publication needs the Nix daemon: a temporary root exists only for
+ * the lifetime of a daemon connection, and the daemonless local backend has no
+ * connection to hold one on. `socketPath` is the path that was checked for a
+ * daemon socket.
  */
 export class DaemonRequiredError extends CliError {
 	constructor(public readonly socketPath: string) {
@@ -1028,8 +1039,8 @@ export class DaemonRequiredError extends CliError {
 /**
  * The daemon does not trust this client, so it would silently ignore the
  * invocation's `post-build-hook` override and the build would stream nothing.
- * Refused before the expensive build starts; `requiredSetting` names the
- * daemon setting that admits the user.
+ * Refused before the expensive build starts; `requiredSetting` is the daemon
+ * setting that must list the user.
  */
 export class UntrustedDaemonError extends CliError {
 	public readonly requiredSetting = 'trusted-users';
@@ -1065,8 +1076,9 @@ export class PostBuildHookConflictError extends CliError {
 
 /**
  * The token's granted authorization_details do not cover an operation this
- * run needs on a root, so a later phase would fail after the expensive build;
- * refused up front, naming the missing authority.
+ * run needs on a root, so a later step would fail after the expensive build.
+ * The run is refused before the build starts, and the error states which
+ * operation and root are missing.
  */
 export class MissingGrantError extends CliError {
 	constructor(
@@ -1086,9 +1098,9 @@ export class MissingGrantError extends CliError {
 }
 
 /**
- * This installation carries no compiled hook helper at any expected location,
- * so streaming publication cannot start. The candidates name every location
- * that was checked.
+ * This installation has no compiled hook helper at any expected location, so
+ * streaming publication cannot start. `candidates` lists every location that
+ * was checked.
  */
 export class HookHelperMissingError extends CliError {
 	constructor(public readonly candidates: readonly string[]) {
@@ -1208,9 +1220,9 @@ export class BuildPublicationFailedError extends CliError {
 }
 
 /**
- * The sysexits category a set of publication failures maps to:
- * authentication first, then transient, then unavailable, and the
- * publication code for anything not otherwise classified.
+ * Chooses the sysexits category for a set of publication failures:
+ * authentication first, then transient, then unavailable, and the publication
+ * code for anything not otherwise classified.
  */
 export function publicationFailureExitCode(causes: readonly unknown[]): number {
 	const codes = new Set(

@@ -109,7 +109,9 @@ export function registerAttestCommands(
 ): void {
 	const attest = program
 		.command('attest')
-		.description('Work with filed Sigstore attestation bundles.');
+		.description(
+			'Work with the Sigstore attestation bundles attached to store paths.'
+		);
 
 	attest
 		.command('attach')
@@ -132,7 +134,7 @@ export function registerAttestCommands(
 		.option('--read-password <password>', 'private-read password')
 		.option(
 			'--attestation <bundle>',
-			'Sigstore DSSE bundle whose in-toto subject matches a named path',
+			'Sigstore DSSE bundle whose in-toto subject matches one of the given store paths',
 			collect,
 			[]
 		)
@@ -200,7 +202,7 @@ export function registerAttestCommands(
 	attest
 		.command('verify')
 		.description(
-			'Verify filed Sigstore DSSE attestations against a Sigstore trust root and threshold policy.'
+			'Verify attached Sigstore DSSE attestations against a Sigstore trust root and threshold policy.'
 		)
 		.argument('[bundles...]', 'local Sigstore bundle files')
 		.option('--nar-hash <hash>', 'expected NAR hash for local bundle mode')

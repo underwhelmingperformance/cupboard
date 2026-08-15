@@ -20,9 +20,9 @@ interface DeleteOptions {
 }
 
 /**
- * The slice of the derived client the delete command consumes, in the
- * contract's input and output shapes; the real `tenantRpc(...).paths`
- * satisfies it by construction.
+ * The part of the derived client that the delete command uses, in the
+ * contract's input and output shapes. The real `tenantRpc(...).paths`
+ * satisfies this interface by construction.
  */
 export interface DeleteClient {
 	remove(input: {

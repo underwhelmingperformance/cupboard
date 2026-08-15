@@ -34,8 +34,9 @@ export function exactUploadDecisions<
 
 	for (const decision of decisions) {
 		// A skip reports the NAR hash the destination already serves. It may differ
-		// from the requested hash, which is the divergent-skip fact callers warn
-		// about; the store-path hash still identifies the request it answers.
+		// from the requested one, which is the divergent skip that callers warn
+		// about; the store-path hash still identifies the request the decision
+		// answers.
 		const requestedIdentity =
 			requestedByKey.get(identityKey(decision)) ??
 			(decision.action === 'skip'

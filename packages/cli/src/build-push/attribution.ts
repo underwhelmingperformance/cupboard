@@ -109,12 +109,12 @@ interface FirstBuild {
 }
 
 /**
- * The receipt subjects a run's attribution yields: one per final path whose
- * deriver some attempt built, carrying the earliest attempt that produced it,
- * the store the run realised it in, and whether Nix built it here or a
- * builder built it for this run. A
- * path that was already valid before the run, or whose deriver no attempt
- * touched, is not this run's subject.
+ * The receipt subjects for a run's attribution: one per final path whose
+ * deriver some attempt built. Each subject carries the earliest attempt that
+ * produced the path, the store the run realised it in, and whether Nix built
+ * the path on this machine or a builder built it for this run. A path that was
+ * already valid before the run, or whose deriver no attempt touched, is not
+ * this run's subject.
  */
 export function receiptSubjects(
 	attempts: readonly BuildAttempt[],

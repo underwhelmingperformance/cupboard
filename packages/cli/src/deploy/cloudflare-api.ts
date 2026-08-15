@@ -523,7 +523,7 @@ export function createCloudflareApi(
 
 			if (existing.consumer_id === undefined) {
 				// A matched consumer that cannot be addressed cannot be updated;
-				// leaving it is the only convergent move.
+				// leaving it unchanged is the only thing this deploy can do.
 				return;
 			}
 

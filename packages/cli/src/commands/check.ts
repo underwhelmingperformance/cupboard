@@ -16,9 +16,9 @@ interface CheckOptions {
 }
 
 /**
- * The slice of the derived client the check command consumes, in the
- * contract's input and output shapes; the real `tenantRpc(...).check`
- * satisfies it by construction.
+ * The part of the derived client that the check command uses, in the
+ * contract's input and output shapes. The real `tenantRpc(...).check`
+ * satisfies this interface by construction.
  */
 export interface CheckClient {
 	run(input: { deep: boolean }): Promise<ParsedCheckReport>;

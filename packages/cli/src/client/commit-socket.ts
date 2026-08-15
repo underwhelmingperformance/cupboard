@@ -74,9 +74,10 @@ export type CommitSocketConnect = (
 
 /**
  * A path to commit over the session, with the identity from negotiation.
- * `retention`, true only when this upload negotiated a retention plan, lets a
- * reconnect that resolves a gone row by identity ask the server for the
- * path's durable grace fact instead of none.
+ * `retention`, true only when this upload negotiated a retention plan, is set
+ * on the entries this session sends. A server that has already cleared the row
+ * resolves it by identity on a reconnect and answers with the path's durable
+ * grace fact, rather than a frame carrying no grace fact at all.
  */
 export interface CommitSessionTarget {
 	readonly uploadId: UploadId;
@@ -760,7 +761,8 @@ export function runCommitSession(
 
 			case 'unsupported': {
 				// The session only sends ops the server advertised, so a rejection
-				// names a broken server; the whole session rode on that op landing.
+				// means the server is broken; every outstanding commit depended on
+				// that op being accepted.
 				failSession(
 					new CommitSocketProtocolError(
 						options.path,

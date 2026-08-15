@@ -78,9 +78,9 @@ export interface GithubSetupOptions {
 }
 
 /**
- * The slice of the derived client github setup consumes, in the contract's
- * input and output shapes; the real `tenantRpc(...)` sub-clients satisfy it
- * by construction.
+ * The part of the derived client that github setup uses, in the contract's
+ * input and output shapes. The real `tenantRpc(...)` sub-clients satisfy this
+ * interface by construction.
  */
 export interface GithubSetupClient {
 	readonly policies: Pick<PolicyClient, 'graceList' | 'graceAdd'>;
@@ -124,10 +124,10 @@ interface CacheInfoFetcherDependencies {
 const cacheInfoTimeoutMs = 30_000;
 
 /**
- * A `nix-cache-info` fetcher for the given read credential: a private
- * tenant's read routes answer 401 without one, so setup and check thread the
- * same Basic credential a reader would use. Supplying only half the pair is
- * refused before any request.
+ * A `nix-cache-info` fetcher that uses the given read credential. A private
+ * tenant's read routes answer 401 without a credential, so setup and check send
+ * the same Basic credential a reader would use. Supplying only one half of the
+ * pair is refused before any request.
  */
 export function cacheInfoFetcher(
 	options: ReadCredentialOptions,

@@ -66,10 +66,8 @@ function requireGrant(
  * to hold temporary roots, a daemon that trusts this client (an untrusted
  * client's `post-build-hook` override is silently ignored), no operator hook
  * to collide with, a compiled helper in this installation, a socket path that
- * fits `sun_path`, the root authority the run's later phases need, and a
- * declared target set this machine could rebuild itself when the run verifies
- * its rebuilds. Each refusal is a typed error; success returns the proven
- * endpoints.
+ * fits `sun_path`, and the root grants the run's later steps need. Each refusal
+ * is a typed error; success returns the proven endpoints.
  */
 export async function preflightBuildPush(
 	options: BuildPushPreflightOptions

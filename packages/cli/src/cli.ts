@@ -77,8 +77,8 @@ function parseOutputMode(value: string): ReporterMode {
 	return parsed.data;
 }
 
-// The LogTape sink diagnostics flow through for a run: clack narration in
-// terminal mode (sharing the UI's colour setting) or line-delimited JSON on
+// The LogTape sink that a run's diagnostics flow through: clack narration in
+// terminal mode (sharing the UI's colour setting), or line-delimited JSON on
 // stderr in machine mode, so structured logs never contaminate stdout.
 function loggingSink(mode: ReporterMode, colour: boolean | undefined): Sink {
 	if (mode === 'terminal') {
@@ -89,9 +89,9 @@ function loggingSink(mode: ReporterMode, colour: boolean | undefined): Sink {
 }
 
 // The command-scoped logger for the run in progress, set once the invoked
-// subcommand is known (the `preAction` hook). Held on an object so the hook
-// updates a field on it; before a command begins, callers fall back to the bare
-// root logger.
+// subcommand is known (the `preAction` hook). It is held on an object so the
+// hook can replace the field; before a command begins, callers fall back to the
+// bare root logger.
 const commandLoggerState: { logger?: Logger } = {};
 
 /**
@@ -143,9 +143,10 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 				// The top-level funnel reports the failure; commander stays silent.
 			}
 		})
-		// The one place a run's output mode and colour are settled: the global flags
-		// have parsed and the invoked subcommand is known, so configure logging once
-		// (idempotent) and scope the root logger to the command for its handler.
+		// Both the global flags and the invoked subcommand are known here, so this
+		// is where a run's output mode and colour are decided: configure logging
+		// once (the call is idempotent) and tag the root logger with the command
+		// name for its handler.
 		.hook('preAction', (_thisCommand, actionCommand) => {
 			const mode = reporterModeFromGlobals(command);
 
@@ -266,8 +267,8 @@ export function cliExitCode(error: unknown, abortExitCode: number): number {
 /**
  * Reports a top-level failure through the reporter: one `{event:'error'}` in JSON
  * mode, one red marker line in terminal mode. An abort (Ctrl-C) is a
- * cancellation, not a failure, so it reports nothing and the exit code carries
- * it.
+ * cancellation, not a failure, so nothing is reported and only the exit code
+ * signals it.
  */
 export function reportCliFailure(reporter: Reporter, error: unknown): void {
 	if (isAbortError(error)) {

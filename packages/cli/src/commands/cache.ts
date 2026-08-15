@@ -35,9 +35,9 @@ interface CacheRemoveOptions {
 }
 
 /**
- * The slice of the derived client the cache commands consume, in the
- * contract's input and output shapes; the real `tenantRpc(...).caches`
- * satisfies it by construction.
+ * The part of the derived client that the cache commands use, in the
+ * contract's input and output shapes. The real `tenantRpc(...).caches`
+ * satisfies this interface by construction.
  */
 export interface CacheClient {
 	list(): Promise<ParsedCacheListResponse>;

@@ -107,10 +107,10 @@ function assertNarMetadata(info: NixValidPathInfo, digest: NarDigest): void {
  * then validity, then read, Nix's documented ordering), resolves metadata over
  * that session, then negotiates, uploads and commits through the ordinary push
  * client, with the session closing as the batch's reads complete. The
- * session-wide dedup records outcomes, never enqueuings: a path whose
- * publication fails returns to the candidate set for the next flush or for
- * final reconciliation, and a path that vanished from the local store is a
- * typed `collected` outcome, never a batch failure.
+ * session-wide deduplication records terminal outcomes, not the fact that a
+ * path was enqueued: a path whose publication fails returns to the candidate
+ * set for the next flush or for final reconciliation, and a path that vanished
+ * from the local store is a typed `collected` outcome, never a batch failure.
  */
 export class BuildOutputBatcher {
 	private readonly waiting = new Set<StorePathString>();

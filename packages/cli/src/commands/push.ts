@@ -76,11 +76,12 @@ interface PushOptions {
 }
 
 /**
- * The retention plan a push must resolve before authenticating: `--no-retain`
- * clashes with either `--root` or `--ttl`, and a mutating GitHub OIDC push must
- * commit to a named root or explicit unretained publication before requesting a
- * token, so a CI run never authenticates for a plan it cannot express. A dry run
- * publishes nothing, so it is exempt from the OIDC choice.
+ * Checks the retention options before a push authenticates. `--no-retain`
+ * conflicts with `--root` and with `--ttl`. A mutating GitHub OIDC push must
+ * choose either a named root or explicit unretained publication before it
+ * requests a token, so a CI run never obtains a token for a retention plan it
+ * cannot carry out. A dry run publishes nothing, so it does not need that
+ * choice.
  */
 export function validateRetentionChoice(
 	options: Pick<
@@ -102,9 +103,9 @@ export function validateRetentionChoice(
 		throw new NoRetainConflictError('--ttl');
 	}
 
-	// The run root is independent of the target-root choice: an unretained
-	// push may still bind one, its commits joining the run root while the
-	// push declares no target root. Only a TTL with no run root to carry it
+	// The run root is independent of the target root: an unretained push may
+	// still bind a run root, and its commits join that root while the push
+	// declares no target root. Only a `--run-root-ttl` with no `--run-root`
 	// is refused.
 	if (options.runRootTtl !== undefined && options.runRoot === undefined) {
 		throw new RunRootTtlWithoutRunRootError();
@@ -121,16 +122,17 @@ export function validateRetentionChoice(
 }
 
 /**
- * The build store a push records a receipt against, or nothing when the push
- * writes no receipt. A receipt attributes every subject to the store the run
- * selected, so a push reading the store Nix itself would use has no selection
- * to record and is refused. Naming a build store also commits the caller to
- * stating what it already held, `--already-held` zero or more times or
- * `--no-already-held` for none. It must separately name the paths for which it
- * has current-invocation realisation evidence, `--claimable` zero or more
- * times or `--no-claimable` for none. The two explicit sets keep a receipt
- * from claiming either an earlier output or one that appeared after planning
- * but before the build asked for it.
+ * Returns the build store a push records a receipt against, or `undefined`
+ * when the push writes no receipt. A receipt attributes every subject to the
+ * store the run selected, so a push that reads the store Nix itself would use
+ * has no explicit selection to record and is refused.
+ *
+ * Selecting a build store also requires the caller to state which paths that
+ * store already held, with `--already-held` zero or more times or
+ * `--no-already-held` for none, and which paths this invocation observed being
+ * realised, with `--claimable` zero or more times or `--no-claimable` for none.
+ * Those two explicit sets stop a receipt claiming an output that existed
+ * before the run, or one that appeared between planning and the build.
  */
 export function receiptBuildStore(
 	options: Pick<
@@ -158,9 +160,10 @@ export function receiptBuildStore(
 }
 
 /**
- * The authority a push's token exchange requests. A CI exchange must name
- * what it wants; a dry run publishes nothing, so it requests only the
- * read-only preview operation, never a push's full upload grant.
+ * The authority requested by a push's token exchange. A CI exchange must
+ * request its authorization_details explicitly. A dry run publishes nothing, so
+ * it requests only the read-only preview operation and never a push's full
+ * upload grant.
  */
 export function pushCommandAuthorizationDetails(
 	options: Pick<PushOptions, 'dryRun' | 'attest' | 'root' | 'runRoot'>,
@@ -187,8 +190,8 @@ function collect(
 
 /**
  * Splits a newline-delimited path file into its lines: each is trimmed and
- * blank lines are dropped. The file is transport only; the publication
- * collection validates every line as a store path.
+ * blank lines are dropped. {@link PublicationCollection} validates every line
+ * as a store path.
  */
 export function parsePathFile(contents: string): string[] {
 	return contents
@@ -198,13 +201,12 @@ export function parsePathFile(contents: string): string[] {
 }
 
 /**
- * Resolves one CLI-supplied path to the store path it names, the way
- * `nix path-info` does: a store path passes through untouched, and anything
- * else resolves through the filesystem, with a `result` symlink and a file
- * inside a store path both landing on the containing store path. The command
- * layer parses; the domain gets store paths, so a location that still is not
- * one is returned as resolved and refused by the publication collection's
- * typed error.
+ * Resolves one path given on the command line to a store path, the way
+ * `nix path-info` does. A store path is returned unchanged. Anything else is
+ * resolved through the filesystem, so both a `result` symlink and a file inside
+ * a store path resolve to the store path that contains them. A location that
+ * still does not parse as a store path is returned as resolved, and
+ * {@link PublicationCollection} refuses it with a typed error.
  */
 export function resolvePushPath(
 	path: string,
@@ -275,7 +277,7 @@ export function registerPushCommand(
 		)
 		.option(
 			'--root <name>',
-			'retain the pushed paths under this named channel (e.g. github:owner/repo/main)',
+			'retain the pushed paths under this named retention root (e.g. github:owner/repo/main)',
 			parseRootName
 		)
 		.option(
@@ -285,7 +287,7 @@ export function registerPushCommand(
 		)
 		.option(
 			'--no-retain',
-			"publish without any retention root or pin; kept only by the cache's retention grace policy, if one matches"
+			"publish without any retention root or per-path pin; the paths are kept only by the destination cache's retention grace policy, if one covers that cache"
 		)
 		.option(
 			'--closure',
@@ -331,7 +333,7 @@ export function registerPushCommand(
 		)
 		.option(
 			'--receipt-file <path>',
-			'write a build receipt (JSON) for the published paths to this file, attributing each subject to the store --store names'
+			'write a build receipt (JSON) for the published paths to this file, attributing each subject to the store given by --store'
 		)
 		.option(
 			'--already-held <path>',
@@ -353,7 +355,7 @@ export function registerPushCommand(
 		)
 		.option(
 			'--attestation <bundle>',
-			'file a Sigstore DSSE bundle whose in-toto subject matches a pushed path',
+			'path to a Sigstore DSSE bundle whose in-toto subject matches a pushed path',
 			collect,
 			[]
 		)
@@ -428,11 +430,10 @@ export function registerPushCommand(
 				throw new ReferenceSourcePairError();
 			}
 
-			// The files are transport; the collection is the type. An argument or
-			// file line may name a store path through a symlink, so each resolves
-			// through the filesystem first; entries are store paths at the domain
-			// boundary, so a location that still is not one fails here, before any
-			// token is requested.
+			// A path argument or a line in a path file may refer to a store path
+			// through a symlink, so each is resolved through the filesystem first.
+			// `PublicationCollection` accepts only store paths, so anything that
+			// does not resolve to one fails here, before any token is requested.
 			const intermediatePaths =
 				options.intermediatePathsFile === undefined
 					? undefined
