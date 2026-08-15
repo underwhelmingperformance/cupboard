@@ -256,20 +256,14 @@ export async function attestAttachAction(
 	const checksums = parseChecksums(
 		await readFile(inputs.checksumsFile, 'utf8')
 	);
-	const eligibleSubjects =
-		receipt.version === 3
-			? receipt.subjects.filter(
-					(subject) => subject.verification !== 'unverified'
-				)
-			: receipt.subjects;
-	const mismatched = eligibleSubjects
+	const mismatched = receipt.subjects
 		.filter(
 			(subject) =>
 				checksums.get(path.basename(subject.storePath)) !== subject.narHash
 		)
 		.map((subject) => subject.storePath);
 	const eligibleNames = new Set(
-		eligibleSubjects.map((subject) => path.basename(subject.storePath))
+		receipt.subjects.map((subject) => path.basename(subject.storePath))
 	);
 	const unexpectedNames = checksums
 		.keys()
@@ -280,7 +274,7 @@ export async function attestAttachAction(
 		throw new AttestationChecksumsMismatchError(mismatched, unexpectedNames);
 	}
 
-	const subjectPaths = eligibleSubjects.map((subject) => subject.storePath);
+	const subjectPaths = receipt.subjects.map((subject) => subject.storePath);
 
 	if (subjectPaths.length === 0) {
 		reporter.warn(

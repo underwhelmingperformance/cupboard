@@ -256,7 +256,6 @@ interface ConstructedFlowConfig {
 	readonly requireProvenance?: boolean;
 	/** Simulates a helper delivery failure after Nix completed the build. */
 	readonly suppressEvent?: boolean;
-	readonly verifyRebuilds?: boolean;
 	/** The machine the stub's activity log attributes; empty is local. */
 	readonly machine?: string;
 }
@@ -292,7 +291,6 @@ interface FlowRun extends RecordedRun {
 	readonly receiptFile: string;
 	readonly sleeps: readonly number[];
 	readonly attemptIdsIssued: number;
-	readonly verifications: readonly ChildCommand[];
 	readonly negotiatedPaths: readonly (readonly StorePathString[])[];
 	readonly rootSets: readonly string[];
 	readonly settledTargets: readonly StorePathString[];
@@ -416,7 +414,6 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		storeCalls: []
 	};
 	const sleeps: number[] = [];
-	const verifications: ChildCommand[] = [];
 	const negotiatedPaths: StorePathString[][] = [];
 	const rootSets: string[] = [];
 	let settledTargets: readonly StorePathString[] = [];
@@ -578,11 +575,6 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 				}
 			};
 		},
-		runChild: (options) => {
-			verifications.push(options.command);
-
-			return Promise.resolve({ status: 0, signal: undefined });
-		},
 		settledTargets: (targets) => {
 			settledTargets = targets;
 		}
@@ -611,9 +603,6 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 						...(config.constructed.rebuild === true && { rebuild: true }),
 						...(config.constructed.requireProvenance === true && {
 							requireProvenance: true
-						}),
-						...(config.constructed.verifyRebuilds === true && {
-							verifyRebuilds: true
 						})
 					}
 				};
@@ -636,7 +625,6 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		receiptFile,
 		sleeps,
 		attemptIdsIssued,
-		verifications,
 		negotiatedPaths,
 		rootSets,
 		settledTargets
@@ -859,12 +847,13 @@ describe('runBuildPush', () => {
 		};
 	}
 
-	function subjectClaimed(verification: string): unknown {
+	function subjectClaimed(verification: string, machine?: string): unknown {
 		return {
 			storePath: pathA,
 			narHash: narHash.digestHex(),
 			derivation: drvA,
 			buildStore: 'auto',
+			...(machine !== undefined && { machine }),
 			verification
 		};
 	}
@@ -880,21 +869,21 @@ describe('runBuildPush', () => {
 			verification: 'build-store'
 		},
 		{
-			name: 'an output a builder realised and a local rebuild reproduced',
+			name: 'an output that a remote builder produced for this run',
 			config: {
 				constructed: {
 					succeedOn: 1,
 					installables: [`${drvA}^*`],
-					verifyRebuilds: true,
 					machine: 'ssh://builder-1'
 				},
 				declaredOutputs: [pathA]
 			},
-			verification: 'verified-rebuild'
+			verification: 'build-store',
+			machine: 'ssh://builder-1'
 		}
 	])('claims $name against the store the run built in', async (row) => {
 		await expect(reconciledReceipt(row.config)).resolves.toStrictEqual(
-			receiptOver([subjectClaimed(row.verification)])
+			receiptOver([subjectClaimed(row.verification, row.machine)])
 		);
 	});
 
@@ -918,17 +907,6 @@ describe('runBuildPush', () => {
 		{
 			name: 'a path no question before the build covered',
 			config: { constructed: { succeedOn: 1 }, ultimatePaths: [pathA] }
-		},
-		{
-			name: 'an output a builder realised that no rebuild reproduced',
-			config: {
-				constructed: {
-					succeedOn: 1,
-					installables: [`${drvA}^*`],
-					machine: 'ssh://builder-1'
-				},
-				declaredOutputs: [pathA]
-			}
 		}
 	])('publishes $name without claiming it', async (row) => {
 		await expect(reconciledReceipt(row.config)).resolves.toStrictEqual(
@@ -1023,14 +1001,15 @@ describe('runBuildPush', () => {
 		});
 	});
 
-	it('publishes failed-build survivors without verifying or claiming them', async () => {
+	// The build failed after the builder produced pathA, so the receipt
+	// records both the failure and the subject.
+	it('publishes failed-build survivors and still records their builder', async () => {
 		const run = await runFlow({
 			preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
 			constructed: {
 				succeedOn: 4,
 				attempts: 1,
 				installables: [`${drvA}^*`],
-				verifyRebuilds: true,
 				machine: 'ssh://builder-1'
 			},
 			declaredOutputs: [pathA, pathB],
@@ -1046,16 +1025,23 @@ describe('runBuildPush', () => {
 					? { name: run.error.name, exitCode: run.error.exitCode }
 					: run.error,
 			negotiatedPaths: run.negotiatedPaths,
-			verifications: run.verifications,
 			receipt
 		}).toStrictEqual({
 			error: { name: 'BuildCommandFailedError', exitCode: 1 },
 			negotiatedPaths: [[pathA]],
-			verifications: [],
 			receipt: {
 				version: 3,
 				paths: [pathA],
-				subjects: [],
+				subjects: [
+					{
+						storePath: pathA,
+						narHash: narHash.digestHex(),
+						derivation: drvA,
+						buildStore: 'auto',
+						machine: 'ssh://builder-1',
+						verification: 'build-store'
+					}
+				],
 				childExitStatus: 1,
 				terminalFailure: {
 					kind: 'target-build',
@@ -1220,13 +1206,11 @@ describe('runBuildPush', () => {
 		expect({
 			error: run.error,
 			sleeps: run.sleeps,
-			attemptIdsIssued: run.attemptIdsIssued,
-			verifications: run.verifications
+			attemptIdsIssued: run.attemptIdsIssued
 		}).toStrictEqual({
 			error: undefined,
 			sleeps: [],
-			attemptIdsIssued: 0,
-			verifications: []
+			attemptIdsIssued: 0
 		});
 	});
 
@@ -1244,12 +1228,10 @@ describe('runBuildPush', () => {
 		expect({
 			error: run.error,
 			sleeps: run.sleeps,
-			verifications: run.verifications,
 			receipt
 		}).toStrictEqual({
 			error: undefined,
 			sleeps: [15_000],
-			verifications: [],
 			receipt: {
 				version: 3,
 				paths: [pathA],
@@ -1381,11 +1363,10 @@ describe('runBuildPush', () => {
 		});
 	});
 
-	it('preserves first remote attribution when verification follows a retry', async () => {
+	it('keeps the first recorded builder across a retry', async () => {
 		const run = await runFlow({
 			constructed: {
 				succeedOn: 2,
-				verifyRebuilds: true,
 				machine: 'ssh://builder-1'
 			},
 			valid: [pathA]
@@ -1397,24 +1378,10 @@ describe('runBuildPush', () => {
 		expect({
 			error: run.error,
 			sleeps: run.sleeps,
-			verifications: run.verifications,
 			receipt
 		}).toStrictEqual({
 			error: undefined,
 			sleeps: [15_000],
-			verifications: [
-				[
-					'nix',
-					'build',
-					'--rebuild',
-					'--no-link',
-					'--builders',
-					'',
-					'--max-jobs',
-					'1',
-					`${drvA}^*`
-				]
-			],
 			receipt: {
 				version: 3,
 				paths: [pathA],
@@ -1427,7 +1394,7 @@ describe('runBuildPush', () => {
 						attemptId: 'attempt-1',
 						buildStore: 'auto',
 						machine: 'ssh://builder-1',
-						verification: 'verified-rebuild'
+						verification: 'build-store'
 					}
 				],
 				outcomes: [{ outcome: 'destination-served', storePath: pathA }],

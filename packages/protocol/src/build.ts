@@ -60,21 +60,17 @@ export type BuildStore = z.output<typeof buildStoreSchema>;
 /** The value recorded when Nix selects the store. */
 export const autoBuildStore = 'auto';
 
-// How the run verified a receipt subject.
+// Who produced the path a receipt subject records.
 //
-// `local` means the coordinator built it. `verified-rebuild` means a local
-// rebuild reproduced a remote result. `build-store` means the selected store
-// reported the path as ultimately trusted. The store gives the same status to
-// paths added directly, so verification depends on the operator's trust in that
-// store rather than observation of the build. `unverified` means no local
-// rebuild or trusted store verified the remote result, so it is not eligible
-// for attestation.
-export const subjectVerificationSchema = z.enum([
-	'local',
-	'verified-rebuild',
-	'build-store',
-	'unverified'
-]);
+// `local` means a supervised attempt built it on the coordinating machine
+// and the activity log recorded that build. `build-store` means the selected
+// store holds the path as its own work; the run did not watch that build, so
+// the store's report is the only evidence. When the activity log recorded a
+// builder for the deriver, the subject also records that builder in
+// `machine`. A subject records which producer the path came from and nothing
+// more. Deciding whether to trust that producer is left to whoever reads the
+// receipt.
+export const subjectVerificationSchema = z.enum(['local', 'build-store']);
 export type SubjectVerification = z.output<typeof subjectVerificationSchema>;
 
 // One receipt subject and its verification details. Supervised attempts include

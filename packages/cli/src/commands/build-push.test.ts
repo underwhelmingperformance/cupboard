@@ -356,7 +356,6 @@ describe('parseCohortsFile', () => {
 					attempts: 2,
 					rebuild: true,
 					requireProvenance: true,
-					verifyRebuilds: true,
 					keepGoing: true,
 					maxJobs: 4
 				},
@@ -373,7 +372,6 @@ describe('parseCohortsFile', () => {
 					attempts: 2,
 					rebuild: true,
 					requireProvenance: true,
-					verifyRebuilds: true,
 					keepGoing: true,
 					maxJobs: 4
 				}
