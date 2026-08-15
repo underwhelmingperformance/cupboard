@@ -592,13 +592,19 @@ export async function runPlanCohort(
 		kind: 'plan-cohort',
 		data: result,
 		rows: [
-			{ label: 'Attach only', value: String(partition.attachOnly.length) },
 			{
-				label: 'Publish by reference',
+				label: 'Already served by the cache',
+				value: String(partition.attachOnly.length)
+			},
+			{
+				label: 'Reused from the tenant',
 				value: String(partition.publishByReference.length)
 			},
-			{ label: 'Left upstream', value: String(partition.leftUpstream.length) },
-			{ label: 'Build set', value: String(partition.buildSet.length) },
+			{
+				label: 'Left to upstream caches',
+				value: String(partition.leftUpstream.length)
+			},
+			{ label: 'To build', value: String(partition.buildSet.length) },
 			// Every availability answer above was given without these, so a
 			// reader can tell "nobody holds this" from "we never asked
 			// everybody".

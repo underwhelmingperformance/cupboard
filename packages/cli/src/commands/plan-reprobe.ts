@@ -122,7 +122,7 @@ export async function runPlanReprobe(
 		data: reprobe,
 		rows: [
 			{ label: 'Withdrawn', value: String(reprobe.withdrawn.length) },
-			{ label: 'Build set', value: String(reprobe.buildSet.length) }
+			{ label: 'To build', value: String(reprobe.buildSet.length) }
 		]
 	});
 
