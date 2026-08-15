@@ -265,17 +265,20 @@ export function slugProblemText(value: string): string | undefined {
 }
 
 /**
- * Turns a deployed Worker into a usable cache, in two steps. First the
- * deployment must be up: its URL is resolved (the custom domain, or the
- * account's workers.dev subdomain with the script's route enabled) and the
- * unauthenticated `/_version` route polled until it answers with the version
- * just uploaded, since routing, DNS and the new Worker version all take time
- * to settle (an older version may still answer, with the old configuration).
- * Then it is initialised: the deployer claims global admin with their
- * id_token, the admin token is cached for the other commands, a slug is
- * chosen for the first cache (the create call is the arbiter of slug
- * ownership, so a conflict re-prompts), and the new cache's `/pubkey` is
- * polled, whose first success creates the signing key.
+ * Turns a deployed Worker into a usable cache, in two steps.
+ *
+ * First the deployment must be up: its URL is resolved (the custom domain, or
+ * the account's workers.dev subdomain with the script's route enabled) and the
+ * unauthenticated `/_version` route is polled until it answers with the version
+ * just uploaded, since routing, DNS and the new Worker version all take time to
+ * settle and an older version may answer in the meantime, with the old
+ * configuration.
+ *
+ * Then it is initialised: the deployer claims global admin with their id_token,
+ * the admin token is cached for the other commands, a slug is chosen for the
+ * first cache (the create call is the arbiter of slug ownership, so a conflict
+ * re-prompts), and the new cache's `/pubkey` is polled, since the first
+ * successful request creates the signing key.
  */
 export async function onboardDeployment(
 	options: OnboardOptions
@@ -736,9 +739,9 @@ async function resolveClaimSecret(
 /**
  * Claims global admin with the deployer's id_token (idempotent for the same
  * principal), exchanges it for an admin access token, and caches that token so
- * the admin commands work without a separate `cupboard login`. A refusal is an
- * answer, not a failure: the gate may name a different principal by the time
- * the claim lands.
+ * the admin commands work without a separate `cupboard login`. A refusal comes
+ * back as a `refused` result rather than an exception, because by the time the
+ * claim arrives the signup gate may name a different principal.
  */
 async function claimAdmin(
 	ui: DeployUi,

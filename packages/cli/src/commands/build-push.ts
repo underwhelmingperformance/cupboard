@@ -408,7 +408,7 @@ export function registerBuildPushCommand(
 		)
 		.option(
 			'--no-retain',
-			"publish without any target root; kept only by the cache's retention grace policy, if one matches"
+			"publish without any target root; the paths are kept only by the destination cache's retention grace policy, if one covers that cache"
 		)
 		.option(
 			'--closure',

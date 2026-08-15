@@ -64,7 +64,7 @@ function baseOptions(
 }
 
 describe('reprobeAvailability', () => {
-	it('leaves a build set nothing has caught up with exactly as it was', async () => {
+	it('leaves the build set unchanged when nothing has become available', async () => {
 		const reprobe = await reprobeAvailability(
 			baseOptions({
 				targets: [target(), target({ installable: otherPath })]

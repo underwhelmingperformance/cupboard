@@ -125,13 +125,14 @@ export interface PushDependencies {
 	readonly ttlSeconds?: TtlSeconds;
 	// The run root this push binds at negotiate: the server attaches every
 	// committed path under it, for the root's own time-to-live. Independent of
-	// `root` and `retain`: an unretained push may still bind one, its commits
-	// joining the run root while it declares no target root.
+	// `root` and `retain`: an unretained push may still bind a run root, and its
+	// commits join that root even though the push declares no target root.
 	readonly runRoot?: UploadAttachRoot;
-	// Whether this push retains what it publishes at all. Absent (or true) keeps
-	// today's behaviour: a named root with `root`, or an implicit pin per path
-	// otherwise. `false` is `--no-retain`: no root RPCs at all, so a path is kept
-	// only by whatever retention grace policy the cache has configured.
+	// Whether this push retains what it publishes at all. Absent or true
+	// retains: under the named root when `root` is set, under an implicit pin
+	// per path otherwise. `false` is `--no-retain`: no root RPCs at all, so a
+	// path is kept only by whatever retention grace policy the cache has
+	// configured.
 	readonly retain?: boolean;
 	// `push` waits by default for deferred uploads to become servable before it
 	// records retention, since root activation only admits servable targets.
@@ -185,9 +186,9 @@ export interface PushDependencies {
 	readonly delegated?: ReadonlyMap<string, string>;
 }
 
-// Each upload streams one NAR's compression into its R2 PUT, a CPU-bound zstd
-// pass overlapped with network, so running several at once keeps the phase from
-// walking the closure one NAR at a time.
+// Each upload compresses one NAR with zstd and streams the result into its R2
+// PUT, so the CPU work overlaps the network. Running several at once keeps the
+// phase from working through the closure one NAR at a time.
 export const defaultUploadConcurrency = 6;
 
 /**
@@ -289,19 +290,20 @@ async function negotiateUpload(
 	return response;
 }
 
-// The read-only twin of `negotiateUpload`. A server that predates preview
-// has no such route at all, so it answers a generic, contract-undefined
-// `NOT_FOUND`; other conditions can too, so the rejection is diagnosed
-// with the same empty-closure probe negotiate uses: a current server answers
-// an empty preview, so only a probe that meets the same undefined `NOT_FOUND`
-// reads as too old, and any other probe answer leaves the original failure
-// the caller's to see. A defined `NOT_FOUND` would be the procedure itself
-// refusing over a missing resource, not a missing route, so it never enters
-// the diagnosis. An unknown tenant also answers a routing-level `NOT_FOUND`
-// on every route, so before the too-old diagnosis stands, the tenant itself
-// must answer something: a tenant that serves `nix-cache-info` but not
-// preview is genuinely too old, and one that serves neither surfaces its own
-// `NOT_FOUND` untranslated.
+// The read-only twin of `negotiateUpload`. A server that predates preview has
+// no such route, so it answers a generic, contract-undefined `NOT_FOUND`. Other
+// conditions answer the same way, so a rejection is diagnosed with the
+// empty-closure probe negotiate uses: a current server answers an empty
+// preview, so only a probe that fails with the same undefined `NOT_FOUND` means
+// the server is too old, and any other probe result leaves the original failure
+// for the caller to see.
+//
+// A defined `NOT_FOUND` comes from the procedure refusing over a missing
+// resource rather than from a missing route, so it never enters the diagnosis.
+// An unknown tenant answers a routing-level `NOT_FOUND` on every route, so the
+// tenant must answer something before the too-old diagnosis stands: a tenant
+// that serves `nix-cache-info` but not preview is genuinely too old, and one
+// that serves neither surfaces its own `NOT_FOUND` untranslated.
 async function previewUpload(
 	client: PushClient,
 	paths: UploadPreviewRequest['paths']
@@ -455,8 +457,9 @@ function resolvedNarHash(path: ResolvedPushPath): string {
 }
 
 // The fields negotiate carries for one path. A reference entry's served
-// metadata also names the blob (file hash, size, compression), which the
-// negotiate request does not carry, so only the path fields travel.
+// metadata also describes the blob (file hash, size, compression), which a
+// negotiate request has no place for, so only the path fields are taken from
+// it.
 function negotiationOf(path: ResolvedPushPath): UploadPathNegotiationFields {
 	if (path.source === 'local') {
 		return prepareStorePathNegotiation(path.pathInfo);
@@ -584,14 +587,14 @@ interface ReceiptClaims {
 
 /**
  * The build receipt a push writes for the build it published: the paths that
- * ended servable, and one subject per published target the build store holds a
- * deriver for and records as its own. The store answered every subject's NAR
- * hash and deriver over the connection the push already opened, so the subjects
- * are what that store realised. Every subject records `build-store`
- * verification; when a builder produced the path for this run, the subject
- * also records that builder in `machine`. Reference and intermediate entries
- * are nobody's build subject: a reference is republished from elsewhere and
- * an intermediate is not a target of this push.
+ * ended servable, and one subject for each published target that the build
+ * store holds a deriver for and marks as its own work. The push read every
+ * subject's NAR hash and deriver from that store over the connection it had
+ * already opened, so each subject describes what that store realised. Every
+ * subject records `build-store` verification, and when a builder produced the
+ * path for this run the subject also records that builder in `machine`.
+ * Reference and intermediate entries never become subjects: a reference is
+ * republished from elsewhere, and an intermediate is not a target of this push.
  */
 function reconciledReceipt(
 	claims: ReceiptClaims,
@@ -689,11 +692,11 @@ async function runPushFlow(
 		wait: shouldWait,
 		waitTimeoutSeconds
 	} = dependencies;
-	// A path that fails to resolve, upload or commit is collected here, so the
-	// paths that can finish do. The push then fails as a whole (see the end of
-	// this function) so the incomplete result is never mistaken for a finished
-	// one. A vanished intermediate is not a failure: it is recorded as
-	// collected and the run continues.
+	// A path that fails to resolve, upload or commit is recorded here, so the
+	// paths that can finish still do. The push then fails as a whole (see the end
+	// of this function) so the incomplete result is never mistaken for a finished
+	// one. A vanished intermediate is not a failure: it is recorded as collected
+	// and the run continues.
 	const failures: PushFailure[] = [];
 	const collected: CollectedPath[] = [];
 
@@ -912,9 +915,9 @@ async function runPushFlow(
 		timeoutSeconds: waitTimeoutSeconds
 	};
 	const session = await client.openCommitSession?.(commitOptions);
-	// Keyed by store-path hash, refined in place as a deferred path settles or
-	// re-drives, so the push summary reads each path's latest outcome once every
-	// phase below has run.
+	// Keyed by store-path hash and updated in place as a deferred path settles or
+	// is re-driven, so the push summary reads each path's latest outcome once
+	// every phase below has run.
 	const outcomes = new Map<StorePathHash, CommitOutcome>();
 	// Keyed by store-path hash: the action each path's latest negotiation
 	// chose. A re-drive renegotiates, and the fresh decision can differ from
@@ -966,7 +969,7 @@ async function runPushFlow(
 				// A pending path is committed (its row is reserved) but not yet
 				// servable; its `settled` promise carries the verdict the wait phase
 				// awaits, and its decision lets the wait phase re-drive an `absent`
-				// verdict. Collected by store-path hash, so a re-negotiated upload id
+				// verdict. Gathered by store-path hash, so a re-negotiated upload id
 				// still resolves to its path.
 				const pending: {
 					decision: UploadDecisionOf<'upload' | 'commit'>;
@@ -1042,9 +1045,10 @@ async function runPushFlow(
 					recordRetention(retention, client, ctx)
 				);
 
-		// Retention is durable now, so the wait only reports the verdicts: it fails
-		// the push loudly if a deferred path fails verification. `--no-wait` leaves
-		// them to settle server-side and reports them pending.
+		// Retention is already recorded, so the wait phase only collects the
+		// verdicts. A deferred path that fails verification fails the push.
+		// `--no-wait` leaves such paths to settle on the server and reports them as
+		// pending.
 		if (shouldWait && commit.pending.length > 0) {
 			await reporter.progress(
 				'Verifying uploads',
@@ -1278,9 +1282,10 @@ async function reportDryRun(
 	unretainedUngracedWarning(reporter, retention, preview.uploads);
 }
 
-// The wording a mutating push's committed and already-present rows use, and
-// the dry run's already-cached rows: `retainUntil` is a materialised
-// deadline, so it is reported as a fact rather than a projection.
+// The row text for a path with a stored `retainUntil`, used by a mutating
+// push's committed and already-present rows and by the dry run's already-cached
+// rows. The deadline is already stored on the server, so it is reported as a
+// fact rather than as something the push would achieve.
 function graceRetainUntilRow(retainUntil: string): string {
 	return `kept until ${formatTimestamp(retainUntil)}`;
 }
@@ -1322,14 +1327,14 @@ function pushSummaryPathRow(path: PushSummaryPath): ResultRow {
 	};
 }
 
-// One row per path, naming its retention grace fact. For a rooted or pinned
-// push the rows only render once the push shows at least one fact: an
-// ungraced cache (the common case) would otherwise pad the report with a
+// One row per path, reporting its retention grace fact. For a rooted or pinned
+// push the rows render only once at least one path has such a fact: on an
+// ungraced cache (the common case) they would otherwise be a
 // "no retention grace policy matched" row per path for no benefit. An
-// unretained push always renders them, because grace is the only thing that
-// would keep its paths: all-ungraced is exactly what the user must see. The
-// JSON `data.paths` carries the full per-path facts unconditionally either
-// way, for a consumer that always wants them.
+// unretained push always renders them, because a grace policy is the only
+// thing that would keep its paths, and the user needs to see when none does.
+// The JSON `data.paths` carries the full per-path facts either way, for a
+// consumer that always wants them.
 function pushSummaryPathRows(
 	paths: readonly PushSummaryPath[],
 	retention: RetentionPlan
@@ -1362,13 +1367,14 @@ function cappedPathRows(rows: readonly ResultRow[]): readonly ResultRow[] {
 	];
 }
 
-// The wording a matched zero-grace policy earns wherever a fact renders: the
-// policy exists, but it retains nothing.
+// The row text for a path covered by a policy whose grace is zero: the policy
+// exists, but it retains nothing.
 const zeroGraceRow = 'matched a zero-grace policy; nothing retains it';
 
-// The warning an unretained push earns when no path resolved a positive grace
-// fact: nothing retains what it just published. A matched zero-grace policy
-// still retains nothing, but it is named as such rather than as no policy.
+// Warns after an unretained push when no path came back with a positive grace
+// fact, since nothing then retains what the push just published. A zero-grace
+// policy retains nothing either, but the warning says a policy matched rather
+// than reporting that none did.
 function unretainedUngracedWarning(
 	reporter: Reporter,
 	retention: RetentionPlan,
@@ -1406,12 +1412,11 @@ function hasGraceFact(
 	return grace?.retainUntil !== undefined || grace?.graceSeconds !== undefined;
 }
 
-// A dry run never commits anything, so `commit`/`upload` decisions carry only
-// the grace a real push would capture, never a materialised deadline; a
-// `skip` decision (an already-published path) reports the deadline already
-// stored, unstretched, or the policy the cache resolves when none is stored
-// yet, which a real push's already-present decision would extend into a
-// deadline.
+// A dry run never commits anything, so an `upload` or `commit` decision
+// reports only the grace a real push would capture, never a stored deadline. A
+// `skip` decision names an already-published path: it reports the deadline the
+// server has stored, without the extension a real push would apply, or, when
+// no deadline is stored yet, the grace the cache's policy resolves to.
 function previewPathRow(decision: ParsedUploadPreviewDecision): ResultRow {
 	if (decision.grace?.retainUntil !== undefined) {
 		return {
@@ -1736,8 +1741,9 @@ function formatExpiry(summary: RootSummary): string {
 }
 
 function describePinExpiry(summaries: readonly RootSummary[]): string {
-	// Compared after rendering: expiries that only differ beneath the rendered
-	// minute report as one value, not a range of two identical timestamps.
+	// The comparison below is on the rendered timestamps, so expiries that differ
+	// only below the displayed minute report as one value rather than as a range
+	// between two identical timestamps.
 	const expiries = summaries
 		.map((summary) => summary.expiresAt)
 		.filter((expiresAt) => expiresAt !== undefined)
@@ -1838,11 +1844,11 @@ function isAbsentVerdict(error: unknown): boolean {
 }
 
 // Commits one path, re-negotiating it if what it negotiated is gone by commit
-// time. A long upload phase can outlive the slot negotiate stamped, and a
-// reused blob can be collected between negotiate and commit; a `NOT_FOUND`
-// commit or an `absent` deferred verdict means one of those, not that the
-// transfer is dead, so the path is re-driven. The re-drive
-// commits without this wrapper, so a second loss propagates.
+// time. A long upload phase can outlive the pending row negotiate reserved, and
+// a reused blob can be collected between negotiate and commit. A `NOT_FOUND`
+// commit or an `absent` deferred verdict means one of those happened, not that
+// the transfer failed, so the path is re-driven. The re-drive commits without
+// this wrapper, so a second loss propagates.
 async function commitNegotiated(
 	decision: UploadDecisionOf<'upload' | 'commit'>,
 	context: CommitContext
@@ -1918,7 +1924,8 @@ async function redriveExpiredCommit(
 	}
 
 	if (isSkip(fresh)) {
-		// Already in the store: nothing to verify, so it is servable at once.
+		// The destination already serves the path, so there is nothing to verify
+		// and it is servable at once.
 		return {
 			storePathHash: fresh.storePathHash,
 			narHash: fresh.narHash,
@@ -1999,9 +2006,10 @@ function divergentSkips(
 	return divergent;
 }
 
-// A skip whose cached NAR differs from the local bytes is not reproducible
-// as-is; the mutating push and the dry run warn identically, since the
-// preview's skip decisions carry the same cached hash.
+// A skip whose cached NAR differs from the local bytes means the two sides
+// realised the same store path from different bytes, so the build is not
+// reproducible. The mutating push and the dry run warn in the same words,
+// because a preview's skip decisions report the same cached hash.
 function warnDivergentSkips(
 	reporter: Reporter,
 	divergent: ReadonlyMap<StorePathHash, DivergentSkip>
@@ -2016,10 +2024,10 @@ function warnDivergentSkips(
 	}
 }
 
-// The resolved paths indexed by the pair a negotiation decision names, so
-// resolving a decision back to its path is one lookup. Built once: scanning
-// the resolved set and rehashing every store path on every lookup is quadratic
-// across a large push.
+// The resolved paths indexed by store-path hash and NAR hash, the pair a
+// negotiation decision reports, so resolving a decision back to its path is one
+// lookup. Built once, because scanning the resolved set and rehashing every
+// store path on every lookup is quadratic across a large push.
 type NegotiatedPaths = ReadonlyMap<string, ResolvedPushPath>;
 
 function negotiatedPathKey(storePathHash: string, narHash: string): string {

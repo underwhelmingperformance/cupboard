@@ -18,16 +18,16 @@ import {
 } from './substituter-reach.ts';
 
 /**
- * The store a confirmation asks, opened over settings whose substituter list
- * holds only the ones a consumer elsewhere could also reach. Cupboard's own
- * destination cache and the tenant's reuse views are not among them: they are
- * configured on the runner, and content only they hold is the tenant's, not
- * something a target can be left upstream on. Neither are the substituters
- * that serve the runner alone, such as a directory on its disk or a cache on
- * its own network.
+ * The store a confirmation asks, opened with settings that list only the
+ * substituters a consumer elsewhere could also reach. Cupboard's own
+ * destination cache and the tenant's reuse views are left out: they are
+ * configured on the runner, but a path only they serve is the tenant's own
+ * content, which is no reason to leave a target upstream. So are the
+ * substituters that serve this runner alone, such as a directory on its disk or
+ * a cache on its own network.
  *
- * The store reports its own trust, because the settings a daemon connection
- * was opened with hold only for a client the daemon trusts.
+ * The store also reports whether the daemon trusts the connection, because a
+ * daemon applies a client's settings only for a client it trusts.
  */
 export type PermittedSubstituterStore = Pick<
 	Nix,
@@ -41,8 +41,9 @@ export interface UpstreamConfirmationOptions {
 	readonly substitution: NixSubstitutionSettings;
 	readonly store: PermittedSubstituterStore;
 	/**
-	 * Whether a consumer would take what a substituter offers, which decides
-	 * whether the offer proves anything.
+	 * Whether a consumer would accept a substituter's offer of a path, under the
+	 * consumer's own signature policy. An offer a consumer would refuse proves
+	 * nothing about availability.
 	 */
 	readonly accepts: AcceptsOffer;
 	readonly closure?: SubstitutableClosureOptions;
@@ -61,8 +62,8 @@ export interface UpstreamConfirmationOptions {
 export function confirmLeftUpstreamWith(
 	options: UpstreamConfirmationOptions
 ): (candidate: LeftUpstreamCandidate) => Promise<LeftUpstreamVerdict> {
-	// Whichever store answers, it answers the same way for every candidate
-	// this confirmation settles, so it is asked once.
+	// The trust answer is the same for every candidate this confirmation
+	// checks, so the store is asked once and the answer reused.
 	let honoured: Promise<SubstituterSettingsOutcome> | undefined;
 
 	return async (candidate) => {

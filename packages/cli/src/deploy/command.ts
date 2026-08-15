@@ -1387,8 +1387,9 @@ async function deployFlow(
 
 	const { options } = await planFor(agreed);
 
-	// The admin gate is applied exactly once, on the agreed config: applying it
-	// in the render loop would let repeated edits compound state and config.
+	// The signup gate is applied once, to the agreed config. Applying it inside
+	// the plan review loop would apply it again to an already-gated config on
+	// every edit.
 	const deployedConfig = withSignupGate(
 		agreed.config,
 		agreed.owner.kind === 'owner' ? agreed.owner.owner : undefined

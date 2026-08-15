@@ -631,9 +631,9 @@ export async function runPlanCohort(
 							value: String(partition.unattested.length)
 						}
 					]),
-			// Every availability answer above was given without these, so a
-			// reader can tell "nobody holds this" from "we never asked
-			// everybody".
+			// None of the substituters listed here answered any of the availability
+			// questions above, so the reader can tell "nobody serves this path"
+			// from "not every substituter was asked".
 			...(partition.unreachableSubstituters.length === 0
 				? []
 				: [

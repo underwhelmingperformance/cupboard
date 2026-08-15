@@ -17,9 +17,9 @@ const attributeSchema = z
 	);
 
 // The daemon wire protocol names a realisation target as a store path
-// optionally followed by `^` and the outputs to realise; a cohort's
-// installable travels through the targets file in that same shape. The
-// output selection is rendered into diagnostics like the attr, so the same
+// optionally followed by `^` and the outputs to realise, and a cohort's
+// installable is written in the targets file in that same form. The output
+// selection is rendered into diagnostics like the attr, so the same
 // control-character rule applies to it.
 function parseInstallable(
 	value: string,
@@ -63,8 +63,8 @@ export const cohortInstallableSchema = z
 
 // One cohort member as `cupboard plan cohort` reads it from its targets
 // file: what `nix build` would realise, the concrete output path when Nix
-// can predict it before building, and the retention root that target's own
-// `roots.ensure` call answers for. This is the file `build-cohort` writes
+// can predict it before building, and the retention root the target's own
+// `roots.ensure` call names. This is the file `build-cohort` writes
 // from a plan job's cohort-matrix entry, so it stays a plain, file-portable
 // shape rather than the branded `AvailabilityTarget` the partition itself
 // consumes.

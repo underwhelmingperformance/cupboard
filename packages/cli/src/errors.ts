@@ -731,9 +731,9 @@ export class CacheInfoUnparsableError extends CliError {
 }
 
 /**
- * github setup found stored state that neither matches what it would write
- * nor was replaced. The drifted steps are reported and left in place; the
- * non-zero exit makes the divergence visible to scripts and CI.
+ * github setup found stored state that differs from what it would write. Setup
+ * never replaces stored state, so the drifted steps are reported and left in
+ * place, and the non-zero exit makes the divergence visible to scripts and CI.
  */
 export class GithubSetupDriftError extends CliError {
 	constructor(public readonly steps: readonly string[]) {

@@ -3,11 +3,12 @@ import { DaemonRequiredError, UntrustedDaemonError } from '../errors.ts';
 import type { BuildPushPreflight } from './preflight.ts';
 
 /**
- * How a run publishes what it builds. The streamed mode holds the endpoints
- * preflight proved: each completed output leaves the daemon's post-build hook
- * and publishes while the build continues. The reconciled local mode holds the
- * daemon condition that ruled streaming out: the build runs without the hook
- * and one push publishes from the store the build populated.
+ * How a run publishes what it builds. The streamed mode includes the endpoints
+ * preflight proved: each completed output arrives through the daemon's
+ * post-build hook and is published while the build continues. The reconciled
+ * local mode includes the daemon condition that ruled streaming out: the build
+ * runs without the hook and one push publishes from the store the build
+ * populated.
  */
 export type BuildPushMode =
 	| { readonly kind: 'streamed'; readonly preflight: BuildPushPreflight }
@@ -21,7 +22,7 @@ export type BuildPushMode =
  * socket, or a daemon that would ignore this client's `post-build-hook`, can
  * still build and publish, so both select the reconciled local mode rather
  * than ending the run. Every other refusal is a condition publication cannot
- * work around, and fails the run as it stands.
+ * work around, so the run fails.
  */
 export async function selectBuildPushMode(
 	preflight: () => Promise<BuildPushPreflight>
@@ -44,7 +45,7 @@ const reconciledLocalPublication =
 	'so the build runs without the post-build hook and one push publishes ' +
 	'what it leaves in the store.';
 
-/** The line the reporter carries for the mode a run took, and why it took it. */
+/** The line the reporter shows for the mode a run took, and why. */
 export function buildPushModeDescription(mode: BuildPushMode): string {
 	if (mode.kind === 'streamed') {
 		return (

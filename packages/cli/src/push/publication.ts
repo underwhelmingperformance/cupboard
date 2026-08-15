@@ -45,12 +45,12 @@ interface PublicationDeclaration {
 
 /**
  * The publication entries one push publishes: each store path exactly once,
- * tagged with its kind and metadata source, so a transposition between the
- * kinds is unrepresentable. Entries are branded store paths at the domain
- * boundary; an input that is not a store path refuses with
- * {@link InvalidStorePathError}. A path declared as both a target and an
- * intermediate resolves to a target, the stronger declaration, and a path
- * also declared by reference is a target read from the reference source.
+ * tagged with its kind and metadata source, so no path can appear under two
+ * kinds. Entries are branded store paths at the domain boundary, and an input
+ * that is not a store path is refused with {@link InvalidStorePathError}. A
+ * path declared as both a target and an intermediate becomes a target, the
+ * stronger declaration, and a path also declared by reference is a target read
+ * from the reference source.
  */
 export class PublicationCollection {
 	static of(input: PublicationInput): PublicationCollection {

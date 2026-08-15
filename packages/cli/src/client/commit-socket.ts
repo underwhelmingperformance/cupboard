@@ -73,11 +73,10 @@ export type CommitSocketConnect = (
 ) => CommitSocket;
 
 /**
- * A path to commit over the session, with the identity from negotiation.
- * `retention`, true only when this upload negotiated a retention plan, is set
- * on the entries this session sends. A server that has already cleared the row
- * resolves it by identity on a reconnect and answers with the path's durable
- * grace fact, rather than a frame carrying no grace fact at all.
+ * A path to commit over the session, with the identity from negotiation. Set
+ * `retention` when the upload negotiated a retention plan: on a reconnect the
+ * server resolves a row it has already cleared by that identity, and the marker
+ * makes it answer with the path's stored grace fact instead of none.
  */
 export interface CommitSessionTarget {
 	readonly uploadId: UploadId;
@@ -364,8 +363,8 @@ export function runCommitSession(
 	// Whether the current connection's server accepts the `retention` marker on
 	// a `commit-batch` or `subscribe-identity` entry, respectively. A target
 	// negotiated with a retention plan sets the marker on an entry of that op
-	// only when the connection supports it, so a plan-carrying reconnect answers
-	// with the path's durable grace fact rather than none.
+	// only when the connection supports it, so that after a reconnect the server
+	// answers with the path's stored grace fact rather than none.
 	let hasBatchRetentionMarker = false;
 	let hasIdentityRetentionMarker = false;
 

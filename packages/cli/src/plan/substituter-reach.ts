@@ -1,19 +1,19 @@
 /**
  * Decides whether a consumer elsewhere could also reach a configured
- * substituter. {@link isReachableElsewhere} is the answer for a real one.
+ * substituter. {@link isReachableElsewhere} is the implementation a plan uses.
  */
 export type SubstituterReach = (substituter: string) => boolean;
 
 /**
- * Whether a consumer elsewhere could also reach a configured substituter: it
- * has to be a binary cache served over HTTP or HTTPS, on a host that names the
- * same machine wherever the name or address is read.
+ * Whether a consumer elsewhere could also reach a configured substituter. It
+ * has to be a binary cache served over HTTP or HTTPS, on a host that refers to
+ * the same machine wherever it is read.
  *
  * The host is judged from its syntax alone, with no name resolution, so the
  * answer is the same on every machine and at every moment. An address literal
- * is classified by the block it sits in, `localhost` and the names under it
- * are the loopback interface by RFC 6761, and every other name passes: which
- * addresses it holds is the reader's business, not this configuration's.
+ * is judged by the block it belongs to, `localhost` and the names under it are
+ * the loopback interface by RFC 6761, and every other name is accepted,
+ * because deciding otherwise would mean resolving it.
  */
 export function isReachableElsewhere(substituter: string): boolean {
 	const parsed = URL.parse(substituter);
@@ -91,7 +91,7 @@ function hexGroups(part: string): readonly number[] {
 	return part.split(':').map((group) => Number.parseInt(group, 16));
 }
 
-// The blocks a first octet settles on its own: 0.0.0.0/8 is this network,
+// The blocks a first octet identifies on its own: 0.0.0.0/8 is this network,
 // 10.0.0.0/8 is private use, and 127.0.0.0/8 is the loopback interface.
 const confinedIpv4FirstOctets = new Set([0, 10, 127]);
 
@@ -136,7 +136,7 @@ function isReachableIpv6(groups: readonly number[]): boolean {
 		return true;
 	}
 
-	// ::ffff:0:0/96 carries an IPv4 address, which the IPv4 blocks settle. The
+	// ::ffff:0:0/96 carries an IPv4 address, which the IPv4 blocks cover. The
 	// rest of ::/80 is the loopback address, the unspecified address, and the
 	// deprecated IPv4-compatible range.
 	const [mapped = 0, ...low] = groups.slice(5);

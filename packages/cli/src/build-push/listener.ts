@@ -53,9 +53,9 @@ export interface BuildEventListenerOptions {
  * The invocation's hook endpoint: a Unix-socket listener accepting the
  * post-build hook's events. One connection carries one newline-terminated
  * message, so concurrent hook firings cannot interleave. Every valid event is
- * recorded immediately; the accepted set is unbounded by design, since even an
- * enormous build is tens of thousands of paths and backpressure lives in the
- * bounded upload pool consuming the set, never in the hook.
+ * recorded immediately, and the accepted set is deliberately unbounded: even an
+ * enormous build is only tens of thousands of paths, and the back-pressure comes
+ * from the bounded upload pool that consumes the set, never from the hook.
  */
 export class BuildEventListener {
 	static async listen(

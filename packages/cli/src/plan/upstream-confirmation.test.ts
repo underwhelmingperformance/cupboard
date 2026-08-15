@@ -164,9 +164,9 @@ describe('confirmLeftUpstreamWith', () => {
 		});
 	});
 
-	// The trust of a connection is a property of the peer the daemon accepted,
-	// so one handshake answers for every candidate the confirmation settles.
-	it('asks the connection trust once however many candidates it settles', async () => {
+	// Whether the daemon trusts a connection is a property of the client it
+	// accepted, so one answer holds for every candidate the confirmation checks.
+	it('asks whether the connection is trusted only once, for any number of candidates', async () => {
 		const store = storeDouble();
 		const confirm = confirmLeftUpstreamWith({
 			substitution: defaultSubstitution,

@@ -58,10 +58,11 @@ export interface CredentialChain {
 	readonly login: () => Promise<CloudflareGrant>;
 	/**
 	 * Whether an incomplete cached grant may be replaced by a fresh browser
-	 * login. A grant from before the `openid` scope carries no subject and its
-	 * refresh token cannot grow one, so only a new login can say who the
-	 * operator is; without a terminal the old grant is used as-is. (A grant
-	 * missing only its id_token upgrades by refresh first, browser second.)
+	 * login. A grant issued before the `openid` scope was requested carries no
+	 * subject, and refreshing it cannot add one, so only a new login can
+	 * establish who the operator is; with no terminal to log in on, the old
+	 * grant is used as it stands. A grant missing only its id_token is upgraded
+	 * by a refresh first and the browser second.
 	 */
 	readonly upgradeLogin: boolean;
 	readonly now: () => number;

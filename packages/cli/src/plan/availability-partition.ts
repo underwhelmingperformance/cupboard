@@ -69,9 +69,9 @@ export interface AvailabilityCeilingConfig {
 
 /**
  * A target the classification would leave upstream, paired with the path it
- * resolved to, as the confirmation receives it. The installable comes along
- * because a derivation carries its own substitution option, which the store
- * path alone cannot answer for.
+ * resolved to, as the confirmation receives it. The installable is included as
+ * well as the path because a derivation can disable substitutes for its own
+ * outputs, and that setting cannot be read from the store path alone.
  */
 export interface LeftUpstreamCandidate {
 	readonly installable: NixDerivedPathString;
@@ -106,8 +106,9 @@ export type LeftUpstreamVerdict =
 			readonly missing: StorePathString;
 	  }
 	/**
-	 * A path in the candidate's closure that this store does not hold, so
-	 * there is no closure to prove anything about past it.
+	 * A path in the candidate's closure that this store does not hold. The
+	 * confirmation has nothing to compare a substituter's offer against, so it
+	 * cannot check the rest of the closure.
 	 */
 	| {
 			readonly kind: 'closure-not-held-locally';
@@ -140,7 +141,7 @@ export type LeftUpstreamRejection = Exclude<
 
 export type CeilingSource = 'configured' | 'untrusted-fallback';
 
-/** What substituting one path would cost, as an answer measured it. */
+/** What substituting one path would cost, as the store reported it. */
 export interface SubstitutablePathSize {
 	readonly downloadSize: number;
 	readonly narSize: number;
@@ -322,10 +323,11 @@ export async function partitionAvailability(
 		]);
 	const missing = accountForLocalDerivations(queriedMissing, options.targets);
 
-	// Only a path this store already holds valid is a "leave it upstream"
-	// candidate: asking whether a path Nix still needs to build or fetch is
-	// already available elsewhere answers a question that does not apply to
-	// it yet.
+	// Substitutability is asked only about the paths this store already holds
+	// valid, because only such a path can be left upstream: the confirmation
+	// below compares what a substituter offers against the NAR hashes this
+	// store recorded, and a path Nix has still to build or fetch has no
+	// recorded hash to compare against.
 	const substitutableRaw =
 		await options.store.querySubstitutablePaths(validPaths);
 	const substitutableExternal = new Set(
@@ -457,13 +459,13 @@ function isTargetPath(
 	].includes(storePath);
 }
 
-// A remote store cannot inspect a derivation that is absent from that store,
-// so queryMissing reports the derivation itself as unknown and stops walking.
-// A caller that promises to materialise the complete planned derivation
-// closure locally and copy it before realisation has already settled that
-// uncertainty: after the copy, this is ordinary build work. Paths that carry
-// no such evidence remain unknown and retain the ceiling's fail-closed
-// behaviour.
+// A remote store cannot inspect a derivation it does not hold, so queryMissing
+// reports that derivation as unknown and stops walking there. A target that
+// declares `plannedLocalDerivation` commits the caller to materialising the
+// complete planned derivation closure and copying it to the store before
+// realisation, and after that copy the derivation is ordinary build work, so
+// move it out of the unknown set and into `willBuild`. Every other unknown path
+// stays unknown and counts against the ceiling.
 function accountForLocalDerivations(
 	missing: NixMissingPartition,
 	targets: readonly AvailabilityTarget[]
@@ -492,8 +494,8 @@ function accountForLocalDerivations(
 
 /**
  * Where one target belongs once the three availability questions have been
- * answered for it: a named bucket with the path that answers for it, or the
- * build set.
+ * answered for it: a named bucket together with the store path that is already
+ * served, or the build set.
  */
 export type Classification =
 	| {
@@ -514,8 +516,9 @@ interface ClassifiedTarget {
 const maximumConcurrentConfirmations = 4;
 
 // Only a target the classification would leave upstream is worth confirming.
-// A path answer is shared, but the derivation's substitution option belongs to
-// the installable, so every distinct path-and-installable pair needs an answer.
+// Two targets can resolve to the same store path through different
+// installables, and a derivation can disable substitutes for its own outputs,
+// so each distinct path-and-installable pair is confirmed on its own.
 async function confirmCandidates(
 	classified: readonly ClassifiedTarget[],
 	options: AvailabilityPartitionOptions
@@ -627,10 +630,10 @@ function builtWhenUnattested(
 }
 
 /**
- * Places one target given the destination, view and substitutability answers
- * that apply to it, in the order the partition settles them. Exported so a
- * later confirmation over a subset of the same targets classifies by these
- * rules and no others.
+ * Classifies one target from the destination, view and substitutability
+ * answers that apply to it, checked in that order of precedence. Exported so a
+ * later re-probe over a subset of the same targets classifies by these rules
+ * and no others.
  */
 export function classify(
 	target: AvailabilityTarget,
@@ -683,9 +686,10 @@ function addToBucket(
 	buckets[classification.bucket].push(classification.path);
 }
 
-// `roots.ensure` already probes the exact list a root last reconciled: a
-// retained root serves every one of its targets, and a build-required
-// answer still names, in `unavailable`, only the ones that do not.
+// `roots.ensure` reports on the exact target list the root last reconciled. A
+// `retained` answer means the cache serves all of those targets; any other
+// answer lists the ones it does not serve in `unavailable`, so a target absent
+// from that list is served.
 function isServedByRootEnsure(
 	target: AvailabilityTarget,
 	rootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse>
@@ -757,9 +761,9 @@ async function settleUnknowns(
 		partition: {
 			willBuild: toBuild,
 			willSubstitute: toSubstitute,
-			// The fresh answer walks the closures of the paths it resolved, which
-			// reaches paths the first answer settled by another route. One
-			// settled either way is settled, whichever answer left it unknown.
+			// The re-query walks the closures of the paths it resolved, so it can
+			// report as unknown a path the first query already put in `willBuild`
+			// or `willSubstitute`. A path either query settled is settled.
 			unknown: requery.unknown.filter((storePath) => !settled.has(storePath)),
 			downloadSize:
 				missing.downloadSize + requery.downloadSize - twice.downloadSize,
@@ -770,17 +774,15 @@ async function settleUnknowns(
 }
 
 /**
- * The bytes both answers counted: what each states is one total over the paths
- * it settled, so a path both settled is in both totals and belongs in the
- * merged one once.
+ * The download and NAR bytes that both answers counted. Each answer reports one
+ * total over the paths it settled, so adding the two totals counts a path that
+ * both of them settled twice. The caller subtracts what this returns.
  *
- * The fresh answer's per-path figures are enough to take it out exactly. A
- * path in both totals is by definition one the fresh answer settled, so its
- * figures are always the ones that came back with it, and the first answer
- * needs none of its own. A path whose figures did not come back stays in both
- * totals, since the merged total is read as the number of bytes that
- * substitution would fetch, and a guessed figure could put that total below the
- * true one.
+ * The per-path figures come from the re-query, which is enough on its own: a
+ * path in both totals is one the re-query settled, so the re-query asked for
+ * its size. A path whose size did not come back stays counted twice, because
+ * the merged total is read as the bytes substitution would fetch and
+ * subtracting a guess could put it below the true figure.
  */
 function bytesSettledTwice(
 	missing: SettledMissing,

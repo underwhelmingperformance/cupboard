@@ -332,7 +332,7 @@ describe('runPlanCohort', () => {
 		}
 	});
 
-	it('carries planned local derivations into remote availability accounting', async () => {
+	it('passes a target’s planned local derivation through to the partition', async () => {
 		const derivation = storePathSchema.parse(
 			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
 		);

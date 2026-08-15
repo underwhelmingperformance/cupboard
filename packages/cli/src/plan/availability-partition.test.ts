@@ -839,7 +839,7 @@ describe('partitionAvailability', () => {
 		]);
 	});
 
-	it('accounts locally copyable derivations as build work instead of unknown availability', async () => {
+	it('counts a planned local derivation as build work instead of unknown availability', async () => {
 		const derivations = Array.from({ length: 6 }, (_, index) =>
 			path(`${String(index + 1).repeat(32)}-target-${String(index)}.drv`)
 		);
@@ -910,7 +910,7 @@ describe('partitionAvailability', () => {
 
 	// A path counted as held nowhere is held nowhere among the substituters
 	// that answered, so which ones did not answer belongs beside the counts.
-	it('records the substituters nothing could be asked of', async () => {
+	it('records the substituters that could not be queried', async () => {
 		const unreachable = [
 			{ uri: 'https://down.example', reason: 'no-cache-info' as const }
 		];
