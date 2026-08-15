@@ -25,7 +25,7 @@ import process, { arch, platform } from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import type { Reporter } from '@cupboard/reporter';
-import { createOctokitClient, RequestError } from '@cupboard/shared/octokit';
+import { createOctokitClient } from '@cupboard/shared/octokit';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import {
 	AttestationSubjectMismatchError,
@@ -35,6 +35,7 @@ import {
 	verifyBundle
 } from '@cupboard/shared/sigstore';
 import { slsaSourceCommit } from '@cupboard/shared/slsa';
+import { RequestError } from '@octokit/request-error';
 import { StatusCodes } from 'http-status-codes';
 import semverLt from 'semver/functions/lt.js';
 import semverValid from 'semver/functions/valid.js';

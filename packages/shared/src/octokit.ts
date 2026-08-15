@@ -66,5 +66,3 @@ export function createOctokitClient(
 
 	return octokit;
 }
-
-export { RequestError } from '@octokit/request-error';
