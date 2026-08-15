@@ -25,9 +25,9 @@ export abstract class UsageError extends CodedError {
 const maxRenderedCauses = 5;
 
 /**
- * The `cause` chain behind a thrown value, nearest cause first, described as
- * `name: message` for an `Error` and as `String(cause)` for anything else.
- * Returns an empty array for a value without a cause.
+ * The `cause` chain behind a thrown value, nearest cause first. An `Error` is
+ * described as `name: message`, an object as JSON, and any other value by its
+ * string form. Returns an empty array for a value without a cause.
  *
  * The walk stops after {@link maxRenderedCauses} levels, and at any value
  * already described, so a chain that refers back to an earlier error does not
@@ -63,9 +63,35 @@ export function errorCauses(error: unknown): string[] {
 }
 
 function describeCause(cause: unknown): string {
-	return cause instanceof Error
-		? `${cause.name}: ${cause.message}`
-		: String(cause);
+	if (cause instanceof Error) {
+		return `${cause.name}: ${cause.message}`;
+	}
+
+	if (typeof cause === 'object' && cause !== null) {
+		return describeObject(cause);
+	}
+
+	return String(cause);
+}
+
+// An object cause as JSON, so its fields appear in the diagnostic. `String`
+// gives `[object Object]` for an object that does not define its own
+// `toString`, and a cause that is not an error is usually a plain object.
+// `JSON.stringify` throws on a structure it cannot represent, such as a
+// circular one or one holding a BigInt, so those fall back to the object's tag.
+function describeObject(cause: object): string {
+	try {
+		return serialise(cause) ?? Object.prototype.toString.call(cause);
+	} catch {
+		return Object.prototype.toString.call(cause);
+	}
+}
+
+// `JSON.stringify` returns undefined when the value's `toJSON` returns
+// undefined, but its declared return type is plain `string`. Keep that
+// possibility in this wrapper's type so the caller has to handle it.
+function serialise(value: object): string | undefined {
+	return JSON.stringify(value);
 }
 
 /**

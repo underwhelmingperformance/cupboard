@@ -21,6 +21,15 @@ class SelfReferringError extends Error {
 	}
 }
 
+// A cause object that refers to itself, which `JSON.stringify` rejects.
+interface CircularCause {
+	code: string;
+	self?: CircularCause;
+}
+
+const circularCause: CircularCause = { code: 'EAGAIN' };
+circularCause.self = circularCause;
+
 // An error whose message is `level depth`, with a `cause` chain descending to
 // `level 0`.
 function nestedError(depth: number): Error {
@@ -52,6 +61,18 @@ describe('errorCauses', () => {
 			name: 'a cause that is not an error',
 			error: new Error('the step failed', { cause: 'the daemon said no' }),
 			expected: ['the daemon said no']
+		},
+		{
+			name: 'a cause that is an object',
+			error: new Error('the step failed', {
+				cause: { code: 'ENOENT', path: '/nix/store/x' }
+			}),
+			expected: ['{"code":"ENOENT","path":"/nix/store/x"}']
+		},
+		{
+			name: 'a cause object JSON cannot represent',
+			error: new Error('the step failed', { cause: circularCause }),
+			expected: ['[object Object]']
 		},
 		{
 			name: 'a chain that leads back to the error itself',

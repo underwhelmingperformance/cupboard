@@ -33,6 +33,7 @@ import {
 	type ReporterMode,
 	type ResultRow
 } from '@cupboard/reporter';
+import { errorCauses } from '@cupboard/shared/errors';
 import pc from 'picocolors';
 
 import { type BrowserMessages, openBrowser } from './open-browser.ts';
@@ -588,6 +589,19 @@ function warnText(label: string, value?: string): string {
 	return value === undefined ? label : `${label}: ${value}`;
 }
 
+// A failure message with the error's `cause` chain indented beneath it, one
+// line per level. `log.error` splits the text on newlines and draws its guide
+// bar before each one, so the causes line up under the message. They are dimmed
+// like the other supporting detail this renderer prints.
+function errorText(error: unknown, colours: Colours): string {
+	const message = error instanceof Error ? error.message : String(error);
+
+	return [
+		message,
+		...errorCauses(error).map((cause) => colours.dim(`  ${cause}`))
+	].join('\n');
+}
+
 interface UnitNotes {
 	warn: (label: string, value?: string) => void;
 	flush: () => void;
@@ -791,7 +805,7 @@ function clackReporter(
 		},
 
 		error(error) {
-			log.error(error instanceof Error ? error.message : String(error));
+			log.error(errorText(error, colours));
 		}
 	};
 }

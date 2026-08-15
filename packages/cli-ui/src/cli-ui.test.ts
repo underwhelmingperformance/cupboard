@@ -4,6 +4,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { Writable } from 'node:stream';
 
+import { S_BAR, S_ERROR } from '@clack/prompts';
 import { parseReporterResults, type ReporterMode } from '@cupboard/reporter';
 import pc from 'picocolors';
 import { describe, expect, it, vi } from 'vitest';
@@ -318,6 +319,86 @@ describe('createCliUi result file', () => {
 			vi.restoreAllMocks();
 			rmSync(directory, { recursive: true, force: true });
 		}
+	});
+});
+
+const ansiStyling = new RegExp(`${escape}${String.raw`\[[\d;]*m`}`, 'gu');
+
+// Clack styles its guide bar and its markers, and whether it does so depends on
+// the terminal the tests run in. Strip the styling so an assertion can match the
+// text of each line.
+function withoutStyling(text: string): string {
+	return text.replaceAll(ansiStyling, '');
+}
+
+// Everything the terminal reporter wrote while `body` ran. Clack draws to
+// `process.stdout` directly, so the test captures it there.
+function captureTerminal(body: (ui: CliUi) => void, hasColour = false): string {
+	const chunks: string[] = [];
+	vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
+		chunks.push(String(chunk));
+
+		return true;
+	});
+
+	try {
+		body(
+			createCliUi({
+				mode: 'terminal' satisfies ReporterMode,
+				interactive: false,
+				colour: hasColour
+			})
+		);
+	} finally {
+		vi.restoreAllMocks();
+	}
+
+	return chunks.join('');
+}
+
+describe('createCliUi terminal errors', () => {
+	const failure = new Error('could not verify the attestation', {
+		cause: new RangeError('the bundle has no subject', {
+			cause: new TypeError('the digest is not hexadecimal')
+		})
+	});
+
+	it('prints the cause chain indented under the failure message', () => {
+		const written = captureTerminal((ui) => {
+			ui.reporter().error(failure);
+		});
+
+		expect(withoutStyling(written).split('\n')).toStrictEqual([
+			S_BAR,
+			`${S_ERROR}  could not verify the attestation`,
+			`${S_BAR}    RangeError: the bundle has no subject`,
+			`${S_BAR}    TypeError: the digest is not hexadecimal`,
+			''
+		]);
+	});
+
+	it('dims the cause lines when colour is enabled', () => {
+		const coloured = pc.createColors(true);
+
+		const written = captureTerminal((ui) => {
+			ui.reporter().error(failure);
+		}, true);
+
+		expect(written).toContain(
+			coloured.dim('  RangeError: the bundle has no subject')
+		);
+	});
+
+	it('prints a thrown value that is not an error', () => {
+		const written = captureTerminal((ui) => {
+			ui.reporter().error('the daemon said no');
+		});
+
+		expect(withoutStyling(written).split('\n')).toStrictEqual([
+			S_BAR,
+			`${S_ERROR}  the daemon said no`,
+			''
+		]);
 	});
 });
 
