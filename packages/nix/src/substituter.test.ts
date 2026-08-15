@@ -588,7 +588,7 @@ describe('a substituter held in a directory', () => {
 		});
 	});
 
-	it('fails rather than reports an absence for a narinfo it cannot read', async () => {
+	it('fails instead of reporting an absence for a narinfo it cannot read', async () => {
 		const directory = cacheDirectory({ 'nix-cache-info': fileCacheInfo });
 		mkdirSync(path.join(directory, `${'a'.repeat(32)}.narinfo`));
 
@@ -1016,7 +1016,7 @@ describe('openSubstituters', () => {
 	// answering, which one bad cache would otherwise take down with it.
 	// One substituter answering more than an answer can hold is one that
 	// cannot describe itself, and the rest of the list still answers.
-	it('leaves out one whose cache info is longer than an answer can be', async () => {
+	it('leaves out a substituter whose cache info is larger than `maxSubstituterAnswerByteLength`', async () => {
 		const { substituters, unreachable } = await openSubstituters(
 			['https://flood.example', 'https://cache.example'],
 			{ fetch: flooding }
@@ -1716,7 +1716,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 
 	// A substituter is a remote server, and a narinfo is a few hundred bytes.
 	// A body without end would otherwise be held in this process entire.
-	it('refuses an answer longer than an answer can be', async () => {
+	it('refuses a response larger than `maxSubstituterAnswerByteLength`', async () => {
 		await expect(
 			clientOver(
 				[substituter('https://flood.example')],
@@ -1760,7 +1760,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 
 	// A body longer than an answer can be is what the server sent, not a
 	// passing condition, so coming back for it would get the same one.
-	it('asks once for a narinfo longer than an answer can be', async () => {
+	it('does not retry a narinfo request when the response is oversized', async () => {
 		let asked = 0;
 		const oversized: typeof fetch = (input) => {
 			const { pathname } = new URL(
@@ -1961,7 +1961,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 	// A substituter asking to be left alone for a day is left alone. Coming
 	// back before it said it would be ready spends an attempt on the answer it
 	// has already given, and waiting the day out holds the query for a day.
-	it('gives up on a substituter asking for longer than it will wait', async () => {
+	it('gives up when a substituter asks for a delay longer than the maximum', async () => {
 		const waits: number[] = [];
 		let asked = 0;
 		const patient: typeof fetch = (input, init) => {
@@ -1990,7 +1990,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 
 	// A wait the substituter asked for is made in full when it is one this
 	// query will make, with the backoff spread on top of it.
-	it('waits out a substituter asking for less than its bound', async () => {
+	it('waits the full delay a substituter asks for when it is within the maximum', async () => {
 		const waits: number[] = [];
 
 		await expect(
@@ -2146,9 +2146,9 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 		expect(infos.map(({ storePath }) => storePath)).toStrictEqual([appPath]);
 	});
 
-	// Only the substituter asked last can settle the query: an earlier one
-	// that failed was followed by one that answered for the question.
-	it('says nothing of a failure an answering substituter followed', async () => {
+	// Only the last substituter queried decides the result: an earlier failure
+	// is discarded once a later substituter answers.
+	it('ignores an earlier failure once a later substituter answers', async () => {
 		const { fetch: fetcher } = caches({
 			'https://broken.example': { status: 503 },
 			'https://empty.example': {}
@@ -2167,7 +2167,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 
 	// A narinfo describing another path answers a question the caller did not
 	// ask, which Nix reads as the substituter not holding what was asked for.
-	it('reads an answer about another path as not holding this one', async () => {
+	it('treats a narinfo for another path as an absence', async () => {
 		const { fetch: fetcher } = caches({
 			'https://cache.example': {
 				narInfos: { [`${'a'.repeat(32)}.narinfo`]: 'StorePath: not-a-path\n' }
@@ -2184,7 +2184,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 });
 
 describe('SubstituterClient.querySubstitutablePaths', () => {
-	it('asks only substituters inviting a batch, and only about what is left', async () => {
+	it('queries only substituters advertising WantMassQuery, and only for the paths still unresolved', async () => {
 		const { fetch: fetcher, requests } = caches({
 			'https://private.example': {
 				narInfos: {
@@ -2321,7 +2321,7 @@ describe('SubstituterClient.querySubstitutablePaths', () => {
 
 	// The mass-query operation calls one substituter's query as a whole. Its
 	// failure escapes that operation before another substituter is considered.
-	it('does not answer a failed mass query from a later substituter', async () => {
+	it('fails the mass query instead of continuing to a later substituter', async () => {
 		const { fetch: fetcher } = caches({
 			'https://broken.example': { status: 503 },
 			'https://holder.example': {

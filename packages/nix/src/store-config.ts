@@ -112,9 +112,10 @@ export interface NixSubstitutionSettings {
 
 /**
  * The effective settings deciding where Nix would build a derivation. Nix
- * builds one on this machine when its system is among `systems` and every
- * feature it requires is among `features`; anything else it hands to a remote
- * builder. If no suitable builder is configured, the derivation cannot build.
+ * builds a derivation on this machine when the derivation's system is among
+ * `systems` and every feature it requires is among `features`; anything else it
+ * hands to a remote builder. If no suitable builder is configured, the
+ * derivation cannot build.
  */
 export interface NixBuildSettings {
 	/**
@@ -142,8 +143,8 @@ export interface NixFileTransferSettings {
 	readonly retryDelayMs: number;
 	/**
 	 * The `filetransfer-retry-delay-rate-limited` setting, in milliseconds: the
-	 * longer wait a server rate-limiting this client or saying it is overloaded
-	 * is given.
+	 * longer wait used when a server rate-limits this client or reports that it
+	 * is overloaded.
 	 */
 	readonly rateLimitedRetryDelayMs: number;
 	/** The `filetransfer-retry-max-delay` setting: the ceiling on the backoff. */
@@ -154,13 +155,13 @@ export interface NixFileTransferSettings {
 	 * The `stalled-download-timeout` setting, in milliseconds: how long a
 	 * server may remain stalled before the transfer is abandoned.
 	 *
-	 * Nix states this to libcurl as a rate: a transfer whose average falls under
-	 * a byte a second for this long is abandoned, however long it has been
-	 * running. This client states it as a deadline on the whole request
-	 * instead. These approaches behave alike for the small documents it reads. A
+	 * Nix expresses this to libcurl as a rate: a transfer whose average falls
+	 * under a byte a second for this long is abandoned, however long it has been
+	 * running. This client applies it as a deadline on the whole request. These
+	 * approaches behave alike for the small documents this client reads. A
 	 * narinfo and a `nix-cache-info` are a few hundred bytes. A transfer still
-	 * running when the deadline passes has been delivering a byte or two a second,
-	 * which is the rate Nix configures. The approaches differ only for a
+	 * running when the deadline passes has been delivering a byte or two a
+	 * second, which is the rate Nix configures. The approaches differ only for a
 	 * response approaching the megabyte limit. These documents are much smaller.
 	 */
 	readonly stalledTransferTimeoutMs: number;
@@ -190,7 +191,8 @@ export interface NixSignatureSettings {
 	readonly trustedPublicKeys: readonly string[];
 	/**
 	 * The `secret-key-files` list. Nix trusts the published half of every key
-	 * it signs with, so these name keys as much as the list above does.
+	 * it signs with, so this list contributes trusted keys just as
+	 * `trusted-public-keys` does.
 	 */
 	readonly secretKeyFiles: readonly string[];
 }
@@ -229,9 +231,10 @@ function netrcFileIn(configDirectory: string): string {
 }
 
 /**
- * Host capabilities that Nix probes before claiming it can build a derivation. Each
- * default below is a capability Nix probes for at startup, so a machine
- * unavailable capability is omitted. The probe is injected for deterministic tests.
+ * Host capabilities that Nix probes before claiming it can build a derivation.
+ * Each default below runs the same probe Nix runs at startup, so a capability
+ * this machine does not have is left out. The probes are injected so tests are
+ * deterministic.
  */
 export interface NixMachineProbes {
 	/** Whether the path is readable and writable, as the `access` check is. */
@@ -365,8 +368,8 @@ export interface NixConfigEnvironment {
 	readonly env: Readonly<Record<string, string | undefined>>;
 	/**
 	 * The file's contents, or `undefined` when it does not exist. Every other
-	 * reason a read fails is raised: what a caller does about a file it may not
-	 * read differs from what it does about one nobody wrote.
+	 * reason a read fails is raised: a caller handles a file it is not allowed to
+	 * read differently from a file that does not exist.
 	 */
 	readonly readFile: (filePath: string) => string | undefined;
 	readonly homeDirectory: () => string | undefined;
@@ -392,9 +395,9 @@ const maxIncludeDepth = 16;
 const inlineConfigSource = 'NIX_CONFIG';
 
 /**
- * Where a configuration line came from. A file lends its own directory to a
- * relative include written in it; `NIX_CONFIG` is a value rather than a file
- * and names no directory for one to sit under.
+ * Where a configuration line came from. A relative include is resolved against
+ * the directory of the file that contains it. `NIX_CONFIG` is a value rather
+ * than a file, so a relative include written there cannot be resolved.
  */
 type ConfigSource =
 	| { readonly kind: 'file'; readonly filePath: string }
@@ -407,8 +410,8 @@ function sourceName(source: ConfigSource): string {
 
 /**
  * A configuration line's whitespace-separated tokens. Nix tokenises a line
- * before reading anything out of it, so `name = value` needs its spaces and a
- * multi-word value collapses to single ones.
+ * before reading anything out of it, so `name = value` needs its spaces, and
+ * each run of whitespace inside a multi-word value collapses to a single space.
  */
 function settingTokens(line: string): readonly string[] {
 	return line.split(/[\t\r ]+/u).filter(Boolean);
@@ -431,8 +434,8 @@ export const defaultMachineProbes: NixMachineProbes = {
 		platform === 'darwin' &&
 		sysctlInteger('kern.hv_vmm_present') !== 1 &&
 		sysctlInteger('kern.hv_support') === 1,
-	// WSL 1 names itself in the kernel release, where WSL 2 carries a real
-	// kernel that runs i686 binaries.
+	// WSL 1 identifies itself in the kernel release string, whereas WSL 2 uses a
+	// real kernel that can execute i686 binaries.
 	isWsl1: () => release().endsWith('-Microsoft'),
 	microarchitectureLevels: () =>
 		arch === 'x64' && platform === 'linux'
@@ -897,9 +900,9 @@ function applyInclude(
 	try {
 		text = read(resolved);
 	} catch {
-		// Nix reads an include that is there inside a `try` that swallows
-		// whatever the filesystem says about it, so a file this process may not
-		// read is passed over the way one naming no settings would be.
+		// Nix reads an existing include inside a `try` that ignores every
+		// filesystem error, so a file this process may not read is skipped,
+		// exactly like a file that assigns no settings.
 		return;
 	}
 
@@ -996,8 +999,9 @@ class EffectiveSettings {
 				return true;
 			}
 			case 'max-silent-time': {
-				// Nix counts this one in a signed width, so a configuration may
-				// state a negative and this frame carries it.
+				// Nix declares this setting with a signed width, so a configuration
+				// may give it a negative value and the SetOptions frame passes that
+				// value on.
 				this.dedicated.maxSilentTime = parseSettingInteger(name, value);
 				return true;
 			}
@@ -1037,7 +1041,7 @@ class EffectiveSettings {
 		return true;
 	}
 
-	// The list settings whose resolved value this client states. Nix forwards
+	// The list settings whose resolved value this client forwards. Nix forwards
 	// what a setting resolved to across every source it read, which for these
 	// is the merged value: a system-wide assignment a user
 	// configuration appends to is part of the value, and the compiled-in
@@ -1080,7 +1084,10 @@ class EffectiveSettings {
 		return this.overridden.values(this.settledLists());
 	}
 
-	/** The names the configuration states that no Nix this client knows has. */
+	/**
+	 * The setting names in the configuration that neither the pinned Nix nor this
+	 * client recognises.
+	 */
 	unknownSettings(): readonly string[] {
 		return [...this.unknown].toSorted(byName);
 	}
@@ -1151,8 +1158,8 @@ class EffectiveSignatureSettings {
 // A list setting as the merge proceeds. An assignment replaces the current
 // value, including values appended so far; an `extra-` assignment
 // appends to it. A setting never assigned resolves to the default it is given.
-// Duplicate values remain duplicated, as in Nix list settings. Settings
-// Nix keeps as a set say so where they are resolved.
+// Duplicate values remain duplicated, as in Nix list settings. A setting that
+// Nix keeps as a set is deduplicated by the code that resolves it.
 export class EffectiveList {
 	private assigned: readonly string[] | undefined;
 
@@ -1201,8 +1208,8 @@ export class EffectiveList {
 
 // The build settings as the merge proceeds, starting from the system this
 // machine reports so a configuration that never assigns one still describes
-// what Nix would build here. The platforms and features a configuration
-// leaves alone take the defaults Nix computes for the effective system.
+// what Nix would build here. The platforms and features a configuration leaves
+// alone take the defaults Nix computes for the system this machine reports.
 class EffectiveBuildSettings {
 	private readonly extraPlatforms = new EffectiveList();
 
@@ -1518,8 +1525,9 @@ class EffectiveSubstitutionSettings {
 /**
  * Overrides under the canonical names a daemon connection carries. Nix
  * resolves a setting against every source it read and forwards what the merge
- * settled under the setting's own name, so a daemon receiving one holds the
- * value this client holds rather than appending to a list of its own.
+ * settled under the setting's own name, so a daemon that receives an override
+ * takes the value this client resolved instead of appending to a list of its
+ * own.
  */
 class EffectiveDaemonOverrides {
 	private readonly appendable = new Map<string, EffectiveList>();
@@ -1527,8 +1535,8 @@ class EffectiveDaemonOverrides {
 	private readonly scalar = new Map<string, string>();
 
 	apply(name: string, value: string): void {
-		// A daemon holds the settings the pinned Nix holds, so a name that Nix
-		// has none for is a name an override could tell it nothing by.
+		// A daemon knows the settings the pinned Nix knows, so an override under a
+		// name that Nix has no setting for would have no effect.
 		const named = namedSetting(name);
 
 		if (named === undefined) {
@@ -1550,10 +1558,10 @@ class EffectiveDaemonOverrides {
 
 	/**
 	 * The overrides to forward, taking each list setting's value from the
-	 * merge that settled it. A setting the merge did not settle states the
-	 * value it was assigned here; one only appended to states the append
-	 * itself, since the list it appends to is the default this client does not
-	 * resolve and a daemon holds that same default.
+	 * merge that settled it. A setting the merge did not settle is forwarded with
+	 * the value assigned here. A setting that was only appended to is forwarded
+	 * under its `extra-` name, because the list it appends to is the compiled-in
+	 * default, which this client does not resolve and the daemon already holds.
 	 */
 	values(settled: ReadonlyMap<string, readonly string[]>): NixDaemonOverrides {
 		const entries: [string, string][] = [...this.scalar];
@@ -1611,10 +1619,10 @@ const settingAliases = new Map([
 ]);
 
 /**
- * The name a daemon is told a setting by, where that differs from the name
- * this client reads it under. Nix renamed the transfer-retry attempts setting
- * and kept the older spelling as an alias of it, so the older one is the name
- * a daemon of either vintage accepts.
+ * The name this client sends to the daemon for a setting, if that differs from
+ * the name it reads the setting under. Nix renamed the transfer-retry attempts
+ * setting and kept the older spelling as an alias of it, so the older one is
+ * the name a daemon of either vintage accepts.
  */
 const forwardedSettingNames = new Map([
 	['filetransfer-retry-attempts', 'download-attempts']
@@ -1622,8 +1630,8 @@ const forwardedSettingNames = new Map([
 
 /**
  * Settings this client reads that the pinned Nix has no name for, under the
- * names Nix master gave them. The table names what that Nix reads, so these
- * are the settings this client knows of beyond it.
+ * names Nix master gave them. The generated table covers only what the pinned
+ * Nix reads, so these names are recognised separately.
  */
 const masterOnlySettings = new Set([
 	'filetransfer-retry-delay',
@@ -1655,8 +1663,9 @@ interface NamedSetting {
 /**
  * The setting an assignment names, or `undefined` when Nix has none for it.
  * Nix looks the name up as it stands and only then reads an `extra-` prefix as
- * an append, so a setting whose own name starts with `extra-` is found first
- * and a prefix on a setting that holds one value names nothing.
+ * an append, so a setting whose own name starts with `extra-` is found first.
+ * An `extra-` prefix on a scalar setting matches no setting, and the assignment
+ * is reported as unknown.
  */
 function namedSetting(name: string): NamedSetting | undefined {
 	const pinnedName = pinnedSettingName(name);
@@ -1692,8 +1701,8 @@ function byName(left: string, right: string): number {
 
 /**
  * Whether a setting's value reads as enabled. Nix accepts three spellings for
- * each, and refuses anything else, so a caller reading a setting reads it the
- * one way the configuration layer does.
+ * each, and refuses anything else. Callers use this function so that every
+ * boolean setting is read the same way.
  */
 export function isEnabledSettingValue(name: string, value: string): boolean {
 	if (['true', 'yes', '1'].includes(value)) {
@@ -1716,9 +1725,10 @@ export function isEnabledSettingValue(name: string, value: string): boolean {
  * digits, and an optional binary unit, bounded by the width Nix declared the
  * setting with.
  *
- * Nix counts two of its widths in 64 bits, which reaches further than a number
- * here counts exactly. A value beyond that is held to the nearest number, which
- * is far above any this client acts on: the largest of them is a byte count.
+ * Two of Nix's setting widths are 64 bits, which covers values beyond the range
+ * a JavaScript number represents exactly. A value beyond that range is rounded
+ * to the nearest representable number. Such values are far above anything this
+ * client acts on; the largest setting it reads is a byte count.
  */
 function parseSettingInteger(name: string, value: string): number {
 	const parsed = nixInteger(name, value);

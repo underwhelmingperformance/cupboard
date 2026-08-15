@@ -68,11 +68,10 @@ const integerBounds: Readonly<Record<NixIntegerWidth, IntegerBounds>> = {
  * Parses an integer setting, or returns `undefined` when the value is invalid
  * for the setting's width.
  *
- * Nix reads the digits into the width it declared the setting with, so a
+ * Nix reads the digits into the width it declared the setting with, so an
  * out-of-range input is rejected. A unit then multiplies the parsed value, and
- * the product wraps within that same width: `cores = 1T`
- * reads as zero, since a tebibyte is a whole number of times the width holding
- * it.
+ * the product wraps within that same width: `cores = 1T` reads as zero, because
+ * a tebibyte is an exact multiple of that width's range.
  *
  * A setting absent from the generated width table uses the widest width. The
  * table includes every integer setting known to the pinned Nix.
@@ -81,7 +80,7 @@ export function nixInteger(name: string, value: string): bigint | undefined {
 	return nixIntegerOfWidth(value, nixIntegerWidths[name] ?? 'uint64');
 }
 
-/** The integer a Nix setting of the declared width reads. */
+/** The integer Nix reads from the value for a setting of the given width. */
 export function nixIntegerOfWidth(
 	value: string,
 	width: NixIntegerWidth
@@ -224,9 +223,9 @@ export function canonicalStoreReference(
 	return `local://${rooted}${parameters === '' ? '' : `?${parameters}`}`;
 }
 
-// Whether Nix reads the reference as a path. A path is not a URI, and it is
-// not one of the words Nix has a store for. It also contains a separator. A
-// value without one is a word, and Nix has no store for it.
+// Whether Nix reads the reference as a path. A path is not a URI, is not one of
+// the words Nix has a store for, and contains a separator. A value with no
+// separator is a word, and Nix has no store under that name.
 function isPathReference(reference: string): boolean {
 	return (
 		!namedStores.has(reference) &&

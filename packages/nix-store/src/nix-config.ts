@@ -43,11 +43,12 @@ export class NixConfig {
 }
 
 /**
- * The netrc line Nix needs to read a private cache. netrc keys on the machine
- * host alone, so the substituter URL supplies it: the hostname without its port
- * and, for an IPv6 literal, without the surrounding brackets. Credentials that
- * cannot sit unquoted in a netrc token are wrapped in the quoted-token grammar;
- * a control character, which no quoting can encode, is refused.
+ * The netrc line Nix needs to read a private cache. A netrc entry is keyed by
+ * machine host alone, so the machine name comes from the substituter URL: the
+ * hostname without its port and, for an IPv6 literal, without the surrounding
+ * brackets. Credentials that cannot sit unquoted in a netrc token are wrapped
+ * in the quoted-token grammar; a control character, which no quoting can
+ * encode, is refused.
  */
 export function renderNetrc(url: URL, user: string, password: string): string {
 	return `machine ${netrcMachine(url)} login ${netrcToken(user)} password ${netrcToken(password)}\n`;

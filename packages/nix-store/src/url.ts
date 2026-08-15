@@ -17,8 +17,8 @@ function withoutTrailingSlashes(value: string): string {
  * every request derived from it can take the result on trust. Only the origin
  * and path are addressable, so a base is refused when it carries embedded
  * credentials, which would be sent on every request built from it, or a query
- * or fragment, which appending a path to would corrupt. Trailing slashes are
- * dropped from the path so one deployment has one base.
+ * or fragment, which appending a path segment would corrupt. Trailing slashes
+ * are dropped from the path so one deployment has one base.
  */
 export function parseBaseUrl(url: URL): URL {
 	if (

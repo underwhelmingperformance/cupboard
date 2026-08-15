@@ -13,9 +13,9 @@ type ZstdFactory = () => Transform;
 const maxQueuedChunks = 16;
 
 export function zstdCompressionStream(): ByteTransformPair {
-	// Embed a content checksum in the frame epilogue: every decompressor, the
-	// server's verify pass and the client's Nix alike, then rejects a corrupted
-	// frame on its own, independent of the narHash check.
+	// Embed a content checksum in the frame epilogue. Every decompressor, the
+	// server's verify pass and the Nix client alike, then rejects a corrupted
+	// frame on its own, independently of the narHash check.
 	return zstdTransformStream(() =>
 		createZstdCompress({ params: { [constants.ZSTD_c_checksumFlag]: 1 } })
 	);

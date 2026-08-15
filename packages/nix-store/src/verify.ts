@@ -80,8 +80,8 @@ const secretKeyByteLength = 64;
 // The signature algorithm every Nix signing key uses.
 const algorithm = 'Ed25519';
 
-// The Web Crypto API takes bytes backed by a buffer of their own, and a
-// decoded value's may be shared, so each one is copied into its own.
+// The Web Crypto API needs bytes backed by a buffer of their own, and a decoded
+// value's buffer may be shared, so each value is copied into a new buffer.
 function ownBuffer(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
 	const copy = new Uint8Array(bytes.byteLength);
 	copy.set(bytes);

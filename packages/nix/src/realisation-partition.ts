@@ -99,7 +99,7 @@ export interface RealisationPartitionSource {
 }
 
 /**
- * Computes what realising the given targets would require using Nix's
+ * Computes what realising the given targets would require, the way Nix's
  * `queryMissing` does: a walk out from each target that stops wherever the
  * store already has a path, follows a substitutable path into its
  * references, and follows a path that must be built into the derivations it
@@ -150,9 +150,9 @@ class RealisationWalk {
 
 	// Visit each derived path once so shared dependencies are not counted twice.
 	//
-	// The cap is applied here, as each path is reached, so a substituter
-	// offering references without end is stopped at the path that passes it
-	// and never has a level's worth of them gathered up first.
+	// The cap is applied here, as each path is reached, so a substituter that
+	// offers an endless chain of references is stopped at the path that exceeds
+	// the cap, before a whole level of those references is gathered.
 	private claim(target: DerivedPath): boolean {
 		const key = keyOf(target);
 
@@ -349,8 +349,9 @@ class RealisationWalk {
 
 	/**
 	 * Walks out from the given targets a level at a time, so every path a
-	 * level reaches is queried in one batch. Each substituter lookup is
-	 * a request, and a closure holds thousands of paths.
+	 * level reaches is queried in one batch. Each substituter lookup costs a
+	 * request, and a closure can hold thousands of paths, so batching keeps the
+	 * number of requests down.
 	 */
 	async from(targets: readonly NixDerivedPathString[]): Promise<void> {
 		let frontier = this.claimed(
@@ -455,7 +456,8 @@ function partitionTargets(
 	return [builtTargets, opaquePaths];
 }
 
-// The paths the wanted outputs produce. A floating output has none to give.
+// The store paths of the wanted outputs. A floating output has no path until it
+// is built, so it is refused.
 function wantedOutputs(
 	derivation: Derivation,
 	target: BuiltTarget

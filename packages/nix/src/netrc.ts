@@ -169,9 +169,9 @@ class NetrcReader {
 	}
 
 	/**
-	 * A token that runs to the next character no token may hold. Every character
-	 * above a space belongs to it. A carriage return terminates the token and is
-	 * also treated as a line ending.
+	 * A token that runs to the next character a token cannot contain: every
+	 * character greater than a space belongs to the token. A carriage return
+	 * terminates the token and is also treated as a line ending.
 	 */
 	private plainToken(): string {
 		const start = this.at;

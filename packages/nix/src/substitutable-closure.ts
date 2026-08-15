@@ -97,8 +97,8 @@ export interface SubstitutableClosureQueries {
  *
  * Every offer must also be one a consumer would accept, which `accepts`
  * decides. A consumer refuses a path it cannot verify however well a
- * substituter serves it, so an offer that would be refused is a hole in the
- * closure exactly as an absent one is.
+ * substituter serves it, so an offer that would be refused counts against full
+ * coverage in the same way as a missing offer.
  *
  * Only metadata crosses the wire. The walk reads what the substituters
  * advertise and never fetches a NAR, so proving a large closure costs one

@@ -96,8 +96,8 @@ export interface NixSubstituterOffer extends NixOfferedPath {
 	/** The signatures the substituter published for the path. */
 	readonly signatures: readonly string[];
 	/**
-	 * Whether the substituter that made this offer is configured as trusted,
-	 * which takes what it serves without asking for a signature.
+	 * Whether the substituter that made this offer is configured as trusted. Nix
+	 * accepts a path from a trusted substituter without checking its signatures.
 	 */
 	readonly fromTrustedSubstituter: boolean;
 }
@@ -262,8 +262,8 @@ export interface NixStoreClient {
 	/**
 	 * Configured substituters that could not be queried. This distinguishes a
 	 * confirmed absence from an incomplete query. Only a store this process
-	 * drives exposes this information; a daemon keeps
-	 * its own substituters and reports what it reached to its own log.
+	 * drives exposes this information; a daemon manages its own substituters and
+	 * records which of them it reached in its own log.
 	 */
 	unreachableSubstituters?(): Promise<readonly UnreachableSubstituter[]>;
 }
@@ -284,11 +284,11 @@ export function requireStorePath(reported: string): StorePathString {
 }
 
 /**
- * How many path-info queries the closure walk runs at once by default. A daemon
- * query is a round-trip the walk would otherwise pay one path at a time, so the
- * frontier fans out across this many concurrent queries. The backend must be
- * able to serve this many at once: the daemon store gives each query its own
- * connection.
+ * How many path-info queries the closure walk runs at once by default. Each
+ * path-info query is one round trip to the backend, and a serial walk would
+ * make that round trip once per path, so each frontier is queried with this
+ * many requests in flight. The backend must be able to serve this many at
+ * once: the daemon store gives each query its own connection.
  */
 export const defaultClosureConcurrency = 16;
 
@@ -404,7 +404,7 @@ export class NixConfigIncludeError extends NixStoreError {
 }
 
 /**
- * A configuration line Nix cannot read as one. Nix takes a line's
+ * A configuration line Nix cannot parse. Nix takes a line's
  * whitespace-separated tokens and requires `<name> = <value…>`, refusing the
  * whole configuration over anything else. This client also rejects malformed
  * lines so it cannot proceed under a configuration Nix would refuse.
@@ -491,7 +491,7 @@ export class InvalidNixStoreDirectoryError extends NixStoreError {
 /**
  * A local store URI naming a directory by something other than an absolute
  * path. Nix reads each of these parameters as a path from the filesystem root,
- * and refuses a store URI naming one any other way.
+ * and refuses a store URI that gives such a directory in any other form.
  */
 export class InvalidNixStoreParameterError extends NixStoreError {
 	constructor(

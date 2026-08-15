@@ -176,12 +176,12 @@ export function storeClientForBackend(
  * from the substituter's narinfo and includes the NAR hash and signatures a
  * consumer would verify.
  *
- * Private-cache requests use the credentials selected by the configured netrc for
- * its host, and every request takes whatever route the environment's proxy
- * variables put it on.
+ * A request to a private cache uses the credentials the configured netrc gives
+ * for that request's host, and every request goes through whatever proxy the
+ * environment's `http_proxy` and `https_proxy` variables specify.
  *
- * The caller's signal reaches every request the client makes, so abandoning
- * the work abandons all of it.
+ * The caller's signal is passed to every request the client makes, so aborting
+ * the signal cancels all of them.
  */
 export function substituterClientOver(
 	directories: ConfiguredStoreDirectories,
@@ -332,9 +332,9 @@ export interface AvailabilityStore {
 }
 
 /**
- * A store that can report external availability: which paths the
- * substituters offer, what they offer for one, and what realising a target
- * would require.
+ * A store that can report external availability: which paths the substituters
+ * offer, what a substituter offers for a given path, and what realising a
+ * target would require.
  *
  * Both backends support these operations. A daemon manages the substituter
  * configuration and requests for its clients. Without a daemon, this process
@@ -382,8 +382,8 @@ export function createAvailabilityStoreClient(
 		};
 	}
 
-	// Availability opens the daemon for an automatic store whenever it is
-	// present, because the daemon supports substitutability and missing-path
+	// For an automatic store, this function opens the daemon whenever its socket
+	// is present, because the daemon serves substitutability and missing-path
 	// queries that the local reader cannot. An explicitly local URI still names
 	// the local store and must not be replaced by this availability preference.
 	if (
@@ -424,10 +424,9 @@ export function createAvailabilityStoreClient(
 
 /**
  * Applies substitution overrides to the discovered settings. A daemon reads
- * these values from its client's SetOptions frame. A plain
- * `substituters` assignment replaces the discovered list, an
- * `extra-substituters` assignment appends to the current list. The configuration
- * layer parses each boolean consistently.
+ * these values from its client's SetOptions frame. A plain `substituters`
+ * assignment replaces the discovered list; an `extra-substituters` assignment
+ * appends to it. The configuration layer parses each boolean consistently.
  */
 export function overriddenSubstitution(
 	discovered: NixSubstitutionSettings,
@@ -527,8 +526,9 @@ export function resolveStoreBackend(
 }
 
 // The `auto` store: the local store when this process can read and write the
-// state directory, else the daemon when its socket is present, else a chroot
-// store where one is called for, else the local store as configured.
+// state directory, else the daemon when its socket is present, else the
+// per-user chroot store when this machine qualifies for it, else the local
+// store as configured.
 function resolveAuto(
 	config: NixStoreConfig,
 	environment: StoreClientEnvironment
@@ -555,9 +555,9 @@ function resolveAuto(
  * per-user store below the data directory. Nix uses it only when no existing
  * installation or explicit store configuration applies.
  *
- * Absent on any other platform, and absent whenever the state directory
- * exists, this process is the superuser, or the environment configures a store or
- * state directory of its own.
+ * Nix does not use this store on any other platform. It also does not use it
+ * when the state directory exists, when this process runs as the superuser, or
+ * when the environment configures a store or state directory of its own.
  */
 function chrootStore(
 	config: NixStoreConfig,
@@ -596,8 +596,9 @@ function isLinuxMachine(environment: StoreClientEnvironment): boolean {
 	return environment.currentSystem()?.endsWith('-linux') === true;
 }
 
-// Nix roots the chroot store at `root` under its data directory, which
-// `NIX_DATA_HOME` names outright and `XDG_DATA_HOME` names `nix` under.
+// Nix roots the chroot store at `root` inside its data directory.
+// `NIX_DATA_HOME` gives that directory directly; under `XDG_DATA_HOME` the data
+// directory is `nix` inside it.
 function chrootStoreRoot(
 	environment: StoreClientEnvironment
 ): string | undefined {

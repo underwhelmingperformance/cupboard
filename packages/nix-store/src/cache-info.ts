@@ -9,8 +9,9 @@ import {
 /**
  * The store directory a cupboard cache serves. A binary cache serves exactly
  * one, which is why `nix-cache-info` contains `StoreDir`: a client substituting
- * from the cache must be running the same store. This is the single statement
- * of that fact, so what the cache advertises and what it accepts agree.
+ * from the cache must be running the same store. This constant is the only
+ * definition of that directory, so what the cache advertises and what it
+ * accepts always agree.
  */
 export const servedStoreDirectory = storeDirectorySchema.parse('/nix/store');
 

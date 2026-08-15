@@ -100,7 +100,7 @@ export class NetrcControlCharacterError extends ProtocolError {
 
 // A nix-cache-info document missing or mis-typing one of its fields. `field`
 // names the first field that failed, so a consumer that must not guess a
-// default (a priority comparison, say) can report exactly what was absent.
+// default, such as one comparing priorities, can report which field was wrong.
 export class CacheInfoParseError extends ProtocolError {
 	constructor(public readonly field: string) {
 		super(`Invalid nix-cache-info: ${field}`);

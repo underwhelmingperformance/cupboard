@@ -30,8 +30,8 @@ export interface NarInfoFields {
 
 // A narinfo is a sequence of `Key: value` lines. Most keys appear once; `Sig`
 // may repeat. The lexer collects raw values per key, splitting on either line
-// ending, and a malformed line (no separator) is the only failure it owns;
-// every other rule belongs to the schema.
+// ending. The lexer reports only one failure, a line with no separator; every
+// other rule belongs to the schema.
 export function parseFields(source: string): Record<string, string[]> {
 	const fields: Record<string, string[]> = {};
 
@@ -60,9 +60,10 @@ function single<S extends z.ZodType>(value: S) {
 }
 
 /**
- * The size a narinfo `FileSize` or `NarSize` states, or `undefined` for a value
- * that states none. Nix converts the whole value, so a value carrying anything
- * beyond digits, or counting past what an exact integer holds, is not a size.
+ * The size given by a narinfo `FileSize` or `NarSize` field, or `undefined`
+ * when the value is not a size. Nix converts the whole value, so a value
+ * containing any character other than a digit, or one larger than an exact
+ * integer can hold, is not a size.
  */
 export function narInfoSize(value: string): number | undefined {
 	if (!/^\d+$/u.test(value)) {

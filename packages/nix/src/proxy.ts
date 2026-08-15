@@ -81,8 +81,9 @@ export function proxiedFetch(env: ProxyEnvironment): typeof fetch | undefined {
 
 	// Reuse one agent and its proxy connections across requests.
 	// The agent otherwise falls back to `process.env` for every absent option.
-	// State each absence explicitly so an upper-case HTTP_PROXY deliberately
-	// excluded above cannot come back when the agent constructs its routes.
+	// Pass an empty string for each proxy that is not configured, so an
+	// upper-case HTTP_PROXY, which is deliberately not read above, cannot come
+	// back when the agent builds its routes.
 	const dispatcher = new EnvHttpProxyAgent({
 		httpProxy: proxies.httpProxy ?? '',
 		httpsProxy: proxies.httpsProxy ?? '',
