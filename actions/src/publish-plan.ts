@@ -143,9 +143,9 @@ export const publishTargetSchema = z.strictObject({
 			message: `cohort must be a printable ASCII label of at most ${String(cohortLabelMaxLength)} characters without spaces`
 		})
 		.optional(),
-	// Component publication: see expandComponents. Present, this target's own
-	// attr and rootDrvPath are never evaluated or built; its components are
-	// published in its place, under its own rootSuffix.
+	// Component publication: see expandComponents. When it is present, this
+	// target's own attr and rootDrvPath are never evaluated or built; its
+	// components are published in its place, under its rootSuffix.
 	components: z.array(publishComponentSchema).min(1).optional()
 });
 
@@ -241,10 +241,10 @@ export interface TargetEvaluation {
 }
 
 /**
- * One manifest-declared cohort: the targets that run together in one job.
- * Absent an explicit `cohort` label a target is its own cohort, so cohorts
- * partition the whole manifest, retained targets included, exactly as
- * declared; nothing here depends on what the destination already holds.
+ * One manifest-declared cohort: the targets that run together in one job. A
+ * target without an explicit `cohort` label is its own cohort. Cohorts
+ * partition the whole manifest exactly as declared, retained targets included,
+ * and membership never depends on what the destination already holds.
  */
 export interface Cohort {
 	readonly key: string;
@@ -252,18 +252,16 @@ export interface Cohort {
 	readonly os: string;
 	readonly remote: boolean;
 	readonly targets: readonly PublishTarget[];
-	// The multi-installable build request a cohort job hands to `nix build`:
-	// one `attr^outputs` form per member, the same shape a target job builds
-	// today.
+	// The installables a cohort job passes to `nix build`: one `attr^outputs`
+	// form per member, in the same form a single-target job uses.
 	readonly installables: readonly string[];
 }
 
 /**
  * One derivation and the target identities (attrs) whose evaluated graph
- * contains it. Built from the recursive graph {@link evaluateTargets}
- * already read, so a streamed build's post-build hook can resolve a
- * `DRV_PATH` to the target, and from there the root, it belongs to without
- * asking Nix again.
+ * contains it. Built from the recursive graph {@link evaluateTargets} has
+ * already read, so a streamed build's post-build hook can map a `DRV_PATH` to
+ * its target, and from there to that target's root, without asking Nix again.
  */
 export interface DerivationToTargetsEntry {
 	readonly drvPath: string;
@@ -459,10 +457,10 @@ async function evaluateResolvedTarget(
 	}
 }
 
-// A best-effort target's failure is surfaced as a workflow warning rather than
-// thrown, so the reason keeps the evaluator's own message: a
-// {@link TargetEvaluationError} names the attribute and carries that message as
-// its cause, so both are joined back into one line.
+// A best-effort target's failure becomes a workflow warning instead of a thrown
+// error, so the reason must keep the evaluator's own message. A
+// {@link TargetEvaluationError} names the attribute and keeps that message as
+// its cause, so the two are joined back into one line.
 function evaluationFailureReason(error: unknown): string {
 	if (error instanceof TargetEvaluationError && error.cause instanceof Error) {
 		return `${error.message}: ${error.cause.message}`;
@@ -685,9 +683,9 @@ function nodeOutputs(
 	});
 }
 
-// A derivation reference is printed either absolute or as a bare basename, and
-// a basename belongs to the store the evaluating Nix reads, whose directory the
-// runner's configuration decides.
+// A derivation reference is printed either absolute or as a bare basename. A
+// basename refers to the store the evaluating Nix reads, and the runner's
+// configuration decides that store's directory.
 function absoluteStorePath(
 	storePath: string,
 	storeDirectory: StoreDirectory
@@ -827,9 +825,8 @@ async function queryMissingStorePathHashes(
 }
 
 /**
- * Fails the plan when two cohorts would emit one key: the workflow selects
- * jobs solely by key, so a shared key would make colliding jobs consume both
- * cohorts.
+ * Fails the plan when two cohorts would emit the same key. The workflow selects
+ * a job by its key alone, so two cohorts sharing one could not be told apart.
  */
 export function assertDistinctGroupKeys(
 	groups: readonly { readonly key: string }[]
@@ -1025,10 +1022,10 @@ export interface CohortPreFilterDecision {
  * Reduces a cohort's member coverage to one prune decision. The pre-filter
  * prunes jobs, never composes build sets, so this only ever decides whether
  * the cohort's job is needed at all: pruned when every member is covered,
- * and never pruned when any member is uncovered, unknown, or failed. A
- * failed member makes the whole decision advisory rather than a refusal:
- * the job spawns and the reason travels with it, so the plan itself never
- * goes red for a check whose only job is to save runner minutes.
+ * and never pruned when any member is uncovered, unknown, or failed. A failed
+ * member never refuses the plan: the cohort's job still runs and the decision
+ * records the failure reason, so a pre-filter that exists only to save runner
+ * minutes cannot fail the plan.
  */
 export function cohortPreFilterDecision(
 	cohort: Cohort,

@@ -952,13 +952,12 @@ export async function buildCohortAction(
 			nixDerivedPathSchema.parse(member.queryInstallable)
 		);
 
-		// The build set's entries are derivation paths, and `nix build` reads
-		// those derivations from the runner's local store whether it builds
-		// there or copies them to a non-publishing remote store. A temp root
-		// lasts only while its daemon
-		// connection stays open, and a daemon running automatic GC can collect
-		// an unrooted derivation between materialisation and the build. Plan
-		// and build inside the rooted connection so the materialised closure
+		// The build set's entries are derivation paths, and `nix build` reads those
+		// derivations from the runner's local store whether it builds there or
+		// copies them to a non-publishing remote store. A temporary root lasts only
+		// while its daemon connection stays open, and a daemon running automatic GC
+		// can collect an unrooted derivation between materialisation and the build.
+		// Plan and build inside the rooted connection so the materialised closure
 		// survives until the build registers roots of its own.
 		await withLocalDerivationRoots(
 			targets.map((target) => derivationPathOf(target)),
@@ -1250,10 +1249,11 @@ async function settleCohortBuild(
 }
 
 /**
- * The cohorts file one supervised `cupboard build-push` run consumes. Strict
- * builds retain cross-target work sharing, while best-effort builds keep one
- * target per cohort so every failure remains attributable. Both modes retain
- * the attempt loop and local re-verification of remotely built derivations.
+ * The cohorts file one supervised `cupboard build-push` run consumes. A strict
+ * build keeps every target in one cohort so they share work; a best-effort
+ * build puts one target in each cohort so every failure can be attributed to
+ * its target. Both modes keep the attempt loop and the local re-verification of
+ * remotely built derivations.
  */
 export function buildPushCohortsFile(
 	installables: readonly string[],
@@ -1465,9 +1465,10 @@ interface CohortRootGrouping {
 }
 
 /**
- * Groups target paths by retention root. Remote keyed results retain ownership
- * for floating and multi-output targets. Otherwise, predictable output paths
- * determine the root. A local path without known ownership uses the first root.
+ * Groups target paths by retention root. For a floating or multi-output target,
+ * the remote keyed results say which member produced each output, so they decide
+ * the root; otherwise the predictable output paths decide it. A local path with
+ * no known owner uses the first root.
  */
 export function rootGroups(
 	members: readonly CohortMember[],
@@ -1687,9 +1688,9 @@ interface PublishCohortOptions {
 	readonly incompleteRoots: ReadonlySet<string>;
 }
 
-// One push per exact root group. Reference paths travel only with their owning
-// root, so an all-reference group remains publishable without broadening any
-// other root's retained set.
+// One push per exact root group. A reference path is published only under the
+// root that owns it, so a group made up entirely of reference paths can still
+// be published without adding paths to any other root's retained set.
 async function publishCohort(options: PublishCohortOptions): Promise<void> {
 	const {
 		inputs,
@@ -1841,7 +1842,7 @@ function linesOf(paths: readonly string[]): string {
 
 /**
  * The partition as the re-probe leaves it: every withdrawn target moves out of
- * the build set and into the bucket the re-probe classified it under, so the
+ * the build set and into the list the re-probe classified it under, so the
  * target paths, the reference paths and the pushes that set the target roots
  * all read one partition rather than two. The `leftUpstream` list keeps the
  * plan's own entries, because the re-probe classifies a withdrawn target only
@@ -2232,16 +2233,15 @@ function planCohortResult(
 
 /**
  * Runs `nix build --keep-going` over the given installables. A local build's
- * out-links are kept under a directory this invocation owns, protecting its
+ * out-links are kept under a directory this invocation owns, which protects its
  * closure until publication finishes. A remote non-publishing build also
  * receives the argument, but its out-link exists only in the local filesystem
- * and is not treated as a remote GC root. A cohort with one failing
- * derivation still reports whatever `--print-out-paths` prints for the
- * survivors. A failure with no reported target results is treated as a command
- * failure. A configured remote store owns the
- * build: `--store` sends the results there while `--eval-store auto` keeps
- * evaluation on the runner, so the built closure never enters the runner's
- * local store.
+ * and is not a GC root on the remote store. Because of `--keep-going`, a cohort
+ * with one failing derivation still reports whatever `--print-out-paths` prints
+ * for the survivors; a failure that reports no target results at all is treated
+ * as a command failure. A configured remote store owns the build: `--store`
+ * sends the results there while `--eval-store auto` keeps evaluation on the
+ * runner, so the built closure never enters the runner's local store.
  */
 export function nixBuildArguments(
 	installables: readonly string[],
@@ -2876,7 +2876,7 @@ export async function runNixBuildWithResults(
 
 /**
  * Work that must share one remote daemon session so copied derivations and
- * realised outputs remain protected until publication has settled.
+ * realised outputs stay protected until publication has finished.
  */
 export interface RemoteDerivationPreparation {
 	/** Top-level derivations whose copied closures the session must protect. */
@@ -3347,9 +3347,9 @@ async function resolveLocalBuildOwners(options: {
 
 /**
  * The already-held paths to pass to a receipt push. The push records no subject
- * for a path it is told the store already held, and a provenance rebuild
- * realises a path the store already had, so this drops every path this run
- * claims as built.
+ * for a path it is told the store already held. A provenance rebuild realises a
+ * path the store already had, so every path this run claims as built is removed
+ * from the list.
  */
 export function receiptAlreadyHeldPaths(
 	alreadyValid: readonly string[],

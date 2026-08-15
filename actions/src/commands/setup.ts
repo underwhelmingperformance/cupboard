@@ -391,8 +391,9 @@ async function fetchCacheInfoPriority(
 ): Promise<CachePriority> {
 	const url = canonicalHref(substituter);
 	const target = `${url}/nix-cache-info`;
-	// Bounded per request, retries included: a stalled connection must fail
-	// promptly, not sit on undici's defaults.
+	// Each request, retries included, is bounded by the probe deadline, so a
+	// stalled connection fails promptly instead of waiting out undici's much
+	// longer default timeout.
 	return fetchWithProbeDeadline(
 		fetcher,
 		target,
@@ -467,8 +468,8 @@ export async function resolveSubstituters(
 			dependencies.signal
 		)
 	]);
-	// The view's priority comes from its own endpoint's cache-info, so its
-	// provenance is known here: carry it as a reuse-view priority.
+	// The priority came from the view's own `nix-cache-info`, so it is a
+	// reuse-view priority and is parsed as one.
 	const viewPriority = reuseViewPrioritySchema.parse(rawViewPriority);
 
 	if (!isDestinationPreferred(destinationPriority, viewPriority)) {

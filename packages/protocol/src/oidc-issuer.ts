@@ -66,9 +66,9 @@ export class IssuerUrl {
 	}
 }
 
-// The issuer and audience cupboard stamps into, and pins when verifying, its own
-// access tokens when a deployment leaves CUPBOARD_AUTH_ISSUER / _AUDIENCE unset.
-// One default keeps the issued token, its verification, and the published OAuth
-// metadata reporting the same identity.
+// The issuer and audience cupboard puts in its own access tokens, and pins when
+// verifying them, when a deployment leaves CUPBOARD_AUTH_ISSUER and _AUDIENCE
+// unset. One default keeps the issued token, its verification and the published
+// OAuth metadata reporting the same identity.
 export const defaultAuthIssuer = 'cupboard';
 export const defaultAuthAudience = 'cupboard';

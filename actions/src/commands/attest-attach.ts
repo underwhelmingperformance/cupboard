@@ -164,9 +164,9 @@ export function resolveAttestAttachInputs(
 }
 
 /**
- * The `cupboard attest attach` argv for one receipt's paths: the bundles
- * attach to the already-published paths over GitHub OIDC, so no upload or
- * retention flag travels with it.
+ * The `cupboard attest attach` argv for one receipt's paths. The bundles attach
+ * to paths the run has already published, authenticated with GitHub OIDC, so
+ * the argv carries no upload or retention flag.
  */
 export function attestAttachArguments(
 	inputs: AttestAttachInputs,

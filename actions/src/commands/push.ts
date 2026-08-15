@@ -639,10 +639,10 @@ export async function inspectCupboardVersion(
 }
 
 /**
- * Combines one summary per root-group push into the totals and combined path
- * list this action reports as its own outputs and require-grace checks
- * against: a grouped push is still one logical publication, whatever number
- * of `cupboard push` invocations it took to reach every root.
+ * Combines one summary per root-group push into a single summary. The action
+ * publishes these totals as its own outputs and runs the require-grace checks
+ * over the combined path list, because a grouped push is one publication
+ * however many `cupboard push` invocations it took to reach every root.
  */
 export function aggregatePushSummaries(
 	summaries: readonly ParsedPushSummary[]
@@ -705,9 +705,9 @@ export function requireGraceResultProtocol(
 }
 
 /**
- * Whether the push report carries any path with no grace fact at all: with
- * `require-grace` that means no policy covers the cache, the cache-level
- * condition {@link GracePolicyMissingError} models.
+ * Whether the push report includes any path with no grace fact at all. Under
+ * `require-grace` that means no policy covers the cache, which is the
+ * cache-level condition {@link GracePolicyMissingError} reports.
  */
 export function hasUngracedPath(summary: ParsedPushSummary): boolean {
 	return summary.paths.some(
@@ -750,11 +750,11 @@ async function publishPushOutputs(
 	await setOutput(environment, 'uploaded-bytes', String(summary.uploadedBytes));
 }
 
-// A successful push always records its summary, parsed against the protocol's
-// own schema so a shape the two sides do not agree on (a mismatched cupboard
-// version, say) fails loudly rather than reading as a vacuous pass. Its
-// absence means the run did not report what it did, so there is nothing to
-// publish and the action fails.
+// A successful push always records its summary. It is parsed against the
+// protocol's own schema, so a summary whose shape the two sides disagree on (a
+// mismatched cupboard version, say) fails instead of parsing as an empty
+// result. When the run recorded no summary at all, the action has no counts to
+// publish and fails.
 export function requirePushSummary(
 	results: readonly ReporterResultEvent[],
 	protocol: CupboardResultProtocol = 'result-file'
@@ -801,7 +801,7 @@ export function buildPushArguments(
 		'--github-oidc'
 	];
 	// No default here: the CLI derives the audience from the canonical form of
-	// the URL it parses, so one defaulting site serves the whole system.
+	// the URL it parses, so the default is applied in one place only.
 	if (options.audience !== '') {
 		arguments_.push('--audience', options.audience);
 	}

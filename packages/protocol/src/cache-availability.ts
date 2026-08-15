@@ -1,13 +1,13 @@
 import { storePathHashSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
-// A cache hash costs one R2 head, leaving headroom beneath the Worker's
-// internal-subrequest ceiling.
+// Each requested hash costs one R2 head request, so this bound leaves headroom
+// beneath the Worker's internal-subrequest ceiling.
 export const cacheAvailabilityMaxPaths = 900;
 
-// A reuse-view hash can select up to 16 candidate NARs. The server verifies
-// their D1 facts set-wise, while this bound keeps the worst-case R2 work below
-// the same ceiling.
+// One hash in a reuse-view request can select up to 16 candidate NARs. The
+// server verifies their D1 facts as a set, and this lower bound keeps the
+// worst-case R2 work below the same ceiling.
 export const reuseViewAvailabilityMaxPaths = 50;
 
 export const cacheAvailabilityRequestSchema = z.strictObject({

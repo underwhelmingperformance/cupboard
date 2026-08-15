@@ -10,10 +10,9 @@ const maxRetryDelayMs = 5000;
 
 // The statuses that mean "make the same request again": a rate limit and the
 // gateway/overload conditions a server clears on its own. A deterministic
-// refusal keeps its own status and is never in this set: a `500` invariant, an
-// over-quota `507`, or any 4xx surfaces to the caller on the first response.
-// `Retry-After`, when present, only sets how long to wait, never whether to
-// retry.
+// refusal is never in this set and reaches the caller on its first response: a
+// `500` from a broken invariant, an over-quota `507`, or any 4xx. A
+// `Retry-After` header only sets how long to wait, never whether to retry.
 const retryableStatuses = new Set<number>([
 	StatusCodes.TOO_MANY_REQUESTS,
 	StatusCodes.BAD_GATEWAY,

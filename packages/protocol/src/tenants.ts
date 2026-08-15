@@ -45,11 +45,10 @@ export type ParsedTenantReadCredential = z.output<
 	typeof tenantReadCredentialSchema
 >;
 
-// Creating a tenant requires an explicit read mode (private is the hosted default,
-// chosen by the caller) and the owner's OIDC identity, which seeds the tenant's
-// admin trust. A private cache may carry the read credential that authorises its
-// reads; without one a private cache fails closed. A strict object rejects unknown
-// fields.
+// Creating a tenant requires an explicit read mode, chosen by the caller, and
+// the owner's OIDC identity, which becomes the tenant's first admin trust rule.
+// The hosted deployment chooses private. A private cache may include the read
+// credential that authorises its reads; without one it fails closed.
 export const tenantCreateBodySchema = z.strictObject({
 	id: tenantIdSchema,
 	readMode: tenantReadModeSchema,
@@ -98,9 +97,9 @@ export type ParsedTenantMutateResponse = z.output<
 export type TenantMutateResponse = z.input<typeof tenantMutateResponseSchema>;
 
 // The body returned by a deployment-level membership rebuild: how many live
-// tenants the gate now carries. Reasserts every live tenant's marker and
-// rebuilds the filter from the registry, so it repairs admission state without
-// touching any tenant's data.
+// tenants the gate now admits. The rebuild reasserts every live tenant's marker
+// and rebuilds the filter from the registry, so it repairs the admission state
+// without touching any tenant's data.
 export const membershipRebuildResponseSchema = z.strictObject({
 	tenants: z.number().int().nonnegative()
 });

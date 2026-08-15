@@ -253,8 +253,8 @@ export interface PlanInputs {
 }
 
 /**
- * The processes the plan reaches out through, injectable so tests can drive
- * the whole plan without a Nix store, a network or a cupboard binary.
+ * The external processes and network calls the plan makes, injectable so tests
+ * can run the whole plan without a Nix store, a network or a cupboard binary.
  */
 export interface PlanDependencies {
 	readonly evaluator?: NixEvaluator;
@@ -549,9 +549,9 @@ export async function planAction(
 	const { plan, evaluations } = inputs.optimise
 		? await optimisedPlan(inputs, reporter, dependencies)
 		: { plan: unoptimisedPlan(inputs.targets), evaluations: [] };
-	// The pre-filter needs the same evaluated graph the plan itself used, so
-	// it only runs when planning did: the unoptimised path never inspects the
-	// cache, and spawning every cohort's job unfiltered matches that.
+	// The pre-filter needs the same evaluated graph the plan itself used, so it
+	// runs only when the plan was optimised. The unoptimised path never inspects
+	// the cache, and it leaves every cohort's job in the matrix.
 	const cohortDecisions =
 		inputs.optimise && !inputs.requireProvenance
 			? await cohortPreFilter(
@@ -845,8 +845,8 @@ async function ensureRoot(
 	return ensureResponse(root, await readEnsureResults(root, resultFile));
 }
 
-// A run that never opened its result file recorded no result; any other read
-// failure is the caller's environment misbehaving and propagates as itself.
+// A run that never opened its result file recorded no result. Any other read
+// failure comes from the environment, so it propagates unchanged.
 async function readEnsureResults(
 	root: string,
 	resultFile: string
@@ -950,8 +950,8 @@ async function readRootTargets(
 	return new Set(targets.map((target) => target.storePath));
 }
 
-// A run that never opened its result file recorded no result; any other read
-// failure is the caller's environment misbehaving and propagates as itself.
+// A run that never opened its result file recorded no result. Any other read
+// failure comes from the environment, so it propagates unchanged.
 async function readRootTargetsResults(
 	root: string,
 	resultFile: string
@@ -996,11 +996,10 @@ function rootTargetsResponse(
 	throw new RootTargetsResultMissingError(root);
 }
 
-// One target's coverage, gathered by the IO the pure decision in
-// evaluateTargetCoverage cannot itself perform. An unevaluated target, or one
-// whose outputs are not all known before building, never reaches the read or
-// ensure calls at all: the pre-filter reaches only targets whose output
-// paths are known before building, per the design.
+// One target's coverage, including the I/O that the pure decision in
+// `evaluateTargetCoverage` cannot perform itself. A target that did not
+// evaluate, or whose selected outputs are not all known before building,
+// reports `unknown-output` without reading or ensuring its root.
 async function targetCoverageOutcome(
 	target: PublishTarget,
 	evaluationByAttribute: ReadonlyMap<string, TargetEvaluation>,
@@ -1197,12 +1196,12 @@ interface MeasurableTarget {
 }
 
 /**
- * The production packing measurer: prices each surviving cohort target's own
- * substitutable NAR size by shelling to `cupboard plan measure` against the
- * store the cohorts build against, per target, exactly the store queries the
- * cohort partition itself asks. Best-effort by design: any failure yields no
- * measurements at all, packing then leaves every cohort exactly as the
- * manifest declared it, and the plan itself stays green.
+ * The production packing measurer: it prices each surviving cohort target's own
+ * substitutable NAR size by running `cupboard plan measure` against the store
+ * the cohorts build against, one target at a time, using the same store queries
+ * the cohort partition makes. It is best-effort. A failed measurement returns
+ * no measurements at all, so packing leaves every cohort exactly as the
+ * manifest declared it and the plan still succeeds.
  */
 export function packingMeasurer(
 	inputs: PlanInputs,
@@ -1289,8 +1288,8 @@ async function measureTargetSizes(
 	return measureResponse(await readMeasureResults(resultFile));
 }
 
-// A run that never opened its result file recorded no result; any other read
-// failure is the caller's environment misbehaving and propagates as itself.
+// A run that never opened its result file recorded no result. Any other read
+// failure comes from the environment, so it propagates unchanged.
 async function readMeasureResults(resultFile: string): Promise<string> {
 	try {
 		return await readFile(resultFile, 'utf8');

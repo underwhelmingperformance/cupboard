@@ -101,8 +101,8 @@ export const reuseViewSetBodySchema = z.strictObject({
 export type ParsedReuseViewSetBody = z.output<typeof reuseViewSetBodySchema>;
 
 // A reuse view's definition revision, issued by its own persistent counter and
-// bumped on every definition change. Its own brand keeps it from crossing with a
-// narinfo generation or any other integer fence.
+// raised on every definition change. Its own brand keeps it from being confused
+// with a narinfo generation or any other counter.
 export const reuseViewRevisionSchema = z
 	.number()
 	.int()

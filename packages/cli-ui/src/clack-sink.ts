@@ -47,9 +47,10 @@ function renderProperty(key: string, value: unknown): string {
 	return `${key} ${String(value)}`;
 }
 
-// The record's properties as a dimmed, single-line summary, in the spirit of
-// `renderFacts`: variable data lives here so the message itself stays constant
-// and low-cardinality. Undefined values are skipped.
+// The record's properties as a dimmed, single-line summary, rendered the same
+// way as the facts on a spinner title: the variable data goes here so the
+// message itself stays constant and low-cardinality. Undefined values are
+// skipped.
 function renderFields(
 	properties: Record<string, unknown>,
 	colours: Colours

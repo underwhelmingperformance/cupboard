@@ -14,8 +14,8 @@ import { countSchema } from './internal/counts.ts';
 // branded form.
 
 // A derivation's own store path: the `.drv` file a build event and a receipt
-// subject name their derivation by. Its own brand keeps it from crossing with
-// the output paths the derivation produces.
+// subject name their derivation by. Its own brand keeps it distinct from the
+// output paths the derivation produces.
 export const derivationPathSchema = storePathSchema
 	.refine((value) => value.endsWith('.drv'))
 	.brand('DerivationPath');
@@ -137,10 +137,11 @@ export const targetOutcomeSchema = z.discriminatedUnion('outcome', [
 ]);
 export type ParsedTargetOutcome = z.output<typeof targetOutcomeSchema>;
 
-// The planner's partition of the requested targets: the realisation split Nix
-// reports (a raised `unknown` count is the record that a substituter did not
-// answer and the run degraded toward building) plus the publication split the
-// availability questions produce.
+// The planner's partition of the requested targets. `willBuild`,
+// `willSubstitute` and `unknown` are the realisation split Nix reports; a
+// raised `unknown` count records that a substituter did not answer, so the run
+// treated those targets as ones to build. `attached`, `adopted` and
+// `leftUpstream` are the publication split the availability questions produce.
 export const plannerPartitionSchema = z.strictObject({
 	willBuild: countSchema,
 	willSubstitute: countSchema,

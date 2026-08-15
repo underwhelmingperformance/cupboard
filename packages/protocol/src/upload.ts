@@ -36,9 +36,9 @@ const uploadPathNegotiationShape = {
 	narHash: nixSha256HashSchema,
 	narSize: positiveIntSchema,
 	references: referencesSchema,
-	// A narinfo names the deriver the way it names references, by basename: the
-	// store directory is the one the cache's `StoreDir` states. `ca` is a
-	// content-address specification, not a path, so it stays a metadata line.
+	// A narinfo names the deriver by basename, as it does references; the store
+	// directory comes from the cache's `StoreDir`. `ca` is a content-address
+	// specification, not a path, so it stays a metadata line.
 	deriver: storePathBasenameSchema.optional(),
 	ca: narInfoLineSchema.optional()
 };
@@ -93,14 +93,14 @@ export type UploadId = z.infer<typeof uploadIdSchema>;
 
 // A commit session's server-issued opaque id, one per WebSocket. A pending row
 // records the session waiting on an upload so a verdict routes to the right
-// socket. Branded so it can never stand in for the upload id it sits beside.
+// socket. Branded so it cannot be passed where an upload id is expected.
 export const sessionIdSchema = z.string().brand('SessionId');
 export type SessionId = z.infer<typeof sessionIdSchema>;
 
-// A temporary R2 S3 credential: the access-key triple a standard S3 client signs
-// with, where to send the requests, and when it stops working. The single
-// declaration of the shape, shared by the server helper that builds it and the
-// wire response that carries it.
+// A temporary R2 S3 credential: the access-key triple a standard S3 client
+// signs with, where to send the requests, and when the credential expires.
+// This is the one declaration of that shape, used by the server helper that
+// builds the credential and by the wire response that returns it.
 export const r2CredentialSchema = z.strictObject({
 	accessKeyId: z.string(),
 	secretAccessKey: z.string(),
@@ -113,9 +113,9 @@ export type ParsedR2Credential = z.output<typeof r2CredentialSchema>;
 export type R2Credential = z.input<typeof r2CredentialSchema>;
 
 // The credential a push uploads its blobs with, scoped to the push's staging
-// prefix, plus the signed push id that names the prefix. The CLI drives a
-// standard S3 client with these straight to R2, so no blob byte passes the
-// Worker.
+// prefix, plus the signed push id that names the prefix. The CLI uses these
+// with a standard S3 client and uploads directly to R2, so no blob bytes pass
+// through the Worker.
 export const pushCredentialSchema = z.strictObject({
 	pushId: pushIdSchema,
 	...r2CredentialSchema.shape
@@ -124,16 +124,16 @@ export type ParsedPushCredential = z.output<typeof pushCredentialSchema>;
 export type PushCredential = z.input<typeof pushCredentialSchema>;
 
 // One negotiate carries a store-path closure, bounded by the store itself. The
-// cap sits well above any real closure, so it rejects only an abusive body, not
-// a legitimate push.
+// cap is far above any real closure, so it rejects only an abusive body, not a
+// legitimate push.
 export const uploadNegotiateMaxPaths = 100_000;
 
-// The retention grace fact a capable negotiation reports per decision:
+// The retention grace fact a capable negotiation reports per decision.
 // `retainUntil` is the deadline an already-present path was extended to before
-// the decision returned, and `graceSeconds` is the matched policy's grace,
-// either the captured grace a planned upload applies when it materialises or
-// the policy a read-only decision resolved (zero included). Both absent
-// strictly means no grace policy matched.
+// the decision returned. `graceSeconds` is the matched policy's grace: either
+// the captured grace a planned upload applies when it materialises, or the
+// grace a read-only decision resolved (zero included). When both are absent, no
+// grace policy matched.
 export const uploadGraceFactSchema = z
 	.strictObject({
 		retainUntil: z.string().optional(),
@@ -225,11 +225,11 @@ export type ParsedUploadPreviewRequest = z.output<
 	typeof uploadPreviewRequestSchema
 >;
 
-// A preview decision names the same action negotiate would plan, but carries
-// none of a real decision's upload machinery (no `uploadId`, `r2Key`, or
-// `expiresAt`): it stages nothing, so there is nothing for those fields to
-// address. `grace` is present when the request accepted upload grace facts;
-// without that capability, decisions retain their legacy shape.
+// A preview decision reports the same action negotiate would plan, without the
+// fields a real decision needs in order to carry the upload out (`uploadId`,
+// `r2Key`, `expiresAt`): preview creates no staging object for them to refer
+// to. `grace` is present when the request accepted upload grace facts; without
+// that capability, decisions retain their legacy shape.
 export const uploadPreviewDecisionSchema = z.strictObject({
 	action: z.enum(['skip', 'commit', 'upload']),
 	storePathHash: storePathHashSchema,
@@ -315,10 +315,9 @@ export type UploadStatusResponse = z.input<typeof uploadStatusResponseSchema>;
 const uploadIdsSchema = z.array(uploadIdSchema);
 
 // The response header on the commit session's 101 listing the optional ops this
-// server accepts. A client sends `commit-batch` only when the server listed it,
-// so a batching client degrades to per-id `commit` ops against a server that
-// does not list it, because such a server would close the socket on an op it
-// cannot parse.
+// server accepts. A client sends `commit-batch` only when the server listed it.
+// A server that does not list the op would close the socket on an op it cannot
+// parse, so a batching client falls back to per-id `commit` ops instead.
 export const commitCapabilitiesHeader = 'x-cupboard-commit-capabilities';
 
 // The response header on upload negotiation listing the optional response
