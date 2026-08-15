@@ -121,9 +121,10 @@ export interface Reporter {
 	 */
 	step(message: string): void;
 	/**
-	 * Reports a terminal failure: a single red marker line in terminal mode, or
-	 * one `{event:'error', name, message}` in JSON mode, with an added `causes`
-	 * array when the error has a `cause`.
+	 * Reports a terminal failure: a red marker line in terminal mode, with the
+	 * error's `cause` chain indented under it, or one `{event:'error', name,
+	 * message}` in JSON mode, with an added `causes` array when the error has a
+	 * `cause`.
 	 */
 	error(error: unknown): void;
 }
