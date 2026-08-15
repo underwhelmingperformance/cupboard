@@ -250,10 +250,10 @@ describe('runPlanCohort', () => {
 					kind: 'plan-cohort',
 					data: expectedResult,
 					rows: [
-						{ label: 'Attach only', value: '2' },
-						{ label: 'Publish by reference', value: '0' },
-						{ label: 'Left upstream', value: '0' },
-						{ label: 'Build set', value: '0' },
+						{ label: 'Already served by the cache', value: '2' },
+						{ label: 'Reused from the tenant', value: '0' },
+						{ label: 'Left to upstream caches', value: '0' },
+						{ label: 'To build', value: '0' },
 						{ label: 'Plan file', value: planFile }
 					]
 				}
@@ -388,10 +388,10 @@ describe('runPlanCohort', () => {
 						kind: 'plan-cohort',
 						data: expectedResult,
 						rows: [
-							{ label: 'Attach only', value: '0' },
-							{ label: 'Publish by reference', value: '0' },
-							{ label: 'Left upstream', value: '0' },
-							{ label: 'Build set', value: '1' },
+							{ label: 'Already served by the cache', value: '0' },
+							{ label: 'Reused from the tenant', value: '0' },
+							{ label: 'Left to upstream caches', value: '0' },
+							{ label: 'To build', value: '1' },
 							{ label: 'Plan file', value: planFile }
 						]
 					}
@@ -633,10 +633,10 @@ describe('runPlanCohort', () => {
 					kind: 'plan-cohort',
 					data: expectedResult,
 					rows: [
-						{ label: 'Attach only', value: '1' },
-						{ label: 'Publish by reference', value: '0' },
-						{ label: 'Left upstream', value: '0' },
-						{ label: 'Build set', value: '0' },
+						{ label: 'Already served by the cache', value: '1' },
+						{ label: 'Reused from the tenant', value: '0' },
+						{ label: 'Left to upstream caches', value: '0' },
+						{ label: 'To build', value: '0' },
 						{ label: 'Plan file', value: planFile }
 					]
 				}

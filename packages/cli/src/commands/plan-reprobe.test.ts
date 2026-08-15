@@ -90,7 +90,7 @@ describe('runPlanReprobe', () => {
 			},
 			rows: [
 				{ label: 'Withdrawn', value: '0' },
-				{ label: 'Build set', value: '2' }
+				{ label: 'To build', value: '2' }
 			]
 		},
 		{
@@ -108,7 +108,7 @@ describe('runPlanReprobe', () => {
 			},
 			rows: [
 				{ label: 'Withdrawn', value: '1' },
-				{ label: 'Build set', value: '1' }
+				{ label: 'To build', value: '1' }
 			]
 		}
 	])('reports $name', async ({ destination, expected, rows }) => {
