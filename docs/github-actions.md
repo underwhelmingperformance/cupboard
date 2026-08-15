@@ -125,11 +125,12 @@ already cover later matching releases. What each piece of this configuration is,
 and the commands to write it by hand, are under
 [Manual configuration](#manual-configuration).
 
-One consequence deserves calling out before running it: the grace policy changes
-how the covered caches are collected, permanently. The first publication
-accepted under it marks its cache grace-managed, `policy remove-grace` does not
-unmark it, and a grace-managed cache whose last deadline lapses may be emptied
-by collection, which a cache without the marker never is.
+One consequence deserves stating before you run that command: the grace policy
+changes how the covered caches are collected, permanently. The first publication
+accepted under the policy marks its cache grace-managed. `policy remove-grace`
+does not remove that marker. When the last deadline on a grace-managed cache
+lapses, collection may empty it; a cache without the marker is never emptied
+that way.
 
 ### 3. Declare the targets
 
@@ -288,9 +289,10 @@ and cohort jobs to finish.
 
 The view's priority of 50 sits above the destination cache's priority, which
 defaults to 40 on the server; Nix tries substituters lowest-priority-first, so
-this keeps the destination preferred. 50 is also the CLI's default, spelled out
-here because the relationship, view strictly above destination, is required:
-setup refuses a view that would tie or precede the destination.
+this keeps the destination preferred. 50 is also the CLI's default. It is
+written out here because the required relationship is that the view's priority
+is strictly greater than the destination's: setup refuses a view whose priority
+ties with or falls below the destination's.
 
 The trust commands resolve and pin the repository's immutable GitHub ids. The PR
 rule confines each pull request to its own cache and root; the branch rule
@@ -454,7 +456,8 @@ retries three times and outputs the realised `paths`, a `paths-file`, and the
 already present from an earlier run is not recorded as built. Outputs returned
 by a remote builder are rebuilt and compared with `nix build --rebuild` before
 they qualify. When no path qualifies, nothing is signed and `bundle-path` is
-empty, which `actions/push` accepts as no attestations.
+empty. `actions/push` treats an empty `bundle-path` as a push with no
+attestations.
 
 Set `require-provenance` when publication must not succeed without provenance
 for every final output. If a final output came from a cache or was already
@@ -749,7 +752,7 @@ outputs available throughout the run, even before their target roots are set.
 Cohort jobs write a build receipt, verify its subjects against the committed
 destination, sign those accepted subjects, and attach the resulting provenance
 bundle after publication. A substituted or already-valid path may be published
-and retained, but it is not claimed as work performed by this invocation.
+and retained, but the receipt does not record it as built by this run.
 
 `reuse-view` opts the run into reading shared intermediates through a named
 tenant reuse view when the destination is missing them; see
@@ -793,8 +796,8 @@ rather than overlapping the build.
 
 Because the paths never touch the runner's filesystem, the plan skips the local
 store-capacity preflight and records `capacity: {"skipped": "remote-store"}` in
-its plan file: ssh cannot measure the remote filesystem, and a remote store is
-itself the deployment answer to a runner whose disk cannot hold the build.
+its plan file: ssh cannot measure the remote filesystem, and using a remote
+store is already the way to run a build that a runner's own disk cannot hold.
 
 Direct-store mode and classic `builders` delegation are separate choices and
 cannot be enabled together. A selected store keeps its daemon's default build
@@ -876,11 +879,12 @@ so the runner's peak disk use falls from the whole environment's closure to the
 largest component's own input closure. Every component publishes under the
 aggregate's own `rootSuffix`, one retention root whose target list is every
 component's path; a manifest declaring more components than a root accepts in
-one write (1000) is refused before anything builds, since paging that write
-would lose the all-or-nothing property retention depends on. Components inherit
-the aggregate's system, os, remote, best-effort flag and cohort label, so by
-default each is its own cohort and its own job, and a shared `cohort` label on
-the aggregate groups them into one job exactly as it would for ordinary targets.
+one write (1000) is refused before anything builds, because splitting that write
+across pages would lose the all-or-nothing property that retention depends on.
+Components inherit the aggregate's system, os, remote, best-effort flag and
+cohort label, so by default each is its own cohort and its own job, and a shared
+`cohort` label on the aggregate groups them into one job exactly as it would for
+ordinary targets.
 
 The machine that activates the environment (a NixOS host running
 `nixos-rebuild switch`, a home-manager user running `home-manager switch`)

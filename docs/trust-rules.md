@@ -12,31 +12,37 @@ grant those, the whole exchange is refused, not narrowed.
 
 Every claim comparison is exact: a rule value is matched against the token's
 claim as a literal string, so `@refs/heads/main` and `@main` are different
-values, and a rule whose spelling differs from the claim a real token carries
-can never match.
+values, and a rule value that differs from the claim in a real token never
+matches.
 
 ## Pinning identity
 
 A good rule pins identity on two axes. The repository is pinned by its immutable
-numeric ids (`repository_id` and `repository_owner_id`), so a rename cannot
-silently transfer trust and nobody reusing the freed-up name inherits it. The
-trigger is pinned by the `ref` claim, which is the branch (or pull request) that
-started the run, so only that branch's pushes are accepted. Optionally the
-workflow file is pinned too, by `job_workflow_ref`, as a further restriction.
+numeric ids (`repository_id` and `repository_owner_id`), so renaming the
+repository cannot silently transfer trust, and whoever later takes the freed
+name does not inherit the tenant's trust. The trigger is pinned by the `ref`
+claim, which names the branch or pull request that started the run, so only
+pushes from that branch are accepted. Optionally the workflow file is pinned
+too, by `job_workflow_ref`, as a further restriction.
 
 ## The presets
 
 The `add-github-pr` and `add-github-branch` commands assemble these rules for
-the common cases. `add-github-pr` trusts pull-request builds and routes each one
-to its own short-lived cache (`pr-<number>`) and matching retention root
-(`github:<owner>/<repo>/pr-<number>/`), both keyed on the pull-request number,
-so one PR cannot reach another's paths. `add-github-branch` trusts pushes to one
-branch and publishes to the tenant's default cache under the retention root the
-push action writes by default, `github:<owner>/<repo>/<branch>/`; it pins the
-branch through the `ref` claim, so a sibling branch sharing a reusable workflow
-cannot match. Both look up the repository's ids for you, grant the push and the
-retention root, and grant attestation by default; pass `--no-attest` to withhold
-it, or `--root-template` to override the root.
+the common cases.
+
+`add-github-pr` trusts pull-request builds. It routes each build to its own
+short-lived cache, `pr-<number>`, and to the matching retention root,
+`github:<owner>/<repo>/pr-<number>/`. Both are keyed on the pull-request number,
+so one pull request cannot reach another's paths.
+
+`add-github-branch` trusts pushes to one branch and publishes to the tenant's
+default cache, under `github:<owner>/<repo>/<branch>/`, which is the retention
+root the push action writes by default. It pins the branch through the `ref`
+claim, so a sibling branch that shares a reusable workflow does not match.
+
+Both commands look up the repository's ids for you and grant the push, the
+retention root and attestation. Pass `--no-attest` to withhold attestation, or
+`--root-template` to override the root.
 
 ```bash
 # Per-PR rule: build the pull request, push to its own pr-<n> cache.
@@ -59,8 +65,8 @@ A ref of `refs/tags/<glob>` with `*` wildcards is a tag pattern. The rule
 accepts the workflow file at every matching tag, including tags created later.
 For example, `v*` accepts every release tag. The repository's tag publishers are
 therefore part of the trust boundary. Omitting `@ref` produces a deliberately
-weaker rule that accepts the file from every branch and release. In that case,
-only the `ref` claim restricts what was built.
+weaker rule that accepts the file from every branch and release. In that case
+only the `ref` claim restricts which branch or tag the run came from.
 
 The option follows the claim name because `job_workflow_ref` differs from
 `workflow`, which contains the workflow name, and `workflow_ref`, which
@@ -71,22 +77,24 @@ identifies the calling workflow.
 When a repository calls a reusable workflow, the jobs belong to the reusable
 workflow while the standard repository and ref claims still describe the caller.
 A trust rule that restricts `job_workflow_ref` must therefore name the file in
-the repository where the reusable workflow lives, for cupboard's own workflow
-`underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*`,
-and keep its caller repository and ref restrictions. [GitHub documents this
-called-workflow claim][github-oidc-reusable-workflows] separately from the
-standard caller claims.
+the repository where the reusable workflow lives, and must keep its caller
+repository and ref restrictions as well. For cupboard's own workflow that claim
+is
+`underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v*`.
+[GitHub documents this called-workflow claim][github-oidc-reusable-workflows]
+separately from the standard caller claims.
 
 [github-oidc-reusable-workflows]:
   https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-with-reusable-workflows
 
 Reference cupboard's reusable workflows by an immutable published release tag.
-The caller selects one reviewed release, while a `refs/tags/v*` rule trusts the
-release channel once. A pull request cannot gain access by adding an edited copy
-of the publication job, and moving to a later release needs no tenant change.
-This makes cupboard's release publishers part of the trust boundary. An explicit
-`cupboard-version` is only needed to intentionally run a different release from
-the workflow pin.
+The caller selects one reviewed release, and a `refs/tags/v*` rule is written
+once and accepts every later release tag. A pull request cannot gain access by
+adding an edited copy of the publication job, and moving to a later release
+needs no tenant change. Anyone who can publish a cupboard release tag is
+therefore inside the tenant's trust boundary. Set `cupboard-version` only when
+you deliberately want to run a release other than the one the workflow is pinned
+to.
 
 A tenant can instead trust the full commit SHA or exact release tag from the
 caller. That narrower policy requires a tenant administrator to add trust for
@@ -114,11 +122,11 @@ per-system root beneath it.
 
 ## The run-root grant
 
-A build-time push may bind a run root at negotiate: every path the push commits
-is attached under that name and retained for the root's own time-to-live.
-Attaching is its own operation, `root:attach`, granted by the `attach`
-shorthand. Like `root`, it binds a root selector, so give the rule the exact
-name or trailing-slash prefix the run roots will use:
+A build-time push may bind a run root when it negotiates its token. Every path
+the push commits is then attached under that root's name and retained for the
+root's own time-to-live. Attaching is its own operation, `root:attach`, granted
+by the `attach` shorthand. Like `root`, it binds a root selector, so give the
+rule the exact name or trailing-slash prefix the run roots will use:
 
 ```bash
 cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
@@ -130,22 +138,24 @@ cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
 
 A push that names both a target root and a run root asks for two grants on the
 same cache, one per root selector. Rule selection picks exactly one trust rule
-per exchange, so the same rule must permit both grants: splitting the
-target-root and run-root allowances across two rules leaves the exchange with
-whichever single rule was selected, and it cannot grant the other. The exchange
-asks for everything or nothing, so a rule that cannot grant both refuses the
-whole exchange, which is the safer failure: the push learns at token exchange,
-never by silently publishing without its retention.
+per exchange, so that single rule must permit both grants. If the target-root
+and run-root allowances are split across two rules, the exchange is evaluated
+against whichever rule was selected, and that rule cannot grant the other
+allowance.
+
+The exchange is all-or-nothing, so a rule that cannot grant both refuses the
+whole exchange. That is the safer failure: the push fails at token exchange
+rather than publishing successfully with no retention.
 
 ## The flake publish workflow's grants
 
 The flake publish workflow depends on that prefix. Each of its jobs exchanges
 its own OIDC token under the same trust rule: the plan job ensures a retention
 root for each already-cached target, and the cohort jobs push and attest. Every
-root it writes, one per target plus the shared per-run root, sits beneath the
-`root-prefix` the caller passes, so a single prefix grant covers them all. Trust
-it with the branch preset, pinning `job_workflow_ref` to cupboard's reusable
-file:
+root the workflow writes, one per target plus the shared per-run root, is
+beneath the `root-prefix` the caller passes, so a single prefix grant covers
+them all. Trust the workflow with the branch preset, pinning `job_workflow_ref`
+to cupboard's reusable file:
 
 ```bash
 # Trust main's flake publish. The preset grants github:acme/app/main/, a
@@ -173,9 +183,9 @@ jobs:
 
 The `job_workflow_ref` names the file in `underwhelmingperformance/cupboard`,
 where the reusable workflow lives, not the caller's repository. The plan and
-build jobs run inside cupboard's workflow, so that is the claim their token
-carries; the caller is still pinned, by the repository ids and `ref` the preset
-sets.
+build jobs run inside cupboard's workflow, so their tokens carry cupboard's file
+in `job_workflow_ref`. The caller is still pinned, by the repository ids and the
+`ref` claim the preset sets.
 
 ## Capture rules
 
