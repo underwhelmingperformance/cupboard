@@ -349,9 +349,9 @@ function buildApp(): Hono<WorkerHonoEnv> {
 
 	// A reuse view's nix-cache-info: the Durable Object renders it from the
 	// view's own stored priority and already answers it `no-store`, so this
-	// dispatches directly rather than through `cacheInfoResponse` — that
-	// helper's default-cache edge render and private-only no-store rewrite are
-	// both wrong here.
+	// dispatches directly rather than through `cacheInfoResponse`, whose
+	// default-cache edge render and private-only no-store rewrite are both
+	// wrong here.
 	app.get('/t/:tenant/reuse/:view/nix-cache-info', async (context) => {
 		const denied = await guardRead(context.req.raw, context.get('tenantEntry'));
 
@@ -503,10 +503,11 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 // The tenant-relative request: the `/t/<tenant>/` prefix stripped, everything
-// else preserved, as the Durable Object and the serve helpers expect it. The
-// hint-token header is always dropped here, the one choke point every tenant
-// dispatch passes: hints are staged over RPC and only the Worker sets the
-// token, so a client-supplied value must never reach the Durable Object.
+// else preserved, as the Durable Object and the serve helpers expect it. Hints
+// are staged over RPC and only the Worker sets the hint token, so a
+// client-supplied value must never reach the Durable Object. Every tenant
+// dispatch passes through this function, so dropping the header here removes
+// it from every dispatch.
 function innerRequest(context: Context<WorkerHonoEnv>): Request {
 	const inner = new URL(context.req.url);
 	inner.pathname = context.get('tenantRest');
@@ -587,11 +588,11 @@ function isCacheAvailabilityRequest(method: string, pathname: string): boolean {
 }
 
 // The authoritative tenant status, read from D1 and not the KV manifest, so a
-// write stop takes effect before the manifest TTL catches up. Returns undefined if
-// the row is gone, which the caller treats as not-active and fails closed. The
-// read sits on every tenant write, the same exposure as the admission row read,
-// so it gets the same bounded retry and maps a persistent fault to the same
-// retryable refusal.
+// write stop takes effect without waiting for the manifest entry to expire.
+// Returns undefined if the row is gone, which the caller treats as not-active
+// and fails closed. The read sits on every tenant write, the same exposure as
+// the admission row read, so it gets the same bounded retry and maps a
+// persistent fault to the same retryable refusal.
 async function tenantStatus(
 	env: Env,
 	tenant: TenantId

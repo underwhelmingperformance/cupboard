@@ -103,8 +103,9 @@ export async function guardRead(
 // through another's path. The R2 object stays global for dedupe; the edge cache
 // key carries the tenant so a cached entry is only ever replayed to the tenant
 // that was authorised to populate it. An unowned hash reads as a miss,
-// indistinguishable from one that exists for no tenant, closing the existence
-// oracle the negotiate path already guards.
+// indistinguishable from a hash no tenant has, so this route cannot be used to
+// learn that another tenant holds those bytes. Negotiation already blocks the
+// same disclosure.
 export function serveNar(
 	request: Request,
 	env: Env,

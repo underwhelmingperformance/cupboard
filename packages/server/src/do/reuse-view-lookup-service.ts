@@ -49,10 +49,10 @@ import { storedSignaturesSchema } from './signing-keys.ts';
 
 /**
  * The most distinct source-cache copies of one store-path hash a lookup will
- * verify. More copies than this answers as a miss (with a structured event)
- * rather than truncating: a miss only degrades the reader to its next
- * substituter or a local build, whereas an answer computed from a truncated
- * candidate set could hide a conflict.
+ * verify. A hash with more copies than this is served as a miss and recorded
+ * as a structured event; the candidate set is never truncated. A miss only
+ * sends the reader to its next substituter or to a local build, whereas a
+ * narinfo computed from a truncated candidate set could hide a conflict.
  */
 export const reuseCandidateLimit = 16;
 
@@ -573,16 +573,17 @@ export class ReuseViewLookupService {
 
 	// Gate 2: the answer is only served if the definition revision and every
 	// verified candidate identity are exactly as gate 1 read them, so a
-	// concurrent view change, recommit, or deletion fails towards a miss
-	// rather than admitting a stale generation. Candidates the off-gate phase
-	// already discarded contribute nothing to the answer, so churn on those
-	// rows is not rechecked: a reclaimed reservation must not fail the lookup
-	// into Nix's negative narinfo cache. The conflict computation is decided
-	// against the gate-1 snapshot: a copy whose first commit lands after that
-	// snapshot affects the next lookup (answers are no-store), exactly as a
-	// commit landing just after the response would. The revision sequence
-	// survives view deletion, so a deleted-and-recreated view can never
-	// present the revision this lookup captured.
+	// concurrent view change, recommit, or deletion produces a miss instead of
+	// admitting a stale generation. Candidates the off-gate phase already
+	// discarded contribute nothing to the answer, so churn on those rows is
+	// not rechecked: a reclaimed reservation would otherwise turn the lookup
+	// into a miss, and Nix caches a miss in its negative narinfo cache, so the
+	// reader would keep missing after the churn had passed. The conflict
+	// computation is decided against the gate-1 snapshot: a copy whose first
+	// commit lands after that snapshot affects the next lookup (answers are
+	// no-store), exactly as a commit landing just after the response would.
+	// The revision sequence survives view deletion, so a deleted-and-recreated
+	// view can never present the revision this lookup captured.
 	private revalidateSnapshot(
 		snapshot: GateSnapshot,
 		view: ParsedReuseViewName,
@@ -780,7 +781,7 @@ export class ReuseViewLookupService {
 		].toSorted(byCodeUnit);
 
 		// The virtual narinfo is served beneath `/reuse/<view>/`, two segments
-		// deep, and points back at the tenant's one canonical NAR route.
+		// deep, and points back at the tenant's canonical NAR route.
 		return new NarInfo(
 			new StorePath(row.storePath),
 			`../../${narObjectKey(row.narHash)}`,

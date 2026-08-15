@@ -114,7 +114,8 @@ type Database = DrizzleD1Database<typeof d1Schema>;
 // RFC 8693 token exchange for the control plane: an external OIDC subject token is
 // matched to a control trust rule on its unverified claims, the signature is then
 // checked against that rule's issuer JWKS, and only then is a global-admin token
-// issued with the control signing key. A forged claim earns no scope.
+// issued with the control signing key. A subject token whose signature does not
+// verify against that rule's issuer is refused, whatever claims it carries.
 export async function controlTokenExchange(
 	request: Request,
 	env: Env
@@ -364,11 +365,11 @@ export async function controlAuthenticate(
 // The admin-gated deployment check: diagnostics only the deployment itself can
 // perform. Readiness comes first: whether the control database answers, since a
 // deploy cannot trust the version probe alone (a prior Worker version may serve
-// it before the new version's D1 binding is live). Then whether the R2
-// credentials sign requests R2 accepts. The credentials live on the tenant
-// script, so a tenant's Durable Object answers; the bindings are script-wide, so
-// any live tenant's object speaks for the deployment, and with none there is
-// nowhere to run the probe.
+// it before the new version's D1 binding is live). Then whether R2 accepts
+// requests signed with the configured credentials. Those credentials live on
+// the tenant script, so a tenant's Durable Object runs that probe. The
+// bindings are script-wide, so any live tenant's object gives the same answer
+// for the whole deployment, and if no tenant is live the probe cannot run.
 export async function controlCheck(env: Env): Promise<ControlCheckReport> {
 	const databaseCheck = await controlDatabaseCheck(env);
 
@@ -482,10 +483,10 @@ export async function controlTenantCreate(
 ): Promise<TenantSummary> {
 	const database = controlDatabase(env);
 
-	// Provision in order: write the authoritative row, configure the Durable Object,
-	// write the tenant's membership marker, then publish the rebuilt filter. Each
-	// step is idempotent, so a retry after a mid-provision failure replays cleanly
-	// avoiding an admitted-but-unconfigured tenant.
+	// Provision in order: write the authoritative row, configure the Durable
+	// Object, write the tenant's membership marker, then publish the rebuilt
+	// filter. Each step is idempotent, so a retry after a mid-provision failure
+	// replays cleanly and never leaves a tenant admitted but unconfigured.
 	const now = new Date();
 	const summary = await ensureTenant(database, body, isoTimestamp(now));
 	const issuer = oidcIssuerSchema.parse(`${origin}/t/${summary.id}`);
