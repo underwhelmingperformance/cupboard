@@ -295,8 +295,9 @@ export function derivationPathOf(
 	return parsed.data;
 }
 
-// Structured attributes travel in the `__json` environment entry, parsed here.
-// A derivation without that entry has no structured attributes.
+// Nix stores a derivation's structured attributes as JSON in the `__json`
+// environment entry. A derivation without that entry has no structured
+// attributes.
 function structuredAttributes(
 	environment: ReadonlyMap<string, string>
 ): Readonly<Record<string, unknown>> | undefined {
@@ -335,9 +336,9 @@ function isSequence(value: ATermValue): value is readonly ATermValue[] {
 }
 
 // `Derive(outputs, inputDerivations, inputSources, platform, builder, args,
-// environment)`. Every element before the last one this module reads has to be
-// parsed to find where that element starts, so the reader parses the whole
-// term.
+// environment)`. An ATerm records no offsets, so reaching an element means
+// parsing every element in front of it. The reader parses all seven and this
+// module picks the ones it needs out by position.
 const derivePrefix = 'Derive(';
 const deriveElementCount = 7;
 const outputIndex = 0;
@@ -349,7 +350,7 @@ const environmentIndex = 6;
 // `(name, path, hashAlgo, hash)`.
 const outputFieldCount = 4;
 
-// The seven elements of the `Derive(...)` term the given bytes serialise.
+// The seven elements of the `Derive(...)` term in the given ATerm text.
 function derivationTerm(aterm: string): readonly ATermValue[] {
 	return new ATermReader(aterm).readDerive();
 }
@@ -389,8 +390,8 @@ function derivationEnvironment(
 	return entries;
 }
 
-// Nix escapes the quote and backslash characters inside an ATerm string, along
-// with the three whitespace characters listed here.
+// The escape sequences Nix writes inside an ATerm string: newline, carriage
+// return, tab, double quote and backslash.
 const escapedCharacters = new Map([
 	['n', '\n'],
 	['r', '\r'],

@@ -1966,7 +1966,7 @@ describe('discoverNixStoreConfig', () => {
 		});
 	});
 
-	it('names no builders for a machines file that is not there', () => {
+	it('reports no builders for a machines file that does not exist', () => {
 		const config = discover({
 			files: { '/etc/nix/nix.conf': 'builders = @/etc/nix/machines\n' }
 		});

@@ -1,9 +1,9 @@
 import { decodeNixHash } from './hash.ts';
 
-// The prefix a `fixed` address uses when the contents are serialised as a NAR
-// before hashing. Nix reads a `git:` method here as well, behind the
-// git-hashing experimental feature, so the default build cannot read an address
-// that specifies it.
+// The prefix on a `fixed` address whose contents are serialised as a NAR before
+// hashing. Nix accepts a `git:` prefix in the same position, but only with the
+// git-hashing experimental feature enabled, so this function does not accept
+// it.
 const nixArchivePrefix = 'r:';
 
 /**

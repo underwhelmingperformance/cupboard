@@ -1,9 +1,10 @@
 import { NixStoreError } from './nix-store.ts';
 
 /**
- * The most a single file is read into memory from a NAR. A derivation is the
- * only file read this way and is far smaller, so a stream longer than this
- * bound is not a derivation and is refused instead of buffered.
+ * The largest file this reader will hold in memory while reading a NAR. A
+ * derivation is the only file read this way and is far smaller, so a stream
+ * longer than this bound is not a derivation and is refused instead of
+ * buffered.
  */
 export const maxNarFileByteLength = 32 * 1024 * 1024;
 
@@ -20,7 +21,7 @@ export class NarFileTooLargeError extends NixStoreError {
 		public readonly maxByteLength: number
 	) {
 		super(
-			`The NAR is ${String(byteLength)} bytes, more than the ${String(maxByteLength)}-byte limit for reading a single file from a NAR`
+			`The NAR contains a ${String(byteLength)}-byte file, more than the ${String(maxByteLength)}-byte limit for reading a file into memory`
 		);
 		this.name = 'NarFileTooLargeError';
 	}

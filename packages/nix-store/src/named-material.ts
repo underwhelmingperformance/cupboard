@@ -74,9 +74,10 @@ export abstract class NamedMaterial {
 	}
 }
 
-// `atob` throws on material that is not base64, so decoding it is the check.
-// `atob` also skips whitespace, which a rendered value never contains and Nix's
-// own decoder rejects, so whitespace is rejected here before decoding.
+// `base64ToBytes` throws on material that is not base64, so decoding it is the
+// check. It decodes through `atob`, which skips whitespace. A rendered value
+// never contains whitespace and Nix's own decoder rejects it, so whitespace is
+// rejected here rather than ignored by the decode.
 function decodeMaterial(material: string): Uint8Array | undefined {
 	if (/\s/u.test(material)) {
 		return undefined;

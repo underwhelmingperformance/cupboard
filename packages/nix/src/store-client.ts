@@ -273,10 +273,11 @@ export interface NixDaemonClientOptions {
 
 /**
  * Opens a daemon-backed store whenever its socket is present, regardless of
- * what automatic selection would pick. The substitutable and missing-path
- * queries exist only behind the daemon, so callers that need them select the daemon
- * here; an install with no daemon socket is refused with
- * {@link NixDaemonUnavailableError} naming the probed socket path.
+ * what automatic selection would pick. A daemon manages the substituter
+ * configuration and makes the substituter requests itself, so a caller that
+ * wants availability answered that way selects the daemon here. An install
+ * with no daemon socket is refused with {@link NixDaemonUnavailableError}
+ * naming the probed socket path.
  */
 export function createNixDaemonStoreClient(
 	dependencies: StoreClientEnvironment = defaultStoreClientEnvironment,
@@ -383,9 +384,9 @@ export function createAvailabilityStoreClient(
 	}
 
 	// For an automatic store, this function opens the daemon whenever its socket
-	// is present, because the daemon serves substitutability and missing-path
-	// queries that the local reader cannot. An explicitly local URI still names
-	// the local store and must not be replaced by this availability preference.
+	// is present, so that substitutability and missing-path queries go through
+	// the daemon's own substituter configuration. An explicitly local store URI
+	// selects the local store, and this preference must not override it.
 	if (
 		backend.backend === 'local' &&
 		(storeUri === 'auto' || storeUri === '') &&

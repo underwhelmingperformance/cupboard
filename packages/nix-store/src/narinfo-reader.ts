@@ -255,8 +255,8 @@ class NarInfoReader {
 
 		const narHash = this.narHash;
 
-		// Nix treats a document that omits any of these fields as incomplete: the
-		// substituter did not finish writing it.
+		// Nix rejects a narinfo missing any of these fields as corrupt, so this
+		// reader does too and the path is never reported as available.
 		if (
 			narHash === undefined ||
 			!this.hasPath ||

@@ -14,11 +14,11 @@ function withoutTrailingSlashes(value: string): string {
 
 /**
  * The base a cache's URLs are built from, checked once so every builder and
- * every request derived from it can take the result on trust. Only the origin
- * and path are addressable, so a base is refused when it carries embedded
- * credentials, which would be sent on every request built from it, or a query
- * or fragment, which appending a path segment would corrupt. Trailing slashes
- * are dropped from the path so one deployment has one base.
+ * every request derived from it can take the result on trust. The scheme must
+ * be `http` or `https`, and only the origin and path may be set: a username or
+ * password would be sent with every request built from the base, and a query
+ * or fragment would be carried onto every URL derived from it. Trailing
+ * slashes are dropped from the path so one deployment has one base.
  */
 export function parseBaseUrl(url: URL): URL {
 	if (

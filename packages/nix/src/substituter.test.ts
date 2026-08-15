@@ -286,7 +286,7 @@ describe('a substituter held in a directory', () => {
 		return directory;
 	}
 
-	it('reads what the directory says about itself', async () => {
+	it("reads a directory cache's settings from its nix-cache-info", async () => {
 		const directory = cacheDirectory({ 'nix-cache-info': fileCacheInfo });
 
 		const { substituters, unreachable } = await openSubstituters(
@@ -1011,11 +1011,10 @@ describe('openSubstituters', () => {
 		expect(opened?.priority).toBe(5);
 	});
 
-	// A substituter that cannot say which store it serves cannot be asked
-	// about that store's paths. Dropping it leaves the rest of the list
-	// answering, which one bad cache would otherwise take down with it.
-	// One substituter answering more than an answer can hold is one that
-	// cannot describe itself, and the rest of the list still answers.
+	// A substituter that cannot say which store it serves cannot be asked about
+	// that store's paths. A cache whose `nix-cache-info` exceeds the response
+	// limit is in that position, so it is dropped and the rest of the list is
+	// still queried.
 	it('leaves out a substituter whose cache info is larger than `maxSubstituterAnswerByteLength`', async () => {
 		const { substituters, unreachable } = await openSubstituters(
 			['https://flood.example', 'https://cache.example'],
@@ -1148,7 +1147,7 @@ describe('openSubstituters', () => {
 		]);
 	});
 
-	it('asks with nothing for a host the netrc does not name', async () => {
+	it('sends no credentials for a host the netrc has no entry for', async () => {
 		const { fetch: fetcher, credentials } = caches({
 			'https://cache.example': { cacheInfo: 'StoreDir: /nix/store\n' }
 		});
@@ -1161,9 +1160,9 @@ describe('openSubstituters', () => {
 		expect(credentials).toStrictEqual([undefined]);
 	});
 
-	// A store URI stating a user and password states the credentials itself,
-	// and a URL holding any is one no request can be made from, so they are
-	// carried as a header and the URI the documents are read under holds none.
+	// A store URI with a user and password supplies the credentials itself. They
+	// are sent in an `Authorization` header, and the URL the documents are read
+	// from keeps none of them, so they never appear in a request URL.
 	it("asks with the store URI's own credentials, over the netrc's", async () => {
 		const {
 			fetch: fetcher,
@@ -1184,9 +1183,10 @@ describe('openSubstituters', () => {
 		});
 	});
 
-	// A cache asking to be identified, and a proxy asking the same before it
-	// will carry the request, are a credential this run does not hold rather
-	// than a cache that said nothing: the cache may well hold the paths.
+	// A cache that asks to be identified, and a proxy that asks the same before
+	// it will forward the request, both mean this run lacks a credential. The
+	// cache may well have the paths, so it is reported as unreachable rather
+	// than as having none.
 	it.each([
 		{ name: 'a cache asking to be identified', status: 401 },
 		{ name: 'a proxy asking the same', status: 407 }
@@ -1485,7 +1485,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 		expect({ infos, requests }).toStrictEqual({ infos: [], requests: [] });
 	});
 
-	it('answers nothing at all when the substitute setting is off', async () => {
+	it('returns no offers and makes no request when the substitute setting is off', async () => {
 		const { fetch: fetcher, requests } = caches({
 			'https://cache.example': {
 				narInfos: {
@@ -1715,7 +1715,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 	});
 
 	// A substituter is a remote server, and a narinfo is a few hundred bytes.
-	// A body without end would otherwise be held in this process entire.
+	// An unbounded body would otherwise be buffered in this process in full.
 	it('refuses a response larger than `maxSubstituterAnswerByteLength`', async () => {
 		await expect(
 			clientOver(
@@ -1758,8 +1758,8 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 		}).toStrictEqual({ storePaths: [appPath], asked: 2 });
 	});
 
-	// A body longer than an answer can be is what the server sent, not a
-	// passing condition, so coming back for it would get the same one.
+	// An oversized body is what the server sends, not a transient condition, so
+	// a retry would get the same response.
 	it('does not retry a narinfo request when the response is oversized', async () => {
 		let asked = 0;
 		const oversized: typeof fetch = (input) => {
@@ -1831,7 +1831,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 
 	// Nix tries a transfer several times, since a connection that failed or a
 	// server failing on its own account may answer next time.
-	it('tries again when a substituter answers that it might answer later', async () => {
+	it('retries a substituter that returns 503 and takes the later answer', async () => {
 		const served = rendered(narInfo());
 		let asked = 0;
 		const flaky: typeof fetch = () => {
@@ -1958,9 +1958,9 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 		}
 	);
 
-	// A substituter asking to be left alone for a day is left alone. Coming
-	// back before it said it would be ready spends an attempt on the answer it
-	// has already given, and waiting the day out holds the query for a day.
+	// A substituter that asks to be left alone for a day is left alone.
+	// Retrying before the time it gave would spend an attempt on the same
+	// response, and waiting the day out would hold the query open for a day.
 	it('gives up when a substituter asks for a delay longer than the maximum', async () => {
 		const waits: number[] = [];
 		let asked = 0;
@@ -2119,9 +2119,9 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 		expect(infos.map(({ storePath }) => storePath)).toStrictEqual([appPath]);
 	});
 
-	// Nix leaves a failure behind when it moves on: a substituter that
-	// answered after it settled the question, so nothing is left in doubt.
-	it('answers past a corrupt narinfo that another substituter holds', async () => {
+	// Nix moves on to the next substituter after a corrupt narinfo, and the
+	// offer that substituter returns settles the query.
+	it('takes an offer from a later substituter after a corrupt narinfo', async () => {
 		const { fetch: fetcher } = caches({
 			'https://corrupt.example': {
 				narInfos: {
@@ -2225,7 +2225,7 @@ describe('SubstituterClient.querySubstitutablePaths', () => {
 		});
 	});
 
-	it('answers nothing at all when the substitute setting is off', async () => {
+	it('reports no paths and makes no request when the substitute setting is off', async () => {
 		const { fetch: fetcher, requests } = caches({
 			'https://cache.example': {
 				narInfos: { [`${'a'.repeat(32)}.narinfo`]: rendered(narInfo()) }

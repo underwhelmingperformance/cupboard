@@ -106,7 +106,7 @@ export class Nix {
 	}
 
 	/**
-	 * Opens a store that can report external availability. Automatic selection
+	 * Opens a store that can report external availability. {@link Nix.open}
 	 * does not guarantee that: it prefers the local reader whenever the state
 	 * directory is writable, and a local reader with no substituters cannot
 	 * report external paths.
@@ -304,10 +304,9 @@ export class Nix {
 
 	/**
 	 * Configured substituters that could not be queried. This distinguishes a
-	 * confirmed absence from an incomplete query. A daemon manages the
-	 * substituters itself and records which of them it reached only in its own
-	 * log, which it does not expose to clients, so a daemon-backed store returns
-	 * an empty list here.
+	 * confirmed absence from an incomplete query. A daemon manages its own
+	 * substituters and does not report which of them it could not reach, so a
+	 * daemon-backed store returns an empty list here.
 	 */
 	async unreachableSubstituters(): Promise<readonly UnreachableSubstituter[]> {
 		return (await this.store.unreachableSubstituters?.()) ?? [];
@@ -359,7 +358,7 @@ export class Nix {
 			: { isHonoured: false, reason: 'daemon-trust', trust };
 	}
 
-	/** The NAR serialisation of the store path the argument names. */
+	/** The NAR serialisation of the store path the argument resolves to. */
 	narFromPath(path: string): AsyncIterable<Uint8Array> {
 		return this.store.narFromPath(this.toStorePath(path));
 	}
