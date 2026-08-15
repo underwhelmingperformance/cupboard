@@ -20,9 +20,9 @@
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.18.0",
 		"@cloudflare/workers-types": "^5.20260705.1",
-		"@orpc/client": "^1.14.7",
-		"@orpc/contract": "^1.14.7",
-		"@orpc/openapi-client": "^1.14.7",
+		"@orpc/client": "^1.15.0",
+		"@orpc/contract": "^1.15.0",
+		"@orpc/openapi-client": "^1.15.0",
 		"drizzle-kit": "^0.31.10",
 		"typescript": "^6.0.3",
 		"vitest": "^4.1.8",
