@@ -1,6 +1,7 @@
 import path from 'node:path';
 
-import { createOctokitClient, RequestError } from '@cupboard/shared/octokit';
+import { createOctokitClient } from '@cupboard/shared/octokit';
+import { RequestError } from '@octokit/request-error';
 import { StatusCodes } from 'http-status-codes';
 import makeFetchHappen from 'make-fetch-happen';
 

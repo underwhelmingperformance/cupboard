@@ -1,5 +1,6 @@
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
-import { createOctokitClient, RequestError } from '@cupboard/shared/octokit';
+import { createOctokitClient } from '@cupboard/shared/octokit';
+import { RequestError } from '@octokit/request-error';
 import { z } from 'zod';
 
 import {

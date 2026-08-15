@@ -16,6 +16,7 @@
 		"@cupboard/protocol": "workspace:*",
 		"@cupboard/reporter": "workspace:*",
 		"@cupboard/shared": "workspace:*",
+		"@octokit/request-error": "^7.1.1",
 		"@orpc/client": "^1.15.0",
 		"@orpc/contract": "^1.15.0",
 		"@orpc/openapi-client": "^1.15.0",
