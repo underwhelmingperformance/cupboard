@@ -7,15 +7,13 @@ import type {
 import { z } from 'zod';
 
 /**
- * One build activity a JSON activity log attributed: the derivation that ran,
- * the machine it ran on, and whether a local rebuild has since reproduced its
- * outputs. An empty machine is a local build; a non-empty one names the remote
- * builder that produced the outputs.
+ * One build activity a JSON activity log attributed: the derivation that ran
+ * and the machine it ran on. An empty machine is a local build; a non-empty
+ * one names the remote builder that produced the outputs.
  */
 export interface BuildActivity {
 	readonly derivation: string;
 	readonly machine: string;
-	readonly verified: boolean;
 }
 
 /**
@@ -65,7 +63,7 @@ export function parseBuildActivities(log: string): readonly BuildActivity[] {
 		}
 
 		const [derivation, machine] = start.data.fields;
-		activities.set(derivation, { derivation, machine, verified: false });
+		activities.set(derivation, { derivation, machine });
 	}
 
 	return activities
@@ -75,71 +73,31 @@ export function parseBuildActivities(log: string): readonly BuildActivity[] {
 }
 
 /**
- * The derivations whose outputs need a local re-verification build before they
- * are trusted: every final derivation built on a remote machine, and every one
- * first built in an attempt other than the successful one, whose store state
- * the successful attempt did not itself produce.
+ * The builder for each derivation a builder built, keyed by derivation path.
+ * A derivation built locally has no entry. When several attempts record the
+ * same derivation, the entry is the builder from the earliest attempt, which
+ * is also the attempt the receipt subject records.
  */
-export function derivationsRequiringVerification(
-	attempts: readonly BuildAttempt[],
-	successfulAttempt: number,
-	finalInfos: readonly NixValidPathInfo[]
-): readonly string[] {
-	const finalDerivations = new Set(
-		finalInfos.flatMap((info) =>
-			info.deriver === undefined ? [] : [info.deriver]
-		)
-	);
-	const derivations = new Set<string>();
+export function delegatedMachines(
+	attempts: readonly BuildAttempt[]
+): ReadonlyMap<string, string> {
+	const machines = new Map<string, string>();
 
 	for (const attempt of attempts) {
 		for (const activity of attempt.activities) {
-			if (
-				finalDerivations.has(activity.derivation) &&
-				(attempt.attempt !== successfulAttempt || activity.machine !== '')
-			) {
-				derivations.add(activity.derivation);
+			if (activity.machine !== '' && !machines.has(activity.derivation)) {
+				machines.set(activity.derivation, activity.machine);
 			}
 		}
 	}
 
-	return derivations.values().toArray().toSorted(byCodeUnit);
+	return machines;
 }
 
-/**
- * The attempts' attribution once a verification pass has rebuilt the given
- * derivations locally: each derivation's first recorded activity is marked as
- * reproduced, preserving the attempt and machine that first produced it. A
- * derivation no attempt recorded is left unattributed.
- */
-export function verifiedAttribution(
-	attempts: readonly BuildAttempt[],
-	verified: readonly string[]
-): readonly BuildAttempt[] {
-	const pending = new Set(verified);
-
-	return attempts.map((attempt) => ({
-		...attempt,
-		activities: attempt.activities.map((activity) => {
-			if (!pending.delete(activity.derivation)) {
-				return activity;
-			}
-
-			return { ...activity, verified: true };
-		})
-	}));
-}
-
-// How far a build activity establishes that its outputs are this run's. A local
-// rebuild is what the run finally trusts, so a reproduced activity reads as
-// verified whatever machine first ran it; an unreproduced remote build is
-// attributed to that machine and nothing more.
+// An empty machine means Nix ran the build here; any other value is the
+// builder that ran it for this run.
 function verificationOf(activity: BuildActivity): SubjectVerification {
-	if (activity.verified) {
-		return 'verified-rebuild';
-	}
-
-	return activity.machine === '' ? 'local' : 'unverified';
+	return activity.machine === '' ? 'local' : 'build-store';
 }
 
 // One derivation's first build within a run: the attempt that ran it and the
@@ -153,7 +111,8 @@ interface FirstBuild {
 /**
  * The receipt subjects a run's attribution yields: one per final path whose
  * deriver some attempt built, carrying the earliest attempt that produced it,
- * the store the run realised it in, and how far the build was established. A
+ * the store the run realised it in, and whether Nix built it here or a
+ * builder built it for this run. A
  * path that was already valid before the run, or whose deriver no attempt
  * touched, is not this run's subject.
  */

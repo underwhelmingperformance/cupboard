@@ -1278,7 +1278,6 @@ export function buildPushCohortsFile(
 				rebuild: true
 			}),
 			...(requiresProvenance && { requireProvenance: true }),
-			verifyRebuilds: true,
 			keepGoing: !shouldSeparateTargets,
 			...(maxJobs !== '' && { maxJobs: Number(maxJobs) })
 		}))

@@ -156,7 +156,7 @@ describe('attestationSubjects', () => {
 function provenancedSubject(
 	storePath: StorePathString,
 	digestByte: string,
-	verification: 'local' | 'verified-rebuild' | 'build-store'
+	verification: 'local' | 'build-store'
 ) {
 	return {
 		storePath,
@@ -184,8 +184,8 @@ describe('provenancedSubjects', () => {
 	const realisedHere = [
 		{ name: 'a local build', verification: 'local' as const },
 		{
-			name: 'a reproduced remote build',
-			verification: 'verified-rebuild' as const
+			name: 'a build the selected store realised',
+			verification: 'build-store' as const
 		}
 	];
 
@@ -208,8 +208,7 @@ describe('provenancedSubjects', () => {
 				)
 			).toStrictEqual({
 				subjects: [{ storePath: builtPath, sha256: 'aa'.repeat(32) }],
-				skipped: [substitutedPath],
-				refused: []
+				skipped: [substitutedPath]
 			});
 		}
 	);
@@ -318,60 +317,32 @@ describe('provenancedSubjects', () => {
 			)
 		).toStrictEqual({
 			subjects: [{ storePath: remotePath, sha256: 'bb'.repeat(32) }],
-			skipped: [],
-			refused: []
+			skipped: []
 		});
 	});
 
-	it('refuses a subject built on a machine the run did not verify', () => {
-		expect(
-			provenancedSubjects(
+	it('attests a subject with a recorded builder', () => {
+		const holdsRemotePath: SelectedPathInfos = new Map([
+			[remotePath, attestPathInfo(remotePath, 0xbb)]
+		]);
+		const receipt = {
+			version: 3 as const,
+			paths: [remotePath],
+			subjects: [
 				{
-					version: 3,
-					paths: [builtPath, remotePath],
-					subjects: [
-						provenancedSubject(builtPath, 'aa', 'local'),
-						{
-							storePath: remotePath,
-							narHash: 'bb'.repeat(32),
-							derivation: `${remotePath}.drv`,
-							buildStore: 'auto',
-							machine: 'ssh://builder-1',
-							verification: 'unverified'
-						}
-					]
-				},
-				holdsBuiltPath
-			)
-		).toStrictEqual({
-			subjects: [{ storePath: builtPath, sha256: 'aa'.repeat(32) }],
-			skipped: [],
-			refused: [{ storePath: remotePath, machine: 'ssh://builder-1' }]
-		});
-	});
+					storePath: remotePath,
+					narHash: 'bb'.repeat(32),
+					derivation: `${remotePath}.drv`,
+					buildStore: 'auto',
+					machine: 'ssh://builder-1',
+					verification: 'build-store' as const
+				}
+			]
+		};
 
-	it('refuses an unverified subject whose machine the receipt does not name', () => {
-		expect(
-			provenancedSubjects(
-				{
-					version: 3,
-					paths: [remotePath],
-					subjects: [
-						{
-							storePath: remotePath,
-							narHash: 'bb'.repeat(32),
-							derivation: `${remotePath}.drv`,
-							buildStore: 'auto',
-							verification: 'unverified'
-						}
-					]
-				},
-				heldNowhere
-			)
-		).toStrictEqual({
-			subjects: [],
-			skipped: [],
-			refused: [{ storePath: remotePath }]
+		expect(provenancedSubjects(receipt, holdsRemotePath)).toStrictEqual({
+			subjects: [{ storePath: remotePath, sha256: 'bb'.repeat(32) }],
+			skipped: []
 		});
 	});
 });

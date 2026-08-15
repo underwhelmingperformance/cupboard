@@ -177,11 +177,12 @@ export interface PushDependencies {
 	 */
 	readonly claimable?: readonly string[];
 	/**
-	 * The derivations a local rebuild reproduced during this run. Their outputs
-	 * are claimed however the build store first came by them, because the
-	 * rebuild is what establishes them.
+	 * The builder for each delegated derivation, keyed by derivation path.
+	 * When a published path's deriver appears here, a builder produced that
+	 * path at this run's request, and the receipt subject records the builder
+	 * in `machine`.
 	 */
-	readonly verifiedDerivations?: readonly string[];
+	readonly delegated?: ReadonlyMap<string, string>;
 }
 
 // Each upload streams one NAR's compression into its R2 PUT, a CPU-bound zstd
@@ -415,7 +416,7 @@ interface PushRuntimeDependencies {
 	readonly buildStore?: string;
 	readonly alreadyHeld?: readonly string[];
 	readonly claimable?: readonly string[];
-	readonly verifiedDerivations?: readonly string[];
+	readonly delegated?: ReadonlyMap<string, string>;
 }
 
 // One publication path with its metadata resolved: a local entry carries the
@@ -575,7 +576,8 @@ interface ReceiptClaims {
 	readonly alreadyHeld: ReadonlySet<string>;
 	/** Unset preserves the internal default that every published path is claimable. */
 	readonly claimable: ReadonlySet<string> | undefined;
-	readonly verifiedDerivations: ReadonlySet<string>;
+	/** The builder for each delegated derivation, keyed by derivation path. */
+	readonly delegated: ReadonlyMap<string, string>;
 }
 
 /**
@@ -583,11 +585,11 @@ interface ReceiptClaims {
  * ended servable, and one subject per published target the build store holds a
  * deriver for and records as its own. The store answered every subject's NAR
  * hash and deriver over the connection the push already opened, so the subjects
- * are what that store realised; no build was observed here, so a subject is
- * classified as the build store's, or as a verified rebuild where this run
- * reproduced it locally. Reference and intermediate entries are nobody's build
- * subject: a reference is republished from elsewhere and an intermediate is not
- * a target of this push.
+ * are what that store realised. Every subject records `build-store`
+ * verification; when a builder produced the path for this run, the subject
+ * also records that builder in `machine`. Reference and intermediate entries
+ * are nobody's build subject: a reference is republished from elsewhere and
+ * an intermediate is not a target of this push.
  */
 function reconciledReceipt(
 	claims: ReceiptClaims,
@@ -639,16 +641,14 @@ function reconciledReceipt(
 				return [];
 			}
 
-			const isRebuilt = claims.verifiedDerivations.has(pathInfo.deriver);
+			const machine = claims.delegated.get(pathInfo.deriver);
 
-			// The store marks a path ultimately trusted when it holds the path as
-			// its own. A path a substituter served during this run, and one a
-			// builder realised and the store copied back, carry the signatures of
-			// whoever produced them and no such mark. A local rebuild that
-			// reproduced the outputs is this run's own evidence, so such a path
-			// is claimed as a verified rebuild and every other unmarked path is
-			// published unclaimed.
-			if (!isRebuilt && !pathInfo.ultimate) {
+			// The store marks a path ultimately trusted when it built the path
+			// itself. A builder's output copied back into the store carries no
+			// such mark, so `delegated` supplies the builder from the activity
+			// log instead. A path with neither the mark nor a `delegated` entry
+			// was substituted, and this run built nothing it can claim for it.
+			if (machine === undefined && !pathInfo.ultimate) {
 				return [];
 			}
 
@@ -658,7 +658,8 @@ function reconciledReceipt(
 					narHash: pathInfo.narHash.digestHex(),
 					derivation: pathInfo.deriver,
 					buildStore: claims.buildStore,
-					verification: isRebuilt ? 'verified-rebuild' : 'build-store'
+					...(machine !== undefined && { machine }),
+					verification: 'build-store'
 				}
 			];
 		})
@@ -1202,7 +1203,7 @@ async function runPushFlow(
 							dependencies.claimable === undefined
 								? undefined
 								: new Set(dependencies.claimable),
-						verifiedDerivations: new Set(dependencies.verifiedDerivations)
+						delegated: dependencies.delegated ?? new Map()
 					},
 					resolved,
 					summaryPaths

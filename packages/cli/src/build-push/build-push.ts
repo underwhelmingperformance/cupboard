@@ -2,7 +2,7 @@ import { readdir, readlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { Nix, NixValidPathInfo } from '@cupboard/nix';
+import type { Nix } from '@cupboard/nix';
 import { derivationPathOf } from '@cupboard/nix-store/derivation';
 import {
 	type RootName,
@@ -56,10 +56,9 @@ import {
 
 import {
 	type BuildAttempt,
-	derivationsRequiringVerification,
+	delegatedMachines,
 	parseBuildActivities,
-	receiptSubjects,
-	verifiedAttribution
+	receiptSubjects
 } from './attribution.ts';
 import { type BatchStore, BuildOutputBatcher } from './batching.ts';
 import { renderHookScript } from './hook-script.ts';
@@ -85,8 +84,6 @@ import {
 import {
 	type ChildCommand,
 	type ChildExit,
-	runChild,
-	type RunChildOptions,
 	type SignalSource,
 	type StartDelay,
 	superviseAttemptedBuild,
@@ -113,11 +110,6 @@ export interface ConstructedBuild {
 	readonly rebuild?: boolean;
 	/** Fail unless the receipt claims every selected final output. */
 	readonly requireProvenance?: boolean;
-	/**
-	 * Locally rebuild remotely built or early-attempt-built derivations once
-	 * the build succeeds, refusing the run when a rebuild diverges.
-	 */
-	readonly verifyRebuilds?: boolean;
 	readonly keepGoing?: boolean;
 	readonly maxJobs?: number;
 }
@@ -177,8 +169,6 @@ export interface BuildPushDependencies {
 	readonly nextAttemptId?: () => string;
 	/** Starts the cancellable wait between attempts; injectable for tests. */
 	readonly startDelay?: StartDelay;
-	/** Runs the verification rebuild child; injectable for tests. */
-	readonly runChild?: (options: RunChildOptions) => Promise<ChildExit>;
 	/** Receives the successfully published targets before this run returns. */
 	readonly settledTargets?: (
 		targets: readonly StorePathString[]
@@ -335,8 +325,7 @@ async function runStreamedBuildPush(
 			options.invocation,
 			dependencies,
 			attempts,
-			eventPaths,
-			exit
+			eventPaths
 		);
 		const terminalFailure = terminalFailureFor(
 			options.invocation,
@@ -434,38 +423,15 @@ function constructedNixCommand(
 	];
 }
 
-// The local re-verification of derivations the successful attempt did not
-// itself build locally: a rebuild with remote builders off, refusing the run
-// when the rebuild diverges.
-function rebuildVerificationCommand(
-	derivations: readonly string[]
-): ChildCommand {
-	return [
-		'nix',
-		'build',
-		'--rebuild',
-		'--no-link',
-		'--builders',
-		'',
-		'--max-jobs',
-		'1',
-		...derivations.map((derivation) => `${derivation}^*`)
-	];
-}
-
-// The receipt subjects a successful constructed build attributes: the built
-// paths joined with the attempts' activity logs. The verification pass, when
-// requested, locally rebuilds what the successful attempt did not build
-// locally and marks each verified derivation's earliest activity as
-// reproduced; without it, that activity remains unverified. A hook event only
-// fires for an executed build, so a path that was valid before the run never
-// appears here.
+// The receipt subjects a constructed build attributes: the built paths
+// joined with the attempts' activity logs. A hook event only fires for an
+// executed build, so a path that was valid before the run never appears
+// here.
 async function attributeSubjects(
 	invocation: BuildInvocation,
 	dependencies: BuildPushDependencies,
 	attempts: readonly SupervisedAttempt[],
-	eventPaths: readonly StorePathString[],
-	exit: ChildExit
+	eventPaths: readonly StorePathString[]
 ): Promise<readonly BuildSubjectV3[]> {
 	if (invocation.kind !== 'constructed' || eventPaths.length === 0) {
 		return [];
@@ -476,31 +442,14 @@ async function attributeSubjects(
 		attemptId: attempt.attemptId,
 		activities: parseBuildActivities(attempt.log)
 	}));
-	const successful = observed.at(-1);
 
-	if (successful === undefined) {
+	if (observed.length === 0) {
 		return [];
 	}
 
 	const infos = await dependencies.store.queryValidPathsInfo(eventPaths);
 
-	if (invocation.build.verifyRebuilds !== true || exit.status !== 0) {
-		return receiptSubjects(observed, infos, new Set(), autoBuildStore);
-	}
-
-	const derivations = await verifyRebuilds(
-		observed,
-		successful.attempt,
-		infos,
-		dependencies
-	);
-
-	return receiptSubjects(
-		verifiedAttribution(observed, derivations),
-		infos,
-		new Set(),
-		autoBuildStore
-	);
+	return receiptSubjects(observed, infos, new Set(), autoBuildStore);
 }
 
 // A singleton constructed request that reached Nix's build graph is the only
@@ -529,42 +478,6 @@ function terminalFailureFor(
 	}
 
 	return { kind: 'command' };
-}
-
-// The local re-verification pass: rebuilds every derivation the successful
-// attempt did not itself build locally, with remote builders off, and refuses
-// the run when a rebuild diverges. The derivations it reproduced are returned,
-// so a receipt can say how far each subject was established.
-async function verifyRebuilds(
-	observed: readonly BuildAttempt[],
-	successfulAttempt: number,
-	infos: readonly NixValidPathInfo[],
-	dependencies: BuildPushDependencies
-): Promise<readonly string[]> {
-	const derivations = derivationsRequiringVerification(
-		observed,
-		successfulAttempt,
-		infos
-	);
-
-	if (derivations.length === 0) {
-		return derivations;
-	}
-
-	const runVerification = dependencies.runChild ?? runChild;
-	const verification = await runVerification({
-		command: rebuildVerificationCommand(derivations),
-		environment: dependencies.environment ?? process.env,
-		...(dependencies.signalSource !== undefined && {
-			signalSource: dependencies.signalSource
-		})
-	});
-
-	if (verification.status !== 0) {
-		throw childFailure(verification);
-	}
-
-	return derivations;
 }
 
 // Keep the activity logs and out-links in separate run directories. The
@@ -635,10 +548,13 @@ async function runReconciledLocalBuildPush(
 			dependencies.store
 		);
 
-		const verified =
-			build.verifyRebuilds === true && exit.status === 0
-				? await verifyRealised(realised, attempts, dependencies)
-				: [];
+		const delegated = delegatedMachines(
+			attempts.map((attempt) => ({
+				attempt: attempt.attempt,
+				attemptId: attempt.attemptId,
+				activities: parseBuildActivities(attempt.log)
+			}))
+		);
 		const terminalFailure = terminalFailureFor(invocation, attempts, exit);
 		const receipt = await publishRealised(
 			{
@@ -648,7 +564,7 @@ async function runReconciledLocalBuildPush(
 				// its output was valid beforehand. Those paths are therefore
 				// current-run provenance candidates rather than exclusions.
 				alreadyHeld: build.rebuild === true ? [] : initiallyValid,
-				verified,
+				delegated,
 				exit,
 				...(terminalFailure !== undefined && { terminalFailure })
 			},
@@ -761,36 +677,14 @@ async function outLinkTargets(
 	});
 }
 
-// Rebuild derivations that the successful attempt did not build locally. The
-// receipt marks only successfully reproduced derivations as verified.
-async function verifyRealised(
-	realised: readonly string[],
-	attempts: readonly SupervisedAttempt[],
-	dependencies: BuildPushDependencies
-): Promise<readonly string[]> {
-	const observed: readonly BuildAttempt[] = attempts.map((attempt) => ({
-		attempt: attempt.attempt,
-		attemptId: attempt.attemptId,
-		activities: parseBuildActivities(attempt.log)
-	}));
-	const successful = observed.at(-1);
-
-	if (successful === undefined) {
-		return [];
-	}
-
-	const infos = await dependencies.store.queryValidPathsInfo(realised);
-
-	return verifyRebuilds(observed, successful.attempt, infos, dependencies);
-}
-
 // Evidence collected by a reconciled local build and used to construct its
 // receipt.
 interface RealisedBuild {
 	readonly realised: readonly string[];
 	readonly declared: readonly string[];
 	readonly alreadyHeld: readonly string[];
-	readonly verified: readonly string[];
+	/** The builder for each delegated derivation, taken from the activity logs. */
+	readonly delegated: ReadonlyMap<string, string>;
 	readonly exit: ChildExit;
 	readonly terminalFailure?: TerminalBuildFailure;
 }
@@ -836,7 +730,7 @@ async function publishRealised(
 			buildStore: autoBuildStore,
 			alreadyHeld: built.alreadyHeld,
 			claimable: built.declared,
-			verifiedDerivations: built.verified,
+			delegated: built.delegated,
 			retain: shouldRetainTargets,
 			...(shouldRetainTargets && { root: options.root }),
 			...(shouldRetainTargets &&

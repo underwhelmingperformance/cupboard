@@ -8,10 +8,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	type BuildAttempt,
-	derivationsRequiringVerification,
+	delegatedMachines,
 	parseBuildActivities,
-	receiptSubjects,
-	verifiedAttribution
+	receiptSubjects
 } from './attribution.ts';
 
 const appPath = storePathSchema.parse(
@@ -56,7 +55,6 @@ function attempt(
 	activities: readonly {
 		derivation: string;
 		machine: string;
-		verified?: boolean;
 	}[]
 ): BuildAttempt {
 	return {
@@ -64,8 +62,7 @@ function attempt(
 		attemptId: `attempt-${String(ordinal)}`,
 		activities: activities.map((activity) => ({
 			derivation: activity.derivation,
-			machine: activity.machine,
-			verified: activity.verified ?? false
+			machine: activity.machine
 		}))
 	};
 }
@@ -79,12 +76,8 @@ describe('parseBuildActivities', () => {
 				startLine(appDrv, '')
 			].join('\n'),
 			expected: [
-				{ derivation: appDrv, machine: '', verified: false },
-				{
-					derivation: libraryDrv,
-					machine: 'ssh://builder-1',
-					verified: false
-				}
+				{ derivation: appDrv, machine: '' },
+				{ derivation: libraryDrv, machine: 'ssh://builder-1' }
 			]
 		},
 		{
@@ -92,7 +85,7 @@ describe('parseBuildActivities', () => {
 			log: [startLine(appDrv, 'ssh://builder-1'), startLine(appDrv, '')].join(
 				'\n'
 			),
-			expected: [{ derivation: appDrv, machine: '', verified: false }]
+			expected: [{ derivation: appDrv, machine: '' }]
 		},
 		{
 			name: 'lines of every other shape, skipped',
@@ -116,82 +109,38 @@ describe('parseBuildActivities', () => {
 	});
 });
 
-describe('derivationsRequiringVerification', () => {
+describe('delegatedMachines', () => {
 	it.each([
 		{
-			name: 'a remote build in the successful attempt',
+			name: 'a delegated build to its builder',
 			attempts: [attempt(1, [{ derivation: appDrv, machine: 'ssh://b1' }])],
-			successfulAttempt: 1,
-			infos: [info(appPath, appDrv)],
-			expected: [appDrv]
+			expected: new Map([[appDrv, 'ssh://b1']])
 		},
 		{
-			name: 'a local build in an earlier attempt',
-			attempts: [
-				attempt(1, [{ derivation: libraryDrv, machine: '' }]),
-				attempt(2, [{ derivation: appDrv, machine: '' }])
-			],
-			successfulAttempt: 2,
-			infos: [info(appPath, appDrv), info(libraryPath, libraryDrv)],
-			expected: [libraryDrv]
-		},
-		{
-			name: 'a local build in the successful attempt, needing nothing',
+			name: 'a local build to nothing',
 			attempts: [attempt(1, [{ derivation: appDrv, machine: '' }])],
-			successfulAttempt: 1,
-			infos: [info(appPath, appDrv)],
-			expected: []
+			expected: new Map()
 		},
 		{
-			name: 'an activity whose derivation no final path names',
-			attempts: [attempt(1, [{ derivation: libraryDrv, machine: 'ssh://b1' }])],
-			successfulAttempt: 1,
-			infos: [info(appPath, appDrv)],
-			expected: []
-		}
-	])('selects $name', ({ attempts, successfulAttempt, infos, expected }) => {
-		expect(
-			derivationsRequiringVerification(attempts, successfulAttempt, infos)
-		).toStrictEqual(expected);
-	});
-});
-
-describe('verifiedAttribution', () => {
-	it('marks the first attributed build, keeping its attempt and machine', () => {
-		const verified = verifiedAttribution(
-			[
+			name: 'the first recorded builder when attempts repeat a derivation',
+			attempts: [
 				attempt(1, [{ derivation: appDrv, machine: 'ssh://b1' }]),
-				attempt(2, [
+				attempt(2, [{ derivation: appDrv, machine: 'ssh://b2' }])
+			],
+			expected: new Map([[appDrv, 'ssh://b1']])
+		},
+		{
+			name: 'each derivation independently',
+			attempts: [
+				attempt(1, [
 					{ derivation: appDrv, machine: '' },
-					{ derivation: libraryDrv, machine: '' }
+					{ derivation: libraryDrv, machine: 'ssh://b2' }
 				])
 			],
-			[appDrv]
-		);
-
-		expect(verified).toStrictEqual([
-			{
-				attempt: 1,
-				attemptId: 'attempt-1',
-				activities: [
-					{ derivation: appDrv, machine: 'ssh://b1', verified: true }
-				]
-			},
-			{
-				attempt: 2,
-				attemptId: 'attempt-2',
-				activities: [
-					{ derivation: appDrv, machine: '', verified: false },
-					{ derivation: libraryDrv, machine: '', verified: false }
-				]
-			}
-		]);
-	});
-
-	it('does not invent attribution for a derivation no attempt ran', () => {
-		const verified = verifiedAttribution([attempt(2, [])], [libraryDrv]);
-
-		expect(verified).toStrictEqual([attempt(2, [])]);
+			expected: new Map([[libraryDrv, 'ssh://b2']])
+		}
+	])('maps $name', ({ attempts, expected }) => {
+		expect(delegatedMachines(attempts)).toStrictEqual(expected);
 	});
 });
 
@@ -230,7 +179,7 @@ describe('receiptSubjects', () => {
 			]
 		},
 		{
-			name: 'an unreproduced remote build, named by its machine',
+			name: 'a delegated build, recording its builder',
 			attempts: [attempt(1, [{ derivation: appDrv, machine: 'ssh://b1' }])],
 			infos: [info(appPath, appDrv)],
 			preExisting: new Set<string>(),
@@ -243,29 +192,7 @@ describe('receiptSubjects', () => {
 					attemptId: 'attempt-1',
 					buildStore: 'auto',
 					machine: 'ssh://b1',
-					verification: 'unverified'
-				}
-			]
-		},
-		{
-			name: 'a remote build a local rebuild reproduced',
-			attempts: [
-				attempt(1, [
-					{ derivation: appDrv, machine: 'ssh://b1', verified: true }
-				])
-			],
-			infos: [info(appPath, appDrv)],
-			preExisting: new Set<string>(),
-			expected: [
-				{
-					storePath: appPath,
-					narHash: narHash.digestHex(),
-					derivation: appDrv,
-					attempt: 1,
-					attemptId: 'attempt-1',
-					buildStore: 'auto',
-					machine: 'ssh://b1',
-					verification: 'verified-rebuild'
+					verification: 'build-store'
 				}
 			]
 		},

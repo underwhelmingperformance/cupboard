@@ -3929,7 +3929,7 @@ function receiptPush(
 	appInfo: NixValidPathInfo,
 	dependencies: Pick<
 		PushDependencies,
-		'buildStore' | 'alreadyHeld' | 'claimable' | 'verifiedDerivations'
+		'buildStore' | 'alreadyHeld' | 'claimable' | 'delegated'
 	>
 ): Promise<ParsedBuildReceiptV3 | undefined> {
 	return runPush(publication([appPath], [runtimePath]), reporter([]), {
@@ -3996,13 +3996,13 @@ describe('the build receipt a push writes', () => {
 		});
 	});
 
-	it('claims an output a local rebuild reproduced during this run', async () => {
-		// A builder realised it and the build store copied it back, so the store
-		// holds it without the mark it gives its own; the rebuild is what
-		// establishes it.
+	it('records the builder when a remote builder produced the output', async () => {
+		// A builder produced appPath and the build store copied it back, so
+		// the store leaves `ultimate` false. The `delegated` map supplies the
+		// builder for that deriver.
 		const receipt = await receiptPush(
 			{ ...pathInfo(appPath, appDigest, [], appDrv), ultimate: false },
-			{ buildStore, verifiedDerivations: [appDrv] }
+			{ buildStore, delegated: new Map([[appDrv, 'ssh://b1']]) }
 		);
 
 		expect(receipt).toStrictEqual({
@@ -4014,7 +4014,8 @@ describe('the build receipt a push writes', () => {
 					narHash: appDigest.narHash.digestHex(),
 					derivation: appDrv,
 					buildStore,
-					verification: 'verified-rebuild'
+					machine: 'ssh://b1',
+					verification: 'build-store'
 				}
 			],
 			uploaded: [appPath]
@@ -4036,12 +4037,12 @@ describe('the build receipt a push writes', () => {
 			dependencies: { buildStore }
 		},
 		{
-			case: 'an output a builder realised that no rebuild reproduced',
+			case: 'a substituted target with an empty delegated map',
 			appInfo: {
 				...pathInfo(appPath, appDigest, [], appDrv),
 				ultimate: false
 			},
-			dependencies: { buildStore, verifiedDerivations: [] }
+			dependencies: { buildStore, delegated: new Map<string, string>() }
 		},
 		{
 			case: 'a path the build store already held',

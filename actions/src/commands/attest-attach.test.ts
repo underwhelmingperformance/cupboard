@@ -337,7 +337,7 @@ describe('attestAttachAction', () => {
 		]);
 	});
 
-	it('passes only the receipt subjects eligible to be signed', async () => {
+	it('passes every receipt subject to the attach invocation', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attach-'));
 		const receiptFile = path.join(directory, 'receipt.json');
 		const checksumsFile = path.join(directory, 'subjects.txt');
@@ -361,14 +361,15 @@ describe('attestAttachAction', () => {
 						derivation: `${runtimePath}.drv`,
 						buildStore: 'auto',
 						machine: 'ssh://builder.example',
-						verification: 'unverified'
+						verification: 'build-store'
 					}
 				]
 			})
 		);
 		await writeFile(
 			checksumsFile,
-			`${sharedHash}  ${path.basename(appPath)}\n`
+			`${sharedHash}  ${path.basename(appPath)}\n` +
+				`${sharedHash}  ${path.basename(runtimePath)}\n`
 		);
 		const invocations: string[][] = [];
 
@@ -380,7 +381,7 @@ describe('attestAttachAction', () => {
 				runCupboard: (_binaryPath, arguments_) => {
 					invocations.push([...arguments_]);
 
-					return Promise.resolve(attachedResults([appPath]));
+					return Promise.resolve(attachedResults([appPath, runtimePath]));
 				}
 			}
 		);
@@ -392,6 +393,7 @@ describe('attestAttachAction', () => {
 				'attach',
 				'https://cache.example.workers.dev/t/acme',
 				appPath,
+				runtimePath,
 				'--github-oidc',
 				'--attestation',
 				'/tmp/bundle.sigstore.json'

@@ -23,10 +23,6 @@ import {
 	type InvocationRuntimePlan,
 	planInvocationRuntime
 } from './runtime-directory.ts';
-import {
-	requireVerifiableTargets,
-	type VerificationSupportOptions
-} from './verification.ts';
 
 export interface BuildPushPreflightOptions {
 	readonly config: NixStoreConfig;
@@ -41,11 +37,6 @@ export interface BuildPushPreflightOptions {
 	readonly runRoot?: RootName;
 	/** The target roots reconciliation will set, when the run declares any. */
 	readonly targetRoots?: readonly RootName[];
-	/**
-	 * The targets a constructed invocation declares, and whether it verifies
-	 * its rebuilds. A user-supplied build command declares nothing here.
-	 */
-	readonly verification?: Omit<VerificationSupportOptions, 'building'>;
 	readonly helper?: HelperResolutionOptions;
 	readonly runtime?: Omit<InvocationRuntimeOptions, 'invocationId'>;
 }
@@ -113,13 +104,6 @@ export async function preflightBuildPush(
 
 	for (const targetRoot of targetRoots) {
 		requireGrant(options.grants, 'root:set', options.cache, targetRoot);
-	}
-
-	if (options.verification !== undefined) {
-		await requireVerifiableTargets({
-			...options.verification,
-			building: config.building
-		});
 	}
 
 	return { daemonSocketPath: config.daemonSocketPath, helperPath, runtimePlan };

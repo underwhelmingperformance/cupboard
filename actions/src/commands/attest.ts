@@ -80,23 +80,6 @@ interface AttestationSubjects {
 	readonly skipped: readonly string[];
 }
 
-/**
- * Attestation candidates from a receipt, divided into eligible subjects,
- * published paths without build evidence, and unverified subjects.
- */
-export interface ResolvedAttestation extends AttestationSubjects {
-	readonly refused: readonly RefusedSubject[];
-}
-
-/**
- * A subject excluded from the attestation, including its build machine when
- * known.
- */
-export interface RefusedSubject {
-	readonly storePath: string;
-	readonly machine?: string;
-}
-
 /** Partition path infos according to a current-run build receipt. */
 export function attestationSubjects(
 	infos: readonly CommittedPathInfo[],
@@ -133,41 +116,32 @@ export function attestationSubjects(
 export type SelectedPathInfos = ReadonlyMap<string, CommittedPathInfo>;
 
 /**
- * Selects the receipt subjects this run can attest.
+ * Checks every receipt subject against the destination cache.
  *
  * A subject is signed under this repository's identity, so the destination
- * cache must serve every verified subject under the NAR hash and deriver the
- * receipt recorded. An absent path fails the run, as does one whose hash or
+ * cache must serve every subject under the NAR hash and deriver recorded in
+ * the receipt. An absent path fails the run, as does one whose hash or
  * deriver has moved since the receipt was written.
  *
- * The build store may already have collected the path, so verification uses
- * the committed destination metadata. A subject produced on an unverified
- * machine is excluded.
+ * The build store may have garbage-collected the path since the build, so
+ * the check reads the committed metadata from the destination cache rather
+ * than from the build store.
  */
 export function provenancedSubjects(
 	receipt: BuildReceiptV3,
 	held: SelectedPathInfos
-): ResolvedAttestation {
+): AttestationSubjects {
 	const subjects: StorePathDigest[] = [];
-	const refused: RefusedSubject[] = [];
 	const named = new Set(receipt.subjects.map((subject) => subject.storePath));
 	const skipped = receipt.paths.filter((storePath) => !named.has(storePath));
 
 	for (const subject of receipt.subjects) {
-		if (subject.verification === 'unverified') {
-			refused.push({
-				storePath: subject.storePath,
-				...(subject.machine !== undefined && { machine: subject.machine })
-			});
-			continue;
-		}
-
 		requireBacked(subject, held.get(subject.storePath));
 
 		subjects.push({ storePath: subject.storePath, sha256: subject.narHash });
 	}
 
-	return { subjects, skipped, refused };
+	return { subjects, skipped };
 }
 
 // Verify each checksum against committed destination metadata. The receipt does
@@ -299,7 +273,7 @@ async function resolveAttestation(
 	receipt: ParsedBuildReceipt,
 	inputs: AttestInputs,
 	dependencies: AttestDependencies
-): Promise<ResolvedAttestation> {
+): Promise<AttestationSubjects> {
 	const paths =
 		receipt.version === 3
 			? receipt.subjects.map((subject) => subject.storePath)
@@ -313,7 +287,7 @@ async function resolveAttestation(
 		);
 	}
 
-	return { ...attestationSubjects(infos, receipt), refused: [] };
+	return attestationSubjects(infos, receipt);
 }
 
 const committedPathConcurrency = 6;
@@ -391,7 +365,7 @@ export async function attestAction(
 	const receipt = buildReceiptSchema.parse(
 		JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
 	);
-	const { subjects, skipped, refused } = await resolveAttestation(
+	const { subjects, skipped } = await resolveAttestation(
 		receipt,
 		inputs,
 		dependencies
@@ -400,12 +374,6 @@ export async function attestAction(
 	for (const storePath of skipped) {
 		reporter.warn(
 			`Not attesting ${storePath}: this workflow run did not build it`
-		);
-	}
-
-	for (const subject of refused) {
-		reporter.warn(
-			`Not attesting ${subject.storePath}: it was built on ${subject.machine ?? 'another machine'}, which this run did not verify`
 		);
 	}
 

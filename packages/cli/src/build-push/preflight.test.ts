@@ -22,8 +22,7 @@ import {
 	MissingGrantError,
 	PostBuildHookConflictError,
 	SocketPathTooLongError,
-	UntrustedDaemonError,
-	UnverifiableTargetError
+	UntrustedDaemonError
 } from '../errors.ts';
 
 import {
@@ -33,7 +32,6 @@ import {
 import { linuxSunPathBytes } from './runtime-directory.ts';
 
 const invocationId = invocationIdSchema.parse('invocation-1');
-const foreignDerivation = '/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-app.drv';
 const cache = cacheSelectorSchema.parse('ci');
 const coveredRoot = rootNameSchema.parse('github:acme/repo/run-1');
 const uncoveredRoot = rootNameSchema.parse('github:other/repo/run-1');
@@ -231,39 +229,6 @@ describe('preflightBuildPush', () => {
 				name: 'MissingGrantError',
 				operation: 'root:attach',
 				root: uncoveredRoot
-			}
-		},
-		{
-			name: 'a verified target this machine could not rebuild',
-			overrides: (): Partial<BuildPushPreflightOptions> => ({
-				config: {
-					...config,
-					building: { ...config.building, builders: 'ssh://builds.example' }
-				},
-				verification: {
-					verifyRebuilds: true,
-					installables: [`${foreignDerivation}^*`],
-					requirements: () =>
-						Promise.resolve({
-							system: 'aarch64-darwin',
-							requiredSystemFeatures: []
-						})
-				}
-			}),
-			probe: (error: unknown) =>
-				error instanceof UnverifiableTargetError
-					? { name: error.name, targets: error.targets, systems: error.systems }
-					: undefined,
-			expected: {
-				name: 'UnverifiableTargetError',
-				targets: [
-					{
-						drvPath: foreignDerivation,
-						system: 'aarch64-darwin',
-						missingFeatures: []
-					}
-				],
-				systems: ['x86_64-linux']
 			}
 		},
 		{

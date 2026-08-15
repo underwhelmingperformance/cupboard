@@ -198,7 +198,7 @@ describe('buildReceiptSchema', () => {
 					...subject,
 					buildStore: 'auto',
 					machine: 'ssh://builder-1',
-					verification: 'verified-rebuild'
+					verification: 'build-store'
 				}
 			],
 			uploaded: [storePath]

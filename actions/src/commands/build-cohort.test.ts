@@ -560,14 +560,12 @@ describe('buildPushCohortsFile', () => {
 				{
 					installables: [libraryQueryInstallable],
 					requireProvenance: true,
-					verifyRebuilds: true,
 					keepGoing: true
 				},
 				{
 					installables: [floatingQueryInstallable],
 					rebuild: true,
 					requireProvenance: true,
-					verifyRebuilds: true,
 					keepGoing: true
 				}
 			]
@@ -588,14 +586,12 @@ describe('buildPushCohortsFile', () => {
 				{
 					installables: [libraryQueryInstallable],
 					requireProvenance: true,
-					verifyRebuilds: true,
 					keepGoing: false
 				},
 				{
 					installables: [floatingQueryInstallable],
 					rebuild: true,
 					requireProvenance: true,
-					verifyRebuilds: true,
 					keepGoing: false
 				}
 			]
@@ -4193,7 +4189,6 @@ describe('buildCohortAction publication', () => {
 						installables,
 						rebuild: true,
 						requireProvenance: true,
-						verifyRebuilds: true,
 						keepGoing: true
 					}
 				]
@@ -4478,7 +4473,6 @@ describe('buildCohortAction publication', () => {
 							libraryQueryInstallable,
 							'.#packages.x86_64-linux.floating^out'
 						],
-						verifyRebuilds: true,
 						keepGoing: true,
 						maxJobs: 0
 					}
