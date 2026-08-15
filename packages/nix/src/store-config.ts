@@ -305,9 +305,10 @@ function kernelOf(system: string | undefined): string | undefined {
 }
 
 // The `system-features` Nix computes for a machine whose configuration assigns
-// none: three names Nixpkgs uses to route builds without requiring host capabilities,
-// machine, plus a Linux machine's user namespaces, plus the two Nix probes the
-// machine for.
+// none: the three names Nixpkgs uses to route builds without requiring a host
+// capability, `uid-range` for a Linux machine's user namespaces, and the
+// capability Nix probes the machine for (`kvm` on Linux, `apple-virt` on
+// Darwin) when that probe succeeds.
 const portableSystemFeatures = ['nixos-test', 'benchmark', 'big-parallel'];
 
 function defaultSystemFeatures(

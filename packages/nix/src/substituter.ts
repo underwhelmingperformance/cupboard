@@ -1240,10 +1240,10 @@ async function describeSubstituter(
 
 	const asked = await readDocument(location, uri, cacheInfoFile, dependencies);
 
-	// A missing `nix-cache-info` is equivalent to an empty document. Nix opens a
-	// directory cache with the defaults; over HTTP it
-	// reports a cache as not being a binary cache, since the upload it attempts
-	// there is refused by anything serving reads alone.
+	// A missing `nix-cache-info` is equivalent to an empty document. Nix writes
+	// the file with the compiled-in defaults when it opens a directory cache;
+	// over HTTP a cache that serves reads alone refuses that write, so Nix
+	// reports that the URL is not a binary cache.
 	if (asked.kind === 'absent') {
 		return location.kind === 'file'
 			? { kind: 'described', description: parseCacheInfo('', servedBy) }

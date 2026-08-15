@@ -81,8 +81,8 @@ export type StoreBackend =
 	| { readonly backend: 'ssh-ng'; readonly remote: NixSshStoreSpec };
 
 /**
- * The kind of store used by a resolved backend. Callers use this discriminant
- * caller selects behaviour on, such as where NAR bytes come from. A
+ * The kind of store used by a resolved backend. Callers branch on this
+ * discriminant, for example to decide where NAR bytes come from. A
  * `local-filesystem` store and a `daemon` store serve paths on this machine's
  * filesystem; an `ssh-ng` store's paths live on the remote machine.
  */

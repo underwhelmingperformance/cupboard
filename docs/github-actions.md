@@ -684,6 +684,15 @@ multiplexing, verbose logging, `Include`, and `Match`. Supply the private key
 only through `builder_ssh_key`. For example, nixbuild.net passes authentication
 tokens in the SSH connection environment:
 
+```yaml
+secrets:
+  builder_ssh_config: |
+    Host eu.nixbuild.net
+      User authtoken
+      PreferredAuthentications none
+      SetEnv NIXBUILDNET_TOKEN=${{ secrets.NIXBUILD_TOKEN }}
+```
+
 Keep the builders specification on one line and separate multiple builders with
 semicolons. Put `-` in the third, SSH-key column, and do not set a non-empty
 `ssh-key` parameter in a builder store URI. Pass the managed private key through
@@ -700,15 +709,6 @@ can serve those inputs. The generated Git SSH command ignores user and global
 known-hosts sources, accepts only those pins and offers only the input key;
 input credentials and pins never enter the builder or direct-store
 configuration.
-
-```yaml
-secrets:
-  builder_ssh_config: |
-    Host eu.nixbuild.net
-      User authtoken
-      PreferredAuthentications none
-      SetEnv NIXBUILDNET_TOKEN=${{ secrets.NIXBUILD_TOKEN }}
-```
 
 For a tenant whose reads are private, also pass `read_user` and `read_password`
 as workflow secrets. `actions/setup`'s netrc file only covers Nix's own
