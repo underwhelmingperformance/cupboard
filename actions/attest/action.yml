@@ -1,9 +1,11 @@
 name: Attest cupboard store paths
 description:
-  Produce a Sigstore build-provenance bundle whose in-toto subjects are the NAR
-  hashes established by a current-run build receipt, ready to attach with the
-  push action. Every subject is checked against the destination cache's live,
-  committed narinfo before signing; the build store need no longer exist.
+  Produce two Sigstore bundles over the NAR hashes a current-run build receipt
+  establishes, ready to attach with the push action. One carries GitHub's SLSA
+  build provenance and the other a cupboard build-origin statement recording
+  where each path came from. Every subject is checked against the destination
+  cache's live, committed narinfo before signing; the build store need no longer
+  exist.
 inputs:
   receipt-file:
     description: Current-run receipt produced by a cupboard build action.
@@ -12,6 +14,11 @@ inputs:
     description:
       Where to write the generated subject checksums file. Defaults to a
       runner-local path under RUNNER_TEMP.
+    required: false
+  predicate-file:
+    description:
+      Where to write the build-origin predicate signed into the second bundle.
+      Defaults to a file beside the checksums file.
     required: false
   url:
     description:
@@ -33,9 +40,15 @@ inputs:
 outputs:
   bundle-path:
     description:
-      Path to the generated Sigstore attestation bundle. Empty when the receipt
+      Path to the generated SLSA build-provenance bundle. Empty when the receipt
       contains no eligible provenance subjects and the action skips signing.
     value: ${{ steps.attest.outputs.bundle-path }}
+  origin-bundle-path:
+    description:
+      Path to the generated build-origin bundle. Empty when the receipt records
+      no origin for the subjects this run signs, which is the case for a version
+      2 receipt and for a run with no eligible subject.
+    value: ${{ steps.origin.outputs.bundle-path }}
   checksums-file:
     description: Path to the generated subject checksums file.
     value: ${{ steps.subjects.outputs.checksums-file }}
@@ -96,6 +109,7 @@ runs:
       env:
         RECEIPT_FILE: ${{ inputs.receipt-file }}
         CHECKSUMS_FILE: ${{ inputs.checksums-file }}
+        PREDICATE_FILE: ${{ inputs.predicate-file }}
         URL: ${{ inputs.url }}
         CACHE: ${{ inputs.cache }}
         READ_USER: ${{ inputs.read-user }}
@@ -106,6 +120,7 @@ runs:
           "$GITHUB_ACTION_PATH/../src/main.ts" attest \
           --receipt-file "$RECEIPT_FILE" \
           --checksums-file "$CHECKSUMS_FILE" \
+          --predicate-file "$PREDICATE_FILE" \
           --url "$URL" \
           --cache "$CACHE" \
           --read-user "$READ_USER" \
@@ -117,4 +132,17 @@ runs:
       uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
       with:
         subject-checksums: ${{ steps.subjects.outputs.checksums-file }}
+        github-token: ${{ inputs.github-token || github.token }}
+
+    # This step signs the same subjects a second time, over cupboard's own
+    # predicate. The build-provenance bundle above states how this workflow ran;
+    # this one states where each path came from, which only the receipt records.
+    - name: Attest build origin
+      id: origin
+      if: ${{ steps.subjects.outputs.predicate-file != '' }}
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-checksums: ${{ steps.subjects.outputs.checksums-file }}
+        predicate-type: ${{ steps.subjects.outputs.predicate-type }}
+        predicate-path: ${{ steps.subjects.outputs.predicate-file }}
         github-token: ${{ inputs.github-token || github.token }}

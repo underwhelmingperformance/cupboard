@@ -406,8 +406,8 @@ what `actions/attest-build-provenance` records by default, therefore does not
 match. `actions/build-paths` builds the requested installables and writes a
 current-run receipt recording which final outputs Nix actually built. After
 publication, the attest action verifies those paths and NAR hashes against the
-destination's committed narinfos, then signs a single SLSA build-provenance
-attestation over them.
+destination's committed narinfos, then signs two attestations over them: a SLSA
+build-provenance attestation and a cupboard build-origin attestation.
 
 ```yaml
 permissions:
@@ -443,7 +443,9 @@ steps:
       cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
       receipt-file: ${{ steps.build.outputs.receipt-file }}
       checksums-file: ${{ steps.attest.outputs.checksums-file }}
-      bundle: ${{ steps.attest.outputs.bundle-path }}
+      bundle: |
+        ${{ steps.attest.outputs.bundle-path }}
+        ${{ steps.attest.outputs.origin-bundle-path }}
 ```
 
 `installables` is newline-delimited. Generated lists can instead be written to a
@@ -463,14 +465,34 @@ before adding it to the receipt; its dependencies may still be substituted. This
 is useful when a failed signing or attachment step will be retried after the
 path was pushed.
 
-The action outputs `bundle-path`, the signed bundle covering every qualifying
-path, alongside `checksums-file` and `subject-count`. `id-token: write` lets the
-action obtain its Sigstore signing certificate, and `attestations: write`
-records the attestation on the repository.
+The action outputs `bundle-path` and `origin-bundle-path`, the two signed
+bundles covering every qualifying path, alongside `checksums-file` and
+`subject-count`. `id-token: write` lets the action obtain its Sigstore signing
+certificate, and `attestations: write` records the attestations on the
+repository.
+
+The two bundles state different things about the same subjects. The SLSA
+build-provenance bundle states how this workflow ran: the repository, the
+commit, the workflow file and the runner it ran on. The build-origin bundle
+states where each path came from, which only the receipt records: the store
+path, its NAR hash, the derivation that produced it, the store where the build
+ran, whether the coordinating machine watched the build or the build store
+reported it, and the builder recorded in the activity log when there was one. It
+makes no claim beyond that: not that the build is reproducible, and not that its
+producer deserves trust. Its predicate type is
+`https://github.com/underwhelmingperformance/cupboard/predicate/build-origin/v1`,
+and `cupboard attest verify --predicate-type` takes that value to verify it. One
+statement covers every subject of the run, so verifying it for one path reports
+the origin of the others too. A version 2 receipt records no origin, so such a
+run produces the build-provenance bundle alone and leaves `origin-bundle-path`
+empty.
 
 Publication comes before signing because the attest action verifies every
 receipt subject against the destination's committed narinfo. The attach action
-then files the signed bundle against each matching path in that same receipt.
+then files both signed bundles against each matching path in that same receipt.
+Its `bundle` input takes one path per line and ignores an empty line, so the
+same workflow step also works for a run that produced only the build-provenance
+bundle.
 
 ## Build, publish, and attest
 
@@ -512,7 +534,9 @@ steps:
       cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
       receipt-file: ${{ steps.build.outputs.receipt-file }}
       checksums-file: ${{ steps.attest.outputs.checksums-file }}
-      bundle: ${{ steps.attest.outputs.bundle-path }}
+      bundle: |
+        ${{ steps.attest.outputs.bundle-path }}
+        ${{ steps.attest.outputs.origin-bundle-path }}
 ```
 
 `setup` adds the cache as a substituter, `build-paths` records what this run

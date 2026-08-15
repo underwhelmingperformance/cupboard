@@ -16,6 +16,7 @@
 	"exports": {
 		"./attestations": "./src/attestations.ts",
 		"./build": "./src/build.ts",
+		"./build-origin": "./src/build-origin.ts",
 		"./cache-availability": "./src/cache-availability.ts",
 		"./caches": "./src/caches.ts",
 		"./capture": "./src/capture.ts",

@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -7,6 +8,8 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import { buildReceiptSchema } from '@cupboard/protocol/build';
+import { buildOriginPredicateType } from '@cupboard/protocol/build-origin';
 import { createGithubReporter } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
@@ -23,6 +26,7 @@ import { parseChecksums } from '../release-install.ts';
 import {
 	attestAction,
 	attestationSubjects,
+	buildOriginPredicateFor,
 	provenancedSubjects,
 	renderChecksums,
 	resolveAttestInputs,
@@ -165,6 +169,11 @@ function provenancedSubject(
 		buildStore: 'ssh-ng://builder.example',
 		verification
 	};
+}
+
+// One entry of the checksums file the signing step receives.
+function acceptedDigest(storePath: StorePathString, sha256: string) {
+	return { storePath, sha256 };
 }
 
 // Represents a coordinator that does not hold any receipt subjects locally.
@@ -347,6 +356,102 @@ describe('provenancedSubjects', () => {
 	});
 });
 
+describe('buildOriginPredicateFor', () => {
+	const builtPath = storePathSchema.parse(
+		'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
+	);
+	const remotePath = storePathSchema.parse(
+		'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib'
+	);
+	it('records the origin of every accepted subject and no other', () => {
+		const receipt = buildReceiptSchema.parse({
+			version: 3,
+			paths: [builtPath, remotePath],
+			subjects: [
+				provenancedSubject(builtPath, 'aa', 'local'),
+				{
+					...provenancedSubject(remotePath, 'bb', 'build-store'),
+					machine: 'ssh://builder-1'
+				}
+			]
+		});
+		const accepted = [acceptedDigest(builtPath, 'aa'.repeat(32))];
+
+		expect(buildOriginPredicateFor(receipt, accepted)).toStrictEqual({
+			subjects: [
+				{
+					storePath: builtPath,
+					narHash: 'aa'.repeat(32),
+					derivation: `${builtPath}.drv`,
+					buildStore: 'ssh-ng://builder.example',
+					verification: 'local'
+				}
+			]
+		});
+	});
+
+	it('carries the builder the receipt recorded', () => {
+		const receipt = buildReceiptSchema.parse({
+			version: 3,
+			paths: [remotePath],
+			subjects: [
+				{
+					...provenancedSubject(remotePath, 'bb', 'build-store'),
+					machine: 'ssh://builder-1'
+				}
+			]
+		});
+
+		const accepted = [acceptedDigest(remotePath, 'bb'.repeat(32))];
+
+		expect(buildOriginPredicateFor(receipt, accepted)).toStrictEqual({
+			subjects: [
+				{
+					storePath: remotePath,
+					narHash: 'bb'.repeat(32),
+					derivation: `${remotePath}.drv`,
+					buildStore: 'ssh-ng://builder.example',
+					machine: 'ssh://builder-1',
+					verification: 'build-store'
+				}
+			]
+		});
+	});
+
+	it.each([
+		{
+			name: 'a version 2 receipt, which records no origin',
+			receipt: {
+				version: 2,
+				paths: [builtPath],
+				subjects: [
+					{
+						storePath: builtPath,
+						narHash: 'aa'.repeat(32),
+						derivation: `${builtPath}.drv`,
+						attempt: 1,
+						attemptId: 'attempt-1'
+					}
+				]
+			},
+			accepted: [acceptedDigest(builtPath, 'aa'.repeat(32))]
+		},
+		{
+			name: 'a run that accepted no subject',
+			receipt: {
+				version: 3,
+				paths: [builtPath],
+				subjects: [provenancedSubject(builtPath, 'aa', 'local')]
+			},
+			accepted: []
+		}
+	])('writes no predicate for $name', ({ receipt, accepted }) => {
+		expect(
+			buildOriginPredicateFor(buildReceiptSchema.parse(receipt), accepted)
+		).toBeUndefined();
+	});
+});
+
 describe('resolveAttestInputs', () => {
 	const receiptFile = '/runner/temp/build-receipt.json';
 
@@ -368,8 +473,36 @@ describe('resolveAttestInputs', () => {
 			cache: 'builds',
 			readUser: 'reader',
 			readPassword: 'secret',
-			checksumsFile: '/runner/temp/cupboard-attestations/subjects.txt'
+			checksumsFile: '/runner/temp/cupboard-attestations/subjects.txt',
+			predicateFile: '/runner/temp/cupboard-attestations/build-origin.json'
 		});
+	});
+
+	it('puts the default predicate file beside an explicit checksums file', () => {
+		const inputs = resolveAttestInputs(
+			{
+				receiptFile,
+				url: 'https://cache.example.test/t/acme',
+				checksumsFile: '/somewhere/subjects.txt'
+			},
+			{}
+		);
+
+		expect(inputs.predicateFile).toBe('/somewhere/build-origin.json');
+	});
+
+	it('honours an explicit predicate file', () => {
+		const inputs = resolveAttestInputs(
+			{
+				receiptFile,
+				url: 'https://cache.example.test/t/acme',
+				checksumsFile: '/somewhere/subjects.txt',
+				predicateFile: '/elsewhere/origin.json'
+			},
+			{}
+		);
+
+		expect(inputs.predicateFile).toBe('/elsewhere/origin.json');
 	});
 
 	it('honours an explicit checksums file', () => {
@@ -388,7 +521,8 @@ describe('resolveAttestInputs', () => {
 			cache: '',
 			readUser: '',
 			readPassword: '',
-			checksumsFile: '/somewhere/subjects.txt'
+			checksumsFile: '/somewhere/subjects.txt',
+			predicateFile: '/somewhere/build-origin.json'
 		});
 	});
 
@@ -505,6 +639,116 @@ describe('attestAction committed cache verification', () => {
 				],
 				checksums: `${'bb'.repeat(32)}  ${path.basename(remotePath)}\n`
 			});
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('writes the build-origin predicate and reports both files', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
+		const receiptFile = await receiptFileIn(directory);
+		const checksumsFile = path.join(directory, 'subjects.txt');
+		const predicateFile = path.join(directory, 'build-origin.json');
+		const outputFile = path.join(directory, 'output');
+
+		try {
+			await attestAction(
+				{
+					receiptFile,
+					checksumsFile,
+					url: 'https://cache.example.test/t/acme'
+				},
+				{ RUNNER_TEMP: directory, GITHUB_OUTPUT: outputFile },
+				createGithubReporter(),
+				{
+					fetch: () =>
+						Promise.resolve(new Response(committedNarInfo(remotePath, 0xbb)))
+				}
+			);
+
+			const outputs = await readFile(outputFile, 'utf8');
+			const predicate: unknown = JSON.parse(
+				await readFile(predicateFile, 'utf8')
+			);
+
+			expect({
+				predicate,
+				outputs: outputs
+					.split('\n')
+					.filter(
+						(line) =>
+							line.startsWith('predicate-file=') ||
+							line.startsWith('predicate-type=')
+					)
+			}).toStrictEqual({
+				predicate: {
+					subjects: [
+						{
+							storePath: remotePath,
+							narHash: 'bb'.repeat(32),
+							derivation: `${remotePath}.drv`,
+							buildStore: 'ssh-ng://builder.example',
+							verification: 'build-store'
+						}
+					]
+				},
+				outputs: [
+					`predicate-file=${predicateFile}`,
+					`predicate-type=${buildOriginPredicateType}`
+				]
+			});
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	// A version 2 receipt records no origin, so the action reports an empty
+	// predicate file and the workflow skips the second signing step.
+	it('reports no predicate file for a receipt that records no origin', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
+		const receiptFile = path.join(directory, 'receipt.json');
+		const predicateFile = path.join(directory, 'build-origin.json');
+		const outputFile = path.join(directory, 'output');
+		await writeFile(
+			receiptFile,
+			JSON.stringify({
+				version: 2,
+				paths: [remotePath],
+				subjects: [
+					{
+						storePath: remotePath,
+						narHash: 'bb'.repeat(32),
+						derivation: `${remotePath}.drv`,
+						attempt: 1,
+						attemptId: 'attempt-1'
+					}
+				]
+			})
+		);
+
+		try {
+			await attestAction(
+				{
+					receiptFile,
+					checksumsFile: path.join(directory, 'subjects.txt'),
+					url: 'https://cache.example.test/t/acme'
+				},
+				{ RUNNER_TEMP: directory, GITHUB_OUTPUT: outputFile },
+				createGithubReporter(),
+				{
+					fetch: () =>
+						Promise.resolve(new Response(committedNarInfo(remotePath, 0xbb)))
+				}
+			);
+
+			const outputs = await readFile(outputFile, 'utf8');
+
+			expect({
+				predicateLine: outputs
+					.split('\n')
+					.find((line) => line.startsWith('predicate-file=')),
+				written: existsSync(predicateFile)
+			}).toStrictEqual({ predicateLine: 'predicate-file=', written: false });
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}

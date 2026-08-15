@@ -4,6 +4,7 @@ import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { storedCacheSchema } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
+import { buildOriginPredicateType } from '@cupboard/protocol/build-origin';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import {
 	AttestationPredicateTypeMismatchError,
@@ -354,6 +355,7 @@ describe('local attestation verification', () => {
 				subjectDigest: narDigest,
 				signerIdentity: 'alice@example.test',
 				signerIssuer: 'https://issuer.test',
+				predicate,
 				provenance: {
 					builder: 'https://github.com/actions/runner/github-hosted',
 					sourceRepository: 'https://github.com/owner/repo',
@@ -364,6 +366,56 @@ describe('local attestation verification', () => {
 					invocationId:
 						'https://github.com/owner/repo/actions/runs/42/attempts/1'
 				},
+				trust
+			}
+		]);
+	});
+
+	// The result carries the predicate itself, so a caller that understands its
+	// own predicate type reads the statement from there.
+	it('returns the predicate a bundle of another type carries', async () => {
+		const predicate = {
+			subjects: [
+				{
+					storePath: '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+					narHash: 'aa'.repeat(32),
+					derivation: '/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv',
+					buildStore: 'ssh-ng://build@example.test',
+					machine: 'ssh://builder-1',
+					verification: 'build-store'
+				}
+			]
+		};
+
+		const results = await verifyLocalAttestations(
+			{
+				bundles: ['build-origin.sigstore.json'],
+				narHash,
+				predicateType: buildOriginPredicateType,
+				certificateIdentity: policy.identity,
+				certificateOidcIssuer: policy.issuer
+			},
+			{
+				readFile: () => Promise.resolve(new Uint8Array([1])),
+				verify: () =>
+					Promise.resolve(
+						verifiedBundle(policy, {
+							predicateType: buildOriginPredicateType,
+							subjectDigests: [narDigest],
+							predicate
+						})
+					)
+			}
+		);
+
+		expect(results).toStrictEqual([
+			{
+				bundle: 'build-origin.sigstore.json',
+				predicateType: buildOriginPredicateType,
+				subjectDigest: narDigest,
+				signerIdentity: 'alice@example.test',
+				signerIssuer: 'https://issuer.test',
+				predicate,
 				trust
 			}
 		]);

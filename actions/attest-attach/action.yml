@@ -32,7 +32,9 @@ inputs:
       action. Only matching receipt subjects are attached.
     required: true
   bundle:
-    description: Sigstore attestation bundle produced by actions/attest.
+    description:
+      Sigstore attestation bundles produced by the attest action, one path per
+      line. An empty line is ignored.
     required: true
 runs:
   using: composite

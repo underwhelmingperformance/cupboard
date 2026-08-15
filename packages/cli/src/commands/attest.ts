@@ -13,6 +13,10 @@ import {
 	runAttestAttach
 } from '../attest/attach.ts';
 import {
+	buildOriginStatement,
+	describeBuildOrigin
+} from '../attest/build-origin.ts';
+import {
 	verifyLocalAttestations,
 	verifyRemoteAttestations
 } from '../attest/verify.ts';
@@ -365,8 +369,26 @@ function bundleRows(result: VerifyResult, options: VerifyOptions): ResultRow[] {
 		{ label: 'Signer', value: result.signerIdentity ?? '(unknown signer)' },
 		...optionalRow('Issuer', result.signerIssuer),
 		...provenanceRows(result.provenance),
+		...originRows(result),
 		...trustRows(result.trust, options)
 	];
+}
+
+// One row per subject of a build-origin statement, naming the path and the
+// producer it came from. A statement covers every subject of its run, so the
+// rows for a bundle verified for one path include the run's other subjects as
+// well.
+function originRows(result: VerifyResult): ResultRow[] {
+	const statement = buildOriginStatement(result);
+
+	if (statement === undefined) {
+		return [];
+	}
+
+	return statement.subjects.map((subject) => ({
+		label: 'Origin',
+		value: `${subject.storePath}: ${describeBuildOrigin(subject)}`
+	}));
 }
 
 function provenanceRows(
