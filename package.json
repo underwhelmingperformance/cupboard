@@ -63,6 +63,7 @@
 		"deploy": "pnpm --filter @cupboard/server deploy",
 		"dev": "pnpm --filter @cupboard/server dev",
 		"diagnose:push": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/diagnose-push.ts",
+		"e2e:pipeline": "pnpm --filter @cupboard/server build-info && vitest run --config tests/e2e/pipeline.vitest.config.ts",
 		"fix": "pnpm run '/^fix:.*/'",
 		"fix:deps": "syncpack format",
 		"fix:format": "prettier --write .",

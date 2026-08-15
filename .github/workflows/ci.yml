@@ -137,6 +137,34 @@ jobs:
       # Darwin-specific configuration cases locally.
       - run: pnpm --config.verify-deps-before-run=false check:conformance
 
+  pipeline-e2e:
+    name: publish pipeline e2e
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # This tier runs a consumer repository's publication for real: a flake
+      # with genuine derivations, the composite action's own steps, a build,
+      # and a push over OIDC to a Worker in workerd. It needs the same Nix a
+      # publishing job gets. The remote-store leg starts its ssh-ng store in a
+      # container; the runner image provides the engine.
+      - uses: nixbuild/nix-quick-install-action@9f63be77f412a248c9d9a65a4c82cf066cdf8f0c # v35
+        with:
+          nix_version: 2.34.7
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm --config.verify-deps-before-run=false e2e:pipeline
+
   action-e2e:
     name: action e2e
     runs-on: ubuntu-24.04

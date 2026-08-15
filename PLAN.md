@@ -397,7 +397,7 @@ the name as one path segment.
 
 ## Testing
 
-Tests live in three tiers. Per-feature test items live with the V1 features that
+Tests live in four tiers. Per-feature test items live with the V1 features that
 need them; this section pins down what each tier is for, how Tier 3 stays
 sandboxed, where fixtures live, and the cross-cutting principles.
 
@@ -441,6 +441,37 @@ Nix configuration. Enforced by the harness, not by convention.
       substituter config.
 - [x] Cupboard URLs are produced by the local test server and rejected unless
       the host is `127.0.0.1` or `localhost`.
+
+### Tier 4: a consumer repository's publish run (`pnpm e2e:pipeline`)
+
+Runs a publication the way a consumer's workflow runs one: a flake with real
+derivations, `actions/plan` producing the cohort matrix, `actions/build-cohort`
+building the closure and publishing it, and the subject step of `actions/attest`
+running over the receipt. Each step goes through the action's own entrypoint
+with the argv its `action.yml` builds, and every `cupboard` invocation is a real
+subprocess of an installation the fixture assembles. Authentication is a genuine
+GitHub Actions OIDC exchange: a stub runner token endpoint answers
+`ACTIONS_ID_TOKEN_REQUEST_URL` with an id_token the stub issuer signed, and the
+tenant verifies it against a trust rule pinned to that issuer. Three legs cover
+the runner's own store, an ssh-ng store in a container, and a padded flake whose
+derivation graph is past the captured-evaluation limit. The remote-store leg
+needs the container engine testcontainers drives and skips when none answers, so
+a machine without one still runs the other two legs. Lives in
+`tests/e2e/publish-pipeline.test.ts`.
+
+The script is outside the `check:*` namespace, so a local `pnpm check` never
+runs it. Set `CUPBOARD_PIPELINE_E2E=1` to run it locally; CI runs it as a job of
+its own, in parallel with the other gates.
+
+Two things stay outside this tier. Signing an attestation needs a real GitHub
+identity, so a run stops at the subjects the receipt records. A push signs its
+blob uploads for Cloudflare's S3 endpoint, which Miniflare does not serve, so a
+module hook replaces the uploader with one that PUTs the same bytes to a
+loopback bridge, which stages them in the bucket the worker verifies against.
+
+Unlike Tier 3, these runs build in the runner's own store, because that is where
+a publication job builds. Each run seeds its derivations from a fresh
+identifier, so it publishes store paths no earlier run created.
 
 ### Fixtures
 
