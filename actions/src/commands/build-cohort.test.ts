@@ -66,7 +66,7 @@ import {
 	parseNixDerivationShow,
 	planReprobeArguments,
 	provenanceRebuildInstallables,
-	provenanceRequiredPartition,
+	receiptAlreadyHeldPaths,
 	remoteBuildSetOptions,
 	type RemoteDerivationPreparation,
 	resolveBuildCohortInputs,
@@ -2223,6 +2223,97 @@ describe('buildCohortAction', () => {
 	});
 
 	it.each([
+		{
+			name: 'does',
+			requireProvenance: 'true',
+			attested: ['--require-attested']
+		},
+		{
+			name: 'does not',
+			requireProvenance: 'false',
+			attested: []
+		}
+	])(
+		'a run that $name require provenance asks the plan for attested availability',
+		async ({ requireProvenance, attested }) => {
+			const calls: (readonly string[])[] = [];
+			const runCupboardMock = vi.fn<typeof runCupboard>(
+				(binaryPath, arguments_, passedEnvironment) => {
+					calls.push(arguments_);
+
+					return cupboardStub()(binaryPath, arguments_, passedEnvironment);
+				}
+			);
+
+			await buildCohortAction(
+				{ ...baseOptions(), requireProvenance },
+				environment,
+				{
+					runCupboard: runCupboardMock,
+					runNixBuild: vi.fn(() =>
+						Promise.resolve({ paths: [libraryBuiltPath], status: 0 })
+					)
+				}
+			);
+
+			expect(
+				calls.find((arguments_) => arguments_[1] === 'plan')
+			).toStrictEqual([
+				'--no-colour',
+				'plan',
+				'cohort',
+				'https://cache.example.test/t/acme',
+				'--targets-file',
+				path.join(
+					directory,
+					'cupboard-plan-cohort-targets-cohort-x86_64-linux-ubuntu-latest-remote-abc123.json'
+				),
+				'--plan-file',
+				path.join(
+					directory,
+					'cupboard-plan-cohort-cohort-x86_64-linux-ubuntu-latest-remote-abc123.json'
+				),
+				'--github-oidc',
+				...attested
+			]);
+		}
+	);
+
+	// The plan moves any served path without an attestation into the build set,
+	// so the action builds that set and leaves the attached targets alone.
+	it('builds only the plan build set when the run requires provenance', async () => {
+		const runNixBuild = vi.fn((installables: readonly string[]) =>
+			Promise.resolve({
+				paths: installables.includes(libraryQueryInstallable)
+					? [libraryBuiltPath]
+					: [],
+				status: 0
+			})
+		);
+
+		await buildCohortAction(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson(),
+				requireProvenance: 'true'
+			},
+			environment,
+			{ runCupboard: vi.fn<typeof runCupboard>(cupboardStub()), runNixBuild }
+		);
+
+		const inputs = resolveBuildCohortInputs(baseOptions(), environment);
+		const targetPaths = await readFile(inputs.targetPathsFile, 'utf8');
+
+		expect({
+			builtInstallables: runNixBuild.mock.calls.map((call) => call[0]),
+			targetPaths: targetPaths.trim().split('\n')
+		}).toStrictEqual({
+			builtInstallables: [[libraryQueryInstallable]],
+			targetPaths: [appPath, libraryBuiltPath]
+		});
+	});
+
+	it.each([
 		{ name: 'ordinary publication', requireProvenance: false },
 		{ name: 'provenance publication', requireProvenance: true }
 	])(
@@ -2343,13 +2434,9 @@ describe('buildCohortAction', () => {
 				targetPaths: targetPaths.trim().split('\n')
 			}).toStrictEqual({
 				runNixBuildInstallables: [[multiOutputInstallable]],
-				commands: requireProvenance
-					? ['plan', 'build-push', 'push']
-					: ['plan', 'build-push', 'push', 'push'],
-				rootRetention: requireProvenance ? ['root'] : ['root', 'root'],
-				targetPaths: requireProvenance
-					? [floatingBuiltPath, floatingDevelopmentPath]
-					: [appPath, floatingBuiltPath, floatingDevelopmentPath]
+				commands: ['plan', 'build-push', 'push', 'push'],
+				rootRetention: ['root', 'root'],
+				targetPaths: [appPath, floatingBuiltPath, floatingDevelopmentPath]
 			});
 		}
 	);
@@ -3260,7 +3347,7 @@ describe('withdrawFromPartition', () => {
 	});
 });
 
-describe('provenanceRequiredPartition', () => {
+describe('provenanceRebuildInstallables', () => {
 	it('rebuilds only targets the selected local build store already held', () => {
 		expect(
 			provenanceRebuildInstallables(
@@ -3297,59 +3384,6 @@ describe('provenanceRequiredPartition', () => {
 				]
 			)
 		).toStrictEqual([appQueryInstallable, libraryQueryInstallable]);
-	});
-
-	it('rebuilds cached finals without treating their prior paths as receipt exclusions', () => {
-		const partition = {
-			attachOnly: [appPath],
-			publishByReference: [libraryBuiltPath, referencePath],
-			leftUpstream: [floatingBuiltPath, leftUpstreamPath],
-			alreadyValid: [appPath, libraryBuiltPath],
-			buildSet: [],
-			counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
-			downloadSize: 0,
-			narSize: 0,
-			unknownCount: 0,
-			ceiling: { value: 0 as number, source: 'configured' as const }
-		};
-
-		expect(
-			provenanceRequiredPartition(partition, [
-				{
-					attr: 'app',
-					installable: '.#app',
-					queryInstallable: appQueryInstallable,
-					expectedPath: appPath,
-					root: 'app'
-				},
-				{
-					attr: 'library',
-					installable: '.#library',
-					queryInstallable: libraryQueryInstallable,
-					expectedPath: libraryBuiltPath,
-					root: 'library'
-				},
-				{
-					attr: 'floating',
-					installable: '.#floating',
-					queryInstallable: floatingQueryInstallable,
-					expectedPath: floatingBuiltPath,
-					root: 'floating'
-				}
-			])
-		).toStrictEqual({
-			...partition,
-			attachOnly: [],
-			publishByReference: [referencePath],
-			leftUpstream: [leftUpstreamPath],
-			alreadyValid: [],
-			buildSet: [
-				appQueryInstallable,
-				libraryQueryInstallable,
-				floatingQueryInstallable
-			],
-			counts: { willBuild: 3, willSubstitute: 0, unknown: 0 }
-		});
 	});
 
 	it.each([
@@ -3389,6 +3423,33 @@ describe('provenanceRequiredPartition', () => {
 		).toStrictEqual([
 			canonicalNixDerivedPath(derivedPath(row.queryInstallable))
 		]);
+	});
+});
+
+describe('receiptAlreadyHeldPaths', () => {
+	it.each([
+		{
+			name: 'keeps a path this run does not claim',
+			alreadyValid: [appPath, libraryBuiltPath],
+			claimable: [],
+			expected: [appPath, libraryBuiltPath]
+		},
+		{
+			name: 'drops a rebuilt path this run claims',
+			alreadyValid: [appPath, libraryBuiltPath],
+			claimable: [libraryBuiltPath],
+			expected: [appPath]
+		},
+		{
+			name: 'returns an empty list when the store held nothing before the build',
+			alreadyValid: [],
+			claimable: [libraryBuiltPath],
+			expected: []
+		}
+	])('$name', ({ alreadyValid, claimable, expected }) => {
+		expect(receiptAlreadyHeldPaths(alreadyValid, claimable)).toStrictEqual(
+			expected
+		);
 	});
 });
 
@@ -3910,9 +3971,25 @@ describe('buildCohortAction publication', () => {
 						3,
 						firstOption === -1 ? arguments_.length : firstOption
 					);
+					// cupboard claims exactly the paths the push declared
+					// claimable, so this double writes a receipt with a subject
+					// for each of them.
+					const subjects = arguments_.flatMap((argument, index) =>
+						argument === '--claimable'
+							? [
+									{
+										storePath: arguments_[index + 1] ?? '',
+										narHash: 'aa'.repeat(32),
+										derivation: `${arguments_[index + 1] ?? ''}.drv`,
+										buildStore: 'auto',
+										verification: 'local'
+									}
+								]
+							: []
+					);
 					await writeFile(
 						receiptFile,
-						`${JSON.stringify({ version: 3, paths, subjects: [] })}\n`
+						`${JSON.stringify({ version: 3, paths, subjects })}\n`
 					);
 				}
 
@@ -5258,8 +5335,59 @@ describe('buildCohortAction publication', () => {
 			receipt: {
 				version: 3,
 				paths: [libraryBuiltPath, referencePath],
-				subjects: []
+				subjects: [
+					{
+						storePath: libraryBuiltPath,
+						narHash: 'aa'.repeat(32),
+						derivation: `${libraryBuiltPath}.drv`,
+						buildStore: 'auto',
+						verification: 'local'
+					}
+				]
 			}
+		});
+	});
+
+	// The destination already holds an attestation for an attached target, so a
+	// provenance run publishes it with no receipt subject.
+	it('publishes an attached target alongside the remote build this run claims', async () => {
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson(),
+				push: 'true',
+				requireProvenance: 'true',
+				store: 'ssh-ng://build@example.test'
+			},
+			[libraryBuiltPath],
+			[remoteResult('built')],
+			[libraryQueryInstallable]
+		);
+		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
+		const receipt: unknown = JSON.parse(await readFile(receiptFile, 'utf8'));
+		const inputs = resolveBuildCohortInputs(baseOptions(), environment);
+		const targetPaths = await readFile(inputs.targetPathsFile, 'utf8');
+
+		expect({
+			invocations: run.calls.map((call) => call[1]),
+			receipt,
+			targetPaths: targetPaths.trim().split('\n')
+		}).toStrictEqual({
+			invocations: ['plan', 'push', 'push', 'push'],
+			receipt: {
+				version: 3,
+				paths: [libraryBuiltPath],
+				subjects: [
+					{
+						storePath: libraryBuiltPath,
+						narHash: 'aa'.repeat(32),
+						derivation: `${libraryBuiltPath}.drv`,
+						buildStore: 'auto',
+						verification: 'local'
+					}
+				]
+			},
+			targetPaths: [appPath, libraryBuiltPath]
 		});
 	});
 

@@ -183,6 +183,16 @@ export interface AvailabilityPartitionOptions {
 		| 'unreachableSubstituters'
 	>;
 	readonly destinationAnswers: DestinationAnswers;
+	/**
+	 * Which of the given paths the destination cache holds an attestation for.
+	 * A plan that requires attested availability sets this field, and a
+	 * destination-served path without an attestation then joins the build set.
+	 * When the field is unset, a target is attach-only whenever the destination
+	 * cache serves its path.
+	 */
+	readonly attestedServed?: (
+		paths: readonly StorePathString[]
+	) => Promise<ReadonlySet<StorePathString>>;
 	/** One `roots.ensure` result per target root, keyed by root name. */
 	readonly rootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse>;
 	/**
@@ -222,6 +232,13 @@ export interface AvailabilityPartition {
 	 */
 	readonly leftUpstreamRejections: readonly LeftUpstreamRejection[];
 	readonly buildSet: readonly NixDerivedPathString[];
+	/**
+	 * Paths the destination cache serves without holding an attestation for
+	 * them. A run that asked for attested availability builds these targets, so
+	 * each of them is in `buildSet` by its installable and absent from
+	 * `attachOnly`. The list is empty for every other run.
+	 */
+	readonly unattested: readonly StorePathString[];
 	readonly counts: {
 		readonly willBuild: number;
 		readonly willSubstitute: number;
@@ -356,9 +373,14 @@ export async function partitionAvailability(
 	const rejectedPaths = new Set(
 		rejections.map((rejection) => rejection.storePath)
 	);
+	const unattested = await unattestedPaths(classified, options);
 
 	for (const { target, classification } of classified) {
-		addToBucket(buckets, target, confirmed(classification, rejectedPaths));
+		addToBucket(
+			buckets,
+			target,
+			builtWhenUnattested(confirmed(classification, rejectedPaths), unattested)
+		);
 	}
 
 	return {
@@ -367,6 +389,7 @@ export async function partitionAvailability(
 		leftUpstream,
 		leftUpstreamRejections: rejections,
 		buildSet,
+		unattested: unattested.values().toArray().toSorted(byCodeUnit),
 		counts: {
 			willBuild: settled.willBuild.length,
 			willSubstitute: settled.willSubstitute.length,
@@ -544,6 +567,58 @@ function confirmed(
 	if (
 		classification.bucket !== 'leftUpstream' ||
 		!rejectedPaths.has(classification.path)
+	) {
+		return classification;
+	}
+
+	return { bucket: 'buildSet' };
+}
+
+/**
+ * The attach-only paths the destination cache serves without an attestation.
+ * The set is empty when the run did not ask for attested availability. Only an
+ * attach-only classification can change, so the query asks about the
+ * attach-only paths and no others.
+ */
+async function unattestedPaths(
+	classified: readonly ClassifiedTarget[],
+	options: AvailabilityPartitionOptions
+): Promise<ReadonlySet<StorePathString>> {
+	const attestedServed = options.attestedServed;
+
+	if (attestedServed === undefined) {
+		return new Set();
+	}
+
+	const attachOnlyPaths = new Set(
+		classified.flatMap(({ classification }) =>
+			classification.bucket === 'attachOnly' ? [classification.path] : []
+		)
+	);
+
+	if (attachOnlyPaths.size === 0) {
+		return new Set();
+	}
+
+	const attested = await attestedServed(attachOnlyPaths.values().toArray());
+
+	return new Set(
+		attachOnlyPaths.values().filter((storePath) => !attested.has(storePath))
+	);
+}
+
+// Attaching a target to its root publishes the path the destination cache
+// already serves. When that cache holds no attestation for the path, the
+// published target has no provenance, so a run that requires attested
+// availability puts the target in the build set and attaches an attestation to
+// the output it builds.
+function builtWhenUnattested(
+	classification: Classification,
+	unattested: ReadonlySet<StorePathString>
+): Classification {
+	if (
+		classification.bucket !== 'attachOnly' ||
+		!unattested.has(classification.path)
 	) {
 		return classification;
 	}

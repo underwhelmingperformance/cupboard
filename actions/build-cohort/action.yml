@@ -52,8 +52,11 @@ inputs:
     required: false
   require-provenance:
     description: >-
-      Execute every selected final derivation even when its output is already
-      valid, so the receipt carries current-invocation provenance.
+      Require provenance from this run for every final output. A target is left
+      unbuilt only when the cache already serves its output path and holds an
+      attestation for it; every other selected final derivation is executed by
+      this action, including a derivation whose output is already valid in the
+      build store.
     required: false
     default: 'false'
   best-effort:

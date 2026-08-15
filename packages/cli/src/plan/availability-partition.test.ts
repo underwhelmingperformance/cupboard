@@ -412,6 +412,119 @@ describe('partitionAvailability', () => {
 		}
 	);
 
+	it('does not ask the cache about attestations when the run does not require them', async () => {
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [target({ expectedPath: appPath, installable: appPath })],
+				destinationAnswers: answersFrom({
+					destinationServed: () => Promise.resolve(new Set([appPath]))
+				})
+			})
+		);
+
+		expect({
+			attachOnly: partition.attachOnly,
+			buildSet: partition.buildSet,
+			unattested: partition.unattested
+		}).toStrictEqual({
+			attachOnly: [appPath],
+			buildSet: [],
+			unattested: []
+		});
+	});
+
+	it.each([
+		{
+			name: 'attaches a served path the cache also holds an attestation for',
+			attested: [appPath],
+			expected: { attachOnly: [appPath], buildSet: [], unattested: [] }
+		},
+		{
+			name: 'builds a served path the cache holds no attestation for',
+			attested: [],
+			expected: { attachOnly: [], buildSet: [appPath], unattested: [appPath] }
+		}
+	])(
+		'with attested availability required, $name',
+		async ({ attested, expected }) => {
+			const asked: (readonly StorePathString[])[] = [];
+
+			const partition = await partitionAvailability(
+				baseOptions({
+					targets: [target({ expectedPath: appPath, installable: appPath })],
+					destinationAnswers: answersFrom({
+						destinationServed: () => Promise.resolve(new Set([appPath]))
+					}),
+					attestedServed: (paths) => {
+						asked.push(paths);
+
+						return Promise.resolve(new Set(attested));
+					}
+				})
+			);
+
+			expect({
+				asked,
+				attachOnly: partition.attachOnly,
+				buildSet: partition.buildSet,
+				unattested: partition.unattested
+			}).toStrictEqual({ asked: [[appPath]], ...expected });
+		}
+	);
+
+	it('asks only about the attach-only paths, and adds the unattested path to the build set', async () => {
+		const asked: (readonly StorePathString[])[] = [];
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({ expectedPath: appPath, installable: appPath }),
+					target({ expectedPath: otherPath, installable: otherPath })
+				],
+				destinationAnswers: answersFrom({
+					destinationServed: () => Promise.resolve(new Set([appPath]))
+				}),
+				attestedServed: (paths) => {
+					asked.push(paths);
+
+					return Promise.resolve(new Set());
+				}
+			})
+		);
+
+		expect({
+			asked,
+			attachOnly: partition.attachOnly,
+			buildSet: partition.buildSet,
+			unattested: partition.unattested
+		}).toStrictEqual({
+			asked: [[appPath]],
+			attachOnly: [],
+			buildSet: [appPath, otherPath],
+			unattested: [appPath]
+		});
+	});
+
+	it('builds an unattested path its retained root still serves', async () => {
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [target({ expectedPath: appPath, installable: appPath })],
+				rootEnsureResults: new Map([[appRoot, retainedResult]]),
+				attestedServed: () => Promise.resolve(new Set())
+			})
+		);
+
+		expect({
+			attachOnly: partition.attachOnly,
+			buildSet: partition.buildSet,
+			unattested: partition.unattested
+		}).toStrictEqual({
+			attachOnly: [],
+			buildSet: [appPath],
+			unattested: [appPath]
+		});
+	});
+
 	it('re-queries only the unknown paths, and folds the fresh answer in', async () => {
 		const unknownPath = path('33333333333333333333333333333333-unknown');
 		const store = new RecordingStore(

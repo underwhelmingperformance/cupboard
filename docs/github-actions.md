@@ -562,11 +562,13 @@ flake at the repository root), `attest` turns provenance signing off for tenants
 that do not accept it, `runs-on` picks the runner, and `trusted-public-key`
 configures the substituter. `cupboard-version` is an optional explicit release
 override; normally the workflow derives cupboard from its own pin. When `attest`
-is enabled, the workflow requires provenance for every final output. A cache hit
-therefore rebuilds the final derivation locally before the workflow signs it,
-while dependencies may still substitute. This makes a rerun after a failed
-signing or attachment step retry the missing provenance instead of succeeding
-with an empty receipt.
+is enabled, the workflow requires provenance for every final output. A target
+the cache already serves is left unbuilt only when the cache also holds an
+attestation for its output path. Every other final derivation is rebuilt locally
+before the workflow signs it, while its dependencies may still substitute. A
+rerun after a failed signing or attachment step therefore builds the output
+again and attaches the provenance that is missing, instead of finishing with an
+empty receipt.
 
 Pin this workflow to an immutable published release tag. With no explicit
 `cupboard-version`, the workflow selects that release and verifies its source

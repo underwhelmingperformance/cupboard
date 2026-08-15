@@ -148,6 +148,7 @@ export interface PlanCohortOptions {
 	readonly planFile?: string;
 	readonly store?: string;
 	readonly storePath?: string;
+	readonly requireAttested?: boolean;
 	readonly unknownCeiling?: number;
 	readonly unknownCeilingUntrustedFallback?: number;
 	readonly headroomAbsoluteMinimum?: number;
@@ -200,8 +201,8 @@ export type PlanCohortRefusal =
  * Dependencies that {@link runPlanCohort} obtains from the environment. Tests
  * can inject each one: a root client for ensure calls, the selected store's
  * availability queries, the daemon trust and re-query facilities used by
- * {@link partitionAvailability}, the destination and view probes, and the
- * store capacity probe.
+ * {@link partitionAvailability}, the destination, view and attestation probes,
+ * and the store capacity probe.
  */
 export interface PlanCohortDependencies {
 	readonly rootClient: Pick<RootClient, 'ensure'>;
@@ -224,6 +225,9 @@ export interface PlanCohortDependencies {
 	readonly viewServed: (
 		paths: readonly StorePathString[]
 	) => Promise<ReadonlySet<StorePathString>>;
+	readonly attestedServed: (
+		paths: readonly StorePathString[]
+	) => Promise<ReadonlySet<StorePathString>>;
 	readonly capacityProbe: StoreCapacityProbe;
 }
 
@@ -235,6 +239,11 @@ export interface PlanCohortRunOptions {
 	readonly storeIdentity: PlanStore;
 	readonly storePath: string;
 	readonly planFile: string;
+	/**
+	 * Whether the destination cache must hold an attestation for a served
+	 * output path before the plan leaves that target unbuilt.
+	 */
+	readonly requireAttested?: boolean;
 	readonly ceiling: AvailabilityCeilingConfig;
 	readonly detected: DetectedCapacityOptions;
 	readonly headroom?: Partial<HeadroomConfig>;
@@ -308,6 +317,10 @@ export function registerPlanCommands(
 		.option(
 			'--store-path <path>',
 			`store path the capacity probe measures (default: ${defaultStorePath})`
+		)
+		.option(
+			'--require-attested',
+			'build a target the cache already serves unless the cache also holds an attestation for it'
 		)
 		.option(
 			'--unknown-ceiling <count>',
@@ -403,6 +416,7 @@ export function registerPlanCommands(
 					},
 					storePath: options.storePath ?? defaultStorePath,
 					planFile: options.planFile ?? defaultPlanFile(),
+					...(options.requireAttested === true && { requireAttested: true }),
 					ceiling: {
 						value: options.unknownCeiling ?? defaultUnknownCeiling,
 						untrustedFallback:
@@ -457,6 +471,7 @@ export function registerPlanCommands(
 					}),
 					destinationServed: answers.destinationServed,
 					viewServed: answers.viewServed,
+					attestedServed: answers.attestedServed,
 					capacityProbe: defaultCapacityProbe
 				}
 			);
@@ -516,6 +531,9 @@ export async function runPlanCohort(
 						destinationServed: dependencies.destinationServed,
 						viewServed: dependencies.viewServed
 					},
+					...(options.requireAttested === true && {
+						attestedServed: dependencies.attestedServed
+					}),
 					rootEnsureResults,
 					storeIdentity: options.storeIdentity,
 					requeryUnknown: dependencies.requeryUnknown,
@@ -605,6 +623,14 @@ export async function runPlanCohort(
 				value: String(partition.leftUpstream.length)
 			},
 			{ label: 'To build', value: String(partition.buildSet.length) },
+			...(partition.unattested.length === 0
+				? []
+				: [
+						{
+							label: 'Served but not attested',
+							value: String(partition.unattested.length)
+						}
+					]),
 			// Every availability answer above was given without these, so a
 			// reader can tell "nobody holds this" from "we never asked
 			// everybody".
