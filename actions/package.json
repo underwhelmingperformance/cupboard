@@ -5,6 +5,7 @@
 		"cupboard-action": "./src/main.ts"
 	},
 	"dependencies": {
+		"@actions/attest": "^3.2.0",
 		"@cupboard/logger": "workspace:*",
 		"@cupboard/nix": "workspace:*",
 		"@cupboard/nix-store": "workspace:*",

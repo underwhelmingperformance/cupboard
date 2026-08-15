@@ -35,7 +35,7 @@ inputs:
     description: Basic-auth password for a private destination cache.
     required: false
   github-token:
-    description: GitHub token used by the attestation step.
+    description: GitHub token used to record the attestations on the repository.
     required: false
 outputs:
   bundle-path:
@@ -48,7 +48,7 @@ outputs:
       Path to the generated build-origin bundle. Empty when the receipt records
       no origin for the subjects this run signs, which is the case for a version
       2 receipt and for a run with no eligible subject.
-    value: ${{ steps.origin.outputs.bundle-path }}
+    value: ${{ steps.attest.outputs.origin-bundle-path }}
   checksums-file:
     description: Path to the generated subject checksums file.
     value: ${{ steps.subjects.outputs.checksums-file }}
@@ -126,23 +126,28 @@ runs:
           --read-user "$READ_USER" \
           --read-password "$READ_PASSWORD"
 
-    - name: Attest subjects
+    # Both statements cover the same subjects. GitHub's SLSA build provenance
+    # states how this workflow ran; cupboard's build-origin predicate states
+    # where each path came from, which only the receipt records.
+    #
+    # The signing happens here rather than in actions/attest-build-provenance
+    # and actions/attest because a `uses:` step cannot be retried and neither
+    # action takes a retry input. A Sigstore witness that stops answering after
+    # the signature was made would otherwise fail the whole publication.
+    - name: Sign the attestation statements
       id: attest
       if: ${{ steps.subjects.outputs.subject-count != '0' }}
-      uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-      with:
-        subject-checksums: ${{ steps.subjects.outputs.checksums-file }}
-        github-token: ${{ inputs.github-token || github.token }}
-
-    # This step signs the same subjects a second time, over cupboard's own
-    # predicate. The build-provenance bundle above states how this workflow ran;
-    # this one states where each path came from, which only the receipt records.
-    - name: Attest build origin
-      id: origin
-      if: ${{ steps.subjects.outputs.predicate-file != '' }}
-      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
-      with:
-        subject-checksums: ${{ steps.subjects.outputs.checksums-file }}
-        predicate-type: ${{ steps.subjects.outputs.predicate-type }}
-        predicate-path: ${{ steps.subjects.outputs.predicate-file }}
-        github-token: ${{ inputs.github-token || github.token }}
+      shell: bash
+      env:
+        CHECKSUMS_FILE: ${{ steps.subjects.outputs.checksums-file }}
+        PREDICATE_FILE: ${{ steps.subjects.outputs.predicate-file }}
+        PREDICATE_TYPE: ${{ steps.subjects.outputs.predicate-type }}
+        GH_TOKEN: ${{ inputs.github-token || github.token }}
+      run: |
+        node --experimental-transform-types \
+          --disable-warning=ExperimentalWarning \
+          "$GITHUB_ACTION_PATH/../src/main.ts" attest-sign \
+          --checksums-file "$CHECKSUMS_FILE" \
+          --predicate-file "$PREDICATE_FILE" \
+          --predicate-type "$PREDICATE_TYPE" \
+          --github-token "$GH_TOKEN"
