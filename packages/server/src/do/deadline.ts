@@ -18,8 +18,8 @@ export const criticalSectionBudgetMs = 25_000;
 const perCallCapMs = 15_000;
 
 // The absolute epoch-millisecond deadline for the current scope. A nested scope
-// only ever tightens it (see {@link withDeadlineBudget}), so the innermost
-// deadline is the one every subrequest reads.
+// only ever tightens it (see {@link withDeadlineBudget}), so every subrequest
+// reads the innermost deadline.
 const deadlineScope = new AsyncLocalStorage<number>();
 
 // Runs `body` under a deadline `budgetMs` from now, never looser than any

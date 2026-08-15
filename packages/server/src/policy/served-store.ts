@@ -6,9 +6,9 @@ import { StorePathNotServedError } from '../errors.ts';
 
 /**
  * Refuses any submitted path that is not in the store directory this cache
- * serves. `storePathSchema` validates the shape of a store path, which is the
- * same shape whichever store it belongs to; which store a given cache accepts
- * is the cache's own fact, so it is checked here, where the request arrives.
+ * serves. `storePathSchema` validates the shape of a store path, and that
+ * shape is the same for every store. Which store a cache accepts is a property
+ * of the cache, so that check runs here, where the request arrives.
  */
 export function requireServedStorePaths(
 	paths: readonly StorePathString[]

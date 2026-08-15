@@ -154,7 +154,6 @@ describe('root activation gating', () => {
 
 		// A sweep landing in the verify window must spare the reserved,
 		// still-unmaterialised row: the root reaches it and its upload is in flight.
-		// This is the regression for a rooted path being collected before it served.
 		await currentServer().runGarbageCollection();
 		await currentServer().runVerification();
 

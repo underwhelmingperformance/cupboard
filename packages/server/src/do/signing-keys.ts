@@ -34,8 +34,8 @@ export const bootstrapKeyId = signingKeyIdSchema.parse('active');
 
 // The stored public key is the only record of the name its signatures carry, so
 // a row that does not render as `<name>:<base64>` fails here rather than
-// yielding a name no client trusts. The id is the handle the key contract
-// retires a key by, so it is held to the same form the contract accepts.
+// producing a name that no client trusts. The id is the handle the key contract
+// uses to retire a key, so it is held to the same form the contract accepts.
 export function signingKeyFromRow(
 	row: typeof schema.signingKeys.$inferSelect
 ): SigningKey {

@@ -313,14 +313,14 @@ export class VerificationService {
 		);
 	}
 
-	// The on-DO verify path, the hourly-cron backstop: reserve the row, decode and
-	// hash-check the staging bytes here, then commit. The prompt path runs the
-	// decode in the queue consumer off the DO thread and records its verdict
-	// through `recordVerification` instead.
-	// Phase A of a batch settle: reserve, verify and promote one claimed upload,
-	// returning it ready to materialise. A settle that finishes here (the path was
-	// lost, already committed, its object definitively absent, or its verdict
-	// failed) returns undefined and is not carried into the materialise phase.
+	// Phase A of a batch settle, and the hourly-cron backstop: reserve the row,
+	// decode and hash-check the staging bytes on the Durable Object, then
+	// promote, returning one claimed upload ready to materialise. A settle that
+	// finishes here (the path was lost, already committed, its object
+	// definitively absent, or its verdict failed) returns undefined and is not
+	// carried into the materialise phase.
+	// The prompt path runs the decode in the queue consumer off the DO thread
+	// and records its verdict through `recordVerification` instead.
 	private async prepareAndPromote(
 		pending: typeof schema.pendingUploads.$inferSelect
 	): Promise<PreparedSettle | undefined> {
@@ -602,9 +602,10 @@ export class VerificationService {
 			probe,
 			graceDecision,
 			attachRootName: pending.attachRootName ?? undefined,
-			// A deferred settle proved its bytes (a fresh decode, or a reuse row
-			// negotiate admitted when the presence edge existed), so ownership is
-			// not re-required here; the first commit of a hash is not yet owned.
+			// A deferred settle proved its bytes: a fresh decode, or a reuse row
+			// that negotiate admitted while the presence edge existed. Ownership
+			// is not re-required here, and on the first commit of a hash the
+			// tenant does not own it yet.
 			mustOwnBlob: false,
 			// A vanished row was settled elsewhere; a terminal one was settled by a
 			// competing pass during this apply's promote and probe awaits. Either

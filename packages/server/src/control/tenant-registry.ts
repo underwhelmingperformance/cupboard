@@ -242,7 +242,7 @@ export async function listTenants(
 // admission manifest after this so the change reaches the read path. Suspending
 // stops new writes at once (the Worker reads status from D1 before dispatching a
 // write) and reads after the manifest TTL; offboarding marks the tenant so nothing
-// new is admitted while its bounded drain (the step 7 state machine) runs.
+// new is admitted while its bounded drain runs.
 export async function setTenantStatus(
 	database: Database,
 	id: TenantId,

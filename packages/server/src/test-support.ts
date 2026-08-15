@@ -197,8 +197,8 @@ export const fixtureOwner = {
 	audience: oidcAudienceSchema.parse('client-id.apps.googleusercontent.com')
 } as const;
 
-// The owner triple a tenant provisioned without an owner carries: every field
-// is empty, so no owner rule is seeded.
+// The owner triple for a tenant provisioned without an owner: every field is
+// empty, so no owner rule is seeded.
 const emptyOwner = {
 	ownerIssuer: oidcIssuerSchema.parse(''),
 	ownerSubject: oidcSubjectSchema.parse(''),
@@ -518,8 +518,8 @@ export function currentServer(): DurableObjectStub<CupboardServer> {
  * are abandoned when it ends (the next test points the harness elsewhere),
  * and an armed alarm on an abandoned object fires into a test environment
  * that has moved on: its handler's console output then races the pool's log
- * forwarding and surfaces as teardown errors. The shared `afterEach` runs
- * this so every object a test drove goes quiet with it.
+ * forwarding and surfaces as teardown errors. The shared `afterEach` calls
+ * this, so no object a test drove is left with an armed alarm.
  */
 export async function clearAbandonedAlarms(): Promise<void> {
 	for (const stub of [harness.server, fixtureWorkerServer()]) {
@@ -1946,10 +1946,11 @@ function closeSettled(socket: WebSocket): Promise<void> {
 	});
 }
 
-// The frame dance the commit helpers share: send the commit op, settle on the
-// reply, or drive the verification pass (the queue would run it in production)
-// and settle on the verdict; `wait: false` returns the deferral as `pending`.
-// The session stays open across a deferral, so the helper closes it on settle.
+// The frame exchange the commit helpers share: send the commit op, settle on
+// the reply, or drive the verification pass (the queue would run it in
+// production) and settle on the verdict; `wait: false` returns the deferral as
+// `pending`. The session stays open across a deferral, so the helper closes it
+// on settle.
 async function settleCommitSession(
 	conversation: CommitConversation,
 	uploadId: UploadId,
@@ -2486,9 +2487,9 @@ export async function putNarBytes(
 /**
  * Seeds an already-available shared blob: writes its canonical object and the
  * `blob_state` row recording its compressed size, so a later upload of a different
- * encoding of the same NAR adopts this canonical size at promote. Lets a test set up
- * the canonical-versus-staged size divergence the quota charge must use the canonical
- * side of.
+ * encoding of the same NAR adopts this canonical size at promote. Lets a test
+ * set up a canonical size that differs from the staged size, so it can check
+ * that the quota charge uses the canonical size.
  */
 export async function seedCanonicalBlob(nar: VerifiableNar): Promise<void> {
 	await putNarBytes(narObjectKey(nar.narHash), nar);
@@ -2929,8 +2930,8 @@ export async function verifyNarInfoSignature(
 	publicKey: string
 ): Promise<boolean> {
 	const key = new NixPublicKey(publicKey);
-	// A signature carries the name of the key that produced it, so only the
-	// signatures naming this key are checked against it.
+	// Each signature names its signing key, so only the signatures naming this
+	// key are checked against it.
 	const signatures = NixSignature.parseAll(narInfo.sigs).filter(
 		(signature) => signature.name === key.name
 	);

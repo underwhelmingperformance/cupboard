@@ -33,8 +33,9 @@ export function isConstantTimeEqual(left: string, right: string): boolean {
 }
 
 // `crypto.subtle.generateKey` is typed to return `CryptoKey | CryptoKeyPair`,
-// so the cast names the pair the Ed25519 parameters guarantee. Centralising it
-// keeps the curve choice and the cast in one place for every signing key.
+// so the cast narrows the result to the key pair that the Ed25519 parameters
+// guarantee. Centralising it keeps the curve choice and the cast in one place
+// for every signing key.
 export async function generateEd25519KeyPair(): Promise<CryptoKeyPair> {
 	return (await crypto.subtle.generateKey('Ed25519', true, [
 		'sign',

@@ -15,9 +15,10 @@ function bounded<A extends unknown[], R>(
 		boundedSubrequest(() => method(...arguments_), subrequest, capMs);
 }
 
-// Refuses a member whose network calls the bound cannot reach: a session or
-// multipart handle issues its own requests outside these proxies, so reaching
-// for one through a bounded wrapper would be a silent bypass.
+// Refuses a member the per-call bound cannot cover: a session or multipart
+// handle issues its own requests outside these proxies, so taking one from a
+// bounded wrapper would let those requests escape the bound with no error
+// reported.
 function unboundable(member: string): () => never {
 	return () => {
 		throw new UnboundableIoError(member);

@@ -164,8 +164,9 @@ function applyMigration<TSchema extends Record<string, unknown>>(
  * A migration is applied unless its tag is already recorded or it predates the
  * latest recorded timestamp, so a store Drizzle's migrator already tracked is
  * reconciled once and tag-tracked thereafter. Tag tracking ensures a regenerated
- * migration does not re-run when its journal timestamp changes. Each migration runs in its own transaction, and a
- * genuine statement failure is raised with its cause attached.
+ * migration does not re-run when its journal timestamp changes. Each migration
+ * runs in its own transaction, and a genuine statement failure is raised with
+ * its cause attached.
  */
 export function applyMigrations<TSchema extends Record<string, unknown>>(
 	database: MigrationDatabase<TSchema>,

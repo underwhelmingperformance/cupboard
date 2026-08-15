@@ -191,8 +191,8 @@ export const tenantMaintenanceEligibility = sqliteTable(
 		// When the wake time was last recomputed. Not strictly monotonic: the conflict
 		// rule can write an older reconcile's stamp when its wake is sooner, so a reader
 		// must not treat this as a "last reconciled" high-water mark. Its only consumer
-		// is the cron staleness floor, where a backward value can only trigger an extra
-		// sweep, never miss one.
+		// is the cron sweep's staleness check, where a backward value can only
+		// trigger an extra sweep, never miss one.
 		reconciledAt: text('reconciled_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [

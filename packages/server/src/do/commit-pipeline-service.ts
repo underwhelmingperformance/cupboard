@@ -270,12 +270,11 @@ function isOverQuota(
 	);
 }
 
-// A stalled body a verify has already piped through is locked, so calling
-// `cancel` on it directly only rejects; it never reaches R2's underlying
-// stream. Retaining the sole reader over `body` instead, and forwarding its
-// chunks through a fresh stream for the verifier to pipe, means the returned
-// `cancel` reaches the R2 stream regardless of what the verifier does with the
-// stream it was handed.
+// The verifier's pipe locks the R2 body, so cancelling that body directly
+// rejects and never reaches R2's underlying stream. This helper keeps the only
+// reader on `body` and forwards its chunks through a fresh stream for the
+// verifier to pipe, so the returned `cancel` always reaches the R2 stream,
+// whatever the verifier does with the stream it was given.
 function cancellableNarBody(body: ReadableStream<Uint8Array>): {
 	readonly stream: ReadableStream<Uint8Array>;
 	readonly cancel: (reason?: unknown) => Promise<void>;
@@ -954,8 +953,9 @@ export class CommitPipelineService {
 		}
 
 		// A reuse binds a narinfo to bytes this tenant never re-proved, on the
-		// strength of its presence edge; with the edge gone (a delete credited it
-		// back) the reuse fails towards re-upload: the presence edge is gone.
+		// strength of its presence edge. If the edge has gone (a delete credited
+		// the bytes back) the tenant no longer has that proof, so the reuse is
+		// refused and the client uploads the bytes again.
 		if (request.mustOwnBlob && !probe.isOwned) {
 			return { outcome: { kind: 'blob-gone' } };
 		}
@@ -1333,7 +1333,7 @@ export class CommitPipelineService {
 		attachRootName?: RootName
 	): Promise<CommitOutcome> {
 		// Each retry needs a fresh recommit to have landed inside the window, so
-		// the loop settles as soon as the path holds still — but sustained churn
+		// the loop settles as soon as no further recommit lands. Sustained churn
 		// must not keep one request re-resolving indefinitely, so past the cap
 		// the upload defers and the verify pass arbitrates.
 		for (let attempt = 0; attempt < concedeAttemptLimit; attempt += 1) {
@@ -1547,8 +1547,8 @@ export class CommitPipelineService {
 			// This upload already started its own commit saga and is mid-verify:
 			// its row is reserved, not yet servable, and the verification pass
 			// re-drives it from the durable marker. Stay deferred, leaving the
-			// marker and the staged bytes the re-drive needs intact. A concurrent commit, by contrast,
-			// reaches here with its own verdict still null.
+			// marker and the staged bytes the re-drive needs intact. A concurrent
+			// commit, by contrast, reaches here with its own verdict still null.
 			if (pending.verdict === 'committing' || pending.verdict === 'pending') {
 				// Request a prompt verification pass so a retried socket is re-driven
 				// within its wait window. A `committing` reuse saga that crashed before
@@ -2086,10 +2086,10 @@ export class CommitPipelineService {
 	// Materialises a reserved narinfo through the shared flush queue: concurrent
 	// settles (socket commits and verify-pass verdicts alike) share one gate and
 	// one combined charge batch per flush, so a push of hundreds of paths costs
-	// a handful of gates. The request's probe arrives
-	// from outside any gate and may be stale by its flush; the charge batch is
-	// the authoritative guard, exactly as it is for a lone settle. The returned
-	// narinfo's object is the caller's to publish, after the flush.
+	// a handful of gates. The request's probe arrives from outside any gate and
+	// may be stale by its flush; the charge batch is the authoritative guard,
+	// exactly as it is for a lone settle. The returned narinfo's object is the
+	// caller's to publish, after the flush.
 	async materialiseBatched(
 		logger: Logger,
 		request: MaterialiseRequest

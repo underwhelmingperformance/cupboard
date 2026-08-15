@@ -451,10 +451,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// before it matches a route is still logged with the request's fields.
 		this.app.use(loggerMiddleware);
 
-		// An unconfigured Durable Object has no identity to issue, verify or advertise
-		// under, so it serves nothing. This is
-		// input-gated: the control plane's `configure` RPC, which assigns the
-		// identity, is a method and so is not gated here.
+		// An unconfigured Durable Object has no identity to issue, verify or
+		// advertise under, so every request that reaches this app is refused with
+		// `TenantNotConfiguredError`. The guard sits on the `fetch` path only: the
+		// control plane's `configure` RPC, which assigns the identity, is a method
+		// call and does not pass through here.
 		this.app.use(async (_context, next) => {
 			if (this.tenantIdentity.current() === undefined) {
 				throw new TenantNotConfiguredError();
@@ -1136,11 +1137,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// The `finally` covers a body that throws after a partial write; the one case it
 	// does not cover is a hard isolate eviction inside that window, which leaves the
 	// prior wake time in place. Deferred verify is re-triggered out of band by the
-	// `tenant-verify` queue message, so it does not wait; the rest waits for the cron's
-	// staleness floor: a now-due queued narinfo deletion, or a
-	// deferred deadline (upload or attestation expiry, retention-root TTL, auth-key
-	// retirement). The reconcile publishes through a single conditional upsert that
-	// writes only when the wake time moves, so a push of many paths costs one write.
+	// `tenant-verify` queue message, so it does not wait. The other kinds of
+	// work, a now-due queued narinfo deletion or a deferred deadline (upload or
+	// attestation expiry, retention-root TTL, auth-key retirement), wait for the
+	// cron sweep and its staleness limit. The reconcile publishes through a
+	// single conditional upsert that writes only when the wake time moves, so a
+	// push of many paths costs one write.
 	private async afterMutation<T>(body: () => Promise<T>): Promise<T> {
 		try {
 			return await body();
@@ -1164,7 +1166,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// is in flight every further request collapses onto a single follow-up,
 	// which runs with the state as it stands then, so the last mutation of a
 	// burst is always covered. An eviction can drop a scheduled publish; the
-	// sweep's staleness floor bounds how long the stale projection can suppress
+	// sweep's staleness limit bounds how long the stale projection can suppress
 	// maintenance, the same backstop the synchronous reconcile's eviction
 	// window relies on.
 	private scheduleMaintenanceReconcile(): void {
@@ -1191,9 +1193,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private async reconcileMaintenanceEligibility(): Promise<void> {
 		// The reconcile publishes through a single conditional upsert, so two concurrent
 		// same-tenant reconciles settle atomically without a lock: a stale one cannot
-		// overwrite a fresher one. A failed reconcile would leave a stale projection that
-		// can suppress maintenance until the staleness floor, so drop the row instead and
-		// let the periodic sweep read the tenant as due (fail-open).
+		// overwrite a fresher one. A failed reconcile would leave a stale
+		// projection that can suppress maintenance until the staleness limit, so
+		// drop the row instead and let the periodic sweep read the tenant as due
+		// (fail-open).
 		try {
 			await this.maintenanceEligibility.reconcile();
 		} catch {
@@ -1203,25 +1206,23 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	// Drops the maintenance-eligibility projection so the periodic sweep reads the
 	// tenant as due and reconciles on its next tick. Fail-open: if the delete also
-	// fails, the staleness floor still bounds the delay.
+	// fails, the sweep's staleness limit still bounds the delay.
 	private async invalidateMaintenanceEligibility(): Promise<void> {
 		try {
 			await this.maintenanceEligibility.invalidate();
 		} catch {
-			// The staleness floor remains the backstop.
+			// The sweep's staleness limit is the backstop.
 		}
 	}
 
 	// Runs a direct RPC entrypoint (one that bypasses `fetch`) inside its own
 	// request cost meter, so the Durable Object rows it reads are logged like an
-	// HTTP request's, so the row-heavy maintenance sweeps
-	// run through here.
+	// HTTP request's. The row-heavy maintenance sweeps arrive as direct RPCs, so
+	// they all run through here.
 	private metered<T>(
 		method: MeteredMethod,
 		body: (logger: Logger) => Promise<T>
 	): Promise<T> {
-		// The one place a direct RPC's logger is built; it is threaded into the body
-		// and the cost line, and every downstream call receives it as a parameter.
 		const logger = rootLogger().with({ method });
 
 		return withSpan('tenant-rpc', { method }, () =>

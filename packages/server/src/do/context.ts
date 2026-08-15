@@ -250,10 +250,11 @@ export class ServerContext {
 		return this.credentialIssuer;
 	}
 
-	// This Durable Object's tenant slug, the one source for its tenant-scoped D1
-	// reference edges and R2 narinfo keys. It comes from the assigned identity, so a
-	// route that reaches a write has already passed the not-configured guard; an absent row
-	// here is a programming error and is surfaced as an exception.
+	// This Durable Object's tenant slug, the sole source of the tenant scope in
+	// its D1 reference edges and R2 narinfo keys. It comes from the assigned
+	// identity, so a route that reaches a write has already passed the
+	// not-configured guard; an absent row here is a programming error and is
+	// surfaced as an exception.
 	requireTenant(): TenantId {
 		const row = this.db
 			.select({ tenant: schema.tenantIdentity.tenant })

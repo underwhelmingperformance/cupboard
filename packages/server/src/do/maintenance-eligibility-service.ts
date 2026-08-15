@@ -24,10 +24,11 @@ const wakeImmediately = isoTimestamp(new Date(0));
 export class MaintenanceEligibilityService {
 	constructor(private readonly context: ServerContext) {}
 
-	// Whether the tenant has work due now: an upload awaiting verification, or a queued
-	// narinfo deletion. Both are existence checks reached through an index, so the cost
-	// is flat in the in-flight set: a single indexed row lookup, so the wake time
-	// can be recomputed on every mutation without quadratic read load.
+	// Whether the tenant has work due now: an upload awaiting verification, or a
+	// queued narinfo deletion. Both are existence checks served by an index, so
+	// each costs a single indexed row lookup whatever the size of the in-flight
+	// set. The wake time can therefore be recomputed on every mutation of a
+	// large push without the read load becoming quadratic.
 	private hasImmediateWork(): boolean {
 		const awaitingVerification = this.context.db
 			.select({ present: sql`1` })

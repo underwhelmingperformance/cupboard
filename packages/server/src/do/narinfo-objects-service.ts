@@ -812,7 +812,8 @@ export class NarInfoObjectsService {
 	// Deletes one path's tenant narinfo object. Every narinfo-object delete
 	// routes through here or the bulk form: the objects are path-keyed and not
 	// healed on read, so the delete must order behind any abandoned mutation of
-	// the same key, or a zombie could destroy an object a later commit wrote.
+	// the same key, or an abandoned delete could destroy an object a later
+	// commit wrote.
 	async deleteNarInfoObject(
 		cache: StoredCache,
 		storePathHash: StorePathHash

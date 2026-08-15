@@ -29,7 +29,7 @@ async function settleBoth(
  * keys. The registry is in-memory and per-instance, which suffices because the
  * tenant Durable Object is the single writer of its path-keyed objects; the
  * verify/reconcile scan remains the durable backstop for an instance that dies
- * with a zombie still in flight.
+ * with an abandoned mutation still in flight.
  */
 export class ObjectWriteOrder {
 	private readonly outstanding = new Map<string, Promise<void>>();
@@ -80,10 +80,10 @@ export class ObjectWriteOrder {
 	 * Runs one R2 mutation of `keys`, first waiting for any abandoned earlier
 	 * mutation of those keys to settle. The wait is itself a bounded
 	 * subrequest: inside a critical section it consumes the section's deadline
-	 * budget and rejects retryably if the zombie outlasts it, leaving the
-	 * signal registered for the retry. When the mutation times out, its
-	 * settled-signal is registered against every key so later mutations order
-	 * behind it.
+	 * budget and rejects retryably if the abandoned mutation outlasts it,
+	 * leaving the signal registered for the retry. When the mutation times out,
+	 * its settled-signal is registered against every key so later mutations
+	 * order behind it.
 	 */
 	async write<T>(
 		keys: readonly R2ObjectKey[],

@@ -182,9 +182,9 @@ export class TenantNotFoundError extends ServerHttpError {
 }
 
 // Creation configures a tenant's Durable Object before it admits the slug, so
-// reaching an admitted tenant whose object was never configured is a broken
-// provisioning invariant: a server fault an operator resolves by re-running the
-// idempotent create, not a client condition and not one a retry clears.
+// an admitted tenant whose object was never configured breaks a provisioning
+// invariant. An operator resolves it by re-running the idempotent create. It
+// is not a client condition, and a retry does not clear it.
 export class TenantNotConfiguredError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
@@ -195,8 +195,8 @@ export class TenantNotConfiguredError extends ServerHttpError {
 }
 
 // A suspended or offboarding tenant stops accepting writes at once: the Worker
-// reads the authoritative status from D1 before dispatching a write, so the stop is
-// effective before the read-path manifest TTL catches up.
+// reads the authoritative status from D1 before dispatching a write, so the
+// stop takes effect without waiting for the read-path manifest entry to expire.
 export class TenantWritesStoppedError extends ServerHttpError {
 	readonly status = StatusCodes.FORBIDDEN;
 
@@ -344,10 +344,11 @@ export class RootTargetsUnavailableError extends ServerHttpError {
 	}
 }
 
-// A binary cache serves one store directory, the one its `nix-cache-info`
-// advertises. A path from another store has a different identity (the store
-// directory is an input to the path hash) and no client of this cache could
-// substitute it, so submitting one is refused at the boundary that took it.
+// A binary cache serves one store directory: the directory its
+// `nix-cache-info` advertises. A path from another store has a different
+// identity, because the store directory is an input to the path hash, and no
+// client of this cache could substitute it. Such a path is refused where the
+// request arrives.
 export class StorePathNotServedError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 
@@ -524,8 +525,8 @@ export class TenantSubjectTokenUntrustedError extends SubjectTokenUntrustedError
 /**
  * A trust rule pinned to the caller's repository ids refused the token over
  * one configured claim. Raised only after the token's signature verified
- * against that rule's issuer, so the diagnostic discloses rule shape only to
- * the repository the rule already names; every other caller receives the flat
+ * against that rule's issuer, so the diagnostic discloses the rule's shape only
+ * to a repository the rule already pins; every other caller receives the flat
  * {@link TenantSubjectTokenUntrustedError}.
  */
 export class TenantSubjectTokenClaimMismatchError extends SubjectTokenUntrustedError {
@@ -743,10 +744,10 @@ export class UploadCacheMismatchError extends ServerHttpError {
 }
 
 export class UploadedObjectNotFoundError extends ServerHttpError {
-	// NOT_FOUND, matching a reaped upload slot: in every flow that surfaces
-	// this (a staging object gone before commit, a reused blob gone between
-	// negotiate and commit), the client's remedy is the same re-negotiate the
-	// push already performs for a 404 commit.
+	// NOT_FOUND, matching a reaped upload slot. Every flow that raises this
+	// error (a staging object gone before commit, a reused blob gone between
+	// negotiate and commit) has the same remedy: the re-negotiation the push
+	// already performs when a commit returns 404.
 	readonly status = StatusCodes.NOT_FOUND;
 
 	constructor(public readonly r2Key: R2ObjectKey) {
@@ -778,9 +779,9 @@ export class DatabaseOverloadedError extends ServerHttpError {
 	}
 }
 
-// An authoritative shared-fact read behind a serve kept failing. Refusing
-// retryably is safer than answering from absence: a missing-object answer
-// would read as the path not existing and send the client off to rebuild it.
+// An authoritative shared-fact read behind a serve kept failing. Reporting the
+// path as a miss would tell the client that the path does not exist and send it
+// off to build the path locally, so the serve refuses retryably instead.
 export class SharedFactsUnavailableError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 5;
@@ -791,9 +792,9 @@ export class SharedFactsUnavailableError extends ServerHttpError {
 	}
 }
 
-// A request the runtime aborted with a fault it marks retryable: the Durable
-// Object serving it was reset or overloaded, so the request died with the
-// object, independent of anything about the request itself.
+// The runtime aborted the request with a fault it marks as retryable: the
+// Durable Object serving the request was reset or overloaded, so the request
+// died with the object, independent of anything about the request itself.
 export class TenantDispatchInterruptedError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 5;
@@ -805,13 +806,13 @@ export class TenantDispatchInterruptedError extends ServerHttpError {
 }
 
 // A storage subrequest (R2, D1 or the Cache API) did not settle within its
-// deadline. The caller abandons it and refuses retryably rather than let a
-// stalled call hold the Durable Object's input gate to the ~30s
-// `blockConcurrencyWhile` reset that would fail every concurrent request. The
-// abandoned call is idempotent, so the client's retry resumes safely. The
-// `subrequest` label names the operation that timed out, for observability.
-// `abandoned` is the abandoned call's settled-signal, absent when the call was
-// never started.
+// deadline. The caller abandons the call and refuses retryably. Otherwise a
+// stalled call holds the Durable Object's input gate until the runtime resets
+// the object at the ~30s `blockConcurrencyWhile` limit, and that reset fails
+// every concurrent request. The abandoned call is idempotent, so the client's
+// retry resumes safely. The `subrequest` label names the operation that timed
+// out, for observability. `abandoned` resolves once the abandoned call finally
+// settles, and is absent when the call was never started.
 export class SubrequestTimeoutError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 5;
@@ -993,8 +994,9 @@ export class ZstdUnavailableError extends ServerHttpError {
 /**
  * A bounded I/O wrapper refused a member it cannot bound: sessions and
  * multipart handles issue their own network calls outside the wrapper, so
- * using one through it would silently escape the per-call limit. Take the
- * handle from the raw binding instead, outside any critical section.
+ * handing one out would let those calls escape the per-call limit with no
+ * error reported. Take the handle from the raw binding instead, outside any
+ * critical section.
  */
 export class UnboundableIoError extends Error {
 	constructor(public readonly member: string) {

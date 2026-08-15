@@ -61,9 +61,9 @@ export const verificationBatchSize = 500;
 // bound cannot be decompressed within the worker CPU budget in any single
 // pass, so the commit is rejected, since it could never be served.
 //
-// PROVISIONAL: awaits the step-1 runtime benchmark (real workerd throughput
-// and whether the Durable Object honours `cpu_ms = 300000`); see PLAN.md V5
-// step 1. The mechanism is correct at any value; only the bound is unmeasured.
+// PROVISIONAL: awaits a runtime benchmark (real workerd throughput and whether
+// the Durable Object honours `cpu_ms = 300000`). The mechanism is correct at
+// any value; only the bound is unmeasured.
 export const verifiableMaxBytes = 4 * 1024 * 1024 * 1024;
 
 // One prompt verify claim: a small row count and a cumulative uncompressed
