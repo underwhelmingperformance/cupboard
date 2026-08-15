@@ -190,9 +190,9 @@ export function isInteractive(streams: {
 /**
  * Everything a cupboard command says or asks, in one clack-based visual
  * language: spinners for phases, notes for structured facts, prompts for the
- * decisions, and a clean cancel path throughout. The same surface drives the
- * machine mode, where the decorative narration falls silent and the structured
- * output flows through {@link CliUi.reporter}.
+ * decisions, and a clean cancel path throughout. The same surface drives
+ * machine mode: there the decorative narration is suppressed and the structured
+ * output goes through {@link CliUi.reporter}.
  */
 export interface CliUi {
 	/** Whether {@link CliUi.confirm} and the prompts can interact with the user. */
@@ -611,8 +611,9 @@ interface UnitNotes {
  * Collects the durable warnings a unit of work raises while it animates. clack
  * draws one region at a time and a {@link log.warn} written into a live spinner
  * or task log corrupts its redraw, so the warnings are emitted once the unit
- * ends, when nothing is animating. A `live` sink, where the unit has a surface
- * that can show them in place (a task log), previews each one as it arrives.
+ * ends, when nothing is animating. When the unit has a surface that can show a
+ * warning in place (a task log), the caller passes a `live` sink, which prints
+ * each warning as it arrives.
  */
 function unitNotes(live?: (message: string) => void): UnitNotes {
 	const pending: string[] = [];

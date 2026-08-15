@@ -144,8 +144,8 @@ export const attestationAttachSummaryResultKind = 'attestation-attach-summary';
 // One named path's attachment outcome: `attached` filed at least one bundle
 // for the path, `reused` found every bundle for it already held, and
 // `unservable` means the cache serves no committed copy of the path, so its
-// bundles could not be recorded. Only paths a bundle's subjects name appear;
-// a named path no bundle describes has nothing to attach.
+// bundles could not be recorded. Only the paths a bundle's subjects cover
+// appear; a requested path that no bundle describes is left out.
 export const attestationAttachPathSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	storePath: storePathSchema.optional(),

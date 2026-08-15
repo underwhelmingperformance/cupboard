@@ -345,7 +345,7 @@ interface PublishReleaseDependencies {
 export type ReleasePublicationStage =
 	'contended' | 'locked' | 'prepared' | 'activated';
 
-/** Fetch and cancellation seams used while downloading a release asset. */
+/** The dependencies injected while downloading a release asset. */
 export interface DownloadAssetDependencies {
 	readonly fetch?: typeof fetch;
 	readonly githubApiOrigin?: string;

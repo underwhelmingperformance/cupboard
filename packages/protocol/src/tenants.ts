@@ -22,9 +22,9 @@ export type TenantStatus = z.infer<typeof tenantStatusSchema>;
 
 export const readPasswordMinLength = 20;
 
-// The Basic-auth user a reader assumes when a cache names none. It is held to
-// the same rule an operator-supplied name is, so it is a `ReadUser` wherever a
-// command falls back to it.
+// The Basic-auth user a reader presents when the cache configuration supplies
+// no name. It is parsed with the same schema as an operator-supplied name, so
+// it is a `ReadUser` wherever a command falls back to it.
 export const defaultReadUser = readUserInputSchema.parse('cupboard');
 
 export const readPasswordSchema = z
@@ -33,10 +33,10 @@ export const readPasswordSchema = z
 	.regex(/^[!-~]+$/);
 
 // The Basic-auth credential a private cache requires from a reader. The user is
-// one an operator supplies, so it is held to what a Basic header can carry back.
-// The password is an opaque secret: the CLI generates one by default, and explicit
-// values must be netrc-safe visible ASCII. The control plane hashes it before
-// persistence.
+// supplied by an operator, so it is parsed with `readUserInputSchema` and
+// cannot contain a colon. The password is an opaque secret: the CLI generates
+// one by default, and explicit values must be netrc-safe visible ASCII. The
+// control plane hashes it before persistence.
 export const tenantReadCredentialSchema = z.strictObject({
 	user: readUserInputSchema,
 	password: readPasswordSchema

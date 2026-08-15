@@ -12,7 +12,8 @@ const maxRetryDelayMs = 5000;
 // gateway/overload conditions a server clears on its own. A deterministic
 // refusal keeps its own status and is never in this set: a `500` invariant, an
 // over-quota `507`, or any 4xx surfaces to the caller on the first response.
-// `Retry-After`, when present, only sets how long to wait, never whether.
+// `Retry-After`, when present, only sets how long to wait, never whether to
+// retry.
 const retryableStatuses = new Set<number>([
 	StatusCodes.TOO_MANY_REQUESTS,
 	StatusCodes.BAD_GATEWAY,

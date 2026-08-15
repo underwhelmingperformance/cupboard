@@ -38,7 +38,10 @@ export type SourceCommandRunner = (
 	signal?: AbortSignal
 ) => Promise<{ readonly stdout: string }>;
 
-/** Filesystem seams used to validate the immutable Nix result. */
+/**
+ * The injectable command runner and filesystem operations used to build
+ * Cupboard from a source checkout and verify the result.
+ */
 export interface SourceInstallDependencies {
 	readonly runCommand?: SourceCommandRunner;
 	readonly isExecutableFile?: (candidate: string) => Promise<boolean>;

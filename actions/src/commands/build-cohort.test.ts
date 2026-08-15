@@ -3043,7 +3043,7 @@ describe('buildCohortAction availability confirmation', () => {
 		};
 	}
 
-	it('asks only about the build set members whose output it can name', async () => {
+	it('re-probes only the build-set members with a known output path', async () => {
 		const run = await runConfirmedCohort(planReprobeSuccess());
 
 		expect(run.targetsFile).toStrictEqual({

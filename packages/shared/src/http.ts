@@ -5,8 +5,7 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 // The Basic-auth user a reader presents, and the value a tenant's stored read
-// verifier carries. The brand alone narrows nothing, so a stored value parses
-// whatever it holds.
+// verifier carries. The brand adds no runtime check, so any string parses.
 export const readUserSchema = z.string().brand('ReadUser');
 export type ReadUser = z.infer<typeof readUserSchema>;
 

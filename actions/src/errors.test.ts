@@ -300,7 +300,7 @@ describe('GithubApiError', () => {
 		});
 	});
 
-	it('carries the status and cause a site supplies', () => {
+	it('carries the status and cause the caller supplies', () => {
 		const cause = new Error('root cause');
 		const error = new GithubApiError('failed to fetch attestations', {
 			status: 404,
