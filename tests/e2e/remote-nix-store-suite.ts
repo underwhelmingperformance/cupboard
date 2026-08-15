@@ -12,6 +12,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { buildReceiptV3Schema } from '@cupboard/protocol/build';
+import { buildOriginPredicateType } from '@cupboard/protocol/build-origin';
 import {
 	parseReporterResults,
 	type Reporter,
@@ -1108,7 +1109,11 @@ async function runAlreadyValidPublication(
 					].toSorted((left, right) => byCodeUnit(left.root, right.root)),
 					attestation: {
 						checksums: `${coldInfo.narHash.digestHex()}  ${path.basename(coldMember.output)}\n`,
-						outputs: `checksums-file=${initialChecksumsFile}\nsubject-count=1\n`
+						outputs:
+							`checksums-file=${initialChecksumsFile}\n` +
+							'subject-count=1\n' +
+							`predicate-file=${path.join(runDirectory, 'build-origin.json')}\n` +
+							`predicate-type=${buildOriginPredicateType}\n`
 					}
 				});
 
@@ -1558,7 +1563,11 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 								`${subject.narHash}  ${path.basename(subject.storePath)}\n`
 						)
 						.join(''),
-					outputs: `checksums-file=${checksumsFile}\nsubject-count=${String(paths.length)}\n`
+					outputs:
+						`checksums-file=${checksumsFile}\n` +
+						`subject-count=${String(paths.length)}\n` +
+						`predicate-file=${path.join(runDirectory, 'build-origin.json')}\n` +
+						`predicate-type=${buildOriginPredicateType}\n`
 				});
 
 				const rejectedChecksumsFile = path.join(

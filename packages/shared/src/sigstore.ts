@@ -59,6 +59,12 @@ export interface VerifyResult {
 	readonly signerIdentity?: string;
 	readonly signerIssuer?: string;
 	readonly provenance?: SlsaProvenanceSummary;
+	/**
+	 * The predicate the statement carries; absent when the bundle carries none.
+	 * A caller that understands its own predicate type reads it from here; this
+	 * package interprets SLSA provenance and nothing else.
+	 */
+	readonly predicate?: unknown;
 	readonly trust: VerifyTrust;
 }
 
@@ -275,6 +281,7 @@ export function resultFor(
 		signerIdentity: verified.signer.identity?.subjectAlternativeName,
 		signerIssuer: verified.signer.identity?.extensions?.issuer,
 		...(provenance !== undefined && { provenance }),
+		...(verified.predicate !== undefined && { predicate: verified.predicate }),
 		trust: trustFor(verified)
 	};
 }

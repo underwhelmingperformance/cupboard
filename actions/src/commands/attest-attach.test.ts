@@ -280,6 +280,32 @@ describe('attestAttachArguments', () => {
 			'/tmp/bundle.sigstore.json'
 		]);
 	});
+
+	// The attest action signs the same subjects twice, and the workflow passes
+	// both bundles on separate lines of one input.
+	it('attaches the build-provenance and build-origin bundles of one run', () => {
+		const inputs = resolveAttestAttachInputs(
+			options({
+				bundle: [
+					'/tmp/provenance.sigstore.json',
+					'/tmp/build-origin.sigstore.json'
+				]
+			})
+		);
+
+		expect(attestAttachArguments(inputs, [appPath])).toStrictEqual([
+			'--no-colour',
+			'attest',
+			'attach',
+			'https://cache.example.workers.dev/t/acme',
+			appPath,
+			'--github-oidc',
+			'--attestation',
+			'/tmp/provenance.sigstore.json',
+			'--attestation',
+			'/tmp/build-origin.sigstore.json'
+		]);
+	});
 });
 
 describe('attestAttachAction', () => {

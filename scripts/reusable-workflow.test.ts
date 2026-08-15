@@ -1329,8 +1329,12 @@ describe('cupboard build provenance', () => {
 			receipt: trimmed.includes(
 				'receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}'
 			),
-			bundle: trimmed.includes(
-				'bundle: ${{ steps.attest.outputs.bundle-path }}'
+			// The workflow passes both bundles of the run in the single
+			// repeatable `bundle` input.
+			bundleLines: trimmed.filter(
+				(line) =>
+					line.startsWith('bundle:') ||
+					line.startsWith('${{ steps.attest.outputs.')
 			)
 		}).toStrictEqual({
 			attestStepNamed: true,
@@ -1343,7 +1347,11 @@ describe('cupboard build provenance', () => {
 			readPassword: true,
 			remoteStore: false,
 			receipt: true,
-			bundle: true
+			bundleLines: [
+				'bundle: |',
+				'${{ steps.attest.outputs.bundle-path }}',
+				'${{ steps.attest.outputs.origin-bundle-path }}'
+			]
 		});
 	});
 

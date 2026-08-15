@@ -17,6 +17,12 @@ import {
 	type BuildSubjectV3,
 	type ParsedBuildReceipt
 } from '@cupboard/protocol/build';
+import {
+	buildOriginPredicateSchema,
+	buildOriginPredicateType,
+	type BuildOriginSubject,
+	type ParsedBuildOriginPredicate
+} from '@cupboard/protocol/build-origin';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
@@ -53,6 +59,7 @@ interface StorePathDigest {
 export interface AttestOptions {
 	readonly receiptFile?: string;
 	readonly checksumsFile?: string;
+	readonly predicateFile?: string;
 	readonly url?: string;
 	readonly cache?: string;
 	readonly readUser?: string;
@@ -62,6 +69,8 @@ export interface AttestOptions {
 export interface AttestInputs {
 	readonly receiptFile: string;
 	readonly checksumsFile: string;
+	/** Where the build-origin predicate is written for the signing step. */
+	readonly predicateFile: string;
 	readonly url: URL;
 	readonly cache: StoredCache;
 	readonly readUser: ReadUser | '';
@@ -178,6 +187,41 @@ function requireUnmoved(
 	}
 }
 
+/**
+ * The build-origin predicate for the subjects this run signs: one entry per
+ * accepted subject, carrying the origin the receipt recorded for it. A version
+ * 2 receipt records no origin, and a run may accept no subject at all; either
+ * way there is no predicate to sign.
+ */
+export function buildOriginPredicateFor(
+	receipt: ParsedBuildReceipt,
+	subjects: readonly StorePathDigest[]
+): ParsedBuildOriginPredicate | undefined {
+	if (receipt.version !== 3) {
+		return undefined;
+	}
+
+	const accepted = new Set(subjects.map((subject) => subject.storePath));
+	const origins: BuildOriginSubject[] = receipt.subjects
+		.filter((subject) => accepted.has(subject.storePath))
+		.map((subject) => ({
+			storePath: subject.storePath,
+			narHash: subject.narHash,
+			derivation: subject.derivation,
+			buildStore: subject.buildStore,
+			...(subject.machine !== undefined && { machine: subject.machine }),
+			verification: subject.verification
+		}));
+
+	if (origins.length === 0) {
+		return undefined;
+	}
+
+	// The statement is signed under this repository's identity, so its contents
+	// are checked against the schema before the file is written.
+	return buildOriginPredicateSchema.parse({ subjects: origins });
+}
+
 export function renderChecksums(digests: readonly StorePathDigest[]): string {
 	return digests
 		.map((digest) => `${digest.sha256}  ${path.basename(digest.storePath)}`)
@@ -201,6 +245,10 @@ export function registerAttestCommand(
 		.option(
 			'--checksums-file <path>',
 			'where to write the generated subject checksums file'
+		)
+		.option(
+			'--predicate-file <path>',
+			'where to write the build-origin predicate for the signing step'
 		)
 		.requiredOption('--url <url>', 'destination cupboard tenant URL')
 		.option('--cache <name>', 'destination named cache')
@@ -240,19 +288,27 @@ export function resolveAttestInputs(
 		);
 	}
 
+	const checksumsFile =
+		provided(options.checksumsFile) ??
+		path.join(
+			requireEnvironment(environment, 'RUNNER_TEMP'),
+			'cupboard-attestations',
+			'subjects.txt'
+		);
+
 	return {
 		receiptFile,
 		url,
 		cache: providedCache(options.cache),
 		readUser,
 		readPassword,
-		checksumsFile:
-			provided(options.checksumsFile) ??
-			path.join(
-				requireEnvironment(environment, 'RUNNER_TEMP'),
-				'cupboard-attestations',
-				'subjects.txt'
-			)
+		checksumsFile,
+		// The predicate file defaults to the checksums file's directory, so a
+		// caller that specifies its own checksums path keeps both files together
+		// and needs no RUNNER_TEMP.
+		predicateFile:
+			provided(options.predicateFile) ??
+			path.join(path.dirname(checksumsFile), 'build-origin.json')
 	};
 }
 
@@ -382,6 +438,20 @@ export async function attestAction(
 	await mkdir(path.dirname(checksumsFile), { recursive: true });
 	await writeFile(checksumsFile, renderChecksums(subjects));
 
+	const predicate = buildOriginPredicateFor(receipt, subjects);
+	const predicateFile =
+		predicate === undefined ? '' : path.resolve(inputs.predicateFile);
+
+	if (predicate !== undefined) {
+		await mkdir(path.dirname(predicateFile), { recursive: true });
+		await writeFile(
+			predicateFile,
+			`${JSON.stringify(predicate, undefined, 2)}\n`
+		);
+	}
+
 	await setOutput(environment, 'checksums-file', checksumsFile);
 	await setOutput(environment, 'subject-count', String(subjects.length));
+	await setOutput(environment, 'predicate-file', predicateFile);
+	await setOutput(environment, 'predicate-type', buildOriginPredicateType);
 }

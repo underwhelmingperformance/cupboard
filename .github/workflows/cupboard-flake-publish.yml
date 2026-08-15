@@ -680,7 +680,12 @@ jobs:
           read-password: ${{ secrets.read_password }}
           receipt-file: ${{ steps.build-cohort.outputs.receipt-file }}
           checksums-file: ${{ steps.attest.outputs.checksums-file }}
-          bundle: ${{ steps.attest.outputs.bundle-path }}
+          # Both bundles cover the same subjects. The attach input takes one
+          # path per line and ignores an empty one, so a run that signed only
+          # the build provenance attaches only that bundle.
+          bundle: |
+            ${{ steps.attest.outputs.bundle-path }}
+            ${{ steps.attest.outputs.origin-bundle-path }}
 
       # At this point, every retention root has been set on the destination and
       # attestation has read the committed narinfos. Remove this build's
