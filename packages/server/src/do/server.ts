@@ -1137,12 +1137,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// The `finally` covers a body that throws after a partial write; the one case it
 	// does not cover is a hard isolate eviction inside that window, which leaves the
 	// prior wake time in place. Deferred verify is re-triggered out of band by the
-	// `tenant-verify` queue message, so it does not wait. The other kinds of
-	// work, a now-due queued narinfo deletion or a deferred deadline (upload or
-	// attestation expiry, retention-root TTL, auth-key retirement), wait for the
-	// cron sweep and its staleness limit. The reconcile publishes through a
-	// single conditional upsert that writes only when the wake time moves, so a
-	// push of many paths costs one write.
+	// `tenant-verify` queue message, so it does not wait for the sweep. The
+	// other kinds of work do wait for it: a queued narinfo deletion that is now
+	// due, or a deferred deadline (upload or attestation expiry, retention-root
+	// TTL, auth-key retirement). They run on the first cron tick that reads the
+	// published wake time as due. The reconcile publishes through a single
+	// conditional upsert that writes only when the wake time moves, so a push of
+	// many paths costs one write.
 	private async afterMutation<T>(body: () => Promise<T>): Promise<T> {
 		try {
 			return await body();
@@ -1641,12 +1642,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// The cron drives maintenance through these RPC methods via service binding,
-	// so no token is
-	// issued or exchanged. The same cores back `/gc` and `/verify` for manual
-	// use. Both sweep every cache and skip the edge-cache purge, exactly as an
-	// internal-origin HTTP sweep did, relying on the narinfo TTL and the
-	// orphan-blob grace window.
+	// The cron reaches maintenance through these Durable Object RPC methods
+	// rather than over HTTP, so no token is issued or exchanged. The `/gc` and
+	// `/verify` routes run the same passes for manual use. Called this way they
+	// sweep every cache and skip the edge-cache purge, leaving stale edge
+	// entries to the narinfo TTL and the orphan-blob grace window.
 	async runGarbageCollection(sweepLimit?: number): Promise<void> {
 		await this.initialise();
 		await this.runCoalescedCronMaintenance('gc', () =>
@@ -2214,12 +2214,10 @@ type MeteredMethod =
 	| 'verification'
 	| 'verify-backstop';
 
-// The same line for a direct RPC entrypoint (the maintenance sweeps, configure,
-// the cold-start migration) that does not flow through `fetch` but still reads
-// Durable Object rows worth surfacing.
 // The same cost line for a direct RPC entrypoint (the maintenance sweeps,
-// configure, the cold-start migration). These fire far more often than HTTP
-// requests — every cron tick and queue message — so it is the noisiest telemetry
+// configure, the cold-start migration): no `fetch` runs, but the rows it reads
+// are still worth surfacing. These fire far more often than HTTP requests, on
+// every cron tick and every queue message, so this is the noisiest telemetry
 // and logs at `trace`, off by default and enabled only when investigating cost.
 function logMethodFinished(logger: Logger, cost: DatabaseCost): void {
 	logger.trace('method finished', {

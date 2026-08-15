@@ -1361,7 +1361,7 @@ describe('retention grace at publication', () => {
 	// ungranted whenever nothing else established a deadline. Drives a real
 	// concede deterministically: negotiate two upload ids for the identical
 	// metadata before either commits, settle the first (the winner), then
-	// commit the second — its own commit() call finds the row the winner just
+	// commit the second: its own commit() call finds the row the winner just
 	// committed and concedes through the hasCommittedReference re-drive.
 	it.each([
 		{
@@ -1543,7 +1543,7 @@ describe('retention grace at publication', () => {
 	// bookkeeping, and the captured decision lives on that row: the grace
 	// application must precede the destruction, or an interruption between
 	// the two would lose the grant with the row. Faulting the staging delete
-	// proves the order — the deadline exists even though the concede failed.
+	// proves the order: the deadline exists even though the concede failed.
 	it('applies the captured grace before the concede destroys the decision', async () => {
 		await useTestServer('concede-ordering');
 		const { token } = await bootstrap();

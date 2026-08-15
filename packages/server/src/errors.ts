@@ -182,9 +182,9 @@ export class TenantNotFoundError extends ServerHttpError {
 }
 
 // Creation configures a tenant's Durable Object before it admits the slug, so
-// an admitted tenant whose object was never configured breaks a provisioning
-// invariant. An operator resolves it by re-running the idempotent create. It
-// is not a client condition, and a retry does not clear it.
+// an admitted tenant whose object was never configured means the provisioning
+// sequence did not finish. The client cannot clear that by retrying: an
+// operator re-runs the create, which is idempotent and configures the object.
 export class TenantNotConfiguredError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
@@ -347,8 +347,8 @@ export class RootTargetsUnavailableError extends ServerHttpError {
 // A binary cache serves one store directory: the directory its
 // `nix-cache-info` advertises. A path from another store has a different
 // identity, because the store directory is an input to the path hash, and no
-// client of this cache could substitute it. Such a path is refused where the
-// request arrives.
+// client of this cache could substitute it. The upload and root routes refuse
+// such a path on the way in, before doing any work with it.
 export class StorePathNotServedError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 
@@ -993,10 +993,9 @@ export class ZstdUnavailableError extends ServerHttpError {
 
 /**
  * A bounded I/O wrapper refused a member it cannot bound: sessions and
- * multipart handles issue their own network calls outside the wrapper, so
- * handing one out would let those calls escape the per-call limit with no
- * error reported. Take the handle from the raw binding instead, outside any
- * critical section.
+ * multipart handles issue their own network calls, and those calls do not pass
+ * through the wrapper, so the per-call limit would not apply to them. Take the
+ * handle from the raw binding instead, outside any critical section.
  */
 export class UnboundableIoError extends Error {
 	constructor(public readonly member: string) {

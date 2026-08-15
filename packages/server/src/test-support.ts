@@ -519,7 +519,9 @@ export function currentServer(): DurableObjectStub<CupboardServer> {
  * and an armed alarm on an abandoned object fires into a test environment
  * that has moved on: its handler's console output then races the pool's log
  * forwarding and surfaces as teardown errors. The shared `afterEach` calls
- * this, so no object a test drove is left with an armed alarm.
+ * this. It covers the server the harness currently points at and the fixture
+ * tenant's object; a test that arms an alarm on any other object clears that
+ * one itself.
  */
 export async function clearAbandonedAlarms(): Promise<void> {
 	for (const stub of [harness.server, fixtureWorkerServer()]) {

@@ -485,8 +485,10 @@ export async function controlTenantCreate(
 
 	// Provision in order: write the authoritative row, configure the Durable
 	// Object, write the tenant's membership marker, then publish the rebuilt
-	// filter. Each step is idempotent, so a retry after a mid-provision failure
-	// replays cleanly and never leaves a tenant admitted but unconfigured.
+	// filter. Admission comes from the marker and the filter, so the object is
+	// already configured by the time a request can reach it. Every step is
+	// idempotent, so the caller can retry the whole create after a failure part
+	// way through.
 	const now = new Date();
 	const summary = await ensureTenant(database, body, isoTimestamp(now));
 	const issuer = oidcIssuerSchema.parse(`${origin}/t/${summary.id}`);

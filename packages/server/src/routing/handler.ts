@@ -505,9 +505,9 @@ export default {
 // The tenant-relative request: the `/t/<tenant>/` prefix stripped, everything
 // else preserved, as the Durable Object and the serve helpers expect it. Hints
 // are staged over RPC and only the Worker sets the hint token, so a
-// client-supplied value must never reach the Durable Object. Every tenant
-// dispatch passes through this function, so dropping the header here removes
-// it from every dispatch.
+// client-supplied value must never reach the Durable Object. Every request to a
+// tenant's object is built here, and the header is deleted from all of them;
+// the negotiate route then sets it again with the token the Worker issued.
 function innerRequest(context: Context<WorkerHonoEnv>): Request {
 	const inner = new URL(context.req.url);
 	inner.pathname = context.get('tenantRest');

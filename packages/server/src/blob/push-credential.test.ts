@@ -49,7 +49,7 @@ describe('pushCredentialTtlSeconds', () => {
 		expect(pushCredentialTtlSeconds(tokenExpiresAt, now)).toBe(maxTtlSeconds);
 	});
 
-	it('floors at one second for an all-but-expired token', () => {
+	it('returns one second for an all-but-expired token', () => {
 		const tokenExpiresAt = new Date(now.getTime() - 1000);
 
 		expect(pushCredentialTtlSeconds(tokenExpiresAt, now)).toBe(
