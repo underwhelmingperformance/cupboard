@@ -16,8 +16,10 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { runAction } from '../../actions/src/program.ts';
+import { parseAudience } from '../../packages/cli/src/audience.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
 import { createBuildPushDaemon } from '../../packages/cli/src/commands/build-push.ts';
+import { githubBranchAddBody } from '../../packages/cli/src/commands/oidc-trust.ts';
 import { discoverNixStoreConfig } from '../../packages/nix/src/index.ts';
 import { Nix } from '../../packages/nix/src/nix.ts';
 import { defaultNixConfigEnvironment } from '../../packages/nix/src/store-config.ts';
@@ -48,15 +50,30 @@ function isSet(value: string | undefined): boolean {
 // it, and `pnpm e2e:pipeline` runs it when CI or CUPBOARD_PIPELINE_E2E is set.
 const isTierEnabled = isSet(env.CI) || isSet(env.CUPBOARD_PIPELINE_E2E);
 
-// The identity the runner's token endpoint asserts, and the claim the tenant's
-// trust rule pins it by.
-const consumerClaims = {
-	sub: 'repo:cupboard-test/consumer:ref:refs/heads/main',
-	repository: 'cupboard-test/consumer',
-	repository_owner_id: '4242'
+// The repository the runner's token asserts. The presets pin a repository by
+// its immutable numeric ids and a branch by its `ref`, so the token carries all
+// three alongside the subject a GitHub token would.
+const consumerRepository = {
+	repositoryId: 4241,
+	repositoryOwnerId: 4242,
+	fullName: 'cupboard-test/consumer'
 };
-const rootPrefix = 'github:cupboard-test/consumer/main';
+const consumerBranch = 'main';
+const consumerClaims = {
+	sub: `repo:${consumerRepository.fullName}:ref:refs/heads/${consumerBranch}`,
+	repository: consumerRepository.fullName,
+	repository_id: String(consumerRepository.repositoryId),
+	repository_owner_id: String(consumerRepository.repositoryOwnerId),
+	ref: `refs/heads/${consumerBranch}`
+};
+const rootPrefix = `github:${consumerRepository.fullName}/${consumerBranch}`;
 const rootGrantPrefix = 'github:cupboard-test/';
+
+// The preset case publishes under roots of its own beneath the same prefix, and
+// authenticates with an audience of its own so rule selection can never confuse
+// its rule with the hand-written one above.
+const presetRootPrefix = `${rootPrefix}/preset`;
+const presetAudience = 'https://cupboard-test.example/preset';
 
 // What Nix reads on the runner: no substituter to fetch from and no builder to
 // delegate to, so every path a run publishes is this machine's own work.
@@ -310,6 +327,8 @@ function planArguments(options: {
 	readonly targets: string;
 	readonly url: string;
 	readonly cupboardPath: string;
+	readonly rootPrefix: string;
+	readonly audience: string;
 	readonly store: string;
 	readonly requireProvenance: boolean;
 }): readonly string[] {
@@ -322,7 +341,7 @@ function planArguments(options: {
 		'--cupboard-path',
 		options.cupboardPath,
 		'--root-prefix',
-		rootPrefix,
+		options.rootPrefix,
 		'--cache',
 		'',
 		'--ttl',
@@ -332,7 +351,7 @@ function planArguments(options: {
 		'--read-password',
 		'',
 		'--audience',
-		'',
+		options.audience,
 		'--plan-file',
 		'',
 		'--optimise',
@@ -351,6 +370,7 @@ function buildCohortArguments(options: {
 	readonly cohortJson: string;
 	readonly url: string;
 	readonly cupboardPath: string;
+	readonly audience: string;
 	readonly store: string;
 	readonly push: boolean;
 	readonly requireProvenance: boolean;
@@ -371,7 +391,7 @@ function buildCohortArguments(options: {
 		'--ttl',
 		'',
 		'--audience',
-		'',
+		options.audience,
 		'--read-user',
 		'',
 		'--read-password',
@@ -471,6 +491,13 @@ interface PublishOptions {
 	readonly flakeDirectory: string;
 	readonly requireProvenance: boolean;
 	readonly store: string;
+	/** Every root this run writes nests under this prefix. */
+	readonly rootPrefix?: string;
+	/**
+	 * The audience the run requests OIDC tokens with. An empty value defaults to
+	 * the tenant URL.
+	 */
+	readonly audience?: string;
 }
 
 /**
@@ -484,6 +511,8 @@ async function runPublication(
 ): Promise<PublishOutcome> {
 	const prepared = fixture();
 	const url = prepared.server.tenantUrl.href;
+	const publishRootPrefix = options.rootPrefix ?? rootPrefix;
+	const audience = options.audience ?? '';
 	const job = await startJob(name);
 	const targets = await runNix([
 		'eval',
@@ -497,6 +526,8 @@ async function runPublication(
 			targets,
 			url,
 			cupboardPath: prepared.cupboard.path,
+			rootPrefix: publishRootPrefix,
+			audience,
 			store: options.store,
 			requireProvenance: options.requireProvenance
 		})
@@ -514,10 +545,11 @@ async function runPublication(
 				cohortJson: JSON.stringify(entry),
 				url,
 				cupboardPath: prepared.cupboard.path,
+				audience,
 				store: options.store,
 				push: true,
 				requireProvenance: options.requireProvenance,
-				runRoot: `${rootPrefix}/_cupboard-run/${job.runId}`
+				runRoot: `${publishRootPrefix}/_cupboard-run/${job.runId}`
 			})
 		);
 		const receiptFile = cohort.outputs['receipt-file'] ?? '';
@@ -827,12 +859,16 @@ interface RetentionRoot {
 	readonly targets: readonly string[];
 }
 
+// The segment that precedes the run identifier in every run root's name.
+const runRootMarker = '/_cupboard-run/';
+
 /**
- * The target roots the tenant holds, with the paths each one retains. The run
- * root every push attaches to is left out: its name carries the run
- * identifier, which changes with every job.
+ * The roots the tenant holds whose names satisfy `isWanted`, with the paths
+ * each one retains.
  */
-async function targetRoots(): Promise<readonly RetentionRoot[]> {
+async function retentionRoots(
+	isWanted: (name: string) => boolean
+): Promise<readonly RetentionRoot[]> {
 	const prepared = fixture();
 	const rpc = tenantRpc(prepared.server.tenantUrl, {
 		credential: await prepared.server.ownerAdminToken()
@@ -841,7 +877,7 @@ async function targetRoots(): Promise<readonly RetentionRoot[]> {
 
 	return Promise.all(
 		roots
-			.filter((root) => !root.name.includes('/_cupboard-run/'))
+			.filter((root) => isWanted(root.name))
 			.toSorted((left, right) => byCodeUnit(left.name, right.name))
 			.map(async (root) => {
 				const { targets } = await rpc.roots.targets({
@@ -857,6 +893,26 @@ async function targetRoots(): Promise<readonly RetentionRoot[]> {
 				};
 			})
 	);
+}
+
+/**
+ * The target roots the tenant holds, with the paths each one retains. The run
+ * root every push attaches to is left out: its name carries the run
+ * identifier, which changes with every job.
+ */
+function targetRoots(): Promise<readonly RetentionRoot[]> {
+	return retentionRoots((name) => !name.includes(runRootMarker));
+}
+
+/**
+ * The run roots beneath a prefix, with the run identifier in each name replaced
+ * by `<run>` so a test can assert on the names deterministically.
+ */
+async function runRoots(prefix: string): Promise<readonly RetentionRoot[]> {
+	const marker = `${prefix}${runRootMarker}`;
+	const roots = await retentionRoots((name) => name.startsWith(marker));
+
+	return roots.map((root) => ({ ...root, name: `${marker}<run>` }));
 }
 
 describe.skipIf(!isTierEnabled || !isNixPresent)(
@@ -1059,6 +1115,115 @@ describe.skipIf(!isTierEnabled || !isNixPresent)(
 					}
 				],
 				audiences: [canonicalHref(prepared.server.tenantUrl)]
+			});
+		});
+
+		// The rule an operator actually holds is the one a preset creates, and
+		// the operations a publication needs have to be in it: `root:attach` for
+		// the run root every push binds, and `root:list` for the reconciled
+		// target list the plan's pre-filter reads before it prunes a cohort.
+		it('publishes under the trust rule the GitHub branch preset creates', async () => {
+			const prepared = fixture();
+			const preset = githubBranchAddBody(
+				prepared.server.tenantUrl,
+				consumerRepository,
+				{
+					repo: consumerRepository.fullName,
+					branch: consumerBranch,
+					audience: parseAudience(presetAudience)
+				}
+			);
+			// The preset pins GitHub's issuer, but the harness signs the tokens
+			// this test uses, so replace the issuer with the harness's.
+			await tenantRpc(prepared.server.tenantUrl, {
+				credential: await prepared.server.ownerAdminToken()
+			}).oidcTrust.add({ ...preset, issuer: prepared.server.issuer.issuer });
+
+			const flakeDirectory = path.join(prepared.workspace, 'preset-consumer');
+			await mkdir(flakeDirectory, { recursive: true });
+			await writeFile(
+				path.join(flakeDirectory, 'flake.nix'),
+				consumerFlake({
+					directory: flakeDirectory,
+					system: prepared.system,
+					seed: randomUUID()
+				})
+			);
+			const options = {
+				flakeDirectory,
+				store: '',
+				rootPrefix: presetRootPrefix,
+				audience: presetAudience,
+				requireProvenance: false
+			};
+
+			const first = await runPublication('preset-first', options);
+			const rerun = await runPublication('preset-rerun', options);
+			const built = await builtPaths(flakeDirectory);
+			const paths = built
+				.toSorted(byStorePath)
+				.map(({ storePath }) => storePath);
+			const tenantRoots = await targetRoots();
+			const presetTargetRoots = tenantRoots.filter((root) =>
+				root.name.startsWith(`${presetRootPrefix}/`)
+			);
+
+			expect({
+				first,
+				rerun,
+				served: await servedStatuses(built),
+				runRoots: await runRoots(presetRootPrefix),
+				targetRoots: presetTargetRoots
+			}).toStrictEqual({
+				first: {
+					planStatus: 0,
+					retainedCount: '0',
+					targetCount: '2',
+					cohortCount: '1',
+					cohorts: [
+						{
+							status: 0,
+							targetPaths: paths,
+							attribution: localAttribution(),
+							receipt: expectedReceipt({
+								built,
+								targets: built,
+								store: '',
+								attribution: localAttribution()
+							}),
+							attestation: {
+								subjectCount: String(built.length),
+								checksums: expectedChecksums(built)
+							}
+						}
+					]
+				},
+				// The pre-filter reads each root's reconciled list before it can
+				// prune a cohort, so `targetCount` and `cohortCount` are `0` only
+				// when the rule permits that read.
+				rerun: {
+					planStatus: 0,
+					retainedCount: '2',
+					targetCount: '0',
+					cohortCount: '0',
+					cohorts: []
+				},
+				served: [200, 200],
+				// The first run's push bound this root and attached every path it
+				// committed; the rerun published nothing and bound no run root.
+				runRoots: [
+					{ name: `${presetRootPrefix}/_cupboard-run/<run>`, targets: paths }
+				],
+				targetRoots: [
+					{
+						name: `${presetRootPrefix}/${prepared.system}/alpha`,
+						targets: [built[0]?.storePath]
+					},
+					{
+						name: `${presetRootPrefix}/${prepared.system}/beta`,
+						targets: [built[1]?.storePath]
+					}
+				]
 			});
 		});
 
