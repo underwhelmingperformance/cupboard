@@ -443,9 +443,14 @@ export function resolveBuildCohortInputs(
 	}
 
 	const runnerTemporary = requireEnvironment(environment, 'RUNNER_TEMP');
+	// The composite action passes every file option, so an unset workflow
+	// input arrives as the empty string, and `path.resolve('')` is the
+	// working directory. Treat blank as absent or the default file becomes
+	// the repository checkout.
 	const outputPath = (name: string, provided_: string | undefined): string =>
 		path.resolve(
-			provided_ ?? path.join(runnerTemporary, `cupboard-cohort-${name}`)
+			provided(provided_) ??
+				path.join(runnerTemporary, `cupboard-cohort-${name}`)
 		);
 
 	return {

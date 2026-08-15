@@ -367,6 +367,47 @@ describe('resolveBuildCohortInputs', () => {
 		expect(inputs.store).toBe('ssh-ng://build@example.test');
 	});
 
+	// The composite action always passes the file options, so an unset
+	// workflow input arrives as the empty string; both spellings of "not
+	// set" must resolve to the RUNNER_TEMP defaults, never to the working
+	// directory.
+	it.each([
+		{ name: 'absent', value: undefined },
+		{ name: 'blank', value: '' }
+	])(
+		'defaults the output files under RUNNER_TEMP for $name inputs',
+		({ value }) => {
+			const inputs = resolveBuildCohortInputs(
+				{
+					...baseOptions(),
+					receiptFile: value,
+					targetPathsFile: value,
+					intermediatePathsFile: value,
+					referencePathsFile: value,
+					leftUpstreamFile: value,
+					countsFile: value
+				},
+				{ RUNNER_TEMP: '/tmp' }
+			);
+
+			expect({
+				receiptFile: inputs.receiptFile,
+				targetPathsFile: inputs.targetPathsFile,
+				intermediatePathsFile: inputs.intermediatePathsFile,
+				referencePathsFile: inputs.referencePathsFile,
+				leftUpstreamFile: inputs.leftUpstreamFile,
+				countsFile: inputs.countsFile
+			}).toStrictEqual({
+				receiptFile: '/tmp/cupboard-cohort-receipt.json',
+				targetPathsFile: '/tmp/cupboard-cohort-target-paths.txt',
+				intermediatePathsFile: '/tmp/cupboard-cohort-intermediate-paths.txt',
+				referencePathsFile: '/tmp/cupboard-cohort-reference-paths.txt',
+				leftUpstreamFile: '/tmp/cupboard-cohort-left-upstream.json',
+				countsFile: '/tmp/cupboard-cohort-counts.json'
+			});
+		}
+	);
+
 	it('requires cohort-json', () => {
 		expect(() =>
 			resolveBuildCohortInputs(
