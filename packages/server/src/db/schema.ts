@@ -454,10 +454,10 @@ export const reuseViewSelectors = sqliteTable(
 );
 
 // The durable, strictly-increasing revision counter per reuse-view name.
-// Mirrors `generation_seq`: a name's counter row is never deleted when the
-// view of that name is removed, so a view recreated under the same name can
-// never repeat a revision. The read path's ABA fence (telling a genuine
-// recreation apart from no change at all) depends on that guarantee holding.
+// Mirrors `generation_seq`: removing a view never deletes its counter row, so
+// a view recreated under the same name can never repeat a revision. The read
+// path's ABA fence (telling a genuine recreation apart from no change at all)
+// depends on that guarantee holding.
 export const reuseViewRevisionSeq = sqliteTable('reuse_view_revision_seq', {
 	name: text('name').primaryKey(),
 	nextRevision: integer('next_revision').$type<ReuseViewRevision>().notNull()

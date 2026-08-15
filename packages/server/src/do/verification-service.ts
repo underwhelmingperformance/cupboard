@@ -313,14 +313,14 @@ export class VerificationService {
 		);
 	}
 
-	// Phase A of a batch settle, and the hourly-cron backstop: reserve the row,
-	// decode and hash-check the staging bytes on the Durable Object, then
-	// promote, returning one claimed upload ready to materialise. A settle that
-	// finishes here (the path was lost, already committed, its object
+	// Phase A of a batch settle, and the backstop the hourly cron runs: reserve
+	// the row, decode and hash-check the staging bytes on the Durable Object,
+	// then promote, returning the claimed upload ready to materialise. A settle
+	// that finishes here (the path was lost, already committed, its object
 	// definitively absent, or its verdict failed) returns undefined and is not
-	// carried into the materialise phase.
-	// The prompt path runs the decode in the queue consumer off the DO thread
-	// and records its verdict through `recordVerification` instead.
+	// carried into the materialise phase. The prompt path instead decodes in the
+	// queue consumer, off the Durable Object thread, and records its verdict
+	// through `recordVerification`.
 	private async prepareAndPromote(
 		pending: typeof schema.pendingUploads.$inferSelect
 	): Promise<PreparedSettle | undefined> {
@@ -1668,11 +1668,11 @@ export class VerificationService {
 
 	// Records the terminal outcome for a deferred upload whose bytes the queue
 	// consumer found definitively gone, so its waiters are answered promptly. A
-	// fresh row's staging object cannot
-	// reappear, so it fails as `mismatch`. A reuse row's bytes are the shared
-	// canonical object, whose disappearance says nothing against the client's
-	// upload: the row is dropped and its waiters told `absent`, the answer that
-	// re-drives the push through a fresh negotiate and upload.
+	// fresh row's staging object cannot reappear, so it fails as `mismatch`. A
+	// reuse row's bytes are the shared canonical object, and that object going
+	// missing is no evidence against the bytes the client offered, so the row is
+	// dropped and its waiters told `absent`, the answer that re-drives the push
+	// through a fresh negotiate and upload.
 	async recordMissingObject(uploadId: UploadId): Promise<void> {
 		const pending = this.context.db
 			.select()

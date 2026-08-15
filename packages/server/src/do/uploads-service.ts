@@ -451,7 +451,7 @@ export class UploadsService {
 			// re-checked. A skippable row absent from the map moved during the
 			// shared-fact reads, so its snapshot no longer describes what holds
 			// the path: fall through and plan this push's own bytes, leaving the
-			// concurrent publication untouched — the commit saga arbitrates the
+			// concurrent publication untouched. The commit saga arbitrates the
 			// race exactly as it does for any contested path.
 			if (existing !== undefined && skipFact !== undefined) {
 				uploads.push({
@@ -465,8 +465,8 @@ export class UploadsService {
 
 			// Committed, but no `blob_state` row backs its NAR: reconcile the stale
 			// narinfo so a re-upload at the requested hash heals it, then plan that
-			// upload. A moved row is not stale — whatever holds the path now is a
-			// live concurrent publication — so it is planned without reconciling.
+			// upload. A moved row is not stale: whatever holds the path now is a
+			// live concurrent publication, so it is planned without reconciling.
 			if (
 				existing !== undefined &&
 				!skippable.has(metadata.storePathHash) &&

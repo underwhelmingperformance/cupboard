@@ -1332,10 +1332,11 @@ export class CommitPipelineService {
 		graceDecision?: GraceDecision,
 		attachRootName?: RootName
 	): Promise<CommitOutcome> {
-		// Each retry needs a fresh recommit to have landed inside the window, so
-		// the loop settles as soon as no further recommit lands. Sustained churn
-		// must not keep one request re-resolving indefinitely, so past the cap
-		// the upload defers and the verify pass arbitrates.
+		// An attempt repeats only when a recommit moved the winning row between
+		// the read and the confirmation below, so an attempt that finds the row
+		// unchanged returns from the loop. A path under sustained churn could
+		// keep one request retrying, so after `concedeAttemptLimit` attempts the
+		// upload defers and the verify pass arbitrates.
 		for (let attempt = 0; attempt < concedeAttemptLimit; attempt += 1) {
 			const winner = await this.narInfoObjects.committedNarInfoRow(
 				cache,

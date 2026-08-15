@@ -15,10 +15,10 @@ function bounded<A extends unknown[], R>(
 		boundedSubrequest(() => method(...arguments_), subrequest, capMs);
 }
 
-// Refuses a member the per-call bound cannot cover: a session or multipart
-// handle issues its own requests outside these proxies, so taking one from a
-// bounded wrapper would let those requests escape the bound with no error
-// reported.
+// Refuses a member the per-call bound cannot cover. A session or multipart
+// handle issues its own requests, and those requests do not pass through these
+// proxies, so handing the handle out would leave them unbounded. The wrapper
+// throws instead.
 function unboundable(member: string): () => never {
 	return () => {
 		throw new UnboundableIoError(member);

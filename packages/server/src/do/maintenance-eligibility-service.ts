@@ -27,7 +27,7 @@ export class MaintenanceEligibilityService {
 	// Whether the tenant has work due now: an upload awaiting verification, or a
 	// queued narinfo deletion. Both are existence checks served by an index, so
 	// each costs a single indexed row lookup whatever the size of the in-flight
-	// set. The wake time can therefore be recomputed on every mutation of a
+	// set. The wake time can therefore be recomputed on every mutation in a
 	// large push without the read load becoming quadratic.
 	private hasImmediateWork(): boolean {
 		const awaitingVerification = this.context.db
