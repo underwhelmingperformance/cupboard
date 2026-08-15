@@ -4,6 +4,7 @@ import { configureLogging, rootLogger } from '@cupboard/logger';
 import { wasErrorReported } from '@cupboard/reporter';
 import {
 	CodedError,
+	formatErrorWithCauses,
 	genericExitCode,
 	usageExitCode
 } from '@cupboard/shared/errors';
@@ -144,16 +145,18 @@ export function reportActionFailure(
 		return error.exitCode;
 	}
 
+	// githubActions.error escapes newlines, so the multi-line text stays one
+	// annotation.
 	if (error instanceof CodedError) {
 		if (!wasAlreadyReported(error) && !wasErrorReported(error)) {
-			githubActions.error(error.message);
+			githubActions.error(formatErrorWithCauses(error));
 		}
 
 		return error.exitCode;
 	}
 
 	if (!wasErrorReported(error)) {
-		githubActions.error(error instanceof Error ? error.message : String(error));
+		githubActions.error(formatErrorWithCauses(error));
 	}
 	// The full error, with its stack, goes to the Actions debug log.
 	rootLogger().debug('action failed', { error });

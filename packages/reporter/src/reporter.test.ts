@@ -34,6 +34,16 @@ function expectReporterTestError(
 	expect(error).toBeInstanceOf(ReporterTestError);
 }
 
+// A failure that reports only that a step failed and keeps the reason two
+// levels down its cause chain.
+function twoLevelFailure(): Error {
+	return new Error('the step failed', {
+		cause: new RangeError('the value is too big', {
+			cause: new TypeError('the key has the wrong type')
+		})
+	});
+}
+
 describe('formatDuration', () => {
 	it.each([
 		[0, '0ms'],
@@ -516,6 +526,24 @@ describe('createReporter', () => {
 			events: [{ event: 'error', name: 'RangeError', message: 'too big' }]
 		});
 	});
+
+	it('includes the cause chain in the JSON error event', () => {
+		const { events, reporter } = jsonReporter();
+
+		reporter.error(twoLevelFailure());
+
+		expect(events()).toStrictEqual([
+			{
+				event: 'error',
+				name: 'Error',
+				message: 'the step failed',
+				causes: [
+					'RangeError: the value is too big',
+					'TypeError: the key has the wrong type'
+				]
+			}
+		]);
+	});
 });
 
 describe('createGithubReporter', () => {
@@ -723,6 +751,18 @@ describe('createGithubReporter', () => {
 		createGithubReporter().error(new RangeError('too big'));
 
 		expect(normaliseErrors(written)).toStrictEqual(['::error::\n']);
+	});
+
+	// GitHub reads an annotation up to the first newline. The workflow command
+	// escapes the newlines, so the whole chain stays in one annotation.
+	it('annotates the cause chain of a failure as one escaped line', () => {
+		createGithubReporter().error(twoLevelFailure());
+
+		expect(written).toStrictEqual([
+			'::error::the step failed' +
+				'%0A  RangeError: the value is too big' +
+				'%0A  TypeError: the key has the wrong type\n'
+		]);
 	});
 });
 

@@ -1,6 +1,7 @@
 import { appendFileSync } from 'node:fs';
 import { stderr, stdout } from 'node:process';
 
+import { errorCauses, formatErrorWithCauses } from '@cupboard/shared/errors';
 import { workflowCommands } from '@cupboard/shared/github-actions';
 import { z } from 'zod';
 
@@ -121,7 +122,8 @@ export interface Reporter {
 	step(message: string): void;
 	/**
 	 * Reports a terminal failure: a single red marker line in terminal mode, or
-	 * one `{event:'error', name, message}` in JSON mode.
+	 * one `{event:'error', name, message}` in JSON mode, with an added `causes`
+	 * array when the error has a `cause`.
 	 */
 	error(error: unknown): void;
 }
@@ -515,13 +517,21 @@ function createJsonReporter(
 	};
 }
 
-// Splits any thrown value into the name and message the reporter renders.
-function describeError(error: unknown): { name: string; message: string } {
-	if (error instanceof Error) {
-		return { name: error.name, message: error.message };
-	}
+// Splits any thrown value into the fields of the JSON error event. `causes` is
+// omitted when the error has no cause, so an event for such an error keeps its
+// two fields.
+function describeError(error: unknown): {
+	name: string;
+	message: string;
+	causes?: string[];
+} {
+	const causes = errorCauses(error);
 
-	return { name: 'Error', message: String(error) };
+	return {
+		name: error instanceof Error ? error.name : 'Error',
+		message: error instanceof Error ? error.message : String(error),
+		...(causes.length > 0 && { causes })
+	};
 }
 
 function buildGithubReporter(
@@ -564,7 +574,9 @@ function buildGithubReporter(
 			return;
 		}
 
-		commands.error(describeError(error).message);
+		// commands.error escapes newlines, so the multi-line text stays one
+		// annotation.
+		commands.error(formatErrorWithCauses(error));
 		markErrorReported(error);
 	};
 

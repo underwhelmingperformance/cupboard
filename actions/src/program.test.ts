@@ -4,6 +4,7 @@ import { CommanderError } from 'commander';
 import { describe, expect, it } from 'vitest';
 
 import {
+	AttestationVerificationFailedError,
 	CupboardReportedError,
 	InvalidInputError,
 	RootEnsureCommandError
@@ -367,6 +368,33 @@ describe('runAction', () => {
 
 		expect({ annotations, exitCode }).toStrictEqual({
 			annotations: [],
+			exitCode: genericExitCode
+		});
+	});
+
+	it('annotates the cause chain when the error message names only the failed step', () => {
+		const annotations: string[] = [];
+		const error = new AttestationVerificationFailedError('cupboard-linux', 1, {
+			cause: new Error('the signature does not verify', {
+				cause: new TypeError('the key has the wrong type')
+			})
+		});
+
+		const exitCode = reportActionFailure(
+			{
+				error(message) {
+					annotations.push(message);
+				}
+			},
+			error
+		);
+
+		expect({ annotations, exitCode }).toStrictEqual({
+			annotations: [
+				`${error.message}\n` +
+					'  Error: the signature does not verify\n' +
+					'  TypeError: the key has the wrong type'
+			],
 			exitCode: genericExitCode
 		});
 	});
