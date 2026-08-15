@@ -218,9 +218,9 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 /**
  * A {@link Reporter} that runs each phase, progress and steps body straight
  * through and collects the result rows, info messages and top-level warnings,
- * for asserting on a command's output without a terminal. Phase-scoped
- * warnings and the rest are discarded; a test that needs them builds a
- * bespoke reporter.
+ * for asserting on a command's output without a terminal. Warnings raised
+ * inside a phase, `data` payloads and errors are discarded; a test that needs
+ * them builds its own reporter.
  */
 export function capturingReporter(
 	results: ResultRow[][],

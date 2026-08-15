@@ -56,15 +56,15 @@ export const uploadsContract = {
 		)
 		.output(uploadNegotiateResponseSchema),
 
-	// The read-only twin of negotiate: classifies a closure exactly as negotiate
-	// would, with the grace facts a report needs, without planning an upload,
-	// healing a stale narinfo, or extending any deadline. It carries no pushId: a
-	// dry run creates no upload credential, so no push id exists yet to sign;
-	// negotiate gets its existence-oracle protection from the pushId, and preview
-	// gets the same protection from the cache-scoped bearer grant plus the
-	// classification's owned-edge check, which never reveals another tenant's
-	// blobs. Never a mutation, so it carries no `maintenance` flag and never
-	// wakes the scheduler.
+	// The read-only twin of negotiate: it classifies a closure exactly as
+	// negotiate would and reports the grace facts a report needs, but it plans no
+	// upload, heals no stale narinfo and extends no deadline. It takes no pushId,
+	// because a dry run creates no upload credential and so has no signed push id
+	// yet. Negotiate relies on that push id to stop a caller using it as an
+	// existence oracle; preview relies instead on the cache-scoped bearer grant
+	// and the classification's owned-edge check, which never reveals another
+	// tenant's blobs. It mutates nothing, so it carries no `maintenance` flag and
+	// never wakes the scheduler.
 	preview: baseProcedure
 		.meta({
 			requires: 'upload:preview',
@@ -79,11 +79,11 @@ export const uploadsContract = {
 		)
 		.output(uploadPreviewResponseSchema),
 
-	// Confirms an unretained publication by store path without uploading bytes:
-	// the same exact-generation check and monotonic grace extension as an
+	// Confirms an unretained publication by store path without uploading bytes.
+	// It runs the same exact-generation check and monotonic grace extension as an
 	// already-present negotiate decision, for a path a mutating push already
-	// committed. It mutates retention state (a successful confirm extends a
-	// grace deadline and can mark the cache grace-managed), so it carries
+	// committed. A successful confirm extends a grace deadline and can mark the
+	// cache grace-managed, so it mutates retention state and carries
 	// `maintenance: true` like negotiate.
 	confirm: baseProcedure
 		.meta({

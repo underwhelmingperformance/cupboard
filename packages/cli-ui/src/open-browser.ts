@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { platform } from 'node:process';
 
-/** Where the launch narrates itself; satisfied by any reporter-like sink. */
+/** Where {@link openBrowser} writes its messages; any reporter satisfies it. */
 export interface BrowserMessages {
 	info(message: string): void;
 	warn(message: string): void;

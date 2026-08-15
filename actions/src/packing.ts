@@ -30,7 +30,7 @@ function effectivePackingHeadroom(
 }
 
 export interface PackCohortsOptions {
-	/** Off by default; packing never runs, and the manifest's own cohorts pass through unchanged, unless this is true. */
+	/** Off by default. When false, packing does not run and {@link packCohorts} returns `undefined`, so the caller keeps the manifest's own cohorts. */
 	readonly enabled: boolean;
 	readonly cohorts: readonly Cohort[];
 	/** Each target's own measured substitutable NAR size, keyed by attr. A target with no entry here cannot be priced, so packing never repartitions it: it keeps its manifest-declared cohort untouched. */
@@ -42,7 +42,7 @@ export interface PackCohortsOptions {
 export interface PackingResult {
 	/** The manifest's cohorts, with packable ones replaced by packed groupings; an explicit multi-target cohort is never split or merged, and always appears here exactly as declared. */
 	readonly cohorts: readonly Cohort[];
-	/** Every emitted cohort's own total measured size, keyed by its key: the pricing a packed grouping (or an untouched one) was derived from. */
+	/** The total measured size of each emitted cohort, keyed by the cohort's key. A cohort whose targets were not all measured has no entry. */
 	readonly measuredSizes: ReadonlyMap<string, number>;
 }
 

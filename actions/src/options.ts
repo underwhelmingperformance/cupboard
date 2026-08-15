@@ -85,8 +85,8 @@ export function providedUrl(
 /**
  * The read user a `read-user` input supplies, or `''` when the input is absent.
  * The value is taken verbatim: surrounding whitespace is part of a credential.
- * A Basic credential is `user:password` split on its first colon, so a name
- * carrying one refuses the input with {@link InvalidInputError} rather than
+ * A Basic credential is `user:password`, split on its first colon, so a name
+ * containing a colon is refused with {@link InvalidInputError} instead of
  * configuring a runner with a credential no cache can match.
  */
 export function providedReadUser(value = ''): ReadUser | '' {

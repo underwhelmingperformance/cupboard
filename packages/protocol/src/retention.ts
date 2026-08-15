@@ -12,10 +12,10 @@ import { z } from 'zod';
 import { countSchema } from './internal/counts.ts';
 import { isoTimestampSchema } from './scalars.ts';
 
-// One root names a bounded target list. Ensuring a root probes each
-// distinct target's narinfo object and canonical NAR in R2 and rewrites the
-// root's target rows, so the bound keeps one request's probe fan-out and
-// statement size within what a single Durable Object request can serve.
+// One root names a bounded target list. Ensuring a root probes each distinct
+// target's narinfo object and canonical NAR in R2, then rewrites the root's
+// target rows. The bound keeps one request's probe fan-out and statement size
+// within what a single Durable Object request can serve.
 export const rootSetMaxTargets = 1000;
 
 const rootTargetListSchema = z.array(storePathSchema).max(rootSetMaxTargets);
@@ -32,7 +32,7 @@ export const rootSetBodySchema = z.strictObject({
 export type ParsedRootSetBody = z.output<typeof rootSetBodySchema>;
 
 // An ensure asks whether the cache already holds the named targets and reports
-// which of them require a build, so it names at least one.
+// which of them require a build, so the request must name at least one target.
 export const rootEnsureBodySchema = z.strictObject({
 	targets: rootTargetListSchema.min(1),
 	ttlSeconds: ttlSecondsSchema.optional()
@@ -76,17 +76,17 @@ export type ParsedRootEnsureResponse = z.output<
 
 // Bounds one listing page. A targets page probes each target's serve state (a
 // narinfo-object check per distinct path), so the bound keeps one request's
-// probe fan-out within what a single Durable Object request can serve; the
-// roots listing shares the bound as plain request sizing.
+// probe fan-out within what a single Durable Object request can serve. The
+// roots listing reuses the same bound to keep its own response a sensible size.
 export const rootListPageSize = 200;
 
 // A continuation for a listing with more pages: opaque to the client, passed
 // back unchanged to resume where the previous page stopped.
 const listCursorSchema = z.string().min(1);
 
-// One root in the listing. A run root accretes attached paths without bound,
-// so the listing carries a target count and no inline targets; a root's
-// targets are read through the paged targets route.
+// One root in the listing. A run root can accumulate attached paths without
+// bound, so the listing reports a target count instead of the targets
+// themselves; a root's targets are read through the paged targets route.
 export const rootListEntrySchema = z.strictObject({
 	name: rootNameSchema,
 	expiresAt: isoTimestampSchema.optional(),
@@ -186,10 +186,10 @@ export type ParsedRetentionPolicyRemoveResponse = z.output<
 const gracePrefixMaxLength = 63;
 
 export const gracePolicyAddBodySchema = z.strictObject({
-	// The prefix must be a prefix of some legal cache name, or the policy
-	// could never match anything: a typo such as an uppercase letter would
-	// otherwise be stored and silently defeat the retention guarantee grace
-	// mode exists to provide.
+	// The prefix must be a prefix of some legal cache name, or the policy could
+	// never match anything. A typo such as an uppercase letter would otherwise
+	// be stored, and it would silently defeat the retention guarantee that grace
+	// mode provides.
 	cachePrefix: z
 		.string()
 		.max(gracePrefixMaxLength)
@@ -227,10 +227,10 @@ export type ParsedGracePolicyRemoveResponse = z.output<
 	typeof gracePolicyRemoveResponseSchema
 >;
 
-// Whether a grace policy covers a cache: a covered cache carries the grace a
-// publication to it would resolve (the longest matching cache-name prefix
-// wins, the same resolution a push is granted); an uncovered cache carries no
-// grace period.
+// Whether a grace policy covers a cache. For a covered cache the response
+// reports the grace a publication to it would resolve, the longest matching
+// cache-name prefix winning exactly as it does for a push. For an uncovered
+// cache it reports no grace period at all.
 export const graceCoverageResponseSchema = z.discriminatedUnion('covered', [
 	z.strictObject({
 		covered: z.literal(true),

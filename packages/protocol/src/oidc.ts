@@ -10,13 +10,12 @@ import {
 } from './grants.ts';
 import { isAllowedIssuerUrl, IssuerUrl } from './oidc-issuer.ts';
 
-// The issuer, subject and audience of an OIDC identity travel together wherever
-// trust is configured or matched. Each carries a distinct brand so the compiler
-// rejects a call that passes them in the wrong order. Branding is type-level
-// only, so these forms parse whatever a live deployment already persisted or
-// issued; the ingress schemas that accept a client-supplied value narrow it,
-// while these plain forms brand a stored or reflected value without
-// re-validating it.
+// The issuer, subject and audience of an OIDC identity are used together
+// wherever trust is configured or matched. Each carries a distinct brand so the
+// compiler rejects a call that passes them in the wrong order. The brands add
+// no runtime check: these schemas brand a stored or reflected value as it
+// stands, and the ingress schemas that accept a client-supplied value do the
+// narrowing.
 export const oidcIssuerSchema = z.string().brand('OidcIssuer');
 export type OidcIssuer = z.infer<typeof oidcIssuerSchema>;
 
@@ -75,8 +74,7 @@ export const subjectTokenTypeJwt = 'urn:ietf:params:oauth:token-type:jwt';
 // JSON-encoded form field, carried as an opaque string here. The token service
 // parses and validates it, so a malformed or unpermitted value answers
 // `invalid_authorization_details` from the token service. A claim-bound (CI)
-// rule must send it; an interactive
-// owner may omit it and receive a wildcard.
+// rule must send it; an interactive owner may omit it and receive a wildcard.
 const requestedAuthorizationDetailsSchema = z.string().min(1);
 
 // The optional fields RFC 8693 permits (`audience`, `scope`, `resource`, …) are

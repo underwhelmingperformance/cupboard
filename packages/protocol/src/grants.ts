@@ -507,9 +507,10 @@ const knownOperations: ReadonlySet<string> = new Set(operationSchema.options);
 const grantWithActionsSchema = z.looseObject({ actions: z.array(z.unknown()) });
 
 // A grant a rule persisted under an earlier build may name an operation since
-// retired (a removed scope). Drop the unknown actions so the rule still
-// validates against the current operation set; the rule is not failed outright. A grant carrying no recognised action becomes meaningless and is
-// dropped; a wildcard grant has no actions and passes through untouched.
+// retired (a removed scope). Drop those unknown actions rather than failing the
+// whole rule, so it still validates against the current operation set. A grant
+// left with no recognised action permits nothing and is dropped as well; a
+// wildcard grant has no actions and passes through untouched.
 function withoutRetiredActions(grants: unknown): unknown {
 	if (!Array.isArray(grants)) {
 		return grants;

@@ -73,10 +73,10 @@ export const rootsContract = {
 
 	// CI sets roots with a token whose grant names the cache and root; the
 	// authoriser enforces both from the grant. The declared list may be empty,
-	// which clears the root's targets while keeping the root and its expiry; the
+	// which clears the root's targets while keeping the root and its expiry. The
 	// `root set` and `root ensure` commands each require at least one store-path
-	// argument, so clearing a root is something a caller states in the request
-	// body rather than something a mistyped command can reach.
+	// argument, so a caller clears a root by sending an empty list in the request
+	// body, and a mistyped command cannot clear one by accident.
 	set: baseProcedure
 		.meta({
 			requires: 'root:set',

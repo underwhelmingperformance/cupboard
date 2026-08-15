@@ -38,7 +38,7 @@ function measurements(
 }
 
 describe('packCohorts', () => {
-	it('yields nothing when disabled', () => {
+	it('returns undefined when packing is disabled', () => {
 		expect(
 			packCohorts({
 				enabled: false,

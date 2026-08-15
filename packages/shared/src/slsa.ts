@@ -108,8 +108,8 @@ export interface SlsaProvenanceSummary {
 /**
  * Summarise the build identity a SLSA provenance predicate records: the source
  * repository, ref and commit, the workflow and its trigger, the builder, and
- * the run that produced it. Returns undefined when the predicate carries none
- * of these, so a non-provenance predicate yields nothing to show.
+ * the run that produced it. Returns undefined when the predicate records none
+ * of these fields, which is what a predicate other than SLSA provenance does.
  */
 export function slsaProvenanceSummary(
 	predicate: unknown

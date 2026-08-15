@@ -1007,9 +1007,10 @@ export class CohortEvaluationDriftError extends CodedError {
 }
 
 /**
- * The cupboard binary exited non-zero. It reported the cause through its own
- * output, so this error contains the exit status adopted by the action and any
- * result events recorded before failure.
+ * The cupboard binary exited non-zero. It has already reported the cause
+ * through its own output, so this error adds no diagnosis of its own: it
+ * carries the exit status the action adopts and any result events the run
+ * recorded before it failed.
  */
 export class CupboardReportedError extends CodedError {
 	constructor(
@@ -1030,8 +1031,8 @@ export class CupboardReportedError extends CodedError {
 /**
  * A `cupboard push` succeeded but recorded no push summary, so the action has
  * no counts to publish as its outputs. `kinds` lists the result kinds the run
- * did record, so the diagnostic shows what the run produced in place of the
- * summary.
+ * did record, so a caller inspecting the error can see what it produced
+ * instead.
  */
 export class PushSummaryMissingError extends CodedError {
 	constructor(public readonly kinds: readonly string[]) {
@@ -1133,10 +1134,6 @@ export interface MissingGracePath {
 	readonly reason: 'not-present' | 'pending';
 }
 
-/**
- * Raised when `require-grace` is set and at least one path has no positive
- * grace deadline.
- */
 // The remedy for each missing-grace reason. It is rendered alongside the
 // reason so the operator can act on the failure without reading cupboard's
 // source.
@@ -1147,6 +1144,10 @@ const missingGraceRemedies: Record<MissingGracePath['reason'], string> = {
 		'its deferred upload has not completed; retry once the push completes'
 };
 
+/**
+ * Raised when `require-grace` is set and at least one path has no positive
+ * grace deadline.
+ */
 export class GraceDeadlineMissingError extends CodedError {
 	constructor(public readonly paths: readonly MissingGracePath[]) {
 		super(

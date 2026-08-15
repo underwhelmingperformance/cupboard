@@ -171,9 +171,9 @@ interface TtyStream {
 }
 
 /**
- * Whether prompts can be shown: only when the output is the terminal UI and both
- * ends of the pipe are a real terminal. A piped or redirected run is not
- * interactive even with `--colour`, so a prompt would have nowhere to go.
+ * Whether prompts can be shown: only when the output is the terminal UI and
+ * both stdin and stdout are a terminal. A piped or redirected run is not
+ * interactive even with `--colour`, because nobody is there to answer.
  */
 export function isInteractive(streams: {
 	readonly mode: ReporterMode;
@@ -188,11 +188,12 @@ export function isInteractive(streams: {
 }
 
 /**
- * Everything a cupboard command says or asks, in one clack-based visual
- * language: spinners for phases, notes for structured facts, prompts for the
- * decisions, and a clean cancel path throughout. The same surface drives
- * machine mode: there the decorative narration is suppressed and the structured
- * output goes through {@link CliUi.reporter}.
+ * Everything a cupboard command prints or asks, in one clack-based visual
+ * language: spinners mark phases, notes present structured facts, prompts ask
+ * for decisions, and every prompt has a clean cancel path. The same interface
+ * serves machine mode, where {@link CliUi.intro}, {@link CliUi.outro} and
+ * {@link CliUi.note} print nothing and the structured output goes through
+ * {@link CliUi.reporter}.
  */
 export interface CliUi {
 	/** Whether {@link CliUi.confirm} and the prompts can interact with the user. */
@@ -310,12 +311,10 @@ export function createCliUi(options: CliUiOptions): CliUi {
 	const isInteractiveRun =
 		options.interactive ?? (isInteractive({ mode, stdin, stdout }) && !isCI());
 	// One reporter per UI, shared between the UI's own narration and every
-	// `ui.reporter()` caller. There is a single terminal, so the spinner state and
-	// the queue that holds narration back while a spinner animates have to be
-	// shared: a phase started through `ui.reporter()` and an `info` raised through
-	// the UI are output to the same place and must not corrupt each other's
-	// redraw. In machine mode it also means both paths emit the same structured
-	// events.
+	// `ui.reporter()` caller. Both write to the same terminal, so a phase started
+	// through `ui.reporter()` and an `info` raised through the UI must not corrupt
+	// each other's redraw. Sharing the reporter also keeps both paths emitting the
+	// same structured events in machine mode.
 	const reporter: Reporter = reporterFor(mode, colours, options);
 
 	const browserMessages: BrowserMessages = {

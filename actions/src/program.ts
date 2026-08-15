@@ -55,12 +55,13 @@ export function buildProgram(
 		.name('cupboard-action')
 		.description('Run the cupboard composite GitHub Action steps.')
 		// Throw a CommanderError rather than exiting the process, and keep
-		// commander silent on stderr, so a usage error reaches the funnel and is
-		// annotated once through the workflow commands.
+		// commander silent on stderr, so a usage error reaches
+		// `reportActionFailure` and is annotated once through the workflow
+		// commands.
 		.exitOverride()
 		.configureOutput({
 			outputError: () => {
-				// The funnel annotates the failure; commander stays silent.
+				// `reportActionFailure` annotates the failure; commander stays silent.
 			}
 		});
 

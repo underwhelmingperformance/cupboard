@@ -4,14 +4,15 @@ const basicScheme = 'Basic ';
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-// The Basic-auth user a reader presents, and the value a tenant's stored read
-// verifier carries. The brand adds no runtime check, so any string parses.
+// The Basic-auth user a reader presents, and the user recorded in a tenant's
+// stored read verifier. The brand adds no runtime check, so any string parses.
 export const readUserSchema = z.string().brand('ReadUser');
 export type ReadUser = z.infer<typeof readUserSchema>;
 
-// A user-id as an operator supplies it. The credential is `user:password` split
-// on its first colon and RFC 7617 gives the user-id no escape for one, so a name
-// carrying a colon cannot be recovered from the header it is rendered into.
+// A user-id as an operator supplies it. The credential is `user:password`,
+// split on its first colon, and RFC 7617 gives the user-id no escape for a
+// colon of its own. A name containing one could not be recovered from the
+// header, so it is refused here.
 export const readUserInputSchema = z
 	.string()
 	.min(1)
@@ -104,8 +105,8 @@ function fromBase64(value: string): string | undefined {
 	return bytes === undefined ? undefined : textDecoder.decode(bytes);
 }
 
-// The bytes a latin1 string stands for, or `undefined` for a character outside
-// a byte's range, which no byte string holds.
+// The bytes a latin1 string stands for, or `undefined` when a character is
+// outside the 0-255 range a byte can represent.
 function latin1Bytes(value: string): Uint8Array | undefined {
 	const bytes = new Uint8Array(value.length);
 

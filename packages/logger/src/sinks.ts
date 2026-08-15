@@ -173,10 +173,10 @@ export function jsonLinesSink(write: (line: string) => void): Sink {
 	};
 }
 
-// A record's fields for a GitHub Actions log line: an `error` field expanded to
-// its name, message, stack and cause (see {@link expandError}), rendered as
-// space-separated `key=value` pairs so the structured context stays legible in
-// the run log.
+// The record's properties as space-separated `key=value` pairs, so the
+// structured context stays legible in a GitHub Actions log line. An `error`
+// property is first expanded into its name, message, stack and cause (see
+// {@link expandError}).
 function actionFields(properties: Record<string, unknown>): string {
 	const parts: string[] = [];
 	const fields = expandError(properties);

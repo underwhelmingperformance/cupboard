@@ -322,9 +322,9 @@ function readCredential(inputs: AttestInputs): BasicCredential | undefined {
 		: { user: inputs.readUser, password: inputs.readPassword };
 }
 
-// What the receipt at hand lets this run attest is checked exclusively against
-// the destination's committed narinfos. The build store may already have
-// collected every output; the receipt alone is never a source of bytes to sign.
+// The subjects this run may attest are checked only against the destination's
+// committed narinfos. The build store may already have collected every output,
+// and the receipt on its own is never a source of bytes to sign.
 async function resolveAttestation(
 	receipt: ParsedBuildReceipt,
 	inputs: AttestInputs,
