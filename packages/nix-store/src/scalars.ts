@@ -7,15 +7,15 @@ export const storePathNamePattern = /^[0-9A-Za-z+._?=-]+$/;
 export const storePathBasenamePattern =
 	/^[0-9a-df-np-sv-z]{32}-[0-9A-Za-z+._?=-]+$/;
 // A store directory is an absolute path of one or more segments, over the same
-// charset a store-path name uses. Which directory a given cache serves is a
-// per-cache fact the cache itself states, not a property of the shape. A `.` or
-// `..` segment is refused so that one directory has one spelling, and so a
-// comparison against the directory a cache serves cannot be evaded.
+// charset a store-path name uses. Each cache publishes the directory it serves;
+// the pattern does not decide it. A `.` or `..` segment is refused so that one
+// directory has one spelling, and so a comparison against the directory a cache
+// serves cannot be evaded.
 export const storeDirectoryPattern =
 	/^(?:\/(?!\.{1,2}(?:\/|$))[0-9A-Za-z+._?=-]+)+$/;
-// A store path is a store directory, a separator, then the basename. The name
-// carries its own 211-character cap here, so the cap holds whatever the length
-// of the store directory in front of it.
+// A store path is a store directory, a separator, then the basename. The
+// pattern caps the name at 211 characters independently of the store directory,
+// so the cap applies whatever the store directory's length is.
 export const storePathPattern =
 	/^(?:\/(?!\.{1,2}(?:\/|$))[0-9A-Za-z+._?=-]+)+\/[0-9a-df-np-sv-z]{32}-[0-9A-Za-z+._?=-]{1,211}$/;
 
@@ -109,8 +109,9 @@ export const ttlSecondsSchema = z
 export type TtlSeconds = z.infer<typeof ttlSecondsSchema>;
 
 // A retention-grace window in seconds: it shares the root TTL's upper bound but
-// admits zero, since a grace policy may configure a zero grace where a root TTL
-// cannot. Its own brand keeps a grace window from crossing with a root TTL.
+// admits zero, since a grace policy may configure a zero grace, whereas a root
+// TTL cannot be zero. Its own brand keeps a grace window from crossing with a
+// root TTL.
 export const graceSecondsSchema = z
 	.number()
 	.int()
@@ -144,7 +145,7 @@ export type AuthKeyId = z.infer<typeof authKeyIdSchema>;
 // A Nix signing key's name: the label a rendered public key or a narinfo
 // signature is prefixed with, and the name a client lists in
 // `trusted-public-keys`. The colon separates the name from the base64 half, so
-// a name carrying one could not be recovered from a rendered key.
+// a name that contained a colon could not be recovered from a rendered key.
 export const nixKeyNameSchema = z
 	.string()
 	.min(1)

@@ -119,9 +119,8 @@ class ProcessNixDaemonTransport implements NixDaemonTransport {
 			this.finish();
 		});
 		// A spawn failure surfaces on the child, never on its stdout, and a
-		// child that never spawned emits no exit. The error therefore
-		// settles both any read waiting on bytes and the promise close()
-		// awaits.
+		// child that never spawned emits no exit. The error therefore fails any
+		// read waiting for bytes and resolves the promise that `close()` awaits.
 		child.once('error', (error) => {
 			this.reader.fail(error);
 			this.finish();

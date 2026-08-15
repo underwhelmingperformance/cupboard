@@ -15,9 +15,9 @@ export class NixSignature extends NamedMaterial {
 	}
 
 	/**
-	 * The well-formed signatures among a narinfo's `Sig` lines. A narinfo is
-	 * signed by whoever served it, so malformed entries are ignored. The
-	 * remaining signatures still determine whether the path is trusted.
+	 * The well-formed signatures among a narinfo's `Sig` lines. Malformed entries
+	 * are ignored. The remaining signatures still determine whether the path is
+	 * trusted.
 	 */
 	static parseAll(values: readonly string[]): readonly NixSignature[] {
 		return values

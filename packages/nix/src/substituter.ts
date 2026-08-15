@@ -66,8 +66,8 @@ export const maxSubstituterConcurrency = 64;
  */
 export const maxRetryWaitMs = 60_000;
 
-// A server that is rate-limiting this client, or saying it is overloaded, is
-// given the longer wait before being asked again.
+// When a server rate-limits this client, or reports that it is overloaded, the
+// client waits the longer delay before retrying.
 const rateLimitedStatuses = new Set([429, 503]);
 
 /**
@@ -352,16 +352,16 @@ export interface SubstituterClientOptions extends SubstituterEnvironment {
  *
  * Every result comes from the substituter itself. Nix keeps a database of the
  * narinfos it has read and reuses an entry for as long as
- * `narinfo-cache-positive-ttl` or `narinfo-cache-negative-ttl` allows, so an
- * cached positive result can be a month old and a negative result an hour old.
- * This client does not cache narinfos, so each query observes current
+ * `narinfo-cache-positive-ttl` or `narinfo-cache-negative-ttl` allows, so a
+ * cached positive result can be a month old and a cached negative result an
+ * hour old. This client does not cache narinfos, so each query observes current
  * substituter state.
  *
- * Planning requires current state because it decides which
- * targets to publish and which to leave for consumers to fetch, and a
- * remembered absence would make it publish work already available while a
- * remembered presence would make it leave a target on a copy that has since
- * gone. The cost is a request per path per run, which is what a plan is for.
+ * Planning decides which targets to publish and which to leave for consumers to
+ * fetch, so it needs current results. A cached absence would make it publish a
+ * path that is already available, and a cached presence would make it leave a
+ * target on a substituter that no longer has it. The cost is one request per
+ * path per run.
  */
 export class SubstituterClient {
 	private opening?: Promise<OpenedSubstituters>;
@@ -553,8 +553,8 @@ export class SubstituterClient {
 	}
 
 	/**
-	 * The configured substituters that this client could not query. A client
-	 * reports none until its first query opens the configured substituters.
+	 * The configured substituters that this client could not query. This list is
+	 * empty until the first query opens the configured substituters.
 	 */
 	async unreachable(): Promise<readonly UnreachableSubstituter[]> {
 		const opening = this.opening;
@@ -667,10 +667,10 @@ type SubstituterAnswer =
 	| { readonly kind: 'failed'; readonly error: SubstituterFailure };
 
 /**
- * Statuses that indicate a substituter does not have a path. A bucket that
- * will not list its contents answers 403 for an object it does not have, and
- * one that previously had a path may return 410, so Nix treats all three
- * as an absence.
+ * Statuses that indicate a substituter does not have a path. A missing object
+ * returns 404, a bucket that will not list its contents returns 403 for an
+ * object it does not have, and a bucket that once had a path may return 410, so
+ * Nix treats all three as an absence.
  */
 const absentStatuses = new Set([403, 404, 410]);
 
@@ -951,7 +951,10 @@ function cacheInfoPriority(value: string): number {
 }
 
 /**
- * Reads a file as text after checking its size against the response limit.
+ * Reads a file as text, refusing a file larger than `maxByteLength`. A
+ * directory substituter serves its documents from disk, and the caller passes
+ * `maxSubstituterAnswerByteLength`, so the same bound applies to a file and to
+ * a response.
  */
 async function boundedFileText(
 	filePath: string,

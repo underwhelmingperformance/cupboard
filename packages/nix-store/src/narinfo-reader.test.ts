@@ -109,7 +109,7 @@ describe('offerFromNarInfo', () => {
 	});
 
 	// The literal a cache serves for a path whose deriver it does not know.
-	it('reads a deriver named as unknown as no deriver at all', () => {
+	it('reads the `unknown-deriver` value as no deriver', () => {
 		expect(read({ fields: { Deriver: 'unknown-deriver' } })).toStrictEqual({
 			source: 'substituter',
 			references: [libraryPath],

@@ -76,7 +76,7 @@ export class StoreFileTooLargeError extends NixStoreError {
 		public readonly maxByteLength: number
 	) {
 		super(
-			`${filePath} holds ${String(byteLength)} bytes, more than the ${String(maxByteLength)} a derivation is read up to`
+			`${filePath} is ${String(byteLength)} bytes, more than the ${String(maxByteLength)}-byte limit for reading a derivation`
 		);
 		this.name = 'StoreFileTooLargeError';
 	}
@@ -121,9 +121,10 @@ export interface NixLocalStoreOptions {
 
 /**
  * Reads path information straight from the local store database, the way Nix's
- * `LocalStore` does, so closures resolve on a daemonless store with no running
- * `nix-daemon` to talk to. With substituter queries it also reports what is available
- * elsewhere too, the way libstore does when it runs in the client.
+ * `LocalStore` does, so closures resolve on a store with no running
+ * `nix-daemon`. When substituter queries are supplied, this client also reports
+ * what those substituters have, the way libstore does when it runs inside the
+ * client.
  */
 export class NixLocalStoreClient implements NixStoreClient {
 	private readonly storeDirectory: StoreDirectory;
@@ -285,8 +286,8 @@ export class NixLocalStoreClient implements NixStoreClient {
 				path.join(this.realStoreDirectory, path.basename(drvPath))
 			);
 		} catch (error) {
-			// A reader that already said what went wrong says it; anything else
-			// means the store does not hold the path.
+			// A reader error already describes what went wrong, so it is rethrown;
+			// any other error means the store does not hold the path.
 			if (error instanceof NixStoreError) {
 				throw error;
 			}
@@ -380,8 +381,8 @@ const placeholderBatchSize = 500;
 
 /**
  * Open the local store database read-only. The shipped binary embeds a Node
- * runtime with `node:sqlite`, loaded here so the daemon path never pulls it in
- * nor pays its experimental-feature warning.
+ * runtime with `node:sqlite`, loaded here so a daemon-backed run never loads it
+ * and never prints its experimental-feature warning.
  */
 export function openLocalStoreDatabase(
 	stateDirectory: string

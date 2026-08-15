@@ -5,8 +5,8 @@ import { DEFAULT_CACHE, type StoredCache } from './scalars.ts';
 // already carry a tenant path (`/t/<slug>`). Every builder appends to that path
 // through `URL`, so the tenant prefix, scheme, host and port are preserved and
 // a name that cannot form a path segment is refused rather than silently
-// climbing or collapsing the path. Bases come from `parseBaseUrl`, which is
-// where a base is checked for carrying nothing beyond origin and path.
+// climbing or collapsing the path. Bases come from `parseBaseUrl`, which checks
+// that a base has only an origin and a path.
 
 /**
  * The substituter URL for a cache: the base URL for the default cache, or the

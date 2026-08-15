@@ -217,7 +217,10 @@ interface KnownHostsFile {
 	dispose(): void;
 }
 
-/** Process environment and filesystem seams used while opening SSH. */
+/**
+ * The process environment and filesystem access used while opening SSH,
+ * injected for tests.
+ */
 export interface NixSshConnectorDependencies {
 	readonly env?: Readonly<Record<string, string | undefined>>;
 	readonly knownHostsFile?: (host: string, publicKey: string) => KnownHostsFile;
@@ -226,7 +229,7 @@ export interface NixSshConnectorDependencies {
 /**
  * A connector that reaches the daemon an `ssh-ng` store names. Every daemon
  * connection owns one SSH child, so closing a completed operation cannot tear
- * down another operation's transport. A pinned known-host fixture has the same
+ * down another operation's transport. A temporary known-hosts file has the same
  * lifetime as that child.
  */
 export function createSshNixDaemonConnector(

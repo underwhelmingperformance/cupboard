@@ -11,10 +11,10 @@ import {
 	type StorePathString
 } from './scalars.ts';
 
-// Pure store-path derivations, kept dependency-free so both the wire schemas
-// and the `StorePath` value object share one implementation. These return
-// `undefined` on failure; callers that want a hard failure layer
-// their own typed error on top.
+// Pure store-path helpers, kept dependency-free so both the wire schemas and
+// the `StorePath` value object share one implementation. These return
+// `undefined` on failure; callers that need a hard failure add their own typed
+// error on top.
 
 // Order strings by UTF-16 code unit, matching the default `Array#sort` order.
 export function byCodeUnit(a: string, b: string): number {
@@ -69,9 +69,10 @@ export interface ResolvedRootTarget {
 }
 
 /**
- * A retention root is a set: collapses targets sharing a store-path hash to the
- * first occurrence, so a repeated path is idempotent, with no primary-key clash downstream. Targets are expected to be validated store paths; any whose
- * hash cannot be derived are dropped.
+ * A retention root is a set of targets. Targets that share a store-path hash
+ * collapse to the first occurrence, so repeating a path in one request does not
+ * create a duplicate row downstream. Targets are expected to be validated store
+ * paths; any whose hash cannot be derived are dropped.
  */
 export function resolveRootTargets(
 	targets: readonly StorePathString[]

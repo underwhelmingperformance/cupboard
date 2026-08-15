@@ -10,9 +10,9 @@ import {
 } from './scalars.ts';
 import { isNixSignature } from './signature.ts';
 
-// The literal a cache serves for a path whose deriver it does not know.
-// cache.nixos.org carries it on many older paths, and Nix reads it as an
-// absent deriver.
+// Some caches write this value for a path whose deriver they do not know.
+// cache.nixos.org serves it for many older paths, and Nix reads it as no
+// deriver.
 const unknownDeriver = 'unknown-deriver';
 
 /** What one narinfo document offers for the store path it describes. */
@@ -44,8 +44,8 @@ export function offerFromNarInfo(
  * decoded so this client does not report a path as available when Nix would
  * reject its narinfo.
  *
- * A field's value starts two characters past its colon, and every line ends
- * with a newline, both of which Nix requires exactly.
+ * A field's value starts two characters after its colon, and every line ends
+ * with a newline. Nix requires both.
  */
 class NarInfoReader {
 	private references?: readonly StorePathString[];
@@ -99,7 +99,6 @@ class NarInfoReader {
 
 	private readField(name: string, value: string): void {
 		if (name === 'StorePath') {
-			// The response must describe the path that the caller requested.
 			if (value !== this.storePath) {
 				throw new MismatchedNarInfoPathError(this.storePath);
 			}
@@ -170,8 +169,6 @@ class NarInfoReader {
 		}
 
 		if (name === 'Deriver') {
-			// The literal a cache serves for a path whose deriver it does not
-			// know, which Nix reads as no deriver.
 			this.deriver = value === unknownDeriver ? undefined : this.inStore(value);
 
 			return;
@@ -258,8 +255,8 @@ class NarInfoReader {
 
 		const narHash = this.narHash;
 
-		// Nix reads a document missing any of these as one the substituter did
-		// not finish writing.
+		// Nix treats a document that omits any of these fields as incomplete: the
+		// substituter did not finish writing it.
 		if (
 			narHash === undefined ||
 			!this.hasPath ||

@@ -141,7 +141,7 @@ describe('NixTrustedKeys', () => {
 		).resolves.toBe(false);
 	});
 
-	it('reports an empty set when nothing it was given names a key', () => {
+	it('reports an empty set when none of the given values parse as a key', () => {
 		expect(NixTrustedKeys.of(['not a key', '']).isEmpty).toBe(true);
 	});
 

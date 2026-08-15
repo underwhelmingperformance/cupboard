@@ -2,8 +2,8 @@ import { NixStoreError } from './nix-store.ts';
 
 /**
  * The most a single file is read into memory from a NAR. A derivation is the
- * only thing read this way and is far smaller, so a stream past this bound
- * names something else and is refused rather than buffered.
+ * only file read this way and is far smaller, so a stream longer than this
+ * bound is not a derivation and is refused instead of buffered.
  */
 export const maxNarFileByteLength = 32 * 1024 * 1024;
 
@@ -20,14 +20,14 @@ export class NarFileTooLargeError extends NixStoreError {
 		public readonly maxByteLength: number
 	) {
 		super(
-			`The NAR holds ${String(byteLength)} bytes, over the ${String(maxByteLength)} this read allows`
+			`The NAR is ${String(byteLength)} bytes, more than the ${String(maxByteLength)}-byte limit for reading a single file from a NAR`
 		);
 		this.name = 'NarFileTooLargeError';
 	}
 }
 
 /**
- * The bytes of the one regular file a NAR serialises. A store path holding a
+ * The bytes of the single regular file a NAR serialises. A store path holding a
  * single file (a derivation, a text file added to the store) serialises to
  * exactly that, so this reads the whole file into memory; a NAR of any other
  * shape is refused.
@@ -39,9 +39,9 @@ export async function narRegularFileContents(
 	const reader = new NarReader(chunks);
 
 	// The reader stops as soon as it has the file, leaving the stream
-	// suspended. Releasing it here is what lets a producer holding a resource
+	// suspended. Releasing the stream here lets a producer that holds a resource
 	// for the stream's lifetime, such as a dedicated daemon connection, close
-	// that resource when this returns.
+	// that resource when this function returns.
 	try {
 		await reader.expectWord('nix-archive-1');
 		await reader.expectWord('(');

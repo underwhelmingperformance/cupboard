@@ -13,8 +13,8 @@ const featureListSchema = z.array(z.string());
  */
 export class Derivation {
 	/**
-	 * Reads the `Derive(...)` term the given bytes serialise. A derivation
-	 * written in any other shape, such as the versioned term the
+	 * Reads the `Derive(...)` term in the given serialised derivation. A
+	 * derivation written in any other shape, such as the versioned term the
 	 * dynamic-derivations feature produces, is refused with
 	 * {@link MalformedDerivationError}.
 	 */
@@ -163,9 +163,9 @@ function derivationOutputs(
 	return declared;
 }
 
-// `[(drvPath, [outputName, ...]), ...]`. A derivation whose inputs carry
-// dynamic children serialises as `DrvWithVersion(...)` instead, which the
-// reader refuses before this sees it, so every node here is a plain list.
+// `[(drvPath, [outputName, ...]), ...]`. A derivation with dynamic input
+// derivations serialises as `DrvWithVersion(...)`, which `readDerive` refuses
+// before this function runs, so every node here is a plain list.
 function derivationInputs(
 	elements: readonly ATermValue[]
 ): ReadonlyMap<StorePathString, readonly string[]> {
@@ -295,8 +295,8 @@ export function derivationPathOf(
 	return parsed.data;
 }
 
-// The `__json` environment entry structured attributes travel in, parsed.
-// A derivation without one has no structured attributes.
+// Structured attributes travel in the `__json` environment entry, parsed here.
+// A derivation without that entry has no structured attributes.
 function structuredAttributes(
 	environment: ReadonlyMap<string, string>
 ): Readonly<Record<string, unknown>> | undefined {
@@ -335,8 +335,9 @@ function isSequence(value: ATermValue): value is readonly ATermValue[] {
 }
 
 // `Derive(outputs, inputDerivations, inputSources, platform, builder, args,
-// environment)`. Every element ahead of the last one read has to be parsed to
-// find where that one starts, so the reader parses the whole term.
+// environment)`. Every element before the last one this module reads has to be
+// parsed to find where that element starts, so the reader parses the whole
+// term.
 const derivePrefix = 'Derive(';
 const deriveElementCount = 7;
 const outputIndex = 0;
@@ -388,8 +389,8 @@ function derivationEnvironment(
 	return entries;
 }
 
-// Nix writes these two characters escaped inside an ATerm string, along with
-// the three whitespace characters below.
+// Nix escapes the quote and backslash characters inside an ATerm string, along
+// with the three whitespace characters listed here.
 const escapedCharacters = new Map([
 	['n', '\n'],
 	['r', '\r'],

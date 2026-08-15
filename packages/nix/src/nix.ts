@@ -106,17 +106,17 @@ export class Nix {
 	}
 
 	/**
-	 * Opens a store that can report external availability, which
-	 * automatic selection does not guarantee: it prefers the local reader
-	 * whenever the state directory is writable, and a local reader with no
-	 * substituters cannot report external paths.
+	 * Opens a store that can report external availability. Automatic selection
+	 * does not guarantee that: it prefers the local reader whenever the state
+	 * directory is writable, and a local reader with no substituters cannot
+	 * report external paths.
 	 *
 	 * A daemon provides these queries whenever its socket is available. Without
 	 * one this process queries the substituters directly. Per-call options
 	 * override discovered daemon settings, with the caller winning per key.
 	 * `storeUri` selects the store, an `ssh-ng` URI reaches that remote's daemon
-	 * over SSH, and a
-	 * `substituters` override selects which substituters answer either way.
+	 * over SSH, and a `substituters` override selects which substituters are
+	 * queried in either case.
 	 */
 	static openForAvailability(
 		dependencies: NixDependencies = defaultStoreClientEnvironment,
@@ -139,7 +139,7 @@ export class Nix {
 	/**
 	 * Build a client over an explicit backend, store directory and path
 	 * resolver. The store kind defaults to `local-filesystem`, the kind whose
-	 * paths sit on this machine's filesystem.
+	 * paths are on this machine's filesystem.
 	 */
 	static forStore(
 		store: NixStoreClient,
@@ -189,7 +189,7 @@ export class Nix {
 		}
 	}
 
-	/** Path information for the store path the argument names. */
+	/** Path information for the store path the argument resolves to. */
 	async queryPathInfo(path: string): Promise<NixValidPathInfo> {
 		return this.store.queryPathInfo(this.toStorePath(path));
 	}
@@ -218,7 +218,10 @@ export class Nix {
 		);
 	}
 
-	/** The arguments this store holds as valid, deduplicated and sorted. */
+	/**
+	 * The subset of the arguments that are valid in this store, deduplicated and
+	 * sorted.
+	 */
 	async queryValidPaths(paths: readonly string[]): Promise<readonly string[]> {
 		return this.store.queryValidPaths(
 			paths.map((path) => this.toStorePath(path))
@@ -255,15 +258,15 @@ export class Nix {
 
 	/**
 	 * Whether everything in this store's closure of the argument is offered by
-	 * this client's substituters, proven by walking the closure the store
-	 * contains and querying every path. The operation uses the substituters
-	 * configured when the client was opened, so a caller that needs a
-	 * particular set of them opens a client carrying that set.
+	 * this client's substituters, proven by walking the closure held by this
+	 * store and querying every path in it. The operation uses the substituters
+	 * configured when the client was opened, so a caller that needs a particular
+	 * set of substituters opens a client configured with them.
 	 *
 	 * Each substituter is queried for the path's narinfo, so every offer includes
-	 * the NAR hash and signatures
-	 * over it. An offer is proof only if a consumer would take it, so a caller
-	 * with a signing policy passes it in `options.accepts`.
+	 * the NAR hash and signatures over it. An offer is proof only if a consumer
+	 * would accept it, so a caller with a signing policy passes that policy in
+	 * `options.accepts`.
 	 */
 	async resolveSubstitutableClosure(
 		path: string,
@@ -301,19 +304,21 @@ export class Nix {
 
 	/**
 	 * Configured substituters that could not be queried. This distinguishes a
-	 * confirmed absence from an incomplete query. A daemon manages its own
-	 * substituters and reports what it
-	 * reached to its own log, so a daemon-backed store names none here.
+	 * confirmed absence from an incomplete query. A daemon manages the
+	 * substituters itself and records which of them it reached only in its own
+	 * log, which it does not expose to clients, so a daemon-backed store returns
+	 * an empty list here.
 	 */
 	async unreachableSubstituters(): Promise<readonly UnreachableSubstituter[]> {
 		return (await this.store.unreachableSubstituters?.()) ?? [];
 	}
 
 	/**
-	 * Whether substituter availability may have come from a
-	 * cache. A daemon keeps one, so an absence it reports may be an absence it
-	 * recorded earlier; a store driven by this process queries the substituters
-	 * directly, so its results are current.
+	 * Whether a substituter availability answer may have come from a cache. A
+	 * daemon caches substituter answers, so a path the daemon reports as
+	 * unavailable may have been recorded as unavailable earlier; a store driven
+	 * by this process queries the substituters directly, so its answers are
+	 * current.
 	 */
 	get cachesSubstituterAnswers(): boolean {
 		return this.storeKind !== 'local-filesystem';
@@ -360,8 +365,8 @@ export class Nix {
 	}
 
 	/**
-	 * Build the given targets and report each result. Targets pass
-	 * through unchanged, the way {@link queryMissing}'s do.
+	 * Build the given targets and report each result. Targets pass through
+	 * unchanged, as they do in {@link queryMissing}.
 	 */
 	async buildPathsWithResults(
 		targets: readonly NixDerivedPathString[]
@@ -444,9 +449,9 @@ export class Nix {
 	 * symlinks, then take the store path containing the result. A `result`
 	 * symlink and a file inside a store path both resolve to the store path.
 	 *
-	 * The entry directly under the store directory has to name a store path for
-	 * the result to be one, so a loose file sitting beside the store's paths is
-	 * refused here as not being in the store.
+	 * The entry directly below the store directory must itself be a valid store
+	 * path, so a loose file beside the store's paths is rejected with
+	 * {@link NotInNixStoreError}.
 	 */
 	toStorePath(path: string): StorePathString {
 		const resolved = this.resolveRealPath(path);

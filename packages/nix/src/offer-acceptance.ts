@@ -21,15 +21,15 @@ export type ReadKeyFile = (filePath: string) => string | undefined;
  *
  * The keys are the `trusted-public-keys` list plus the published half of every
  * `secret-key-files` entry, since a store trusts what it signs itself. A file
- * it cannot read contributes no key, which is ordinary on a machine where the keys
- * belong to another user.
+ * this process cannot read contributes no key, which is ordinary on a machine
+ * where the keys belong to another user.
  *
  * A content-addressed path is accepted by Nix without a signature, because the
- * path name commits to the contents. This implementation also requires a signature:
- * reconstructing a store path from a content address to prove the exemption
- * applies would, if it were ever wrong, waive the signature requirement on a
- * path that has not earned it, and a path refused here is built rather than
- * left upstream.
+ * path name commits to the contents. This implementation still requires a
+ * signature. Applying the exemption would mean reconstructing the store path
+ * from the content address, and a mistake there would drop the signature
+ * requirement for a path that does not qualify. The cost of refusing an offer
+ * here is only that Nix builds the path instead of fetching it.
  */
 export function offerAcceptance(
 	settings: NixSignatureSettings,

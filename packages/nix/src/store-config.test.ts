@@ -709,9 +709,10 @@ describe('discoverNixStoreConfig', () => {
 		});
 	});
 
-	// Nix appends to a list setting and knows no other `extra-` name, so an
-	// assignment naming one names no setting a daemon could be told about.
-	it('forwards nothing for an append to a setting that takes none', () => {
+	// Nix accepts an `extra-` prefix only on a list setting, so an `extra-`
+	// assignment to any other setting matches no setting and produces no daemon
+	// override.
+	it('forwards no override for an `extra-` assignment to a scalar setting', () => {
 		const config = discover({
 			env: {
 				NIX_CONFIG: [
@@ -1052,7 +1053,7 @@ describe('discoverNixStoreConfig', () => {
 
 	// Nix warns about a name it has no setting for and carries on, so the
 	// configuration stands and the name is reported rather than acted on.
-	it('reports a name no nix it knows has, and reads the rest', () => {
+	it('reports a setting name Nix does not have, and reads the remaining settings', () => {
 		const config = discover({
 			env: {
 				NIX_CONFIG: [
@@ -1086,9 +1087,9 @@ describe('discoverNixStoreConfig', () => {
 		});
 	});
 
-	// The settings this client reads under the names nix master gave them are
-	// settings all the same, however the pinned nix spells them.
-	it('reads the settings named ahead of the nix it knows', () => {
+	// A setting this client reads under the name Nix master gave it is still a
+	// valid setting, whatever the pinned Nix calls it.
+	it('reads a setting that only Nix master defines', () => {
 		const config = discover({
 			env: { NIX_CONFIG: 'filetransfer-retry-delay = 250' }
 		});

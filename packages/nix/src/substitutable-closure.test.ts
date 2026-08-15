@@ -142,7 +142,7 @@ describe('resolveSubstitutableClosure', () => {
 
 	// The defect this walk exists for: a path the local store holds, and only
 	// the local store, still leaves a hole in what a consumer can fetch.
-	it('names the first reference no substituter offers and asks no further', async () => {
+	it('reports the first reference no substituter offers and stops querying', async () => {
 		const store = new FakeStore(
 			new Map([
 				[appPath, held(appPath, [localOnlyPath])],
@@ -334,7 +334,7 @@ describe('resolveSubstitutableClosure', () => {
 		});
 	});
 
-	it('raises the signal reason and asks nothing once cancelled', async () => {
+	it('raises the signal reason and makes no further queries after cancellation', async () => {
 		const store = new FakeStore(
 			new Map([[appPath, held(appPath)]]),
 			new Map([[appPath, offer()]])

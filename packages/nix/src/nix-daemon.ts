@@ -102,7 +102,8 @@ const maximumDaemonDerivationOutputs = 65_536;
 
 // Offered during the handshake; a daemon that advertises it back accepts the
 // batched path-info operation. No released daemon does yet, so the batch is
-// speculative and the per-path fallback carries current daemons.
+// speculative, and this client falls back to the per-path operation with
+// current daemons.
 const featureQueryPathInfos = 'queryPathInfos';
 
 const stderrNext = 0x6f_6c_6d_67;
@@ -589,9 +590,9 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	}
 
 	/**
-	 * Build the given targets and report how each settled: exact per-target
-	 * outcomes with the realised outputs where the daemon reports them, which
-	 * is what remote-store reconciliation reads after a build.
+	 * Build the given targets and report the outcome of each one, with the
+	 * realised outputs where the daemon reports them. A caller reconciling a
+	 * remote store reads those outputs after a build.
 	 */
 	async buildPathsWithResults(
 		targets: readonly NixDerivedPathString[],
@@ -724,7 +725,7 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	/**
 	 * Whether the daemon trusts this client. The daemon silently drops an
 	 * untrusted client's setting overrides, so a caller that depends on a
-	 * forwarded setting checks this before relying on it.
+	 * forwarded setting checks the trust level first.
 	 */
 	async daemonTrust(): Promise<NixDaemonTrust> {
 		const connection = await this.openConnection();
@@ -966,10 +967,11 @@ function abortReason(signal: AbortSignal): Error {
 }
 
 // A lazily grown pool of daemon connections, each a serial request/response
-// channel. The closure walk issues several queries at once; this hands each one
-// a free connection, opens a new one up to the cap when none is free, and parks
-// the query until one frees once the cap is reached. A small closure opens only
-// as many connections as it has paths in flight; a large one fans out to the cap.
+// channel. The closure walk issues several queries at once. The pool gives each
+// query a free connection, opens a new connection up to the cap when none is
+// free, and, once the cap is reached, makes the query wait for a connection to
+// be released. A small closure opens only as many connections as it has paths
+// in flight; a large one fans out to the cap.
 class NixDaemonConnectionPool {
 	private readonly all: NixDaemonConnection[] = [];
 
@@ -1955,10 +1957,10 @@ class NixDaemonConnection {
 	 * already holds is reported only when a substituter serves it too, and
 	 * nothing but metadata crosses the wire.
 	 *
-	 * Whether a path's signatures are acceptable is not decided here: the
-	 * daemon applies its own `trusted-public-keys` policy when a substitution
-	 * actually runs, and an answer from this operation is no claim that it
-	 * will accept the path then.
+	 * Whether a path's signatures are acceptable is not decided here: the daemon
+	 * applies its own `trusted-public-keys` policy, so a result from this
+	 * operation does not guarantee that the daemon will accept the path when the
+	 * substitution runs.
 	 */
 	async querySubstitutablePathInfos(
 		storePaths: readonly StorePathString[]
@@ -2197,8 +2199,8 @@ class NixDaemonWriter {
 	private readonly chunks: Buffer[] = [];
 
 	// The protocol carries every number in eight bytes, and reads some of them
-	// back into a signed width, so a negative goes out as the bytes that width
-	// reads it from.
+	// back into a signed width, so a negative value is written as its
+	// two's-complement bytes.
 	writeInteger(value: number): void {
 		const bytes = Buffer.alloc(8);
 		bytes.writeBigUInt64LE(BigInt.asUintN(64, BigInt(value)));
@@ -2291,9 +2293,10 @@ export interface ByteStreamSource {
 }
 
 /**
- * Buffers a byte stream (a socket, a child process pipe) behind exact-length
- * reads, the shape the daemon protocol consumes. The stream ending or failing
- * settles any read the buffered bytes cannot satisfy.
+ * Buffers a byte stream (a socket, a child process pipe) and serves
+ * exact-length reads, which is how the daemon protocol consumes bytes. When the
+ * stream ends or fails, any pending read the buffered bytes cannot satisfy
+ * fails with that error.
  */
 export class ByteStreamReader {
 	private readonly chunks: Buffer[] = [];
@@ -2387,7 +2390,10 @@ export class ByteStreamReader {
 		return result;
 	}
 
-	/** Settle reads on a failure the source's own error event cannot carry. */
+	/**
+	 * Fail any pending read with an error the source's own `error` event does not
+	 * report.
+	 */
 	fail(error: Error): void {
 		this.source.pause();
 		this.failure = error;
