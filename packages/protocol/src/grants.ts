@@ -206,9 +206,9 @@ function isRootWithin(requested: string, granted: string): boolean {
 
 // An operation that is a strict attenuation of a broader one at issuance: doing
 // less than the broader operation, never more, so a rule trusted with the
-// broader operation may mint an explicit grant for the narrower one without
-// naming it separately. `upload:preview` stages nothing an `upload:negotiate`
-// grant does not already reach.
+// broader operation may issue an explicit grant for the narrower one without
+// naming it separately. `upload:preview` only classifies a closure, and an
+// `upload:negotiate` grant already permits that.
 const impliedAtIssuance: Partial<Record<Operation, Operation>> = {
 	'upload:preview': 'upload:negotiate'
 };
@@ -236,7 +236,7 @@ function isOperationImplied(
 
 /**
  * Whether a stored trust rule's permitted action set allows a requested
- * operation to be minted at token issuance: either the set names the
+ * operation to be granted at token issuance: either the set names the
  * operation directly, or the operation is a strict attenuation of one the set
  * already names (see {@link impliedAtIssuance}). Used only against a rule's
  * permitted grants at exchange time, never against a presented token.
@@ -252,9 +252,9 @@ export function isOperationPermittedAtIssuance(
  * Whether a set of actions a token actually carries authorises a requested
  * operation at runtime: either the set carries the operation directly, or the
  * operation is a strict read-only attenuation of one the set already carries
- * (see {@link impliedByPresentedAuthority}). The rule behind every place a
- * PRESENTED token's authority is checked: route authorisation, and the subset
- * check attenuation and refresh narrowing use.
+ * (see {@link impliedByPresentedAuthority}). This is the rule applied wherever
+ * a PRESENTED token's authority is checked: in route authorisation, and in the
+ * subset check used by attenuation and refresh narrowing.
  */
 export function isOperationSatisfiedByPresentedActions(
 	actions: readonly Operation[],

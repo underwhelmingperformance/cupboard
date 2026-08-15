@@ -537,8 +537,8 @@ export class CachePublicKeyEmptyResponseError extends CodedError {
 }
 
 /**
- * A `nix-cache-info` fetch the reuse-view priority check issued, for either
- * the destination cache or the view, came back with a non-2xx status.
+ * The reuse-view priority check fetched `nix-cache-info` for the destination
+ * cache or for the view, and the response had a non-2xx status.
  */
 export class CacheInfoFetchError extends CodedError {
 	constructor(
@@ -554,10 +554,10 @@ export class CacheInfoFetchError extends CodedError {
 }
 
 /**
- * A `nix-cache-info` document the reuse-view priority check fetched failed to
- * parse. Nix itself would default a missing priority to 30, but the check must
- * not guess: it needs the real value to compare, so the parse failure carries
- * through as the cause.
+ * The reuse-view priority check could not parse a `nix-cache-info` document it
+ * fetched. Nix itself would default a missing priority to 30, but the check
+ * must not guess: it needs the real value to compare, so the parse failure
+ * carries through as the cause.
  */
 export class CacheInfoInvalidError extends CodedError {
 	constructor(
@@ -850,11 +850,11 @@ export class PublishRootTargetLimitError extends UsageError {
 /**
  * A component-publication target declares more components than a retention
  * root accepts in one write (`rootSetMaxTargets`), which binds `root:set` and
- * `roots.ensure` identically. A larger set has no remedy today: paging that
- * write loses the all-or-nothing `retained` property retention depends on, so
- * it needs a retention shape built on attach with a generation marker, which
- * cupboard does not yet have, and the target is refused rather than paged or
- * truncated.
+ * `roots.ensure` identically. A larger set cannot be published today. Paging
+ * that write loses the all-or-nothing `retained` property that retention
+ * depends on, and a paged write would need a retention mechanism built on
+ * attach with a generation marker, which cupboard does not yet have. The
+ * target is therefore refused, not paged or truncated.
  */
 export class ComponentRootTargetLimitError extends UsageError {
 	constructor(
@@ -865,7 +865,7 @@ export class ComponentRootTargetLimitError extends UsageError {
 		super(
 			`target ${attribute} declares ${String(count)} components, but a ` +
 				`retention root accepts at most ${String(limit)} targets in one ` +
-				`write; a larger component set needs a retention shape built on ` +
+				`write; a larger component set needs a retention mechanism built on ` +
 				`attach with a generation marker, which cupboard does not yet support`
 		);
 		this.name = 'ComponentRootTargetLimitError';
@@ -1028,9 +1028,10 @@ export class CupboardReportedError extends CodedError {
 }
 
 /**
- * A `cupboard push` succeeded but recorded no push summary, so the action has no
- * counts to publish as its outputs. `kinds` lists the result kinds the run did
- * record, to show what arrived in the summary's place.
+ * A `cupboard push` succeeded but recorded no push summary, so the action has
+ * no counts to publish as its outputs. `kinds` lists the result kinds the run
+ * did record, so the diagnostic shows what the run produced in place of the
+ * summary.
  */
 export class PushSummaryMissingError extends CodedError {
 	constructor(public readonly kinds: readonly string[]) {
@@ -1136,8 +1137,8 @@ export interface MissingGracePath {
  * Raised when `require-grace` is set and at least one path has no positive
  * grace deadline.
  */
-// The remedy each missing-grace reason points the operator at, rendered
-// alongside the reason so the failure is actionable without reading cupboard
+// The remedy for each missing-grace reason. It is rendered alongside the
+// reason so the operator can act on the failure without reading cupboard's
 // source.
 const missingGraceRemedies: Record<MissingGracePath['reason'], string> = {
 	'not-present':

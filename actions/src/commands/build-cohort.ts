@@ -1843,8 +1843,9 @@ function linesOf(paths: readonly string[]): string {
  * The partition as the re-probe leaves it: every withdrawn target moves out of
  * the build set and into the bucket the re-probe classified it under, so the
  * target paths, the reference paths and the pushes that set the target roots
- * all read one partition rather than two. The left-upstream list stays the
- * plan's own, since the confirmation behind it runs when the partition settles.
+ * all read one partition rather than two. The `leftUpstream` list keeps the
+ * plan's own entries, because the re-probe classifies a withdrawn target only
+ * as `attachOnly` or `publishByReference`.
  */
 export function withdrawFromPartition(
 	partition: PartitionData,
@@ -2120,7 +2121,7 @@ async function planCohort(
 
 	// A served path counts as having provenance only when the cache also holds
 	// an attestation for it, so a provenance run asks the plan to build every
-	// served path without one.
+	// served path that has no attestation.
 	if (inputs.requireProvenance) {
 		arguments_.push('--require-attested');
 	}
@@ -2426,7 +2427,7 @@ export interface CapturedNixProcess extends AbortableChildProcessLifecycle {
 	onStdout(listener: (chunk: string) => void): void;
 }
 
-/** Process launcher seam shared by captured-output Nix commands. */
+/** The injectable process launcher shared by captured-output Nix commands. */
 export interface CapturedNixProcessDependencies {
 	readonly start: (
 		arguments_: readonly string[],
@@ -2781,7 +2782,10 @@ export function nixCopyArguments(
 	return ['copy', '--to', store, '--', ...derivations];
 }
 
-/** Process launcher seam for deterministic native-copy lifecycle tests. */
+/**
+ * The injectable process launcher for `runNixCopy`. Tests supply their own
+ * start function so the copy's process lifecycle is deterministic.
+ */
 export interface RunNixCopyDependencies {
 	readonly start: (
 		arguments_: readonly string[],

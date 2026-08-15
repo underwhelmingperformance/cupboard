@@ -59,11 +59,12 @@ export const uploadsContract = {
 	// The read-only twin of negotiate: classifies a closure exactly as negotiate
 	// would, with the grace facts a report needs, without planning an upload,
 	// healing a stale narinfo, or extending any deadline. It carries no pushId: a
-	// dry run creates no upload credential, so no push id exists yet to sign; the
-	// existence-oracle protection negotiate's pushId gives is covered here by the
-	// cache-scoped bearer grant plus the classification's owned-edge check, which
-	// never reveals another tenant's blobs. Never a mutation, so it carries no
-	// `maintenance` flag and never wakes the scheduler.
+	// dry run creates no upload credential, so no push id exists yet to sign;
+	// negotiate gets its existence-oracle protection from the pushId, and preview
+	// gets the same protection from the cache-scoped bearer grant plus the
+	// classification's owned-edge check, which never reveals another tenant's
+	// blobs. Never a mutation, so it carries no `maintenance` flag and never
+	// wakes the scheduler.
 	preview: baseProcedure
 		.meta({
 			requires: 'upload:preview',

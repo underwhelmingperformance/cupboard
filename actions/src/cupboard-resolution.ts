@@ -43,7 +43,10 @@ const resolvedSourceSchema = z.strictObject({
 	sourceCommit: commitSchema
 });
 
-/** The one canonical coordinate every downstream acquisition path consumes. */
+/**
+ * The canonical coordinate every acquisition step consumes: a resolved
+ * release, or a resolved source revision.
+ */
 export const resolvedCupboardSchema = z.discriminatedUnion('kind', [
 	resolvedReleaseSchema,
 	resolvedSourceSchema

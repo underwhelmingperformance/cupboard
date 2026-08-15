@@ -1153,12 +1153,12 @@ function cohortMatrix(
 	}));
 }
 
-// Packing is opt-in and off by default leaves the surviving cohorts
-// untouched, so a disabled run never calls the measurer at all: the emitted
-// matrix is then byte-for-byte what the manifest's own cohorts produce.
-// Enabled with no measurement for a given cohort, it stays untouched the
-// same way `packCohorts` treats any other unpriced cohort, since a
-// repartition without a measurement would be a heuristic, not a price.
+// Packing is opt-in and off by default, so a disabled run never calls the
+// measurer and the emitted matrix is byte-for-byte what the manifest's own
+// cohorts produce. When packing is enabled but a cohort has no measurement,
+// that cohort stays untouched, the same way `packCohorts` treats any other
+// unpriced cohort, since an unpriced repartition would be a heuristic, not a
+// measurement.
 async function packedCohortsFor(
 	inputs: PlanInputs,
 	cohorts: readonly Cohort[],
@@ -1351,12 +1351,12 @@ function queryInstallableFor(
 }
 
 // The single output path a build-time availability check can classify a
-// target member by. A target with more than one selected output has no one
-// path that represents it, and a target whose evaluation left any selected
-// output unresolved (a content-addressed or otherwise floating output) has
-// none at all; both report `undefined` and the target always joins the
-// build set, exactly as a manifest target with no predictable output does
-// elsewhere in the plan.
+// target member by. A target with more than one selected output has no
+// single path that represents it, and a target whose evaluation left any
+// selected output unresolved (a content-addressed or otherwise floating
+// output) has none at all; both report `undefined` and the target always
+// joins the build set, exactly as a manifest target with no predictable
+// output does elsewhere in the plan.
 function expectedPathFor(
 	target: PublishTarget,
 	evaluation: TargetEvaluation | undefined

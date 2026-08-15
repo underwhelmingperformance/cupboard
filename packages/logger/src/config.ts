@@ -69,7 +69,6 @@ export function configureLogging(options: LoggingOptions = {}): void {
 				sinks: ['cupboard'],
 				lowestLevel: options.lowestLevel ?? 'debug'
 			},
-			// LogTape's own diagnostics; surface warnings and errors through the same sink.
 			{
 				category: ['logtape', 'meta'],
 				sinks: ['cupboard'],

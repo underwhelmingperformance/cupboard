@@ -317,7 +317,8 @@ const uploadIdsSchema = z.array(uploadIdSchema);
 // The response header on the commit session's 101 listing the optional ops this
 // server accepts. A client sends `commit-batch` only when the server listed it,
 // so a batching client degrades to per-id `commit` ops against a server that
-// does not advertise, which would close the socket on an op it cannot parse.
+// does not list it, because such a server would close the socket on an op it
+// cannot parse.
 export const commitCapabilitiesHeader = 'x-cupboard-commit-capabilities';
 
 // The response header on upload negotiation listing the optional response
@@ -329,7 +330,7 @@ export const uploadCapabilitiesHeader = 'x-cupboard-upload-capabilities';
 export const acceptCapabilitiesHeader = 'x-cupboard-accept-capabilities';
 
 // The request header the client includes on the upgrade to declare which
-// optional ops it understands. A follow-up wires the client to this constant.
+// optional ops it understands.
 export const commitAcceptCapabilitiesHeader = acceptCapabilitiesHeader;
 
 // Opts an upload negotiation into grace facts on decisions and on the commit
@@ -393,7 +394,7 @@ export const commitCapabilitiesValue = `${commitBatchCapabilityToken},${subscrib
 // Carries the upload to settle or resume plus the path identity the client holds
 // from negotiation. The identity lets a reconnect re-send an entry whose reply
 // was lost: the server resolves a since-gone row against the path's committed
-// narinfo and answers `already-present`, where a bare id could only fail as
+// narinfo and answers `already-present`, whereas a bare id could only fail as
 // unknown. `retention`, present only when the server advertised the
 // retention-marker attribute, additionally tells the server this upload
 // accepted grace facts, so that `already-present` answer can attach the path's
@@ -463,9 +464,10 @@ export const commitSessionFrameSchema = z.discriminatedUnion('ev', [
 		message: z.string()
 	}),
 	// Answers a well-formed op this server does not know, naming it, so a newer
-	// client degrades per message where a close would drop the whole session. Only
-	// ever sent in reply to such an op, which a client of this version or older
-	// never sends, so no deployed client meets a frame it cannot parse.
+	// client degrades one message at a time, whereas a close would drop the whole
+	// session. Only ever sent in reply to such an op, which a client of this
+	// version or older never sends, so no deployed client meets a frame it cannot
+	// parse.
 	z.strictObject({
 		ev: z.literal('unsupported'),
 		op: z.string()

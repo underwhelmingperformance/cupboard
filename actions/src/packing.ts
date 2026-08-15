@@ -6,9 +6,9 @@ import { type Cohort, isBestEffortCohort } from './publish-plan.ts';
  * The headroom shape `checkStoreCapacity` (packages/cli/src/plan/capacity.ts)
  * already prices a single build against. Packing prices a grouping the same
  * way, but `actions/` cannot import `packages/cli`, so the formula and its
- * provisional defaults are mirrored here rather than shared; keep the two
- * numerically in step by hand until both land on a package neither side needs
- * to cross into.
+ * provisional defaults are mirrored here rather than shared; keep the defaults
+ * here and in `capacity.ts` numerically identical by hand until the formula
+ * lives in a package both sides can import.
  */
 export interface PackingHeadroom {
 	readonly absoluteMinimum: number;
@@ -33,7 +33,7 @@ export interface PackCohortsOptions {
 	/** Off by default; packing never runs, and the manifest's own cohorts pass through unchanged, unless this is true. */
 	readonly enabled: boolean;
 	readonly cohorts: readonly Cohort[];
-	/** Each target's own measured substitutable NAR size, keyed by attr. A target packing cannot price (no entry here) is never repartitioned: it keeps its manifest-declared cohort untouched. */
+	/** Each target's own measured substitutable NAR size, keyed by attr. A target with no entry here cannot be priced, so packing never repartitions it: it keeps its manifest-declared cohort untouched. */
 	readonly measurements: ReadonlyMap<string, number>;
 	readonly capacity: number;
 	readonly headroom?: Partial<PackingHeadroom>;
@@ -82,9 +82,9 @@ function executionContextKey(cohort: Cohort): string {
  *
  * An explicit multi-target cohort (the manifest's own `cohort` label) is
  * never split or merged: it is not a candidate for packing at all, and
- * passes through untouched. A single-target cohort packing cannot price,
- * because its target has no entry in `measurements`, is left untouched the
- * same way: an unpriced repartition would be a heuristic, not a measurement.
+ * passes through untouched. A single-target cohort whose target has no
+ * entry in `measurements` cannot be priced, and is left untouched the same
+ * way: an unpriced repartition would be a heuristic, not a measurement.
  *
  * Returns `undefined` when disabled, so a caller can tell "packing found
  * nothing worth combining" (an empty set of packed groups, still a

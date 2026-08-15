@@ -21,10 +21,10 @@ export const rootSetMaxTargets = 1000;
 const rootTargetListSchema = z.array(storePathSchema).max(rootSetMaxTargets);
 
 // A root write declares the channel's whole contents, so the declared list may
-// be empty: a channel whose current generation is served from elsewhere names
-// nothing this cache holds. Settling empty clears the root's target rows,
-// keeps the root row and its expiry, and releases the paths the root held
-// under the ordinary retention grace.
+// be empty: a channel whose current generation is served from elsewhere has no
+// target in this cache. An empty write clears the root's target rows, keeps the
+// root row and its expiry, and releases the paths the root held under the
+// ordinary retention grace.
 export const rootSetBodySchema = z.strictObject({
 	targets: rootTargetListSchema,
 	ttlSeconds: ttlSecondsSchema.optional()
@@ -229,8 +229,8 @@ export type ParsedGracePolicyRemoveResponse = z.output<
 
 // Whether a grace policy covers a cache: a covered cache carries the grace a
 // publication to it would resolve (the longest matching cache-name prefix
-// wins, the same resolution a push is granted), an uncovered cache carries
-// nothing.
+// wins, the same resolution a push is granted); an uncovered cache carries no
+// grace period.
 export const graceCoverageResponseSchema = z.discriminatedUnion('covered', [
 	z.strictObject({
 		covered: z.literal(true),

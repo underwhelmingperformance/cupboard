@@ -466,7 +466,8 @@ export async function buildAction(
 		try {
 			log = await readFile(logFile, 'utf8');
 		} catch {
-			// A failed Nix startup has no event log to attribute.
+			// Nix can fail before it writes the event log, and the attempt then
+			// records no activities.
 		}
 		const buildAttempt = {
 			attempt,

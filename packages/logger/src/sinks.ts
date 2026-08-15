@@ -150,7 +150,7 @@ export interface ConsoleLike {
 /**
  * A sink that hands a plain object to a console, so Cloudflare Workers Logs
  * indexes every field. The message stays a constant string under `msg`; all
- * variable data rides in the object's other keys. The console is injectable
+ * variable data goes in the object's other keys. The console is injectable
  * for tests and defaults to the global one.
  */
 export function cloudflareSink(target: ConsoleLike = console): Sink {

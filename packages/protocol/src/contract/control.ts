@@ -143,8 +143,8 @@ export const controlContract = {
 	membership: {
 		// Reassert every live tenant's admission marker and rebuild the filter
 		// from the registry. The deploy runs this so a change to the admission
-		// representation does not leave existing tenants dark until the hourly
-		// cron; it touches only the KV gate, never any tenant's data.
+		// representation does not leave the gate rejecting existing tenants until
+		// the hourly cron; it touches only the KV gate, never any tenant's data.
 		rebuild: controlProcedure
 			.meta({ requires: 'membership:rebuild' })
 			.route({ method: 'POST', path: '/membership/rebuild' })

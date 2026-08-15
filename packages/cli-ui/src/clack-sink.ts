@@ -9,8 +9,8 @@ type Colours = ReturnType<typeof pc.createColors>;
 type ClackMethod = 'error' | 'info' | 'message' | 'warn';
 
 // Which clack call a level uses. Warnings and errors get their own channels;
-// info narrates; trace and debug are low-priority, so they ride the neutral
-// `log.message` and lean on the dimmed rendering below to stay unobtrusive.
+// info narrates; trace and debug are low-priority, so they use the neutral
+// `log.message` and rely on the dimmed rendering below to stay unobtrusive.
 function methodFor(level: LogLevel): ClackMethod {
 	switch (level) {
 		case 'warning': {
