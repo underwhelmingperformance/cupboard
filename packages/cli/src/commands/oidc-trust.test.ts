@@ -42,6 +42,10 @@ const uploadActions = [
 	'upload:confirm'
 ];
 const attestActions = ['attestation:negotiate', 'attestation:attach'];
+// A preset rule covers a run's whole retention conversation: replacing a
+// target root's list, reading that list, and attaching to the run root every
+// push binds.
+const rootActions = ['root:set', 'root:list', 'root:attach'];
 const prSubstitutions = {
 	pr: {
 		claim: 'ref',
@@ -306,7 +310,7 @@ describe('claimsForAdd', () => {
 });
 
 describe('githubPrAddBody', () => {
-	it('grants push, root and attestation by default, scoped to the per-PR cache and root', () => {
+	it('grants the upload, retention and attestation operations a publication performs, scoped to the per-PR cache and root', () => {
 		expect(
 			githubPrAddBody(tenantBase, identity, { repo: 'acme/infra' })
 		).toStrictEqual({
@@ -320,7 +324,7 @@ describe('githubPrAddBody', () => {
 			permittedGrants: [
 				{
 					type: 'cupboard_cache',
-					actions: [...uploadActions, ...attestActions, 'root:set'],
+					actions: [...uploadActions, ...attestActions, ...rootActions],
 					resources: { cache: prCacheBinding, root: prRootBinding }
 				}
 			],
@@ -351,7 +355,7 @@ describe('githubPrAddBody', () => {
 			permittedGrants: [
 				{
 					type: 'cupboard_cache',
-					actions: [...uploadActions, 'root:set'],
+					actions: [...uploadActions, ...rootActions],
 					resources: { cache: prCacheBinding, root: prRootBinding }
 				}
 			],
@@ -361,7 +365,7 @@ describe('githubPrAddBody', () => {
 });
 
 describe('githubTagAddBody', () => {
-	it('grants push, root and attestation by default, scoped to the per-tag cache and root', () => {
+	it('grants the upload, retention and attestation operations a publication performs, scoped to the per-tag cache and root', () => {
 		expect(
 			githubTagAddBody(tenantBase, identity, { repo: 'acme/infra' })
 		).toStrictEqual({
@@ -375,7 +379,7 @@ describe('githubTagAddBody', () => {
 			permittedGrants: [
 				{
 					type: 'cupboard_cache',
-					actions: [...uploadActions, ...attestActions, 'root:set'],
+					actions: [...uploadActions, ...attestActions, ...rootActions],
 					resources: { cache: tagCacheBinding, root: tagRootBinding }
 				}
 			],
@@ -406,7 +410,7 @@ describe('githubTagAddBody', () => {
 			permittedGrants: [
 				{
 					type: 'cupboard_cache',
-					actions: [...uploadActions, 'root:set'],
+					actions: [...uploadActions, ...rootActions],
 					resources: { cache: tagCacheBinding, root: tagRootBinding }
 				}
 			],
@@ -437,7 +441,7 @@ describe('githubBranchAddBody', () => {
 			permittedGrants: [
 				{
 					type: 'cupboard_cache',
-					actions: [...uploadActions, ...attestActions, 'root:set'],
+					actions: [...uploadActions, ...attestActions, ...rootActions],
 					resources: {
 						cache: { exact: '_default', validate: 'cacheName' },
 						root: {
@@ -470,7 +474,7 @@ describe('githubBranchAddBody', () => {
 		expect(body.permittedGrants).toStrictEqual([
 			{
 				type: 'cupboard_cache',
-				actions: [...uploadActions, 'root:set'],
+				actions: [...uploadActions, ...rootActions],
 				resources: {
 					cache: { exact: '_default', validate: 'cacheName' },
 					root: { validate: 'rootName', exact: 'github:acme/infra/release/' }

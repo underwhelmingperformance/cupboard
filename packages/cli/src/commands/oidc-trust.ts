@@ -347,7 +347,7 @@ export function githubPrAddBody(
 				rootTemplate:
 					options.rootTemplate ??
 					`github:${identity.fullName}/${cacheTemplate}/`,
-				allow: withAttest(['push', 'root'], options.attest),
+				allow: withAttest(['push', 'root', 'attach'], options.attest),
 				substitutions: collectSubstitutions({
 					templateSource: 'github-pr',
 					captures: []
@@ -398,7 +398,7 @@ export function githubTagAddBody(
 				rootTemplate:
 					options.rootTemplate ??
 					`github:${identity.fullName}/${cacheTemplate}/`,
-				allow: withAttest(['push', 'root'], options.attest),
+				allow: withAttest(['push', 'root', 'attach'], options.attest),
 				substitutions: collectSubstitutions({
 					templateSource: 'github-tag',
 					captures: []
@@ -436,7 +436,7 @@ export function githubBranchAddBody(
 		claims,
 		permittedGrants: [
 			buildCacheGrant({
-				allow: withAttest(['push', 'root'], options.attest),
+				allow: withAttest(['push', 'root', 'attach'], options.attest),
 				root: `github:${identity.fullName}/${options.branch}/`
 			})
 		],

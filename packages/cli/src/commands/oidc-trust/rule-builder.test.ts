@@ -49,7 +49,7 @@ describe('expandAllow', () => {
 				'attestation:negotiate',
 				'attestation:attach'
 			],
-			rootActions: ['root:set', 'root:attach']
+			rootActions: ['root:set', 'root:list', 'root:attach']
 		});
 	});
 
@@ -136,7 +136,8 @@ describe('buildCacheGrant', () => {
 				'upload:status',
 				'upload:commit',
 				'upload:confirm',
-				'root:set'
+				'root:set',
+				'root:list'
 			],
 			resources: {
 				cache: {

@@ -40,9 +40,10 @@ default cache, under `github:<owner>/<repo>/<branch>/`, which is the retention
 root the push action writes by default. It pins the branch through the `ref`
 claim, so a sibling branch that shares a reusable workflow does not match.
 
-Both commands look up the repository's ids for you and grant the push, the
-retention root and attestation. Pass `--no-attest` to withhold attestation, or
-`--root-template` to override the root.
+Both commands look up the repository's ids for you and grant the push, every
+retention operation a run performs on its roots, and attestation. Pass
+`--no-attest` to withhold attestation, or `--root-template` to override the
+root.
 
 ```bash
 # Per-PR rule: build the pull request, push to its own pr-<n> cache.
@@ -125,8 +126,9 @@ per-system root beneath it.
 A build-time push may bind a run root when it negotiates its token. Every path
 the push commits is then attached under that root's name and retained for the
 root's own time-to-live. Attaching is its own operation, `root:attach`, granted
-by the `attach` shorthand. Like `root`, it binds a root selector, so give the
-rule the exact name or trailing-slash prefix the run roots will use:
+by the `attach` shorthand. The presets include it; a rule created with `add`
+must name it explicitly. Like `root`, it binds a root selector, so give the rule
+the exact name or trailing-slash prefix the run roots will use:
 
 ```bash
 cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
