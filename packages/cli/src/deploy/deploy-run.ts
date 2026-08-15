@@ -263,11 +263,11 @@ function zoneOf(hostname: string): string {
 }
 
 /**
- * Whether the bindings a deployed script answers match what this deploy would
+ * Whether the bindings a deployed script reports match what this deploy would
  * upload. The live list keeps its secrets across uploads, so `secret_text`
- * entries are not part of the comparison; any other difference (an extra
- * field the API reports included) reads as a mismatch, which costs at most a
- * redundant upload.
+ * entries are left out of the comparison. Any other difference counts as a
+ * mismatch, including an extra field the API adds of its own, and the cost of
+ * treating that as a mismatch is at most one redundant upload.
  */
 export function hasMatchingBindings(
 	planned: readonly unknown[] | undefined,

@@ -18,10 +18,11 @@ import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 import { exactUploadDecisions } from '../push/negotiation.ts';
 import type { CompressNar, PushClient, PushNarArchive } from '../push/push.ts';
 
-// Cachix's narinfo batcher (one hundred paths or half a second) and Attic's
-// session timers corroborate the debounce shape: accepted paths accumulate
-// behind a short window, bounded by the commit batch size and this maximum
-// wait, and each flush enters the ordinary batched negotiation.
+// How long accepted paths accumulate before a flush. A batch is sent once it
+// reaches the commit batch size or this wait elapses, and each flush goes
+// through the ordinary batched negotiation. Cachix batches narinfos at one
+// hundred paths or half a second, and Attic uses session timers of the same
+// order.
 export const flushMaxWaitMs = 500;
 
 /** The daemon operations one flush performs over its own connection. */
@@ -32,8 +33,8 @@ export interface BatchSession {
 
 /**
  * A store that runs a callback against a session bound to one connection. A
- * temporary root taken through the session lives exactly as long as that
- * connection, so the callback's extent is the unit of pinning.
+ * temporary root taken through the session lasts exactly as long as that
+ * connection, so a path stays pinned for the duration of the callback.
  */
 export interface BatchStore {
 	withConnection<T>(use: (session: BatchSession) => Promise<T>): Promise<T>;
@@ -42,9 +43,8 @@ export interface BatchStore {
 /**
  * One path's terminal state in the streaming session: published by this run,
  * already served by the destination, or collected locally before its NAR
- * could be read. Which paths are targets, and what a collected target means
- * for the run, is the command layer's judgement; the outcome data stays
- * generic here.
+ * could be read. The command layer decides which paths are targets and what a
+ * collected target means for the run; this module only reports the outcome.
  */
 export type BatchPathOutcome =
 	| { readonly outcome: 'published'; readonly storePath: StorePathString }
@@ -102,12 +102,13 @@ function assertNarMetadata(info: NixValidPathInfo, digest: NarDigest): void {
 
 /**
  * Debounces accepted build outputs into streamed publication. Accepted paths
- * accumulate in an unbounded candidate set and flush in bounded batches; each
+ * accumulate in an unbounded candidate set and flush in bounded batches. Each
  * flush pins its batch with temporary roots on one daemon connection (root,
  * then validity, then read, Nix's documented ordering), resolves metadata over
  * that session, then negotiates, uploads and commits through the ordinary push
- * client, with the session closing as the batch's reads complete. The
- * session-wide deduplication records terminal outcomes, not the fact that a
+ * client; the session closes once the batch's reads are complete.
+ *
+ * The session-wide deduplication records terminal outcomes, not the fact that a
  * path was enqueued: a path whose publication fails returns to the candidate
  * set for the next flush or for final reconciliation, and a path that vanished
  * from the local store is a typed `collected` outcome, never a batch failure.
@@ -250,8 +251,8 @@ export class BuildOutputBatcher {
 						}
 
 						// The NAR read streams into the upload here, inside the session,
-						// so the temporary root protects the path until its bytes are
-						// fully away.
+						// so the temporary root protects the path until all its bytes
+						// have been sent.
 						try {
 							const upload = compressNar(createNarArchive(info.storePath));
 
@@ -267,8 +268,9 @@ export class BuildOutputBatcher {
 				}
 			);
 
-			// The session is closed here: the batch's reads are complete and its
-			// temporary roots released with the connection.
+			// The connection has closed by this point, releasing the batch's
+			// temporary roots. A commit only sends metadata, so it needs neither the
+			// connection nor the roots.
 			for (const { decision, info } of commits) {
 				try {
 					await this.options.client.commit(
@@ -290,7 +292,8 @@ export class BuildOutputBatcher {
 			}
 		} catch (error) {
 			// A batch-level failure (the connection, the negotiation): every path
-			// not individually settled returns to candidacy for the next flush.
+			// not settled individually returns to the candidate set for the next
+			// flush.
 			for (const storePath of remaining) {
 				this.recordFailure(storePath, error);
 			}

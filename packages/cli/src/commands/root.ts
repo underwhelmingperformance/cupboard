@@ -188,7 +188,7 @@ export function registerRootCommands(
 			[
 				'',
 				'Example:',
-				"  # Keep a channel's top-level paths, expiring after 30 days",
+				"  # Keep a branch's top-level paths, expiring after 30 days",
 				'  cupboard root set https://cupboard.example.workers.dev/t/acme \\',
 				'    github:acme/infra/main /nix/store/<hash>-app --ttl 30d'
 			].join('\n')

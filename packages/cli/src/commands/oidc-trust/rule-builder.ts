@@ -39,11 +39,12 @@ export function jobWorkflowReferenceClaim(value: string): ClaimMatch {
 }
 
 // The cache operations each `--allow` shorthand expands to. `push` includes
-// byte-free confirmation because cache-aware publication refreshes paths it can
-// already substitute; `attest`, `root` and `attach` cover their own write
-// conversations. `root` includes `root:list` because a publication reads a
-// root's reconciled target list before it replaces that list; the read only
-// observes the list `root:set` already rewrites wholesale. `attach` is separate
+// `upload:confirm`, which extends retention without uploading bytes, because a
+// cache-aware publication refreshes paths it can already substitute. `attest`,
+// `root` and `attach` cover their own write conversations. `root` includes
+// `root:list` because a publication reads a root's reconciled target list
+// before it replaces that list, and that read only observes the list
+// `root:set` already rewrites wholesale. `attach` is separate
 // from `push`: attaching retains paths under a name, so its grant binds a root
 // selector, and folding it into `push` would force a root binding on every push
 // rule.

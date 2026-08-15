@@ -67,7 +67,7 @@ export function registerPlanMeasureCommand(
 		)
 		.option(
 			'--store <uri>',
-			'remote ssh-ng store whose own answers price the measurements (default: the local daemon)',
+			'remote ssh-ng store to query for the target sizes (default: the local daemon)',
 			parseStoreUri
 		)
 		.option(

@@ -99,10 +99,10 @@ export interface GithubSetupDependencies {
 	readonly signal?: AbortSignal;
 }
 
-// One converging step's outcome. `drift` means the stored state neither
-// matches what setup would write nor was written: it is reported and left in
-// place for the operator to resolve. `missing` means setup would create the
-// state but wrote nothing because another step drifted.
+// One converging step's outcome. `drift` means the stored state differs from
+// what setup would write; setup leaves it in place and reports it for the
+// operator to resolve. `missing` means setup would have created the state but
+// wrote nothing, because another step drifted.
 export interface SetupStep {
 	readonly step: string;
 	readonly outcome:

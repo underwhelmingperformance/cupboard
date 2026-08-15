@@ -27,12 +27,12 @@ function effectiveHeadroom(config: HeadroomConfig, capacity: number): number {
 }
 
 /**
- * What a caller has already found true of the configuration it detected,
- * carried through to a refusal untouched. This module offers no remedies of its
- * own: it reports what the measurement found, and which remedies the caller
- * already knows are or are not available. A cohort split is never possible for
- * an aggregate target, so the caller sets `cohortSplitPossible` per cohort
- * instead of leaving this module to infer it from the byte counts.
+ * Which remedies apply, as the caller determined from the configuration it
+ * detected, passed through to a refusal unchanged. This module works out no
+ * remedies of its own: it reports what the measurement found, and what the
+ * caller already knows can be done about it. A cohort split is never possible
+ * for an aggregate target, so the caller sets `cohortSplitPossible` per cohort
+ * rather than leaving this module to infer it from the byte counts.
  */
 export interface DetectedCapacityOptions {
 	readonly cohortSplitPossible: boolean;
@@ -47,11 +47,11 @@ export interface CapacityMeasurement {
 }
 
 /**
- * Raised when the measured substitutable bytes cross the store's available
+ * Raised when the measured substitutable bytes exceed the store's available
  * space less its headroom. The measurement excludes build outputs, scratch
- * space, and the NAR-to-disk gap, all of which land on top of it, so this is
- * a preflight refusal of a run that was never close to fitting, not a
- * prediction that a narrower margin will fail too.
+ * space, and the NAR-to-disk gap, which all add to the real requirement, so
+ * this refusal identifies a run that was never close to fitting rather than
+ * predicting that a run with a narrower margin will fail.
  */
 export class StoreCapacityError extends CliError {
 	constructor(
@@ -95,10 +95,9 @@ export interface CapacityCheckResult {
 
 /**
  * Refuses a cohort's build before anything is fetched when its measured
- * substitutable bytes would not fit the selected store. A measurement that
- * only excludes costs can refuse a plan that cannot fit without promising
- * that a passing one will; it never composes a smaller cohort or otherwise
- * repartitions the manifest itself.
+ * substitutable bytes would not fit the selected store. The measurement leaves
+ * costs out, so a refusal is sound but a plan that passes is not promised to
+ * fit. Nothing here composes a smaller cohort or repartitions the manifest.
  */
 export async function checkStoreCapacity(
 	options: CapacityPreflightOptions

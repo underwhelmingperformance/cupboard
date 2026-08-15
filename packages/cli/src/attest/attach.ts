@@ -70,9 +70,9 @@ export interface AttestationAttachClient {
 	attachAttestation(uploadId: string): Promise<AttestationAttachResponse>;
 }
 
-// The push client's attestation conversation is optional, for a minimal
-// client that never attaches; anything that does attach needs all three
-// operations, so the absence of one is a typed refusal.
+// The push client's attestation conversation is optional, for a minimal client
+// that never attaches. A client that does attach needs all three operations, so
+// a missing one is refused with a typed error.
 export function requireAttestationAttachClient(client: {
 	negotiateAttestations?: AttestationAttachClient['negotiateAttestations'];
 	attachAttestation?: AttestationAttachClient['attachAttestation'];
@@ -435,9 +435,9 @@ export async function runAttestationAttachment(
 	const attachStep = log.group('attach');
 	let attached = 0;
 	const unservableStorePathHashes = new Set<StorePathHash>();
-	// A decision names its path by the wire's plain strings; the prepared
-	// bundle it answers carries the branded pair, so outcomes record through
-	// the match.
+	// A decision identifies its bundle with plain strings from the wire, while
+	// the prepared bundle holds the branded pair, so each outcome is recorded
+	// from the matched prepared bundle.
 	const bundles: AttestationBundleOutcome[] = decisions
 		.filter((decision) => isAttestationSkip(decision))
 		.flatMap((decision) => {

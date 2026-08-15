@@ -2500,7 +2500,7 @@ describe('runPush', () => {
 		});
 	});
 
-	it('sets an expiring channel with --root and --ttl', async () => {
+	it('sets an expiring retention root with --root and --ttl', async () => {
 		const roots: SetRootCall[] = [];
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];

@@ -226,7 +226,7 @@ afterEach(() => {
 });
 
 describe('BuildOutputBatcher', () => {
-	it('returns every path to candidacy when negotiation omits decisions', async () => {
+	it('returns every path to the candidate set when negotiation omits decisions', async () => {
 		const { batcher, failures } = harness({ decisions: () => [] });
 
 		batcher.enqueue(pathA);
@@ -369,7 +369,7 @@ describe('BuildOutputBatcher', () => {
 		});
 	});
 
-	it('returns a failed path to candidacy and retries it on the next flush', async () => {
+	it('returns a failed path to the candidate set and retries it on the next flush', async () => {
 		const { batcher, outcomes, failures } = harness({
 			failCommitsOnce: new Set([pathA])
 		});
@@ -416,7 +416,7 @@ describe('BuildOutputBatcher', () => {
 		}).toStrictEqual({ negotiateCount: 1, candidates: [] });
 	});
 
-	it('returns the whole batch to candidacy when negotiation fails', async () => {
+	it('returns the whole batch to the candidate set when negotiation fails', async () => {
 		const { batcher, failures, outcomes } = harness({ failNegotiate: true });
 
 		batcher.enqueue(pathA);

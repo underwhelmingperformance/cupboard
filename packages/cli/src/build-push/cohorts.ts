@@ -76,8 +76,9 @@ function shouldStopSequence(error: unknown): boolean {
  * opted into: between cohorts when the setting is on, after the last only when
  * additionally configured, and never when the setting is off. An ordinary
  * cohort failure stops the sequence unless the keep-going option is set;
- * cancellation always stops it. Either way the failures are returned alongside
- * the settled receipts, the first failure being the run's verdict.
+ * cancellation stops it either way. The result reports the failures alongside
+ * the receipts that did settle, and the caller exits with the first failure's
+ * error.
  */
 export async function runCohortSequence(
 	options: CohortSequenceOptions,

@@ -45,7 +45,7 @@ import type { BatchPathOutcome } from './batching.ts';
 /**
  * One manifest target as reconciliation sees it: the installable the build
  * realises, the output path Nix could predict before building, and the
- * retention root the target's confirmation feeds when the run declares one.
+ * retention root this target contributes to when the run declares one.
  */
 export interface ReconcileTarget {
 	readonly installable: NixDerivedPathString;
@@ -137,8 +137,9 @@ export interface ReconcileResult {
 	readonly failures: readonly ReconcileFailure[];
 }
 
-// How one target's classification settled at plan time. A `publish` target is
-// the run's to realise and publish; the others were answered before the build.
+// How the planner classified one target before the build. A `publish` target is
+// this run's to realise and publish; every other classification was decided
+// before the build.
 type TargetClassification =
 	'publish' | 'attach-only' | 'publish-by-reference' | 'left-upstream';
 
@@ -152,9 +153,9 @@ interface ResolvedTarget {
 	readonly resolution: TargetResolution;
 }
 
-// The store path an outcome names for a target that realised nothing: the
-// prediction when there was one, otherwise the derivation part of the
-// installable, which is itself a store path.
+// The store path an outcome reports for a target that realised nothing: the
+// predicted output path when there was one, otherwise the derivation part of
+// the installable, which is itself a store path.
 function fallbackPath(target: ReconcileTarget): StorePathString {
 	if (target.expectedPath !== undefined) {
 		return target.expectedPath;
@@ -190,10 +191,10 @@ function classify(
 	return 'publish';
 }
 
-// Resolves one target to the output paths the selected store registered for
-// it: the build result when the run drove the build itself, the snapshot's
-// derivation queried against the store, and the pre-build prediction, in that
-// order of authority.
+// Resolves one target to the output paths the selected store registered for it.
+// Three sources are tried in order: the build result when the run drove the
+// build itself, then the outputs the store reports for the snapshot's
+// derivation, then the pre-build prediction.
 async function resolveTarget(
 	target: ReconcileTarget,
 	options: ReconcileOptions,
@@ -583,12 +584,13 @@ function rootContentsOf(resolved: ResolvedTarget): readonly StorePathString[] {
 	return answeredPathsOf(resolved);
 }
 
-// Applies each declared target root whose every target settled, replacing its
-// target list in one call with the paths the destination is to hold; a root
-// with any unconfirmed target is left exactly as it was. A root whose targets
-// all settled upstream is replaced with an empty list, which releases the
-// generation it named. The run root is never among these: it was bound at
-// negotiate, commit by commit, and reconciliation does not touch it.
+// Replaces the target list of each declared target root once every one of its
+// targets is confirmed, in a single call per root, with the paths the
+// destination is to hold; a root with any unconfirmed target is left exactly as
+// it was. When every target of a root was left upstream the new list is empty,
+// which releases the paths the root previously retained. The run root is not
+// among these roots: it was bound at negotiate, commit by commit, and
+// reconciliation does not touch it.
 async function applyTargetRoots(
 	resolvedTargets: readonly ResolvedTarget[],
 	options: ReconcileOptions,
@@ -671,9 +673,9 @@ export async function reconcileBuild(
 
 	// Everything the run must end with servable, in one deduplicated pass: the
 	// publish targets' resolved paths, every accepted event's path whether or
-	// not its streaming settled, and the declared intermediates. The flag says
-	// whether a path answers for a target, which decides how a vanished copy
-	// is recorded.
+	// not its streaming settled, and the declared intermediates. The flag records
+	// whether the path belongs to a target, which decides how a vanished copy is
+	// reported.
 	const required = new Map<StorePathString, boolean>();
 	const requireAll = (
 		paths: Iterable<StorePathString>,
@@ -704,8 +706,8 @@ export async function reconcileBuild(
 		collected: new Set()
 	};
 
-	// What the streaming session already published counts as this run's
-	// uploading; the re-query below confirms each such path is servable.
+	// A path the streaming session published counts as published by this run; the
+	// re-query below confirms that each such path is servable.
 	for (const [storePath, streamed] of options.outcomes) {
 		if (streamed.outcome === 'published') {
 			ledger.published.add(storePath);

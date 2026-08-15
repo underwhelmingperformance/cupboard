@@ -25,20 +25,20 @@ function recordingReporter(): {
 }
 
 describe('reportUnknownSettings', () => {
-	it('names every setting no nix knows, in one warning', () => {
+	it('warns once, naming every setting no known Nix version defines', () => {
 		const { warnings, reporter } = recordingReporter();
 
 		reportUnknownSettings(reporter, ['extra-cores', 'no-such-setting']);
 
 		expect(warnings).toStrictEqual([
 			{
-				label: 'the configuration names settings no nix knows',
+				label: 'the configuration names settings no known Nix version defines',
 				value: 'extra-cores no-such-setting'
 			}
 		]);
 	});
 
-	it('says nothing about a configuration every setting of which nix knows', () => {
+	it('warns about nothing when Nix defines every setting in the configuration', () => {
 		const { warnings, reporter } = recordingReporter();
 
 		reportUnknownSettings(reporter, []);

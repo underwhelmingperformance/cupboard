@@ -13,10 +13,10 @@ export interface PushGrantIntent {
 	readonly attest: boolean;
 	readonly root?: RootName;
 	/**
-	 * The run root the push binds at negotiate. Attaching retains paths under
-	 * a name, so the run root needs its own explicit grant on its own root
-	 * selector: the request carries a second cache grant on the same cache,
-	 * scoped to the run root, since a run root and a target root are different
+	 * The run root the push binds at negotiate. Attaching a path to a run root
+	 * retains it, so the run root needs its own grant with its own root
+	 * selector. The request therefore includes a second cache grant on the same
+	 * cache, scoped to the run root: a run root and a target root are different
 	 * roots with different lifetimes.
 	 */
 	readonly runRoot?: RootName;
@@ -30,10 +30,10 @@ export interface RootEnsureGrantIntent {
 export interface RootListGrantIntent {
 	readonly cacheSelector: string;
 	/**
-	 * Present for a single root's target listing (`root targets`), absent for
-	 * a cache-wide listing (`root list`): the resource a listing route
-	 * declares carries a root only when it names one, and a grant with no
-	 * root only covers a root-free resource.
+	 * Present for a single root's target listing (`root targets`), absent for a
+	 * cache-wide listing (`root list`). The resource a listing route declares
+	 * includes a root only when the route names one, and a grant with no root
+	 * covers only a resource with no root.
 	 */
 	readonly root?: RootName;
 }
@@ -93,9 +93,9 @@ export function pushAuthorizationDetails(
  * The authority `attest attach` requests: `attestation:negotiate` and
  * `attestation:attach` on the target cache, plus `upload:negotiate`, which
  * issues the credential the bundle bytes are staged under and the signed push
- * id the attestation negotiate names. No commit, status or root operation
- * travels with it, so the exchanged token can attach bundles to served paths
- * but never publish a path or touch retention.
+ * id the attestation negotiate names. The grant includes no commit, status or
+ * root operation, so the exchanged token can attach bundles to paths the cache
+ * already serves but can never publish a path or change retention.
  */
 export function attestAttachAuthorizationDetails(
 	intent: AttestAttachGrantIntent
@@ -146,8 +146,8 @@ export function rootListAuthorizationDetails(
  * The confirm-scoped authority `cupboard confirm` needs: exactly
  * `upload:confirm` on the target cache, never `upload:negotiate` or
  * `upload:commit`, so the exchanged token can extend retention on an
- * already-published path without uploading bytes or reaching a broader
- * upload operation.
+ * already-published path without uploading bytes or using any broader upload
+ * operation.
  */
 export function confirmAuthorizationDetails(
 	intent: ConfirmGrantIntent

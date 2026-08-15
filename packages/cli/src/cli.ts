@@ -77,9 +77,10 @@ function parseOutputMode(value: string): ReporterMode {
 	return parsed.data;
 }
 
-// The LogTape sink that a run's diagnostics flow through: clack narration in
+// The LogTape sink a run's diagnostics are written to: clack narration in
 // terminal mode (sharing the UI's colour setting), or line-delimited JSON on
-// stderr in machine mode, so structured logs never contaminate stdout.
+// stderr in machine mode, so structured logs never reach stdout, which carries
+// the command's own output.
 function loggingSink(mode: ReporterMode, colour: boolean | undefined): Sink {
 	if (mode === 'terminal') {
 		return clackSink(pc.createColors(colour ?? pc.isColorSupported));

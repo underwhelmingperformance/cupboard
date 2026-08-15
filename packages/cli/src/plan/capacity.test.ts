@@ -152,7 +152,7 @@ describe('checkStoreCapacity', () => {
 		expect(result.headroom).toBeGreaterThan(defaultHeadroomFraction * capacity);
 	});
 
-	it('applies an overridden headroom instead of the provisional defaults', async () => {
+	it('applies an overridden headroom instead of the defaults', async () => {
 		const result = await checkStoreCapacity({
 			measurement: measurement({ narSize: 10 }),
 			storePath,

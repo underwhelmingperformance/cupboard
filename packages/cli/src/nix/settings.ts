@@ -18,7 +18,7 @@ export function reportUnknownSettings(
 	}
 
 	reporter.warn(
-		'the configuration names settings no nix knows',
+		'the configuration names settings no known Nix version defines',
 		unknownSettings.join(' ')
 	);
 }

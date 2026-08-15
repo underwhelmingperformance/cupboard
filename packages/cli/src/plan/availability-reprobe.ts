@@ -13,8 +13,8 @@ export type WithdrawnOutcome = 'attachOnly' | 'publishByReference';
 
 /**
  * One target the re-probe took out of the build set: the installable Nix is no
- * longer asked to realise, the path that answers for it, and the bucket it
- * moved into now that it is available.
+ * longer asked to realise, the store path that is now available, and the bucket
+ * the target moved into.
  */
 export interface WithdrawnTarget {
 	readonly installable: NixDerivedPathString;
@@ -35,8 +35,8 @@ export interface AvailabilityReprobe {
 }
 
 // The re-probe asks the destination and the reuse view, never a retention
-// root: a target a root already served was answered by the first partition and
-// is not in the build set to begin with.
+// root: the first partition already classified a target that a root serves as
+// attach-only, so such a target is not in the build set to begin with.
 const noRootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse> =
 	new Map();
 
@@ -53,8 +53,8 @@ const noSubstitutableExternal: ReadonlySet<StorePathString> = new Set();
  * the build set is. A target either of them has gained since the partition
  * settled is withdrawn, to be attached to its root or published by reference.
  * Every other target keeps its place in the build set. Availability is racy: a
- * path can go again straight after the answer, and Nix reports that failure the
- * way it reports any other.
+ * path can disappear again immediately after the answer, and Nix reports the
+ * resulting failure as it reports any other.
  */
 export async function reprobeAvailability(
 	options: AvailabilityReprobeOptions
