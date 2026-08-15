@@ -178,13 +178,13 @@ importers:
         specifier: workspace:*
         version: link:../shared
       '@orpc/client':
-        specifier: ^1.14.7
+        specifier: ^1.15.0
         version: 1.15.0
       '@orpc/contract':
-        specifier: ^1.14.7
+        specifier: ^1.15.0
         version: 1.15.0
       '@orpc/openapi-client':
-        specifier: ^1.14.7
+        specifier: ^1.15.0
         version: 1.15.0
       '@sigstore/verify':
         specifier: ^4.0.0
@@ -342,7 +342,7 @@ importers:
         specifier: workspace:*
         version: link:../shared
       '@orpc/contract':
-        specifier: ^1.14.7
+        specifier: ^1.15.0
         version: 1.15.0
       re2js:
         specifier: ^2.8.3
@@ -398,16 +398,16 @@ importers:
         specifier: workspace:*
         version: link:../shared
       '@orpc/json-schema':
-        specifier: ^1.14.7
+        specifier: ^1.15.0
         version: 1.15.0(ws@8.21.1)
       '@orpc/openapi':
-        specifier: ^1.14.7
+        specifier: ^1.15.0
         version: 1.15.0(ws@8.21.1)
       '@orpc/server':
-        specifier: ^1.14.7
+        specifier: ^1.15.0
         version: 1.15.0(ws@8.21.1)
       '@orpc/zod':
-        specifier: ^1.14.7
+        specifier: ^1.15.0
         version: 1.15.0(@orpc/contract@1.15.0)(@orpc/server@1.15.0(ws@8.21.1))(ws@8.21.1)(zod@4.4.3)
       aws4fetch:
         specifier: ^1.0.20
