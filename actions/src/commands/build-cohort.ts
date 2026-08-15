@@ -544,7 +544,7 @@ export function registerBuildCohortCommand(
 		)
 		.option(
 			'--require-provenance <boolean>',
-			'execute selected final derivations even when already valid (true or false)',
+			'require provenance from this run for every final output (true or false)',
 			'false'
 		)
 		.option(
@@ -679,13 +679,13 @@ export async function buildCohortAction(
 						runCupboard,
 						cupboardRunDependencies
 					);
-		const settledPartition =
+		const partition =
 			result === undefined
 				? undefined
 				: withdrawFromPartition(result.partition, reprobe?.withdrawn ?? []);
 		const provenanceRebuilds = new Set(
-			settledPartition !== undefined && inputs.requireProvenance
-				? provenanceRebuildInstallables(settledPartition, queryable)
+			partition !== undefined && inputs.requireProvenance
+				? provenanceRebuildInstallables(partition, queryable)
 				: []
 		);
 		if (inputs.requireProvenance) {
@@ -693,10 +693,6 @@ export async function buildCohortAction(
 				provenanceRebuilds.add(member.installable);
 			}
 		}
-		const partition =
-			settledPartition === undefined || !inputs.requireProvenance
-				? settledPartition
-				: provenanceRequiredPartition(settledPartition, queryable);
 
 		const buildInstallables = [
 			...new Set([
@@ -1129,6 +1125,10 @@ async function settleCohortBuild(
 		terminalFailure
 	} = build;
 	const claimable = claimableOutputPaths(resultBuilds, provenanceRebuilds);
+	const alreadyHeld = receiptAlreadyHeldPaths(
+		partition?.alreadyValid ?? [],
+		claimable
+	);
 
 	// A plain `nix build` prints only results for the requested installables, so
 	// every output is a target path. The intermediate-paths file remains empty.
@@ -1176,7 +1176,7 @@ async function settleCohortBuild(
 			cohortReceiptPushArguments(
 				inputs,
 				publicationPaths,
-				partition?.alreadyValid ?? [],
+				alreadyHeld,
 				claimable
 			),
 			environment,
@@ -1190,9 +1190,10 @@ async function settleCohortBuild(
 			const claimed = new Set<string>(
 				receipt.subjects.map((subject) => subject.storePath)
 			);
-			const missing = targetPaths.filter(
-				(storePath) => !claimed.has(storePath)
-			);
+			// The destination already holds an attestation for a target the plan
+			// left attached, so only the paths this run built need a receipt
+			// subject.
+			const missing = built.filter((storePath) => !claimed.has(storePath));
 
 			if (missing.length > 0) {
 				throw new Error(
@@ -1876,46 +1877,6 @@ export function withdrawFromPartition(
 	};
 }
 
-/**
- * Reclassifies every queryable final target as work for this invocation.
- * Retention and destination availability cannot prove that a previous run
- * completed provenance attachment, so a provenance-required rerun executes
- * the final derivations and treats their prior outputs as rebuild inputs, not
- * as already-held receipt exclusions.
- */
-export function provenanceRequiredPartition(
-	partition: PartitionData,
-	queryable: readonly CohortMember[]
-): PartitionData {
-	const buildSet = queryable
-		.flatMap((member) =>
-			member.queryInstallable === undefined ? [] : [member.queryInstallable]
-		)
-		.map((installable) =>
-			canonicalNixDerivedPath(nixDerivedPathSchema.parse(installable))
-		)
-		.filter(
-			(installable, index, values) => values.indexOf(installable) === index
-		);
-	const rebuiltPaths = new Set(
-		queryable.flatMap((member) =>
-			member.expectedPath === undefined ? [] : [member.expectedPath]
-		)
-	);
-	const withoutRebuilt = (paths: readonly string[]): string[] =>
-		paths.filter((storePath) => !rebuiltPaths.has(storePath));
-
-	return {
-		...partition,
-		attachOnly: withoutRebuilt(partition.attachOnly),
-		publishByReference: withoutRebuilt(partition.publishByReference),
-		leftUpstream: withoutRebuilt(partition.leftUpstream),
-		alreadyValid: withoutRebuilt(partition.alreadyValid),
-		buildSet,
-		counts: { willBuild: buildSet.length, willSubstitute: 0, unknown: 0 }
-	};
-}
-
 /** Targets already obtainable before this run need explicit rebuild mode. */
 export function provenanceRebuildInstallables(
 	partition: PartitionData,
@@ -2156,6 +2117,13 @@ async function planCohort(
 		planFile,
 		'--github-oidc'
 	];
+
+	// A served path counts as having provenance only when the cache also holds
+	// an attestation for it, so a provenance run asks the plan to build every
+	// served path without one.
+	if (inputs.requireProvenance) {
+		arguments_.push('--require-attested');
+	}
 
 	if (inputs.audience !== '') {
 		arguments_.push('--audience', inputs.audience);
@@ -3371,6 +3339,21 @@ async function resolveLocalBuildOwners(options: {
 	}
 
 	return { builds: owners, incompleteRoots };
+}
+
+/**
+ * The already-held paths to pass to a receipt push. The push records no subject
+ * for a path it is told the store already held, and a provenance rebuild
+ * realises a path the store already had, so this drops every path this run
+ * claims as built.
+ */
+export function receiptAlreadyHeldPaths(
+	alreadyValid: readonly string[],
+	claimable: readonly string[]
+): readonly string[] {
+	const claimed = new Set(claimable);
+
+	return alreadyValid.filter((storePath) => !claimed.has(storePath));
 }
 
 /** Outputs this invocation's keyed daemon results say it actually built. */

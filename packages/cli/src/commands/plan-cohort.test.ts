@@ -156,6 +156,10 @@ function dependencies(
 		confirmLeftUpstream: () => Promise.resolve({ kind: 'confirmed' }),
 		destinationServed: () => Promise.resolve(new Set()),
 		viewServed: () => Promise.resolve(new Set()),
+		attestedServed: () =>
+			Promise.reject(
+				new Error('the attestation probe must not be called in this test')
+			),
 		capacityProbe: () =>
 			Promise.resolve({ available: 10_000_000_000, capacity: 10_000_000_000 }),
 		...overrides
@@ -224,6 +228,7 @@ describe('runPlanCohort', () => {
 				leftUpstream: [],
 				leftUpstreamRejections: [],
 				buildSet: [],
+				unattested: [],
 				counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
 				downloadSize: 0,
 				narSize: 0,
@@ -306,6 +311,7 @@ describe('runPlanCohort', () => {
 						leftUpstream: [],
 						leftUpstreamRejections: [],
 						buildSet: [otherPath],
+						unattested: [],
 						counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
 						downloadSize: 0,
 						narSize: 0,
@@ -342,6 +348,7 @@ describe('runPlanCohort', () => {
 				leftUpstream: [],
 				leftUpstreamRejections: [],
 				buildSet: [installable],
+				unattested: [],
 				counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
 				downloadSize: 0,
 				narSize: 0,
@@ -561,6 +568,7 @@ describe('runPlanCohort', () => {
 					{ kind: 'closure-not-served', missing: otherPath, storePath: appPath }
 				],
 				buildSet: [appPath],
+				unattested: [],
 				counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
 				downloadSize: 0,
 				narSize: 0,
@@ -614,6 +622,7 @@ describe('runPlanCohort', () => {
 					leftUpstream: [],
 					leftUpstreamRejections: [],
 					buildSet: [],
+					unattested: [],
 					counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
 					downloadSize: 0,
 					narSize: 0,
@@ -641,6 +650,97 @@ describe('runPlanCohort', () => {
 					]
 				}
 			]);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	it.each([
+		{
+			name: 'attaches a served path the cache also holds an attestation for',
+			attested: [appPath],
+			attachOnly: [appPath],
+			buildSet: [],
+			unattested: [],
+			extraRows: []
+		},
+		{
+			name: 'builds a served path the cache holds no attestation for',
+			attested: [],
+			attachOnly: [],
+			buildSet: [appPath],
+			unattested: [appPath],
+			extraRows: [{ label: 'Served but not attested', value: '1' }]
+		}
+	])('with attested availability required, $name', async (row) => {
+		const payloads: ResultPayload[] = [];
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
+		const planFile = path.join(directory, 'plan.json');
+		const asked: (readonly StorePathString[])[] = [];
+		const attested = new Set(row.attested);
+		const probing = dependencies({
+			rootClient: recordingRootClient([], buildRequired([appPath])),
+			destinationServed: () => Promise.resolve(new Set([appPath])),
+			attestedServed: (paths) => {
+				asked.push(paths);
+
+				return Promise.resolve(attested);
+			}
+		});
+
+		try {
+			await runPlanCohort(
+				runOptions({ targets: [target()], planFile, requireAttested: true }),
+				reporter(payloads),
+				probing
+			);
+
+			const expectedResult = {
+				partition: {
+					attachOnly: row.attachOnly,
+					publishByReference: [],
+					leftUpstream: [],
+					leftUpstreamRejections: [],
+					buildSet: row.buildSet,
+					unattested: row.unattested,
+					counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
+					downloadSize: 0,
+					narSize: 0,
+					unknownCount: 0,
+					alreadyValid: [],
+					unreachableSubstituters: [],
+					ceiling: { value: 0, source: 'configured' }
+				},
+				capacity: {
+					available: 10_000_000_000,
+					capacity: 10_000_000_000,
+					headroom: defaultHeadroomAbsoluteMinimum
+				}
+			};
+
+			const plan: unknown = JSON.parse(await readFile(planFile, 'utf8'));
+
+			expect({ asked, plan, payloads }).toStrictEqual({
+				asked: [[appPath]],
+				plan: expectedResult,
+				payloads: [
+					{
+						kind: 'plan-cohort',
+						data: expectedResult,
+						rows: [
+							{
+								label: 'Already served by the cache',
+								value: String(row.attachOnly.length)
+							},
+							{ label: 'Reused from the tenant', value: '0' },
+							{ label: 'Left to upstream caches', value: '0' },
+							{ label: 'To build', value: String(row.buildSet.length) },
+							...row.extraRows,
+							{ label: 'Plan file', value: planFile }
+						]
+					}
+				]
+			});
 		} finally {
 			rmSync(directory, { recursive: true, force: true });
 		}

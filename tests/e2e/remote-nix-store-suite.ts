@@ -2131,7 +2131,11 @@ function publicationCupboard(
 				return runRealPlanningCommand(plan, realPlanning, 'cohort', arguments_);
 			}
 
-			return publicationPlanResults(plan.members, plan.initiallyAvailable);
+			return publicationPlanResults(
+				plan.members,
+				plan.initiallyAvailable,
+				arguments_.includes('--require-attested')
+			);
 		}
 
 		if (arguments_[1] === 'plan' && arguments_[2] === 'reprobe') {
@@ -2284,26 +2288,34 @@ function publicationReprobeResults(
 
 function publicationPlanResults(
 	members: readonly Pick<RemotePreparedMember, 'target'>[],
-	initiallyAvailable?: RemotePublicationPlan['initiallyAvailable']
+	initiallyAvailable?: RemotePublicationPlan['initiallyAvailable'],
+	// `--require-attested` asks the planner to build a served path the cache
+	// holds no attestation for. No test in this suite creates an attestation, so
+	// every served path is unattested under that flag.
+	requiresAttested = false
 ): readonly ReporterResultEvent[] {
-	const isInitiallyAvailable = (target: NixDerivedPathString): boolean =>
-		initiallyAvailable?.target === target;
+	const attached = requiresAttested ? undefined : initiallyAvailable;
+	const isAttached = (target: NixDerivedPathString): boolean =>
+		attached?.target === target;
 
 	return [
 		{
 			kind: 'plan-cohort',
 			data: {
 				partition: {
-					attachOnly:
-						initiallyAvailable === undefined ? [] : [initiallyAvailable.output],
+					attachOnly: attached === undefined ? [] : [attached.output],
 					publishByReference: [],
 					leftUpstream: [],
 					leftUpstreamRejections: [],
+					unattested:
+						requiresAttested && initiallyAvailable !== undefined
+							? [initiallyAvailable.output]
+							: [],
 					alreadyValid:
 						initiallyAvailable === undefined ? [] : [initiallyAvailable.output],
 					buildSet: members
 						.map((member) => member.target)
-						.filter((target) => !isInitiallyAvailable(target)),
+						.filter((target) => !isAttached(target)),
 					counts: {
 						willBuild: 0,
 						willSubstitute: 0,
@@ -2338,6 +2350,7 @@ function publicationLocallyCopyablePlanResults(
 					publishByReference: [],
 					leftUpstream: [],
 					leftUpstreamRejections: [],
+					unattested: [],
 					alreadyValid: [],
 					buildSet: members.map((member) => member.target),
 					counts: {

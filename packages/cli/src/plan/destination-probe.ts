@@ -6,6 +6,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import { attestationListSchema } from '@cupboard/protocol/attestations';
 import {
 	cacheAvailabilityMaxPaths,
 	cacheAvailabilityResponseSchema,
@@ -14,11 +15,13 @@ import {
 import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
+import { StatusCodes } from 'http-status-codes';
 
 import type { DestinationAnswers } from './availability-partition.ts';
 import { DestinationProbeResponseError } from './destination-probe-errors.ts';
 
 const maximumConcurrentProbes = 4;
+const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
 export interface DestinationProbeOptions {
 	readonly paths: readonly StorePathString[];
@@ -59,6 +62,21 @@ export function viewServedPaths(
 }
 
 /**
+ * Which of `paths` the destination cache holds at least one attestation for.
+ * The cache serves one attestation list per store-path hash, so the probe
+ * requests one list per distinct hash and reads a 404 as "no attestation for
+ * that path".
+ */
+export function attestedServedPaths(
+	options: DestinationProbeOptions & {
+		readonly baseUrl: URL;
+		readonly cache: StoredCache;
+	}
+): Promise<ReadonlySet<StorePathString>> {
+	return attestedPathsAt(cacheUrl(options.baseUrl, options.cache), options);
+}
+
+/**
  * Where a tenant's destination and reuse-view answers come from, bound to one
  * tenant, cache and credential. A run with no reuse view configured answers an
  * empty set without a request, since there is no view to ask.
@@ -71,10 +89,21 @@ export interface DestinationAnswerOptions {
 	readonly fetcher?: typeof fetch;
 }
 
-/** The pair of destination-side answers a partition or a re-probe asks. */
+/**
+ * The destination-side answers for one tenant and cache: the two availability
+ * questions a partition or a re-probe asks, plus the attestation question that
+ * a plan requiring attested availability asks.
+ */
+export interface TenantAnswers extends DestinationAnswers {
+	readonly attestedServed: (
+		paths: readonly StorePathString[]
+	) => Promise<ReadonlySet<StorePathString>>;
+}
+
+/** The destination-side answers bound to one tenant, cache and credential. */
 export function destinationAnswersFor(
 	options: DestinationAnswerOptions
-): DestinationAnswers {
+): TenantAnswers {
 	const shared = {
 		baseUrl: options.baseUrl,
 		...(options.credentials !== undefined && {
@@ -90,8 +119,29 @@ export function destinationAnswersFor(
 		viewServed: (paths) =>
 			view === undefined
 				? Promise.resolve(new Set())
-				: viewServedPaths({ ...shared, paths, view })
+				: viewServedPaths({ ...shared, paths, view }),
+		attestedServed: (paths) =>
+			attestedServedPaths({ ...shared, paths, cache: options.cache })
 	};
+}
+
+// A cache addresses a path by its hash part alone, so grouping by hash needs
+// one request per distinct hash and its answer applies to every path in that
+// group.
+function pathsByStorePathHash(
+	paths: readonly StorePathString[]
+): ReadonlyMap<StorePathHash, readonly StorePathString[]> {
+	const grouped = new Map<StorePathHash, StorePathString[]>();
+	const uniquePaths = new Set(paths);
+
+	for (const storePath of uniquePaths) {
+		const hash = StorePath.hash(storePath);
+		const matching = grouped.get(hash) ?? [];
+		matching.push(storePath);
+		grouped.set(hash, matching);
+	}
+
+	return grouped;
 }
 
 async function availablePathsAt(
@@ -99,19 +149,10 @@ async function availablePathsAt(
 	options: DestinationProbeOptions,
 	maximumBatchSize: number
 ): Promise<Set<StorePathString>> {
-	const paths = new Set(options.paths).values().toArray();
+	const pathsByHash = pathsByStorePathHash(options.paths);
 
-	if (paths.length === 0) {
+	if (pathsByHash.size === 0) {
 		return new Set();
-	}
-
-	const pathsByHash = new Map<StorePathHash, StorePathString[]>();
-
-	for (const storePath of paths) {
-		const hash = StorePath.hash(storePath);
-		const matching = pathsByHash.get(hash) ?? [];
-		matching.push(storePath);
-		pathsByHash.set(hash, matching);
 	}
 
 	const batches = chunk(pathsByHash.keys().toArray(), maximumBatchSize);
@@ -140,6 +181,89 @@ async function availablePathsAt(
 	}
 
 	return available;
+}
+
+async function attestedPathsAt(
+	probeUrl: URL,
+	options: DestinationProbeOptions
+): Promise<Set<StorePathString>> {
+	const pathsByHash = pathsByStorePathHash(options.paths);
+
+	if (pathsByHash.size === 0) {
+		return new Set();
+	}
+
+	const fetcher = options.fetcher ?? fetch;
+	const headers = {
+		...(options.credentials !== undefined &&
+			basicAuthHeader(options.credentials))
+	};
+	const answers = await mapWithConcurrency(
+		pathsByHash.keys().toArray(),
+		maximumConcurrentProbes,
+		async (hash) =>
+			[hash, await hasAttestation(fetcher, probeUrl, hash, headers)] as const
+	);
+	const attested = new Set<StorePathString>();
+
+	for (const [hash, isAttested] of answers) {
+		if (!isAttested) {
+			continue;
+		}
+
+		const matchingPaths = pathsByHash.get(hash) ?? [];
+
+		for (const storePath of matchingPaths) {
+			attested.add(storePath);
+		}
+	}
+
+	return attested;
+}
+
+async function hasAttestation(
+	fetcher: typeof fetch,
+	probeUrl: URL,
+	storePathHash: StorePathHash,
+	headers: Readonly<Record<string, string>>
+): Promise<boolean> {
+	const target = `${canonicalHref(probeUrl)}/attestations/${storePathHash}`;
+	const response = await fetcher(target, { headers });
+
+	if (response.status === notFoundStatus) {
+		await response.body?.cancel();
+
+		return false;
+	}
+
+	if (!response.ok) {
+		await response.body?.cancel();
+		throw new DestinationProbeResponseError(target, response.status);
+	}
+
+	let value: unknown;
+
+	try {
+		value = await response.json();
+	} catch (error) {
+		throw new DestinationProbeResponseError(
+			target,
+			response.status,
+			error instanceof Error ? error : new Error(String(error))
+		);
+	}
+
+	const parsed = attestationListSchema.safeParse(value);
+
+	if (!parsed.success) {
+		throw new DestinationProbeResponseError(
+			target,
+			response.status,
+			parsed.error
+		);
+	}
+
+	return parsed.data.attestations.length > 0;
 }
 
 async function queryMissingStorePathHashes(
