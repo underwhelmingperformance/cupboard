@@ -93,11 +93,11 @@ const negativeNarinfoCacheBypass = { 'narinfo-cache-negative-ttl': '0' };
  * bypass reaches substituters only when the store honours client settings.
  */
 export async function requeryUnknownWith(
-	store: Pick<Nix, 'cachesSubstituterAnswers' | 'honoursSubstituterSettings'>,
+	store: Pick<Nix, 'cachesSubstituterQueries' | 'honoursSubstituterSettings'>,
 	openBypass: () => Pick<Nix, 'queryMissing' | 'querySubstitutablePathInfos'>,
 	storePaths: readonly StorePathString[]
 ): Promise<UnknownRequeryOutcome> {
-	if (!store.cachesSubstituterAnswers) {
+	if (!store.cachesSubstituterQueries) {
 		return { kind: 'already-fresh' };
 	}
 

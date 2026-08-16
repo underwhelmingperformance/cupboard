@@ -532,7 +532,7 @@ describe('Nix.openForAvailability', () => {
 			hasSocket: true,
 			trust: 1,
 			expected: {
-				cachesSubstituterAnswers: true,
+				cachesSubstituterQueries: true,
 				preservesDaemonOptions: false,
 				isHonoured: true
 			}
@@ -542,7 +542,7 @@ describe('Nix.openForAvailability', () => {
 			hasSocket: true,
 			trust: 2,
 			expected: {
-				cachesSubstituterAnswers: true,
+				cachesSubstituterQueries: true,
 				preservesDaemonOptions: false,
 				isHonoured: false,
 				reason: 'daemon-trust',
@@ -554,7 +554,7 @@ describe('Nix.openForAvailability', () => {
 			hasSocket: true,
 			trust: 0,
 			expected: {
-				cachesSubstituterAnswers: true,
+				cachesSubstituterQueries: true,
 				preservesDaemonOptions: false,
 				isHonoured: false,
 				reason: 'daemon-trust',
@@ -567,7 +567,7 @@ describe('Nix.openForAvailability', () => {
 			storeUri: 'ssh-ng://build@example.test',
 			trust: 1,
 			expected: {
-				cachesSubstituterAnswers: true,
+				cachesSubstituterQueries: true,
 				preservesDaemonOptions: true,
 				isHonoured: false,
 				reason: 'daemon-options-preserved',
@@ -579,7 +579,7 @@ describe('Nix.openForAvailability', () => {
 			hasSocket: false,
 			trust: 0,
 			expected: {
-				cachesSubstituterAnswers: false,
+				cachesSubstituterQueries: false,
 				preservesDaemonOptions: false,
 				isHonoured: true
 			}
@@ -593,7 +593,7 @@ describe('Nix.openForAvailability', () => {
 			});
 
 			expect({
-				cachesSubstituterAnswers: nix.cachesSubstituterAnswers,
+				cachesSubstituterQueries: nix.cachesSubstituterQueries,
 				preservesDaemonOptions: nix.preservesDaemonOptions,
 				...(await nix.honoursSubstituterSettings())
 			}).toStrictEqual(expected);
