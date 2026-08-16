@@ -15,9 +15,11 @@ import {
 	DsseDecodeError,
 	inTotoStatementSchema
 } from './in-toto.ts';
-import { type SlsaProvenanceSummary, slsaProvenanceSummary } from './slsa.ts';
-
-const slsaProvenancePrefix = 'https://slsa.dev/provenance/';
+import {
+	isSlsaProvenanceType,
+	type SlsaProvenanceSummary,
+	slsaProvenanceSummary
+} from './slsa.ts';
 
 export interface IdentityPolicyOptions {
 	readonly certificateIdentity?: string;
@@ -270,7 +272,7 @@ export function resultFor(
 		);
 	}
 
-	const provenance = verified.predicateType.startsWith(slsaProvenancePrefix)
+	const provenance = isSlsaProvenanceType(verified.predicateType)
 		? slsaProvenanceSummary(verified.predicate)
 		: undefined;
 

@@ -2120,8 +2120,8 @@ async function planCohort(
 	];
 
 	// A served path counts as having provenance only when the cache also holds
-	// an attestation for it, so a provenance run asks the plan to build every
-	// served path that has no attestation.
+	// a build-provenance statement for it, so a provenance run asks the plan to
+	// build every served path without one.
 	if (inputs.requireProvenance) {
 		arguments_.push('--require-attested');
 	}

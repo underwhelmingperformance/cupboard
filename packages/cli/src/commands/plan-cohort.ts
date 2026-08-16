@@ -239,7 +239,7 @@ export interface PlanCohortRunOptions {
 	readonly storePath: string;
 	readonly planFile: string;
 	/**
-	 * Whether the destination cache must hold an attestation for a served
+	 * Whether the destination cache must hold build provenance for a served
 	 * output path before the plan leaves that target unbuilt.
 	 */
 	readonly requireAttested?: boolean;
@@ -320,7 +320,7 @@ export function registerPlanCommands(
 		)
 		.option(
 			'--require-attested',
-			'build a target the cache already serves unless the cache also holds an attestation for it'
+			'build a target the cache already serves unless the cache also holds build provenance for it'
 		)
 		.option(
 			'--unknown-ceiling <count>',
