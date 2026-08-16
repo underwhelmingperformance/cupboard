@@ -1,15 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { once } from 'node:events';
+import { createServer, type Server } from 'node:http';
 
-const mocked = vi.hoisted(() => ({ agentOptions: [] as unknown[] }));
-
-vi.mock('undici', () => ({
-	EnvHttpProxyAgent: function MockEnvHttpProxyAgent(options: unknown) {
-		mocked.agentOptions.push(options);
-	}
-}));
+import { StatusCodes } from 'http-status-codes';
+import { describe, expect, it } from 'vitest';
 
 import {
 	proxiedFetch,
+	type ProxyEnvironment,
 	type ProxySettings,
 	proxySettingsFrom
 } from './proxy.ts';
@@ -84,10 +81,6 @@ describe('proxySettingsFrom', () => {
 });
 
 describe('proxiedFetch', () => {
-	beforeEach(() => {
-		mocked.agentOptions.length = 0;
-	});
-
 	// Nothing stands between the request and the network when no variable
 	// configures a proxy, so the request takes the route every other one takes.
 	it.each([
@@ -111,11 +104,107 @@ describe('proxiedFetch', () => {
 		expect(proxiedFetch(env) !== undefined).toBe(routed);
 	});
 
-	it('overrides an excluded upper-case HTTP proxy with no proxy', () => {
-		proxiedFetch({ HTTP_PROXY: proxy, https_proxy: other });
+	it('sends an HTTP request through the configured proxy', async () => {
+		const requests: string[] = [];
+		const server = createServer((request, response) => {
+			requests.push(request.url ?? '');
+			response.statusCode = StatusCodes.ACCEPTED;
+			response.setHeader('connection', 'close');
+			response.end('from proxy');
+		});
+		const proxyOrigin = await listen(server);
 
-		expect(mocked.agentOptions).toStrictEqual([
-			{ httpProxy: '', httpsProxy: other, noProxy: '' }
-		]);
+		try {
+			const fetcher = proxiedFetch({ http_proxy: proxyOrigin });
+
+			if (fetcher === undefined) {
+				throw new Error('The configured HTTP proxy did not create a fetcher');
+			}
+
+			const response = await fetcher(
+				new URL('http://cache.invalid/nix-cache-info')
+			);
+
+			expect({ requests, status: response.status }).toStrictEqual({
+				requests: ['http://cache.invalid/nix-cache-info'],
+				status: StatusCodes.ACCEPTED
+			});
+		} finally {
+			await close(server);
+		}
+	});
+
+	it('bypasses the proxy when no_proxy matches the request host', async () => {
+		await expectDirectRequest((proxyOrigin) => ({
+			http_proxy: proxyOrigin,
+			no_proxy: '127.0.0.1'
+		}));
+	});
+
+	it('ignores an upper-case HTTP_PROXY value for HTTP requests', async () => {
+		await expectDirectRequest((proxyOrigin) => ({
+			HTTP_PROXY: proxyOrigin,
+			https_proxy: proxyOrigin
+		}));
 	});
 });
+
+async function expectDirectRequest(
+	environmentFor: (proxyOrigin: string) => ProxyEnvironment
+): Promise<void> {
+	const directRequests: string[] = [];
+	const direct = createServer((request, response) => {
+		directRequests.push(request.url ?? '');
+		response.setHeader('connection', 'close');
+		response.end('direct');
+	});
+	const directOrigin = await listen(direct);
+	const proxyRequests: string[] = [];
+	const proxyServer = createServer((request, response) => {
+		proxyRequests.push(request.url ?? '');
+		response.statusCode = StatusCodes.BAD_GATEWAY;
+		response.setHeader('connection', 'close');
+		response.end('from proxy');
+	});
+	const proxyOrigin = await listen(proxyServer);
+
+	try {
+		const fetcher = proxiedFetch(environmentFor(proxyOrigin));
+
+		if (fetcher === undefined) {
+			throw new Error('The proxy settings did not create an HTTP fetcher');
+		}
+
+		const response = await fetcher(new URL('/nix-cache-info', directOrigin));
+
+		expect({
+			directRequests,
+			proxyRequests,
+			status: response.status
+		}).toStrictEqual({
+			directRequests: ['/nix-cache-info'],
+			proxyRequests: [],
+			status: StatusCodes.OK
+		});
+	} finally {
+		await Promise.all([close(direct), close(proxyServer)]);
+	}
+}
+
+async function listen(server: Server): Promise<string> {
+	server.listen(0, '127.0.0.1');
+	await once(server, 'listening');
+
+	const address = server.address();
+
+	if (address === null || typeof address === 'string') {
+		throw new Error('The HTTP test server did not listen on a TCP port');
+	}
+
+	return `http://127.0.0.1:${String(address.port)}`;
+}
+
+async function close(server: Server): Promise<void> {
+	server.close();
+	await once(server, 'close');
+}
