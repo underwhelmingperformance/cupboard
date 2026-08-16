@@ -1045,7 +1045,7 @@ class EffectiveSettings {
 	// the merged value: it includes a system-wide assignment that a user
 	// configuration appends to, and it starts from the compiled-in default when
 	// no source assigns the setting.
-	private settledLists(): ReadonlyMap<string, readonly string[]> {
+	private resolvedLists(): ReadonlyMap<string, readonly string[]> {
 		const substitution = this.substituting.values();
 		const signatures = this.signing.values();
 
@@ -1080,7 +1080,7 @@ class EffectiveSettings {
 	}
 
 	overrides(): NixDaemonOverrides {
-		return this.overridden.values(this.settledLists());
+		return this.overridden.values(this.resolvedLists());
 	}
 
 	/**
@@ -1523,8 +1523,8 @@ class EffectiveSubstitutionSettings {
 
 /**
  * Overrides under the canonical names a daemon connection carries. Nix
- * resolves a setting against every source it read and forwards what the merge
- * settled under the setting's own name, so a daemon that receives an override
+ * resolves a setting against every source it read and forwards the resolved
+ * value under the setting's own name, so a daemon that receives an override
  * takes the value this client resolved instead of appending to a list of its
  * own.
  */
@@ -1556,17 +1556,19 @@ class EffectiveDaemonOverrides {
 	}
 
 	/**
-	 * The overrides to forward, taking each list setting's value from the
-	 * merge that settled it. A setting the merge did not settle is forwarded with
-	 * the value assigned here. A setting that was only appended to is forwarded
+	 * The overrides to forward, taking each list setting's value from the merge
+	 * that resolved it. A setting the merge did not resolve is forwarded with the
+	 * value assigned here. A setting that was only appended to is forwarded
 	 * under its `extra-` name, because the list it appends to is the compiled-in
 	 * default, which this client does not resolve and the daemon already holds.
 	 */
-	values(settled: ReadonlyMap<string, readonly string[]>): NixDaemonOverrides {
+	values(
+		resolvedLists: ReadonlyMap<string, readonly string[]>
+	): NixDaemonOverrides {
 		const entries: [string, string][] = [...this.scalar];
 
 		for (const [name, list] of this.appendable) {
-			const resolved = settled.get(name) ?? list.assignedValue();
+			const resolved = resolvedLists.get(name) ?? list.assignedValue();
 
 			if (resolved !== undefined) {
 				entries.push([name, resolved.join(' ')]);
