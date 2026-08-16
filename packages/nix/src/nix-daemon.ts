@@ -5,6 +5,7 @@ import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	type StoreDirectory,
 	storeDirectorySchema,
+	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
@@ -112,6 +113,18 @@ const stderrWrite = 0x64_61_74_16;
 const stderrLast = 0x61_6c_74_73;
 const stderrError = 0x63_78_74_70;
 const stderrStartActivity = 0x53_54_52_54;
+// Nix's `actCopyPath`. Nix starts the activity once a transfer begins, which is
+// after it has checked that the destination does not already hold the path.
+const copyPathActivity = 100;
+
+/** One field of a logger message: an integer or a string, as Nix encodes it. */
+type NixLoggerField = number | string;
+
+/** One copy the daemon reported: the path, and the store it was read from. */
+export interface NixCopyRecord {
+	readonly storePath: StorePathString;
+	readonly source: string;
+}
 const stderrStopActivity = 0x53_54_4f_50;
 const stderrResult = 0x52_53_4c_54;
 
@@ -358,6 +371,8 @@ export class NixDaemonStoreClient implements NixStoreClient {
 
 	private readonly signal?: AbortSignal;
 
+	private readonly copies = new Map<StorePathString, string[]>();
+
 	/** Whether this client deliberately omits SetOptions on every connection. */
 	readonly preservesDaemonOptions: boolean;
 
@@ -375,6 +390,16 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		this.daemonSetOptions = options.setOptions ?? {};
 		this.overrides = options.overrides ?? {};
 		this.signal = options.signal;
+	}
+
+	private recordCopy(record: NixCopyRecord): void {
+		const sources = this.copies.get(record.storePath) ?? [];
+
+		if (!sources.includes(record.source)) {
+			sources.push(record.source);
+		}
+
+		this.copies.set(record.storePath, sources);
 	}
 
 	private async openConnection(
@@ -414,6 +439,9 @@ export class NixDaemonStoreClient implements NixStoreClient {
 			this.storeDirectory,
 			openedAt,
 			release,
+			(record) => {
+				this.recordCopy(record);
+			},
 			signal
 		);
 
@@ -594,6 +622,16 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	 * realised outputs where the daemon reports them. A caller reconciling a
 	 * remote store reads those outputs after a build.
 	 */
+	/**
+	 * The stores this client watched each path being copied from, in the order
+	 * the daemon reported them. The daemon reports a copy it performs, such as a
+	 * substitution during a build, over the connection that asked for the work.
+	 * A copy this client did not ask for has no entry.
+	 */
+	observedCopies(): ReadonlyMap<StorePathString, readonly string[]> {
+		return this.copies;
+	}
+
 	async buildPathsWithResults(
 		targets: readonly NixDerivedPathString[],
 		mode: NixBuildMode = 'normal'
@@ -1327,6 +1365,7 @@ class NixDaemonConnection {
 		private readonly storeDirectory: StoreDirectory,
 		private readonly openedAt: number,
 		private readonly releaseBudget: () => void,
+		private readonly onCopy?: (record: NixCopyRecord) => void,
 		private readonly signal?: AbortSignal
 	) {
 		if (signal === undefined) {
@@ -1530,10 +1569,11 @@ class NixDaemonConnection {
 		if (messageType === stderrStartActivity) {
 			await this.readInteger();
 			await this.readInteger();
-			await this.readInteger();
+			const activityType = await this.readInteger();
 			await this.readString('activity message');
-			await this.readLoggerFields();
+			const fields = await this.readLoggerFields();
 			await this.readInteger();
+			this.recordCopyActivity(activityType, fields);
 			return true;
 		}
 
@@ -1571,22 +1611,53 @@ class NixDaemonConnection {
 		return message;
 	}
 
-	private async readLoggerFields(): Promise<void> {
+	// A copy is an activity of type `copyPathActivity`, whose fields are the
+	// store path, the store the bytes are read from and the store they are
+	// written to. The daemon forwards its own activities over this connection,
+	// so a substitution it performs for this client arrives here.
+	private recordCopyActivity(
+		activityType: number,
+		fields: readonly NixLoggerField[]
+	): void {
+		if (activityType !== copyPathActivity || this.onCopy === undefined) {
+			return;
+		}
+
+		const [storePath, source] = fields;
+
+		if (typeof storePath !== 'string' || typeof source !== 'string') {
+			return;
+		}
+
+		if (source === '') {
+			return;
+		}
+
+		const parsed = storePathSchema.safeParse(storePath);
+
+		if (parsed.success) {
+			this.onCopy({ storePath: parsed.data, source });
+		}
+	}
+
+	private async readLoggerFields(): Promise<readonly NixLoggerField[]> {
 		const fieldCount = await this.readCount(
 			'logger fields',
 			maximumDaemonLoggerFields
 		);
+		const fields: NixLoggerField[] = [];
 
 		for (let index = 0; index < fieldCount; index += 1) {
 			const fieldType = await this.readInteger();
 
-			if (fieldType === 0) {
-				await this.readInteger();
-				continue;
-			}
-
-			await this.readString('logger field');
+			fields.push(
+				fieldType === 0
+					? await this.readInteger()
+					: await this.readString('logger field')
+			);
 		}
+
+		return fields;
 	}
 
 	private async readStringSet(

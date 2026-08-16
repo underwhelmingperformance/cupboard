@@ -131,6 +131,7 @@ const testMaximumDaemonDerivationOutputs = 65_536;
 const stderrLast = 0x61_6c_74_73;
 const stderrError = 0x63_78_74_70;
 const stderrStartActivity = 0x53_54_52_54;
+const copyPathActivity = 100;
 
 interface ScriptedDaemonResponses {
 	readonly features?: Buffer;
@@ -247,6 +248,41 @@ function postHandshakeFrame(version: string): Buffer {
 	response.writeString(version);
 	response.writeInteger(0);
 	response.writeInteger(stderrLast);
+
+	return response.bytes();
+}
+
+// The records a daemon forwards while it substitutes a path for this client:
+// the copy it starts, and the query it made to find the path first. Both carry
+// a store path and a store URI, and only the copy means the bytes moved.
+function substitutingResponse(
+	buildPaths: readonly string[],
+	copies: readonly { readonly storePath: string; readonly source: string }[]
+): Buffer {
+	const response = new ProtocolWriter();
+
+	for (const copy of copies) {
+		response.writeInteger(stderrStartActivity);
+		response.writeInteger(1);
+		response.writeInteger(2);
+		response.writeInteger(copyPathActivity);
+		response.writeString(`copying path '${copy.storePath}'`);
+		response.writeInteger(3);
+		response.writeInteger(1);
+		response.writeString(copy.storePath);
+		response.writeInteger(1);
+		response.writeString(copy.source);
+		response.writeInteger(1);
+		response.writeString('local');
+		response.writeInteger(0);
+	}
+
+	response.writeInteger(stderrLast);
+	response.writeStringSet(buildPaths);
+	response.writeStringSet([]);
+	response.writeStringSet([]);
+	response.writeInteger(0);
+	response.writeInteger(0);
 
 	return response.bytes();
 }
@@ -711,6 +747,87 @@ describe('Nix daemon response bounds', () => {
 			narSize: 0
 		});
 	});
+});
+
+describe('NixDaemonStoreClient copy observation', () => {
+	const libraryPath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib';
+
+	it('records the store each forwarded copy read from', async () => {
+		const transport = new ScriptedDaemonTransport({
+			operation: substitutingResponse(
+				[],
+				[
+					{ storePath: appPath, source: 'https://cache.nixos.org' },
+					{ storePath: libraryPath, source: 'ssh://builder-1' },
+					{ storePath: appPath, source: 'https://cache.nixos.org' }
+				]
+			)
+		});
+		const client = new NixDaemonStoreClient({
+			connect: () => Promise.resolve(transport)
+		});
+
+		await client.queryMissing([appPath]);
+
+		expect([...client.observedCopies()]).toStrictEqual([
+			[appPath, ['https://cache.nixos.org']],
+			[libraryPath, ['ssh://builder-1']]
+		]);
+	});
+
+	it.each([
+		{
+			name: 'an activity of another type',
+			activityType: 108,
+			storePath: appPath,
+			source: 'https://cache.nixos.org'
+		},
+		{
+			name: 'a field that is not a store path',
+			activityType: copyPathActivity,
+			storePath: 'not a store path',
+			source: 'https://cache.nixos.org'
+		},
+		{
+			name: 'a copy with no source store',
+			activityType: copyPathActivity,
+			storePath: appPath,
+			source: ''
+		}
+	])(
+		'records nothing for $name',
+		async ({ activityType, storePath, source }) => {
+			const response = new ProtocolWriter();
+			response.writeInteger(stderrStartActivity);
+			response.writeInteger(1);
+			response.writeInteger(2);
+			response.writeInteger(activityType);
+			response.writeString('activity');
+			response.writeInteger(2);
+			response.writeInteger(1);
+			response.writeString(storePath);
+			response.writeInteger(1);
+			response.writeString(source);
+			response.writeInteger(0);
+			response.writeInteger(stderrLast);
+			response.writeStringSet([]);
+			response.writeStringSet([]);
+			response.writeStringSet([]);
+			response.writeInteger(0);
+			response.writeInteger(0);
+
+			const transport = new ScriptedDaemonTransport({
+				operation: response.bytes()
+			});
+			const client = new NixDaemonStoreClient({
+				connect: () => Promise.resolve(transport)
+			});
+
+			await client.queryMissing([appPath]);
+
+			expect([...client.observedCopies()]).toStrictEqual([]);
+		}
+	);
 });
 
 describe('NixDaemonStoreClient', () => {

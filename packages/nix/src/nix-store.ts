@@ -174,6 +174,11 @@ export type NixBuildMode = 'normal' | 'check';
 export interface NixStoreClient {
 	/** Whether this transport deliberately omits per-connection SetOptions. */
 	readonly preservesDaemonOptions?: boolean;
+	/**
+	 * The stores this client watched each path being copied from, in the order
+	 * they were reported. A client that cannot observe copies reports none.
+	 */
+	observedCopies?: () => ReadonlyMap<StorePathString, readonly string[]>;
 	resolveClosure(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly NixValidPathInfo[]>;

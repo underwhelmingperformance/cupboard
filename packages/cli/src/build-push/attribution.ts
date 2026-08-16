@@ -1,14 +1,8 @@
-import type { NixValidPathInfo } from '@cupboard/nix';
-import {
-	storePathSchema,
-	type StorePathString
-} from '@cupboard/nix-store/scalars';
+import { activityLogRecords, type NixValidPathInfo } from '@cupboard/nix';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
-import {
-	type BuildSubjectV3,
-	type NixStoreUri,
-	nixStoreUriSchema,
-	type SubjectVerification
+import type {
+	BuildSubjectV3,
+	SubjectVerification
 } from '@cupboard/protocol/build';
 import { z } from 'zod';
 
@@ -41,39 +35,6 @@ const buildActivityStartSchema = z.object({
 	fields: z.tuple([z.string().endsWith('.drv'), z.string()]).rest(z.unknown())
 });
 
-// A copy starting is an `action: 'start'` record of activity type 100 whose
-// fields are the store path, the store the bytes are read from and the store
-// they are written to. Nix writes the record once the transfer begins, which is
-// after it has checked that the destination does not already hold the path, so
-// the record shows that this run really did fetch the path from that source.
-// Type 108 names the substituter a substitution chose, but Nix writes that
-// record before the check, so it also appears for a path the destination turns
-// out to hold already.
-const copyActivityStartSchema = z.object({
-	action: z.literal('start'),
-	type: z.literal(100),
-	fields: z
-		.tuple([storePathSchema, nixStoreUriSchema, nixStoreUriSchema])
-		.rest(z.unknown())
-});
-
-// The log is another process's output, so reading it is tolerant: a line that
-// is not JSON is skipped, and each caller ignores the records it does not
-// recognise.
-function* logRecords(log: string): Generator {
-	for (const line of log.split(/\r?\n/u)) {
-		if (line === '') {
-			continue;
-		}
-
-		try {
-			yield JSON.parse(line);
-		} catch {
-			continue;
-		}
-	}
-}
-
 /**
  * Parses a JSON activity log into the build activities it recorded, one per
  * derivation, later records winning.
@@ -81,7 +42,7 @@ function* logRecords(log: string): Generator {
 export function parseBuildActivities(log: string): readonly BuildActivity[] {
 	const activities = new Map<string, BuildActivity>();
 
-	for (const record of logRecords(log)) {
+	for (const record of activityLogRecords(log)) {
 		const start = buildActivityStartSchema.safeParse(record);
 
 		if (!start.success) {
@@ -96,50 +57,6 @@ export function parseBuildActivities(log: string): readonly BuildActivity[] {
 		.values()
 		.toArray()
 		.toSorted((left, right) => byCodeUnit(left.derivation, right.derivation));
-}
-
-/**
- * The stores this run copied each path from, keyed by store path, in the order
- * the logs recorded them. A path has more than one source when the run copied it
- * more than once, which happens when Nix moves on to the next substituter after
- * a fetch fails.
- *
- * A path the run never copied has no entry. That covers every path the store
- * already held when the run started, and every path some other store fetched
- * where this run could not see it.
- */
-export function copySources(
-	logs: readonly string[]
-): ReadonlyMap<StorePathString, readonly NixStoreUri[]> {
-	const sources = new Map<StorePathString, NixStoreUri[]>();
-
-	for (const log of logs) {
-		recordCopySources(log, sources);
-	}
-
-	return sources;
-}
-
-function recordCopySources(
-	log: string,
-	sources: Map<StorePathString, NixStoreUri[]>
-): void {
-	for (const record of logRecords(log)) {
-		const start = copyActivityStartSchema.safeParse(record);
-
-		if (!start.success) {
-			continue;
-		}
-
-		const [storePath, source] = start.data.fields;
-		const recorded = sources.get(storePath) ?? [];
-
-		if (!recorded.includes(source)) {
-			recorded.push(source);
-		}
-
-		sources.set(storePath, recorded);
-	}
 }
 
 /**

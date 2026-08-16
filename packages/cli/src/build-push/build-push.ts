@@ -2,7 +2,7 @@ import { readdir, readlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
-import type { Nix } from '@cupboard/nix';
+import { copySources, type Nix } from '@cupboard/nix';
 import { derivationPathOf } from '@cupboard/nix-store/derivation';
 import {
 	type RootName,
@@ -17,6 +17,7 @@ import {
 	type BuildSubjectV3,
 	type InvocationId,
 	type NixStoreUri,
+	nixStoreUriSchema,
 	type ParsedBuildReceiptV3,
 	type TerminalBuildFailure
 } from '@cupboard/protocol/build';
@@ -57,7 +58,6 @@ import {
 
 import {
 	type BuildAttempt,
-	copySources,
 	delegatedMachines,
 	parseBuildActivities,
 	receiptSubjects
@@ -342,7 +342,7 @@ async function runStreamedBuildPush(
 			maxQueueDepth,
 			eventPaths,
 			subjects,
-			copiedFrom: copySources(attempts.map((attempt) => attempt.log)),
+			copiedFrom: watchedCopySources(attempts.map((attempt) => attempt.log)),
 			...(selectedTargetPaths !== undefined && { selectedTargetPaths }),
 			...(terminalFailure !== undefined && { terminalFailure })
 		});
@@ -424,6 +424,22 @@ function constructedNixCommand(
 			: ['--max-jobs', String(build.maxJobs)]),
 		...build.installables
 	];
+}
+
+// `@cupboard/nix` reads Nix's own log and returns the store URIs verbatim,
+// because that package knows nothing of the receipt's schemas. Brand them here,
+// where they enter the receipt's vocabulary.
+function watchedCopySources(
+	logs: readonly string[]
+): ReadonlyMap<StorePathString, readonly NixStoreUri[]> {
+	return new Map(
+		copySources(logs)
+			.entries()
+			.map(([storePath, sources]) => [
+				storePath,
+				sources.map((source) => nixStoreUriSchema.parse(source))
+			])
+	);
 }
 
 // The receipt subjects a constructed build attributes: the built paths
@@ -570,7 +586,7 @@ async function runReconciledLocalBuildPush(
 				// current-run provenance candidates rather than exclusions.
 				alreadyHeld: build.rebuild === true ? [] : initiallyValid,
 				delegated,
-				copiedFrom: copySources(attemptLogs),
+				copiedFrom: watchedCopySources(attemptLogs),
 				exit,
 				...(terminalFailure !== undefined && { terminalFailure })
 			},

@@ -7,8 +7,13 @@ import {
 	type RootName,
 	selectorForCache,
 	storePathSchema,
+	type StorePathString,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
+import {
+	type NixStoreUri,
+	observedCopiesSchema
+} from '@cupboard/protocol/build';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
@@ -66,6 +71,7 @@ interface PushOptions {
 	readonly receiptFile?: string;
 	readonly alreadyHeld?: readonly string[] | false;
 	readonly claimable?: readonly string[] | false;
+	readonly copiedFromFile?: string;
 	readonly wait?: boolean;
 	readonly waitTimeout?: WaitTimeoutSeconds;
 	readonly attest?: boolean;
@@ -157,6 +163,30 @@ export function receiptBuildStore(
 	}
 
 	return options.store;
+}
+
+/**
+ * The copies a supervising build watched, read from the file it wrote. A push
+ * runs after the build and in its own process, so it watches no copy itself.
+ * A run that supplies no file records no source for any path it publishes.
+ */
+export async function observedCopiesFrom(
+	copiedFromFile: string | undefined
+): Promise<ReadonlyMap<StorePathString, readonly NixStoreUri[]> | undefined> {
+	if (copiedFromFile === undefined) {
+		return undefined;
+	}
+
+	const parsed = observedCopiesSchema.parse(
+		JSON.parse(await readFile(copiedFromFile, 'utf8'))
+	);
+	const copies = new Map<StorePathString, readonly NixStoreUri[]>();
+
+	for (const [storePath, sources] of Object.entries(parsed)) {
+		copies.set(storePathSchema.parse(storePath), sources);
+	}
+
+	return copies;
 }
 
 /**
@@ -354,6 +384,10 @@ export function registerPushCommand(
 			'state that this invocation observed no realisation evidence, so the receipt has no subjects'
 		)
 		.option(
+			'--copied-from-file <path>',
+			'JSON file listing the stores a supervising build watched each path being copied from'
+		)
+		.option(
 			'--attestation <bundle>',
 			'path to a Sigstore DSSE bundle whose in-toto subject matches a pushed path',
 			collect,
@@ -478,6 +512,7 @@ export function registerPushCommand(
 				)
 			});
 
+			const copiedFrom = await observedCopiesFrom(options.copiedFromFile);
 			const receipt = await runPush(publication, reporter, {
 				client: pushClientFor(url, token, {
 					cache: options.cache,
@@ -529,7 +564,8 @@ export function registerPushCommand(
 				}),
 				...(options.claimable !== undefined && {
 					claimable: options.claimable === false ? [] : options.claimable
-				})
+				}),
+				...(copiedFrom !== undefined && { copiedFrom })
 			});
 
 			if (receipt === undefined || options.receiptFile === undefined) {

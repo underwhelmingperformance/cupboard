@@ -12,6 +12,7 @@ import { InvalidStorePathError } from '@cupboard/nix-store/errors';
 import { rootNameSchema, ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import type { ProgramOptions } from '../cli.ts';
 import {
@@ -29,6 +30,7 @@ import {
 } from '../errors.ts';
 
 import {
+	observedCopiesFrom,
 	parsePathFile,
 	pushCommandAuthorizationDetails,
 	receiptBuildStore,
@@ -160,6 +162,46 @@ describe('validateRetentionChoice', () => {
 		expect(() => {
 			validateRetentionChoice(options);
 		}).not.toThrow();
+	});
+});
+
+describe('observedCopiesFrom', () => {
+	it('reads the copies a supervising build recorded', async () => {
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-copies-'));
+		const copiedFromFile = path.join(directory, 'observed-copies.json');
+		const appPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
+
+		try {
+			writeFileSync(
+				copiedFromFile,
+				JSON.stringify({ [appPath]: ['https://cache.example.test'] })
+			);
+
+			expect([
+				...((await observedCopiesFrom(copiedFromFile)) ?? [])
+			]).toStrictEqual([[appPath, ['https://cache.example.test']]]);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
+	});
+
+	it('records no copy for a run that supplied no file', async () => {
+		await expect(observedCopiesFrom(undefined)).resolves.toBeUndefined();
+	});
+
+	it('refuses a file that does not describe observed copies', async () => {
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-copies-'));
+		const copiedFromFile = path.join(directory, 'observed-copies.json');
+
+		try {
+			writeFileSync(copiedFromFile, JSON.stringify({ 'not a path': [] }));
+
+			await expect(observedCopiesFrom(copiedFromFile)).rejects.toBeInstanceOf(
+				z.ZodError
+			);
+		} finally {
+			rmSync(directory, { recursive: true, force: true });
+		}
 	});
 });
 

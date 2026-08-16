@@ -1,3 +1,4 @@
+export { activityLogRecords, copySources } from './activity-log.ts';
 export { NarFileTooLargeError, UnexpectedNarShapeError } from './nar-file.ts';
 export type {
 	NixDependencies,
