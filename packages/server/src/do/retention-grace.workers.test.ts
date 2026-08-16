@@ -108,7 +108,7 @@ import { VerificationService } from './verification-service.ts';
 const repeated = (character: string): string => character.repeat(32);
 const tenantWideContinuation = {
 	scope: 'tenant',
-	sweepLimit: maxPathsSweptPerRun
+	collectLimit: maxPathsSweptPerRun
 };
 
 // The pipeline over a live instance's context, as the server itself builds it.

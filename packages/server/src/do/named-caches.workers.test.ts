@@ -358,7 +358,7 @@ describe('named caches', () => {
 					{
 						scope: 'cache',
 						cache: 'a',
-						sweepLimit: maxPathsSweptPerRun
+						collectLimit: maxPathsSweptPerRun
 					}
 				]
 			},

@@ -1094,7 +1094,7 @@ export class GarbageCollectionService {
 		logger: Logger,
 		cache?: StoredCache,
 		purgeOrigin?: RequestOrigin,
-		sweepLimit: number = maxPathsSweptPerRun
+		collectLimit: number = maxPathsSweptPerRun
 	): Promise<GarbageCollectionOutcome> {
 		const log = logger.with({
 			job: 'garbage-collection',
@@ -1173,7 +1173,7 @@ export class GarbageCollectionService {
 							hasMoreExpiredRoots: false,
 							hasMoreWork: false
 						}
-					: this.collectUnreachable(sweepCache, now, sweepLimit);
+					: this.collectUnreachable(sweepCache, now, collectLimit);
 			const hasMoreWork =
 				cache === undefined && sweepCache !== undefined && !swept.hasMoreWork
 					? this.advanceTenantSweep(sweepCache)
