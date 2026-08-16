@@ -219,7 +219,7 @@ export const refreshTokens = sqliteTable(
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
 	},
-	// The GC sweep deletes expired refresh tokens by `expires_at`; the index spares
+	// The GC pass deletes expired refresh tokens by `expires_at`; the index spares
 	// it a scan of every live grant.
 	(table) => [index('refresh_token_expires_at_idx').on(table.expiresAt)]
 );
@@ -323,12 +323,12 @@ export const garbageCollectionScans = sqliteTable('garbage_collection_scan', {
 	cache: text('cache').$type<StoredCache>().primaryKey(),
 	revision: integer('revision').notNull(),
 	phase: text('phase', {
-		enum: ['expire-roots', 'expire-grace', 'roots', 'grace', 'mark', 'sweep']
+		enum: ['expire-roots', 'expire-grace', 'roots', 'grace', 'mark', 'collect']
 	}).notNull(),
 	cursor: text('cursor').notNull().default(''),
 	markStorePathHash: text('mark_store_path_hash').$type<StorePathHash>(),
 	referenceCursor: integer('reference_cursor').notNull().default(-1),
-	allowEmptySweep: integer('allow_empty_sweep', { mode: 'boolean' })
+	allowEmptyCollection: integer('allow_empty_collection', { mode: 'boolean' })
 		.notNull()
 		.default(false)
 });
@@ -351,9 +351,9 @@ export const garbageCollectionMarks = sqliteTable(
 	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
 );
 
-// A tenant-wide sweep advances through one cache at a time. The current cache
-// remains here until its incremental scan completes, then the next cache is
-// selected lexicographically without loading the complete cache registry.
+// A tenant-wide collection advances through one cache at a time. The current
+// cache remains here until its incremental scan completes, then the next cache
+// is selected lexicographically without loading the complete cache registry.
 export const garbageCollectionTenantRuns = sqliteTable(
 	'garbage_collection_tenant_run',
 	{

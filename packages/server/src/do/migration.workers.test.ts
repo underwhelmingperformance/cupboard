@@ -292,6 +292,41 @@ describe('migrations', () => {
 		expect(migrated).toStrictEqual([{ id: 'u1', hasAttachRoot: false }]);
 	});
 
+	it('carries a pre-0034 scan through the collect phase rename', async () => {
+		const insertCollectingScan =
+			"INSERT INTO garbage_collection_scan (cache, revision, phase, cursor, reference_cursor, allow_empty_sweep) VALUES ('builds', 7, 'sweep', 'aa', -1, 1)";
+		const selectScans =
+			'SELECT cache, revision, phase, cursor, allow_empty_collection FROM garbage_collection_scan';
+
+		const migrated = await runInDurableObject(
+			testServerFor('migration-collect-phase'),
+			async (_instance, state) => {
+				// A collection interrupted before 0034 left a scan row naming the
+				// phase `sweep` and holding its allow-empty flag in
+				// `allow_empty_sweep`. The migration must rename the column and
+				// rewrite the phase, so the interrupted collection resumes where it
+				// stopped. The anchor is fixed so later migrations cannot silently
+				// retarget the test.
+				await migrateThrough(state, 33);
+				state.storage.sql.exec(insertCollectingScan);
+
+				await migrateThrough(state, latestMigrationIndex);
+
+				return state.storage.sql.exec(selectScans).toArray();
+			}
+		);
+
+		expect(migrated).toStrictEqual([
+			{
+				cache: 'builds',
+				revision: 7,
+				phase: 'collect',
+				cursor: 'aa',
+				allow_empty_collection: 1
+			}
+		]);
+	});
+
 	it('gains the reuse-view tables and narinfo index at the latest migration, leaving an existing narinfo row untouched', async () => {
 		const storePathHash = 'a'.repeat(32);
 		const narInfoRow = {
