@@ -426,9 +426,9 @@ function constructedNixCommand(
 	];
 }
 
-// `@cupboard/nix` reads Nix's own log and returns the store URIs verbatim,
-// because that package knows nothing of the receipt's schemas. Brand them here,
-// where they enter the receipt's vocabulary.
+// `copySources` returns each store as a plain string, because `@cupboard/nix`
+// does not depend on the receipt schemas. Brand the strings here, where they
+// become receipt values.
 function watchedCopySources(
 	logs: readonly string[]
 ): ReadonlyMap<StorePathString, readonly NixStoreUri[]> {

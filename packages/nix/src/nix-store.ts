@@ -175,8 +175,8 @@ export interface NixStoreClient {
 	/** Whether this transport deliberately omits per-connection SetOptions. */
 	readonly preservesDaemonOptions?: boolean;
 	/**
-	 * The stores this client watched each path being copied from, in the order
-	 * they were reported. A client that cannot observe copies reports none.
+	 * The stores each path was copied from, in the order the store reported
+	 * them. A client that cannot observe copies does not implement this method.
 	 */
 	observedCopies?: () => ReadonlyMap<StorePathString, readonly string[]>;
 	resolveClosure(

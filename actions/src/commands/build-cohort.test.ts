@@ -3976,7 +3976,7 @@ describe('buildCohortAction publication', () => {
 		plannedBuildSet: readonly string[] = [libraryQueryInstallable],
 		publicationPaths?: readonly string[],
 		// The copies the remote store reported over the build session, which the
-		// real client accumulates and hands to publication.
+		// real client accumulates and passes to publication.
 		observedCopies: ReadonlyMap<StorePathString, readonly string[]> = new Map()
 	): Promise<PublicationRun> {
 		const calls: (readonly string[])[] = [];
@@ -5462,7 +5462,7 @@ describe('buildCohortAction publication', () => {
 		});
 	});
 
-	it('hands the push the copies the remote build session watched', async () => {
+	it('writes the copies the remote build session watched beside the receipt', async () => {
 		await runPublicationFlow(
 			{
 				...baseOptions(),

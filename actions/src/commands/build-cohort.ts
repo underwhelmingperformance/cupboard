@@ -896,9 +896,10 @@ export async function buildCohortAction(
 			build = {
 				paths: streamedFailure.receipt.paths,
 				status: streamedFailure.error.status,
-				// A streamed run has already published what it built, so this
-				// branch resolves paths rather than building, and no copy passes
-				// through it.
+				// The streamed run published through `cupboard build-push`, which
+				// records the copies it watched in the receipt it writes. This
+				// branch only reads the paths back out of that receipt, so there
+				// is no copy for this process to record.
 				copiedFrom: new Map()
 			};
 		}
@@ -1109,7 +1110,7 @@ async function settleCohortBuild(
 		readonly localBuilds?: readonly CohortOwnedBuild[];
 		readonly incompleteRoots?: ReadonlySet<string>;
 		readonly terminalFailure?: ParsedTerminalBuildFailure;
-		/** The stores the build watched each path being copied from. */
+		/** The stores each path was copied from, keyed by store path. */
 		readonly copiedFrom?: ReadonlyMap<string, readonly string[]>;
 	}
 ): Promise<void> {
@@ -2287,9 +2288,9 @@ export function nixBuildArguments(
 		'--print-out-paths',
 		'--out-link',
 		path.join(outLinkDirectory, 'result'),
-		// The log records which store each copied path was read from, which is
-		// the only evidence a run has for a path it substituted rather than
-		// built.
+		// The log records the store each copied path was read from. For a path
+		// the run substituted rather than built, that record is how the receipt
+		// can say where the path came from.
 		'--option',
 		'json-log-path',
 		logFile
@@ -3298,7 +3299,7 @@ export function buildResultOutputPaths(
 export interface NixBuildCommandResult {
 	readonly paths: readonly string[];
 	readonly status: number | null;
-	/** The stores the build watched each path being copied from. */
+	/** The stores each path was copied from, keyed by store path. */
 	readonly copiedFrom: ReadonlyMap<StorePathString, readonly string[]>;
 }
 
@@ -3466,9 +3467,9 @@ export async function runNixBuild(
 	return { paths, status, copiedFrom: await readCopySources(logFile) };
 }
 
-// Nix creates the activity log when the build starts, so a build that failed
-// before then leaves no file. A read that fails therefore means the run
-// recorded no copy.
+// Nix creates the activity log when the build starts, so an invocation that
+// failed before then leaves no file. Treat a log this process cannot read as a
+// run that copied nothing.
 async function readCopySources(
 	logFile: string
 ): Promise<ReadonlyMap<StorePathString, readonly string[]>> {

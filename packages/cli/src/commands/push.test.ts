@@ -185,7 +185,7 @@ describe('observedCopiesFrom', () => {
 		}
 	});
 
-	it('records no copy for a run that supplied no file', async () => {
+	it('returns nothing when the run supplied no file', async () => {
 		await expect(observedCopiesFrom(undefined)).resolves.toBeUndefined();
 	});
 

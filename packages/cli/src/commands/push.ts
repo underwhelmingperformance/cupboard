@@ -166,9 +166,10 @@ export function receiptBuildStore(
 }
 
 /**
- * The copies a supervising build watched, read from the file it wrote. A push
- * runs after the build and in its own process, so it watches no copy itself.
- * A run that supplies no file records no source for any path it publishes.
+ * The copies a supervising build recorded, read back from the file it wrote.
+ * The push runs in its own process after the build, so it observes no copy
+ * itself. Returns undefined when the run supplies no file, and the receipt
+ * then records no source for any path it publishes.
  */
 export async function observedCopiesFrom(
 	copiedFromFile: string | undefined
@@ -385,7 +386,7 @@ export function registerPushCommand(
 		)
 		.option(
 			'--copied-from-file <path>',
-			'JSON file listing the stores a supervising build watched each path being copied from'
+			'a JSON file, written by the build, recording the stores each path was copied from'
 		)
 		.option(
 			'--attestation <bundle>',
