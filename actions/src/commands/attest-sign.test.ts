@@ -86,7 +86,10 @@ function options(
 	};
 }
 
-/** Records what each statement was signed with and returns a fixed bundle. */
+/**
+ * Records the subjects and the statement of each signing call, then returns a
+ * fixed bundle. Each listed failure fails the call at the matching position.
+ */
 function recordingSigner(
 	records: SigningRecord[],
 	failures: readonly Error[] = []
@@ -256,7 +259,7 @@ describe('attestSignAction', () => {
 		}
 	});
 
-	it('refuses a checksums file that names no subject', async () => {
+	it('refuses a checksums file that lists no subject', async () => {
 		const files = await workspace();
 
 		try {
@@ -274,7 +277,7 @@ describe('attestSignAction', () => {
 		}
 	});
 
-	it('refuses a predicate file that is not a JSON object before signing', async () => {
+	it('refuses a predicate file that holds no JSON object, before signing', async () => {
 		const files = await workspace();
 		const records: SigningRecord[] = [];
 

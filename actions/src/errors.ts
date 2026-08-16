@@ -494,9 +494,9 @@ export class AttestationChecksumsMismatchError extends CodedError {
 }
 
 /**
- * Signing a statement failed for a reason the action does not retry, or failed
- * on every attempt it made. `attempts` counts the attempts, so a value of one
- * means the first failure was classified as final.
+ * Signing a statement failed on every attempt, or failed once with a failure
+ * the action treats as final. `attempts` is the number of attempts made, so one
+ * means the first failure was final.
  */
 export class AttestationSigningError extends CodedError {
 	constructor(
@@ -512,14 +512,14 @@ export class AttestationSigningError extends CodedError {
 	}
 }
 
-/** The build-origin predicate file does not hold a JSON object to sign. */
+/** The build-origin predicate file is not readable as a JSON object to sign. */
 export class AttestationPredicateFileError extends CodedError {
 	constructor(
 		public readonly predicateFile: string,
 		options: { readonly cause: unknown }
 	) {
 		super(
-			`${predicateFile} does not contain a JSON object to sign`,
+			`${predicateFile} does not parse as a JSON object to sign`,
 			withCause(options.cause)
 		);
 		this.name = 'AttestationPredicateFileError';
