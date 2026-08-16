@@ -128,7 +128,7 @@ export class GarbageCollectionService {
 					phase: 'expire-roots',
 					cursor: '',
 					referenceCursor: -1,
-					allowEmptySweep: false
+					allowEmptyCollection: false
 				})
 				.onConflictDoUpdate({
 					target: schema.garbageCollectionScans.cache,
@@ -138,7 +138,7 @@ export class GarbageCollectionService {
 						cursor: '',
 						markStorePathHash: sql`null`,
 						referenceCursor: -1,
-						allowEmptySweep: false
+						allowEmptyCollection: false
 					}
 				})
 				.run();
@@ -178,7 +178,11 @@ export class GarbageCollectionService {
 		set: Partial<
 			Pick<
 				typeof schema.garbageCollectionScans.$inferInsert,
-				'phase' | 'cursor' | 'referenceCursor' | 'allowEmptySweep' | 'revision'
+				| 'phase'
+				| 'cursor'
+				| 'referenceCursor'
+				| 'allowEmptyCollection'
+				| 'revision'
 			>
 		> & {
 			readonly markStorePathHash?: StorePathHash | SQL;
@@ -648,12 +652,12 @@ export class GarbageCollectionService {
 			.limit(1)
 			.get();
 
-		if (retained === undefined && !scan.allowEmptySweep) {
+		if (retained === undefined && !scan.allowEmptyCollection) {
 			this.clearScan(cache);
 			return true;
 		}
 
-		this.updateScan(cache, { phase: 'sweep', cursor: '' });
+		this.updateScan(cache, { phase: 'collect', cursor: '' });
 		return false;
 	}
 
@@ -816,8 +820,8 @@ export class GarbageCollectionService {
 				hasMoreExpiredRoots ||= expired.hasMoreExpiredRoots;
 				this.updateScan(cache, {
 					revision: this.currentRevision(cache),
-					allowEmptySweep:
-						scan.allowEmptySweep ||
+					allowEmptyCollection:
+						scan.allowEmptyCollection ||
 						expired.rootsExpired > 0 ||
 						this.cacheGraceManaged(cache),
 					...(!expired.hasMoreExpiredRoots && { phase: 'expire-grace' })
@@ -864,8 +868,8 @@ export class GarbageCollectionService {
 				expiryRemaining -= batch.length;
 				this.updateScan(cache, {
 					revision: this.currentRevision(cache),
-					allowEmptySweep:
-						scan.allowEmptySweep || this.cacheGraceManaged(cache),
+					allowEmptyCollection:
+						scan.allowEmptyCollection || this.cacheGraceManaged(cache),
 					...(candidates.length <= batch.length && { phase: 'roots' })
 				});
 
