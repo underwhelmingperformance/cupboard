@@ -949,11 +949,11 @@ async function runPushFlow(
 	);
 
 	// Every commit conversation runs concurrently: deferred uploads park on
-	// their sockets and the server's verification pass settles them together,
-	// so committing serially would wait one pass per path. With `--no-wait` a
-	// deferred upload reports `pending` as soon as it is stored. The committable
-	// decisions are the uploaded paths and the blobs the negotiation said to
-	// reuse.
+	// their sockets and one server verification pass reaches a verdict on all
+	// of them, so committing serially would wait one pass per path. With
+	// `--no-wait` a deferred upload reports `pending` as soon as it is stored.
+	// The committable decisions are the uploaded paths and the blobs the
+	// negotiation said to reuse.
 	const commitDecisions = [
 		...uploaded,
 		...negotiation.uploads.filter((decision) => isReusedBlobCommit(decision))
@@ -962,9 +962,9 @@ async function runPushFlow(
 		timeoutSeconds: waitTimeoutSeconds
 	};
 	const session = await client.openCommitSession?.(commitOptions);
-	// Keyed by store-path hash and updated in place as a deferred path settles or
-	// is re-driven, so the push summary reads each path's latest outcome once
-	// every phase below has run.
+	// Keyed by store-path hash and updated in place as a deferred path's verdict
+	// arrives or the path is re-driven, so the push summary reads each path's
+	// latest outcome once every phase below has run.
 	const outcomes = new Map<StorePathHash, CommitOutcome>();
 	// Keyed by store-path hash: the action each path's latest negotiation
 	// chose. A re-drive renegotiates, and the fresh decision can differ from
@@ -1094,8 +1094,8 @@ async function runPushFlow(
 
 		// Retention is already recorded, so the wait phase only collects the
 		// verdicts. A deferred path that fails verification fails the push.
-		// `--no-wait` leaves such paths to settle on the server and reports them as
-		// pending.
+		// `--no-wait` leaves the server to reach their verdicts and reports them
+		// as pending.
 		if (shouldWait && commit.pending.length > 0) {
 			await reporter.progress(
 				'Verifying uploads',
@@ -1529,7 +1529,7 @@ function committedOrPendingPath(
 ): PushSummaryPath {
 	const isFinal = outcome.status !== 'pending' || shouldWait;
 	const grace = isFinal
-		? (outcome.settledGrace?.() ?? outcome.grace)
+		? (outcome.verdictGrace?.() ?? outcome.grace)
 		: outcome.grace;
 
 	return {
@@ -1886,7 +1886,7 @@ function commitTarget(
 }
 
 // A deferred commit whose verify pass answered `absent`: the row or the
-// shared blob it relied on vanished before the verdict could settle it, the
+// shared blob it relied on vanished before the pass could verify it, the
 // deferred twin of a `NOT_FOUND` commit. It recovers the same way, by
 // planning afresh.
 function isAbsentVerdict(error: unknown): boolean {
