@@ -24,7 +24,10 @@ vi.mock('@actions/attest', () => ({
 	buildSLSAProvenancePredicate: mocks.buildSLSAProvenancePredicate
 }));
 
-/** What `@sigstore/sign` raises: a code for the stage that failed, and why. */
+/**
+ * Stands in for a `@sigstore/sign` error: a code for the stage that failed,
+ * with the underlying failure as its cause.
+ */
 class SigningFailure extends Error {
 	constructor(
 		public readonly code: string,
@@ -35,10 +38,13 @@ class SigningFailure extends Error {
 	}
 }
 
-/** What the Sigstore HTTP client raises for a non-2xx answer. */
+/**
+ * Stands in for the error the Sigstore HTTP client throws for a non-2xx
+ * response.
+ */
 class HttpFailure extends Error {
 	constructor(public readonly statusCode: number) {
-		super('the service refused the request');
+		super('the service answered with an error status');
 		this.name = 'HttpFailure';
 	}
 }
@@ -62,12 +68,12 @@ interface ClassificationCase {
 
 const classificationCases: readonly ClassificationCase[] = [
 	{
-		failure: 'the transparency log did not answer the entry fetch',
+		failure: 'fetching the log entry got no answer',
 		error: signingFailure('TLOG_FETCH_ENTRY_ERROR'),
 		transient: true
 	},
 	{
-		failure: 'the transparency log answered the entry fetch with 504',
+		failure: 'the transparency log answered the fetch with 504',
 		error: signingFailure('TLOG_FETCH_ENTRY_ERROR', httpFailure(504)),
 		transient: true
 	},
@@ -77,12 +83,12 @@ const classificationCases: readonly ClassificationCase[] = [
 		transient: true
 	},
 	{
-		failure: 'the transparency log rejected the entry with 400',
+		failure: 'the transparency log refused the new entry with 400',
 		error: signingFailure('TLOG_CREATE_ENTRY_ERROR', httpFailure(400)),
 		transient: false
 	},
 	{
-		failure: 'Fulcio answered with 503',
+		failure: 'Fulcio answered the certificate request with 503',
 		error: signingFailure(
 			'CA_CREATE_SIGNING_CERTIFICATE_ERROR',
 			httpFailure(503)
@@ -98,7 +104,7 @@ const classificationCases: readonly ClassificationCase[] = [
 		transient: false
 	},
 	{
-		failure: 'the timestamp authority did not answer',
+		failure: 'the timestamp authority gave no answer',
 		error: signingFailure('TSA_CREATE_TIMESTAMP_ERROR'),
 		transient: true
 	},
@@ -113,7 +119,7 @@ const classificationCases: readonly ClassificationCase[] = [
 		transient: false
 	},
 	{
-		failure: 'the attestation store rejected the bundle',
+		failure: 'the attestation store refused the bundle',
 		error: new Error('the store refused the bundle'),
 		transient: false
 	},
@@ -142,9 +148,9 @@ const signed: SignedAttestation = { bundle: '{"mediaType":"test"}\n' };
 
 interface SigningRun {
 	readonly signer: StatementSigner;
-	/** The statement handed to the signer, once per attempt made. */
+	/** The statement passed to the signer, recorded once per attempt. */
 	readonly attempted: AttestationStatement[];
-	/** The attempt number each wait was asked for. */
+	/** The attempt number passed to each wait. */
 	readonly delays: number[];
 	readonly delay: (attempt: number) => Promise<void>;
 }
@@ -281,7 +287,7 @@ describe('signStatement', () => {
 });
 
 describe('githubStatementSigner', () => {
-	it('signs the subjects as sha256 digests and serialises one bundle', async () => {
+	it('sends each subject as a sha256 digest and returns the bundle as text', async () => {
 		const bundle = {
 			mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json'
 		};
@@ -324,17 +330,17 @@ describe('githubStatementSigner', () => {
 });
 
 describe('slsaProvenanceStatement', () => {
-	it('takes the predicate type and body from the generated provenance', async () => {
-		const body = { buildDefinition: { buildType: 'workflow' } };
+	it('takes the type and the parameters of the generated predicate', async () => {
+		const parameters = { buildDefinition: { buildType: 'workflow' } };
 
 		mocks.buildSLSAProvenancePredicate.mockResolvedValue({
 			type: 'https://slsa.dev/provenance/v1',
-			params: body
+			params: parameters
 		});
 
 		expect(await slsaProvenanceStatement()).toStrictEqual({
 			predicateType: 'https://slsa.dev/provenance/v1',
-			predicate: body
+			predicate: parameters
 		});
 	});
 });

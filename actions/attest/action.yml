@@ -130,10 +130,11 @@ runs:
     # states how this workflow ran; cupboard's build-origin predicate states
     # where each path came from, which only the receipt records.
     #
-    # The signing happens here rather than in actions/attest-build-provenance
-    # and actions/attest because a `uses:` step cannot be retried and neither
-    # action takes a retry input. A Sigstore witness that stops answering after
-    # the signature was made would otherwise fail the whole publication.
+    # This step signs them itself so that a failed signing attempt can be made
+    # again. A workflow cannot retry a `uses:` step, and neither
+    # actions/attest-build-provenance nor actions/attest takes a retry input, so
+    # a Sigstore witness that stops answering once the signature is made would
+    # fail the whole publication.
     - name: Sign the attestation statements
       id: attest
       if: ${{ steps.subjects.outputs.subject-count != '0' }}

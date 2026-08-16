@@ -36,7 +36,10 @@ export interface AttestSignOptions {
 
 export interface AttestSignInputs {
 	readonly checksumsFile: string;
-	/** The build-origin predicate to sign. Empty signs the provenance only. */
+	/**
+	 * Path to the build-origin predicate. An empty path signs the provenance
+	 * alone.
+	 */
 	readonly predicateFile: string;
 	readonly predicateType: string;
 	readonly bundleFile: string;
@@ -45,7 +48,10 @@ export interface AttestSignInputs {
 }
 
 export interface AttestSignDependencies extends SigningDependencies {
-	/** Signs each statement. Defaults to signing through GitHub's Sigstore. */
+	/**
+	 * Builds the signer for the run's subjects. Defaults to
+	 * {@link githubStatementSigner}.
+	 */
 	readonly signerFor?: (
 		subjects: readonly AttestationSubject[],
 		githubToken: string
@@ -54,10 +60,10 @@ export interface AttestSignDependencies extends SigningDependencies {
 	readonly provenanceStatement?: () => Promise<AttestationStatement>;
 }
 
-// The predicate file is written by the `attest` command, which validates the
-// build-origin predicate against its schema before writing it. This command
-// signs the document as it stands and only checks that it is a JSON object,
-// which is what an in-toto statement can carry.
+// The `attest` command validates the build-origin predicate against its schema
+// before it writes the file, so this command signs the document as it stands.
+// The only check here is that the document is a JSON object, because that is
+// what the predicate field of an in-toto statement takes.
 const predicateDocumentSchema = z.looseObject({});
 
 export function registerAttestSignCommand(
@@ -120,8 +126,8 @@ export function resolveAttestSignInputs(
 		);
 	}
 
-	// Both bundles default to the checksums file's directory, so a caller that
-	// chose its own checksums path keeps the whole attestation set together.
+	// Both bundles default to the directory of the checksums file, so a caller
+	// that chose its own checksums path gets the bundles beside it.
 	const bundleDirectory = path.dirname(path.resolve(checksumsFile));
 
 	return {
@@ -176,10 +182,10 @@ async function writeBundle(
 }
 
 /**
- * Signs the subjects the `attest` command resolved, into one bundle carrying
- * GitHub's SLSA build provenance and, when the run recorded an origin for those
- * subjects, a second bundle carrying cupboard's build-origin statement. Both
- * bundles cover the same subjects.
+ * Signs the subjects that the `attest` command resolved. The first bundle
+ * carries GitHub's SLSA build provenance. When the run recorded an origin for
+ * those subjects, a second bundle carries cupboard's build-origin statement.
+ * Both bundles cover the same subjects.
  */
 export async function attestSignAction(
 	options: AttestSignOptions,
@@ -193,7 +199,7 @@ export async function attestSignAction(
 	if (subjects.length === 0) {
 		throw new InvalidInputError(
 			'checksums-file',
-			`${inputs.checksumsFile} names no subject to sign`
+			`${inputs.checksumsFile} lists no subject to sign`
 		);
 	}
 
@@ -206,9 +212,9 @@ export async function attestSignAction(
 		dependencies.provenanceStatement ?? slsaProvenanceStatement;
 	const signing: SigningDependencies =
 		dependencies.delay === undefined ? {} : { delay: dependencies.delay };
-	// Read the build-origin predicate before anything is signed. An unreadable
-	// file then fails the step without having recorded a provenance attestation
-	// on the repository first.
+	// Read the build-origin predicate before signing anything. Reading it later
+	// would record a provenance attestation on the repository for a run that
+	// then fails on an unreadable file.
 	const originPredicate =
 		inputs.predicateFile === ''
 			? undefined
