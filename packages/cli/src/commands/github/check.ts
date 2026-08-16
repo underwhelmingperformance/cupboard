@@ -24,7 +24,8 @@ import { isAbortError } from '../../abort.ts';
 import {
 	confirmAuthorizationDetails,
 	pushAuthorizationDetails,
-	rootEnsureAuthorizationDetails
+	rootEnsureAuthorizationDetails,
+	rootListAuthorizationDetails
 } from '../../auth/attenuate.ts';
 import {
 	GithubCheckFailedError,
@@ -419,17 +420,25 @@ export async function runGithubCheck(
 	// The authority each run genuinely requests, against the placeholder
 	// claims above: the PR run publishes to its pr-1 cache and roots under it,
 	// the branch run to the default cache under the caller's root prefix.
-	const pullRequestRoot = parseRootName(
-		`github:${identity.fullName}/pr-1/target`
+	const pullRequestRootPrefix = `github:${identity.fullName}/pr-1`;
+	const branchRootPrefix =
+		options.rootPrefix ?? `github:${identity.fullName}/${options.branch}`;
+	const pullRequestRoot = parseRootName(`${pullRequestRootPrefix}/target`);
+	const pullRequestRunRoot = parseRootName(
+		`${pullRequestRootPrefix}/_cupboard-run/1`
 	);
-	const branchRoot = parseRootName(
-		`${options.rootPrefix ?? `github:${identity.fullName}/${options.branch}`}/target`
-	);
+	const branchRoot = parseRootName(`${branchRootPrefix}/target`);
+	const branchRunRoot = parseRootName(`${branchRootPrefix}/_cupboard-run/1`);
 	const defaultSelector = selectorForCache(DEFAULT_CACHE);
 	const pullRequestRequests = [
 		pushAuthorizationDetails({
 			cacheSelector: 'pr-1',
 			attest: true,
+			root: pullRequestRoot,
+			runRoot: pullRequestRunRoot
+		}),
+		rootListAuthorizationDetails({
+			cacheSelector: 'pr-1',
 			root: pullRequestRoot
 		}),
 		rootEnsureAuthorizationDetails({
@@ -442,6 +451,11 @@ export async function runGithubCheck(
 		pushAuthorizationDetails({
 			cacheSelector: defaultSelector,
 			attest: true,
+			root: branchRoot,
+			runRoot: branchRunRoot
+		}),
+		rootListAuthorizationDetails({
+			cacheSelector: defaultSelector,
 			root: branchRoot
 		}),
 		rootEnsureAuthorizationDetails({

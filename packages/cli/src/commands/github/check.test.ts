@@ -7,6 +7,7 @@ import {
 	cachePrioritySchema,
 	graceSecondsSchema
 } from '@cupboard/nix-store/scalars';
+import { type Operation, type PermittedGrant } from '@cupboard/protocol/grants';
 import {
 	oidcTrustListResponseSchema,
 	type OidcTrustSummary
@@ -62,6 +63,23 @@ function storedRule(
 	body: ReturnType<typeof githubPrAddBody>
 ): OidcTrustSummary {
 	return { id, ...body, disabled: false };
+}
+
+function withoutOperation(
+	rule: OidcTrustSummary,
+	operation: Operation
+): OidcTrustSummary {
+	return {
+		...rule,
+		permittedGrants: rule.permittedGrants.map((grant): PermittedGrant =>
+			grant.type === 'cupboard_cache'
+				? {
+						...grant,
+						actions: grant.actions.filter((action) => action !== operation)
+					}
+				: grant
+		)
+	};
 }
 
 const prRule = storedRule(
@@ -765,6 +783,81 @@ describe('runGithubCheck', () => {
 			}
 		});
 	});
+
+	it.each([
+		{
+			name: 'pull-request root listing',
+			operation: 'root:list',
+			rules: [withoutOperation(prRule, 'root:list'), branchRule],
+			check: 'pull-request trust rule',
+			row: 0,
+			detail: 'root:list on cache pr-1 with root github:acme/app/pr-1/target'
+		},
+		{
+			name: 'pull-request run-root attachment',
+			operation: 'root:attach',
+			rules: [withoutOperation(prRule, 'root:attach'), branchRule],
+			check: 'pull-request trust rule',
+			row: 0,
+			detail:
+				'root:attach on cache pr-1 with root ' +
+				'github:acme/app/pr-1/_cupboard-run/1'
+		},
+		{
+			name: 'branch root listing',
+			operation: 'root:list',
+			rules: [prRule, withoutOperation(branchRule, 'root:list')],
+			check: 'main trust rule',
+			row: 1,
+			detail:
+				'root:list on cache _default with root github:acme/app/main/target'
+		},
+		{
+			name: 'branch run-root attachment',
+			operation: 'root:attach',
+			rules: [prRule, withoutOperation(branchRule, 'root:attach')],
+			check: 'main trust rule',
+			row: 1,
+			detail:
+				'root:attach on cache _default with root ' +
+				'github:acme/app/main/_cupboard-run/1'
+		}
+	] as const)(
+		'fails a rule missing the $name grant',
+		async ({ operation, rules, check, row, detail }) => {
+			const results: ResultRow[][] = [];
+			let failure: unknown;
+
+			try {
+				await runGithubCheck(
+					url,
+					options,
+					reporter(results),
+					checkClient({ graceSeconds: 86_400, rules: [...rules] }),
+					checkDependencies({})
+				);
+			} catch (error) {
+				failure = error;
+			}
+
+			expectFailed(failure);
+			expect({
+				operation,
+				checks: failure.checks,
+				row: findings(results)[row]
+			}).toStrictEqual({
+				operation,
+				checks: [check],
+				row: {
+					label: check,
+					value:
+						`failed: rule ${check.startsWith('pull-request') ? 'pr' : 'branch'} ` +
+						`matches but its grants do not permit ${detail}; remove it and ` +
+						're-run setup'
+				}
+			});
+		}
+	);
 
 	it('requires the exact workflow reference currently used by the caller', async () => {
 		const patternReference =
