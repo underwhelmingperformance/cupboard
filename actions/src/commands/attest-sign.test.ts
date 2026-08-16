@@ -50,24 +50,30 @@ interface SigningRecord {
 interface Workspace {
 	readonly directory: string;
 	readonly checksumsFile: string;
+	readonly builtChecksumsFile: string;
 	readonly predicateFile: string;
 	readonly outputFile: string;
 }
 
+// The run published both paths and built the first, so the attest command
+// writes both into the checksums file and only the first into the built one.
 async function workspace(): Promise<Workspace> {
 	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-sign-'));
 	const checksumsFile = path.join(directory, 'subjects.txt');
+	const builtChecksumsFile = path.join(directory, 'built-subjects.txt');
 	const predicateFile = path.join(directory, 'build-origin.json');
 
 	await writeFile(
 		checksumsFile,
 		`${appDigest}  ${appName}\n${runtimeDigest}  ${runtimeName}\n`
 	);
+	await writeFile(builtChecksumsFile, `${appDigest}  ${appName}\n`);
 	await writeFile(predicateFile, `${JSON.stringify(originPredicate)}\n`);
 
 	return {
 		directory,
 		checksumsFile,
+		builtChecksumsFile,
 		predicateFile,
 		outputFile: path.join(directory, 'output')
 	};
@@ -79,6 +85,7 @@ function options(
 ): AttestSignOptions {
 	return {
 		checksumsFile: files.checksumsFile,
+		builtChecksumsFile: files.builtChecksumsFile,
 		predicateFile: files.predicateFile,
 		predicateType: buildOriginPredicateType,
 		githubToken: 'token',
@@ -134,12 +141,14 @@ describe('resolveAttestSignInputs', () => {
 		expect(
 			resolveAttestSignInputs({
 				checksumsFile: '/runner/temp/attestations/subjects.txt',
+				builtChecksumsFile: '/runner/temp/attestations/built-subjects.txt',
 				predicateFile: '/runner/temp/attestations/build-origin.json',
 				predicateType: buildOriginPredicateType,
 				githubToken: 'token'
 			})
 		).toStrictEqual({
 			checksumsFile: '/runner/temp/attestations/subjects.txt',
+			builtChecksumsFile: '/runner/temp/attestations/built-subjects.txt',
 			predicateFile: '/runner/temp/attestations/build-origin.json',
 			predicateType: buildOriginPredicateType,
 			githubToken: 'token',
@@ -155,14 +164,26 @@ describe('resolveAttestSignInputs', () => {
 			expected: MissingInputError
 		},
 		{
+			missing: 'built-checksums-file',
+			options: {
+				checksumsFile: '/runner/temp/subjects.txt',
+				githubToken: 'token'
+			},
+			expected: MissingInputError
+		},
+		{
 			missing: 'github-token',
-			options: { checksumsFile: '/runner/temp/subjects.txt' },
+			options: {
+				checksumsFile: '/runner/temp/subjects.txt',
+				builtChecksumsFile: '/runner/temp/built-subjects.txt'
+			},
 			expected: MissingInputError
 		},
 		{
 			missing: 'predicate-type',
 			options: {
 				checksumsFile: '/runner/temp/subjects.txt',
+				builtChecksumsFile: '/runner/temp/built-subjects.txt',
 				predicateFile: '/runner/temp/build-origin.json',
 				githubToken: 'token'
 			},
@@ -174,7 +195,7 @@ describe('resolveAttestSignInputs', () => {
 });
 
 describe('attestSignAction', () => {
-	it('signs both statements over the same subjects', async () => {
+	it('signs the provenance over the built paths and the origin over every published path', async () => {
 		const files = await workspace();
 		const records: SigningRecord[] = [];
 
@@ -200,10 +221,7 @@ describe('attestSignAction', () => {
 			}).toStrictEqual({
 				records: [
 					{
-						subjects: [
-							{ name: appName, sha256: appDigest },
-							{ name: runtimeName, sha256: runtimeDigest }
-						],
+						subjects: [{ name: appName, sha256: appDigest }],
 						statement: {
 							predicateType: 'https://slsa.dev/provenance/v1',
 							predicate: { buildDefinition: { buildType: 'workflow' } }
@@ -252,6 +270,37 @@ describe('attestSignAction', () => {
 				outputs: {
 					'bundle-path': path.join(files.directory, 'provenance.sigstore.json'),
 					'origin-bundle-path': ''
+				}
+			});
+		} finally {
+			await rm(files.directory, { recursive: true, force: true });
+		}
+	});
+
+	it('signs the origin alone when the run built none of the paths it published', async () => {
+		const files = await workspace();
+		const records: SigningRecord[] = [];
+
+		try {
+			await writeFile(files.builtChecksumsFile, '');
+			await attestSignAction(
+				options(files),
+				{ GITHUB_OUTPUT: files.outputFile },
+				createGithubReporter(),
+				recordingSigner(records)
+			);
+
+			expect({
+				predicateTypes: records.map((record) => record.statement.predicateType),
+				outputs: await outputsOf(files.outputFile)
+			}).toStrictEqual({
+				predicateTypes: [buildOriginPredicateType],
+				outputs: {
+					'bundle-path': '',
+					'origin-bundle-path': path.join(
+						files.directory,
+						'build-origin.sigstore.json'
+					)
 				}
 			});
 		} finally {

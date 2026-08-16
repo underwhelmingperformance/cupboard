@@ -59,6 +59,7 @@ interface StorePathDigest {
 export interface AttestOptions {
 	readonly receiptFile?: string;
 	readonly checksumsFile?: string;
+	readonly builtChecksumsFile?: string;
 	readonly predicateFile?: string;
 	readonly url?: string;
 	readonly cache?: string;
@@ -68,7 +69,10 @@ export interface AttestOptions {
 
 export interface AttestInputs {
 	readonly receiptFile: string;
+	/** Where the checksums of every path the receipt describes are written. */
 	readonly checksumsFile: string;
+	/** Where the checksums of the paths this run built are written. */
+	readonly builtChecksumsFile: string;
 	/** Where the build-origin predicate is written for the signing step. */
 	readonly predicateFile: string;
 	readonly url: URL;
@@ -85,7 +89,16 @@ export interface CommittedPathInfo {
 }
 
 interface AttestationSubjects {
+	/**
+	 * Every path the receipt describes, checked against the destination. These
+	 * are the subjects of the build-origin statement.
+	 */
 	readonly subjects: readonly StorePathDigest[];
+	/**
+	 * The paths this run built. GitHub's build-provenance statement claims that
+	 * the workflow produced its subjects, so only these belong in it.
+	 */
+	readonly built: readonly StorePathDigest[];
 	readonly skipped: readonly string[];
 }
 
@@ -115,7 +128,8 @@ export function attestationSubjects(
 		});
 	}
 
-	return { subjects, skipped };
+	// Every version 2 subject is a path the run built.
+	return { subjects, built: subjects, skipped };
 }
 
 /**
@@ -125,12 +139,14 @@ export function attestationSubjects(
 export type SelectedPathInfos = ReadonlyMap<string, CommittedPathInfo>;
 
 /**
- * Checks every receipt subject against the destination cache.
+ * Checks every receipt subject against the destination cache, and separates the
+ * paths this run built from the rest.
  *
  * A subject is signed under this repository's identity, so the destination
- * cache must serve every subject under the NAR hash and deriver recorded in
- * the receipt. An absent path fails the run, as does one whose hash or
- * deriver has moved since the receipt was written.
+ * cache must serve every subject under the NAR hash the receipt recorded, and
+ * under its deriver where the receipt recorded one. An absent path fails the
+ * run, as does one whose hash or deriver has moved since the receipt was
+ * written.
  *
  * The build store may have garbage-collected the path since the build, so
  * the check reads the committed metadata from the destination cache rather
@@ -141,16 +157,26 @@ export function provenancedSubjects(
 	held: SelectedPathInfos
 ): AttestationSubjects {
 	const subjects: StorePathDigest[] = [];
+	const built: StorePathDigest[] = [];
 	const named = new Set(receipt.subjects.map((subject) => subject.storePath));
 	const skipped = receipt.paths.filter((storePath) => !named.has(storePath));
 
 	for (const subject of receipt.subjects) {
 		requireBacked(subject, held.get(subject.storePath));
 
-		subjects.push({ storePath: subject.storePath, sha256: subject.narHash });
+		const digest = {
+			storePath: subject.storePath,
+			sha256: subject.narHash
+		};
+
+		subjects.push(digest);
+
+		if (subject.origin === 'built') {
+			built.push(digest);
+		}
 	}
 
-	return { subjects, skipped };
+	return { subjects, built, skipped };
 }
 
 // Verify each checksum against committed destination metadata. The receipt does
@@ -160,17 +186,19 @@ function requireBacked(
 	info: CommittedPathInfo | undefined
 ): void {
 	if (info === undefined) {
-		throw new SubjectNotHeldError(subject.storePath, subject.verification);
+		throw new SubjectNotHeldError(subject.storePath, subject.origin);
 	}
 
 	requireUnmoved(info, subject.narHash, subject.derivation);
 }
 
-// Check the destination metadata before signing under the repository's identity.
+// Check the destination metadata before signing under the repository's
+// identity. A subject with no deriver leaves the destination's deriver
+// unchecked, because the receipt recorded no deriver to compare it against.
 function requireUnmoved(
 	info: CommittedPathInfo,
 	narHash: string,
-	derivation: string
+	derivation: string | undefined
 ): void {
 	const held = info.narHash.digestHex();
 
@@ -178,13 +206,32 @@ function requireUnmoved(
 		throw new SubjectNarHashMovedError(info.storePath, narHash, held);
 	}
 
-	if (info.deriver !== derivation) {
+	if (derivation !== undefined && info.deriver !== derivation) {
 		throw new SubjectDeriverMovedError(
 			info.storePath,
 			derivation,
 			info.deriver
 		);
 	}
+}
+
+// One receipt subject as the statement records it. The attempt fields belong to
+// the run's own attribution, so a `built` subject is rebuilt without them. The
+// other origins carry over unchanged.
+function originSubject(subject: BuildSubjectV3): BuildOriginSubject {
+	if (subject.origin === 'built') {
+		return {
+			origin: 'built',
+			storePath: subject.storePath,
+			narHash: subject.narHash,
+			derivation: subject.derivation,
+			buildStore: subject.buildStore,
+			...(subject.machine !== undefined && { machine: subject.machine }),
+			verification: subject.verification
+		};
+	}
+
+	return subject;
 }
 
 /**
@@ -204,14 +251,7 @@ export function buildOriginPredicateFor(
 	const accepted = new Set(subjects.map((subject) => subject.storePath));
 	const origins: BuildOriginSubject[] = receipt.subjects
 		.filter((subject) => accepted.has(subject.storePath))
-		.map((subject) => ({
-			storePath: subject.storePath,
-			narHash: subject.narHash,
-			derivation: subject.derivation,
-			buildStore: subject.buildStore,
-			...(subject.machine !== undefined && { machine: subject.machine }),
-			verification: subject.verification
-		}));
+		.map((subject) => originSubject(subject));
 
 	if (origins.length === 0) {
 		return undefined;
@@ -236,7 +276,7 @@ export function registerAttestCommand(
 	program
 		.command('attest')
 		.description(
-			'Resolve the provenance subjects established by a current-run build receipt.'
+			'Resolve the subjects a current-run build receipt describes, and which of them this run built.'
 		)
 		.requiredOption(
 			'--receipt-file <path>',
@@ -244,7 +284,11 @@ export function registerAttestCommand(
 		)
 		.option(
 			'--checksums-file <path>',
-			'where to write the generated subject checksums file'
+			'where to write the checksums of every path the receipt describes'
+		)
+		.option(
+			'--built-checksums-file <path>',
+			'where to write the checksums of the paths the run built'
 		)
 		.option(
 			'--predicate-file <path>',
@@ -303,6 +347,12 @@ export function resolveAttestInputs(
 		readUser,
 		readPassword,
 		checksumsFile,
+		// The built checksums default to the checksums file's directory, so a
+		// caller that specifies its own checksums path keeps both lists
+		// together and needs no RUNNER_TEMP.
+		builtChecksumsFile:
+			provided(options.builtChecksumsFile) ??
+			path.join(path.dirname(checksumsFile), 'built-subjects.txt'),
 		// The predicate file defaults to the checksums file's directory, so a
 		// caller that specifies its own checksums path keeps both files together
 		// and needs no RUNNER_TEMP.
@@ -421,7 +471,7 @@ export async function attestAction(
 	const receipt = buildReceiptSchema.parse(
 		JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
 	);
-	const { subjects, skipped } = await resolveAttestation(
+	const { subjects, built, skipped } = await resolveAttestation(
 		receipt,
 		inputs,
 		dependencies
@@ -429,14 +479,17 @@ export async function attestAction(
 
 	for (const storePath of skipped) {
 		reporter.warn(
-			`Not attesting ${storePath}: this workflow run did not build it`
+			`Not attesting ${storePath}: the receipt records no origin for it`
 		);
 	}
 
 	const checksumsFile = path.resolve(inputs.checksumsFile);
+	const builtChecksumsFile = path.resolve(inputs.builtChecksumsFile);
 
 	await mkdir(path.dirname(checksumsFile), { recursive: true });
 	await writeFile(checksumsFile, renderChecksums(subjects));
+	await mkdir(path.dirname(builtChecksumsFile), { recursive: true });
+	await writeFile(builtChecksumsFile, renderChecksums(built));
 
 	const predicate = buildOriginPredicateFor(receipt, subjects);
 	const predicateFile =
@@ -452,6 +505,8 @@ export async function attestAction(
 
 	await setOutput(environment, 'checksums-file', checksumsFile);
 	await setOutput(environment, 'subject-count', String(subjects.length));
+	await setOutput(environment, 'built-checksums-file', builtChecksumsFile);
+	await setOutput(environment, 'built-subject-count', String(built.length));
 	await setOutput(environment, 'predicate-file', predicateFile);
 	await setOutput(environment, 'predicate-type', buildOriginPredicateType);
 }

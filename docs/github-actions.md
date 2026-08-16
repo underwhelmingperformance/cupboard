@@ -454,12 +454,14 @@ steps:
 newline-delimited file and passed as `installables-file`, which avoids runner
 limits on the size of action inputs and environment variables. The build action
 retries three times and outputs the realised `paths`, a `paths-file`, and the
-`receipt-file` consumed by the attest action. A path substituted from a cache or
-already present from an earlier run is not recorded as built. Outputs returned
-by a remote builder are rebuilt and compared with `nix build --rebuild` before
-they qualify. When no path qualifies, nothing is signed and `bundle-path` is
-empty. `actions/push` treats an empty `bundle-path` as a push with no
-attestations.
+`receipt-file` consumed by the attest action. The receipt describes every path
+the run published and says where each one came from: the paths the run built,
+the paths the build store had already registered as its own work, and the paths
+that entered the store by copy. Only the first group counts as built. Outputs
+returned by a remote builder are rebuilt and compared with `nix build --rebuild`
+before they qualify. When the run built nothing, no build provenance is signed
+and `bundle-path` is empty. `actions/push` treats an empty `bundle-path` as a
+push with no attestations.
 
 Set `require-provenance` when publication must not succeed without provenance
 for every final output. If a final output came from a cache or was already
@@ -468,11 +470,13 @@ before adding it to the receipt; its dependencies may still be substituted. This
 is useful when a failed signing or attachment step will be retried after the
 path was pushed.
 
-The action outputs `bundle-path` and `origin-bundle-path`, the two signed
-bundles covering every qualifying path, alongside `checksums-file` and
-`subject-count`. `id-token: write` lets the action obtain its Sigstore signing
-certificate, and `attestations: write` records the attestations on the
-repository, so `gh attestation verify` finds them.
+The action outputs the two signed bundles, `bundle-path` and
+`origin-bundle-path`, along with the checksums each one was signed over.
+`built-checksums-file` and `built-subject-count` describe the build-provenance
+bundle; `checksums-file` and `subject-count` describe the build-origin bundle.
+`id-token: write` lets the action obtain its Sigstore signing certificate, and
+`attestations: write` records the attestations on the repository, so
+`gh attestation verify` finds them.
 
 The action signs both statements itself, so that a failed signing attempt can be
 made again. A workflow cannot retry a `uses:` step, and neither
@@ -487,20 +491,33 @@ read or decoded, or when Fulcio refuses to issue the certificate. Once the
 attempts run out the step fails, so a publication never continues without a
 bundle.
 
-The two bundles state different things about the same subjects. The SLSA
-build-provenance bundle states how this workflow ran: the repository, the
-commit, the workflow file and the runner it ran on. The build-origin bundle
-states where each path came from, which only the receipt records: the store
-path, its NAR hash, the derivation that produced it, the store where the build
-ran, whether the coordinating machine watched the build or the build store
-reported it, and the builder recorded in the activity log when there was one. It
-makes no claim beyond that: not that the build is reproducible, and not that its
-producer deserves trust. Its predicate type is
-`https://github.com/underwhelmingperformance/cupboard/predicate/build-origin/v1`,
+The two bundles cover different subjects and state different things. The SLSA
+build-provenance bundle claims that this workflow produced its subjects, so it
+covers the paths the run built, and it states how the run happened: the
+repository, the commit, the workflow file and the runner it ran on.
+
+The build-origin bundle covers every path the run published and records where
+each one came from, which only the receipt knows. For a path the run built, it
+records the store path, the NAR hash, the derivation that produced it, the store
+where the build ran, whether the coordinating machine watched the build or the
+build store reported it, and the builder from the activity log when there was
+one. For a path the build store had already registered as its own work, it
+records the store and that the run did not build the path. For a path that
+entered the store by copy, it records the signatures the store holds over the
+path, the content address when the path has one, and the stores the run watched
+the path being copied from. That last field comes from Nix's activity log, which
+names the source of each copy Nix performs, so it reports only copies this run
+saw happen. A path that was already valid when the run started, or that some
+other store fetched where the run could not see it, has no source recorded.
+
+The statement claims nothing beyond that. It does not say that a build is
+reproducible, that a producer deserves trust, or that a copied path came from
+any substituter the run did not watch. Its predicate type is
+`https://github.com/underwhelmingperformance/cupboard/predicate/build-origin/v2`,
 and `cupboard attest verify --predicate-type` takes that value to verify it. One
-statement covers every subject of the run, so verifying it for one path reports
-the origin of the others too. A version 2 receipt records no origin, so such a
-run produces the build-provenance bundle alone and leaves `origin-bundle-path`
+statement covers every path of the run, so verifying it for one path also
+reports the origin of the others. A version 2 receipt records no origin, so such
+a run produces the build-provenance bundle alone and leaves `origin-bundle-path`
 empty.
 
 Publication comes before signing because the attest action verifies every

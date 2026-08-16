@@ -132,6 +132,7 @@ describe('attestationSubjects', () => {
 
 		expect(partitioned).toStrictEqual({
 			subjects: [{ storePath: builtPath, sha256: 'aa'.repeat(32) }],
+			built: [{ storePath: builtPath, sha256: 'aa'.repeat(32) }],
 			skipped: [substitutedPath]
 		});
 	});
@@ -163,11 +164,23 @@ function provenancedSubject(
 	verification: 'local' | 'build-store'
 ) {
 	return {
+		origin: 'built' as const,
 		storePath,
 		narHash: digestByte.repeat(32),
 		derivation: `${storePath}.drv`,
 		buildStore: 'ssh-ng://builder.example',
 		verification
+	};
+}
+
+// A version 3 subject for a path the run published but did not build.
+function copiedSubject(storePath: StorePathString, digestByte: string) {
+	return {
+		origin: 'copied' as const,
+		storePath,
+		narHash: digestByte.repeat(32),
+		derivation: `${storePath}.drv`,
+		signatures: ['cache.example.org-1:c2ln']
 	};
 }
 
@@ -217,6 +230,7 @@ describe('provenancedSubjects', () => {
 				)
 			).toStrictEqual({
 				subjects: [{ storePath: builtPath, sha256: 'aa'.repeat(32) }],
+				built: [{ storePath: builtPath, sha256: 'aa'.repeat(32) }],
 				skipped: [substitutedPath]
 			});
 		}
@@ -245,8 +259,8 @@ describe('provenancedSubjects', () => {
 			if (failure instanceof SubjectNotHeldError) {
 				expect({
 					storePath: failure.storePath,
-					verification: failure.verification
-				}).toStrictEqual({ storePath: builtPath, verification });
+					origin: failure.origin
+				}).toStrictEqual({ storePath: builtPath, origin: 'built' });
 			}
 		}
 	);
@@ -326,6 +340,7 @@ describe('provenancedSubjects', () => {
 			)
 		).toStrictEqual({
 			subjects: [{ storePath: remotePath, sha256: 'bb'.repeat(32) }],
+			built: [{ storePath: remotePath, sha256: 'bb'.repeat(32) }],
 			skipped: []
 		});
 	});
@@ -339,6 +354,7 @@ describe('provenancedSubjects', () => {
 			paths: [remotePath],
 			subjects: [
 				{
+					origin: 'built' as const,
 					storePath: remotePath,
 					narHash: 'bb'.repeat(32),
 					derivation: `${remotePath}.drv`,
@@ -351,6 +367,58 @@ describe('provenancedSubjects', () => {
 
 		expect(provenancedSubjects(receipt, holdsRemotePath)).toStrictEqual({
 			subjects: [{ storePath: remotePath, sha256: 'bb'.repeat(32) }],
+			built: [{ storePath: remotePath, sha256: 'bb'.repeat(32) }],
+			skipped: []
+		});
+	});
+
+	it('accepts a copied path as a subject but leaves it out of the built list', () => {
+		const holdsBothPaths: SelectedPathInfos = new Map([
+			[builtPath, attestPathInfo(builtPath, 0xaa)],
+			[substitutedPath, attestPathInfo(substitutedPath, 0xdd)]
+		]);
+
+		expect(
+			provenancedSubjects(
+				{
+					version: 3,
+					paths: [builtPath, substitutedPath],
+					subjects: [
+						provenancedSubject(builtPath, 'aa', 'local'),
+						copiedSubject(substitutedPath, 'dd')
+					]
+				},
+				holdsBothPaths
+			)
+		).toStrictEqual({
+			subjects: [
+				{ storePath: builtPath, sha256: 'aa'.repeat(32) },
+				{ storePath: substitutedPath, sha256: 'dd'.repeat(32) }
+			],
+			built: [{ storePath: builtPath, sha256: 'aa'.repeat(32) }],
+			skipped: []
+		});
+	});
+
+	it('leaves the deriver unchecked for a subject that records no deriver', () => {
+		const held: SelectedPathInfos = new Map([
+			[substitutedPath, attestPathInfo(substitutedPath, 0xdd)]
+		]);
+		const subject = {
+			origin: 'copied' as const,
+			storePath: substitutedPath,
+			narHash: 'dd'.repeat(32),
+			signatures: []
+		};
+
+		expect(
+			provenancedSubjects(
+				{ version: 3, paths: [substitutedPath], subjects: [subject] },
+				held
+			)
+		).toStrictEqual({
+			subjects: [{ storePath: substitutedPath, sha256: 'dd'.repeat(32) }],
+			built: [],
 			skipped: []
 		});
 	});
@@ -380,6 +448,7 @@ describe('buildOriginPredicateFor', () => {
 		expect(buildOriginPredicateFor(receipt, accepted)).toStrictEqual({
 			subjects: [
 				{
+					origin: 'built',
 					storePath: builtPath,
 					narHash: 'aa'.repeat(32),
 					derivation: `${builtPath}.drv`,
@@ -407,6 +476,7 @@ describe('buildOriginPredicateFor', () => {
 		expect(buildOriginPredicateFor(receipt, accepted)).toStrictEqual({
 			subjects: [
 				{
+					origin: 'built',
 					storePath: remotePath,
 					narHash: 'bb'.repeat(32),
 					derivation: `${remotePath}.drv`,
@@ -474,6 +544,8 @@ describe('resolveAttestInputs', () => {
 			readUser: 'reader',
 			readPassword: 'secret',
 			checksumsFile: '/runner/temp/cupboard-attestations/subjects.txt',
+			builtChecksumsFile:
+				'/runner/temp/cupboard-attestations/built-subjects.txt',
 			predicateFile: '/runner/temp/cupboard-attestations/build-origin.json'
 		});
 	});
@@ -522,8 +594,23 @@ describe('resolveAttestInputs', () => {
 			readUser: '',
 			readPassword: '',
 			checksumsFile: '/somewhere/subjects.txt',
+			builtChecksumsFile: '/somewhere/built-subjects.txt',
 			predicateFile: '/somewhere/build-origin.json'
 		});
+	});
+
+	it('honours an explicit built-checksums file', () => {
+		const inputs = resolveAttestInputs(
+			{
+				receiptFile,
+				url: 'https://cache.example.test/t/acme',
+				checksumsFile: '/somewhere/subjects.txt',
+				builtChecksumsFile: '/elsewhere/built.txt'
+			},
+			{}
+		);
+
+		expect(inputs.builtChecksumsFile).toBe('/elsewhere/built.txt');
 	});
 
 	it('requires a build receipt', () => {
@@ -684,6 +771,7 @@ describe('attestAction committed cache verification', () => {
 				predicate: {
 					subjects: [
 						{
+							origin: 'built',
 							storePath: remotePath,
 							narHash: 'bb'.repeat(32),
 							derivation: `${remotePath}.drv`,

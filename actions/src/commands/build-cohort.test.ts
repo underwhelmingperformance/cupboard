@@ -2359,6 +2359,7 @@ describe('buildCohortAction', () => {
 						arguments_[arguments_.indexOf('--receipt-file') + 1] ?? '';
 					const subjects = requireProvenance
 						? [floatingBuiltPath, floatingDevelopmentPath].map((storePath) => ({
+								origin: 'built',
 								storePath,
 								narHash: 'aa'.repeat(32),
 								derivation:
@@ -2368,6 +2369,7 @@ describe('buildCohortAction', () => {
 							}))
 						: [
 								{
+									origin: 'built',
 									storePath: dependencyPath,
 									narHash: 'bb'.repeat(32),
 									derivation:
@@ -3978,6 +3980,7 @@ describe('buildCohortAction publication', () => {
 						argument === '--claimable'
 							? [
 									{
+										origin: 'built',
 										storePath: arguments_[index + 1] ?? '',
 										narHash: 'aa'.repeat(32),
 										derivation: `${arguments_[index + 1] ?? ''}.drv`,
@@ -5337,6 +5340,7 @@ describe('buildCohortAction publication', () => {
 				paths: [libraryBuiltPath, referencePath],
 				subjects: [
 					{
+						origin: 'built',
 						storePath: libraryBuiltPath,
 						narHash: 'aa'.repeat(32),
 						derivation: `${libraryBuiltPath}.drv`,
@@ -5379,6 +5383,7 @@ describe('buildCohortAction publication', () => {
 				paths: [libraryBuiltPath],
 				subjects: [
 					{
+						origin: 'built',
 						storePath: libraryBuiltPath,
 						narHash: 'aa'.repeat(32),
 						derivation: `${libraryBuiltPath}.drv`,

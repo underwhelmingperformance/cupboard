@@ -1,4 +1,4 @@
-import type { SubjectVerification } from '@cupboard/protocol/build';
+import type { SubjectOrigin } from '@cupboard/protocol/build';
 import type { ReporterResultEvent } from '@cupboard/reporter';
 import {
 	CodedError,
@@ -411,10 +411,10 @@ export class SubjectDeriverMovedError extends CodedError {
 export class SubjectNotHeldError extends CodedError {
 	constructor(
 		public readonly storePath: string,
-		public readonly verification: SubjectVerification
+		public readonly origin: SubjectOrigin
 	) {
 		super(
-			`${storePath} was recorded as ${verification}, but the destination cache does not serve it`
+			`${storePath} was recorded with origin ${origin}, but the destination cache does not serve it`
 		);
 		this.name = 'SubjectNotHeldError';
 	}

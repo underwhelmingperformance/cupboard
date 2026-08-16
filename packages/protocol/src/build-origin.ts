@@ -1,13 +1,9 @@
-import {
-	sha256HexDigestSchema,
-	storePathSchema
-} from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {
-	buildStoreSchema,
-	derivationPathSchema,
-	subjectVerificationSchema
+	builtOriginFields,
+	copiedOriginFields,
+	storeHeldOriginFields
 } from './build.ts';
 
 /**
@@ -16,30 +12,29 @@ import {
  * version changes when the predicate's shape does.
  */
 export const buildOriginPredicateType =
-	'https://github.com/underwhelmingperformance/cupboard/predicate/build-origin/v1';
+	'https://github.com/underwhelmingperformance/cupboard/predicate/build-origin/v2';
 
-// One path's origin, copied from the receipt subject that recorded it: the
-// path, the NAR hash the destination serves it under, the derivation that
-// produced it, which producer the path came from, the store where the build
-// ran, and the builder from the activity log when the log recorded one.
+// One path's origin, copied from the receipt subject that recorded it. The
+// three cases carry different fields because the run has different evidence for
+// each: a path it built, a path the store registered as its own work, and a
+// path that entered the store from elsewhere.
 //
-// These are the receipt's own facts. The statement says where a path came
-// from. It makes no claim that the path is reproducible or that its producer
-// deserves trust.
-export const buildOriginSubjectSchema = z.strictObject({
-	storePath: storePathSchema,
-	narHash: sha256HexDigestSchema,
-	derivation: derivationPathSchema,
-	buildStore: buildStoreSchema,
-	machine: z.string().min(1).optional(),
-	verification: subjectVerificationSchema
-});
+// These are the receipt's own facts. The statement reports what the run
+// established about where a path came from. It does not claim that the path is
+// reproducible, that its producer deserves trust, or, for a copied path, that
+// any particular substituter served it.
+export const buildOriginSubjectSchema = z.discriminatedUnion('origin', [
+	z.strictObject({ origin: z.literal('built'), ...builtOriginFields }),
+	z.strictObject({ origin: z.literal('store-held'), ...storeHeldOriginFields }),
+	z.strictObject({ origin: z.literal('copied'), ...copiedOriginFields })
+]);
 export type ParsedBuildOriginSubject = z.output<
 	typeof buildOriginSubjectSchema
 >;
 
-// One statement covers every subject of one run, so a reader who verified the
-// statement for one path can read the origin of every path the run signed.
+// One statement covers every path the run published from its store, so a reader
+// who verified the statement for one path can also read the origin of every
+// other path in the same run.
 export const buildOriginPredicateSchema = z.strictObject({
 	subjects: z.array(buildOriginSubjectSchema).min(1)
 });

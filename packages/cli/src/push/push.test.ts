@@ -16,7 +16,10 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import type { AttestationNegotiateRequest } from '@cupboard/protocol/attestations';
-import type { ParsedBuildReceiptV3 } from '@cupboard/protocol/build';
+import {
+	nixStoreUriSchema,
+	type ParsedBuildReceiptV3
+} from '@cupboard/protocol/build';
 import { pushSummaryResultKind } from '@cupboard/protocol/reports';
 import {
 	type RootSetBody,
@@ -3924,12 +3927,12 @@ describe('runPush', () => {
 });
 
 // A push whose target is uploaded and committed while its intermediate is
-// already served, so both are servable and only the target is a subject.
+// already served. Both end servable, so the receipt describes both.
 function receiptPush(
 	appInfo: NixValidPathInfo,
 	dependencies: Pick<
 		PushDependencies,
-		'buildStore' | 'alreadyHeld' | 'claimable' | 'delegated'
+		'buildStore' | 'alreadyHeld' | 'claimable' | 'delegated' | 'copiedFrom'
 	>
 ): Promise<ParsedBuildReceiptV3 | undefined> {
 	return runPush(publication([appPath], [runtimePath]), reporter([]), {
@@ -3973,6 +3976,14 @@ function receiptPush(
 describe('the build receipt a push writes', () => {
 	const appDrv = '/nix/store/8123456789abcdfghijklmnpqrsvwxyz-app.drv';
 	const buildStore = 'ssh-ng://builder.example';
+	// The store registered the intermediate as its own work, so every receipt
+	// below describes it the same way.
+	const runtimeSubject = {
+		origin: 'store-held',
+		storePath: runtimePath,
+		narHash: runtimeDigest.narHash.digestHex(),
+		buildStore
+	};
 
 	it('records each published target the build store holds a deriver for', async () => {
 		const receipt = await receiptPush(
@@ -3985,12 +3996,14 @@ describe('the build receipt a push writes', () => {
 			paths: [appPath, runtimePath],
 			subjects: [
 				{
+					origin: 'built',
 					storePath: appPath,
 					narHash: appDigest.narHash.digestHex(),
 					derivation: appDrv,
 					buildStore,
 					verification: 'build-store'
-				}
+				},
+				runtimeSubject
 			],
 			uploaded: [appPath]
 		});
@@ -4010,59 +4023,115 @@ describe('the build receipt a push writes', () => {
 			paths: [appPath, runtimePath],
 			subjects: [
 				{
+					origin: 'built',
 					storePath: appPath,
 					narHash: appDigest.narHash.digestHex(),
 					derivation: appDrv,
 					buildStore,
 					machine: 'ssh://b1',
 					verification: 'build-store'
-				}
+				},
+				runtimeSubject
 			],
 			uploaded: [appPath]
 		});
 	});
 
+	const substituterUri = nixStoreUriSchema.parse('https://cache.example.org');
+	const substituted = {
+		...pathInfo(appPath, appDigest, [], appDrv),
+		ultimate: false,
+		signatures: ['cache.example.org-1:c2ln'],
+		ca: 'fixed:r:sha256:1111111111111111111111111111111111111111111111111111'
+	};
+
 	it.each([
 		{
 			case: 'a target with no deriver',
 			appInfo: pathInfo(appPath, appDigest, []),
-			dependencies: { buildStore }
+			dependencies: { buildStore },
+			appSubject: {
+				origin: 'store-held',
+				storePath: appPath,
+				narHash: appDigest.narHash.digestHex(),
+				buildStore
+			}
 		},
 		{
 			case: 'a target the build store substituted',
-			appInfo: {
-				...pathInfo(appPath, appDigest, [], appDrv),
-				ultimate: false
+			appInfo: substituted,
+			dependencies: { buildStore },
+			appSubject: {
+				origin: 'copied',
+				storePath: appPath,
+				narHash: appDigest.narHash.digestHex(),
+				derivation: appDrv,
+				signatures: substituted.signatures,
+				ca: substituted.ca
+			}
+		},
+		{
+			case: 'a substituted target this run watched being copied',
+			appInfo: substituted,
+			dependencies: {
+				buildStore,
+				copiedFrom: new Map([[appPath, [substituterUri]]])
 			},
-			dependencies: { buildStore }
+			appSubject: {
+				origin: 'copied',
+				storePath: appPath,
+				narHash: appDigest.narHash.digestHex(),
+				derivation: appDrv,
+				signatures: substituted.signatures,
+				ca: substituted.ca,
+				copiedFrom: [substituterUri]
+			}
 		},
 		{
 			case: 'a substituted target with an empty delegated map',
-			appInfo: {
-				...pathInfo(appPath, appDigest, [], appDrv),
-				ultimate: false
-			},
-			dependencies: { buildStore, delegated: new Map<string, string>() }
+			appInfo: { ...pathInfo(appPath, appDigest, [], appDrv), ultimate: false },
+			dependencies: { buildStore, delegated: new Map<string, string>() },
+			appSubject: {
+				origin: 'copied',
+				storePath: appPath,
+				narHash: appDigest.narHash.digestHex(),
+				derivation: appDrv,
+				signatures: []
+			}
 		},
 		{
 			case: 'a path the build store already held',
 			appInfo: pathInfo(appPath, appDigest, [], appDrv),
-			dependencies: { buildStore, alreadyHeld: [appPath] }
+			dependencies: { buildStore, alreadyHeld: [appPath] },
+			appSubject: {
+				origin: 'store-held',
+				storePath: appPath,
+				narHash: appDigest.narHash.digestHex(),
+				derivation: appDrv,
+				buildStore
+			}
 		},
 		{
 			case: 'a path this run never resolved before it built',
 			appInfo: pathInfo(appPath, appDigest, [], appDrv),
-			dependencies: { buildStore, claimable: [runtimePath] }
+			dependencies: { buildStore, claimable: [runtimePath] },
+			appSubject: {
+				origin: 'store-held',
+				storePath: appPath,
+				narHash: appDigest.narHash.digestHex(),
+				derivation: appDrv,
+				buildStore
+			}
 		}
 	])(
-		'publishes $case without claiming it as a subject',
-		async ({ appInfo, dependencies }) => {
+		'describes $case without claiming that this run built it',
+		async ({ appInfo, dependencies, appSubject }) => {
 			const receipt = await receiptPush(appInfo, dependencies);
 
 			expect(receipt).toStrictEqual({
 				version: 3,
 				paths: [appPath, runtimePath],
-				subjects: [],
+				subjects: [appSubject, runtimeSubject],
 				uploaded: [appPath]
 			});
 		}

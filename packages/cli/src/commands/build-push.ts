@@ -24,7 +24,8 @@ import {
 	buildReceiptV3Schema,
 	invocationIdSchema,
 	type ParsedBuildReceipt,
-	type ParsedBuildReceiptV3
+	type ParsedBuildReceiptV3,
+	type ParsedBuildSubjectV3
 } from '@cupboard/protocol/build';
 import type { RootSetBody } from '@cupboard/protocol/retention';
 import type { Reporter } from '@cupboard/reporter';
@@ -232,6 +233,23 @@ function unique<T>(values: readonly T[]): readonly T[] {
 	return [...new Set(values)];
 }
 
+// One path can appear in several cohorts: the cohort that built it records the
+// build, and a later cohort finds it already in the store. Keep the `built`
+// subject whichever order the receipts arrive in.
+function recordAggregateSubject(
+	subjects: Map<string, ParsedBuildSubjectV3>,
+	subject: ParsedBuildSubjectV3
+): void {
+	if (
+		subjects.get(subject.storePath)?.origin === 'built' &&
+		subject.origin !== 'built'
+	) {
+		return;
+	}
+
+	subjects.set(subject.storePath, subject);
+}
+
 /** One schema-valid receipt over every settled cohort in a sequence. */
 export function aggregateBuildReceipts(
 	receipts: readonly ParsedBuildReceipt[]
@@ -255,11 +273,13 @@ export function aggregateBuildReceipts(
 	const firstFailedReceipt = parsed.find(
 		(receipt) => receipt.terminalFailure !== undefined
 	);
-	const subjects = new Map(
-		parsed.flatMap((receipt) =>
-			receipt.subjects.map((subject) => [subject.storePath, subject] as const)
-		)
-	);
+	const subjects = new Map<string, ParsedBuildSubjectV3>();
+
+	for (const receipt of parsed) {
+		for (const subject of receipt.subjects) {
+			recordAggregateSubject(subjects, subject);
+		}
+	}
 
 	return buildReceiptV3Schema.parse({
 		version: 3,
