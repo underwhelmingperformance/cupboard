@@ -8,6 +8,7 @@ import {
 	isTransientSigningFailure,
 	maxSigningAttempts,
 	type SignedAttestation,
+	type SigningStageCode,
 	signStatement,
 	slsaProvenanceStatement,
 	type StatementSigner
@@ -30,7 +31,7 @@ vi.mock('@actions/attest', () => ({
  */
 class SigningFailure extends Error {
 	constructor(
-		public readonly code: string,
+		public readonly code: SigningStageCode,
 		public override readonly cause: unknown
 	) {
 		super('the signing attempt failed');
@@ -50,7 +51,7 @@ class HttpFailure extends Error {
 }
 
 function signingFailure(
-	code: string,
+	code: SigningStageCode,
 	cause: unknown = new Error('the connection timed out')
 ): SigningFailure {
 	return new SigningFailure(code, cause);
@@ -121,6 +122,11 @@ const classificationCases: readonly ClassificationCase[] = [
 	{
 		failure: 'the attestation store refused the bundle',
 		error: new Error('the store refused the bundle'),
+		transient: false
+	},
+	{
+		failure: 'the code is not a `@sigstore/sign` stage code',
+		error: { code: 'DEPLOY_FAILED', cause: new Error('the socket closed') },
 		transient: false
 	},
 	{
