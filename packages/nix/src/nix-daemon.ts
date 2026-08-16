@@ -120,7 +120,7 @@ const copyPathActivity = 100;
 /** One field of a logger message: an integer or a string, as Nix encodes it. */
 type NixLoggerField = number | string;
 
-/** One copy the daemon reported: the path, and the store it was read from. */
+/** One copy the daemon reported: the store path, and the store it came from. */
 export interface NixCopyRecord {
 	readonly storePath: StorePathString;
 	readonly source: string;
@@ -618,20 +618,20 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	}
 
 	/**
-	 * Build the given targets and report the outcome of each one, with the
-	 * realised outputs where the daemon reports them. A caller reconciling a
-	 * remote store reads those outputs after a build.
-	 */
-	/**
-	 * The stores this client watched each path being copied from, in the order
+	 * The stores each path was copied from, keyed by store path and in the order
 	 * the daemon reported them. The daemon reports a copy it performs, such as a
-	 * substitution during a build, over the connection that asked for the work.
-	 * A copy this client did not ask for has no entry.
+	 * substitution during a build, over the connection that asked for the work,
+	 * so this map holds only the copies the daemon made for this client.
 	 */
 	observedCopies(): ReadonlyMap<StorePathString, readonly string[]> {
 		return this.copies;
 	}
 
+	/**
+	 * Build the given targets and report the outcome of each one, with the
+	 * realised outputs where the daemon reports them. A caller reconciling a
+	 * remote store reads those outputs after a build.
+	 */
 	async buildPathsWithResults(
 		targets: readonly NixDerivedPathString[],
 		mode: NixBuildMode = 'normal'
@@ -1611,10 +1611,10 @@ class NixDaemonConnection {
 		return message;
 	}
 
-	// A copy is an activity of type `copyPathActivity`, whose fields are the
-	// store path, the store the bytes are read from and the store they are
-	// written to. The daemon forwards its own activities over this connection,
-	// so a substitution it performs for this client arrives here.
+	// The fields of a copy activity are the store path, the store the bytes are
+	// read from and the store they are written to. The daemon forwards its own
+	// activities over this connection, so a substitution it performs for this
+	// client arrives here.
 	private recordCopyActivity(
 		activityType: number,
 		fields: readonly NixLoggerField[]

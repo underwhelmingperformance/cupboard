@@ -10,8 +10,8 @@ const libraryPath = storePathSchema.parse(
 	'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib'
 );
 
-// Nix starts a copy with a record naming the store path, the store the bytes
-// come from and the store they go to.
+// Nix starts a copy with a record whose fields are the store path, the store
+// the bytes come from and the store they go to.
 function copyLine(
 	storePath: string,
 	source: string,

@@ -207,19 +207,20 @@ export class Nix {
 	}
 
 	/**
-	 * Path information for valid arguments, in argument order. Invalid paths are
-	 * omitted.
-	 */
-	/**
-	 * The stores this run watched each path being copied from. The store reports
-	 * a copy it performs, such as a substitution during a build this client
-	 * drove, over the connection that asked for the work. A path the store
-	 * already held, or one that another process fetched, has no entry.
+	 * The stores each path was copied from, as the store reported the copies to
+	 * this client. The store reports a copy it performs for a caller, such as a
+	 * substitution during a build this client asked for. A path the store
+	 * already held has no entry, and neither does a path another process
+	 * fetched.
 	 */
 	observedCopies(): ReadonlyMap<StorePathString, readonly string[]> {
 		return this.store.observedCopies?.() ?? new Map();
 	}
 
+	/**
+	 * Path information for valid arguments, in argument order. Invalid paths are
+	 * omitted.
+	 */
 	async queryValidPathsInfo(
 		paths: readonly string[]
 	): Promise<readonly NixValidPathInfo[]> {

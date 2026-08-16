@@ -252,9 +252,9 @@ function postHandshakeFrame(version: string): Buffer {
 	return response.bytes();
 }
 
-// The records a daemon forwards while it substitutes a path for this client:
-// the copy it starts, and the query it made to find the path first. Both carry
-// a store path and a store URI, and only the copy means the bytes moved.
+// A daemon response that forwards one start-activity record for each copy it
+// performs, then completes the operation. The fields of a copy record are the
+// store path, the store the bytes came from and the store they went to.
 function substitutingResponse(
 	buildPaths: readonly string[],
 	copies: readonly { readonly storePath: string; readonly source: string }[]
@@ -752,7 +752,7 @@ describe('Nix daemon response bounds', () => {
 describe('NixDaemonStoreClient copy observation', () => {
 	const libraryPath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib';
 
-	it('records the store each forwarded copy read from', async () => {
+	it('records the store each forwarded copy was read from', async () => {
 		const transport = new ScriptedDaemonTransport({
 			operation: substitutingResponse(
 				[],
