@@ -459,12 +459,12 @@ interface AttestationOutcome {
 }
 
 /**
- * Who a receipt names as the producer of its subjects: a supervised attempt on
- * this machine, or the report of the store that holds them. `no-subjects` and
- * `mixed` are recorded rather than rejected, so a receipt that claims neither
- * shape fails the case saying so.
+ * Which producer a receipt attributes its own builds to: a supervised attempt
+ * on this machine, or the report of the store that holds them. `no-builds` and
+ * `mixed` are values in their own right, so a receipt that matches neither
+ * shape fails the case showing what it did record.
  */
-type RecordedAttribution = Attribution | 'no-subjects' | 'mixed';
+type RecordedAttribution = Attribution | 'no-builds' | 'mixed';
 
 interface RecordedReceipt {
 	readonly attribution: RecordedAttribution;
@@ -620,12 +620,11 @@ async function recordedReceipt(receiptFile: string): Promise<RecordedReceipt> {
 	const subjects = receipt.subjects
 		.toSorted((left, right) => byCodeUnit(left.storePath, right.storePath))
 		.map((subject) => {
-			const { attemptId } = subject;
-
-			if (attemptId === undefined) {
+			if (subject.origin !== 'built' || subject.attemptId === undefined) {
 				return subject;
 			}
 
+			const { attemptId } = subject;
 			const label =
 				attempts.get(attemptId) ?? `attempt-${String(attempts.size)}`;
 			attempts.set(attemptId, label);
@@ -652,20 +651,24 @@ async function recordedReceipt(receiptFile: string): Promise<RecordedReceipt> {
 }
 
 /**
- * The producer the receipt attributed its subjects to, read back from the
+ * The producer the receipt attributed its own builds to, read back from the
  * subjects themselves. A leg asserts this against what the runner's daemon
  * state predicts, so a run that took the other path fails with the path named
- * rather than with a difference somewhere in the receipt.
+ * and not with a difference somewhere in the receipt. A subject for a path the
+ * run published without building it records no producer, so only the `built`
+ * subjects are read here.
  */
 function recordedAttribution(
 	subjects: readonly ParsedBuildSubjectV3[]
 ): RecordedAttribution {
-	if (subjects.length === 0) {
-		return 'no-subjects';
+	const built = subjects.filter((subject) => subject.origin === 'built');
+
+	if (built.length === 0) {
+		return 'no-builds';
 	}
 
 	if (
-		subjects.every(
+		built.every(
 			(subject) =>
 				subject.verification === 'local' && subject.attemptId !== undefined
 		)
@@ -674,7 +677,7 @@ function recordedAttribution(
 	}
 
 	if (
-		subjects.every(
+		built.every(
 			(subject) =>
 				subject.verification === 'build-store' &&
 				subject.attemptId === undefined
@@ -782,6 +785,7 @@ function expectedReceipt(
 	const claimed = claimedPaths(options);
 	const paths = claimed.toSorted(byStorePath).map(({ storePath }) => storePath);
 	const subjects = claimed.toSorted(byStorePath).map((entry) => ({
+		origin: 'built',
 		storePath: entry.storePath,
 		narHash: entry.narHash,
 		derivation: entry.derivation,

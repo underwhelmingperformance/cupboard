@@ -376,10 +376,9 @@ function bundleRows(result: VerifyResult, options: VerifyOptions): ResultRow[] {
 	];
 }
 
-// One row per subject of a build-origin statement, naming the path and the
-// producer it came from. A statement covers every subject of its run, so the
-// rows for a bundle verified for one path include the run's other subjects as
-// well.
+// One row per subject of a build-origin statement, naming the path and where it
+// came from. A statement covers every path its run published, so the rows for a
+// bundle verified for one path include the run's other subjects as well.
 function originRows(result: VerifyResult): ResultRow[] {
 	const statement = buildOriginStatement(result);
 

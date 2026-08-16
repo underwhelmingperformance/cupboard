@@ -375,6 +375,7 @@ describe('attestAttachAction', () => {
 				paths: [appPath, runtimePath],
 				subjects: [
 					{
+						origin: 'built',
 						storePath: appPath,
 						narHash: sharedHash,
 						derivation: `${appPath}.drv`,
@@ -382,6 +383,7 @@ describe('attestAttachAction', () => {
 						verification: 'local'
 					},
 					{
+						origin: 'built',
 						storePath: runtimePath,
 						narHash: sharedHash,
 						derivation: `${runtimePath}.drv`,

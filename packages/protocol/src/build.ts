@@ -60,7 +60,8 @@ export type BuildStore = z.output<typeof buildStoreSchema>;
 /** The value recorded when Nix selects the store. */
 export const autoBuildStore = 'auto';
 
-// Who produced the path a receipt subject records.
+// What a `built` subject rests on: which producer built the path, and how the
+// run knows.
 //
 // `local` means a supervised attempt built it on the coordinating machine
 // and the activity log recorded that build. `build-store` means the selected
@@ -73,21 +74,108 @@ export const autoBuildStore = 'auto';
 export const subjectVerificationSchema = z.enum(['local', 'build-store']);
 export type SubjectVerification = z.output<typeof subjectVerificationSchema>;
 
-// One receipt subject and its verification details. Supervised attempts include
-// attempt fields. Reconciled builds omit them because they inspect the store
-// after the build. `machine` identifies the builder from the activity log and
-// is absent when only the remote build location is known.
-export const buildSubjectV3Schema = z.strictObject({
+// One narinfo `Sig` entry as the store recorded it: a key name, a colon and
+// base64 signature material. The receipt copies the entry without interpreting
+// it, so a reader parses and checks it exactly as Nix does.
+export const subjectSignatureSchema = z
+	.string()
+	.min(1)
+	.brand('SubjectSignature');
+export type SubjectSignature = z.output<typeof subjectSignatureSchema>;
+
+// A path's content address as the store recorded it, in Nix's own form:
+// `fixed:r:sha256:…` for a fixed-output path, `text:sha256:…` for a file added
+// to the store. A reader can recompute the address from the NAR the
+// destination serves, which gives it something to check for a copied path that
+// carries no signature.
+export const subjectContentAddressSchema = z
+	.string()
+	.min(1)
+	.brand('SubjectContentAddress');
+export type SubjectContentAddress = z.output<
+	typeof subjectContentAddressSchema
+>;
+
+// The identifier Nix prints for a store in its log output: a URI such as
+// `https://cache.nixos.org` or `ssh://builder`, or a bare word such as
+// `local`. The value is opaque here; the schema requires only that it is not
+// empty.
+export const nixStoreUriSchema = z.string().min(1).brand('NixStoreUri');
+export type NixStoreUri = z.output<typeof nixStoreUriSchema>;
+
+// A subject's `origin` records where a published path came from, as far as the
+// run can establish.
+//
+// `built` means the run realised the path itself. `store-held` means the store
+// registered the path as its own work, but nothing the run saw shows that this
+// invocation is what realised it; a store kept between runs may have built the
+// path earlier. `copied` means the store did not build the path at all, so it
+// entered the store from somewhere else.
+
+// Every subject records the path and the NAR hash the destination serves it
+// under, whatever its origin. The attestation step checks both against the
+// destination's committed narinfo before signing.
+const subjectIdentityFields = {
 	storePath: storePathSchema,
-	narHash: sha256HexDigestSchema,
+	narHash: sha256HexDigestSchema
+};
+
+// A path the run realised: the derivation that produced it, the store it was
+// realised in, the evidence behind the claim, and the builder from the activity
+// log when the log recorded one.
+export const builtOriginFields = {
+	...subjectIdentityFields,
 	derivation: derivationPathSchema,
-	attempt: positiveIntSchema.optional(),
-	attemptId: z.string().min(1).optional(),
 	buildStore: buildStoreSchema,
 	machine: z.string().min(1).optional(),
 	verification: subjectVerificationSchema
-});
+};
+
+// A path the store registered as its own work, without the run watching the
+// build. That registration is all the evidence there is: the subject records
+// the store, and no field says when the build ran.
+export const storeHeldOriginFields = {
+	...subjectIdentityFields,
+	derivation: derivationPathSchema.optional(),
+	buildStore: buildStoreSchema
+};
+
+// A path that entered the store from elsewhere. The subject carries the
+// signatures the store holds over the path, and the content address when the
+// path has one. A reader can check both for itself.
+//
+// `copiedFrom` names the stores the run watched the path being copied from, in
+// the order the activity log recorded them. It is an observation of this run
+// and not a property of the path: the store keeps no record of which
+// substituter served a path, so a path that was already valid before the run
+// started, or that some other store fetched where the run could not see it, has
+// no entry. A path has more than one entry when the run copied it more than
+// once, which happens when Nix moves on to the next substituter after a fetch
+// fails.
+export const copiedOriginFields = {
+	...subjectIdentityFields,
+	derivation: derivationPathSchema.optional(),
+	signatures: z.array(subjectSignatureSchema),
+	ca: subjectContentAddressSchema.optional(),
+	copiedFrom: z.array(nixStoreUriSchema).min(1).optional()
+};
+
+// One receipt subject: one published path and the origin the run established
+// for it. A supervised build records the attempt that produced the path; a
+// reconciled build leaves the attempt fields out, because it inspects the store
+// after the build and never watches the build itself.
+export const buildSubjectV3Schema = z.discriminatedUnion('origin', [
+	z.strictObject({
+		origin: z.literal('built'),
+		...builtOriginFields,
+		attempt: positiveIntSchema.optional(),
+		attemptId: z.string().min(1).optional()
+	}),
+	z.strictObject({ origin: z.literal('store-held'), ...storeHeldOriginFields }),
+	z.strictObject({ origin: z.literal('copied'), ...copiedOriginFields })
+]);
 export type ParsedBuildSubjectV3 = z.output<typeof buildSubjectV3Schema>;
+export type SubjectOrigin = ParsedBuildSubjectV3['origin'];
 
 // Why a failed target failed: the build itself, the upload of its NAR, the
 // destination's verification of the upload, the retention root that should
@@ -204,7 +292,10 @@ export const buildReceiptV2Schema = z.strictObject({
 });
 export type ParsedBuildReceiptV2 = z.output<typeof buildReceiptV2Schema>;
 
-// Version 3 also records each subject's build store and verification method.
+// Version 3 records one subject per path the run published from the build
+// store, whether the run built the path or found it already there. A published
+// path with no subject is one the run read no store metadata for, which is the
+// case for a path republished from a reference source.
 export const buildReceiptV3Schema = z.strictObject({
 	version: z.literal(3),
 	subjects: z.array(buildSubjectV3Schema),

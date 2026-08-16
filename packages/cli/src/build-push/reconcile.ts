@@ -13,9 +13,11 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import {
+	autoBuildStore,
 	buildReceiptV3Schema,
 	type BuildSubjectV3,
 	type DerivationPath,
+	type NixStoreUri,
 	type ParsedBuildReceiptV3,
 	type TargetFailureReason,
 	type TargetOutcome,
@@ -33,6 +35,7 @@ import { compressNarToStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 import { exactUploadDecisions } from '../push/negotiation.ts';
+import { publishedSubjects } from '../push/origin.ts';
 import {
 	type CompressNar,
 	defaultUploadConcurrency,
@@ -111,7 +114,13 @@ export interface ReconcileOptions {
 	readonly uploadConcurrency?: number;
 	readonly childExitStatus?: number;
 	readonly terminalFailure?: TerminalBuildFailure;
+	/**
+	 * The subjects the run attributed to its own build. The receipt describes
+	 * every other published path from that path's store metadata.
+	 */
 	readonly subjects?: readonly BuildSubjectV3[];
+	/** The stores the run watched each path being copied from. */
+	readonly copiedFrom?: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 }
 
 /** One declared target root's reconciliation: replaced, or left untouched. */
@@ -397,14 +406,15 @@ async function publishDecision(
 // and publishes what it does not hold: an already uploaded path negotiates to
 // a cheap skip, a failed streaming upload re-drives through the ordinary
 // upload and commit steps, and a deferred verdict is awaited where the run
-// waits.
+// waits. It returns the store metadata it read, so the receipt can describe
+// every published path without asking the store again.
 async function publishRequired(
 	required: ReadonlyMap<StorePathString, boolean>,
 	options: ReconcileOptions,
 	ledger: PublicationLedger
-): Promise<void> {
+): Promise<readonly NixValidPathInfo[]> {
 	if (required.size === 0) {
-		return;
+		return [];
 	}
 
 	let infos: readonly NixValidPathInfo[];
@@ -416,7 +426,7 @@ async function publishRequired(
 			recordFailure(ledger, storePath, 'upload', error);
 		}
 
-		return;
+		return [];
 	}
 
 	const present = new Set(infos.map((info) => info.storePath));
@@ -428,7 +438,7 @@ async function publishRequired(
 	}
 
 	if (infos.length === 0) {
-		return;
+		return infos;
 	}
 
 	let decisions: readonly ParsedUploadDecision[];
@@ -448,7 +458,7 @@ async function publishRequired(
 			recordFailure(ledger, info.storePath, 'upload', error);
 		}
 
-		return;
+		return infos;
 	}
 
 	const infoByHash = new Map(
@@ -486,6 +496,8 @@ async function publishRequired(
 				ledger
 			)
 	);
+
+	return infos;
 }
 
 function targetOutcome(
@@ -714,14 +726,23 @@ export async function reconcileBuild(
 		}
 	}
 
-	await publishRequired(required, options, ledger);
+	const infos = await publishRequired(required, options, ledger);
+	const built = new Map(
+		(options.subjects ?? []).map((subject) => [subject.storePath, subject])
+	);
 
 	const roots = await applyTargetRoots(resolvedTargets, options, ledger);
 	const partition = options.partition;
 	const receipt = buildReceiptV3Schema.parse({
 		version: 3,
 		paths: [...ledger.servable].toSorted(byCodeUnit),
-		subjects: [...(options.subjects ?? [])],
+		subjects: publishedSubjects({
+			built,
+			infos,
+			servable: ledger.servable,
+			buildStore: autoBuildStore,
+			copiedFrom: options.copiedFrom ?? new Map()
+		}),
 		outcomes: resolvedTargets.map((resolved) =>
 			targetOutcome(resolved, ledger)
 		),

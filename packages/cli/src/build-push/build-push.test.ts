@@ -78,6 +78,29 @@ function pathInfo(
 	};
 }
 
+// The receipt describes every path it publishes. A fixture path the run did not
+// build is described from what the store records: the store's own work when the
+// store registered the path as ultimate, and a copy otherwise.
+function heldSubject(storePath: StorePathString): unknown {
+	return {
+		origin: 'store-held',
+		storePath,
+		narHash: narHash.digestHex(),
+		derivation: drvA,
+		buildStore: 'auto'
+	};
+}
+
+function copiedSubject(storePath: StorePathString): unknown {
+	return {
+		origin: 'copied',
+		storePath,
+		narHash: narHash.digestHex(),
+		derivation: drvA,
+		signatures: []
+	};
+}
+
 function decisionFor(
 	storePath: StorePathString,
 	action: UploadDecision['action']
@@ -761,7 +784,7 @@ describe('runBuildPush', () => {
 				receipt: {
 					version: 3,
 					paths: [pathA],
-					subjects: [],
+					subjects: [copiedSubject(pathA)],
 					childExitStatus: 0,
 					uploaded: []
 				}
@@ -849,6 +872,7 @@ describe('runBuildPush', () => {
 
 	function subjectClaimed(verification: string, machine?: string): unknown {
 		return {
+			origin: 'built',
 			storePath: pathA,
 			narHash: narHash.digestHex(),
 			derivation: drvA,
@@ -895,22 +919,25 @@ describe('runBuildPush', () => {
 				declaredOutputs: [pathA],
 				alreadyValid: [pathA],
 				ultimatePaths: [pathA]
-			}
+			},
+			subject: heldSubject(pathA)
 		},
 		{
-			name: 'a path the store substituted rather than built',
+			name: 'a path the build store fetched from a substituter',
 			config: {
 				constructed: { succeedOn: 1, installables: [`${drvA}^*`] },
 				declaredOutputs: [pathA]
-			}
+			},
+			subject: copiedSubject(pathA)
 		},
 		{
 			name: 'a path no question before the build covered',
-			config: { constructed: { succeedOn: 1 }, ultimatePaths: [pathA] }
+			config: { constructed: { succeedOn: 1 }, ultimatePaths: [pathA] },
+			subject: heldSubject(pathA)
 		}
-	])('publishes $name without claiming it', async (row) => {
+	])('describes $name without claiming that this run built it', async (row) => {
 		await expect(reconciledReceipt(row.config)).resolves.toStrictEqual(
-			receiptOver([])
+			receiptOver([row.subject])
 		);
 	});
 
@@ -1034,6 +1061,7 @@ describe('runBuildPush', () => {
 				paths: [pathA],
 				subjects: [
 					{
+						origin: 'built',
 						storePath: pathA,
 						narHash: narHash.digestHex(),
 						derivation: drvA,
@@ -1125,7 +1153,7 @@ describe('runBuildPush', () => {
 			receipt: {
 				version: 3,
 				paths: [pathA],
-				subjects: [],
+				subjects: [copiedSubject(pathA)],
 				outcomes: [{ outcome: 'destination-served', storePath: pathA }],
 				childExitStatus: 0,
 				uploaded: [],
@@ -1173,7 +1201,7 @@ describe('runBuildPush', () => {
 			receipt: {
 				version: 3,
 				paths: [pathA],
-				subjects: [],
+				subjects: [copiedSubject(pathA)],
 				outcomes: [{ outcome: 'destination-served', storePath: pathA }],
 				childExitStatus: 0,
 				uploaded: [],
@@ -1237,6 +1265,7 @@ describe('runBuildPush', () => {
 				paths: [pathA],
 				subjects: [
 					{
+						origin: 'built',
 						storePath: pathA,
 						narHash: narHash.digestHex(),
 						derivation: drvA,
@@ -1263,6 +1292,7 @@ describe('runBuildPush', () => {
 				version: 3,
 				paths: [pathA, pathB],
 				subjects: [pathA, pathB].map((storePath) => ({
+					origin: 'built',
 					storePath,
 					narHash: narHash.digestHex(),
 					derivation: drvA,
@@ -1288,6 +1318,7 @@ describe('runBuildPush', () => {
 				version: 3,
 				paths: [pathA, pathB],
 				subjects: [pathA, pathB].map((storePath) => ({
+					origin: 'built',
 					storePath,
 					narHash: narHash.digestHex(),
 					derivation: drvA,
@@ -1387,6 +1418,7 @@ describe('runBuildPush', () => {
 				paths: [pathA],
 				subjects: [
 					{
+						origin: 'built',
 						storePath: pathA,
 						narHash: narHash.digestHex(),
 						derivation: drvA,

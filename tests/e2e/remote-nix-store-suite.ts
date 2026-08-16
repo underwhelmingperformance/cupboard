@@ -1032,6 +1032,31 @@ async function runAlreadyValidPublication(
 					JSON.parse(await readFile(provenanceReceiptFile, 'utf8'))
 				);
 				const paths = members.map(({ output }) => output).toSorted(byCodeUnit);
+				// The receipt sorts its subjects by store path, and so does the
+				// checksums file the attest step writes from them. Which of the two
+				// outputs sorts first depends on the hashes this run produced, so
+				// the expectation sorts too.
+				const describedPaths = [
+					{
+						origin: 'built' as const,
+						storePath: coldMember.output,
+						narHash: coldInfo.narHash.digestHex(),
+						derivation: coldMember.derivation,
+						buildStore: store.storeUri,
+						verification: 'build-store' as const
+					},
+					// The remote store already held this output, so the run
+					// publishes it and records it as the store's own work.
+					{
+						origin: 'store-held' as const,
+						storePath: member.output,
+						narHash: info.narHash.digestHex(),
+						derivation: member.derivation,
+						buildStore: store.storeUri
+					}
+				].toSorted((left, right) =>
+					byCodeUnit(left.storePath, right.storePath)
+				);
 
 				expect({
 					receipt,
@@ -1055,15 +1080,7 @@ async function runAlreadyValidPublication(
 					receipt: {
 						version: 3,
 						paths,
-						subjects: [
-							{
-								storePath: coldMember.output,
-								narHash: coldInfo.narHash.digestHex(),
-								derivation: coldMember.derivation,
-								buildStore: store.storeUri,
-								verification: 'build-store'
-							}
-						],
+						subjects: describedPaths,
 						uploaded: paths
 					},
 					provenanceReceipt: {
@@ -1071,6 +1088,7 @@ async function runAlreadyValidPublication(
 						paths: [member.output],
 						subjects: [
 							{
+								origin: 'built',
 								storePath: member.output,
 								narHash: info.narHash.digestHex(),
 								derivation: member.derivation,
@@ -1107,11 +1125,21 @@ async function runAlreadyValidPublication(
 							]
 						}
 					].toSorted((left, right) => byCodeUnit(left.root, right.root)),
+					// The build-origin statement covers both published paths, while
+					// the build-provenance statement covers only the one this run
+					// built.
 					attestation: {
-						checksums: `${coldInfo.narHash.digestHex()}  ${path.basename(coldMember.output)}\n`,
+						checksums: describedPaths
+							.map(
+								(subject) =>
+									`${subject.narHash}  ${path.basename(subject.storePath)}\n`
+							)
+							.join(''),
 						outputs:
 							`checksums-file=${initialChecksumsFile}\n` +
-							'subject-count=1\n' +
+							'subject-count=2\n' +
+							`built-checksums-file=${path.join(runDirectory, 'built-subjects.txt')}\n` +
+							'built-subject-count=1\n' +
 							`predicate-file=${path.join(runDirectory, 'build-origin.json')}\n` +
 							`predicate-type=${buildOriginPredicateType}\n`
 					}
@@ -1426,17 +1454,31 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 						`The successful cohort closure contained ${String(privateReferences.length)} private runtime references; expected one`
 					);
 				}
-				const expectedSubjects = paths.map((storePath) => {
+				// The receipt describes every published path. A member's output is
+				// this run's build; the private runtime reference in the closure is
+				// work the remote store already held.
+				const expectedSubjects = closurePaths.map((storePath) => {
 					const member = members.find(({ outputs }) =>
 						outputs.includes(storePath)
 					);
 					const info = pathInfos.get(storePath);
 
-					if (member === undefined || info === undefined) {
+					if (info === undefined) {
 						throw new Error(`Missing all-success evidence for ${storePath}`);
 					}
 
+					if (member === undefined) {
+						return {
+							origin: 'store-held' as const,
+							storePath,
+							narHash: info.narHash.digestHex(),
+							...(info.deriver !== undefined && { derivation: info.deriver }),
+							buildStore: storeUri
+						};
+					}
+
 					return {
+						origin: 'built' as const,
 						storePath,
 						narHash: info.narHash.digestHex(),
 						derivation: member.derivation,
@@ -1565,7 +1607,9 @@ async function runAllSuccessPublicationAndSubjectResolution(): Promise<void> {
 						.join(''),
 					outputs:
 						`checksums-file=${checksumsFile}\n` +
-						`subject-count=${String(paths.length)}\n` +
+						`subject-count=${String(closurePaths.length)}\n` +
+						`built-checksums-file=${path.join(runDirectory, 'built-subjects.txt')}\n` +
+						`built-subject-count=${String(paths.length)}\n` +
 						`predicate-file=${path.join(runDirectory, 'build-origin.json')}\n` +
 						`predicate-type=${buildOriginPredicateType}\n`
 				});
@@ -1780,6 +1824,7 @@ async function runRemotePublication(store: NixSshStoreFixture): Promise<void> {
 						paths: [successful.output],
 						subjects: [
 							{
+								origin: 'built',
 								storePath: successful.output,
 								narHash: info.narHash.digestHex(),
 								derivation: successful.derivation,
@@ -1964,6 +2009,7 @@ async function runSixTargetRemotePublication(
 					}
 
 					return {
+						origin: 'built' as const,
 						storePath,
 						narHash: info.narHash.digestHex(),
 						derivation: member.derivation,

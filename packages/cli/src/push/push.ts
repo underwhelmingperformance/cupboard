@@ -19,6 +19,7 @@ import type {
 import {
 	buildReceiptV3Schema,
 	type BuildSubjectV3,
+	type NixStoreUri,
 	type ParsedBuildReceiptV3
 } from '@cupboard/protocol/build';
 import {
@@ -89,6 +90,7 @@ import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 
 import { exactUploadDecisions } from './negotiation.ts';
+import { publishedSubjects } from './origin.ts';
 import {
 	type PublicationCollection,
 	type PublicationEntry,
@@ -184,6 +186,13 @@ export interface PushDependencies {
 	 * in `machine`.
 	 */
 	readonly delegated?: ReadonlyMap<string, string>;
+	/**
+	 * The stores a supervised build watched each path being copied from, keyed
+	 * by store path. The receipt subject for a copied path records them. A run
+	 * with no activity log to read leaves this unset, and then no subject
+	 * records a source.
+	 */
+	readonly copiedFrom?: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 }
 
 // Each upload compresses one NAR with zstd and streams the result into its R2
@@ -419,6 +428,7 @@ interface PushRuntimeDependencies {
 	readonly alreadyHeld?: readonly string[];
 	readonly claimable?: readonly string[];
 	readonly delegated?: ReadonlyMap<string, string>;
+	readonly copiedFrom?: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 }
 
 // One publication path with its metadata resolved: a local entry carries the
@@ -583,18 +593,75 @@ interface ReceiptClaims {
 	readonly claimable: ReadonlySet<string> | undefined;
 	/** The builder for each delegated derivation, keyed by derivation path. */
 	readonly delegated: ReadonlyMap<string, string>;
+	/** The stores this run watched each path being copied from. */
+	readonly copiedFrom: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
+}
+
+// The subject for one published path the run realised. A path the run cannot
+// show it realised gets no subject here, and `publishedSubjects` describes it
+// from the store's metadata instead.
+//
+// The push read the path's NAR hash and deriver from the store over the
+// connection it had already opened. Verification is `build-store` because a
+// reconciling push inspects the store after the build and never watches the
+// build itself. When a builder produced the path for this run, the subject also
+// records that builder in `machine`.
+function builtSubject(
+	claims: ReceiptClaims,
+	pathInfo: NixValidPathInfo
+): BuildSubjectV3 | undefined {
+	if (pathInfo.deriver === undefined) {
+		return undefined;
+	}
+
+	// The run never recorded what the store held for this path before the
+	// build, so whether this invocation realised it is unknown.
+	if (
+		claims.claimable !== undefined &&
+		!claims.claimable.has(pathInfo.storePath)
+	) {
+		return undefined;
+	}
+
+	// The build store held this path before the build, so the run did not
+	// realise it and has no build to claim for it.
+	if (claims.alreadyHeld.has(pathInfo.storePath)) {
+		return undefined;
+	}
+
+	const machine = claims.delegated.get(pathInfo.deriver);
+
+	// The store marks a path as ultimately trusted when it built the path
+	// itself. An output a builder copied back into the store carries no such
+	// mark, so `delegated` supplies the builder from the activity log. A path
+	// with neither the mark nor a `delegated` entry reached the store some
+	// other way, and `publishedSubjects` describes it from what the store
+	// records.
+	if (machine === undefined && !pathInfo.ultimate) {
+		return undefined;
+	}
+
+	return {
+		origin: 'built',
+		storePath: pathInfo.storePath,
+		narHash: pathInfo.narHash.digestHex(),
+		derivation: pathInfo.deriver,
+		buildStore: claims.buildStore,
+		...(machine !== undefined && { machine }),
+		verification: 'build-store'
+	};
 }
 
 /**
  * The build receipt a push writes for the build it published: the paths that
- * ended servable, and one subject for each published target that the build
- * store holds a deriver for and marks as its own work. The push read every
- * subject's NAR hash and deriver from that store over the connection it had
- * already opened, so each subject describes what that store realised. Every
- * subject records `build-store` verification, and when a builder produced the
- * path for this run the subject also records that builder in `machine`.
- * Reference and intermediate entries never become subjects: a reference is
- * republished from elsewhere, and an intermediate is not a target of this push.
+ * ended servable, and one subject for each of those paths that the push read
+ * from the build store. A path the run realised carries the build the run can
+ * claim for it; every other path carries what the store records about where it
+ * came from.
+ *
+ * A reference entry has no subject. Its metadata comes from the reference cache
+ * and no store the push can query holds the path, so the run has nothing to say
+ * about where the path came from.
  */
 function reconciledReceipt(
 	claims: ReceiptClaims,
@@ -618,62 +685,29 @@ function reconciledReceipt(
 		}
 	}
 
-	const subjects = resolved
-		.flatMap((path): BuildSubjectV3[] => {
-			if (path.source !== 'local' || path.kind !== 'target') {
-				return [];
-			}
+	const infos = resolved.flatMap((path) =>
+		path.source === 'local' ? [path.pathInfo] : []
+	);
+	const built = new Map<string, BuildSubjectV3>();
 
-			const { pathInfo } = path;
+	for (const pathInfo of infos) {
+		const subject = builtSubject(claims, pathInfo);
 
-			if (pathInfo.deriver === undefined || !servable.has(pathInfo.storePath)) {
-				return [];
-			}
-
-			// Nothing established what the store held for this path before the
-			// build, so whether this run realised it is unknown. It is still
-			// published, and still a path the receipt records.
-			if (
-				claims.claimable !== undefined &&
-				!claims.claimable.has(pathInfo.storePath)
-			) {
-				return [];
-			}
-
-			// The build store held this before the build, so this run did not
-			// realise it and has no provenance to claim for it.
-			if (claims.alreadyHeld.has(pathInfo.storePath)) {
-				return [];
-			}
-
-			const machine = claims.delegated.get(pathInfo.deriver);
-
-			// The store marks a path ultimately trusted when it built the path
-			// itself. A builder's output copied back into the store carries no
-			// such mark, so `delegated` supplies the builder from the activity
-			// log instead. A path with neither the mark nor a `delegated` entry
-			// was substituted, and this run built nothing it can claim for it.
-			if (machine === undefined && !pathInfo.ultimate) {
-				return [];
-			}
-
-			return [
-				{
-					storePath: pathInfo.storePath,
-					narHash: pathInfo.narHash.digestHex(),
-					derivation: pathInfo.deriver,
-					buildStore: claims.buildStore,
-					...(machine !== undefined && { machine }),
-					verification: 'build-store'
-				}
-			];
-		})
-		.toSorted((left, right) => byCodeUnit(left.storePath, right.storePath));
+		if (subject !== undefined) {
+			built.set(pathInfo.storePath, subject);
+		}
+	}
 
 	return buildReceiptV3Schema.parse({
 		version: 3,
 		paths: [...servable].toSorted(byCodeUnit),
-		subjects,
+		subjects: publishedSubjects({
+			built,
+			infos,
+			servable,
+			buildStore: claims.buildStore,
+			copiedFrom: claims.copiedFrom
+		}),
 		uploaded: [...published].toSorted(byCodeUnit)
 	});
 }
@@ -1209,7 +1243,8 @@ async function runPushFlow(
 							dependencies.claimable === undefined
 								? undefined
 								: new Set(dependencies.claimable),
-						delegated: dependencies.delegated ?? new Map()
+						delegated: dependencies.delegated ?? new Map(),
+						copiedFrom: dependencies.copiedFrom ?? new Map()
 					},
 					resolved,
 					summaryPaths

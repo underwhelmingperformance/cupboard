@@ -1186,8 +1186,13 @@ async function settleCohortBuild(
 			const receipt = buildReceiptV3Schema.parse(
 				JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
 			);
+			// The receipt describes every published path, so a target satisfies
+			// the requirement only when its subject records that this run built
+			// it.
 			const claimed = new Set<string>(
-				receipt.subjects.map((subject) => subject.storePath)
+				receipt.subjects
+					.filter((subject) => subject.origin === 'built')
+					.map((subject) => subject.storePath)
 			);
 			// The destination already holds an attestation for a target the plan
 			// left attached, so only the paths this run built need a receipt

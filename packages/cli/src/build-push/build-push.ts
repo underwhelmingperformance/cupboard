@@ -16,6 +16,7 @@ import {
 	buildReceiptV3Schema,
 	type BuildSubjectV3,
 	type InvocationId,
+	type NixStoreUri,
 	type ParsedBuildReceiptV3,
 	type TerminalBuildFailure
 } from '@cupboard/protocol/build';
@@ -56,6 +57,7 @@ import {
 
 import {
 	type BuildAttempt,
+	copySources,
 	delegatedMachines,
 	parseBuildActivities,
 	receiptSubjects
@@ -340,6 +342,7 @@ async function runStreamedBuildPush(
 			maxQueueDepth,
 			eventPaths,
 			subjects,
+			copiedFrom: copySources(attempts.map((attempt) => attempt.log)),
 			...(selectedTargetPaths !== undefined && { selectedTargetPaths }),
 			...(terminalFailure !== undefined && { terminalFailure })
 		});
@@ -549,6 +552,7 @@ async function runReconciledLocalBuildPush(
 			dependencies.store
 		);
 
+		const attemptLogs = attempts.map((attempt) => attempt.log);
 		const delegated = delegatedMachines(
 			attempts.map((attempt) => ({
 				attempt: attempt.attempt,
@@ -566,6 +570,7 @@ async function runReconciledLocalBuildPush(
 				// current-run provenance candidates rather than exclusions.
 				alreadyHeld: build.rebuild === true ? [] : initiallyValid,
 				delegated,
+				copiedFrom: copySources(attemptLogs),
 				exit,
 				...(terminalFailure !== undefined && { terminalFailure })
 			},
@@ -686,6 +691,8 @@ interface RealisedBuild {
 	readonly alreadyHeld: readonly string[];
 	/** The builder for each delegated derivation, taken from the activity logs. */
 	readonly delegated: ReadonlyMap<string, string>;
+	/** The stores each copied path came from, read from the activity logs. */
+	readonly copiedFrom: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 	readonly exit: ChildExit;
 	readonly terminalFailure?: TerminalBuildFailure;
 }
@@ -732,6 +739,7 @@ async function publishRealised(
 			alreadyHeld: built.alreadyHeld,
 			claimable: built.declared,
 			delegated: built.delegated,
+			copiedFrom: built.copiedFrom,
 			retain: shouldRetainTargets,
 			...(shouldRetainTargets && { root: options.root }),
 			...(shouldRetainTargets &&
@@ -800,6 +808,8 @@ interface RunFacts {
 	readonly maxQueueDepth: number;
 	readonly eventPaths: readonly StorePathString[];
 	readonly subjects: readonly BuildSubjectV3[];
+	/** The stores the run watched each path being copied from. */
+	readonly copiedFrom: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 	readonly selectedTargetPaths?: readonly StorePathString[];
 	readonly terminalFailure?: TerminalBuildFailure;
 }
@@ -816,7 +826,14 @@ function requireCompleteProvenance(
 		return;
 	}
 
-	const claimed = new Set(subjects.map((subject) => subject.storePath));
+	// Every published path has a subject, so counting subjects alone would
+	// accept a target the run merely found in the store. Only a `built` subject
+	// satisfies the requirement.
+	const claimed = new Set(
+		subjects
+			.filter((subject) => subject.origin === 'built')
+			.map((subject) => subject.storePath)
+	);
 	const missing = targetPaths.filter((storePath) => !claimed.has(storePath));
 
 	if (missing.length > 0) {
@@ -903,6 +920,7 @@ async function settleRun(
 						compressNar: dependencies.compressNar
 					}),
 					...(facts.subjects.length > 0 && { subjects: facts.subjects }),
+					copiedFrom: facts.copiedFrom,
 					childExitStatus: childExitCode(exit),
 					...(facts.terminalFailure !== undefined && {
 						terminalFailure: facts.terminalFailure

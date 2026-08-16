@@ -13,6 +13,7 @@ const narHash = 'aa'.repeat(32);
 
 function localSubject(): BuildOriginPredicate['subjects'][number] {
 	return {
+		origin: 'built',
 		storePath,
 		narHash,
 		derivation,
@@ -27,6 +28,7 @@ describe('buildOriginPredicateSchema', () => {
 			subjects: [
 				localSubject(),
 				{
+					origin: 'built',
 					storePath: otherPath,
 					narHash: 'bb'.repeat(32),
 					derivation,
@@ -60,6 +62,7 @@ describe('buildOriginPredicateSchema', () => {
 describe('buildOriginSubjectSchema', () => {
 	it('round-trips a subject with a recorded builder', () => {
 		const subject = {
+			origin: 'built' as const,
 			storePath,
 			narHash,
 			derivation,
@@ -68,6 +71,41 @@ describe('buildOriginSubjectSchema', () => {
 			verification: 'build-store' as const
 		};
 
+		expect(buildOriginSubjectSchema.parse(subject)).toStrictEqual(subject);
+	});
+
+	it.each([
+		{
+			name: 'a path the store registered as its own work',
+			subject: {
+				origin: 'store-held' as const,
+				storePath,
+				narHash,
+				derivation,
+				buildStore: 'auto'
+			}
+		},
+		{
+			name: 'a path the run watched being copied',
+			subject: {
+				origin: 'copied' as const,
+				storePath,
+				narHash,
+				derivation,
+				signatures: ['cache.nixos.org-1:c2ln'],
+				copiedFrom: ['https://cache.nixos.org']
+			}
+		},
+		{
+			name: 'a copied path with neither a signature nor a watched source',
+			subject: {
+				origin: 'copied' as const,
+				storePath,
+				narHash,
+				signatures: []
+			}
+		}
+	])('round-trips $name', ({ subject }) => {
 		expect(buildOriginSubjectSchema.parse(subject)).toStrictEqual(subject);
 	});
 
@@ -83,6 +121,30 @@ describe('buildOriginSubjectSchema', () => {
 		{
 			name: 'a producer the receipt never records',
 			value: { ...localSubject(), verification: 'substituted' }
+		},
+		{
+			name: 'an origin the receipt never records',
+			value: { ...localSubject(), origin: 'substituted' }
+		},
+		{
+			name: 'a built subject with no origin',
+			value: {
+				storePath,
+				narHash,
+				derivation,
+				buildStore: 'auto',
+				verification: 'local'
+			}
+		},
+		{
+			name: 'a store-held subject carrying signatures',
+			value: {
+				origin: 'store-held',
+				storePath,
+				narHash,
+				buildStore: 'auto',
+				signatures: []
+			}
 		},
 		{
 			name: 'an empty build store',

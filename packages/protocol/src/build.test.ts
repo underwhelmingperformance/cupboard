@@ -181,6 +181,7 @@ describe('buildReceiptSchema', () => {
 	});
 
 	const provenancedSubject = {
+		origin: 'built',
 		storePath,
 		narHash: 'aa'.repeat(32),
 		derivation,
@@ -195,6 +196,7 @@ describe('buildReceiptSchema', () => {
 			subjects: [
 				provenancedSubject,
 				{
+					origin: 'built',
 					...subject,
 					buildStore: 'auto',
 					machine: 'ssh://builder-1',
@@ -207,8 +209,53 @@ describe('buildReceiptSchema', () => {
 		expect(buildReceiptSchema.parse(receipt)).toStrictEqual(receipt);
 	});
 
+	it('accepts a receipt describing a path the run did not build', () => {
+		const receipt = {
+			version: 3,
+			paths: [storePath, outputPath],
+			subjects: [
+				{
+					origin: 'store-held',
+					storePath,
+					narHash: 'aa'.repeat(32),
+					derivation,
+					buildStore: 'auto'
+				},
+				{
+					origin: 'copied',
+					storePath: outputPath,
+					narHash: 'bb'.repeat(32),
+					signatures: ['cache.nixos.org-1:c2ln'],
+					ca: 'fixed:r:sha256:0000000000000000000000000000000000000000000000000000',
+					copiedFrom: ['https://cache.nixos.org']
+				}
+			],
+			uploaded: [storePath]
+		};
+
+		expect(buildReceiptSchema.parse(receipt)).toStrictEqual(receipt);
+	});
+
+	it('accepts a copied subject the run holds no signature for', () => {
+		const receipt = {
+			version: 3,
+			paths: [storePath],
+			subjects: [
+				{
+					origin: 'copied',
+					storePath,
+					narHash: 'aa'.repeat(32),
+					signatures: []
+				}
+			]
+		};
+
+		expect(buildReceiptSchema.parse(receipt)).toStrictEqual(receipt);
+	});
+
 	it('accepts both receipt versions through the same parser', () => {
 		const version2 = { version: 2, paths: [storePath], subjects: [subject] };
+
 		const version3 = {
 			version: 3,
 			paths: [storePath],
@@ -261,6 +308,54 @@ describe('buildReceiptSchema', () => {
 				version: 2,
 				paths: [storePath],
 				subjects: [{ ...subject, narHash: 'zz'.repeat(32) }]
+			}
+		},
+		{
+			name: 'a version 3 subject with no origin',
+			value: {
+				version: 3,
+				paths: [storePath],
+				subjects: [
+					{
+						storePath,
+						narHash: 'aa'.repeat(32),
+						derivation,
+						buildStore: 'auto',
+						verification: 'build-store'
+					}
+				]
+			}
+		},
+		{
+			name: 'a copied subject claiming a build store',
+			value: {
+				version: 3,
+				paths: [storePath],
+				subjects: [
+					{
+						origin: 'copied',
+						storePath,
+						narHash: 'aa'.repeat(32),
+						signatures: [],
+						buildStore: 'auto'
+					}
+				]
+			}
+		},
+		{
+			name: 'a copied subject whose list of sources is empty',
+			value: {
+				version: 3,
+				paths: [storePath],
+				subjects: [
+					{
+						origin: 'copied',
+						storePath,
+						narHash: 'aa'.repeat(32),
+						signatures: [],
+						copiedFrom: []
+					}
+				]
 			}
 		},
 		{

@@ -12,7 +12,11 @@ import {
 	ttlSecondsSchema
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
-import { derivationPathSchema } from '@cupboard/protocol/build';
+import {
+	autoBuildStore,
+	type BuildSubjectV3,
+	derivationPathSchema
+} from '@cupboard/protocol/build';
 import type { RootSetBody } from '@cupboard/protocol/retention';
 import {
 	type ParsedUploadNegotiateResponse,
@@ -60,6 +64,7 @@ const drvA = derivationPathSchema.parse(
 const rootOne = rootNameSchema.parse('github:acme/repo/one');
 const rootTwo = rootNameSchema.parse('github:acme/repo/two');
 const narHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa));
+const substituterSignature = 'cache.example.org-1:c2ln';
 
 function target(storePath: StorePathString, root?: RootName): ReconcileTarget {
 	return {
@@ -69,15 +74,35 @@ function target(storePath: StorePathString, root?: RootName): ReconcileTarget {
 	};
 }
 
-function pathInfo(storePath: StorePathString): NixValidPathInfo {
+// By default a path the store built itself, which is what a run normally
+// reaches reconciliation with. `isSubstituted` describes a path the store
+// fetched from a substituter instead.
+function pathInfo(
+	storePath: StorePathString,
+	isSubstituted = false
+): NixValidPathInfo {
 	return {
 		storePath,
 		narHash,
 		narSize: 4,
 		references: [],
-		signatures: [],
-		ultimate: false
+		signatures: isSubstituted ? [substituterSignature] : [],
+		ultimate: !isSubstituted
 	};
+}
+
+// A receipt describes every path it publishes. These paths are the store's own
+// work and no attempt attributed a build to them, so each is described as work
+// the store already held.
+function heldSubjects(
+	storePaths: readonly StorePathString[]
+): readonly BuildSubjectV3[] {
+	return storePaths.map((storePath) => ({
+		origin: 'store-held' as const,
+		storePath,
+		narHash: narHash.digestHex(),
+		buildStore: autoBuildStore
+	}));
 }
 
 function partitionOf(
@@ -134,6 +159,8 @@ function emptyStream(): ReadableStream<Uint8Array> {
 
 interface HarnessOptions {
 	readonly valid?: readonly StorePathString[];
+	/** Paths the store fetched from a substituter. */
+	readonly substituted?: readonly StorePathString[];
 	readonly actions?: ReadonlyMap<StorePathString, UploadDecision['action']>;
 	readonly failUploads?: ReadonlySet<StorePathString>;
 	readonly commitBehaviour?: ReadonlyMap<
@@ -159,6 +186,7 @@ function harness(options: HarnessOptions = {}): Harness {
 	const rootReplacements: { name: string; body: RootSetBody }[] = [];
 	const uploadedKeys: string[] = [];
 	const valid = new Set(options.valid);
+	const substituted = new Set(options.substituted);
 	const pathByHash = new Map(
 		[pathA, pathB, pathC, pathD, pathG, pathH].map((path) => [
 			StorePath.hash(path),
@@ -173,7 +201,12 @@ function harness(options: HarnessOptions = {}): Harness {
 					.filter((path): path is StorePathString =>
 						valid.has(storePathSchema.parse(path))
 					)
-					.map((path) => pathInfo(storePathSchema.parse(path)))
+					.map((path) =>
+						pathInfo(
+							storePathSchema.parse(path),
+							substituted.has(storePathSchema.parse(path))
+						)
+					)
 			),
 		queryDerivationOutputPaths: (drvPaths) =>
 			Promise.resolve(
@@ -363,7 +396,7 @@ describe('reconcileBuild', () => {
 				receipt: {
 					version: 3,
 					paths: [pathA, pathB],
-					subjects: [],
+					subjects: heldSubjects([pathA, pathB]),
 					outcomes: [
 						{ outcome: 'built', storePath: pathA },
 						{ outcome: 'built', storePath: pathB }
@@ -416,7 +449,7 @@ describe('reconcileBuild', () => {
 				receipt: {
 					version: 3,
 					paths: [pathA],
-					subjects: [],
+					subjects: heldSubjects([pathA]),
 					outcomes: [
 						{ outcome: 'built', storePath: pathA },
 						{ outcome: 'failed', storePath: pathB, reason: 'upload' }
@@ -449,7 +482,7 @@ describe('reconcileBuild', () => {
 				receipt: {
 					version: 3,
 					paths: [pathC],
-					subjects: [],
+					subjects: heldSubjects([pathC]),
 					outcomes: [{ outcome: 'built', storePath: pathC }],
 					uploaded: [pathC],
 					failed: [],
@@ -515,7 +548,7 @@ describe('reconcileBuild', () => {
 				receipt: {
 					version: 3,
 					paths: [pathA],
-					subjects: [],
+					subjects: heldSubjects([pathA]),
 					outcomes: [
 						{ outcome: 'built', storePath: pathA },
 						{ outcome: 'left-upstream', storePath: pathD }
@@ -600,7 +633,7 @@ describe('reconcileBuild', () => {
 				receipt: {
 					version: 3,
 					paths: [pathB],
-					subjects: [],
+					subjects: heldSubjects([pathB]),
 					outcomes: [{ outcome: 'built', storePath: pathB }],
 					uploaded: [pathB],
 					failed: [],
@@ -637,6 +670,40 @@ describe('reconcileBuild', () => {
 			}
 		},
 		{
+			name: 'records a published intermediate the store fetched as copied',
+			harness: { valid: [pathA, pathG], substituted: [pathG] },
+			options: {
+				targets: [target(pathA, rootOne)],
+				outcomes: new Map<StorePathString, BatchPathOutcome>([
+					[pathA, { outcome: 'published', storePath: pathA }]
+				]),
+				intermediatePaths: [pathG]
+			},
+			expected: {
+				receipt: {
+					version: 3,
+					paths: [pathA, pathG],
+					subjects: [
+						...heldSubjects([pathA]),
+						{
+							origin: 'copied',
+							storePath: pathG,
+							narHash: narHash.digestHex(),
+							signatures: [substituterSignature]
+						}
+					],
+					outcomes: [{ outcome: 'built', storePath: pathA }],
+					uploaded: [pathA],
+					failed: [],
+					collected: []
+				},
+				roots: [{ root: rootOne, applied: true, targets: [pathA] }],
+				rootReplacements: [{ name: rootOne, body: { targets: [pathA] } }],
+				negotiatedPaths: [[pathA, pathG]],
+				failures: []
+			}
+		},
+		{
 			name: 'records a vanished intermediate as collected',
 			harness: { valid: [pathA] },
 			options: {
@@ -650,7 +717,7 @@ describe('reconcileBuild', () => {
 				receipt: {
 					version: 3,
 					paths: [pathA],
-					subjects: [],
+					subjects: heldSubjects([pathA]),
 					outcomes: [{ outcome: 'built', storePath: pathA }],
 					uploaded: [pathA],
 					failed: [],

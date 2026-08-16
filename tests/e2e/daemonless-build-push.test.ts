@@ -395,6 +395,7 @@ describe('build-push with no daemon to stream through', () => {
 				paths: [storePath],
 				subjects: [
 					{
+						origin: 'built',
 						storePath,
 						narHash: info.narHash.digestHex(),
 						derivation,
@@ -433,12 +434,25 @@ describe('build-push with no daemon to stream through', () => {
 		const [output] = await nix.queryDerivationOutputPaths([derivation]);
 		const storePath = storePathSchema.parse(output);
 
+		const info = await nix.queryPathInfo(storePath);
+
 		expect({ negotiated: record.negotiated, receipt }).toStrictEqual({
 			negotiated: [storePath, storePath],
 			receipt: {
 				version: 3,
 				paths: [storePath],
-				subjects: [],
+				// The first run built the path, so the store registered it as
+				// its own work. The second run publishes the path again and
+				// records that registration, claiming no build of its own.
+				subjects: [
+					{
+						origin: 'store-held',
+						storePath,
+						narHash: info.narHash.digestHex(),
+						derivation,
+						buildStore: 'auto'
+					}
+				],
 				uploaded: [storePath],
 				childExitStatus: 0
 			}
@@ -511,6 +525,7 @@ describe('build-push with no daemon to stream through', () => {
 				paths: [storePath],
 				subjects: [
 					{
+						origin: 'built',
 						storePath,
 						narHash: info.narHash.digestHex(),
 						derivation,

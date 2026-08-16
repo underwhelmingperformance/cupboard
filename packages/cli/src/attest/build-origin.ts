@@ -1,3 +1,4 @@
+import { NixSignature } from '@cupboard/nix-store/signature';
 import {
 	buildOriginPredicateSchema,
 	buildOriginPredicateType,
@@ -58,11 +59,20 @@ export function buildOriginStatement(
 }
 
 /**
- * A sentence naming where one subject came from: the coordinating machine that
- * watched the build, the builder the activity log recorded, or the build store
- * that reported the path as its own work.
+ * One sentence describing where a subject came from. A path the run built names
+ * the machine or store that built it. A path the store already held names that
+ * store. A path the run copied names the stores it came from and the keys that
+ * signed it.
  */
 export function describeBuildOrigin(subject: ParsedBuildOriginSubject): string {
+	if (subject.origin === 'store-held') {
+		return `${subject.buildStore} registered it as its own work, and this run did not build it`;
+	}
+
+	if (subject.origin === 'copied') {
+		return describeCopied(subject);
+	}
+
 	if (subject.verification === 'local') {
 		return 'the coordinating machine built it under supervision';
 	}
@@ -72,4 +82,25 @@ export function describeBuildOrigin(subject: ParsedBuildOriginSubject): string {
 	}
 
 	return `${subject.machine} built it, and ${subject.buildStore} reported the build`;
+}
+
+// A copied path is described from what the run can show: the stores it watched
+// the copy come from, if it watched one at all, and the keys that signed the
+// path.
+function describeCopied(
+	subject: Extract<ParsedBuildOriginSubject, { origin: 'copied' }>
+): string {
+	const source =
+		subject.copiedFrom === undefined
+			? 'it was copied into the build store, but this run did not watch the copy'
+			: `this run copied it from ${subject.copiedFrom.join(', ')}`;
+	const names = NixSignature.parseAll(subject.signatures).map(
+		(signature) => signature.name
+	);
+
+	if (names.length === 0) {
+		return `${source}; the store holds no signature for it`;
+	}
+
+	return `${source}; signed by ${names.join(', ')}`;
 }
