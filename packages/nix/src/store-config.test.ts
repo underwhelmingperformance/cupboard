@@ -328,7 +328,7 @@ describe('microarchitectureLevelsOf', () => {
 	});
 
 	// Each level names exactly what libcpuid names, so a flag no level asks
-	// for settles nothing.
+	// for changes nothing.
 	it.each(everyLevelFlags)('asks for %s', (flag) => {
 		const short = everyLevelFlags.filter((offered) => offered !== flag);
 
@@ -659,7 +659,7 @@ describe('discoverNixStoreConfig', () => {
 
 	// Nix clears every setting's overridden mark once it has read the system
 	// file, so a daemon is told what a user's own configuration said and
-	// nothing the system file settled, however the value reached it.
+	// nothing the system file resolved, however the value reached it.
 	it('uses system daemon settings as a base without forwarding them', () => {
 		const config = discover({
 			files: {
