@@ -1,7 +1,4 @@
-// The agent is handed to the global `fetch`, which types its dispatcher from
-// the `undici-types` that `@types/node` carries, so undici's own version has to
-// be the one those types are published from.
-import { type Dispatcher, EnvHttpProxyAgent } from 'undici';
+import { EnvHttpProxyAgent, fetch as undiciFetch } from 'undici';
 
 /**
  * Proxy values from the environment, using libcurl's variable names and
@@ -66,12 +63,6 @@ function firstNonEmpty(
 }
 
 /**
- * A request's proxy dispatcher. Node accepts this as a request option rather
- * than deriving it from the URL.
- */
-type RoutedRequest = RequestInit & { readonly dispatcher?: Dispatcher };
-
-/**
  * Creates a proxy dispatcher from the environment, or returns `undefined` for
  * direct requests.
  *
@@ -79,7 +70,9 @@ type RoutedRequest = RequestInit & { readonly dispatcher?: Dispatcher };
  * which accepts a leading dot, a bare domain matched on its label boundaries,
  * an optional port, and `*` for every host.
  */
-export function proxiedFetch(env: ProxyEnvironment): typeof fetch | undefined {
+export function proxiedFetch(
+	env: ProxyEnvironment
+): typeof undiciFetch | undefined {
 	const proxies = proxySettingsFrom(env);
 
 	if (proxies.httpProxy === undefined && proxies.httpsProxy === undefined) {
@@ -98,8 +91,6 @@ export function proxiedFetch(env: ProxyEnvironment): typeof fetch | undefined {
 	});
 
 	return (input, init) => {
-		const routed: RoutedRequest = { ...init, dispatcher };
-
-		return fetch(input, routed);
+		return undiciFetch(input, { ...init, dispatcher });
 	};
 }

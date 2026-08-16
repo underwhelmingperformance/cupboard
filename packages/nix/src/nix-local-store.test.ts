@@ -6,6 +6,7 @@ import {
 	storeDirectorySchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
+import { fetch as undiciFetch, Response } from 'undici';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -341,9 +342,9 @@ describe('NixLocalStoreClient with substituters', () => {
 /**
 A cache serving the given `nix-cache-info` and one narinfo.
 */
-function servedBy(cacheInfo: string, narInfo: string): typeof fetch {
+function servedBy(cacheInfo: string, narInfo: string): typeof undiciFetch {
 	return (input) => {
-		const url = new URL(input instanceof Request ? input.url : String(input));
+		const url = requestUrl(input);
 
 		if (url.pathname === '/nix-cache-info') {
 			return Promise.resolve(new Response(cacheInfo));
@@ -355,6 +356,14 @@ function servedBy(cacheInfo: string, narInfo: string): typeof fetch {
 				: new Response('', { status: 404 })
 		);
 	};
+}
+
+function requestUrl(input: Parameters<typeof undiciFetch>[0]): URL {
+	if (typeof input === 'string' || input instanceof URL) {
+		return new URL(input);
+	}
+
+	return new URL(input.url);
 }
 
 function emptyDatabase(): NixStoreDatabase {

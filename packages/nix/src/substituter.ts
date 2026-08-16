@@ -20,6 +20,7 @@ import {
 	type BasicCredential,
 	readUserSchema
 } from '@cupboard/shared/http';
+import { fetch as undiciFetch, type Response } from 'undici';
 
 import {
 	type LocalStoreDirectories,
@@ -218,7 +219,7 @@ export interface Substituter extends SubstituterDescription {
 }
 
 export interface SubstituterEnvironment {
-	readonly fetch?: typeof fetch;
+	readonly fetch?: typeof undiciFetch;
 	readonly signal?: AbortSignal;
 	/**
 	 * Retry settings from the effective Nix configuration.
@@ -730,7 +731,7 @@ async function fetchDocument(
 	credential: BasicCredential | undefined,
 	dependencies: SubstituterEnvironment
 ): Promise<DocumentOutcome> {
-	const fetcher = dependencies.fetch ?? fetch;
+	const fetcher = dependencies.fetch ?? undiciFetch;
 	const settings = transferSettings(dependencies);
 	let failure: SubstituterUnreachableError | undefined;
 

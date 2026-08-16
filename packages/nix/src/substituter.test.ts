@@ -8,12 +8,13 @@ import {
 	storeDirectorySchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
+import { fetch as undiciFetch, Response } from 'undici';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 /**
 A fetcher no test using it expects to be called.
 */
-const never: typeof fetch = () => {
+const never: typeof undiciFetch = () => {
 	throw new Error('no request was expected here');
 };
 
@@ -103,7 +104,7 @@ interface CacheContents {
 }
 
 interface FakeCaches {
-	readonly fetch: typeof fetch;
+	readonly fetch: typeof undiciFetch;
 	readonly requests: string[];
 	/**
 	The method each request was made with, in the same order.
@@ -125,7 +126,7 @@ function caches(contents: Readonly<Record<string, CacheContents>>): FakeCaches {
 		methods,
 		credentials,
 		fetch: (input, init) => {
-			const url = new URL(input instanceof Request ? input.url : String(input));
+			const url = requestUrl(input);
 			const origin = url.origin;
 			const cache = contents[origin];
 			requests.push(`${origin}${url.pathname}`);
@@ -176,7 +177,7 @@ function brokenBody(): ReadableStream<Uint8Array> {
 /**
 A cache whose body never ends.
 */
-const endless: typeof fetch = () =>
+const endless: typeof undiciFetch = () =>
 	Promise.resolve(
 		new Response(
 			new ReadableStream({
@@ -190,8 +191,8 @@ const endless: typeof fetch = () =>
 /**
 A cache whose `nix-cache-info` never ends.
 */
-const flooding: typeof fetch = (input) => {
-	const url = new URL(input instanceof Request ? input.url : String(input));
+const flooding: typeof undiciFetch = (input) => {
+	const url = requestUrl(input);
 
 	return url.origin === 'https://flood.example'
 		? Promise.resolve(
@@ -209,7 +210,7 @@ const flooding: typeof fetch = (input) => {
 /**
 A cache asking to be left alone for the given number of seconds.
 */
-function askingToWait(seconds: string): typeof fetch {
+function askingToWait(seconds: string): typeof undiciFetch {
 	return () =>
 		Promise.resolve(
 			new Response('', { status: 503, headers: { 'retry-after': seconds } })
@@ -229,7 +230,7 @@ const askingForAMinute = askingToWait('55');
 /**
 A cache that accepts the connection and never answers on it.
 */
-const silent: typeof fetch = (_input, init) =>
+const silent: typeof undiciFetch = (_input, init) =>
 	new Promise((_resolve, reject) => {
 		init?.signal?.addEventListener('abort', () => {
 			reject(new Error('the deadline passed'));
@@ -253,7 +254,7 @@ function substituter(
 
 function clientOver(
 	substituters: readonly Substituter[],
-	fetcher: typeof fetch,
+	fetcher: typeof undiciFetch,
 	options: {
 		readonly substitute?: boolean;
 		readonly fallback?: boolean;
@@ -860,7 +861,7 @@ describe('openSubstituters', () => {
 	// than left out of every answer after.
 	it('tries again for a substituter whose cache info fails once', async () => {
 		let asked = 0;
-		const flaky: typeof fetch = () => {
+		const flaky: typeof undiciFetch = () => {
 			asked += 1;
 
 			return Promise.resolve(
@@ -1227,7 +1228,7 @@ describe('openSubstituters', () => {
 		{ name: 'a cache asking to be identified', status: 401 },
 		{ name: 'a proxy asking the same', status: 407 }
 	])('names $name as one needing credentials', async ({ status }) => {
-		const answering: typeof fetch = () =>
+		const answering: typeof undiciFetch = () =>
 			Promise.resolve(new Response('', { status }));
 
 		const { substituters, unreachable } = await openSubstituters(
@@ -1250,7 +1251,7 @@ describe('openSubstituters', () => {
 		{ name: 'one that will not say what it holds', status: 403 },
 		{ name: 'one failing on its own account', status: 500 }
 	])('names $name as one with no cache info', async ({ status }) => {
-		const answering: typeof fetch = () =>
+		const answering: typeof undiciFetch = () =>
 			Promise.resolve(new Response('', { status }));
 
 		const { unreachable } = await openSubstituters(['https://quiet.example'], {
@@ -1765,10 +1766,8 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 	// tried again the same as a connection that never opened.
 	it('tries again for a narinfo whose body fails part-way through', async () => {
 		let asked = 0;
-		const truncating: typeof fetch = (input) => {
-			const { pathname } = new URL(
-				input instanceof Request ? input.url : String(input)
-			);
+		const truncating: typeof undiciFetch = (input) => {
+			const { pathname } = requestUrl(input);
 
 			if (pathname === '/nix-cache-info') {
 				return Promise.resolve(
@@ -1798,10 +1797,8 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 	// a retry would get the same response.
 	it('does not retry a narinfo request when the response is oversized', async () => {
 		let asked = 0;
-		const oversized: typeof fetch = (input) => {
-			const { pathname } = new URL(
-				input instanceof Request ? input.url : String(input)
-			);
+		const oversized: typeof undiciFetch = (input) => {
+			const { pathname } = requestUrl(input);
 
 			if (pathname === '/nix-cache-info') {
 				return Promise.resolve(
@@ -1870,7 +1867,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 	it('retries a substituter that returns 503 and takes the later answer', async () => {
 		const served = rendered(narInfo());
 		let asked = 0;
-		const flaky: typeof fetch = () => {
+		const flaky: typeof undiciFetch = () => {
 			asked += 1;
 
 			return Promise.resolve(
@@ -1963,7 +1960,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 		'spreads its waits over $name',
 		async ({ status, retryAfter, transfer, expected }) => {
 			const waits: number[] = [];
-			const refusing: typeof fetch = () =>
+			const refusing: typeof undiciFetch = () =>
 				Promise.resolve(
 					new Response('', {
 						status,
@@ -2000,7 +1997,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 	it('gives up when a substituter asks for a delay longer than the maximum', async () => {
 		const waits: number[] = [];
 		let asked = 0;
-		const patient: typeof fetch = (input, init) => {
+		const patient: typeof undiciFetch = (input, init) => {
 			asked += 1;
 
 			return askingForADay(input, init);
@@ -2054,7 +2051,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 	it('abandons a wait when the caller gives up', async () => {
 		const reason = new Error('the caller gave up');
 		const abandoning = new AbortController();
-		const failing: typeof fetch = () => {
+		const failing: typeof undiciFetch = () => {
 			abandoning.abort(reason);
 
 			return Promise.resolve(new Response('', { status: 503 }));
@@ -2084,7 +2081,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 			abandoning.abort(reason);
 
 			let asked = 0;
-			const failing: typeof fetch = () => {
+			const failing: typeof undiciFetch = () => {
 				asked += 1;
 
 				return Promise.resolve(new Response('', { status: 503 }));
@@ -2115,7 +2112,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 		{ name: 'a method it does not implement', status: 501 }
 	])('asks once when a substituter answers $name', async ({ status }) => {
 		let asked = 0;
-		const refusing: typeof fetch = () => {
+		const refusing: typeof undiciFetch = () => {
 			asked += 1;
 
 			return Promise.resolve(new Response('', { status }));
@@ -2218,6 +2215,14 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 		).resolves.toStrictEqual([]);
 	});
 });
+
+function requestUrl(input: Parameters<typeof undiciFetch>[0]): URL {
+	if (typeof input === 'string' || input instanceof URL) {
+		return new URL(input);
+	}
+
+	return new URL(input.url);
+}
 
 describe('SubstituterClient.querySubstitutablePaths', () => {
 	it('queries only substituters advertising WantMassQuery, and only for the paths still unresolved', async () => {
