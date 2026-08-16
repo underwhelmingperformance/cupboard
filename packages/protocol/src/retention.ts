@@ -117,14 +117,15 @@ export type ParsedRootRemoveResponse = z.output<
 	typeof rootRemoveResponseSchema
 >;
 
-// One garbage-collection sweep's counts: expired roots, swept paths, the pending
-// and committed rows it removed, and the untracked staging objects it reclaimed.
+// One garbage-collection pass's counts: expired roots, collected paths, the
+// pending and committed rows it removed, and the untracked staging objects it
+// reclaimed.
 export const gcResponseSchema = z.strictObject({
 	ok: z.literal(true),
 	pendingUploadsDeleted: countSchema,
 	pendingAttestationsDeleted: countSchema,
 	rootsExpired: countSchema,
-	pathsSwept: countSchema,
+	pathsCollected: countSchema,
 	narInfosDeleted: countSchema,
 	orphanStagingDeleted: countSchema
 });

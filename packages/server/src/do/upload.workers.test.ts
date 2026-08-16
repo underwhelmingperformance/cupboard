@@ -2861,7 +2861,7 @@ describe('upload flow', () => {
 			pendingUploadsDeleted: 0,
 			pendingAttestationsDeleted: 0,
 			rootsExpired: 0,
-			pathsSwept: 1,
+			pathsCollected: 1,
 			narInfosDeleted: 1,
 			orphanStagingDeleted: 0
 		});
@@ -2944,7 +2944,7 @@ describe('upload flow', () => {
 				pendingUploadsDeleted: 0,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
-				pathsSwept: 0,
+				pathsCollected: 0,
 				narInfosDeleted: 0,
 				orphanStagingDeleted: 0
 			},
@@ -3052,7 +3052,7 @@ describe('upload flow', () => {
 			pendingUploadsDeleted: 1,
 			pendingAttestationsDeleted: 0,
 			rootsExpired: 0,
-			pathsSwept: 0,
+			pathsCollected: 0,
 			narInfosDeleted: 0,
 			orphanStagingDeleted: 0
 		});
@@ -3130,7 +3130,7 @@ describe('upload flow', () => {
 			pendingUploadsDeleted: 1,
 			pendingAttestationsDeleted: 0,
 			rootsExpired: 0,
-			pathsSwept: 0,
+			pathsCollected: 0,
 			narInfosDeleted: 0,
 			orphanStagingDeleted: 0
 		});
@@ -3868,7 +3868,7 @@ describe('upload flow', () => {
 				pendingUploadsDeleted: 0,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
-				pathsSwept: 1,
+				pathsCollected: 1,
 				narInfosDeleted: 1,
 				orphanStagingDeleted: 0
 			});
@@ -3918,7 +3918,7 @@ describe('upload flow', () => {
 				pendingUploadsDeleted: 0,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
-				pathsSwept: 1,
+				pathsCollected: 1,
 				narInfosDeleted: 1,
 				orphanStagingDeleted: 0
 			});
@@ -3962,7 +3962,7 @@ describe('upload flow', () => {
 				pendingUploadsDeleted: 0,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
-				pathsSwept: 1,
+				pathsCollected: 1,
 				narInfosDeleted: 1,
 				orphanStagingDeleted: 0
 			});
@@ -3987,7 +3987,7 @@ describe('upload flow', () => {
 				pendingUploadsDeleted: 0,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
-				pathsSwept: 0,
+				pathsCollected: 0,
 				narInfosDeleted: 0,
 				orphanStagingDeleted: 0
 			});
@@ -4016,7 +4016,7 @@ describe('upload flow', () => {
 				pendingUploadsDeleted: 0,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
-				pathsSwept: 0,
+				pathsCollected: 0,
 				narInfosDeleted: 0,
 				orphanStagingDeleted: 0
 			});
@@ -4053,7 +4053,7 @@ describe('upload flow', () => {
 				pendingUploadsDeleted: 0,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 1,
-				pathsSwept: 1,
+				pathsCollected: 1,
 				narInfosDeleted: 1,
 				orphanStagingDeleted: 0
 			});
@@ -4088,7 +4088,7 @@ describe('upload flow', () => {
 				pendingUploadsDeleted: 0,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 1,
-				pathsSwept: 1,
+				pathsCollected: 1,
 				narInfosDeleted: 1,
 				orphanStagingDeleted: 0
 			});
@@ -4128,7 +4128,7 @@ describe('upload flow', () => {
 				pendingUploadsDeleted: 0,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
-				pathsSwept: 1,
+				pathsCollected: 1,
 				narInfosDeleted: 1,
 				orphanStagingDeleted: 0
 			});
@@ -4170,7 +4170,7 @@ describe('upload flow', () => {
 				pendingUploadsDeleted: 0,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
-				pathsSwept: 1,
+				pathsCollected: 1,
 				narInfosDeleted: 1,
 				orphanStagingDeleted: 0
 			});

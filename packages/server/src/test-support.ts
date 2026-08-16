@@ -220,7 +220,7 @@ export interface GcResult {
 	readonly pendingUploadsDeleted: number;
 	readonly pendingAttestationsDeleted: number;
 	readonly rootsExpired: number;
-	readonly pathsSwept: number;
+	readonly pathsCollected: number;
 	readonly narInfosDeleted: number;
 	readonly orphanStagingDeleted: number;
 }

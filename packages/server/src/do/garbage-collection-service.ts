@@ -722,7 +722,7 @@ export class GarbageCollectionService {
 		budget: number
 	): {
 		readonly used: number;
-		readonly pathsSwept: number;
+		readonly pathsCollected: number;
 		readonly complete: boolean;
 	} {
 		const rows = this.context.db
@@ -745,7 +745,7 @@ export class GarbageCollectionService {
 		const hashes = batch.map((row) => row.storePathHash);
 		const marked = this.existingMarks(cache, hashes);
 		const inFlight = this.inFlightHashes(cache, hashes);
-		let pathsSwept = 0;
+		let pathsCollected = 0;
 
 		for (const path of batch) {
 			if (marked.has(path.storePathHash) || inFlight.has(path.storePathHash)) {
@@ -771,7 +771,7 @@ export class GarbageCollectionService {
 					now
 				);
 			});
-			pathsSwept += 1;
+			pathsCollected += 1;
 		}
 
 		if (rows.length > batch.length) {
@@ -785,7 +785,7 @@ export class GarbageCollectionService {
 
 		return {
 			used: batch.length,
-			pathsSwept,
+			pathsCollected,
 			complete: rows.length <= batch.length
 		};
 	}
@@ -797,7 +797,7 @@ export class GarbageCollectionService {
 	): {
 		rootsExpired: number;
 		rootTargetsExpired: number;
-		pathsSwept: number;
+		pathsCollected: number;
 		hasMoreExpiredRoots: boolean;
 		hasMoreWork: boolean;
 	} {
@@ -807,7 +807,7 @@ export class GarbageCollectionService {
 		let sweepRemaining = budget;
 		let rootsExpired = 0;
 		let rootTargetsExpired = 0;
-		let pathsSwept = 0;
+		let pathsCollected = 0;
 		let hasMoreExpiredRoots = false;
 
 		for (;;) {
@@ -912,7 +912,7 @@ export class GarbageCollectionService {
 
 			const swept = this.advanceSweep(cache, now, scan.cursor, sweepRemaining);
 			sweepRemaining -= swept.used;
-			pathsSwept += swept.pathsSwept;
+			pathsCollected += swept.pathsCollected;
 
 			if (sweepRemaining === 0 || swept.complete) {
 				break;
@@ -922,7 +922,7 @@ export class GarbageCollectionService {
 		return {
 			rootsExpired,
 			rootTargetsExpired,
-			pathsSwept,
+			pathsCollected,
 			hasMoreExpiredRoots,
 			hasMoreWork:
 				this.context.db
@@ -1169,7 +1169,7 @@ export class GarbageCollectionService {
 				sweepCache === undefined
 					? {
 							rootsExpired: 0,
-							pathsSwept: 0,
+							pathsCollected: 0,
 							hasMoreExpiredRoots: false,
 							hasMoreWork: false
 						}
@@ -1193,7 +1193,7 @@ export class GarbageCollectionService {
 				pendingUploadsDeleted: expiredUploads.length,
 				pendingAttestationsDeleted: expiredAttestations.length,
 				rootsExpired: swept.rootsExpired,
-				pathsSwept: swept.pathsSwept,
+				pathsCollected: swept.pathsCollected,
 				hasMoreExpiredRoots: swept.hasMoreExpiredRoots,
 				hasMoreWork,
 				narInfosDeleted

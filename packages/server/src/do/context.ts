@@ -98,7 +98,7 @@ export interface GarbageCollectionOutcome {
 	readonly pendingUploadsDeleted: number;
 	readonly pendingAttestationsDeleted: number;
 	readonly rootsExpired: number;
-	readonly pathsSwept: number;
+	readonly pathsCollected: number;
 	readonly hasMoreExpiredRoots: boolean;
 	readonly hasMoreWork: boolean;
 	readonly narInfosDeleted: number;
