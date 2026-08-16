@@ -324,13 +324,13 @@ export class Nix {
 	}
 
 	/**
-	 * Whether a substituter availability answer may have come from a cache. A
-	 * daemon caches substituter answers, so a path the daemon reports as
-	 * unavailable may have been recorded as unavailable earlier; a store driven
-	 * by this process queries the substituters directly, so its answers are
-	 * current.
+	 * Whether an availability result may have come from a cache rather than from
+	 * a fresh substituter query. A daemon caches what its substituter queries
+	 * returned, so a path the daemon reports as unavailable may have been
+	 * recorded as unavailable earlier; a store driven by this process queries
+	 * the substituters directly, so its results are current.
 	 */
-	get cachesSubstituterAnswers(): boolean {
+	get cachesSubstituterQueries(): boolean {
 		return this.storeKind !== 'local-filesystem';
 	}
 
@@ -350,7 +350,7 @@ export class Nix {
 	 * process applies the settings directly.
 	 */
 	async honoursSubstituterSettings(): Promise<SubstituterSettingsOutcome> {
-		if (!this.cachesSubstituterAnswers) {
+		if (!this.cachesSubstituterQueries) {
 			return { isHonoured: true };
 		}
 

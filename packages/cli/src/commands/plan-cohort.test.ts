@@ -833,7 +833,7 @@ describe('requeryUnknownWith', () => {
 
 		const outcome = await requeryUnknownWith(
 			{
-				cachesSubstituterAnswers: false,
+				cachesSubstituterQueries: false,
 				honoursSubstituterSettings: () =>
 					Promise.reject(new Error('the settings must not be asked about'))
 			},
@@ -852,7 +852,7 @@ describe('requeryUnknownWith', () => {
 
 		const outcome = await requeryUnknownWith(
 			{
-				cachesSubstituterAnswers: true,
+				cachesSubstituterQueries: true,
 				honoursSubstituterSettings: () => Promise.resolve({ isHonoured: true })
 			},
 			bypassAnswering(opened),
@@ -909,7 +909,7 @@ describe('requeryUnknownWith', () => {
 
 			const outcome = await requeryUnknownWith(
 				{
-					cachesSubstituterAnswers: true,
+					cachesSubstituterQueries: true,
 					honoursSubstituterSettings: () => Promise.resolve(settings)
 				},
 				bypassAnswering(opened),
