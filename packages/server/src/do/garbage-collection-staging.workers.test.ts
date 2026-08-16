@@ -160,7 +160,7 @@ describe('garbage collection best-effort staging deletes', () => {
 				pendingUploadsDeleted: 1,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
-				pathsSwept: 0,
+				pathsCollected: 0,
 				hasMoreExpiredRoots: false,
 				hasMoreWork: false,
 				narInfosDeleted: 0,

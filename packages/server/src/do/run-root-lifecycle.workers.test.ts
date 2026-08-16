@@ -385,7 +385,7 @@ describe('run root lifecycle', () => {
 				pendingUploadsDeleted: 0,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
-				pathsSwept: 0,
+				pathsCollected: 0,
 				narInfosDeleted: 0,
 				orphanStagingDeleted: 0
 			},
@@ -394,7 +394,7 @@ describe('run root lifecycle', () => {
 				pendingUploadsDeleted: 0,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 1,
-				pathsSwept: 2,
+				pathsCollected: 2,
 				narInfosDeleted: 2,
 				orphanStagingDeleted: 0
 			},
@@ -463,7 +463,7 @@ describe('run root lifecycle', () => {
 				pendingUploadsDeleted: 0,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 1,
-				pathsSwept: 0,
+				pathsCollected: 0,
 				narInfosDeleted: 0,
 				orphanStagingDeleted: 0
 			},
@@ -480,7 +480,7 @@ describe('run root lifecycle', () => {
 				pendingUploadsDeleted: 0,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 1,
-				pathsSwept: 1,
+				pathsCollected: 1,
 				narInfosDeleted: 1,
 				orphanStagingDeleted: 0
 			},
@@ -521,7 +521,7 @@ describe('run root lifecycle', () => {
 				pendingUploadsDeleted: 0,
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
-				pathsSwept: 0,
+				pathsCollected: 0,
 				narInfosDeleted: 0,
 				orphanStagingDeleted: 0
 			}

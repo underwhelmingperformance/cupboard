@@ -327,7 +327,7 @@ async function collectGarbage(
 		pendingUploadsDeleted: outcome.pendingUploadsDeleted,
 		pendingAttestationsDeleted: outcome.pendingAttestationsDeleted,
 		rootsExpired: outcome.rootsExpired,
-		pathsSwept: outcome.pathsSwept,
+		pathsCollected: outcome.pathsCollected,
 		narInfosDeleted: outcome.narInfosDeleted,
 		orphanStagingDeleted: outcome.orphanStagingDeleted
 	};

@@ -23,7 +23,7 @@ const gcOutcome = {
 	pendingUploadsDeleted: 0,
 	pendingAttestationsDeleted: 0,
 	rootsExpired: 0,
-	pathsSwept: 0,
+	pathsCollected: 0,
 	hasMoreExpiredRoots: false,
 	hasMoreWork: false,
 	narInfosDeleted: 0,
@@ -40,7 +40,7 @@ const scopedContinuation = (cache: string) => ({
 });
 const cappedGcOutcome = {
 	...gcOutcome,
-	pathsSwept: maxPathsSweptPerRun,
+	pathsCollected: maxPathsSweptPerRun,
 	hasMoreWork: true
 };
 

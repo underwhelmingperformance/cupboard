@@ -350,7 +350,7 @@ describe('named caches', () => {
 					pendingUploadsDeleted: 0,
 					pendingAttestationsDeleted: 0,
 					rootsExpired: 0,
-					pathsSwept: maxPathsSweptPerRun,
+					pathsCollected: maxPathsSweptPerRun,
 					narInfosDeleted: maxNarInfoDeletionsFlushedPerRun,
 					orphanStagingDeleted: 0
 				},
