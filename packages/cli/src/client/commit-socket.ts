@@ -127,12 +127,12 @@ export interface CommitOutcome {
 	readonly status: 'committed' | 'pending' | 'already-present';
 	readonly settled: Promise<void>;
 	// The retention grace fact this outcome's frame carried, present only when
-	// the negotiation sent a retention plan: a deadline for a settled path, the
-	// captured grace for one still pending.
+	// the negotiation sent a retention plan: a deadline for a path whose verdict
+	// has arrived, the captured grace for one still pending.
 	readonly grace?: ParsedUploadGraceFact;
 	// The grace fact of the terminal frame, readable once `settled` resolves: a
 	// deferred path's deadline arrives with its verdict, not its ack.
-	readonly settledGrace?: () => ParsedUploadGraceFact | undefined;
+	readonly verdictGrace?: () => ParsedUploadGraceFact | undefined;
 }
 
 /** A push's commit session: many paths commit over one socket. */
@@ -159,8 +159,8 @@ interface SessionEntry {
 	// and the timer of a retry not yet sent, cleared with the deadline.
 	retryAttempts: number;
 	retryTimer?: NodeJS.Timeout;
-	// The grace fact of the last settled or verdict frame, exposed through the
-	// outcome's `settledGrace` once the entry settles.
+	// The grace fact of the last `settled` or `verdict` frame, exposed through
+	// the outcome's `verdictGrace` once the entry has its verdict.
 	verdictGrace?: ParsedUploadGraceFact;
 }
 
@@ -624,7 +624,7 @@ export function runCommitSession(
 						status: frame.response.status,
 						settled: entry.settled,
 						...(frame.grace !== undefined && { grace: frame.grace }),
-						settledGrace: () => entry.verdictGrace
+						verdictGrace: () => entry.verdictGrace
 					});
 				});
 
@@ -649,7 +649,7 @@ export function runCommitSession(
 					status: 'pending',
 					settled: entry.settled,
 					...(frame.grace !== undefined && { grace: frame.grace }),
-					settledGrace: () => entry.verdictGrace
+					verdictGrace: () => entry.verdictGrace
 				});
 
 				return;
@@ -688,7 +688,7 @@ export function runCommitSession(
 								status: 'committed',
 								settled: settling.settled,
 								...(frame.grace !== undefined && { grace: frame.grace }),
-								settledGrace: () => settling.verdictGrace
+								verdictGrace: () => settling.verdictGrace
 							});
 						}
 					});
