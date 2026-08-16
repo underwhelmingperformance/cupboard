@@ -573,7 +573,7 @@ describe('partitionAvailability', () => {
 	});
 
 	// The fresh answer walks the closures of the paths it resolved, so it names
-	// paths the first answer settled by another route. Each of those is one
+	// paths the first answer classified by another route. Each of those is one
 	// path, however many answers named it.
 	it('counts a path both answers name once', async () => {
 		const unknownPath = path('33333333333333333333333333333333-unknown');
@@ -588,9 +588,9 @@ describe('partitionAvailability', () => {
 				narSize: 20
 			})
 		);
-		// The fresh answer settles the unknown path, names the shared paths
-		// again, and leaves one the first answer had already settled unknown.
-		// Its bytes cover both paths it settled as substitutable.
+		// The fresh answer classifies the unknown path, names the shared paths
+		// again, and leaves one the first answer had already classified unknown.
+		// Its bytes cover both paths it classified as substitutable.
 		const bypassPartition = missingWith({
 			willBuild: [sharedBuild],
 			willSubstitute: [unknownPath, sharedSubstitute],
@@ -924,8 +924,8 @@ describe('partitionAvailability', () => {
 	});
 
 	// A store asking the substituters as the question is put has no cache to
-	// look past, so its unknowns are as settled as they get and the configured
-	// ceiling stands.
+	// look past, so a second query would classify no more of its unknowns and
+	// the configured ceiling stands.
 	it('keeps the configured ceiling when the first answer was already fresh', async () => {
 		const unknownPath = path('33333333333333333333333333333333-unknown');
 		const store = new RecordingStore(missingWith({ unknown: [unknownPath] }));
