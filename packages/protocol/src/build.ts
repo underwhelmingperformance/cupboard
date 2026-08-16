@@ -175,6 +175,17 @@ export const republishedOriginFields = {
 	metadataSource: z.url()
 };
 
+// The copies a run watched while it built: one entry per path, listing the
+// stores the path was read from in the order the run observed them. A build and
+// the push that publishes its results run as separate processes, so the
+// supervising process writes this document and the push reads it.
+export const observedCopiesSchema = z.record(
+	storePathSchema,
+	z.array(nixStoreUriSchema).min(1)
+);
+export type ParsedObservedCopies = z.output<typeof observedCopiesSchema>;
+export type ObservedCopies = z.input<typeof observedCopiesSchema>;
+
 // One receipt subject: one published path and the origin the run established
 // for it. A supervised build records the attempt that produced the path; a
 // reconciled build leaves the attempt fields out, because it inspects the store

@@ -491,16 +491,21 @@ describe('resolveBuildCohortInputs', () => {
 
 describe('nixBuildArguments', () => {
 	const outLinks = '/tmp/cupboard-out-links-cohort';
+	const logFile = '/tmp/cupboard-out-links-cohort/activity.jsonl';
+	// Every invocation asks for the same activity log, which records the store
+	// each copied path was read from.
+	const logOptions = ['--option', 'json-log-path', logFile];
 
 	it('keeps the out-links in the directory it is given, with no --no-link', () => {
 		expect(
-			nixBuildArguments(['.#a^out', '.#b^out'], '', '', outLinks)
+			nixBuildArguments(['.#a^out', '.#b^out'], '', '', outLinks, logFile)
 		).toStrictEqual([
 			'build',
 			'--keep-going',
 			'--print-out-paths',
 			'--out-link',
 			'/tmp/cupboard-out-links-cohort/result',
+			...logOptions,
 			'--',
 			'.#a^out',
 			'.#b^out'
@@ -508,12 +513,15 @@ describe('nixBuildArguments', () => {
 	});
 
 	it('carries an explicit max-jobs through', () => {
-		expect(nixBuildArguments(['.#a^out'], '4', '', outLinks)).toStrictEqual([
+		expect(
+			nixBuildArguments(['.#a^out'], '4', '', outLinks, logFile)
+		).toStrictEqual([
 			'build',
 			'--keep-going',
 			'--print-out-paths',
 			'--out-link',
 			'/tmp/cupboard-out-links-cohort/result',
+			...logOptions,
 			'--max-jobs',
 			'4',
 			'--',
@@ -527,7 +535,8 @@ describe('nixBuildArguments', () => {
 				['.#a^out'],
 				'',
 				'ssh-ng://build@example.test',
-				outLinks
+				outLinks,
+				logFile
 			)
 		).toStrictEqual([
 			'build',
@@ -535,6 +544,7 @@ describe('nixBuildArguments', () => {
 			'--print-out-paths',
 			'--out-link',
 			'/tmp/cupboard-out-links-cohort/result',
+			...logOptions,
 			'--store',
 			'ssh-ng://build@example.test',
 			'--eval-store',
@@ -2120,7 +2130,8 @@ describe('buildCohortAction', () => {
 		const runNixBuild = vi.fn((_installables: readonly string[]) =>
 			Promise.resolve({
 				paths: [libraryBuiltPath, floatingBuiltPath],
-				status: 0
+				status: 0,
+				copiedFrom: new Map()
 			})
 		);
 
@@ -2251,7 +2262,11 @@ describe('buildCohortAction', () => {
 				{
 					runCupboard: runCupboardMock,
 					runNixBuild: vi.fn(() =>
-						Promise.resolve({ paths: [libraryBuiltPath], status: 0 })
+						Promise.resolve({
+							paths: [libraryBuiltPath],
+							status: 0,
+							copiedFrom: new Map()
+						})
 					)
 				}
 			);
@@ -2287,7 +2302,8 @@ describe('buildCohortAction', () => {
 				paths: installables.includes(libraryQueryInstallable)
 					? [libraryBuiltPath]
 					: [],
-				status: 0
+				status: 0,
+				copiedFrom: new Map()
 			})
 		);
 
@@ -2329,7 +2345,8 @@ describe('buildCohortAction', () => {
 				if (installables[0] === multiOutputInstallable) {
 					return Promise.resolve({
 						paths: [floatingBuiltPath, floatingDevelopmentPath],
-						status: 0
+						status: 0,
+						copiedFrom: new Map()
 					});
 				}
 
@@ -2519,7 +2536,11 @@ describe('buildCohortAction', () => {
 		const inputs = resolveBuildCohortInputs(baseOptions(), environment);
 		const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
 		const runNixBuild = vi.fn(() =>
-			Promise.resolve({ paths: [libraryBuiltPath], status: 1 })
+			Promise.resolve({
+				paths: [libraryBuiltPath],
+				status: 1,
+				copiedFrom: new Map()
+			})
 		);
 
 		await expect(
@@ -2543,7 +2564,11 @@ describe('buildCohortAction', () => {
 	it('fails a best-effort build-only cohort closed without structured target evidence', async () => {
 		const warnings: string[] = [];
 		const runNixBuild = vi.fn((_installables: readonly string[]) =>
-			Promise.resolve({ paths: [libraryBuiltPath], status: 75 })
+			Promise.resolve({
+				paths: [libraryBuiltPath],
+				status: 75,
+				copiedFrom: new Map()
+			})
 		);
 		const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
 
@@ -2615,7 +2640,8 @@ describe('buildCohortAction', () => {
 		const runNixBuild = vi.fn(() =>
 			Promise.resolve({
 				paths: [libraryBuiltPath, floatingBuiltPath],
-				status: 0
+				status: 0,
+				copiedFrom: new Map()
 			})
 		);
 		const evaluated: {
@@ -2707,7 +2733,9 @@ describe('buildCohortAction', () => {
 			expectedPaths: [undefined, undefined, undefined]
 		});
 		const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
-		const runNixBuild = vi.fn(() => Promise.resolve({ paths: [], status: 0 }));
+		const runNixBuild = vi.fn(() =>
+			Promise.resolve({ paths: [], status: 0, copiedFrom: new Map() })
+		);
 
 		await buildCohortAction(
 			{ ...baseOptions(), cohortJson: unevaluated },
@@ -2765,7 +2793,7 @@ describe('buildCohortAction', () => {
 		const runNixBuild = (installables: readonly string[]) => {
 			buildRuns.push(installables);
 
-			return Promise.resolve({ paths: [], status: 0 });
+			return Promise.resolve({ paths: [], status: 0, copiedFrom: new Map() });
 		};
 
 		let error: unknown;
@@ -2818,7 +2846,7 @@ describe('buildCohortAction', () => {
 		const runNixBuild = (installables: readonly string[]) => {
 			buildRuns.push(installables);
 
-			return Promise.resolve({ paths: [], status: 0 });
+			return Promise.resolve({ paths: [], status: 0, copiedFrom: new Map() });
 		};
 
 		let error: unknown;
@@ -2867,7 +2895,9 @@ describe('buildCohortAction', () => {
 				new CupboardReportedError(69, refusalEvents, undefined, true)
 			)
 		);
-		const runNixBuild = vi.fn(() => Promise.resolve({ paths: [], status: 0 }));
+		const runNixBuild = vi.fn(() =>
+			Promise.resolve({ paths: [], status: 0, copiedFrom: new Map() })
+		);
 
 		let error: unknown;
 
@@ -2901,7 +2931,9 @@ describe('buildCohortAction', () => {
 		const runCupboardMock = vi.fn<typeof runCupboard>(() =>
 			Promise.reject(new CupboardReportedError(1, [], undefined, true))
 		);
-		const runNixBuild = vi.fn(() => Promise.resolve({ paths: [], status: 0 }));
+		const runNixBuild = vi.fn(() =>
+			Promise.resolve({ paths: [], status: 0, copiedFrom: new Map() })
+		);
 
 		await expect(
 			buildCohortAction(baseOptions(), environment, {
@@ -2915,7 +2947,9 @@ describe('buildCohortAction', () => {
 		const runCupboardMock = vi.fn<typeof runCupboard>(() =>
 			Promise.resolve([])
 		);
-		const runNixBuild = vi.fn(() => Promise.resolve({ paths: [], status: 0 }));
+		const runNixBuild = vi.fn(() =>
+			Promise.resolve({ paths: [], status: 0, copiedFrom: new Map() })
+		);
 
 		await expect(
 			buildCohortAction(baseOptions(), environment, {
@@ -2935,7 +2969,9 @@ describe('buildCohortAction', () => {
 		await expect(
 			buildCohortAction(baseOptions(), environment, {
 				runCupboard: runCupboardMock,
-				runNixBuild: vi.fn(() => Promise.resolve({ paths: [], status: 0 }))
+				runNixBuild: vi.fn(() =>
+					Promise.resolve({ paths: [], status: 0, copiedFrom: new Map() })
+				)
 			})
 		).rejects.toBeInstanceOf(CohortPlanResultInvalidError);
 	});
@@ -3001,7 +3037,8 @@ describe('buildCohortAction availability confirmation', () => {
 
 					return built === undefined ? [] : [built];
 				}),
-				status: 0
+				status: 0,
+				copiedFrom: new Map()
 			})
 		);
 		const options: BuildCohortOptions = {
@@ -3285,7 +3322,8 @@ describe('cohortReceiptPushArguments', () => {
 				},
 				paths,
 				alreadyHeld,
-				claimable
+				claimable,
+				'/tmp/observed-copies.json'
 			)
 		).toStrictEqual([
 			'--no-colour',
@@ -3298,6 +3336,8 @@ describe('cohortReceiptPushArguments', () => {
 			'ssh-ng://build@example.test',
 			'--receipt-file',
 			'/tmp/receipt.json',
+			'--copied-from-file',
+			'/tmp/observed-copies.json',
 			...held,
 			...evidence,
 			...extra
@@ -3934,7 +3974,10 @@ describe('buildCohortAction publication', () => {
 		builtPaths: readonly string[] = [libraryBuiltPath, floatingBuiltPath],
 		results: readonly NixBuildResult[] = [remoteResult('built')],
 		plannedBuildSet: readonly string[] = [libraryQueryInstallable],
-		publicationPaths?: readonly string[]
+		publicationPaths?: readonly string[],
+		// The copies the remote store reported over the build session, which the
+		// real client accumulates and hands to publication.
+		observedCopies: ReadonlyMap<StorePathString, readonly string[]> = new Map()
 	): Promise<PublicationRun> {
 		const calls: (readonly string[])[] = [];
 		const lifecycle: string[] = [];
@@ -4017,7 +4060,8 @@ describe('buildCohortAction publication', () => {
 					installables.length === 1
 						? [...(localOutputs.get(installables[0] ?? '') ?? [])]
 						: [...builtPaths],
-				status: 0
+				status: 0,
+				copiedFrom: new Map()
 			})
 		);
 		let didEvaluationReceiveSignal = false;
@@ -4090,7 +4134,8 @@ describe('buildCohortAction publication', () => {
 					builds: readonly NixBuildResult[],
 					failures: readonly RemoteCohortBuildFailure[],
 					publicationPaths: readonly StorePathString[],
-					provenanceRebuilds: ReadonlySet<NixDerivedPathString>
+					provenanceRebuilds: ReadonlySet<NixDerivedPathString>,
+					copiedFrom: ReadonlyMap<StorePathString, readonly string[]>
 				) => Promise<void>,
 				receivedSignal?: AbortSignal,
 				preparation?: RemoteDerivationPreparation
@@ -4130,7 +4175,14 @@ describe('buildCohortAction publication', () => {
 							addTempRoot: () => Promise.resolve()
 						},
 						installables,
-						publish,
+						(builds, failures, paths, provenanceRebuilds) =>
+							publish(
+								builds,
+								failures,
+								paths,
+								provenanceRebuilds,
+								observedCopies
+							),
 						preparation
 					);
 				} finally {
@@ -4199,7 +4251,11 @@ describe('buildCohortAction publication', () => {
 	it('reports the directory holding the out-links that root its targets', async () => {
 		const outputFile = path.join(directory, 'github-output');
 		const runNixBuild = vi.fn(() =>
-			Promise.resolve({ paths: [libraryBuiltPath], status: 0 })
+			Promise.resolve({
+				paths: [libraryBuiltPath],
+				status: 0,
+				copiedFrom: new Map()
+			})
 		);
 
 		await buildCohortAction(baseOptions(), environment, {
@@ -4330,7 +4386,9 @@ describe('buildCohortAction publication', () => {
 
 		await buildCohortAction(options, environment, {
 			runCupboard: runCupboardMock,
-			runNixBuild: vi.fn(() => Promise.resolve({ paths: [], status: 0 }))
+			runNixBuild: vi.fn(() =>
+				Promise.resolve({ paths: [], status: 0, copiedFrom: new Map() })
+			)
 		});
 
 		const inputs = resolveBuildCohortInputs(options, environment);
@@ -4403,7 +4461,9 @@ describe('buildCohortAction publication', () => {
 
 		await buildCohortAction(options, environment, {
 			runCupboard: runCupboardMock,
-			runNixBuild: vi.fn(() => Promise.resolve({ paths: [], status: 0 }))
+			runNixBuild: vi.fn(() =>
+				Promise.resolve({ paths: [], status: 0, copiedFrom: new Map() })
+			)
 		});
 
 		const pushCalls = runCupboardMock.mock.calls
@@ -4684,7 +4744,9 @@ describe('buildCohortAction publication', () => {
 				environment,
 				{
 					runCupboard: runCupboardMock,
-					runNixBuild: vi.fn(() => Promise.resolve({ paths: [], status: 0 }))
+					runNixBuild: vi.fn(() =>
+						Promise.resolve({ paths: [], status: 0, copiedFrom: new Map() })
+					)
 				}
 			);
 
@@ -5175,7 +5237,8 @@ describe('buildCohortAction publication', () => {
 					builds: readonly NixBuildResult[],
 					failures: readonly RemoteCohortBuildFailure[],
 					publicationPaths: readonly StorePathString[],
-					provenanceRebuilds: ReadonlySet<NixDerivedPathString>
+					provenanceRebuilds: ReadonlySet<NixDerivedPathString>,
+					copiedFrom: ReadonlyMap<StorePathString, readonly string[]>
 				) => Promise<void>
 			) => {
 				if (publish === undefined) {
@@ -5189,7 +5252,8 @@ describe('buildCohortAction publication', () => {
 						[remoteResult('built')],
 						[],
 						[storePathSchema.parse(libraryBuiltPath)],
-						new Set()
+						new Set(),
+						new Map()
 					);
 				} finally {
 					lifecycle.push('closed');
@@ -5315,6 +5379,8 @@ describe('buildCohortAction publication', () => {
 				'ssh-ng://build@example.test',
 				'--receipt-file',
 				receiptFile,
+				'--copied-from-file',
+				path.join(directory, 'observed-copies.json'),
 				'--already-held',
 				appPath,
 				'--claimable',
@@ -5396,6 +5462,31 @@ describe('buildCohortAction publication', () => {
 		});
 	});
 
+	it('hands the push the copies the remote build session watched', async () => {
+		await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson(),
+				push: 'true',
+				store: 'ssh-ng://build@example.test'
+			},
+			[libraryBuiltPath],
+			[remoteResult('built')],
+			[libraryQueryInstallable],
+			undefined,
+			new Map([
+				[storePathSchema.parse(appPath), ['https://cache.example.test']]
+			])
+		);
+		const observed: unknown = JSON.parse(
+			await readFile(path.join(directory, 'observed-copies.json'), 'utf8')
+		);
+
+		expect(observed).toStrictEqual({
+			[appPath]: ['https://cache.example.test']
+		});
+	});
+
 	it('claims only the queryable remote output Nix reports this invocation built', async () => {
 		const run = await runPublicationFlow({
 			...baseOptions(),
@@ -5453,6 +5544,8 @@ describe('buildCohortAction publication', () => {
 				'ssh-ng://build@example.test',
 				'--receipt-file',
 				receiptFile,
+				'--copied-from-file',
+				path.join(directory, 'observed-copies.json'),
 				'--already-held',
 				appPath,
 				'--claimable',
@@ -5546,6 +5639,8 @@ describe('buildCohortAction publication', () => {
 					'ssh-ng://build@example.test',
 					'--receipt-file',
 					path.join(directory, 'cupboard-cohort-receipt.json'),
+					'--copied-from-file',
+					path.join(directory, 'observed-copies.json'),
 					'--already-held',
 					appPath,
 					'--no-claimable'

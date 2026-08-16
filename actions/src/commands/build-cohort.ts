@@ -4,6 +4,7 @@ import path from 'node:path';
 import { env } from 'node:process';
 
 import {
+	copySources,
 	createProcessNixDaemonConnector,
 	type DaemonCommandRunner,
 	Nix,
@@ -803,7 +804,8 @@ export async function buildCohortAction(
 								results,
 								failures,
 								publicationPaths,
-								currentProvenanceRebuilds
+								currentProvenanceRebuilds,
+								copiedFrom
 							) => {
 								const targetFailures = failures.filter(
 									(failure) => failure.kind === 'target'
@@ -838,6 +840,7 @@ export async function buildCohortAction(
 										built: buildResultOutputPaths(results),
 										publicationPaths,
 										resultBuilds: results,
+										copiedFrom,
 										incompleteRoots: incompleteRootsFor(members, failures),
 										...(terminalFailure !== undefined && {
 											terminalFailure
@@ -881,7 +884,7 @@ export async function buildCohortAction(
 		if (streamedFailure === undefined) {
 			build =
 				buildInstallables.length === 0
-					? { paths: [], status: 0 }
+					? { paths: [], status: 0, copiedFrom: new Map() }
 					: await runNix(
 							buildInstallables,
 							inputs.maxJobs,
@@ -892,7 +895,11 @@ export async function buildCohortAction(
 		} else {
 			build = {
 				paths: streamedFailure.receipt.paths,
-				status: streamedFailure.error.status
+				status: streamedFailure.error.status,
+				// A streamed run has already published what it built, so this
+				// branch resolves paths rather than building, and no copy passes
+				// through it.
+				copiedFrom: new Map()
 			};
 		}
 
@@ -935,6 +942,7 @@ export async function buildCohortAction(
 		await settleCohortBuild(context, {
 			built: build.paths,
 			localBuilds: localOwnership.builds,
+			copiedFrom: build.copiedFrom,
 			incompleteRoots: localOwnership.incompleteRoots
 		});
 
@@ -1101,6 +1109,8 @@ async function settleCohortBuild(
 		readonly localBuilds?: readonly CohortOwnedBuild[];
 		readonly incompleteRoots?: ReadonlySet<string>;
 		readonly terminalFailure?: ParsedTerminalBuildFailure;
+		/** The stores the build watched each path being copied from. */
+		readonly copiedFrom?: ReadonlyMap<string, readonly string[]>;
 	}
 ): Promise<void> {
 	const {
@@ -1121,8 +1131,15 @@ async function settleCohortBuild(
 		resultBuilds = [],
 		localBuilds = [],
 		incompleteRoots = new Set<string>(),
-		terminalFailure
+		terminalFailure,
+		copiedFrom = new Map<string, readonly string[]>()
 	} = build;
+	// The build and the push run as separate processes, so the copies the build
+	// watched reach the push through a file beside the receipt.
+	const copiedFromFile = path.join(
+		path.dirname(inputs.receiptFile),
+		'observed-copies.json'
+	);
 	const claimable = claimableOutputPaths(resultBuilds, provenanceRebuilds);
 	const alreadyHeld = receiptAlreadyHeldPaths(
 		partition?.alreadyValid ?? [],
@@ -1139,6 +1156,11 @@ async function settleCohortBuild(
 	const leftUpstream = partition?.leftUpstream ?? [];
 
 	await mkdir(path.dirname(inputs.targetPathsFile), { recursive: true });
+	await mkdir(path.dirname(copiedFromFile), { recursive: true });
+	await writeFile(
+		copiedFromFile,
+		`${JSON.stringify(Object.fromEntries(copiedFrom), undefined, 2)}\n`
+	);
 	await writeFile(inputs.targetPathsFile, linesOf(targetPaths));
 	await writeFile(inputs.intermediatePathsFile, linesOf(intermediatePaths));
 	await writeFile(inputs.referencePathsFile, linesOf(referencePaths));
@@ -1176,7 +1198,8 @@ async function settleCohortBuild(
 				inputs,
 				publicationPaths,
 				alreadyHeld,
-				claimable
+				claimable,
+				copiedFromFile
 			),
 			environment,
 			cupboardRunDependencies
@@ -1408,7 +1431,8 @@ export function cohortReceiptPushArguments(
 	>,
 	paths: readonly string[],
 	alreadyHeld: readonly string[],
-	claimable: readonly string[]
+	claimable: readonly string[],
+	copiedFromFile: string
 ): readonly string[] {
 	const arguments_ = [
 		'--no-colour',
@@ -1421,6 +1445,8 @@ export function cohortReceiptPushArguments(
 		inputs.store,
 		'--receipt-file',
 		inputs.receiptFile,
+		'--copied-from-file',
+		copiedFromFile,
 		...(alreadyHeld.length === 0
 			? ['--no-already-held']
 			: alreadyHeld.flatMap((storePath) => ['--already-held', storePath])),
@@ -2252,14 +2278,21 @@ export function nixBuildArguments(
 	installables: readonly string[],
 	maxJobs: string,
 	store: string,
-	outLinkDirectory: string
+	outLinkDirectory: string,
+	logFile: string
 ): readonly string[] {
 	const arguments_ = [
 		'build',
 		'--keep-going',
 		'--print-out-paths',
 		'--out-link',
-		path.join(outLinkDirectory, 'result')
+		path.join(outLinkDirectory, 'result'),
+		// The log records which store each copied path was read from, which is
+		// the only evidence a run has for a path it substituted rather than
+		// built.
+		'--option',
+		'json-log-path',
+		logFile
 	];
 
 	if (maxJobs !== '') {
@@ -2856,7 +2889,8 @@ export async function runNixBuildWithResults(
 		results: readonly NixBuildResult[],
 		failures: readonly RemoteCohortBuildFailure[],
 		publicationPaths: readonly StorePathString[],
-		provenanceRebuilds: ReadonlySet<NixDerivedPathString>
+		provenanceRebuilds: ReadonlySet<NixDerivedPathString>,
+		copiedFrom: ReadonlyMap<StorePathString, readonly string[]>
 	) => Promise<void>,
 	signal?: AbortSignal,
 	preparation?: RemoteDerivationPreparation
@@ -2874,8 +2908,23 @@ export async function runNixBuildWithResults(
 					...(signal !== undefined && { signal })
 				});
 
+	// The store reports each copy it performs over the connection that asked for
+	// the work, so by the time publication runs the client has recorded every
+	// path the build fetched.
 	await nix.withConnection((session) =>
-		buildAndRootNixResults(session, installables, publish, preparation)
+		buildAndRootNixResults(
+			session,
+			installables,
+			(results, failures, publicationPaths, provenanceRebuilds) =>
+				publish(
+					results,
+					failures,
+					publicationPaths,
+					provenanceRebuilds,
+					nix.observedCopies()
+				),
+			preparation
+		)
 	);
 }
 
@@ -3249,6 +3298,8 @@ export function buildResultOutputPaths(
 export interface NixBuildCommandResult {
 	readonly paths: readonly string[];
 	readonly status: number | null;
+	/** The stores the build watched each path being copied from. */
+	readonly copiedFrom: ReadonlyMap<StorePathString, readonly string[]>;
 }
 
 async function resolveLocalBuildOwners(options: {
@@ -3394,11 +3445,13 @@ export async function runNixBuild(
 
 	await mkdir(outLinkDirectory, { recursive: true });
 
+	const logFile = path.join(outLinkDirectory, 'activity.jsonl');
 	const arguments_ = nixBuildArguments(
 		installables,
 		maxJobs,
 		store,
-		outLinkDirectory
+		outLinkDirectory,
+		logFile
 	);
 
 	const { status, stdout } = await runCapturedNixProcess(
@@ -3410,5 +3463,18 @@ export async function runNixBuild(
 
 	const paths = stdout.split(/\r?\n/u).filter((line) => line !== '');
 
-	return { paths, status };
+	return { paths, status, copiedFrom: await readCopySources(logFile) };
+}
+
+// Nix creates the activity log when the build starts, so a build that failed
+// before then leaves no file. A read that fails therefore means the run
+// recorded no copy.
+async function readCopySources(
+	logFile: string
+): Promise<ReadonlyMap<StorePathString, readonly string[]>> {
+	try {
+		return copySources([await readFile(logFile, 'utf8')]);
+	} catch {
+		return new Map();
+	}
 }
