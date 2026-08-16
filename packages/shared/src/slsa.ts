@@ -2,6 +2,19 @@ import { z } from 'zod';
 
 const githubUrlPrefix = 'https://github.com/';
 
+// Every version of the SLSA build-provenance predicate type is a URL under this
+// prefix, and the major version is the last segment.
+const slsaProvenancePrefix = 'https://slsa.dev/provenance/';
+
+/**
+ * Whether a predicate type is SLSA build provenance, of any version. Such a
+ * statement claims that its signer's build produced the subjects, which is a
+ * claim no other predicate type in this project makes.
+ */
+export function isSlsaProvenanceType(predicateType: string): boolean {
+	return predicateType.startsWith(slsaProvenancePrefix);
+}
+
 const slsaDependencySchema = z.object({
 	uri: z.string().nullish(),
 	digest: z.object({ gitCommit: z.string().nullish() }).nullish()

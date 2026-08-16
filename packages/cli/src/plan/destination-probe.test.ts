@@ -34,15 +34,11 @@ function requestUrl(input: RequestInfo | URL): string {
 	return input instanceof URL ? input.href : input.url;
 }
 
-function attestationList(): Response {
+function attestationList(
+	predicateType = 'https://slsa.dev/provenance/v1'
+): Response {
 	return Response.json({
-		attestations: [
-			{
-				digest: 'a'.repeat(64),
-				predicateType: 'https://slsa.dev/provenance/v1',
-				size: 512
-			}
-		]
+		attestations: [{ digest: 'a'.repeat(64), predicateType, size: 512 }]
 	});
 }
 
@@ -73,6 +69,24 @@ function recordingFetcher(
 }
 
 describe('attestedServedPaths', () => {
+	// A build-origin statement covers every path its run published, so a path
+	// that carries one and no build provenance is not attested as built.
+	it('passes over a path whose only attestation is not build provenance', async () => {
+		const attested = await attestedServedPaths({
+			baseUrl,
+			cache: DEFAULT_CACHE,
+			paths: [appPath],
+			fetcher: () =>
+				Promise.resolve(
+					attestationList(
+						'https://github.com/underwhelmingperformance/cupboard/predicate/build-origin/v2'
+					)
+				)
+		});
+
+		expect([...attested]).toStrictEqual([]);
+	});
+
 	it('reports the paths whose attestation list the cache serves', async () => {
 		const requests: ProbeRequest[] = [];
 

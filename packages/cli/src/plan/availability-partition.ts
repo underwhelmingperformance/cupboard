@@ -185,9 +185,9 @@ export interface AvailabilityPartitionOptions {
 	>;
 	readonly destinationAnswers: DestinationAnswers;
 	/**
-	 * Which of the given paths the destination cache holds an attestation for.
-	 * A plan that requires attested availability sets this field, and a
-	 * destination-served path without an attestation then joins the build set.
+	 * Which of the given paths the destination cache holds build provenance
+	 * for. A plan that requires attested availability sets this field, and a
+	 * destination-served path with no provenance then joins the build set.
 	 * When the field is unset, a target is attach-only whenever the destination
 	 * cache serves its path.
 	 */
@@ -234,7 +234,7 @@ export interface AvailabilityPartition {
 	readonly leftUpstreamRejections: readonly LeftUpstreamRejection[];
 	readonly buildSet: readonly NixDerivedPathString[];
 	/**
-	 * Paths the destination cache serves without holding an attestation for
+	 * Paths the destination cache serves without holding build provenance for
 	 * them. A run that asked for attested availability builds these targets, so
 	 * each of them is in `buildSet` by its installable and absent from
 	 * `attachOnly`. The list is empty for every other run.

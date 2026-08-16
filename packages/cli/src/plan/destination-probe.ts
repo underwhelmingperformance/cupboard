@@ -15,6 +15,7 @@ import {
 import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
+import { isSlsaProvenanceType } from '@cupboard/shared/slsa';
 import { StatusCodes } from 'http-status-codes';
 
 import type { DestinationAnswers } from './availability-partition.ts';
@@ -62,10 +63,14 @@ export function viewServedPaths(
 }
 
 /**
- * Which of `paths` the destination cache holds at least one attestation for.
- * The cache serves one attestation list per store-path hash, so the probe
- * requests one list per distinct hash and reads a 404 as "no attestation for
- * that path".
+ * Which of `paths` the destination cache holds build provenance for. The cache
+ * serves one attestation list per store-path hash, so the probe requests one
+ * list per distinct hash and reads a 404 as "no attestation for that path".
+ *
+ * Only a SLSA build-provenance statement counts. A cupboard build-origin
+ * statement covers every path its run published, including paths the run
+ * copied into its store, so its presence alone would let a path the workflow
+ * never built pass as attested.
  */
 export function attestedServedPaths(
 	options: DestinationProbeOptions & {
@@ -263,7 +268,9 @@ async function hasAttestation(
 		);
 	}
 
-	return parsed.data.attestations.length > 0;
+	return parsed.data.attestations.some((descriptor) =>
+		isSlsaProvenanceType(descriptor.predicateType)
+	);
 }
 
 async function queryMissingStorePathHashes(
