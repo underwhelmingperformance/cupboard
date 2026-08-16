@@ -860,7 +860,7 @@ describe('requeryUnknownWith', () => {
 		);
 
 		// The sizes are asked of the same bypass the partition came from, for
-		// the paths that answer settled as substitutable.
+		// the paths that answer classified as substitutable.
 		expect({ outcome, opened }).toStrictEqual({
 			outcome: {
 				kind: 'answered',

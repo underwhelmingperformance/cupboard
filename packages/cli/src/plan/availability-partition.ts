@@ -339,18 +339,15 @@ export async function partitionAvailability(
 			)
 	);
 
-	const { partition: settled, ceiling } = await settleUnknowns(
-		missing,
-		options
-	);
+	const { partition, ceiling } = await classifyUnknowns(missing, options);
 	const unreachableSubstituters = await options.store.unreachableSubstituters();
 
-	if (settled.unknown.length > ceiling.value) {
+	if (partition.unknown.length > ceiling.value) {
 		throw new UnknownPathsCeilingError(
-			unknownPathDetails(settled.unknown, options.targets, ceiling),
+			unknownPathDetails(partition.unknown, options.targets, ceiling),
 			ceiling,
-			settled.downloadSize,
-			settled.narSize,
+			partition.downloadSize,
+			partition.narSize,
 			options.storeIdentity,
 			unreachableSubstituters.map(({ uri }) => uri)
 		);
@@ -393,16 +390,16 @@ export async function partitionAvailability(
 		buildSet,
 		unattested: unattested.values().toArray().toSorted(byCodeUnit),
 		counts: {
-			willBuild: settled.willBuild.length,
-			willSubstitute: settled.willSubstitute.length,
-			unknown: settled.unknown.length
+			willBuild: partition.willBuild.length,
+			willSubstitute: partition.willSubstitute.length,
+			unknown: partition.unknown.length
 		},
-		downloadSize: settled.downloadSize,
-		narSize: settled.narSize,
+		downloadSize: partition.downloadSize,
+		narSize: partition.narSize,
 		alreadyValid: validPaths
 			.map((storePath) => storePathSchema.parse(storePath))
 			.toSorted(byCodeUnit),
-		unknownCount: settled.unknown.length,
+		unknownCount: partition.unknown.length,
 		ceiling,
 		unreachableSubstituters
 	};
@@ -707,22 +704,14 @@ function isServedByRootEnsure(
 	return !result.unavailable.includes(target.expectedPath);
 }
 
-interface SettledMissing {
-	readonly willBuild: readonly StorePathString[];
-	readonly willSubstitute: readonly StorePathString[];
-	readonly unknown: readonly StorePathString[];
-	readonly downloadSize: number;
-	readonly narSize: number;
-}
-
 // An unknown path is one no substituter offered. That answer may have come
 // from a cache holding an earlier absence, so the store is given one more
 // chance to answer it afresh.
-async function settleUnknowns(
+async function classifyUnknowns(
 	missing: Awaited<ReturnType<Nix['queryMissing']>>,
 	options: AvailabilityPartitionOptions
 ): Promise<{
-	readonly partition: SettledMissing;
+	readonly partition: NixMissingPartition;
 	readonly ceiling: AvailabilityCeiling;
 }> {
 	const configured = {
@@ -754,8 +743,8 @@ async function settleUnknowns(
 	const requery = outcome.partition;
 	const toBuild = eachOnce(missing.willBuild, requery.willBuild);
 	const toSubstitute = eachOnce(missing.willSubstitute, requery.willSubstitute);
-	const settled = new Set([...toBuild, ...toSubstitute]);
-	const twice = bytesSettledTwice(missing, requery, outcome.sizes);
+	const classified = new Set([...toBuild, ...toSubstitute]);
+	const twice = bytesCountedTwice(missing, requery, outcome.sizes);
 
 	return {
 		partition: {
@@ -763,8 +752,10 @@ async function settleUnknowns(
 			willSubstitute: toSubstitute,
 			// The re-query walks the closures of the paths it resolved, so it can
 			// report as unknown a path the first query already put in `willBuild`
-			// or `willSubstitute`. A path either query settled is settled.
-			unknown: requery.unknown.filter((storePath) => !settled.has(storePath)),
+			// or `willSubstitute`. A path either query classified is not unknown.
+			unknown: requery.unknown.filter(
+				(storePath) => !classified.has(storePath)
+			),
 			downloadSize:
 				missing.downloadSize + requery.downloadSize - twice.downloadSize,
 			narSize: missing.narSize + requery.narSize - twice.narSize
@@ -775,28 +766,31 @@ async function settleUnknowns(
 
 /**
  * The download and NAR bytes that both answers counted. Each answer reports one
- * total over the paths it settled, so adding the two totals counts a path that
- * both of them settled twice. The caller subtracts what this returns.
+ * total over the paths it classified as substitutable, so adding the two totals
+ * counts a path both of them classified that way twice. The caller subtracts
+ * what this returns.
  *
  * The per-path figures come from the re-query, which is enough on its own: a
- * path in both totals is one the re-query settled, so the re-query asked for
- * its size. A path whose size did not come back stays counted twice, because
- * the merged total is read as the bytes substitution would fetch and
- * subtracting a guess could put it below the true figure.
+ * path in both totals is one the re-query classified as substitutable, so the
+ * re-query asked for its size. A path whose size did not come back stays
+ * counted twice, because the merged total is read as the bytes substitution
+ * would fetch and subtracting a guess could put it below the true figure.
  */
-function bytesSettledTwice(
-	missing: SettledMissing,
+function bytesCountedTwice(
+	missing: NixMissingPartition,
 	requery: NixMissingPartition,
 	sizes: ReadonlyMap<StorePathString, SubstitutablePathSize>
 ): SubstitutablePathSize {
-	const freshlySettled = new Set(requery.willSubstitute);
-	const settledTwice = new Set(
-		missing.willSubstitute.filter((storePath) => freshlySettled.has(storePath))
+	const freshlySubstitutable = new Set(requery.willSubstitute);
+	const countedTwice = new Set(
+		missing.willSubstitute.filter((storePath) =>
+			freshlySubstitutable.has(storePath)
+		)
 	);
 	let downloadSize = 0;
 	let narSize = 0;
 
-	for (const storePath of settledTwice) {
+	for (const storePath of countedTwice) {
 		const size = sizes.get(storePath);
 
 		downloadSize += size?.downloadSize ?? 0;

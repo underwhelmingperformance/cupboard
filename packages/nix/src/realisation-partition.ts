@@ -256,10 +256,12 @@ class RealisationWalk {
 				.flatMap(({ missing: outputs }) => outputs)
 		);
 
-		return this.claimed(missing.flatMap((entry) => this.settle(entry, offers)));
+		return this.claimed(
+			missing.flatMap((entry) => this.classify(entry, offers))
+		);
 	}
 
-	private settle(
+	private classify(
 		entry: {
 			readonly target: BuiltTarget;
 			readonly derivation: Derivation;
