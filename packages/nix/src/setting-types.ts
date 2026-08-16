@@ -99,11 +99,13 @@ export function nixIntegerOfWidth(
 		return undefined;
 	}
 
-	return heldIn(read * (binaryUnits.get(unit.toLowerCase()) ?? 1n), bounds);
+	return wrappedInto(
+		read * (binaryUnits.get(unit.toLowerCase()) ?? 1n),
+		bounds
+	);
 }
 
-// Wrap a value using the C++ integer width declared for the setting.
-function heldIn(value: bigint, bounds: IntegerBounds): bigint {
+function wrappedInto(value: bigint, bounds: IntegerBounds): bigint {
 	const span = bounds.greatest - bounds.least + 1n;
 
 	return ((((value - bounds.least) % span) + span) % span) + bounds.least;

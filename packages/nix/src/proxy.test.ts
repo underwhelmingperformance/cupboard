@@ -8,19 +8,23 @@ vi.mock('undici', () => ({
 	}
 }));
 
-import { type NamedProxies, proxiedFetch, proxiesNamedBy } from './proxy.ts';
+import {
+	proxiedFetch,
+	type ProxySettings,
+	proxySettingsFrom
+} from './proxy.ts';
 
 interface ProxyCase {
 	readonly name: string;
 	readonly env: Readonly<Record<string, string | undefined>>;
-	readonly expected: NamedProxies;
+	readonly expected: ProxySettings;
 }
 
 const proxy = 'http://proxy.example:3128';
 const other = 'http://other.example:3128';
 
 const cases: readonly ProxyCase[] = [
-	{ name: 'an environment naming none', env: {}, expected: {} },
+	{ name: 'an environment with no proxy variables', env: {}, expected: {} },
 	{
 		name: 'a proxy for each scheme',
 		env: { http_proxy: proxy, https_proxy: other },
@@ -48,9 +52,9 @@ const cases: readonly ProxyCase[] = [
 	},
 	{
 		// A CGI script runs with the request headers in its environment, so a
-		// request carrying a `Proxy:` header would name the proxy for every
+		// request carrying a `Proxy:` header would choose the proxy for every
 		// transfer that script made.
-		name: 'the upper-case spelling for http, which names nothing',
+		name: 'the upper-case spelling for http, which is ignored',
 		env: { HTTP_PROXY: proxy },
 		expected: {}
 	},
@@ -66,16 +70,16 @@ const cases: readonly ProxyCase[] = [
 	},
 	{
 		// A variable set to nothing is how one is unset for a single command,
-		// so it names no proxy and the next spelling is read instead.
+		// so it configures no proxy and the next spelling is read instead.
 		name: 'an empty value, over which the one for everything is read',
 		env: { http_proxy: '', all_proxy: proxy },
 		expected: { httpProxy: proxy, httpsProxy: proxy }
 	}
 ];
 
-describe('proxiesNamedBy', () => {
+describe('proxySettingsFrom', () => {
 	it.each(cases)('reads $name', ({ env, expected }) => {
-		expect(proxiesNamedBy(env)).toStrictEqual(expected);
+		expect(proxySettingsFrom(env)).toStrictEqual(expected);
 	});
 });
 
@@ -84,22 +88,22 @@ describe('proxiedFetch', () => {
 		mocked.agentOptions.length = 0;
 	});
 
-	// Nothing stands between the request and the network when no variable names
-	// a proxy, so the request takes the route every other one takes.
+	// Nothing stands between the request and the network when no variable
+	// configures a proxy, so the request takes the route every other one takes.
 	it.each([
-		{ name: 'an environment naming no proxy', env: {}, routed: false },
+		{ name: 'an environment with no proxy', env: {}, routed: false },
 		{
-			name: 'an environment naming only the hosts that go direct',
+			name: 'an environment with only the hosts that go direct',
 			env: { no_proxy: '*' },
 			routed: false
 		},
 		{
-			name: 'an environment naming a proxy',
+			name: 'an environment with a proxy',
 			env: { http_proxy: proxy },
 			routed: true
 		},
 		{
-			name: 'an environment naming one for everything',
+			name: 'an environment with one proxy for everything',
 			env: { all_proxy: proxy },
 			routed: true
 		}

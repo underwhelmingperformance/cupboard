@@ -51,7 +51,7 @@ import {
  * `nix-cache-info` are both a few hundred bytes, so this is far above any
  * real response and this limit bounds memory use.
  */
-export const maxSubstituterAnswerByteLength = 1024 * 1024;
+export const maxSubstituterDocumentByteLength = 1024 * 1024;
 
 /**
  * Maximum concurrent requests when the configuration specifies no limit. A
@@ -406,14 +406,14 @@ export class SubstituterClient {
 			// A later successful response supersedes an earlier failure.
 			failure = undefined;
 
-			const answer = await this.offerFor(substituter, storePath);
+			const outcome = await this.offerFor(substituter, storePath);
 
-			if (answer.kind === 'held') {
-				return { storePath, ...answer.offer };
+			if (outcome.kind === 'held') {
+				return { storePath, ...outcome.offer };
 			}
 
-			if (answer.kind === 'failed') {
-				failure = answer.error;
+			if (outcome.kind === 'failed') {
+				failure = outcome.error;
 			}
 		}
 
@@ -437,7 +437,7 @@ export class SubstituterClient {
 	private async offerFor(
 		substituter: Substituter,
 		storePath: StorePathString
-	): Promise<SubstituterAnswer> {
+	): Promise<SubstituterOutcome> {
 		if (substituter.location.kind === 'local-store') {
 			return this.offerFromStore(
 				substituter,
@@ -495,7 +495,7 @@ export class SubstituterClient {
 		substituter: Substituter,
 		directories: LocalStoreDirectories,
 		storePath: StorePathString
-	): SubstituterAnswer {
+	): SubstituterOutcome {
 		const open = this.options.openStore ?? openLocalStoreDatabase;
 		let database: NixStoreDatabase;
 
@@ -661,7 +661,7 @@ type SubstituterFailure =
  * The result from one substituter for one path: an offer, an absence or a
  * failure. A later substituter may still provide the path after a failure.
  */
-type SubstituterAnswer =
+type SubstituterOutcome =
 	| { readonly kind: 'held'; readonly offer: SubstituterOffer }
 	| { readonly kind: 'absent' }
 	| { readonly kind: 'failed'; readonly error: SubstituterFailure };
@@ -733,13 +733,16 @@ async function fetchDocument(
 			try {
 				return {
 					kind: 'answered',
-					document: await boundedText(response, maxSubstituterAnswerByteLength)
+					document: await boundedText(
+						response,
+						maxSubstituterDocumentByteLength
+					)
 				};
 			} catch (error) {
 				dependencies.signal?.throwIfAborted();
 
 				// The server will return the same oversized document on a retry.
-				if (error instanceof OversizedSubstituterAnswerError) {
+				if (error instanceof OversizedSubstituterDocumentError) {
 					return {
 						kind: 'failed',
 						error: new SubstituterAnswerUnreadableError(uri, { cause: error })
@@ -918,12 +921,12 @@ async function discard(response: Response): Promise<void> {
 }
 
 /** A substituter response that exceeds the configured size limit. */
-class OversizedSubstituterAnswerError extends NixStoreError {
+class OversizedSubstituterDocumentError extends NixStoreError {
 	constructor(public readonly maxByteLength: number) {
 		super(
 			`A substituter answered with more than ${String(maxByteLength)} bytes`
 		);
-		this.name = 'OversizedSubstituterAnswerError';
+		this.name = 'OversizedSubstituterDocumentError';
 	}
 }
 
@@ -953,8 +956,8 @@ function cacheInfoPriority(value: string): number {
 /**
  * Reads a file as text, refusing a file larger than `maxByteLength`. A
  * directory substituter serves its documents from disk, and the caller passes
- * `maxSubstituterAnswerByteLength`, so the same bound applies to a file and to
- * a response.
+ * `maxSubstituterDocumentByteLength`, so the same bound applies to a file and
+ * to a response.
  */
 async function boundedFileText(
 	filePath: string,
@@ -966,7 +969,7 @@ async function boundedFileText(
 		const { size } = await handle.stat();
 
 		if (size > maxByteLength) {
-			throw new OversizedSubstituterAnswerError(maxByteLength);
+			throw new OversizedSubstituterDocumentError(maxByteLength);
 		}
 
 		return await handle.readFile('utf8');
@@ -1004,7 +1007,7 @@ async function boundedText(
 			byteLength += value.byteLength;
 
 			if (byteLength > maxByteLength) {
-				throw new OversizedSubstituterAnswerError(maxByteLength);
+				throw new OversizedSubstituterDocumentError(maxByteLength);
 			}
 
 			text += decoder.decode(value, { stream: true });
@@ -1193,7 +1196,7 @@ async function readDocument(
 			kind: 'answered',
 			document: await boundedFileText(
 				path.join(location.directory, documentPath),
-				maxSubstituterAnswerByteLength
+				maxSubstituterDocumentByteLength
 			)
 		};
 	} catch (error) {

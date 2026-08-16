@@ -21,7 +21,7 @@ import {
 	type NixFileTransferSettings
 } from './store-config.ts';
 import {
-	maxSubstituterAnswerByteLength,
+	maxSubstituterDocumentByteLength,
 	openSubstituters,
 	type Substituter,
 	SubstituterAnswerUnreadableError,
@@ -1015,7 +1015,7 @@ describe('openSubstituters', () => {
 	// that store's paths. A cache whose `nix-cache-info` exceeds the response
 	// limit is in that position, so it is dropped and the rest of the list is
 	// still queried.
-	it('leaves out a substituter whose cache info is larger than `maxSubstituterAnswerByteLength`', async () => {
+	it('leaves out a substituter whose cache info is larger than `maxSubstituterDocumentByteLength`', async () => {
 		const { substituters, unreachable } = await openSubstituters(
 			['https://flood.example', 'https://cache.example'],
 			{ fetch: flooding }
@@ -1716,7 +1716,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 
 	// A substituter is a remote server, and a narinfo is a few hundred bytes.
 	// An unbounded body would otherwise be buffered in this process in full.
-	it('refuses a response larger than `maxSubstituterAnswerByteLength`', async () => {
+	it('refuses a response larger than `maxSubstituterDocumentByteLength`', async () => {
 		await expect(
 			clientOver(
 				[substituter('https://flood.example')],
@@ -1776,7 +1776,7 @@ describe('SubstituterClient.querySubstitutablePathInfos', () => {
 			asked += 1;
 
 			return Promise.resolve(
-				new Response('x'.repeat(maxSubstituterAnswerByteLength + 1))
+				new Response('x'.repeat(maxSubstituterDocumentByteLength + 1))
 			);
 		};
 

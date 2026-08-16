@@ -53,9 +53,9 @@ describe('ObjectWriteOrder', () => {
 
 		try {
 			const order = new ObjectWriteOrder();
-			const zombie = Promise.withResolvers<string>();
+			const abandonedCall = Promise.withResolvers<string>();
 
-			await abandonedWrite(order, [key('key')], settled(zombie.promise));
+			await abandonedWrite(order, [key('key')], settled(abandonedCall.promise));
 
 			const events: string[] = [];
 			const blocked = order.write([key('key')], () => {
@@ -67,7 +67,7 @@ describe('ObjectWriteOrder', () => {
 			await flushMicrotasks();
 			expect(events).toStrictEqual([]);
 
-			zombie.resolve('landed');
+			abandonedCall.resolve('landed');
 			await blocked;
 
 			expect(events).toStrictEqual(['issued']);
@@ -81,9 +81,9 @@ describe('ObjectWriteOrder', () => {
 
 		try {
 			const order = new ObjectWriteOrder();
-			const zombie = Promise.withResolvers<string>();
+			const abandonedCall = Promise.withResolvers<string>();
 
-			await abandonedWrite(order, [key('key')], settled(zombie.promise));
+			await abandonedWrite(order, [key('key')], settled(abandonedCall.promise));
 
 			const result = await order.write([key('other')], () =>
 				Promise.resolve('ok')
@@ -91,7 +91,7 @@ describe('ObjectWriteOrder', () => {
 
 			expect(result).toBe('ok');
 
-			zombie.resolve('landed');
+			abandonedCall.resolve('landed');
 		} finally {
 			vi.useRealTimers();
 		}
@@ -102,9 +102,9 @@ describe('ObjectWriteOrder', () => {
 
 		try {
 			const order = new ObjectWriteOrder();
-			const zombie = Promise.withResolvers<string>();
+			const abandonedCall = Promise.withResolvers<string>();
 
-			await abandonedWrite(order, [key('key')], settled(zombie.promise));
+			await abandonedWrite(order, [key('key')], settled(abandonedCall.promise));
 
 			const events: string[] = [];
 			const blocked = order.write([key('key')], () => {
@@ -121,7 +121,7 @@ describe('ObjectWriteOrder', () => {
 			expect(events).toStrictEqual([]);
 
 			// The signal stayed registered: the retry still orders behind the
-			// zombie, and proceeds once it settles.
+			// abandoned call, and proceeds once it settles.
 			const retried = order.write([key('key')], () => {
 				events.push('retried');
 
@@ -131,7 +131,7 @@ describe('ObjectWriteOrder', () => {
 			await flushMicrotasks();
 			expect(events).toStrictEqual([]);
 
-			zombie.resolve('landed');
+			abandonedCall.resolve('landed');
 			await retried;
 
 			expect(events).toStrictEqual(['retried']);
@@ -145,12 +145,12 @@ describe('ObjectWriteOrder', () => {
 
 		try {
 			const order = new ObjectWriteOrder();
-			const zombie = Promise.withResolvers<string>();
+			const abandonedCall = Promise.withResolvers<string>();
 
 			await abandonedWrite(
 				order,
 				[key('first'), key('second')],
-				settled(zombie.promise)
+				settled(abandonedCall.promise)
 			);
 
 			const events: string[] = [];
@@ -163,7 +163,7 @@ describe('ObjectWriteOrder', () => {
 			await flushMicrotasks();
 			expect(events).toStrictEqual([]);
 
-			zombie.resolve('landed');
+			abandonedCall.resolve('landed');
 			await blocked;
 
 			expect(events).toStrictEqual(['issued']);

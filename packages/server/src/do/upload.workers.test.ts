@@ -2298,7 +2298,7 @@ describe('upload flow', () => {
 		).resolves.toBeNull();
 	});
 
-	it('records a durable mismatch for an undecodable deferred blob, not a pending zombie', async () => {
+	it('records a durable mismatch for an undecodable deferred blob, not a retried pending upload', async () => {
 		const token = await initialise();
 		// Bytes that are not a valid zstd frame, but whose declared compressed hash
 		// matches (so R2 and verifyUploadedObject accept them); only decompression
@@ -2405,8 +2405,8 @@ describe('upload flow', () => {
 		await markUploadPendingVerification(upload.uploadId);
 
 		// The staging object is gone for good (R2 loss / external delete). The
-		// background pass must terminally fail it, not retry forever as a `pending`
-		// zombie that re-reads an absent object every cron tick.
+		// background pass must terminally fail it. Left `pending`, the upload
+		// would re-read an absent object on every cron tick, for ever.
 		await env.BLOBS.delete(upload.r2Key);
 		await currentServer().runVerification();
 
