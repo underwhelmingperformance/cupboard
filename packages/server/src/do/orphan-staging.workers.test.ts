@@ -97,7 +97,7 @@ describe('orphan staging reconciliation', () => {
 		}).toStrictEqual({ orphanStagingDeleted: 0, orphanPresent: true });
 	});
 
-	it('caps the reclaim per run and leaves the overflow for the next sweep', async () => {
+	it('caps the reclaim per run and leaves the overflow for the next run', async () => {
 		const perRunCap = 1000;
 		const total = perRunCap + 1;
 
@@ -128,7 +128,8 @@ describe('orphan staging reconciliation', () => {
 			orphanStagingDeleted: result.orphanStagingDeleted,
 			remaining: remaining.objects.length,
 			warnedAboutCap: capture.logs.some(
-				(entry) => entry.message === 'orphan staging sweep hit the per-run cap'
+				(entry) =>
+					entry.message === 'orphan staging reclaim hit the per-run cap'
 			)
 		}).toStrictEqual({
 			orphanStagingDeleted: perRunCap,

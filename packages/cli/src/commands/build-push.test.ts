@@ -446,14 +446,14 @@ describe('betweenCohortCollector', () => {
 		return { commands, warnings };
 	}
 
-	it('sweeps with nix store gc, silently on success', async () => {
+	it('collects with nix store gc, silently on success', async () => {
 		expect(await runCollector(0)).toStrictEqual({
 			commands: [['nix', 'store', 'gc']],
 			warnings: []
 		});
 	});
 
-	it('surfaces a failed sweep as a warning and carries on', async () => {
+	it('surfaces a failed collection as a warning and carries on', async () => {
 		expect(await runCollector(5)).toStrictEqual({
 			commands: [['nix', 'store', 'gc']],
 			warnings: [
@@ -466,7 +466,7 @@ describe('betweenCohortCollector', () => {
 		});
 	});
 
-	it('continues the sequence after an ordinary failed sweep', async () => {
+	it('continues the sequence after an ordinary failed collection', async () => {
 		const events: string[] = [];
 		const warnings: string[] = [];
 		const collect = betweenCohortCollector(
@@ -513,7 +513,7 @@ describe('betweenCohortCollector', () => {
 		{ signal: 'SIGINT' as const, exitCode: 130 },
 		{ signal: 'SIGTERM' as const, exitCode: 143 }
 	])(
-		'surfaces a sweep killed by $signal as typed cancellation',
+		'surfaces a collection killed by $signal as typed cancellation',
 		async ({ signal, exitCode }) => {
 			const collect = betweenCohortCollector(
 				{ warn: vi.fn() },
@@ -550,7 +550,7 @@ describe('betweenCohortCollector', () => {
 		{ signal: 'SIGINT' as const, exitCode: 130 },
 		{ signal: 'SIGTERM' as const, exitCode: 143 }
 	])(
-		'surfaces a sweep that translates $signal to status $exitCode as typed cancellation',
+		'surfaces a collection that translates $signal to status $exitCode as typed cancellation',
 		async ({ signal, exitCode }) => {
 			const warnings: string[] = [];
 			const collect = betweenCohortCollector(

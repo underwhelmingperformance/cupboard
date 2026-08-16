@@ -54,7 +54,7 @@ import {
 
 import { chunk } from './bulk.ts';
 import { maxNarInfoDeletionsFlushedPerRun } from './deletion-queue-service.ts';
-import { maxPathsSweptPerRun } from './garbage-collection-service.ts';
+import { maxPathsCollectedPerRun } from './garbage-collection-service.ts';
 import { gcContinuationKey } from './server.ts';
 
 const buildsCache = cacheNameSchema.parse('builds');
@@ -218,49 +218,49 @@ describe('named caches', () => {
 			storePathHash: 'a'.repeat(32),
 			name: 'kept'
 		});
-		const swept = uploadMetadata({
+		const collected = uploadMetadata({
 			fileSize: narBytes.byteLength,
 			storePathHash: 'b'.repeat(32),
-			name: 'swept'
+			name: 'collected'
 		});
 
 		await pushPath(init.token, kept);
-		await pushPath(init.token, swept);
-		await pushPath(init.token, swept, 'builds');
+		await pushPath(init.token, collected);
+		await pushPath(init.token, collected, 'builds');
 
-		// The default cache retains `kept`, so `swept` is collectable there; the
-		// builds cache retains `swept`, so the shared NAR stays referenced.
+		// The default cache retains only `kept`, so the other path is unreachable
+		// there; the builds cache retains it, so the shared NAR stays referenced.
 		await putRoot(init.token, '', 'channel', kept.storePath);
-		await putRoot(init.token, 'builds', 'channel', swept.storePath);
+		await putRoot(init.token, 'builds', 'channel', collected.storePath);
 
 		const gc = await authorisedFetch('/gc', init.token, { method: 'POST' });
 		expect(gc.status).toBe(StatusCodes.OK);
 
-		const sweptDefault = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, swept.storePathHash)
+		const collectedDefault = await env.BLOBS.head(
+			narInfoObjectKey(fixtureTenant, collected.storePathHash)
 		);
 		const keptDefault = await env.BLOBS.head(
 			narInfoObjectKey(fixtureTenant, kept.storePathHash)
 		);
-		const sweptBuilds = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, swept.storePathHash, buildsCache)
+		const collectedBuilds = await env.BLOBS.head(
+			narInfoObjectKey(fixtureTenant, collected.storePathHash, buildsCache)
 		);
 		const sharedNar = await env.BLOBS.head(narObjectKey(narHash));
 
 		expect({
-			sweptFromDefault: sweptDefault === null,
+			collectedFromDefault: collectedDefault === null,
 			keptInDefault: keptDefault !== null,
-			keptInBuilds: sweptBuilds !== null,
+			keptInBuilds: collectedBuilds !== null,
 			sharedNarSurvives: sharedNar !== null
 		}).toStrictEqual({
-			sweptFromDefault: true,
+			collectedFromDefault: true,
 			keptInDefault: true,
 			keptInBuilds: true,
 			sharedNarSurvives: true
 		});
 	});
 
-	it('resumes an overflowing cache sweep without collecting another cache', async () => {
+	it('resumes an overflowing cache run without collecting another cache', async () => {
 		await useTestServer('named-cache-gc-continuation');
 		const init = await bootstrap();
 		const keptInA = uploadMetadata({
@@ -284,7 +284,7 @@ describe('named caches', () => {
 		await pushPath(init.token, collectableInB, 'b');
 		await putRoot(init.token, 'a', 'channel', keptInA.storePath);
 		await putRoot(init.token, 'b', 'channel', keptInB.storePath);
-		await seedCollectablePaths('a', maxPathsSweptPerRun + 1);
+		await seedCollectablePaths('a', maxPathsCollectedPerRun + 1);
 
 		const observed = await runInDurableObject(
 			currentServer(),
@@ -350,7 +350,7 @@ describe('named caches', () => {
 					pendingUploadsDeleted: 0,
 					pendingAttestationsDeleted: 0,
 					rootsExpired: 0,
-					pathsCollected: maxPathsSweptPerRun,
+					pathsCollected: maxPathsCollectedPerRun,
 					narInfosDeleted: maxNarInfoDeletionsFlushedPerRun,
 					orphanStagingDeleted: 0
 				},
@@ -358,7 +358,7 @@ describe('named caches', () => {
 					{
 						scope: 'cache',
 						cache: 'a',
-						collectLimit: maxPathsSweptPerRun
+						collectLimit: maxPathsCollectedPerRun
 					}
 				]
 			},

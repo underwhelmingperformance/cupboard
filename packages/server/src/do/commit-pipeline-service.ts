@@ -1778,7 +1778,7 @@ export class CommitPipelineService {
 
 		// Reserve the narinfo row at commit so it exists before verification: a
 		// retention root set right after commit can reference it, and the
-		// reachability sweep keeps it through the verify window. The verify pass
+		// reachability scan keeps it through the verify window. The verify pass
 		// re-runs this idempotently (`mine`, same generation, no counter advance);
 		// a `lost` outcome writes no row, and the verify pass answers the waiter.
 		await this.reserveNarInfoRow(cache, metadata);

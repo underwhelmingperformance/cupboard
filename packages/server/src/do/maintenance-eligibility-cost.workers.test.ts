@@ -223,7 +223,7 @@ describe('maintenance pass cost', () => {
 	// `refresh_token` expiry index. No reconcile reads that table, so this is the one
 	// guard on that index: drop it and the delete scans the whole token backlog, so
 	// the large-backlog pass reads more than the small one.
-	it('sweeps expired refresh tokens without scanning the backlog', async () => {
+	it('deletes expired refresh tokens without scanning the backlog', async () => {
 		await initialise();
 
 		await seedRefreshTokens(3, 'small');
@@ -281,7 +281,7 @@ async function seedRefreshTokens(count: number, label: string): Promise<void> {
 					ruleId: trustRuleIdSchema.parse('rule'),
 					subject: oidcSubjectSchema.parse('subject'),
 					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
-					// Far-future expiry so the sweep deletes none and the read count is the
+					// Far-future expiry so the pass deletes none and the read count is the
 					// index seek alone, not the cost of deleting rows.
 					expiresAt: isoTimestampSchema.parse('2099-01-01T00:00:00.000Z')
 				})

@@ -66,7 +66,7 @@ async function stageDeferredForNewTenant(
 		issuer,
 		cacheWriteGrants()
 	);
-	const nar = await verifiableNar(`sweep-${id}`);
+	const nar = await verifiableNar(`collect-${id}`);
 	const metadata = uploadMetadata({
 		storePathHash: 'a'.repeat(32),
 		references: [],

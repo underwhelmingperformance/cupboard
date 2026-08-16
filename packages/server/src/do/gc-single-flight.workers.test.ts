@@ -14,7 +14,7 @@ import {
 
 import {
 	GarbageCollectionService,
-	maxPathsSweptPerRun
+	maxPathsCollectedPerRun
 } from './garbage-collection-service.ts';
 import { gcContinuationKey } from './server.ts';
 import { VerificationService } from './verification-service.ts';
@@ -31,16 +31,16 @@ const gcOutcome = {
 };
 const tenantWideContinuation = {
 	scope: 'tenant',
-	collectLimit: maxPathsSweptPerRun
+	collectLimit: maxPathsCollectedPerRun
 };
 const scopedContinuation = (cache: string) => ({
 	scope: 'cache',
 	cache,
-	collectLimit: maxPathsSweptPerRun
+	collectLimit: maxPathsCollectedPerRun
 });
 const cappedGcOutcome = {
 	...gcOutcome,
-	pathsCollected: maxPathsSweptPerRun,
+	pathsCollected: maxPathsCollectedPerRun,
 	hasMoreWork: true
 };
 
@@ -62,7 +62,7 @@ describe('garbage-collection maintenance serialisation', () => {
 	afterEach(clearAbandonedAlarms);
 
 	it.each([{ drivers: 2 }, { drivers: 3 }])(
-		'coalesces $drivers concurrent cron drivers into one sweep',
+		'coalesces $drivers concurrent cron drivers into one collection',
 		async ({ drivers }) => {
 			await initialise();
 
@@ -82,7 +82,7 @@ describe('garbage-collection maintenance serialisation', () => {
 				await runInDurableObject(currentServer(), async (instance) => {
 					const first = instance.runGarbageCollection();
 
-					// The first driver is now inside the sweep, holding the 'gc' chain.
+					// The first driver is now inside the collection, holding the 'gc' chain.
 					await started.promise;
 
 					const rest = Array.from({ length: drivers - 1 }, () =>
@@ -100,7 +100,7 @@ describe('garbage-collection maintenance serialisation', () => {
 		}
 	);
 
-	it('runs an interactive sweep serialised after a blocked cron sweep', async () => {
+	it('runs an interactive collection serialised after a blocked cron collection', async () => {
 		const token = await initialise();
 
 		const events: string[] = [];
@@ -163,16 +163,16 @@ describe('garbage-collection maintenance serialisation', () => {
 
 	// A failing pass surfaces only to its own driver: the per-kind chain
 	// resolves its marker in the finally and the cron coalescing marker is
-	// cleared, so the next cron tick runs a fresh sweep instead of wedging
+	// cleared, so the next cron tick runs a fresh collection instead of wedging
 	// behind the failure or coalescing into it.
-	it('recovers from a failing sweep, running the next cron pass', async () => {
+	it('recovers from a failing collection, running the next cron pass', async () => {
 		await initialise();
 
-		class InjectedSweepError extends Error {}
+		class InjectedCollectionError extends Error {}
 
 		const collect = vi
 			.spyOn(GarbageCollectionService.prototype, 'collectGarbage')
-			.mockRejectedValueOnce(new InjectedSweepError())
+			.mockRejectedValueOnce(new InjectedCollectionError())
 			.mockResolvedValueOnce(gcOutcome);
 
 		try {
@@ -180,7 +180,7 @@ describe('garbage-collection maintenance serialisation', () => {
 				currentServer(),
 				async (instance, state) => {
 					await expect(instance.runGarbageCollection()).rejects.toBeInstanceOf(
-						InjectedSweepError
+						InjectedCollectionError
 					);
 					const afterFailure = {
 						continuation: await state.storage.get(gcContinuationKey),
@@ -222,7 +222,7 @@ describe('garbage-collection maintenance serialisation', () => {
 			const observed = await runInDurableObject(
 				currentServer(),
 				async (instance, state) => {
-					await state.storage.put(gcContinuationKey, maxPathsSweptPerRun);
+					await state.storage.put(gcContinuationKey, maxPathsCollectedPerRun);
 					await instance.alarm();
 
 					const continuation = await state.storage.get(gcContinuationKey);
@@ -247,7 +247,7 @@ describe('garbage-collection maintenance serialisation', () => {
 					{
 						cache: undefined,
 						purgeOrigin: undefined,
-						collectLimit: maxPathsSweptPerRun
+						collectLimit: maxPathsCollectedPerRun
 					}
 				]
 			});
@@ -273,7 +273,7 @@ describe('garbage-collection maintenance serialisation', () => {
 						{
 							scope: 'cache',
 							cache: 'builds',
-							sweepLimit: maxPathsSweptPerRun
+							sweepLimit: maxPathsCollectedPerRun
 						}
 					]);
 					await instance.alarm();
@@ -295,7 +295,7 @@ describe('garbage-collection maintenance serialisation', () => {
 
 			expect(observed).toStrictEqual({
 				continuation: undefined,
-				calls: [{ cache: 'builds', collectLimit: maxPathsSweptPerRun }]
+				calls: [{ cache: 'builds', collectLimit: maxPathsCollectedPerRun }]
 			});
 		} finally {
 			collect.mockRestore();
@@ -305,11 +305,11 @@ describe('garbage-collection maintenance serialisation', () => {
 	it('keeps a cache-scoped continuation on failure and resumes that cache', async () => {
 		const token = await initialise();
 
-		class InjectedScopedSweepError extends Error {}
+		class InjectedScopedCollectionError extends Error {}
 
 		const collect = vi
 			.spyOn(GarbageCollectionService.prototype, 'collectGarbage')
-			.mockRejectedValueOnce(new InjectedScopedSweepError())
+			.mockRejectedValueOnce(new InjectedScopedCollectionError())
 			.mockResolvedValueOnce(gcOutcome);
 		const request = new Request(new URL('/cache/builds/gc', currentOrigin()), {
 			method: 'POST',
@@ -347,7 +347,7 @@ describe('garbage-collection maintenance serialisation', () => {
 						{
 							scope: 'cache',
 							cache: 'builds',
-							collectLimit: maxPathsSweptPerRun
+							collectLimit: maxPathsCollectedPerRun
 						}
 					],
 					alarmArmed: true
@@ -362,7 +362,7 @@ describe('garbage-collection maintenance serialisation', () => {
 		}
 	});
 
-	it('preserves another cache continuation when a scoped sweep drains', async () => {
+	it('preserves another cache continuation when a scoped collection drains', async () => {
 		const token = await initialise();
 		const collect = vi
 			.spyOn(GarbageCollectionService.prototype, 'collectGarbage')
@@ -465,13 +465,14 @@ describe('garbage-collection maintenance serialisation', () => {
 					const widened = await state.storage.get(gcContinuationKey);
 
 					const response = await instance.fetch(request);
-					const afterScopedSweep = await state.storage.get(gcContinuationKey);
+					const afterScopedCollection =
+						await state.storage.get(gcContinuationKey);
 					await state.storage.deleteAlarm();
 
 					return {
 						status: response.status,
 						widened,
-						afterScopedSweep
+						afterScopedCollection
 					};
 				}
 			);
@@ -479,7 +480,7 @@ describe('garbage-collection maintenance serialisation', () => {
 			expect(observed).toStrictEqual({
 				status: StatusCodes.OK,
 				widened: [tenantWideContinuation],
-				afterScopedSweep: [tenantWideContinuation]
+				afterScopedCollection: [tenantWideContinuation]
 			});
 		} finally {
 			collect.mockRestore();
@@ -499,7 +500,7 @@ describe('garbage-collection maintenance serialisation', () => {
 			const observed = await runInDurableObject(
 				currentServer(),
 				async (instance, state) => {
-					await state.storage.put(gcContinuationKey, maxPathsSweptPerRun);
+					await state.storage.put(gcContinuationKey, maxPathsCollectedPerRun);
 
 					await expect(instance.alarm()).rejects.toBeInstanceOf(
 						InjectedContinuationError
@@ -523,7 +524,7 @@ describe('garbage-collection maintenance serialisation', () => {
 		}
 	});
 
-	it('bails from the alarm resume when a concurrent sweep already drained the marker', async () => {
+	it('bails from the alarm resume when a concurrent collection already drained the marker', async () => {
 		await initialise();
 
 		const started = Promise.withResolvers<boolean>();
@@ -542,14 +543,14 @@ describe('garbage-collection maintenance serialisation', () => {
 			const observed = await runInDurableObject(
 				currentServer(),
 				async (instance, state) => {
-					await state.storage.put(gcContinuationKey, maxPathsSweptPerRun);
+					await state.storage.put(gcContinuationKey, maxPathsCollectedPerRun);
 
 					const cron = instance.runGarbageCollection();
 					await started.promise;
 
-					// The alarm's resume reads the marker, then chains behind the sweep
-					// in flight. That sweep drains the marker, so the resume's body finds
-					// nothing left and does not sweep a second time.
+					// The alarm's resume reads the marker, then chains behind the collection
+					// in flight. That collection drains the marker, so the resume's body finds
+					// nothing left and does not collect a second time.
 					const alarm = instance.alarm();
 
 					blocked.resolve(true);

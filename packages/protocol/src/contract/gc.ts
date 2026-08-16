@@ -6,7 +6,7 @@ import { gcResponseSchema } from '../retention.ts';
 import { baseProcedure } from './base.ts';
 
 export const gcContract = {
-	// The bare form sweeps every cache; the scoped form sweeps one.
+	// The bare form collects every cache; the scoped form collects one.
 	runAll: baseProcedure
 		.meta({ requires: 'gc:run', maintenance: true })
 		.route({ method: 'POST', path: '/gc' })

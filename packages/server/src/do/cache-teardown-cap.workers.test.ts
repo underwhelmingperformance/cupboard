@@ -149,7 +149,7 @@ describe('cache teardown', () => {
 		await useTestServer('teardown-batch');
 		const { token } = await bootstrap();
 
-		// Enough paths that the presence sweep spans several parameter sub-chunks.
+		// Enough paths that the presence delete spans several parameter sub-chunks.
 		// Each path must carry a distinct narHash so the IN list does not collapse
 		// to a single value; verifiableNar produces self-consistent compressed bytes
 		// whose decompressed content actually hashes to the declared narHash.

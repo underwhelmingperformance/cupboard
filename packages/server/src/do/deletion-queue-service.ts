@@ -44,7 +44,7 @@ export const maxFencedRetireRows = Math.floor(maxInClauseValues / 2);
 // the section budget while a backlog drains across alarm-resumed passes.
 export const maxNarInfoDeletionsFlushedPerRun = 4 * maxFencedRetireRows;
 
-// The presence sweep credit UPDATE embeds droppableFilter twice (in the
+// The presence delete's credit UPDATE embeds droppableFilter twice (in the
 // droppedBytes and droppedCount subqueries), each binding tenant(1) + IN(N) +
 // the notExists subquery's tenant(1) = N+2 parameters. The two embeds plus
 // updatedAt(1) and the outer WHERE tenant(1) total 2(N+2)+2 = 2N+6 parameters.
@@ -53,7 +53,7 @@ export const maxNarInfoDeletionsFlushedPerRun = 4 * maxFencedRetireRows;
 export const maxTeardownPresenceChunk = 45;
 
 // Builds the credit UPDATE and presence DELETE for one narHash sub-chunk of a
-// teardown sweep. The UPDATE credits back the exact bytes and count the DELETE
+// teardown drain. The UPDATE credits back the exact bytes and count the DELETE
 // drops, computed as subqueries over the same `droppableFilter`: the batch runs
 // its update before its delete in one transaction, so the subqueries read the
 // rows the delete then removes and the credit matches the drop with no separate
@@ -461,7 +461,7 @@ export class DeletionQueueService {
 	// cache, so the work batches cleanly. Each chunk of `maxFencedRetireRows`
 	// runs a self-contained pipeline: its generation fence, one bulk R2 delete
 	// for the narinfo objects, its edge-cache purges, one fenced credit-and-delete
-	// batch, its presence sweep, its attestation retirement and list re-render,
+	// batch, its presence delete, its attestation retirement and list re-render,
 	// then a synchronous clear of exactly that chunk's queue rows. Because a chunk
 	// finishes before the next starts, a mid-pass SubrequestTimeoutError redoes at
 	// most one chunk on the next pass rather than the whole cache. A path
@@ -561,7 +561,7 @@ export class DeletionQueueService {
 			// anywhere, crediting bytes and blob counts by what is actually dropped.
 			// A presence row drops only once no reference edge remains anywhere, and
 			// a hash shared with a later chunk still has that chunk's edge until it
-			// runs, so sweeping per chunk keeps the credit exact. This runs in the
+			// runs, so dropping per chunk keeps the credit exact. This runs in the
 			// caller's critical section and this Durable Object is the single writer
 			// of its tenant's presence rows, so the select and the batch cannot be
 			// interleaved by another charge.
