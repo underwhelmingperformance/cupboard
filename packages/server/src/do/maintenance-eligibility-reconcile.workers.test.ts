@@ -121,7 +121,7 @@ describe('maintenance reconcile', () => {
 
 		await runInDurableObject(currentServer(), async (instance) => {
 			// The reconcile publishes through D1; make its write fail. The hook drops the
-			// row instead, so the periodic sweep reads the tenant as due.
+			// row instead, so the periodic maintenance batch reads the tenant as due.
 			const realD1 = instance.context.d1;
 			Object.defineProperty(instance.context, 'd1', {
 				value: {

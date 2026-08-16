@@ -35,7 +35,7 @@ import {
 	enqueueMaintenanceJobs,
 	executeMaintenanceQueueMessage,
 	type MaintenanceQueueMessage,
-	runCronSweep
+	runMaintenanceBatch
 } from './scheduled.ts';
 import { fixtureTenant } from './tenant-routing.test-support.ts';
 
@@ -286,7 +286,7 @@ describe('multi-tenant writes', () => {
 
 		// A batch of two: the first tick takes the two most-overdue (all NULL, so by
 		// slug tiebreaker acme and beta), maintains and stamps them; gamma is left.
-		await runCronSweep(rootLogger(), env, 2);
+		await runMaintenanceBatch(rootLogger(), env, 2);
 		const afterFirst = {
 			acme: await servedAt('acme'),
 			beta: await servedAt('beta'),
@@ -297,7 +297,7 @@ describe('multi-tenant writes', () => {
 
 		// The second tick: gamma is now the most overdue (still NULL, while acme and
 		// beta carry a stamp), so it is maintained next.
-		await runCronSweep(rootLogger(), env, 2);
+		await runMaintenanceBatch(rootLogger(), env, 2);
 		const gammaAfterSecond = await servedAt('gamma');
 
 		expect({

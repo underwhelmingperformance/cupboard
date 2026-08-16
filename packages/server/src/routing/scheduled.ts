@@ -52,7 +52,7 @@ import {
 
 import { tenantServer } from './durable-object.ts';
 
-// One cron tick maintains at most this many tenants. The sweep picks the
+// One cron tick maintains at most this many tenants. The batch picks the
 // most-overdue active tenants by `last_maintained_at`, so the whole fleet is
 // covered over successive ticks. Provisional, pending a fleet-scale measurement.
 const maintenanceBatchSize = 100;
@@ -131,11 +131,11 @@ export type MaintenanceQueueMessage =
 	| { readonly kind: 'control-key-retirement' };
 
 /**
- * One hourly cron tick: the bounded tenant maintenance sweep, then the global blob
+ * One hourly cron tick: the bounded tenant maintenance batch, then the global blob
  * reaper on its reserved budget after the fan-out, in its three passes (arm and
  * collect unreferenced blobs, then demote those whose object has gone missing). Each
  * pass runs independently of the others' outcome, and their failures are surfaced
- * together so neither a stalled sweep nor a stalled reaper is silently swallowed.
+ * together so neither a stalled batch nor a stalled reaper is silently swallowed.
  */
 export async function runCronTick(logger: Logger, env: Env): Promise<void> {
 	const failures: unknown[] = [];
@@ -144,8 +144,8 @@ export async function runCronTick(logger: Logger, env: Env): Promise<void> {
 	// fan-out so a long fan-out cannot starve it, and each pass is isolated so one
 	// stalling does not hold back the next.
 	for (const pass of [
-		() => runCronSweep(logger, env),
-		() => runOffboardSweep(logger, env),
+		() => runMaintenanceBatch(logger, env),
+		() => runOffboardBatch(logger, env),
 		() => runBlobReaper(logger, env),
 		() => runCasReaper(logger, env),
 		() => runReaperDemote(logger, env),
@@ -485,10 +485,10 @@ class TenantCasReferenceDemoter implements CasReferenceDemoter {
  * Object (the single writer of those rows) and a bounded batch of its R2 objects
  * through the Worker; a tenant whose rows and objects are both gone is finalised into
  * its terminal scrubbed tombstone. Offboarding tenants are disjoint from the
- * maintenance sweep (which serves only active tenants), so the two never contend for
+ * maintenance batch (which serves only active tenants), so the two never contend for
  * one tenant. Per-tenant failures are all surfaced.
  */
-export async function runOffboardSweep(
+export async function runOffboardBatch(
 	logger: Logger,
 	env: Env,
 	tenantLimit: number = offboardTenantsPerTick,
@@ -592,11 +592,11 @@ async function finaliseTenant(env: Env, id: TenantId): Promise<void> {
  * Drives one hourly cron tick: maintains the most-overdue active tenants and stamps
  * them, so the table's own `last_maintained_at` carries the round-robin position and
  * the whole fleet is covered over successive ticks. Per-tenant failures are collected
- * and all surfaced, so a fleet-wide stall is observable;
- * the batch is stamped regardless of per-tenant outcome, so one failing tenant does
- * not wedge the sweep.
+ * and all surfaced, so a fleet-wide stall is observable; the batch is stamped
+ * regardless of per-tenant outcome, so one failing tenant does not stall the
+ * rotation.
  */
-export async function runCronSweep(
+export async function runMaintenanceBatch(
 	logger: Logger,
 	env: Env,
 	batchSize: number = maintenanceBatchSize,

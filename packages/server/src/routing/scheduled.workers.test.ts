@@ -25,8 +25,8 @@ import {
 	executeMaintenanceQueueMessage,
 	type MaintenanceQueueMessage,
 	QueueBatchSendError,
-	runCronSweep,
-	runOffboardSweep,
+	runMaintenanceBatch,
+	runOffboardBatch,
 	sendQueueMessages
 } from './scheduled.ts';
 
@@ -581,7 +581,7 @@ describe('scheduled tenant pass failure records', () => {
 
 		const seen: string[] = [];
 		await runWithClock('2026-01-01T00:00:00.000Z', () =>
-			runCronSweep(rootLogger(), env, 10, (_logger, _env, tenant) => {
+			runMaintenanceBatch(rootLogger(), env, 10, (_logger, _env, tenant) => {
 				seen.push(tenant);
 
 				return Promise.resolve();
@@ -616,7 +616,7 @@ describe('scheduled tenant pass failure records', () => {
 
 		const seen: string[] = [];
 		await runWithClock('2026-01-01T00:00:00.000Z', () =>
-			runCronSweep(rootLogger(), env, 10, (_logger, _env, id) => {
+			runMaintenanceBatch(rootLogger(), env, 10, (_logger, _env, id) => {
 				seen.push(id);
 
 				return Promise.resolve();
@@ -660,7 +660,7 @@ describe('scheduled tenant pass failure records', () => {
 
 		const seen: string[] = [];
 		await runWithClock('2026-01-01T00:00:00.000Z', () =>
-			runCronSweep(rootLogger(), env, 10, (_logger, _env, id) => {
+			runMaintenanceBatch(rootLogger(), env, 10, (_logger, _env, id) => {
 				seen.push(id);
 
 				return Promise.resolve();
@@ -681,7 +681,7 @@ describe('scheduled tenant pass failure records', () => {
 		const firstFailure = new Error('maintenance failed');
 		const error = await runWithClock('2026-01-02T00:00:00.000Z', async () => {
 			try {
-				await runCronSweep(rootLogger(), env, 2, (_logger, _env, id) => {
+				await runMaintenanceBatch(rootLogger(), env, 2, (_logger, _env, id) => {
 					seen.push(id);
 
 					if (id === 'acme') {
@@ -703,7 +703,7 @@ describe('scheduled tenant pass failure records', () => {
 		};
 
 		await runWithClock('2026-01-03T00:00:00.000Z', () =>
-			runCronSweep(rootLogger(), env, 1, () => Promise.resolve())
+			runMaintenanceBatch(rootLogger(), env, 1, () => Promise.resolve())
 		);
 		const afterSuccess = await tenantMaintenanceFailureRow(
 			'acme',
@@ -761,13 +761,18 @@ describe('scheduled tenant pass failure records', () => {
 		let maxActive = 0;
 		const seen: string[] = [];
 
-		await runCronSweep(rootLogger(), env, 5, async (_logger, _env, id) => {
-			seen.push(id);
-			active += 1;
-			maxActive = Math.max(maxActive, active);
-			await new Promise((resolve) => setTimeout(resolve, 0));
-			active -= 1;
-		});
+		await runMaintenanceBatch(
+			rootLogger(),
+			env,
+			5,
+			async (_logger, _env, id) => {
+				seen.push(id);
+				active += 1;
+				maxActive = Math.max(maxActive, active);
+				await new Promise((resolve) => setTimeout(resolve, 0));
+				active -= 1;
+			}
+		);
 
 		expect({ seen, maxActive }).toStrictEqual({
 			seen: ['acme', 'beta', 'delta', 'epsilon', 'gamma'],
@@ -785,7 +790,7 @@ describe('scheduled tenant pass failure records', () => {
 		const firstFailure = new TypeError('offboard failed');
 		const error = await runWithClock('2026-01-02T00:00:00.000Z', async () => {
 			try {
-				await runOffboardSweep(
+				await runOffboardBatch(
 					rootLogger(),
 					env,
 					2,
@@ -812,7 +817,7 @@ describe('scheduled tenant pass failure records', () => {
 		};
 
 		await runWithClock('2026-01-03T00:00:00.000Z', () =>
-			runOffboardSweep(rootLogger(), env, 1, 1, 1, () => Promise.resolve())
+			runOffboardBatch(rootLogger(), env, 1, 1, 1, () => Promise.resolve())
 		);
 		const afterSuccess = await tenantMaintenanceFailureRow('acme', 'offboard');
 

@@ -149,7 +149,7 @@ export const pendingAttestations = sqliteTable(
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
 	},
-	// The maintenance sweep finds the soonest-expiring attestation and GC reaps the
+	// The maintenance pass finds the soonest-expiring attestation and GC reaps the
 	// expired ones; the index spares both a scan of every staged bundle.
 	(table) => [index('pending_attestation_expires_at_idx').on(table.expiresAt)]
 );
@@ -192,7 +192,7 @@ export const authKeys = sqliteTable(
 		scheduledRetireAt: text('scheduled_retire_at').$type<IsoTimestamp>(),
 		retiredAt: text('retired_at').$type<IsoTimestamp>()
 	},
-	// The maintenance sweep finds the soonest scheduled retirement among the keys
+	// The maintenance pass finds the soonest scheduled retirement among the keys
 	// still in service; filtering on `retired_at` then ordering by
 	// `scheduled_retire_at` uses this index.
 	(table) => [
@@ -260,7 +260,7 @@ export const retentionRoots = sqliteTable(
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 	},
-	// The maintenance sweep finds the soonest-expiring TTL root; the index spares
+	// The maintenance pass finds the soonest-expiring TTL root; the index spares
 	// it a scan of every root.
 	(table) => [
 		primaryKey({ columns: [table.cache, table.name] }),

@@ -148,7 +148,7 @@ export const tenant = sqliteTable(
 		readUser: text('read_user').$type<ReadUser>(),
 		readPasswordHash: text('read_password_hash').$type<ReadPasswordHash>(),
 		readPasswordSalt: text('read_password_salt').$type<ReadPasswordSalt>(),
-		// When the cron last ran maintenance (GC + verify) for this tenant. The sweep
+		// When the cron last ran maintenance (GC + verify) for this tenant. The batch
 		// processes the most-overdue active tenants first and stamps this, so the
 		// table carries its own round-robin position (no separate cursor);
 		// NULL (a never-maintained tenant) sorts first, so a new tenant is picked up
@@ -191,8 +191,8 @@ export const tenantMaintenanceEligibility = sqliteTable(
 		// When the wake time was last recomputed. Not strictly monotonic: the conflict
 		// rule can write an older reconcile's stamp when its wake is sooner, so a reader
 		// must not treat this as a "last reconciled" high-water mark. Its only consumer
-		// is the cron sweep's staleness check, where a backward value can only
-		// trigger an extra sweep, never miss one.
+		// is the maintenance batch's staleness check, where a backward value can only
+		// trigger an extra pass, never miss one.
 		reconciledAt: text('reconciled_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [

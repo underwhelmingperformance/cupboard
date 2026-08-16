@@ -1058,7 +1058,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			roots: this.roots,
 			deletionQueue: this.deletionQueue,
 			runGarbageCollection: (logger, cache, purgeOrigin) =>
-				this.sweepGarbageInteractive(logger, cache, purgeOrigin),
+				this.collectGarbageInteractive(logger, cache, purgeOrigin),
 			uploads: this.uploads,
 			attestations: this.attestations,
 			runVerification: (logger, purgeOrigin, limit) =>
@@ -1113,8 +1113,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	// Runs a body and reconciles the maintenance-eligibility projection
 	// synchronously after it, invalidating first so a crash anywhere in the body
-	// leaves the tenant due (fail-open). The cron sweeps use this: a crash during a
-	// maintenance pass must not leave a stale not-due row behind. The mutating
+	// leaves the tenant due (fail-open). The cron maintenance passes use this: a
+	// crash during a pass must not leave a stale not-due row behind. The mutating
 	// request paths skip the invalidate (that would cost a D1 delete on every
 	// mutation and defeat the write-coalescing) and accept the eviction window
 	// their trailing reconcile leaves: the admin mutations reconcile inline via
@@ -1137,7 +1137,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// The `finally` covers a body that throws after a partial write; the one case it
 	// does not cover is a hard isolate eviction inside that window, which leaves the
 	// prior wake time in place. Deferred verify is re-triggered out of band by the
-	// `tenant-verify` queue message, so it does not wait for the sweep. The
+	// `tenant-verify` queue message, so it does not wait for the cron pass. The
 	// other kinds of work do wait for it: a queued narinfo deletion that is now
 	// due, or a deferred deadline (upload or attestation expiry, retention-root
 	// TTL, auth-key retirement). They run on the first cron tick that reads the
@@ -1167,8 +1167,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// is in flight every further request collapses onto a single follow-up,
 	// which runs with the state as it stands then, so the last mutation of a
 	// burst is always covered. An eviction can drop a scheduled publish; the
-	// sweep's staleness limit bounds how long the stale projection can suppress
-	// maintenance, the same backstop the synchronous reconcile's eviction
+	// maintenance batch's staleness limit bounds how long the stale projection can
+	// suppress maintenance, the same backstop the synchronous reconcile's eviction
 	// window relies on.
 	private scheduleMaintenanceReconcile(): void {
 		this.isReconcileDue = true;
@@ -1196,8 +1196,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// same-tenant reconciles settle atomically without a lock: a stale one cannot
 		// overwrite a fresher one. A failed reconcile would leave a stale
 		// projection that can suppress maintenance until the staleness limit, so
-		// drop the row instead and let the periodic sweep read the tenant as due
-		// (fail-open).
+		// drop the row instead and let the periodic maintenance batch read the
+		// tenant as due (fail-open).
 		try {
 			await this.maintenanceEligibility.reconcile();
 		} catch {
@@ -1205,20 +1205,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// Drops the maintenance-eligibility projection so the periodic sweep reads the
-	// tenant as due and reconciles on its next tick. Fail-open: if the delete also
-	// fails, the sweep's staleness limit still bounds the delay.
+	// Drops the maintenance-eligibility projection so the periodic maintenance batch
+	// reads the tenant as due and reconciles on its next tick. Fail-open: if the
+	// delete also fails, the batch's staleness limit still bounds the delay.
 	private async invalidateMaintenanceEligibility(): Promise<void> {
 		try {
 			await this.maintenanceEligibility.invalidate();
 		} catch {
-			// The sweep's staleness limit is the backstop.
+			// The maintenance batch's staleness limit is the backstop.
 		}
 	}
 
 	// Runs a direct RPC entrypoint (one that bypasses `fetch`) inside its own
 	// request cost meter, so the Durable Object rows it reads are logged like an
-	// HTTP request's. The row-heavy maintenance sweeps arrive as direct RPCs, so
+	// HTTP request's. The row-heavy maintenance passes arrive as direct RPCs, so
 	// they all run through here.
 	private metered<T>(
 		method: MeteredMethod,
@@ -1358,14 +1358,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// One bounded sweep. It records a continuation and arms an immediate alarm
-	// when either there is likely more to collect (the sweep stopped at the cap)
-	// or a capped narinfo-deletion backlog is still queued, so the remaining paths
-	// and deletions drain across firings. The gate is free between firings, so
+	// One bounded collection pass. It records a continuation and arms an immediate
+	// alarm when either there is likely more to collect (the pass stopped at the
+	// cap) or a capped narinfo-deletion backlog is still queued, so the remaining
+	// paths and deletions drain across firings. The gate is free between firings, so
 	// push requests interleave while the backlog drains across chunks, and each
 	// chunk holds the gate only for its own deletes. The scope and cap are
 	// persisted so the alarm resumes the same work with the bound it started with.
-	private async sweepGarbageOnce(
+	private async collectGarbageOnce(
 		sweepLimit: number = maxPathsSweptPerRun,
 		cache?: StoredCache
 	): Promise<void> {
@@ -1406,11 +1406,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// Records or clears the garbage-collection continuation after a sweep. It arms
-	// an immediate alarm when the sweep stopped at its cap or a capped
+	// Records or clears the garbage-collection continuation after a pass. It arms
+	// an immediate alarm when the pass stopped at its cap or a capped
 	// narinfo-deletion backlog is still queued, so the leftover paths and deletions
 	// drain across firings; otherwise it clears the marker. Shared by the cron
-	// sweep and the interactive path.
+	// pass and the interactive path.
 	private async settleGarbageContinuation(
 		outcome: GarbageCollectionOutcome,
 		continuation: GarbageCollectionContinuation
@@ -1424,12 +1424,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	// The interactive garbage-collection pass the admin oRPC procedure reaches. It
-	// serialises against the cron sweep and the alarm resume through the same 'gc'
-	// chain and arms the continuation the same way, so a manual sweep that hits the
+	// serialises against the cron pass and the alarm resume through the same 'gc'
+	// chain and arms the continuation the same way, so a manual run that hits the
 	// per-run cap drains its remainder across alarm firings too. The metering and
-	// eligibility reconcile the cron sweep runs inline are supplied instead by the
+	// eligibility reconcile the cron pass runs inline are supplied instead by the
 	// request meter and the oRPC maintenance hook the interactive request carries.
-	private sweepGarbageInteractive(
+	private collectGarbageInteractive(
 		logger: Logger,
 		cache: StoredCache | undefined,
 		purgeOrigin: RequestOrigin | undefined
@@ -1495,7 +1495,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.ctx.storage.setAlarm(Date.now());
 	}
 
-	// Resumes a garbage-collection sweep that stopped at its per-run cap. A run
+	// Resumes a garbage-collection pass that stopped at its per-run cap. A run
 	// that did not stop at the cap left no continuation, so this is a no-op.
 	private async resumeGarbageCollection(): Promise<void> {
 		const pending = parseGarbageCollectionContinuations(
@@ -1503,14 +1503,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 
 		// No continuation means no work: return without touching the chain, so an
-		// idle alarm costs nothing and never queues behind a concurrent sweep.
+		// idle alarm costs nothing and never queues behind a concurrent pass.
 		if (pending.length === 0) {
 			return;
 		}
 
 		await this.runExclusiveMaintenance('gc', async () => {
-			// Re-read under the chain: a sweep that ran while this pass waited may
-			// have drained the marker, in which case there is nothing left to resume.
+			// Re-read under the chain: a collection that ran while this pass waited
+			// may have drained the marker, in which case there is nothing left to
+			// resume.
 			const continuation = parseGarbageCollectionContinuations(
 				await this.ctx.storage.get(gcContinuationKey)
 			)[0];
@@ -1519,7 +1520,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				return;
 			}
 
-			await this.sweepGarbageOnce(
+			await this.collectGarbageOnce(
 				continuation.sweepLimit,
 				continuation.scope === 'cache' ? continuation.cache : undefined
 			);
@@ -1527,7 +1528,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	// One bounded reconcile of the committed paths a recent negotiate queued. Like
-	// the garbage-collection sweep it holds the gate only for the chunk's
+	// the garbage-collection pass it holds the gate only for the chunk's
 	// reconciles and re-arms the alarm while more remain, so a large closure's R2
 	// probes drain across firings off the push hot path. A drained queue clears its
 	// origin marker so a later push starts fresh.
@@ -1650,7 +1651,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	async runGarbageCollection(sweepLimit?: number): Promise<void> {
 		await this.initialise();
 		await this.runCoalescedCronMaintenance('gc', () =>
-			this.sweepGarbageOnce(sweepLimit)
+			this.collectGarbageOnce(sweepLimit)
 		);
 	}
 
@@ -1659,8 +1660,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// verify backstop, and finally resuming a capped garbage-collection sweep. Each
 	// re-arms the alarm while it has work left, so the backlogs converge across
 	// firings while the gate stays free between them. Garbage collection resumes
-	// last so a queued gc pass, which may wait behind an interactive or cron sweep
-	// on the chain, cannot stall the other resume loops.
+	// last so a queued gc pass, which may wait behind an interactive or cron
+	// collection on the chain, cannot stall the other resume loops.
 	override async alarm(): Promise<void> {
 		await this.initialise();
 		// The alarm is a top-level entrypoint, so it seeds the logger the resume
@@ -2214,7 +2215,7 @@ type MeteredMethod =
 	| 'verification'
 	| 'verify-backstop';
 
-// The same cost line for a direct RPC entrypoint (the maintenance sweeps,
+// The same cost line for a direct RPC entrypoint (the maintenance passes,
 // configure, the cold-start migration): no `fetch` runs, but the rows it reads
 // are still worth surfacing. These fire far more often than HTTP requests, on
 // every cron tick and every queue message, so this is the noisiest telemetry

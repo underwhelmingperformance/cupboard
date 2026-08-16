@@ -48,7 +48,7 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
-import { runBlobReaper, runCronTick, runOffboardSweep } from './scheduled.ts';
+import { runBlobReaper, runCronTick, runOffboardBatch } from './scheduled.ts';
 
 // Offboarding is a quiesce-then-drain state machine: the control plane marks the
 // tenant `offboarding` (stopping new writes and, after the manifest TTL, reads), then
@@ -160,7 +160,7 @@ describe('offboarding drain', () => {
 		);
 
 		await offboardTenant(id);
-		await runOffboardSweep(rootLogger(), env);
+		await runOffboardBatch(rootLogger(), env);
 
 		const drained = {
 			edges: await tenantEdges(id),
@@ -219,7 +219,7 @@ describe('offboarding drain', () => {
 
 		// One row and one object per tick: the first tick cannot finish, so the tenant
 		// stays `offboarding` with residue and is not finalised early.
-		await runOffboardSweep(rootLogger(), env, 10, 1, 1);
+		await runOffboardBatch(rootLogger(), env, 10, 1, 1);
 
 		const midRow = await tenantRow(id);
 		const midDrain = {
@@ -230,8 +230,8 @@ describe('offboarding drain', () => {
 		};
 
 		// Further ticks drain the remainder and finalise the tenant.
-		await runOffboardSweep(rootLogger(), env, 10, 1, 1);
-		await runOffboardSweep(rootLogger(), env, 10, 1, 1);
+		await runOffboardBatch(rootLogger(), env, 10, 1, 1);
+		await runOffboardBatch(rootLogger(), env, 10, 1, 1);
 
 		const finalRow = await tenantRow(id);
 
@@ -414,7 +414,7 @@ describe('offboarding drain', () => {
 
 		await offboardTenant(id);
 
-		// The whole tick: the maintenance sweep skips the offboarding tenant, the
+		// The whole tick: the maintenance batch skips the offboarding tenant, the
 		// offboard pass drains and finalises it, and the reaper arms its freed blob.
 		await runCronTick(rootLogger(), env);
 		vi.setSystemTime(afterGrace());
