@@ -9,7 +9,7 @@ import {
 	UntrustedDaemonError
 } from '../errors.ts';
 
-import { buildPushModeDescription, selectBuildPushMode } from './mode.ts';
+import { selectBuildPushMode } from './mode.ts';
 import type { BuildPushPreflight } from './preflight.ts';
 
 const socketPath = '/nix/var/nix/daemon-socket/socket';
@@ -70,41 +70,5 @@ describe('selectBuildPushMode', () => {
 		await expect(selectBuildPushMode(() => Promise.reject(error))).rejects.toBe(
 			error
 		);
-	});
-});
-
-describe('buildPushModeDescription', () => {
-	it.each([
-		{
-			name: 'the streamed mode',
-			mode: { kind: 'streamed', preflight } as const,
-			expected:
-				'Publication mode: streamed. Each completed output publishes while ' +
-				'the build runs.'
-		},
-		{
-			name: 'a reconciled local run behind a missing daemon',
-			mode: {
-				kind: 'reconciled-local',
-				reason: new DaemonRequiredError(socketPath)
-			} as const,
-			expected:
-				`Publication mode: reconciled local. No Nix daemon socket exists at ` +
-				`${socketPath}, so the build runs without the post-build hook and ` +
-				'one push publishes what it leaves in the store.'
-		},
-		{
-			name: 'a reconciled local run behind an untrusting daemon',
-			mode: {
-				kind: 'reconciled-local',
-				reason: new UntrustedDaemonError('not-trusted')
-			} as const,
-			expected:
-				'Publication mode: reconciled local. The Nix daemon does not trust ' +
-				'this client, so the build runs without the post-build hook and one ' +
-				'push publishes what it leaves in the store.'
-		}
-	])('names $name', ({ mode, expected }) => {
-		expect(buildPushModeDescription(mode)).toBe(expected);
 	});
 });

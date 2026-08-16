@@ -41,10 +41,6 @@ export async function selectBuildPushMode(
 	}
 }
 
-const reconciledLocalPublication =
-	'so the build runs without the post-build hook and one push publishes ' +
-	'what it leaves in the store.';
-
 /**
 The line the reporter shows for the mode a run took, and why.
 */
@@ -58,13 +54,26 @@ export function buildPushModeDescription(mode: BuildPushMode): string {
 
 	if (mode.reason instanceof DaemonRequiredError) {
 		return (
-			`Publication mode: reconciled local. No Nix daemon socket exists at ` +
-			`${mode.reason.socketPath}, ${reconciledLocalPublication}`
+			'Publication mode: after the build. Nix is running without a daemon, ' +
+			'so Cupboard cannot protect completed outputs from garbage ' +
+			'collection while the build continues. Cupboard will publish the ' +
+			'successful outputs after the build finishes.'
+		);
+	}
+
+	if (mode.reason.trust === 'not-trusted') {
+		return (
+			'Publication mode: after the build. The current user is not included ' +
+			"in the Nix daemon's trusted-users setting, so Cupboard cannot " +
+			'publish outputs as they finish. Cupboard will publish the successful ' +
+			'outputs after the build finishes.'
 		);
 	}
 
 	return (
-		'Publication mode: reconciled local. The Nix daemon does not trust this ' +
-		`client, ${reconciledLocalPublication}`
+		'Publication mode: after the build. Cupboard could not confirm whether ' +
+		"the current user is included in the Nix daemon's trusted-users " +
+		'setting, so Cupboard cannot publish outputs as they finish. Cupboard ' +
+		'will publish the successful outputs after the build finishes.'
 	);
 }
