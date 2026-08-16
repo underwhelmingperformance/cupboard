@@ -1,0 +1,33 @@
+{
+	"name": "@cupboard/s3",
+	"version": "0.0.0",
+	"dependencies": {
+		"@noble/hashes": "^2.3.0",
+		"aws4fetch": "^1.0.20",
+		"fast-xml-builder": "^1.2.0",
+		"fast-xml-parser": "^5.9.3",
+		"hono": "^4.12.23",
+		"http-status-codes": "^2.3.0",
+		"zod": "^4.4.3"
+	},
+	"devDependencies": {
+		"@types/node": "^25.9.1",
+		"typescript": "^6.0.3",
+		"vitest": "^4.1.8"
+	},
+	"exports": {
+		"./app": "./src/app.ts",
+		"./errors": "./src/errors.ts",
+		"./passthrough": "./src/passthrough.ts",
+		"./ports": "./src/ports.ts",
+		"./sigv4": "./src/sigv4.ts",
+		"./xml": "./src/xml.ts"
+	},
+	"license": "AGPL-3.0-or-later",
+	"private": true,
+	"scripts": {
+		"check:types": "tsc --noEmit",
+		"test": "vitest run --passWithNoTests"
+	},
+	"type": "module"
+}
