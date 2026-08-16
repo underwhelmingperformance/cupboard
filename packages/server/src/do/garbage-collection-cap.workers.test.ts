@@ -37,7 +37,7 @@ const repeated = (character: string): string => character.repeat(32);
 const defaultCache: StoredCache = DEFAULT_CACHE;
 const tenantWideContinuation = {
 	scope: 'tenant',
-	sweepLimit: maxPathsSweptPerRun
+	collectLimit: maxPathsSweptPerRun
 };
 
 async function continuation(): Promise<unknown> {

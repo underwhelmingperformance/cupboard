@@ -31,12 +31,12 @@ const gcOutcome = {
 };
 const tenantWideContinuation = {
 	scope: 'tenant',
-	sweepLimit: maxPathsSweptPerRun
+	collectLimit: maxPathsSweptPerRun
 };
 const scopedContinuation = (cache: string) => ({
 	scope: 'cache',
 	cache,
-	sweepLimit: maxPathsSweptPerRun
+	collectLimit: maxPathsSweptPerRun
 });
 const cappedGcOutcome = {
 	...gcOutcome,
@@ -231,10 +231,10 @@ describe('garbage-collection maintenance serialisation', () => {
 					return {
 						continuation,
 						calls: collect.mock.calls.map(
-							([_logger, cache, purgeOrigin, sweepLimit]) => ({
+							([_logger, cache, purgeOrigin, collectLimit]) => ({
 								cache,
 								purgeOrigin,
-								sweepLimit
+								collectLimit
 							})
 						)
 					};
@@ -247,9 +247,55 @@ describe('garbage-collection maintenance serialisation', () => {
 					{
 						cache: undefined,
 						purgeOrigin: undefined,
-						sweepLimit: maxPathsSweptPerRun
+						collectLimit: maxPathsSweptPerRun
 					}
 				]
+			});
+		} finally {
+			collect.mockRestore();
+		}
+	});
+
+	it('resumes a continuation stored under the retired limit key', async () => {
+		await initialise();
+
+		const collect = vi
+			.spyOn(GarbageCollectionService.prototype, 'collectGarbage')
+			.mockResolvedValue(gcOutcome);
+
+		try {
+			const observed = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					// The shape an earlier build wrote for a cache-scoped run that
+					// stopped at its cap.
+					await state.storage.put(gcContinuationKey, [
+						{
+							scope: 'cache',
+							cache: 'builds',
+							sweepLimit: maxPathsSweptPerRun
+						}
+					]);
+					await instance.alarm();
+
+					const continuation = await state.storage.get(gcContinuationKey);
+					await state.storage.deleteAlarm();
+
+					return {
+						continuation,
+						calls: collect.mock.calls.map(
+							([_logger, cache, _purgeOrigin, collectLimit]) => ({
+								cache,
+								collectLimit
+							})
+						)
+					};
+				}
+			);
+
+			expect(observed).toStrictEqual({
+				continuation: undefined,
+				calls: [{ cache: 'builds', collectLimit: maxPathsSweptPerRun }]
 			});
 		} finally {
 			collect.mockRestore();
@@ -301,7 +347,7 @@ describe('garbage-collection maintenance serialisation', () => {
 						{
 							scope: 'cache',
 							cache: 'builds',
-							sweepLimit: maxPathsSweptPerRun
+							collectLimit: maxPathsSweptPerRun
 						}
 					],
 					alarmArmed: true

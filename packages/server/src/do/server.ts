@@ -177,23 +177,42 @@ const commitSessionAttachmentSchema = z.object({
 // unboundedly many root names, so a per-root cap would bound nothing.
 export const maxCommitSessionsPerTenant = 8;
 
-// A storage key marking that a bounded garbage-collection sweep stopped at its
+// A storage key marking that a bounded garbage collection stopped at its
 // per-run cap with work left over. The alarm reads it to resume, so a large
 // backlog drains across successive alarm firings without holding the gate open.
 export const gcContinuationKey = 'maintenance:gc-pending';
 
-const garbageCollectionSweepLimitSchema = z.number().int().positive();
-const garbageCollectionContinuationSchema = z.discriminatedUnion('scope', [
+const garbageCollectionLimitSchema = z.number().int().positive();
+
+// An earlier build stored the per-run cap as `sweepLimit`. A tenant whose
+// collection stopped at the cap keeps its marker until the alarm drains it, so
+// a marker written before the rename is read as the current shape.
+function adoptStoredLimit(value: unknown): unknown {
+	if (typeof value !== 'object' || value === null || !('sweepLimit' in value)) {
+		return value;
+	}
+
+	const { sweepLimit, ...rest } = value;
+
+	return { ...rest, collectLimit: sweepLimit };
+}
+
+// The continuation as this build writes it.
+const currentContinuationSchema = z.discriminatedUnion('scope', [
 	z.object({
 		scope: z.literal('tenant'),
-		sweepLimit: garbageCollectionSweepLimitSchema
+		collectLimit: garbageCollectionLimitSchema
 	}),
 	z.object({
 		scope: z.literal('cache'),
 		cache: storedCacheSchema,
-		sweepLimit: garbageCollectionSweepLimitSchema
+		collectLimit: garbageCollectionLimitSchema
 	})
 ]);
+const garbageCollectionContinuationSchema = z.preprocess(
+	adoptStoredLimit,
+	currentContinuationSchema
+);
 const garbageCollectionContinuationsSchema = z
 	.array(garbageCollectionContinuationSchema)
 	.min(1);
@@ -205,10 +224,10 @@ type GarbageCollectionContinuation = z.infer<
 function parseGarbageCollectionContinuations(
 	value: unknown
 ): GarbageCollectionContinuation[] {
-	const legacy = garbageCollectionSweepLimitSchema.safeParse(value);
+	const legacy = garbageCollectionLimitSchema.safeParse(value);
 
 	if (legacy.success) {
-		return [{ scope: 'tenant', sweepLimit: legacy.data }];
+		return [{ scope: 'tenant', collectLimit: legacy.data }];
 	}
 
 	const parsed = garbageCollectionContinuationsSchema.safeParse(value);
@@ -224,11 +243,11 @@ function parseGarbageCollectionContinuations(
 
 function garbageCollectionContinuation(
 	cache: StoredCache | undefined,
-	sweepLimit: number
+	collectLimit: number
 ): GarbageCollectionContinuation {
 	return cache === undefined
-		? { scope: 'tenant', sweepLimit }
-		: { scope: 'cache', cache, sweepLimit };
+		? { scope: 'tenant', collectLimit }
+		: { scope: 'cache', cache, collectLimit };
 }
 
 function mergeGarbageCollectionContinuation(
@@ -1366,10 +1385,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// chunk holds the gate only for its own deletes. The scope and cap are
 	// persisted so the alarm resumes the same work with the bound it started with.
 	private async collectGarbageOnce(
-		sweepLimit: number = maxPathsSweptPerRun,
+		collectLimit: number = maxPathsSweptPerRun,
 		cache?: StoredCache
 	): Promise<void> {
-		const continuation = garbageCollectionContinuation(cache, sweepLimit);
+		const continuation = garbageCollectionContinuation(cache, collectLimit);
 
 		await this.runGarbagePass(
 			() =>
@@ -1379,7 +1398,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 							logger,
 							cache,
 							undefined,
-							sweepLimit
+							collectLimit
 						)
 					)
 				),
@@ -1521,7 +1540,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			}
 
 			await this.collectGarbageOnce(
-				continuation.sweepLimit,
+				continuation.collectLimit,
 				continuation.scope === 'cache' ? continuation.cache : undefined
 			);
 		});
@@ -1648,10 +1667,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// `/verify` routes run the same passes for manual use. Called this way they
 	// sweep every cache and skip the edge-cache purge, leaving stale edge
 	// entries to the narinfo TTL and the orphan-blob grace window.
-	async runGarbageCollection(sweepLimit?: number): Promise<void> {
+	async runGarbageCollection(collectLimit?: number): Promise<void> {
 		await this.initialise();
 		await this.runCoalescedCronMaintenance('gc', () =>
-			this.collectGarbageOnce(sweepLimit)
+			this.collectGarbageOnce(collectLimit)
 		);
 	}
 
