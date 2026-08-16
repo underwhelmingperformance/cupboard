@@ -42,12 +42,12 @@ export interface AvailabilityTarget {
 }
 
 /**
- * Destination availability that the planner cannot determine from the local
- * store. One query checks the destination cache and the other checks the
- * tenant's configured reuse view. Both accept a batch of paths, matching the
- * existing `availableCachePaths` HTTP probe.
+ * The probes for destination availability, which the planner cannot determine
+ * from the local store. One probe asks the destination cache and the other
+ * asks the tenant's configured reuse view. Both accept a batch of paths,
+ * matching the existing `availableCachePaths` HTTP probe.
  */
-export interface DestinationAnswers {
+export interface DestinationProbes {
 	readonly destinationServed: (
 		paths: readonly StorePathString[]
 	) => Promise<ReadonlySet<StorePathString>>;
@@ -183,7 +183,7 @@ export interface AvailabilityPartitionOptions {
 		| 'queryValidPaths'
 		| 'unreachableSubstituters'
 	>;
-	readonly destinationAnswers: DestinationAnswers;
+	readonly destinationProbes: DestinationProbes;
 	/**
 	 * Which of the given paths the destination cache holds build provenance
 	 * for. A plan that requires attested availability sets this field, and a
@@ -316,8 +316,8 @@ export async function partitionAvailability(
 
 	const [destinationServedPaths, viewServedPaths, validPaths, queriedMissing] =
 		await Promise.all([
-			options.destinationAnswers.destinationServed(knownPaths),
-			options.destinationAnswers.viewServed(knownPaths),
+			options.destinationProbes.destinationServed(knownPaths),
+			options.destinationProbes.viewServed(knownPaths),
 			options.store.queryValidPaths(knownPaths),
 			options.store.queryMissing(installables)
 		]);

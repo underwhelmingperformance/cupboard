@@ -5,7 +5,7 @@ import type { ParsedRootEnsureResponse } from '@cupboard/protocol/retention';
 import {
 	type AvailabilityTarget,
 	classify,
-	type DestinationAnswers
+	type DestinationProbes
 } from './availability-partition.ts';
 
 /** The bucket a withdrawn target moved into, named as the partition names it. */
@@ -25,7 +25,7 @@ export interface WithdrawnTarget {
 export interface AvailabilityReprobeOptions {
 	/** The build set as it stands, one entry per target Nix is about to realise. */
 	readonly targets: readonly AvailabilityTarget[];
-	readonly destinationAnswers: DestinationAnswers;
+	readonly destinationProbes: DestinationProbes;
 }
 
 /** The build set as the re-probe leaves it, with what it took out of it. */
@@ -50,8 +50,8 @@ const noSubstitutableExternal: ReadonlySet<StorePathString> = new Set();
  * Confirms, immediately before the build set is dispatched, that every target
  * in it still needs realising. The exact requested outputs are asked of the
  * destination and of the reuse view, in one batch per question however large
- * the build set is. A target either of them has gained since the partition
- * settled is withdrawn, to be attached to its root or published by reference.
+ * the build set is. A target either of them has gained since the partition ran
+ * is withdrawn, to be attached to its root or published by reference.
  * Every other target keeps its place in the build set. Availability is racy: a
  * path can disappear again immediately after the answer, and Nix reports the
  * resulting failure as it reports any other.
@@ -71,8 +71,8 @@ export async function reprobeAvailability(
 	}
 
 	const [destinationServedPaths, viewServedPaths] = await Promise.all([
-		options.destinationAnswers.destinationServed(knownPaths),
-		options.destinationAnswers.viewServed(knownPaths)
+		options.destinationProbes.destinationServed(knownPaths),
+		options.destinationProbes.viewServed(knownPaths)
 	]);
 
 	const buildSet: NixDerivedPathString[] = [];

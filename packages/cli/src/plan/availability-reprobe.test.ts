@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 
 import type {
 	AvailabilityTarget,
-	DestinationAnswers
+	DestinationProbes
 } from './availability-partition.ts';
 import {
 	type AvailabilityReprobeOptions,
@@ -40,17 +40,15 @@ function target(
 	};
 }
 
-function noAnswers(): DestinationAnswers {
+function noProbes(): DestinationProbes {
 	return {
 		destinationServed: () => Promise.resolve(new Set()),
 		viewServed: () => Promise.resolve(new Set())
 	};
 }
 
-function answersFrom(
-	overrides: Partial<DestinationAnswers>
-): DestinationAnswers {
-	return { ...noAnswers(), ...overrides };
+function probesFrom(overrides: Partial<DestinationProbes>): DestinationProbes {
+	return { ...noProbes(), ...overrides };
 }
 
 function baseOptions(
@@ -58,7 +56,7 @@ function baseOptions(
 ): AvailabilityReprobeOptions {
 	return {
 		targets: [],
-		destinationAnswers: noAnswers(),
+		destinationProbes: noProbes(),
 		...overrides
 	};
 }
@@ -87,7 +85,7 @@ describe('reprobeAvailability', () => {
 					target(),
 					target({ installable: otherPath, expectedPath: otherPath })
 				],
-				destinationAnswers: {
+				destinationProbes: {
 					destinationServed: (paths) => {
 						destinationCalls.push(paths);
 
@@ -113,7 +111,7 @@ describe('reprobeAvailability', () => {
 			becameAvailable: 'at the destination',
 			outcome: 'attachOnly',
 			options: {
-				destinationAnswers: answersFrom({
+				destinationProbes: probesFrom({
 					destinationServed: () => Promise.resolve(new Set([appPath]))
 				})
 			}
@@ -122,7 +120,7 @@ describe('reprobeAvailability', () => {
 			becameAvailable: 'in the reuse view',
 			outcome: 'publishByReference',
 			options: {
-				destinationAnswers: answersFrom({
+				destinationProbes: probesFrom({
 					viewServed: () => Promise.resolve(new Set([appPath]))
 				})
 			}
@@ -159,7 +157,7 @@ describe('reprobeAvailability', () => {
 		const reprobe = await reprobeAvailability(
 			baseOptions({
 				targets: [floating, target()],
-				destinationAnswers: answersFrom({
+				destinationProbes: probesFrom({
 					destinationServed: () => Promise.resolve(new Set([appPath]))
 				})
 			})
@@ -177,7 +175,7 @@ describe('reprobeAvailability', () => {
 		const reprobe = await reprobeAvailability(
 			baseOptions({
 				targets: [target({ expectedPath: undefined })],
-				destinationAnswers: {
+				destinationProbes: {
 					destinationServed: () => {
 						throw new Error('the destination must not be asked here');
 					},

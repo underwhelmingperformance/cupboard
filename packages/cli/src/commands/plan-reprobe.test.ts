@@ -16,7 +16,7 @@ import {
 	InvalidCohortTargetsFileError,
 	ReadCredentialPairError
 } from '../errors.ts';
-import type { DestinationAnswers } from '../plan/availability-partition.ts';
+import type { DestinationProbes } from '../plan/availability-partition.ts';
 import type { ParsedCohortTarget } from '../plan/cohort-target.ts';
 
 import { registerPlanCommands } from './plan-cohort.ts';
@@ -47,7 +47,7 @@ const otherTarget: ParsedCohortTarget = {
 	root: appRoot
 };
 
-function answers(served: readonly StorePathString[] = []): DestinationAnswers {
+function answers(served: readonly StorePathString[] = []): DestinationProbes {
 	return {
 		destinationServed: () => Promise.resolve(new Set(served)),
 		viewServed: () => Promise.resolve(new Set())
@@ -116,7 +116,7 @@ describe('runPlanReprobe', () => {
 		const reprobe = await runPlanReprobe(
 			{ targets: [appTarget, otherTarget] },
 			reporter(payloads),
-			{ destinationAnswers: answers(destination) }
+			{ destinationProbes: answers(destination) }
 		);
 
 		expect(reprobe).toStrictEqual(expected);

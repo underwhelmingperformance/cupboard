@@ -18,7 +18,7 @@ import {
 	type AvailabilityCeilingConfig,
 	type AvailabilityPartitionOptions,
 	type AvailabilityTarget,
-	type DestinationAnswers,
+	type DestinationProbes,
 	type LeftUpstreamCandidate,
 	type LeftUpstreamVerdict,
 	partitionAvailability,
@@ -81,17 +81,15 @@ function buildRequired(
 	return { status: 'build-required', unavailable: [...unavailable] };
 }
 
-function noAnswers(): DestinationAnswers {
+function noProbes(): DestinationProbes {
 	return {
 		destinationServed: () => Promise.resolve(new Set()),
 		viewServed: () => Promise.resolve(new Set())
 	};
 }
 
-function answersFrom(
-	overrides: Partial<DestinationAnswers>
-): DestinationAnswers {
-	return { ...noAnswers(), ...overrides };
+function probesFrom(overrides: Partial<DestinationProbes>): DestinationProbes {
+	return { ...noProbes(), ...overrides };
 }
 
 const defaultCeiling: AvailabilityCeilingConfig = {
@@ -159,7 +157,7 @@ function baseOptions(
 		targets: [],
 		storeIdentity: { kind: 'daemon' },
 		store: new RecordingStore(),
-		destinationAnswers: noAnswers(),
+		destinationProbes: noProbes(),
 		rootEnsureResults: new Map(),
 		requeryUnknown: neverAsked,
 		confirmLeftUpstream: alwaysConfirms,
@@ -241,7 +239,7 @@ describe('partitionAvailability', () => {
 			baseOptions({
 				targets: [target({ expectedPath: appPath })],
 				store,
-				destinationAnswers: answersFrom({
+				destinationProbes: probesFrom({
 					viewServed: () => Promise.resolve(new Set([appPath]))
 				})
 			})
@@ -288,7 +286,7 @@ describe('partitionAvailability', () => {
 					target({ expectedPath: otherPath, installable: otherPath })
 				],
 				store,
-				destinationAnswers: answersFrom({
+				destinationProbes: probesFrom({
 					destinationServed: () => Promise.resolve(new Set([otherPath]))
 				}),
 				confirmLeftUpstream: (candidate) => {
@@ -416,7 +414,7 @@ describe('partitionAvailability', () => {
 		const partition = await partitionAvailability(
 			baseOptions({
 				targets: [target({ expectedPath: appPath, installable: appPath })],
-				destinationAnswers: answersFrom({
+				destinationProbes: probesFrom({
 					destinationServed: () => Promise.resolve(new Set([appPath]))
 				})
 			})
@@ -452,7 +450,7 @@ describe('partitionAvailability', () => {
 			const partition = await partitionAvailability(
 				baseOptions({
 					targets: [target({ expectedPath: appPath, installable: appPath })],
-					destinationAnswers: answersFrom({
+					destinationProbes: probesFrom({
 						destinationServed: () => Promise.resolve(new Set([appPath]))
 					}),
 					attestedServed: (paths) => {
@@ -481,7 +479,7 @@ describe('partitionAvailability', () => {
 					target({ expectedPath: appPath, installable: appPath }),
 					target({ expectedPath: otherPath, installable: otherPath })
 				],
-				destinationAnswers: answersFrom({
+				destinationProbes: probesFrom({
 					destinationServed: () => Promise.resolve(new Set([appPath]))
 				}),
 				attestedServed: (paths) => {

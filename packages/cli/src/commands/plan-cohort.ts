@@ -61,7 +61,7 @@ import {
 	cohortPlanInputSchema,
 	type ParsedCohortTarget
 } from '../plan/cohort-target.ts';
-import { destinationAnswersFor } from '../plan/destination-probe.ts';
+import { tenantProbesFor } from '../plan/destination-probe.ts';
 import {
 	confirmLeftUpstreamWith,
 	upstreamConfirmationOverrides
@@ -388,7 +388,7 @@ export function registerPlanCommands(
 			const nix = Nix.openForAvailability(undefined, storeSelection);
 
 			reportUnknownSettings(reporter, nix.unknownSettings);
-			const answers = destinationAnswersFor({
+			const probes = tenantProbesFor({
 				baseUrl: url,
 				cache: storedCacheFor(options.cache),
 				...(options.reuseView !== undefined && { view: options.reuseView }),
@@ -469,9 +469,9 @@ export function registerPlanCommands(
 								? {}
 								: { signal: programOptions.signal }
 					}),
-					destinationServed: answers.destinationServed,
-					viewServed: answers.viewServed,
-					attestedServed: answers.attestedServed,
+					destinationServed: probes.destinationServed,
+					viewServed: probes.viewServed,
+					attestedServed: probes.attestedServed,
 					capacityProbe: defaultCapacityProbe
 				}
 			);
@@ -527,7 +527,7 @@ export async function runPlanCohort(
 				partitionAvailability({
 					targets: availabilityTargets,
 					store: dependencies.store,
-					destinationAnswers: {
+					destinationProbes: {
 						destinationServed: dependencies.destinationServed,
 						viewServed: dependencies.viewServed
 					},
