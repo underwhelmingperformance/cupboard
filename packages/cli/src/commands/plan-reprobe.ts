@@ -5,13 +5,13 @@ import type { Command } from 'commander';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { storedCacheFor } from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import type { DestinationAnswers } from '../plan/availability-partition.ts';
+import type { DestinationProbes } from '../plan/availability-partition.ts';
 import {
 	type AvailabilityReprobe,
 	reprobeAvailability
 } from '../plan/availability-reprobe.ts';
 import type { ParsedCohortTarget } from '../plan/cohort-target.ts';
-import { destinationAnswersFor } from '../plan/destination-probe.ts';
+import { tenantProbesFor } from '../plan/destination-probe.ts';
 import { parseReadUser } from '../read-user.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
@@ -32,11 +32,11 @@ export interface PlanReprobeRunOptions {
 
 /**
  * What {@link runPlanReprobe} needs from this run's environment, injectable so
- * a command test drives it with doubles: the destination-side answers for the
+ * a command test drives it with doubles: the destination-side probes for the
  * same tenant and cache the partition asked.
  */
 export interface PlanReprobeDependencies {
-	readonly destinationAnswers: DestinationAnswers;
+	readonly destinationProbes: DestinationProbes;
 }
 
 const planReprobeResultKind = 'plan-reprobe';
@@ -73,7 +73,7 @@ export function registerPlanReprobeCommand(
 			const credentials = readCredentials(options);
 
 			await runPlanReprobe({ targets }, reporter, {
-				destinationAnswers: destinationAnswersFor({
+				destinationProbes: tenantProbesFor({
 					baseUrl: url,
 					cache: storedCacheFor(options.cache),
 					...(options.reuseView !== undefined && { view: options.reuseView }),
@@ -84,8 +84,8 @@ export function registerPlanReprobeCommand(
 }
 
 /**
- * Re-asks the availability questions over a settled build set and reports what
- * has become available since the partition settled. The answer is a
+ * Re-asks the availability questions over a planned build set and reports what
+ * has become available since the partition ran. The answer is a
  * confirmation and never a second partition: no retention root is reconciled,
  * no unknown ceiling applies, and a build set nothing has caught up with is
  * reported unchanged.
@@ -107,7 +107,7 @@ export async function runPlanReprobe(
 					}),
 					root: target.root
 				})),
-				destinationAnswers: dependencies.destinationAnswers
+				destinationProbes: dependencies.destinationProbes
 			});
 
 			context.fact('withdrawn', formatCount(answer.withdrawn.length));

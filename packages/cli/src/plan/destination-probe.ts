@@ -18,7 +18,7 @@ import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
 import { isSlsaProvenanceType } from '@cupboard/shared/slsa';
 import { StatusCodes } from 'http-status-codes';
 
-import type { DestinationAnswers } from './availability-partition.ts';
+import type { DestinationProbes } from './availability-partition.ts';
 import { DestinationProbeResponseError } from './destination-probe-errors.ts';
 
 const maximumConcurrentProbes = 4;
@@ -82,11 +82,11 @@ export function attestedServedPaths(
 }
 
 /**
- * Where a tenant's destination and reuse-view answers come from, bound to one
- * tenant, cache and credential. A run with no reuse view configured answers an
- * empty set without a request, since there is no view to ask.
+ * What the destination and reuse-view probes are bound to: one tenant, cache
+ * and credential. A run with no reuse view configured answers an empty set
+ * without a request, since there is no view to ask.
  */
-export interface DestinationAnswerOptions {
+export interface TenantProbeOptions {
 	readonly baseUrl: URL;
 	readonly cache: StoredCache;
 	readonly view?: string;
@@ -95,20 +95,18 @@ export interface DestinationAnswerOptions {
 }
 
 /**
- * The destination-side answers for one tenant and cache: the two availability
+ * The destination-side probes for one tenant and cache: the two availability
  * questions a partition or a re-probe asks, plus the attestation question that
  * a plan requiring attested availability asks.
  */
-export interface TenantAnswers extends DestinationAnswers {
+export interface TenantProbes extends DestinationProbes {
 	readonly attestedServed: (
 		paths: readonly StorePathString[]
 	) => Promise<ReadonlySet<StorePathString>>;
 }
 
-/** The destination-side answers bound to one tenant, cache and credential. */
-export function destinationAnswersFor(
-	options: DestinationAnswerOptions
-): TenantAnswers {
+/** The destination-side probes bound to one tenant, cache and credential. */
+export function tenantProbesFor(options: TenantProbeOptions): TenantProbes {
 	const shared = {
 		baseUrl: options.baseUrl,
 		...(options.credentials !== undefined && {
