@@ -1,4 +1,5 @@
 import { realpathSync } from 'node:fs';
+import pathModule from 'node:path';
 
 import {
 	Derivation,
@@ -101,6 +102,8 @@ export class Nix {
 			storeClientForBackend(backend, config, substituters),
 			(storePaths) => substituters.querySubstitutablePathInfos(storePaths),
 			directories.storeDirectory,
+			directories.stateDirectory,
+			directories.realStoreDirectory ?? directories.storeDirectory,
 			dependencies.realpath ?? defaultRealPath,
 			storeKindOf(backend),
 			config.unknownSettings
@@ -125,13 +128,21 @@ export class Nix {
 		options: NixDaemonClientOptions = {}
 	): Nix {
 		const config = discoverNixStoreConfig(dependencies);
-		const { client, kind, storeDirectory, substituters } =
-			createAvailabilityStoreClient(dependencies, config, options);
+		const {
+			client,
+			kind,
+			realStoreDirectory,
+			stateDirectory,
+			storeDirectory,
+			substituters
+		} = createAvailabilityStoreClient(dependencies, config, options);
 
 		return new Nix(
 			client,
 			(storePaths) => substituters.querySubstitutablePathInfos(storePaths),
 			storeDirectory,
+			stateDirectory,
+			realStoreDirectory ?? storeDirectory,
 			dependencies.realpath ?? defaultRealPath,
 			kind,
 			config.unknownSettings
@@ -147,6 +158,8 @@ export class Nix {
 		store: NixStoreClient,
 		options: {
 			readonly storeDirectory: StoreDirectory;
+			readonly stateDirectory?: string;
+			readonly realStoreDirectory?: string;
 			readonly realpath?: RealPath;
 			readonly storeKind?: NixStoreKind;
 			/**
@@ -160,6 +173,8 @@ export class Nix {
 			store,
 			options.offers ?? noSubstituters,
 			options.storeDirectory,
+			options.stateDirectory,
+			options.realStoreDirectory ?? options.storeDirectory,
 			options.realpath ?? defaultRealPath,
 			options.storeKind ?? 'local-filesystem'
 		);
@@ -171,7 +186,18 @@ export class Nix {
 		 * Direct substituter queries, independent of the selected store backend.
 		 */
 		private readonly offers: QuerySubstitutablePathInfos,
-		private readonly storeDirectory: StoreDirectory,
+		/**
+		 * The logical directory that prefixes paths in this store.
+		 */
+		public readonly storeDirectory: StoreDirectory,
+		/**
+		 * The physical state directory used by this store backend.
+		 */
+		public readonly stateDirectory: string | undefined,
+		/**
+		 * The physical directory containing the paths in a local store.
+		 */
+		private readonly realStoreDirectory: string,
 		private readonly realpath: RealPath,
 		/**
 		The kind of store backend this client reads through.
@@ -493,5 +519,16 @@ export class Nix {
 		}
 
 		return storePath.data;
+	}
+
+	/**
+	 * The filesystem location of a store path. A rooted local store retains its
+	 * logical store paths but keeps their contents beneath another directory.
+	 */
+	storePathOnDisk(path: string): string {
+		return pathModule.join(
+			this.realStoreDirectory,
+			pathModule.basename(this.toStorePath(path))
+		);
 	}
 }

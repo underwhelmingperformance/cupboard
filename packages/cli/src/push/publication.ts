@@ -50,13 +50,12 @@ interface PublicationDeclaration {
 }
 
 /**
- * The publication entries one push publishes: each store path exactly once,
- * tagged with its kind and metadata source, so no path can appear under two
- * kinds. Entries are branded store paths at the domain boundary, and an input
- * that is not a store path is refused with {@link InvalidStorePathError}. A
- * path declared as both a target and an intermediate becomes a target, the
- * stronger declaration, and a path also declared by reference is a target read
- * from the reference source.
+ * One publication entry for each store path. Every entry records its kind and
+ * metadata source, so a path cannot appear under two kinds. The domain boundary
+ * parses each entry as a branded store path and rejects any other value with
+ * {@link InvalidStorePathError}. If a path is both a target and an intermediate,
+ * it becomes a target. If the reference source also declares that path,
+ * Cupboard reads the target from the reference source.
  */
 export class PublicationCollection {
 	static of(input: PublicationInput): PublicationCollection {

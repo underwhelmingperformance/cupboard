@@ -39,10 +39,10 @@ import { isAbortError } from '../abort.ts';
 import type { WaitTimeoutSeconds } from '../duration.ts';
 import {
 	BuildCommandFailedError,
+	BuildEventHandlingError,
 	BuildProvenanceIncompleteError,
 	BuildPublicationFailedError,
 	CliAbortError,
-	type DaemonRequiredError,
 	publicationFailureExitCode,
 	PushIncompleteError,
 	type UntrustedDaemonError
@@ -78,10 +78,12 @@ import {
 	type ReconcileTarget
 } from './reconcile.ts';
 import {
+	createRootLinkDirectory,
 	createRuntimeDirectory,
 	type InvocationRuntimeOptions,
 	planInvocationDirectory,
-	removeInvocationRuntimeDirectory
+	removeInvocationRuntimeDirectory,
+	type RootLinkDirectory
 } from './runtime-directory.ts';
 import {
 	type ChildCommand,
@@ -126,8 +128,10 @@ export interface ConstructedBuild {
 
 /**
  * What the run builds: a user-supplied command supervised unchanged, with its
- * own semantics and no attempts added, or a constructed nix invocation run
- * under the attempt loop.
+ * own semantics and no attempts added, or a constructed Nix invocation run
+ * under the attempt loop. A user-supplied command must use the inherited Nix
+ * store configuration. Cupboard cannot protect or publish outputs if the
+ * command selects another store itself.
  */
 export type BuildInvocation =
 	| { readonly kind: 'command'; readonly command: ChildCommand }
@@ -162,25 +166,24 @@ export interface BuildPushRunOptions {
 }
 
 /**
- * The store a run reads through: what reconciliation queries, what the
- * publication reads, and which of a cohort's declared outputs the store
- * already holds.
+ * The store used by reconciliation and publication. It also reports which of a
+ * cohort's declared outputs are already valid.
  */
 export type BuildPushStore = ReconcileOptions['store'] &
 	PushStore &
-	Pick<Nix, 'queryValidPaths' | 'readDerivation'>;
+	Pick<Nix, 'queryPathInfo' | 'queryValidPaths' | 'readDerivation'>;
 
 export interface BuildPushDependencies {
 	readonly client: PushClient;
 	readonly store: BuildPushStore;
 	/**
-	The connection-scoped store the streaming batcher pins batches on.
+	The daemon-backed store used to protect completed outputs during a streamed run.
 	*/
 	readonly batchStore: BatchStore;
 	readonly storeDirectory: StoreDirectory;
 	readonly invocationId: InvocationId;
 	/**
-	Proves the run can work and returns the endpoints it builds on.
+	Checks whether the run can stream and returns the required resources.
 	*/
 	readonly preflight: () => Promise<BuildPushPreflight>;
 	/**
@@ -234,9 +237,10 @@ function childFailure(exit: ChildExit): BuildCommandFailedError {
 }
 
 /**
- * Runs one cohort in the mode supported by its machine. A daemon that accepts
- * this client's post-build hook uses streaming publication. Other local stores
- * use a reconciled build followed by one push. The reporter records the mode
+ * Runs one cohort using the publication mode supported by the selected Nix
+ * store. A daemonless store streams after the hook registers GC roots. A trusted
+ * daemon streams by using temporary roots on one connection. An untrusted daemon
+ * publishes from the store after the build. The reporter records the mode
  * before the build starts.
  */
 export async function runBuildPush(
@@ -260,6 +264,48 @@ export async function runBuildPush(
 	return runStreamedBuildPush(options, reporter, dependencies, mode.preflight);
 }
 
+function alreadyProtectedBatchStore(
+	store: Pick<Nix, 'queryPathInfo'>
+): BatchStore {
+	return {
+		withProtectedPaths: (use) =>
+			use({
+				// The hook creates the GC root before sending the event.
+				protectPath: () => Promise.resolve(),
+				queryPathInfo: (storePath) => store.queryPathInfo(storePath)
+			})
+	};
+}
+
+function waitForProtection(
+	operation: Promise<void>,
+	signal: AbortSignal
+): Promise<void> {
+	if (signal.aborted) {
+		return Promise.reject(abortReason(signal));
+	}
+
+	return new Promise((resolve, reject) => {
+		const abort = (): void => {
+			reject(abortReason(signal));
+		};
+
+		signal.addEventListener('abort', abort, { once: true });
+		void operation
+			.then(resolve)
+			.catch(reject)
+			.finally(() => {
+				signal.removeEventListener('abort', abort);
+			});
+	});
+}
+
+function abortReason(signal: AbortSignal): Error {
+	return signal.reason instanceof Error
+		? signal.reason
+		: new Error('Output protection was cancelled.');
+}
+
 /**
  * Runs a build with streaming publication. The run creates the hook endpoint,
  * supervises the child, consumes hook events, drains uploads, reconciles the
@@ -273,56 +319,144 @@ async function runStreamedBuildPush(
 	dependencies: BuildPushDependencies,
 	preflight: BuildPushPreflight
 ): Promise<ParsedBuildReceiptV3> {
+	if (preflight.outputProtection.kind === 'daemon-temporary-roots') {
+		return dependencies.batchStore.withProtectedPaths((session) =>
+			runProtectedStreamedBuildPush(
+				options,
+				reporter,
+				dependencies,
+				preflight,
+				alreadyProtectedBatchStore(dependencies.store),
+				async (storePaths, signal) => {
+					for (const storePath of storePaths) {
+						if (signal.aborted) {
+							throw abortReason(signal);
+						}
+
+						await waitForProtection(session.protectPath(storePath), signal);
+					}
+				}
+			)
+		);
+	}
+
+	return runProtectedStreamedBuildPush(
+		options,
+		reporter,
+		dependencies,
+		preflight,
+		alreadyProtectedBatchStore(dependencies.store),
+		() => Promise.resolve()
+	);
+}
+
+async function runProtectedStreamedBuildPush(
+	options: BuildPushRunOptions,
+	reporter: Reporter,
+	dependencies: BuildPushDependencies,
+	preflight: BuildPushPreflight,
+	batchStore: BatchStore,
+	protectEventPaths: (
+		storePaths: readonly StorePathString[],
+		signal: AbortSignal
+	) => Promise<void>
+): Promise<ParsedBuildReceiptV3> {
 	const plan = preflight.runtimePlan;
 	const targetLinkDirectory = `${plan.directory}-targets`;
+	const childRuntimeDirectory = path.join(plan.directory, 'child');
+	const rootLinkDirectory =
+		preflight.outputProtection.kind === 'daemonless-gc-roots'
+			? preflight.outputProtection.rootLinkDirectory
+			: undefined;
+	let roots: RootLinkDirectory | undefined;
+	let batcher: BuildOutputBatcher;
+	let listener: BuildEventListener;
 
 	await createRuntimeDirectory(plan.directory);
 
-	if (options.invocation.kind === 'constructed') {
-		await createRuntimeDirectory(targetLinkDirectory);
-	}
-
+	let maxQueueDepth = 0;
 	const hookScriptPath = path.join(plan.directory, hookScriptFileName);
 
-	await writeFile(
-		hookScriptPath,
-		renderHookScript({
-			invocationId: dependencies.invocationId,
-			helperPath: preflight.helperPath,
-			socketPath: plan.socketPath
-		}),
-		{ mode: 0o700 }
-	);
-
-	let maxQueueDepth = 0;
-	const batcher = new BuildOutputBatcher({
-		store: dependencies.batchStore,
-		client: dependencies.client,
-		...(options.runRoot !== undefined && { runRoot: options.runRoot }),
-		...(options.waitTimeoutSeconds !== undefined && {
-			commitOptions: { timeoutSeconds: options.waitTimeoutSeconds }
-		}),
-		...(dependencies.createNarArchive !== undefined && {
-			createNarArchive: dependencies.createNarArchive
-		}),
-		...(dependencies.compressNar !== undefined && {
-			compressNar: dependencies.compressNar
-		})
-	});
-	const listener = await BuildEventListener.listen({
-		socketPath: plan.socketPath,
-		storeDirectory: dependencies.storeDirectory,
-		onEvent: (event) => {
-			for (const outputPath of event.outputPaths) {
-				batcher.enqueue(outputPath);
-			}
-
-			maxQueueDepth = Math.max(maxQueueDepth, batcher.candidates.length);
-		},
-		onRejected: (error) => {
-			reporter.warn('rejected event', error.name);
+	try {
+		if (rootLinkDirectory !== undefined) {
+			roots = await createRootLinkDirectory(
+				rootLinkDirectory,
+				path.join(plan.directory, 'root.sock')
+			);
 		}
-	});
+
+		if (options.invocation.kind === 'constructed') {
+			await createRuntimeDirectory(targetLinkDirectory);
+		}
+		await createRuntimeDirectory(childRuntimeDirectory);
+
+		await writeFile(
+			hookScriptPath,
+			renderHookScript({
+				invocationId: dependencies.invocationId,
+				helperPath: preflight.helperPath,
+				socketPath: plan.socketPath,
+				...(rootLinkDirectory !== undefined && { rootLinkDirectory })
+			}),
+			{ mode: 0o700 }
+		);
+
+		batcher = new BuildOutputBatcher({
+			store: batchStore,
+			client: dependencies.client,
+			...(options.runRoot !== undefined && { runRoot: options.runRoot }),
+			...(options.waitTimeoutSeconds !== undefined && {
+				commitOptions: { timeoutSeconds: options.waitTimeoutSeconds }
+			}),
+			...(dependencies.createNarArchive !== undefined && {
+				createNarArchive: dependencies.createNarArchive
+			}),
+			...(dependencies.compressNar !== undefined && {
+				compressNar: dependencies.compressNar
+			})
+		});
+		listener = await BuildEventListener.listen({
+			socketPath: plan.socketPath,
+			storeDirectory: dependencies.storeDirectory,
+			onEvent: async (event, signal) => {
+				if (event.outputProtection === 'failed') {
+					return;
+				}
+
+				await protectEventPaths(event.outputPaths, signal);
+
+				for (const outputPath of event.outputPaths) {
+					batcher.enqueue(outputPath);
+				}
+
+				maxQueueDepth = Math.max(maxQueueDepth, batcher.candidates.length);
+			},
+			onRejected: (error) => {
+				const label =
+					error instanceof BuildEventHandlingError
+						? 'Could not protect completed outputs'
+						: 'Could not read completed outputs from the build hook';
+				const reason =
+					error instanceof BuildEventHandlingError &&
+					error.cause instanceof Error
+						? error.cause.message
+						: error.message;
+
+				reporter.warn(label, reason);
+			}
+		});
+	} catch (error) {
+		try {
+			await roots?.close();
+		} finally {
+			await Promise.all([
+				removeInvocationRuntimeDirectory(plan.directory),
+				removeInvocationRuntimeDirectory(targetLinkDirectory)
+			]);
+		}
+
+		throw error;
+	}
 
 	try {
 		const environment = environmentWithPostBuildHook(
@@ -333,7 +467,7 @@ async function runStreamedBuildPush(
 			runInvocation(
 				options.invocation,
 				environment,
-				plan,
+				childRuntimeDirectory,
 				dependencies,
 				targetLinkDirectory
 			)
@@ -377,8 +511,26 @@ async function runStreamedBuildPush(
 			...(terminalFailure !== undefined && { terminalFailure })
 		});
 	} finally {
-		await listener.close();
-		await removeInvocationRuntimeDirectory(targetLinkDirectory);
+		try {
+			await listener.drain();
+		} finally {
+			try {
+				await batcher.stop();
+			} finally {
+				try {
+					await roots?.close();
+				} finally {
+					try {
+						await listener.close();
+					} finally {
+						await Promise.all([
+							removeInvocationRuntimeDirectory(plan.directory),
+							removeInvocationRuntimeDirectory(targetLinkDirectory)
+						]);
+					}
+				}
+			}
+		}
 	}
 }
 
@@ -388,7 +540,7 @@ async function runStreamedBuildPush(
 async function runInvocation(
 	invocation: BuildInvocation,
 	environment: ChildEnvironment,
-	plan: { readonly directory: string },
+	runtimeDirectory: string,
 	dependencies: BuildPushDependencies,
 	targetLinkDirectory: string
 ): Promise<{
@@ -399,7 +551,7 @@ async function runInvocation(
 		const exit = await superviseBuild({
 			command: invocation.command,
 			environment,
-			runtimeDirectory: plan.directory,
+			runtimeDirectory,
 			...(dependencies.signalSource !== undefined && {
 				signalSource: dependencies.signalSource
 			})
@@ -417,7 +569,7 @@ async function runInvocation(
 			),
 		attempts: invocation.build.attempts ?? defaultBuildAttempts,
 		environment,
-		runtimeDirectory: plan.directory,
+		runtimeDirectory,
 		...(dependencies.signalSource !== undefined && {
 			signalSource: dependencies.signalSource
 		}),
@@ -452,6 +604,7 @@ function constructedNixCommand(
 		...(build.maxJobs === undefined
 			? []
 			: ['--max-jobs', String(build.maxJobs)]),
+		'--',
 		...build.installables
 	];
 }
@@ -538,17 +691,17 @@ const outLinkDirectoryName = 'out-links';
 const outLinkName = 'result';
 
 /**
- * Runs a reconciled local build without a post-build hook, then publishes the
- * realised outputs in one push. The run reads the output metadata from the
- * store and excludes paths that were already valid before the build from its
+ * Runs a reconciled local build without a post-build hook, then publishes all
+ * realised outputs together. The run reads the output metadata from the store
+ * and excludes paths that were already valid before the build from its
  * provenance claims. A user-supplied command does not declare outputs that can
- * be reconciled, so this mode rejects it with the original daemon error.
+ * be reconciled, so this mode returns the preflight error.
  */
 async function runReconciledLocalBuildPush(
 	options: BuildPushRunOptions,
 	reporter: Reporter,
 	dependencies: BuildPushDependencies,
-	reason: DaemonRequiredError | UntrustedDaemonError
+	reason: UntrustedDaemonError
 ): Promise<ParsedBuildReceiptV3> {
 	const { invocation } = options;
 
@@ -747,7 +900,7 @@ interface RealisedBuild {
 	readonly terminalFailure?: TerminalBuildFailure;
 }
 
-// Publish all reconciled outputs in one push. A publication failure after a
+// Publish the reconciled outputs together. A publication failure after a
 // successful build uses a classified sysexits code; a failed build preserves
 // the child's status. An empty result skips the push and leaves the root intact.
 async function publishRealised(

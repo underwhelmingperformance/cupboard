@@ -1,6 +1,5 @@
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process, { env } from 'node:process';
@@ -111,7 +110,7 @@ interface Fixture {
 	readonly cupboard: CupboardCommand;
 	readonly system: string;
 	/**
-	Whether a local build streams; see {@link canStreamThroughDaemon}.
+	Whether a local build streams; see {@link canStreamLocalBuild}.
 	*/
 	readonly streams: boolean;
 }
@@ -159,16 +158,19 @@ function system(): string {
 }
 
 /**
- * Whether this machine's Nix daemon accepts the client that would stream a
- * build through it. A run that streams publishes each output as the build
- * completes it and records the attempt that produced it. A run without such a
- * daemon builds first and reconciles the store afterwards, so the store's own
- * report is the evidence its receipt carries. Both publish the same paths.
+ * Whether local builds use streaming publication on this machine. A daemonless
+ * store registers GC roots. A daemon-backed store streams when the daemon trusts
+ * the current user to configure a build hook for this command.
  */
-async function canStreamThroughDaemon(): Promise<boolean> {
+async function canStreamLocalBuild(): Promise<boolean> {
 	const config = discoverNixStoreConfig();
+	const storeKind = Nix.open().storeKind;
 
-	if (!existsSync(config.daemonSocketPath)) {
+	if (storeKind === 'local-filesystem') {
+		return true;
+	}
+
+	if (storeKind === 'ssh-ng') {
 		return false;
 	}
 
@@ -1052,7 +1054,7 @@ describe.skipIf(!isTierEnabled || !isNixPresent)(
 				runner,
 				cupboard,
 				system: system(),
-				streams: await canStreamThroughDaemon()
+				streams: await canStreamLocalBuild()
 			};
 		}, 600_000);
 

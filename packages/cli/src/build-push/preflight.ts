@@ -1,4 +1,10 @@
-import type { NixDaemonTrust, NixStoreConfig } from '@cupboard/nix';
+import path from 'node:path';
+
+import type {
+	NixDaemonTrust,
+	NixStoreConfig,
+	NixStoreKind
+} from '@cupboard/nix';
 import type { CacheSelector, RootName } from '@cupboard/nix-store/scalars';
 import type { InvocationId } from '@cupboard/protocol/build';
 import {
@@ -8,9 +14,9 @@ import {
 } from '@cupboard/protocol/grants';
 
 import {
-	DaemonRequiredError,
 	MissingGrantError,
 	PostBuildHookConflictError,
+	RemoteBuildPushStoreError,
 	UntrustedDaemonError
 } from '../errors.ts';
 
@@ -26,7 +32,11 @@ import {
 
 export interface BuildPushPreflightOptions {
 	readonly config: NixStoreConfig;
-	readonly socketExists: (socketPath: string) => boolean;
+	readonly storeKind: NixStoreKind;
+	/**
+	The physical state directory used by the resolved store backend.
+	*/
+	readonly stateDirectory: string;
 	readonly daemonTrust: () => Promise<NixDaemonTrust>;
 	readonly invocationId: InvocationId;
 	/**
@@ -50,10 +60,15 @@ export interface BuildPushPreflightOptions {
 }
 
 /**
-What preflight proved: the endpoints a streaming run builds on.
+The resources required for streaming and the method used to protect outputs.
 */
 export interface BuildPushPreflight {
-	readonly daemonSocketPath: string;
+	readonly outputProtection:
+		| { readonly kind: 'daemon-temporary-roots' }
+		| {
+				readonly kind: 'daemonless-gc-roots';
+				readonly rootLinkDirectory: string;
+		  };
 	readonly helperPath: string;
 	readonly runtimePlan: InvocationRuntimePlan;
 }
@@ -72,26 +87,40 @@ function requireGrant(
 }
 
 /**
- * Proves a streaming run can work before the expensive build starts: a daemon
- * to hold temporary roots, a daemon that trusts this client (an untrusted
- * client's `post-build-hook` override is silently ignored), no operator hook
- * to collide with, a compiled helper in this installation, a socket path that
- * fits `sun_path`, and the root grants the run's later steps need. Each refusal
- * is a typed error; success returns the proven endpoints.
+ * Checks whether a build can stream before it starts. With a daemon, the
+ * current user must be allowed to configure the build hook. Without a daemon,
+ * the hook registers GC roots through the local store. Preflight also rejects a
+ * store on another machine, a conflicting operator hook, a missing helper, an
+ * oversized socket path, or insufficient retention grants.
  */
 export async function preflightBuildPush(
 	options: BuildPushPreflightOptions
 ): Promise<BuildPushPreflight> {
 	const { config } = options;
 
-	if (!options.socketExists(config.daemonSocketPath)) {
-		throw new DaemonRequiredError(config.daemonSocketPath);
+	if (options.storeKind === 'ssh-ng') {
+		throw new RemoteBuildPushStoreError(options.storeKind);
 	}
 
-	const trust = await options.daemonTrust();
+	const outputProtection: BuildPushPreflight['outputProtection'] =
+		options.storeKind === 'daemon'
+			? { kind: 'daemon-temporary-roots' }
+			: {
+					kind: 'daemonless-gc-roots',
+					rootLinkDirectory: path.join(
+						options.stateDirectory,
+						'gcroots',
+						'cupboard',
+						options.invocationId
+					)
+				};
 
-	if (trust !== 'trusted') {
-		throw new UntrustedDaemonError(trust);
+	if (options.storeKind === 'daemon') {
+		const trust = await options.daemonTrust();
+
+		if (trust !== 'trusted') {
+			throw new UntrustedDaemonError(trust);
+		}
 	}
 
 	if (config.postBuildHook !== undefined) {
@@ -114,5 +143,5 @@ export async function preflightBuildPush(
 		requireGrant(options.grants, 'root:set', options.cache, targetRoot);
 	}
 
-	return { daemonSocketPath: config.daemonSocketPath, helperPath, runtimePlan };
+	return { outputProtection, helperPath, runtimePlan };
 }

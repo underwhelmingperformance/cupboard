@@ -11,6 +11,8 @@ import type { ParsedBuildEvent } from '@cupboard/protocol/build';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+	BuildEventConnectionClosedError,
+	BuildEventHandlingError,
 	BuildEventMalformedError,
 	BuildEventOutsideStoreError,
 	type BuildEventRejectedError,
@@ -49,7 +51,12 @@ afterEach(async () => {
 	);
 });
 
-async function startListener(options: { drainTimeoutMs?: number } = {}) {
+async function startListener(
+	options: {
+		drainTimeoutMs?: number;
+		onEvent?: (event: ParsedBuildEvent, signal: AbortSignal) => Promise<void>;
+	} = {}
+) {
 	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-hook-'));
 	directories.push(directory);
 
@@ -64,9 +71,10 @@ async function startListener(options: { drainTimeoutMs?: number } = {}) {
 		...(options.drainTimeoutMs !== undefined && {
 			drainTimeoutMs: options.drainTimeoutMs
 		}),
-		onEvent: (event) => {
+		onEvent: async (event, signal) => {
 			events.push(event);
 			notify?.();
+			await options.onEvent?.(event, signal);
 		},
 		onRejected: (error) => {
 			rejections.push(error);
@@ -111,6 +119,7 @@ function runHelper(socketPath: string, payload: string): number | null {
 function send(socketPath: string, payload: string | Uint8Array): Promise<void> {
 	return new Promise((resolve, reject) => {
 		const client = createConnection(socketPath, () => {
+			client.resume();
 			client.end(payload, () => {
 				resolve();
 			});
@@ -136,6 +145,104 @@ describe('BuildEventListener', () => {
 			rejections: [],
 			accepted: [event]
 		});
+	});
+
+	it('confirms a successfully handled event', async () => {
+		const harness = await startListener();
+		const client = createConnection(harness.socketPath);
+		const response: Buffer[] = [];
+		client.on('data', (chunk: Buffer) => {
+			response.push(chunk);
+		});
+		await once(client, 'connect');
+
+		client.end(`${JSON.stringify(buildEvent())}\n`);
+		await once(client, 'close');
+
+		expect({
+			response: [...Buffer.concat(response)],
+			rejections: harness.rejections
+		}).toStrictEqual({ response: [1], rejections: [] });
+	});
+
+	it('keeps the connection open until event handling finishes', async () => {
+		const handled = Promise.withResolvers<undefined>();
+		const harness = await startListener({ onEvent: () => handled.promise });
+		const client = createConnection(harness.socketPath);
+		client.resume();
+		await once(client, 'connect');
+		let isClosed = false;
+		const closed = (async (): Promise<void> => {
+			await once(client, 'close');
+			isClosed = true;
+		})();
+
+		client.end(`${JSON.stringify(buildEvent())}\n`);
+		await harness.settledCount(1);
+		await new Promise((resolve) => setImmediate(resolve));
+
+		expect({
+			isClosed,
+			accepted: [...harness.listener.accepted]
+		}).toStrictEqual({
+			isClosed: false,
+			accepted: [buildEvent()]
+		});
+
+		handled.resolve(undefined);
+		await closed;
+	});
+
+	it('records an event-handling failure by type', async () => {
+		const failure = new Error('protection failed');
+		const harness = await startListener({
+			onEvent: () => Promise.reject(failure)
+		});
+
+		await send(harness.socketPath, `${JSON.stringify(buildEvent())}\n`);
+		await harness.settledCount(2);
+
+		const [rejection] = harness.rejections;
+		expect(rejection).toBeInstanceOf(BuildEventHandlingError);
+
+		expect({
+			accepted: [...harness.listener.accepted],
+			cause:
+				rejection instanceof BuildEventHandlingError
+					? rejection.cause
+					: undefined
+		}).toStrictEqual({
+			accepted: [buildEvent()],
+			cause: failure
+		});
+	});
+
+	it('stops waiting when the hook disconnects during event handling', async () => {
+		const harness = await startListener({
+			onEvent: (_event, signal) =>
+				new Promise((_resolve, reject) => {
+					signal.addEventListener('abort', () => {
+						reject(new BuildEventConnectionClosedError());
+					});
+				})
+		});
+		const client = createConnection(harness.socketPath);
+		client.resume();
+		await once(client, 'connect');
+
+		client.write(`${JSON.stringify(buildEvent())}\n`);
+		await harness.settledCount(1);
+		client.destroy();
+		await harness.listener.drain();
+		await harness.settledCount(2);
+		const [rejection] = harness.rejections;
+		expect(rejection).toBeInstanceOf(BuildEventHandlingError);
+
+		const cause =
+			rejection instanceof BuildEventHandlingError
+				? rejection.cause
+				: undefined;
+		expect(cause).toBeInstanceOf(BuildEventConnectionClosedError);
 	});
 
 	it.runIf(platform === 'darwin' || platform === 'linux')(

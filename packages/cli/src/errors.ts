@@ -1035,22 +1035,25 @@ export class BuildEventTooLargeError extends BuildEventRejectedError {
 }
 
 /**
- * Streaming publication needs the Nix daemon: a temporary root exists only for
- * the lifetime of a daemon connection, and the daemonless local backend has no
- * connection to hold one on. `socketPath` is the path that was checked for a
- * daemon socket.
- */
-export class DaemonRequiredError extends CliError {
-	constructor(public readonly socketPath: string) {
-		super(
-			`Streaming publication requires a Nix daemon, and no daemon socket ` +
-				`exists at ${socketPath}. Start nix-daemon, or run without streaming.`
-		);
-		this.name = 'DaemonRequiredError';
+The listener accepted a valid event but could not protect its output paths from
+garbage collection.
+*/
+export class BuildEventHandlingError extends BuildEventRejectedError {
+	constructor(public override readonly cause: unknown) {
+		super('Cupboard could not protect the completed outputs for streaming.');
+		this.name = 'BuildEventHandlingError';
 	}
+}
 
-	override get exitCode(): number {
-		return unavailableExitCode;
+/**
+The hook stopped waiting before the listener could acknowledge the event.
+*/
+export class BuildEventConnectionClosedError extends Error {
+	constructor() {
+		super(
+			'The build hook stopped waiting before Cupboard protected the completed outputs from garbage collection.'
+		);
+		this.name = 'BuildEventConnectionClosedError';
 	}
 }
 
@@ -1074,6 +1077,25 @@ export class UntrustedDaemonError extends CliError {
 
 	override get exitCode(): number {
 		return authExitCode;
+	}
+}
+
+/**
+The selected store runs on another machine, so its build hook cannot connect to
+the listener on this machine.
+*/
+export class RemoteBuildPushStoreError extends CliError {
+	constructor(public readonly storeKind: 'ssh-ng') {
+		super(
+			'Cupboard cannot stream build outputs from an ssh-ng store because ' +
+				'the build hook and Cupboard run on different machines. Use a local ' +
+				'store or a local Nix daemon.'
+		);
+		this.name = 'RemoteBuildPushStoreError';
+	}
+
+	override get exitCode(): number {
+		return unavailableExitCode;
 	}
 }
 

@@ -17,10 +17,10 @@ import { authorizationDetailsSchema } from '@cupboard/protocol/grants';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
-	DaemonRequiredError,
 	HookHelperMissingError,
 	MissingGrantError,
 	PostBuildHookConflictError,
+	RemoteBuildPushStoreError,
 	SocketPathTooLongError,
 	UntrustedDaemonError
 } from '../errors.ts';
@@ -92,7 +92,8 @@ async function baseOptions(): Promise<BuildPushPreflightOptions> {
 
 	return {
 		config,
-		socketExists: () => true,
+		storeKind: 'daemon',
+		stateDirectory: config.stateDirectory,
 		daemonTrust: () => Promise.resolve('trusted'),
 		invocationId,
 		grants,
@@ -103,7 +104,7 @@ async function baseOptions(): Promise<BuildPushPreflightOptions> {
 }
 
 describe('preflightBuildPush', () => {
-	it('proves the endpoints of a runnable invocation', async () => {
+	it('returns daemon-backed resources when preflight succeeds', async () => {
 		const options = await baseOptions();
 
 		await expect(
@@ -113,7 +114,7 @@ describe('preflightBuildPush', () => {
 				targetRoots: [coveredRoot]
 			})
 		).resolves.toStrictEqual({
-			daemonSocketPath: '/nix/var/nix/daemon-socket/socket',
+			outputProtection: { kind: 'daemon-temporary-roots' },
 			helperPath: path.join(
 				path.dirname(options.helper?.executablePath ?? ''),
 				'cupboard-hook-relay'
@@ -125,23 +126,83 @@ describe('preflightBuildPush', () => {
 		});
 	});
 
+	it('uses direct GC roots when Nix runs without a daemon', async () => {
+		const options = await baseOptions();
+
+		await expect(
+			preflightBuildPush({
+				...options,
+				storeKind: 'local-filesystem',
+				daemonTrust: () =>
+					Promise.reject(new Error('daemon trust must not be queried'))
+			})
+		).resolves.toStrictEqual({
+			outputProtection: {
+				kind: 'daemonless-gc-roots',
+				rootLinkDirectory: '/nix/var/nix/gcroots/cupboard/invocation-1'
+			},
+			helperPath: path.join(
+				path.dirname(options.helper?.executablePath ?? ''),
+				'cupboard-hook-relay'
+			),
+			runtimePlan: {
+				directory: '/tmp/cupboard/invocation-1',
+				socketPath: '/tmp/cupboard/invocation-1/hook.sock'
+			}
+		});
+	});
+
+	it('uses the resolved state directory for a rooted local store', async () => {
+		const options = await baseOptions();
+
+		const result = await preflightBuildPush({
+			...options,
+			storeKind: 'local-filesystem',
+			stateDirectory: '/tmp/store-root/nix/var/nix',
+			daemonTrust: () =>
+				Promise.reject(new Error('daemon trust must not be queried'))
+		});
+
+		expect(result.outputProtection).toStrictEqual({
+			kind: 'daemonless-gc-roots',
+			rootLinkDirectory:
+				'/tmp/store-root/nix/var/nix/gcroots/cupboard/invocation-1'
+		});
+	});
+
+	it('rejects a store on another machine', async () => {
+		const options = await baseOptions();
+		let caught: unknown;
+
+		try {
+			await preflightBuildPush({
+				...options,
+				storeKind: 'ssh-ng',
+				daemonTrust: () =>
+					Promise.reject(new Error('daemon trust must not be queried'))
+			});
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(
+			caught instanceof RemoteBuildPushStoreError
+				? {
+						name: caught.name,
+						storeKind: caught.storeKind,
+						exitCode: caught.exitCode
+					}
+				: caught
+		).toStrictEqual({
+			name: 'RemoteBuildPushStoreError',
+			storeKind: 'ssh-ng',
+			exitCode: 69
+		});
+	});
+
 	it.each([
 		{
-			name: 'a store with no daemon socket',
-			overrides: (): Partial<BuildPushPreflightOptions> => ({
-				socketExists: () => false
-			}),
-			probe: (error: unknown) =>
-				error instanceof DaemonRequiredError
-					? { name: error.name, socketPath: error.socketPath }
-					: undefined,
-			expected: {
-				name: 'DaemonRequiredError',
-				socketPath: '/nix/var/nix/daemon-socket/socket'
-			}
-		},
-		{
-			name: 'a daemon that does not trust the client',
+			name: 'a daemon that does not trust the current user',
 			overrides: (): Partial<BuildPushPreflightOptions> => ({
 				daemonTrust: () => Promise.resolve('not-trusted')
 			}),

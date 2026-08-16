@@ -32,10 +32,11 @@ import {
 	BuildProvenanceIncompleteError,
 	BuildPublicationFailedError,
 	CliAbortError,
+	CliError,
 	CupboardHttpError,
-	DaemonRequiredError,
 	PostBuildHookConflictError,
 	publicationFailureExitCode,
+	unavailableExitCode,
 	UntrustedDaemonError
 } from '../errors.ts';
 import type { PushClient } from '../push/push.ts';
@@ -62,6 +63,17 @@ const pathB = storePathSchema.parse(
 const drvA = '/nix/store/8123456789abcdfghijklmnpqrsvwxyz-app.drv';
 const invocationId = invocationIdSchema.parse('invocation-under-test');
 const narHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 0xaa));
+
+class UnavailableTestError extends CliError {
+	constructor() {
+		super('A required service is unavailable');
+		this.name = 'UnavailableTestError';
+	}
+
+	override get exitCode(): number {
+		return unavailableExitCode;
+	}
+}
 
 function pathInfo(
 	storePath: StorePathString,
@@ -156,6 +168,7 @@ const emitEventScript = [
 	"const net = require('net');",
 	'const [socketPath, line, exitStatus, mode] = process.argv.slice(1);',
 	'const socket = net.connect(socketPath, () => {',
+	'\tsocket.resume();',
 	"\tsocket.write(line + '\\n', () => {",
 	"\t\tif (mode === 'detached') process.exit(Number(exitStatus));",
 	'\t});',
@@ -168,13 +181,15 @@ function emitEventCommand(
 	socketPath: string,
 	outputPath: StorePathString,
 	exitStatus: number,
-	mode: 'awaited' | 'detached'
+	mode: 'awaited' | 'detached',
+	outputProtection?: 'failed'
 ): ChildCommand {
 	const line = JSON.stringify({
 		version: 1,
 		invocationId,
 		derivation: drvA,
-		outputPaths: [outputPath]
+		outputPaths: [outputPath],
+		...(outputProtection !== undefined && { outputProtection })
 	});
 
 	return [
@@ -185,6 +200,43 @@ function emitEventCommand(
 		line,
 		String(exitStatus),
 		mode
+	];
+}
+
+const emitTwoEventsScript = [
+	"const net = require('net');",
+	'const [socketPath, first, second] = process.argv.slice(1);',
+	'const sendAndWait = (line) => new Promise((resolve, reject) => {',
+	'\tconst socket = net.connect(socketPath, () => socket.end(line + "\\n"));',
+	'\tsocket.resume();',
+	'\tsocket.on("close", resolve);',
+	'\tsocket.on("error", reject);',
+	'});',
+	'void sendAndWait(first).then(() => {',
+	'\tconst socket = net.connect(socketPath, () => {',
+	'\t\tsocket.write(second + "\\n", () => process.exit(0));',
+	'\t});',
+	'\tsocket.on("error", () => process.exit(1));',
+	'}).catch(() => process.exit(1));'
+].join('\n');
+
+function eventLine(outputPath: StorePathString): string {
+	return JSON.stringify({
+		version: 1,
+		invocationId,
+		derivation: drvA,
+		outputPaths: [outputPath]
+	});
+}
+
+function emitTwoEventsCommand(socketPath: string): ChildCommand {
+	return [
+		process.execPath,
+		'-e',
+		emitTwoEventsScript,
+		socketPath,
+		eventLine(pathA),
+		eventLine(pathB)
 	];
 }
 
@@ -287,6 +339,7 @@ interface ConstructedFlowConfig {
 	Simulates a helper delivery failure after Nix completed the build.
 	*/
 	readonly suppressEvent?: boolean;
+	readonly outputProtection?: 'failed';
 	/**
 	The machine the stub's activity log attributes; empty is local.
 	*/
@@ -294,14 +347,21 @@ interface ConstructedFlowConfig {
 }
 
 interface FlowConfig {
+	readonly daemonless?: boolean;
 	readonly command?: ChildCommand;
 	readonly constructed?: ConstructedFlowConfig;
 	readonly emitEvent?: boolean;
+	readonly emitTwoEvents?: boolean;
 	readonly emitExitStatus?: number;
 	/**
 	The emitting child exits without waiting for its message to be read.
 	*/
 	readonly emitDetached?: boolean;
+	readonly eventOutputProtection?: 'failed';
+	/**
+	The protection call that never finishes, counting from one.
+	*/
+	readonly stalledProtectionCall?: number;
 	readonly valid?: readonly StorePathString[];
 	/**
 	What the store holds until the build has run; empty unless set.
@@ -341,6 +401,9 @@ interface FlowRun extends RecordedRun {
 	readonly negotiatedPaths: readonly (readonly StorePathString[])[];
 	readonly rootSets: readonly string[];
 	readonly settledTargets: readonly StorePathString[];
+	readonly batchSessions: number;
+	readonly protectionCalls: number;
+	readonly rootLinkDirectory: string;
 }
 
 function activityLine(machine: string): string {
@@ -365,6 +428,7 @@ const stubNixScript = [
 	"const net = require('node:net');",
 	'const args = process.argv.slice(2);',
 	"if (process.env.STUB_REQUIRE_REBUILD === 'true' && !args.includes('--rebuild')) process.exit(2);",
+	"if (args.includes('--store') && !(args.indexOf('--') < args.indexOf('--store'))) process.exit(2);",
 	"const logFile = args[args.indexOf('json-log-path') + 1];",
 	String.raw`fs.writeFileSync(logFile, process.env.STUB_LOG_LINE + '\n');`,
 	'let runs = 0;',
@@ -386,6 +450,7 @@ const stubNixScript = [
 	'}',
 	'if (!process.env.STUB_SOCKET) process.exit(0);',
 	'const socket = net.connect(process.env.STUB_SOCKET, () => {',
+	'\tsocket.resume();',
 	"\tsocket.write(process.env.STUB_EVENT + '\\n');",
 	'});',
 	"socket.on('close', () => process.exit(0));",
@@ -418,7 +483,10 @@ async function stubNixEnvironment(
 			version: 1,
 			invocationId,
 			derivation: drvA,
-			outputPaths: outPaths
+			outputPaths: outPaths,
+			...(constructed.outputProtection !== undefined && {
+				outputProtection: constructed.outputProtection
+			})
 		})
 	};
 }
@@ -446,6 +514,13 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 
 	const runtimeDirectory = path.join(workspace, 'run');
 	const socketPath = path.join(runtimeDirectory, 'hook.sock');
+	const rootLinkDirectory = path.join(
+		workspace,
+		'nix-state',
+		'gcroots',
+		'cupboard',
+		invocationId
+	);
 	const receiptFile =
 		config.unwritableReceipt === true
 			? path.join(workspace, 'absent', 'receipt.json')
@@ -465,6 +540,8 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	const rootSets: string[] = [];
 	let settledTargets: readonly StorePathString[] = [];
 	let attemptIdsIssued = 0;
+	let batchSessions = 0;
+	let protectionCalls = 0;
 	const isStreamed = config.preflightFailure === undefined;
 	const environment =
 		config.constructed === undefined
@@ -476,7 +553,10 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 					config.outPaths ?? config.valid ?? []
 				);
 	const preflight: BuildPushPreflight = {
-		daemonSocketPath: path.join(workspace, 'daemon.sock'),
+		outputProtection:
+			config.daemonless === true
+				? { kind: 'daemonless-gc-roots', rootLinkDirectory }
+				: { kind: 'daemon-temporary-roots' },
 		helperPath: '/bin/cat',
 		runtimePlan: { directory: runtimeDirectory, socketPath }
 	};
@@ -538,6 +618,13 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		hasBuilt() ? valid : alreadyValid;
 	const store: BuildPushStore = {
 		storeKind: 'local-filesystem',
+		queryPathInfo: (candidate) => {
+			const storePath = storePathSchema.parse(candidate);
+
+			return valid.has(storePath)
+				? Promise.resolve(pathInfo(storePath, ultimatePaths.has(storePath)))
+				: Promise.reject(new NixStorePathNotFoundError(storePath));
+		},
 		queryValidPathsInfo: (paths) => {
 			recordCall('queryValidPathsInfo');
 			const holds = held();
@@ -585,14 +672,25 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		client,
 		store,
 		batchStore: {
-			withConnection: (use) =>
-				use({
-					addTempRoot: () => Promise.resolve(),
+			withProtectedPaths: (use) => {
+				batchSessions += 1;
+
+				return use({
+					protectPath: () => {
+						protectionCalls += 1;
+
+						if (protectionCalls === config.stalledProtectionCall) {
+							return Promise.withResolvers<undefined>().promise;
+						}
+
+						return Promise.resolve();
+					},
 					queryPathInfo: (storePath) =>
 						valid.has(storePath)
 							? Promise.resolve(pathInfo(storePath))
 							: Promise.reject(new NixStorePathNotFoundError(storePath))
-				})
+				});
+			}
 		},
 		storeDirectory,
 		invocationId,
@@ -629,14 +727,17 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 
 	const command: ChildCommand =
 		config.command ??
-		(config.emitEvent === true
-			? emitEventCommand(
-					socketPath,
-					pathA,
-					config.emitExitStatus ?? 0,
-					config.emitDetached === true ? 'detached' : 'awaited'
-				)
-			: ['sh', '-c', 'exit 0']);
+		(config.emitTwoEvents === true
+			? emitTwoEventsCommand(socketPath)
+			: config.emitEvent === true
+				? emitEventCommand(
+						socketPath,
+						pathA,
+						config.emitExitStatus ?? 0,
+						config.emitDetached === true ? 'detached' : 'awaited',
+						config.eventOutputProtection
+					)
+				: ['sh', '-c', 'exit 0']);
 	const invocation: BuildInvocation =
 		config.constructed === undefined
 			? { kind: 'command', command }
@@ -674,7 +775,10 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		attemptIdsIssued,
 		negotiatedPaths,
 		rootSets,
-		settledTargets
+		settledTargets,
+		batchSessions,
+		protectionCalls,
+		rootLinkDirectory
 	};
 }
 
@@ -724,7 +828,7 @@ describe('publicationFailureExitCode', () => {
 		},
 		{
 			name: 'an unavailable dependency',
-			causes: [new DaemonRequiredError('/run/daemon.sock')],
+			causes: [new UnavailableTestError()],
 			expected: 69
 		},
 		{
@@ -776,17 +880,13 @@ describe('runBuildPush', () => {
 
 	it.each([
 		{
-			name: 'a store with no daemon socket',
-			failure: new DaemonRequiredError('/nix/var/nix/daemon-socket/socket')
-		},
-		{
 			name: 'a daemon that does not trust the client',
 			failure: new UntrustedDaemonError('not-trusted')
 		}
 	])(
 		// The cohort declares a flake attribute, which names no derivation to
 		// resolve, so the build's own out-links are what the run publishes.
-		'names the reconciled local mode and publishes what it built behind $name',
+		'publishes after the build for $name',
 		async ({ failure }) => {
 			const run = await runFlow({
 				preflightFailure: failure,
@@ -818,7 +918,7 @@ describe('runBuildPush', () => {
 
 	it('asks which declared outputs the store holds before it builds', async () => {
 		const run = await runFlow({
-			preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+			preflightFailure: new UntrustedDaemonError('not-trusted'),
 			constructed: { succeedOn: 1, installables: [`${drvA}^*`] },
 			declaredOutputs: [pathA],
 			valid: [pathA]
@@ -833,6 +933,17 @@ describe('runBuildPush', () => {
 				'queryValidPathsInfo after the build'
 			]
 		});
+	});
+
+	it('passes constructed installables after the Nix option terminator', async () => {
+		const run = await runFlow({
+			constructed: {
+				succeedOn: 1,
+				installables: ['--store', 'ssh-ng://builder.example']
+			}
+		});
+
+		expect(run.error).toBeUndefined();
 	});
 
 	it.each([
@@ -850,7 +961,7 @@ describe('runBuildPush', () => {
 		'publishes only the explicitly selected ^$selection outputs in reconciled mode',
 		async ({ selection, outPaths, expected }) => {
 			const run = await runFlow({
-				preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+				preflightFailure: new UntrustedDaemonError('not-trusted'),
 				constructed: {
 					succeedOn: 1,
 					installables: [`${drvA}^${selection}`]
@@ -874,7 +985,7 @@ describe('runBuildPush', () => {
 	// exactly one path, under the facts each case establishes about it.
 	async function reconciledReceipt(config: FlowConfig): Promise<unknown> {
 		const run = await runFlow({
-			preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+			preflightFailure: new UntrustedDaemonError('not-trusted'),
 			valid: [pathA],
 			...config
 		});
@@ -967,7 +1078,7 @@ describe('runBuildPush', () => {
 
 	it('reports the reconciled local run in its summary', async () => {
 		const run = await runFlow({
-			preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+			preflightFailure: new UntrustedDaemonError('not-trusted'),
 			constructed: { succeedOn: 1 },
 			declaredOutputs: [pathA],
 			valid: [pathA]
@@ -993,7 +1104,7 @@ describe('runBuildPush', () => {
 	// the store, so the run has nothing to publish and touches no root.
 	it('publishes nothing and exits with its own status when the build fails', async () => {
 		const run = await runFlow({
-			preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+			preflightFailure: new UntrustedDaemonError('not-trusted'),
 			constructed: {
 				succeedOn: 4,
 				attempts: 1,
@@ -1029,7 +1140,7 @@ describe('runBuildPush', () => {
 
 	it('publishes failed-build survivors without replacing their target root', async () => {
 		const run = await runFlow({
-			preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+			preflightFailure: new UntrustedDaemonError('not-trusted'),
 			constructed: {
 				succeedOn: 4,
 				attempts: 1,
@@ -1056,7 +1167,7 @@ describe('runBuildPush', () => {
 	// records both the failure and the subject.
 	it('publishes failed-build survivors and still records their builder', async () => {
 		const run = await runFlow({
-			preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+			preflightFailure: new UntrustedDaemonError('not-trusted'),
 			constructed: {
 				succeedOn: 4,
 				attempts: 1,
@@ -1119,7 +1230,7 @@ describe('runBuildPush', () => {
 		'classifies an unwritable reconciled receipt after a $name',
 		async ({ succeedOn, error: expectedError }) => {
 			const run = await runFlow({
-				preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+				preflightFailure: new UntrustedDaemonError('not-trusted'),
 				constructed: {
 					succeedOn,
 					attempts: 1,
@@ -1146,7 +1257,7 @@ describe('runBuildPush', () => {
 	);
 
 	it('refuses a user-supplied command with the condition that ruled streaming out', async () => {
-		const failure = new DaemonRequiredError('/run/nix/daemon.sock');
+		const failure = new UntrustedDaemonError('not-trusted');
 		const run = await runFlow({ preflightFailure: failure });
 
 		expect({ error: run.error, phases: run.phases }).toStrictEqual({
@@ -1184,6 +1295,56 @@ describe('runBuildPush', () => {
 				failed: [],
 				collected: []
 			}
+		});
+	});
+
+	it('publishes an unprotected command output after the build', async () => {
+		const run = await runFlow({
+			daemonless: true,
+			emitEvent: true,
+			eventOutputProtection: 'failed',
+			valid: [pathA]
+		});
+		const receipt = buildReceiptV3Schema.parse(
+			JSON.parse(await readFile(run.receiptFile, 'utf8'))
+		);
+
+		expect({
+			error: run.error,
+			paths: receipt.paths,
+			outcomes: receipt.outcomes,
+			batchSessions: run.batchSessions,
+			rootDirectoryExists: existsSync(run.rootLinkDirectory)
+		}).toStrictEqual({
+			error: undefined,
+			paths: [pathA],
+			outcomes: [{ outcome: 'destination-served', storePath: pathA }],
+			batchSessions: 0,
+			rootDirectoryExists: false
+		});
+	});
+
+	it('removes daemonless roots when settlement fails', async () => {
+		const run = await runFlow({
+			daemonless: true,
+			emitEvent: true,
+			valid: [pathA],
+			unwritableReceipt: true
+		});
+
+		expect(run.error).toBeInstanceOf(BuildPublicationFailedError);
+		expect(
+			run.error instanceof BuildPublicationFailedError
+				? {
+						exitCode: run.error.exitCode,
+						failedPaths: run.error.failedPaths,
+						rootDirectoryExists: existsSync(run.rootLinkDirectory)
+					}
+				: undefined
+		).toStrictEqual({
+			exitCode: 74,
+			failedPaths: [],
+			rootDirectoryExists: false
 		});
 	});
 
@@ -1232,6 +1393,32 @@ describe('runBuildPush', () => {
 				failed: [],
 				collected: []
 			}
+		});
+	});
+
+	it('publishes earlier events when a later protection call does not finish', async () => {
+		const run = await runFlow({
+			emitTwoEvents: true,
+			stalledProtectionCall: 2,
+			valid: [pathA, pathB]
+		});
+		const receipt = buildReceiptV3Schema.parse(
+			JSON.parse(await readFile(run.receiptFile, 'utf8'))
+		);
+
+		expect({
+			error: run.error,
+			batchSessions: run.batchSessions,
+			protectionCalls: run.protectionCalls,
+			outcomes: receipt.outcomes
+		}).toStrictEqual({
+			error: undefined,
+			batchSessions: 1,
+			protectionCalls: 2,
+			outcomes: [
+				{ outcome: 'destination-served', storePath: pathA },
+				{ outcome: 'destination-served', storePath: pathB }
+			]
 		});
 	});
 
@@ -1337,7 +1524,7 @@ describe('runBuildPush', () => {
 		},
 		{
 			name: 'reconciled local',
-			preflightFailure: new DaemonRequiredError('/run/nix/daemon.sock'),
+			preflightFailure: new UntrustedDaemonError('not-trusted'),
 			receipt: {
 				version: 3,
 				paths: [pathA, pathB],
@@ -1518,7 +1705,7 @@ describe('runBuildPush', () => {
 				emitEvent: true,
 				valid: [pathA],
 				action: 'upload',
-				uploadFailure: new DaemonRequiredError('/run/daemon.sock')
+				uploadFailure: new UnavailableTestError()
 			},
 			expected: { type: BuildPublicationFailedError, exitCode: 69 }
 		},

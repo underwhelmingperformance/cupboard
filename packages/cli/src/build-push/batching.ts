@@ -26,20 +26,21 @@ import type { CompressNar, PushClient, PushNarArchive } from '../push/push.ts';
 export const flushMaxWaitMs = 500;
 
 /**
-The daemon operations one flush performs over its own connection.
+The store operations a batch can perform while its paths are protected.
 */
 export interface BatchSession {
-	addTempRoot(storePath: StorePathString): Promise<void>;
+	protectPath(storePath: StorePathString): Promise<void>;
 	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo>;
 }
 
 /**
- * A store that runs a callback against a session bound to one connection. A
- * temporary root taken through the session lasts exactly as long as that
- * connection, so a path stays pinned for the duration of the callback.
+ * Provides store access while paths are protected from garbage collection. The
+ * implementation can open a connection for one batch or retain a connection
+ * for the full streamed run. For a daemonless build, the hook has already
+ * registered GC roots.
  */
 export interface BatchStore {
-	withConnection<T>(use: (session: BatchSession) => Promise<T>): Promise<T>;
+	withProtectedPaths<T>(use: (session: BatchSession) => Promise<T>): Promise<T>;
 }
 
 /**
@@ -107,15 +108,14 @@ function assertNarMetadata(info: NixValidPathInfo, digest: NarDigest): void {
 /**
  * Debounces accepted build outputs into streamed publication. Accepted paths
  * accumulate in an unbounded candidate set and flush in bounded batches. Each
- * flush pins its batch with temporary roots on one daemon connection (root,
- * then validity, then read, Nix's documented ordering), resolves metadata over
- * that session, then negotiates, uploads and commits through the ordinary push
- * client; the session closes once the batch's reads are complete.
+ * flush protects its paths before checking their validity, resolves metadata,
+ * then negotiates, uploads and commits through the ordinary push client. The
+ * store implementation controls how long protection remains in place.
  *
- * The session-wide deduplication records terminal outcomes, not the fact that a
- * path was enqueued: a path whose publication fails returns to the candidate
- * set for the next flush or for final reconciliation, and a path that vanished
- * from the local store is a typed `collected` outcome, never a batch failure.
+ * The batcher records only terminal outcomes. If publication fails, the path
+ * returns to the candidate set for the next flush or final reconciliation. A
+ * path that vanished from the local store produces a typed `collected` outcome
+ * instead of failing the batch.
  */
 export class BuildOutputBatcher {
 	private readonly waiting = new Set<StorePathString>();
@@ -196,12 +196,12 @@ export class BuildOutputBatcher {
 			((storePath: string) => new NarArchive(storePath));
 
 		try {
-			const commits = await this.options.store.withConnection(
+			const commits = await this.options.store.withProtectedPaths(
 				async (session) => {
-					// Nix's documented ordering: take the root first, then check
-					// validity, then read.
+					// Protect each path before checking validity. Checking first would
+					// leave time for garbage collection before the NAR read begins.
 					for (const storePath of batch) {
-						await session.addTempRoot(storePath);
+						await session.protectPath(storePath);
 					}
 
 					const infos: NixValidPathInfo[] = [];
@@ -254,8 +254,8 @@ export class BuildOutputBatcher {
 							continue;
 						}
 
-						// The NAR read streams into the upload here, inside the session,
-						// so the temporary root protects the path until all its bytes
+						// The NAR read streams into the upload inside the protected
+						// session, so the path remains available until all its bytes
 						// have been sent.
 						try {
 							const upload = compressNar(createNarArchive(info.storePath));
@@ -272,9 +272,8 @@ export class BuildOutputBatcher {
 				}
 			);
 
-			// The connection has closed by this point, releasing the batch's
-			// temporary roots. A commit only sends metadata, so it needs neither the
-			// connection nor the roots.
+			// The callback has finished reading the paths. The cache commit below
+			// uses upload metadata and does not read the store path.
 			for (const { decision, info } of commits) {
 				try {
 					await this.options.client.commit(
@@ -321,9 +320,9 @@ export class BuildOutputBatcher {
 	}
 
 	/**
-	 * Accepts one path into the candidate set. A path with a recorded outcome,
-	 * or already waiting or publishing, is not enqueued again; the set flushes
-	 * when it reaches the batch bound or when the debounce window lapses.
+	 * Accepts one path into the candidate set. It ignores a path that already has
+	 * an outcome or is waiting or being published. The set flushes when it reaches
+	 * the batch bound or when the debounce window lapses.
 	 */
 	enqueue(storePath: StorePathString): void {
 		if (
@@ -351,6 +350,14 @@ export class BuildOutputBatcher {
 	Resolves once every flush started so far has finished.
 	*/
 	async settled(): Promise<void> {
+		await this.chain;
+	}
+
+	/**
+	Stops the debounce timer and waits for every started flush to finish.
+	*/
+	async stop(): Promise<void> {
+		this.clearTimer();
 		await this.chain;
 	}
 

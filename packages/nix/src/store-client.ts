@@ -136,7 +136,7 @@ The logical store directory and state directory of a resolved store.
 export function storeDirectoriesOf(
 	backend: StoreBackend,
 	configured: ConfiguredStoreDirectories
-): ConfiguredStoreDirectories {
+): LocalStoreDirectories {
 	if (backend.backend === 'local') {
 		return backend;
 	}
@@ -347,7 +347,9 @@ A store opened with support for external availability queries.
 export interface AvailabilityStore {
 	readonly client: NixStoreClient;
 	readonly kind: NixStoreKind;
-	readonly storeDirectory: ConfiguredStoreDirectories['storeDirectory'];
+	readonly storeDirectory: LocalStoreDirectories['storeDirectory'];
+	readonly stateDirectory: LocalStoreDirectories['stateDirectory'];
+	readonly realStoreDirectory?: string;
 	/**
 	 * Direct queries for the substituters configured when this store was opened.
 	 */
@@ -401,6 +403,10 @@ export function createAvailabilityStoreClient(
 			client: createNixDaemonStoreClient(dependencies, config, options),
 			kind: 'ssh-ng',
 			storeDirectory: directories.storeDirectory,
+			stateDirectory: directories.stateDirectory,
+			...(directories.realStoreDirectory !== undefined && {
+				realStoreDirectory: directories.realStoreDirectory
+			}),
 			substituters
 		};
 	}
@@ -418,6 +424,10 @@ export function createAvailabilityStoreClient(
 			client: createNixDaemonStoreClient(dependencies, config, options),
 			kind: 'daemon',
 			storeDirectory: directories.storeDirectory,
+			stateDirectory: directories.stateDirectory,
+			...(directories.realStoreDirectory !== undefined && {
+				realStoreDirectory: directories.realStoreDirectory
+			}),
 			substituters
 		};
 	}
@@ -433,6 +443,10 @@ export function createAvailabilityStoreClient(
 			client: createNixDaemonStoreClient(dependencies, config, options),
 			kind: 'daemon',
 			storeDirectory: directories.storeDirectory,
+			stateDirectory: directories.stateDirectory,
+			...(directories.realStoreDirectory !== undefined && {
+				realStoreDirectory: directories.realStoreDirectory
+			}),
 			substituters
 		};
 	}
@@ -441,6 +455,10 @@ export function createAvailabilityStoreClient(
 		client: localStoreOver(backend, substituters, substitution, options.signal),
 		kind: 'local-filesystem',
 		storeDirectory: directories.storeDirectory,
+		stateDirectory: directories.stateDirectory,
+		...(directories.realStoreDirectory !== undefined && {
+			realStoreDirectory: directories.realStoreDirectory
+		}),
 		substituters
 	};
 }

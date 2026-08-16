@@ -1,7 +1,9 @@
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
+import { mkdir, mkdtemp, readdir, rm, stat, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { platform } from 'node:process';
+import process, { platform } from 'node:process';
 
 import { invocationIdSchema } from '@cupboard/protocol/build';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -10,6 +12,7 @@ import { SocketPathTooLongError } from '../errors.ts';
 
 import {
 	createInvocationRuntimeDirectory,
+	createRootLinkDirectory,
 	darwinSunPathBytes,
 	linuxSunPathBytes,
 	planInvocationRuntime,
@@ -161,4 +164,66 @@ describe('invocation runtime directory', () => {
 			code: 'ENOENT'
 		});
 	});
+
+	it.runIf(platform === 'darwin' || platform === 'linux')(
+		'removes root directories without a live owner',
+		async () => {
+			const base = await mkdtemp(path.join(tmpdir(), 'cup-roots-'));
+			bases.push(base);
+			const parent = path.join(base, 'cupboard');
+			const active = path.join(parent, 'active-roots');
+			const stale = path.join(parent, 'stale-roots');
+			const unknown = path.join(parent, 'unknown-roots');
+			const orphanOwner = path.join(parent, '.orphan-roots.cupboard-owner');
+			const current = path.join(parent, 'current-roots');
+			const activeOwner = path.join(base, 'active.sock');
+			const currentOwner = path.join(base, 'current.sock');
+
+			await mkdir(unknown, { recursive: true });
+			const activeRoots = await createRootLinkDirectory(active, activeOwner);
+			await mkdir(stale, { recursive: true });
+			const staleSocket = path.join(base, 'stale.sock');
+			const staleOwner = spawn(
+				process.execPath,
+				[
+					'-e',
+					String.raw`const { createServer } = require('node:net'); const server = createServer(); server.listen(process.argv[1], () => process.stdout.write('ready\n'));`,
+					staleSocket
+				],
+				{ stdio: ['ignore', 'pipe', 'inherit'] }
+			);
+			await once(staleOwner.stdout, 'data');
+			await symlink(path.join(base, 'orphan.sock'), orphanOwner);
+			await symlink(
+				staleSocket,
+				path.join(parent, '.stale-roots.cupboard-owner')
+			);
+			staleOwner.kill('SIGKILL');
+			await once(staleOwner, 'exit');
+
+			const currentRoots = await createRootLinkDirectory(current, currentOwner);
+
+			try {
+				const directories = await readdir(parent);
+				const currentDirectory = await stat(current);
+
+				expect({
+					directories: directories.toSorted((left, right) =>
+						left.localeCompare(right)
+					),
+					mode: currentDirectory.mode & 0o777
+				}).toStrictEqual({
+					directories: [
+						'.active-roots.cupboard-owner',
+						'.current-roots.cupboard-owner',
+						'active-roots',
+						'current-roots'
+					],
+					mode: 0o700
+				});
+			} finally {
+				await Promise.all([activeRoots.close(), currentRoots.close()]);
+			}
+		}
+	);
 });

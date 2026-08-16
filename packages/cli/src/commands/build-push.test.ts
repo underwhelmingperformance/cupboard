@@ -29,6 +29,7 @@ import {
 	aggregateCohortTargets,
 	betweenCohortCollector,
 	createBuildPushDaemon,
+	createNarArchiveForStore,
 	multiCohortReceiptDocument,
 	parseCohortsFile,
 	registerBuildPushCommand,
@@ -65,6 +66,23 @@ const nixConfig: NixStoreConfig = {
 	signatures: defaultSignatureSettings,
 	unknownSettings: []
 };
+
+describe('createNarArchiveForStore', () => {
+	it('reads a logical store path from its physical location', () => {
+		const physicalPath =
+			'/private/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
+		const storePathOnDisk = vi.fn(() => physicalPath);
+		const archive = createNarArchiveForStore({ storePathOnDisk })(pathA);
+
+		expect({
+			archivePath: archive.path,
+			mappedPaths: storePathOnDisk.mock.calls
+		}).toStrictEqual({
+			archivePath: physicalPath,
+			mappedPaths: [[pathA]]
+		});
+	});
+});
 
 describe('createBuildPushDaemon', () => {
 	it('cancels and closes a pending store operation with the command signal', async () => {

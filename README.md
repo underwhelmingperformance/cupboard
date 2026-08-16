@@ -110,6 +110,10 @@ complete exits with the sysexits vocabulary. A cache failure never presents as a
 build failure or vice versa; the build receipt records both causes when both
 fail.
 
+The build command must use the inherited Nix store configuration. Do not pass
+`--store` to a nested Nix command or change `NIX_REMOTE`. Cupboard cannot
+protect or publish outputs from another store.
+
 | Code | Meaning                                                              |
 | ---- | -------------------------------------------------------------------- |
 | 0    | The build succeeded and every selected path is published.            |

@@ -94,7 +94,7 @@ export interface ReconcileOptions {
 	*/
 	readonly outcomes: ReadonlyMap<StorePathString, BatchPathOutcome>;
 	/**
-	The paths whose streaming publication failed, awaiting reconciliation.
+	Paths that failed to publish during streaming and await reconciliation.
 	*/
 	readonly candidates: readonly StorePathString[];
 	readonly snapshot: DerivationSnapshot;

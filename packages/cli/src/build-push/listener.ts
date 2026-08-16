@@ -9,6 +9,8 @@ import {
 } from '@cupboard/protocol/build';
 
 import {
+	BuildEventConnectionClosedError,
+	BuildEventHandlingError,
 	BuildEventMalformedError,
 	BuildEventOutsideStoreError,
 	type BuildEventRejectedError,
@@ -16,6 +18,7 @@ import {
 } from '../errors.ts';
 
 const newlineByte = 0x0a;
+const acceptedByte = 0x01;
 
 // A post-build event is a compact JSON object. One MiB accommodates thousands
 // of ordinary store paths while bounding an unauthenticated local connection.
@@ -43,7 +46,10 @@ function afterNextPoll(): Promise<void> {
 export interface BuildEventListenerOptions {
 	readonly socketPath: string;
 	readonly storeDirectory: StoreDirectory;
-	readonly onEvent: (event: ParsedBuildEvent) => void;
+	readonly onEvent: (
+		event: ParsedBuildEvent,
+		signal: AbortSignal
+	) => Promise<void> | void;
 	readonly onRejected: (error: BuildEventRejectedError) => void;
 	/**
 	Bounds the drain wait on a connection that never settles.
@@ -76,7 +82,7 @@ export class BuildEventListener {
 	private notifySettled: (() => void) | undefined;
 
 	private constructor(private readonly options: BuildEventListenerOptions) {
-		this.server = createServer((socket) => {
+		this.server = createServer({ allowHalfOpen: true }, (socket) => {
 			this.handleConnection(socket);
 		});
 	}
@@ -106,7 +112,13 @@ export class BuildEventListener {
 		const chunks: Buffer[] = [];
 		let bufferedBytes = 0;
 		let isSettled = false;
+		let isProcessing = false;
+		const handling = new AbortController();
 		const settle = (): void => {
+			if (isSettled) {
+				return;
+			}
+
 			isSettled = true;
 			this.unsettledSockets.delete(socket);
 			this.notifySettled?.();
@@ -118,18 +130,19 @@ export class BuildEventListener {
 			socket.destroy();
 		});
 
-		// Destruction is terminal however it comes about, so the close event
-		// settles any connection nothing else has.
+		// Destruction is terminal however it occurs. Stop any local work that was
+		// waiting to acknowledge the event, then let drain continue.
 		socket.on('close', () => {
 			if (isSettled) {
 				return;
 			}
 
+			handling.abort(new BuildEventConnectionClosedError());
 			settle();
 		});
 
 		socket.on('data', (chunk: string | Buffer) => {
-			if (isSettled) {
+			if (isSettled || isProcessing) {
 				return;
 			}
 
@@ -158,40 +171,54 @@ export class BuildEventListener {
 					? lineChunk
 					: Buffer.concat([...chunks, lineChunk], observedBytes);
 
-			this.accept(line.toString('utf8'));
-			socket.end();
-			settle();
+			isProcessing = true;
+			void this.accept(line.toString('utf8'), handling.signal)
+				.then((accepted) => {
+					if (accepted) {
+						socket.end(Buffer.from([acceptedByte]));
+					} else {
+						socket.destroy();
+					}
+				})
+				.catch((error: unknown) => {
+					this.options.onRejected(new BuildEventHandlingError(error));
+					socket.destroy();
+				})
+				.finally(() => {
+					settle();
+				});
 		});
 
 		socket.on('end', () => {
-			if (isSettled) {
+			if (isSettled || isProcessing) {
 				return;
 			}
 
+			socket.destroy();
 			settle();
 			this.options.onRejected(new BuildEventMalformedError('missing-line'));
 		});
 	}
 
-	private accept(line: string): void {
+	private async accept(line: string, signal: AbortSignal): Promise<boolean> {
 		let payload: unknown;
 
 		try {
 			payload = JSON.parse(line);
 		} catch {
 			this.options.onRejected(new BuildEventMalformedError('invalid-json'));
-			return;
+			return false;
 		}
 
 		const event = buildEventSchema.safeParse(payload);
 
 		if (!event.success) {
 			this.options.onRejected(new BuildEventMalformedError('invalid-event'));
-			return;
+			return false;
 		}
 
-		// A schema-valid store path always constructs, so the containment check
-		// compares parsed directories, never raw strings.
+		// The schema guarantees that StorePath construction succeeds. Compare the
+		// parsed directories instead of the raw strings.
 		const outside = event.data.outputPaths.find(
 			(outputPath) =>
 				new StorePath(outputPath).storeDirectory !== this.options.storeDirectory
@@ -201,11 +228,18 @@ export class BuildEventListener {
 			this.options.onRejected(
 				new BuildEventOutsideStoreError(outside, this.options.storeDirectory)
 			);
-			return;
+			return false;
 		}
 
 		this.acceptedEvents.push(event.data);
-		this.options.onEvent(event.data);
+
+		try {
+			await this.options.onEvent(event.data, signal);
+			return true;
+		} catch (error) {
+			this.options.onRejected(new BuildEventHandlingError(error));
+			return false;
+		}
 	}
 
 	get accepted(): readonly ParsedBuildEvent[] {
@@ -217,8 +251,9 @@ export class BuildEventListener {
 	 * resolves once every accepted connection has reached its terminal state,
 	 * with its message recorded, its rejection reported, or the connection
 	 * closed. A connection that never settles is destroyed once the drain
-	 * timeout elapses, so the wait is always bounded. After drain resolves the
-	 * accepted set is complete.
+	 * timeout elapses. Closing a connection also cancels any output protection
+	 * that was waiting to acknowledge its event. After drain resolves the accepted
+	 * set is complete.
 	 */
 	async drain(): Promise<void> {
 		// A helper that connected before this call may still be waiting for its
