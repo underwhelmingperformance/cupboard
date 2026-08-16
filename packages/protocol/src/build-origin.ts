@@ -3,6 +3,7 @@ import { z } from 'zod';
 import {
 	builtOriginFields,
 	copiedOriginFields,
+	republishedOriginFields,
 	storeHeldOriginFields
 } from './build.ts';
 
@@ -15,9 +16,10 @@ export const buildOriginPredicateType =
 	'https://github.com/underwhelmingperformance/cupboard/predicate/build-origin/v2';
 
 // One path's origin, copied from the receipt subject that recorded it. The
-// three cases carry different fields because the run has different evidence for
-// each: a path it built, a path the store registered as its own work, and a
-// path that entered the store from elsewhere.
+// four cases carry different fields because the run has different evidence for
+// each: a path it built, a path the store registered as its own work, a path
+// that entered the store from elsewhere, and a path no store the push could
+// query held.
 //
 // These are the receipt's own facts. The statement reports what the run
 // established about where a path came from. It does not claim that the path is
@@ -26,7 +28,11 @@ export const buildOriginPredicateType =
 export const buildOriginSubjectSchema = z.discriminatedUnion('origin', [
 	z.strictObject({ origin: z.literal('built'), ...builtOriginFields }),
 	z.strictObject({ origin: z.literal('store-held'), ...storeHeldOriginFields }),
-	z.strictObject({ origin: z.literal('copied'), ...copiedOriginFields })
+	z.strictObject({ origin: z.literal('copied'), ...copiedOriginFields }),
+	z.strictObject({
+		origin: z.literal('republished'),
+		...republishedOriginFields
+	})
 ]);
 export type ParsedBuildOriginSubject = z.output<
 	typeof buildOriginSubjectSchema

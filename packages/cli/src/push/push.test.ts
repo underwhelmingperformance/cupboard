@@ -70,6 +70,7 @@ import {
 	RootTargetLimitError,
 	runPush
 } from './push.ts';
+import type { ReferenceMetadata } from './reference.ts';
 
 const rootName = (value: string) => rootNameSchema.parse(value);
 
@@ -93,9 +94,12 @@ const appDigest = digest(1, 123);
 const runtimeDigest = digest(2, 234);
 const compressedNarBytes = Buffer.from('compressed nar');
 
-// The served metadata a reference entry resolves for `appPath`: the path
-// fields negotiate carries plus the blob fields the served narinfo names.
-function referenceMetadata(): UploadPathMetadataFields {
+// The served metadata a reference entry resolves for `appPath`: the path fields
+// negotiate carries, the blob fields from the served narinfo, and the
+// signatures the source published over the path.
+const referenceSignature = 'cache.example.workers.dev-1:c2ln';
+
+function referenceUploadFields(): UploadPathMetadataFields {
 	return {
 		storePathHash: StorePath.hash(appPath),
 		storePath: appPath,
@@ -105,6 +109,13 @@ function referenceMetadata(): UploadPathMetadataFields {
 		fileHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 		fileSize: 99,
 		compression: 'zstd'
+	};
+}
+
+function referenceMetadata(): ReferenceMetadata {
+	return {
+		upload: referenceUploadFields(),
+		signatures: [referenceSignature]
 	};
 }
 
@@ -4136,6 +4147,57 @@ describe('the build receipt a push writes', () => {
 			});
 		}
 	);
+
+	it('describes a reference entry by the cache its metadata came from', async () => {
+		const receipt = await runPush(
+			PublicationCollection.of({ targets: [], referencePaths: [appPath] }),
+			reporter([]),
+			{
+				retain: false,
+				buildStore,
+				claimable: [],
+				referenceSource: {
+					url: new URL('https://cache.example.workers.dev/t/acme')
+				},
+				fetchReferenceMetadata: () => Promise.resolve(referenceMetadata()),
+				client: {
+					preview: unexpectedPreviewCall,
+					negotiate: () =>
+						Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: [
+									{
+										action: 'skip',
+										storePathHash: StorePath.hash(appPath),
+										narHash: appDigest.narHash.toString()
+									}
+								]
+							})
+						),
+					uploadNar: unexpectedUploadNarCall,
+					commit: () => Promise.resolve(fallbackCommitResponse()),
+					setRoot: unexpectedSetRootCall
+				} satisfies PushClient,
+				createNarArchive: () => new FakeNarArchive(appDigest),
+				compressNar: (nar) => fakeNarUpload(nar, appDigest)
+			}
+		);
+
+		expect(receipt).toStrictEqual({
+			version: 3,
+			paths: [appPath],
+			subjects: [
+				{
+					origin: 'republished',
+					storePath: appPath,
+					narHash: appDigest.narHash.digestHex(),
+					signatures: [referenceSignature],
+					metadataSource: 'https://cache.example.workers.dev/t/acme'
+				}
+			],
+			uploaded: []
+		});
+	});
 
 	it('writes no receipt when the push names no build store', async () => {
 		const receipt = await receiptPush(

@@ -737,7 +737,7 @@ export async function reconcileBuild(
 		version: 3,
 		paths: [...ledger.servable].toSorted(byCodeUnit),
 		subjects: publishedSubjects({
-			built,
+			described: built,
 			infos,
 			servable: ledger.servable,
 			buildStore: autoBuildStore,

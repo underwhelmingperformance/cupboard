@@ -110,7 +110,9 @@ export type NixStoreUri = z.output<typeof nixStoreUriSchema>;
 // registered the path as its own work, but nothing the run saw shows that this
 // invocation is what realised it; a store kept between runs may have built the
 // path earlier. `copied` means the store did not build the path at all, so it
-// entered the store from somewhere else.
+// entered the store from somewhere else. `republished` means no store the push
+// could query held the path: the run read the path's metadata from another
+// cache, and the destination serves the copy it already had.
 
 // Every subject records the path and the NAR hash the destination serves it
 // under, whatever its origin. The attestation step checks both against the
@@ -160,6 +162,19 @@ export const copiedOriginFields = {
 	copiedFrom: z.array(nixStoreUriSchema).min(1).optional()
 };
 
+// A path published by reference. No store the push can query holds it, so the
+// run read the path's metadata from another cache instead. `metadataSource` is
+// that cache, and the signatures are the ones it published over the path. The
+// run transferred no bytes: the destination already held the path, and no field
+// here describes where the destination's copy came from.
+export const republishedOriginFields = {
+	...subjectIdentityFields,
+	derivation: derivationPathSchema.optional(),
+	signatures: z.array(subjectSignatureSchema),
+	ca: subjectContentAddressSchema.optional(),
+	metadataSource: z.url()
+};
+
 // One receipt subject: one published path and the origin the run established
 // for it. A supervised build records the attempt that produced the path; a
 // reconciled build leaves the attempt fields out, because it inspects the store
@@ -172,7 +187,11 @@ export const buildSubjectV3Schema = z.discriminatedUnion('origin', [
 		attemptId: z.string().min(1).optional()
 	}),
 	z.strictObject({ origin: z.literal('store-held'), ...storeHeldOriginFields }),
-	z.strictObject({ origin: z.literal('copied'), ...copiedOriginFields })
+	z.strictObject({ origin: z.literal('copied'), ...copiedOriginFields }),
+	z.strictObject({
+		origin: z.literal('republished'),
+		...republishedOriginFields
+	})
 ]);
 export type ParsedBuildSubjectV3 = z.output<typeof buildSubjectV3Schema>;
 export type SubjectOrigin = ParsedBuildSubjectV3['origin'];
@@ -292,10 +311,9 @@ export const buildReceiptV2Schema = z.strictObject({
 });
 export type ParsedBuildReceiptV2 = z.output<typeof buildReceiptV2Schema>;
 
-// Version 3 records one subject per path the run published from the build
-// store, whether the run built the path or found it already there. A published
-// path with no subject is one the run read no store metadata for, which is the
-// case for a path republished from a reference source.
+// Version 3 records one subject per path the run published: each path it read
+// from the build store, whether the run built the path or found it already
+// there, and each path it republished from another cache's served metadata.
 export const buildReceiptV3Schema = z.strictObject({
 	version: z.literal(3),
 	subjects: z.array(buildSubjectV3Schema),

@@ -11,6 +11,7 @@ import {
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
+import { canonicalHref } from '@cupboard/nix-store/url';
 import type {
 	AttestationAttachResponse,
 	AttestationNegotiateRequest,
@@ -40,7 +41,6 @@ import {
 	type ParsedUploadPreviewResponse,
 	type UploadAttachRoot,
 	type UploadNegotiateRequest,
-	type UploadPathMetadataFields,
 	type UploadPathNegotiationFields,
 	type UploadPreviewRequest
 } from '@cupboard/protocol/upload';
@@ -90,7 +90,7 @@ import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 
 import { exactUploadDecisions } from './negotiation.ts';
-import { publishedSubjects } from './origin.ts';
+import { publishedSubjects, republishedSubject } from './origin.ts';
 import {
 	type PublicationCollection,
 	type PublicationEntry,
@@ -98,6 +98,7 @@ import {
 } from './publication.ts';
 import {
 	fetchReferenceMetadata as fetchReferenceMetadataFromSource,
+	type ReferenceMetadata,
 	type ReferenceSource
 } from './reference.ts';
 
@@ -446,7 +447,7 @@ type ResolvedPushPath =
 			readonly source: 'reference';
 			readonly kind: PublicationKind;
 			readonly storePath: StorePathString;
-			readonly metadata: UploadPathMetadataFields;
+			readonly metadata: ReferenceMetadata;
 	  };
 
 // A path the store no longer held when its metadata or NAR was read: nothing
@@ -463,7 +464,7 @@ function resolvedStorePath(path: ResolvedPushPath): StorePathString {
 function resolvedNarHash(path: ResolvedPushPath): string {
 	return path.source === 'local'
 		? path.pathInfo.narHash.toString()
-		: path.metadata.narHash;
+		: path.metadata.upload.narHash;
 }
 
 // The fields negotiate carries for one path. A reference entry's served
@@ -475,16 +476,16 @@ function negotiationOf(path: ResolvedPushPath): UploadPathNegotiationFields {
 		return prepareStorePathNegotiation(path.pathInfo);
 	}
 
-	const { metadata } = path;
+	const { upload } = path.metadata;
 
 	return {
-		storePathHash: metadata.storePathHash,
-		storePath: metadata.storePath,
-		narHash: metadata.narHash,
-		narSize: metadata.narSize,
-		references: metadata.references,
-		...(metadata.deriver !== undefined && { deriver: metadata.deriver }),
-		...(metadata.ca !== undefined && { ca: metadata.ca })
+		storePathHash: upload.storePathHash,
+		storePath: upload.storePath,
+		narHash: upload.narHash,
+		narSize: upload.narSize,
+		references: upload.references,
+		...(upload.deriver !== undefined && { deriver: upload.deriver }),
+		...(upload.ca !== undefined && { ca: upload.ca })
 	};
 }
 
@@ -561,10 +562,10 @@ async function resolveReferenceEntries(
 				{ signal: dependencies.signal }
 			);
 
-			if (metadata.storePath !== entry.storePath) {
+			if (metadata.upload.storePath !== entry.storePath) {
 				throw new ReferencePathMismatchError(
 					entry.storePath,
-					metadata.storePath
+					metadata.upload.storePath
 				);
 			}
 
@@ -595,6 +596,8 @@ interface ReceiptClaims {
 	readonly delegated: ReadonlyMap<string, string>;
 	/** The stores this run watched each path being copied from. */
 	readonly copiedFrom: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
+	/** The cache a reference entry's served metadata was read from. */
+	readonly referenceSource: string | undefined;
 }
 
 // The subject for one published path the run realised. A path the run cannot
@@ -654,14 +657,13 @@ function builtSubject(
 
 /**
  * The build receipt a push writes for the build it published: the paths that
- * ended servable, and one subject for each of those paths that the push read
- * from the build store. A path the run realised carries the build the run can
- * claim for it; every other path carries what the store records about where it
- * came from.
+ * ended servable, and one subject for each of them. A path the push read from
+ * the build store carries either the build the run can claim for it or what the
+ * store records about where it came from.
  *
- * A reference entry has no subject. Its metadata comes from the reference cache
- * and no store the push can query holds the path, so the run has nothing to say
- * about where the path came from.
+ * A reference entry is not in the build store, so no store metadata describes
+ * it. Its subject reports the cache the push read its metadata from, and the
+ * facts that cache served.
  */
 function reconciledReceipt(
 	claims: ReceiptClaims,
@@ -688,21 +690,32 @@ function reconciledReceipt(
 	const infos = resolved.flatMap((path) =>
 		path.source === 'local' ? [path.pathInfo] : []
 	);
-	const built = new Map<string, BuildSubjectV3>();
+	const described = new Map<string, BuildSubjectV3>();
 
 	for (const pathInfo of infos) {
 		const subject = builtSubject(claims, pathInfo);
 
 		if (subject !== undefined) {
-			built.set(pathInfo.storePath, subject);
+			described.set(pathInfo.storePath, subject);
 		}
+	}
+
+	for (const path of resolved) {
+		if (path.source !== 'reference' || claims.referenceSource === undefined) {
+			continue;
+		}
+
+		described.set(
+			path.storePath,
+			republishedSubject(path.metadata, claims.referenceSource)
+		);
 	}
 
 	return buildReceiptV3Schema.parse({
 		version: 3,
 		paths: [...servable].toSorted(byCodeUnit),
 		subjects: publishedSubjects({
-			built,
+			described,
 			infos,
 			servable,
 			buildStore: claims.buildStore,
@@ -1244,7 +1257,11 @@ async function runPushFlow(
 								? undefined
 								: new Set(dependencies.claimable),
 						delegated: dependencies.delegated ?? new Map(),
-						copiedFrom: dependencies.copiedFrom ?? new Map()
+						copiedFrom: dependencies.copiedFrom ?? new Map(),
+						referenceSource:
+							dependencies.referenceSource === undefined
+								? undefined
+								: canonicalHref(dependencies.referenceSource.url)
 					},
 					resolved,
 					summaryPaths
