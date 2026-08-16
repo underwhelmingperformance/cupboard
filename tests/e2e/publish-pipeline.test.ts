@@ -29,6 +29,10 @@ import { temporaryRoot } from '../support/filesystem.ts';
 import { isolatedEnvironment } from '../support/nix.ts';
 import { runCommand } from '../support/process.ts';
 import {
+	type ReleaseInstallation,
+	unpackReleaseArchive
+} from '../support/release-archive.ts';
+import {
 	type NixSshStoreFixture,
 	startNixSshStore
 } from '../support/remote-nix-store.ts';
@@ -49,6 +53,17 @@ function isSet(value: string | undefined): boolean {
 // This tier is opt-in locally and always on in CI: `pnpm check` runs no part of
 // it, and `pnpm e2e:pipeline` runs it when CI or CUPBOARD_PIPELINE_E2E is set.
 const isTierEnabled = isSet(env.CI) || isSet(env.CUPBOARD_PIPELINE_E2E);
+
+// The release archive the packaged-installation leg publishes from, named by
+// `pnpm build:binary --out-dir`. Building one takes minutes and needs a C
+// compiler, so the leg never builds its own: without this variable it skips,
+// and a developer who wants it runs `pnpm build:binary` first. CI's pipeline
+// job builds the archive before it runs the tier.
+const releaseArchive =
+	env.CUPBOARD_RELEASE_ARCHIVE === undefined ||
+	env.CUPBOARD_RELEASE_ARCHIVE === ''
+		? undefined
+		: path.resolve(env.CUPBOARD_RELEASE_ARCHIVE);
 
 // The repository the runner's token asserts. The presets pin a repository by
 // its immutable numeric ids and a branch by its `ref`, so the token carries all
@@ -74,6 +89,11 @@ const rootGrantPrefix = 'github:cupboard-test/';
 // its rule with the hand-written one above.
 const presetRootPrefix = `${rootPrefix}/preset`;
 const presetAudience = 'https://cupboard-test.example/preset';
+
+// The packaged-installation leg publishes two cohorts under prefixes of its
+// own: one from this checkout's sources, and one from the release archive.
+const releaseSeedRootPrefix = `${rootPrefix}/release-seed`;
+const releaseRootPrefix = `${rootPrefix}/release`;
 
 // What Nix reads on the runner: no substituter to fetch from and no builder to
 // delegate to, so every path a run publishes is this machine's own work.
@@ -104,6 +124,18 @@ function fixture(): Fixture {
 	}
 
 	return prepared;
+}
+
+/**
+ * The archive `CUPBOARD_RELEASE_ARCHIVE` names. Its leg skips when the
+ * variable is unset, so nothing reaches the refusal below.
+ */
+function namedReleaseArchive(): string {
+	if (releaseArchive === undefined) {
+		throw new Error('No release archive was named');
+	}
+
+	return releaseArchive;
 }
 
 function replaceProcessEnvironment(environment: NodeJS.ProcessEnv): void {
@@ -150,10 +182,20 @@ function consumerFlake(options: {
 	readonly directory: string;
 	readonly system: string;
 	readonly seed: string;
+	/**
+	 * Distinguishes this flake's derivation names from those of another flake
+	 * built with the same seed. The builder writes the same bytes either way,
+	 * so the two flakes produce different store paths whose NARs are identical.
+	 */
+	readonly variant?: string;
 }): string {
+	const derivationName = (name: string): string =>
+		options.variant === undefined
+			? `cupboard-pipeline-${name}`
+			: `cupboard-pipeline-${options.variant}-${name}`;
 	const target = (name: string): string => `
     ${name} = derivation {
-      name = "cupboard-pipeline-${name}";
+      name = "${derivationName(name)}";
       system = "${options.system}";
       builder = "/bin/sh";
       args = [ "-c" "echo ${name}-${options.seed} > $out" ];
@@ -494,6 +536,11 @@ interface PublishOptions {
 	/** Every root this run writes nests under this prefix. */
 	readonly rootPrefix?: string;
 	/**
+	 * The `cupboard` executable every step of the run invokes. Defaults to the
+	 * installation the fixture assembles from this checkout's sources.
+	 */
+	readonly cupboardPath?: string;
+	/**
 	 * The audience the run requests OIDC tokens with. An empty value defaults to
 	 * the tenant URL.
 	 */
@@ -512,6 +559,7 @@ async function runPublication(
 	const prepared = fixture();
 	const url = prepared.server.tenantUrl.href;
 	const publishRootPrefix = options.rootPrefix ?? rootPrefix;
+	const cupboardPath = options.cupboardPath ?? prepared.cupboard.path;
 	const audience = options.audience ?? '';
 	const job = await startJob(name);
 	const targets = await runNix([
@@ -525,7 +573,7 @@ async function runPublication(
 		planArguments({
 			targets,
 			url,
-			cupboardPath: prepared.cupboard.path,
+			cupboardPath,
 			rootPrefix: publishRootPrefix,
 			audience,
 			store: options.store,
@@ -544,7 +592,7 @@ async function runPublication(
 			buildCohortArguments({
 				cohortJson: JSON.stringify(entry),
 				url,
-				cupboardPath: prepared.cupboard.path,
+				cupboardPath,
 				audience,
 				store: options.store,
 				push: true,
@@ -1287,6 +1335,152 @@ describe.skipIf(!isTierEnabled || !isNixPresent)(
 				served: claimed.map(() => 200)
 			});
 		});
+
+		// The other legs run `cupboard` from this checkout, through a shim that
+		// executes the CLI sources with Node. A release archive is a different
+		// installation: a single-file executable with the hook helper beside it.
+		// The CLI resolves that helper from the executable that runs it, which
+		// for the shim is a copied Node binary. This leg publishes from the
+		// packaged installation, so a defect in the release asset fails a test
+		// rather than a consumer's job.
+		describe.skipIf(releaseArchive === undefined)(
+			'installed from a release archive',
+			() => {
+				const installed: { installation?: ReleaseInstallation } = {};
+
+				beforeAll(async () => {
+					installed.installation = await unpackReleaseArchive({
+						archivePath: namedReleaseArchive(),
+						directory: path.join(fixture().workspace, 'release')
+					});
+				}, 120_000);
+
+				it('publishes a cohort the packaged executable builds and pushes', async () => {
+					const installation = installed.installation;
+
+					if (installation === undefined) {
+						throw new Error('The release archive was not unpacked');
+					}
+
+					const prepared = fixture();
+					const seed = randomUUID();
+					const seedDirectory = path.join(
+						prepared.workspace,
+						'release-seed-consumer'
+					);
+					const flakeDirectory = path.join(
+						prepared.workspace,
+						'release-consumer'
+					);
+					await mkdir(seedDirectory, { recursive: true });
+					await mkdir(flakeDirectory, { recursive: true });
+					await writeFile(
+						path.join(seedDirectory, 'flake.nix'),
+						consumerFlake({
+							directory: seedDirectory,
+							system: prepared.system,
+							seed
+						})
+					);
+					await writeFile(
+						path.join(flakeDirectory, 'flake.nix'),
+						consumerFlake({
+							directory: flakeDirectory,
+							system: prepared.system,
+							seed,
+							variant: 'release'
+						})
+					);
+
+					// A push signs its blob uploads for Cloudflare's S3 endpoint,
+					// which no part of this harness serves. The shim replaces the
+					// uploader through a module hook, but a single-file executable
+					// has no module to replace, so this leg publishes only paths
+					// whose bytes the destination already holds. The seed run
+					// publishes the same file contents from derivations of its own.
+					// The packaged run's store paths are new and their NARs are
+					// identical to the seed's, so every negotiation commits against
+					// a blob the destination holds and the packaged executable
+					// attempts no upload.
+					const seeded = await runPublication('release-seed', {
+						flakeDirectory: seedDirectory,
+						store: '',
+						requireProvenance: false,
+						rootPrefix: releaseSeedRootPrefix
+					});
+					const packaged = await runPublication('release', {
+						flakeDirectory,
+						store: '',
+						requireProvenance: false,
+						rootPrefix: releaseRootPrefix,
+						cupboardPath: installation.commandPath
+					});
+
+					const seedBuilt = await builtPaths(seedDirectory);
+					const built = await builtPaths(flakeDirectory);
+					const attribution = localAttribution();
+					const paths = built
+						.toSorted(byStorePath)
+						.map(({ storePath }) => storePath);
+
+					expect({
+						archive: installation.entries,
+						seeded: {
+							planStatus: seeded.planStatus,
+							cohortStatuses: seeded.cohorts.map((cohort) => cohort.status)
+						},
+						narHashes: built.map(({ narHash }) => narHash),
+						packaged,
+						served: await servedStatuses(built),
+						roots: await retentionRoots(
+							(name) =>
+								name.startsWith(`${releaseRootPrefix}/`) &&
+								!name.includes(runRootMarker)
+						)
+					}).toStrictEqual({
+						// The helper has to unpack beside the executable, because
+						// that is where the CLI looks for it.
+						archive: ['cupboard', 'cupboard-hook-relay'],
+						seeded: { planStatus: 0, cohortStatuses: [0] },
+						narHashes: seedBuilt.map(({ narHash }) => narHash),
+						packaged: {
+							planStatus: 0,
+							retainedCount: '0',
+							targetCount: '2',
+							cohortCount: '1',
+							cohorts: [
+								{
+									status: 0,
+									targetPaths: paths,
+									attribution,
+									receipt: expectedReceipt({
+										built,
+										targets: built,
+										store: '',
+										attribution
+									}),
+									attestation: {
+										subjectCount: String(built.length),
+										checksums: expectedChecksums(built)
+									}
+								}
+							]
+						},
+						served: [200, 200],
+						roots: [
+							{
+								name: `${releaseRootPrefix}/${prepared.system}/alpha`,
+								targets: [built[0]?.storePath]
+							},
+							{
+								name: `${releaseRootPrefix}/${prepared.system}/beta`,
+								targets: [built[1]?.storePath]
+							}
+						]
+					});
+				});
+			}
+		);
 
 		describe.skipIf(!isContainerEnginePresent)(
 			'against an ssh-ng remote store',

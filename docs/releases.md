@@ -32,6 +32,12 @@ Installers prefer these stable names, so release tags do not need to be valid
 filenames. They retain lookup support for the older
 `cupboard-vX.Y.Z-<platform>-<arch>.tar.gz` assets.
 
+An archive holds the `cupboard` executable and the `cupboard-hook-relay` hook
+helper beside it, which is where the CLI looks for the helper. The publish
+pipeline tier unpacks an archive and runs a consumer's publication from it when
+`CUPBOARD_RELEASE_ARCHIVE` names one, so a defect in the packaged asset fails CI
+rather than a consumer's job.
+
 Each binary build tries the ESM format first: esbuild emits an ESM bundle, the
 SEA config sets `mainFormat: "module"`, postject injects the blob into a pinned
 Node 24 binary, and the result is smoke-tested with `cupboard --version`,
