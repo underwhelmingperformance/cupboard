@@ -4,10 +4,10 @@
 import { type Dispatcher, EnvHttpProxyAgent } from 'undici';
 
 /**
- * Proxy values from the environment, using libcurl's names and precedence. A
- * field is absent when no variable configures that proxy.
+ * Proxy values from the environment, using libcurl's variable names and
+ * precedence. A field is absent when no variable configures that proxy.
  */
-export interface NamedProxies {
+export interface ProxySettings {
 	readonly httpProxy?: string;
 	readonly httpsProxy?: string;
 	readonly noProxy?: string;
@@ -17,23 +17,27 @@ export interface NamedProxies {
 export type ProxyEnvironment = Readonly<Record<string, string | undefined>>;
 
 /**
- * The proxies the environment names. libcurl reads `<scheme>_proxy` first and
- * falls back to `all_proxy`, taking the first non-empty value.
+ * The proxies the environment configures. libcurl reads `<scheme>_proxy` first
+ * and falls back to `all_proxy`, taking the first non-empty value.
  *
  * `http_proxy` is read in lower case alone. A CGI script runs with the request
  * headers in its environment as `HTTP_*` variables, so a request carrying a
  * `Proxy:` header would otherwise choose the proxy for every transfer that
  * script made.
  */
-export function proxiesNamedBy(env: ProxyEnvironment): NamedProxies {
-	const httpProxy = firstNamed(env, ['http_proxy', 'all_proxy', 'ALL_PROXY']);
-	const httpsProxy = firstNamed(env, [
+export function proxySettingsFrom(env: ProxyEnvironment): ProxySettings {
+	const httpProxy = firstNonEmpty(env, [
+		'http_proxy',
+		'all_proxy',
+		'ALL_PROXY'
+	]);
+	const httpsProxy = firstNonEmpty(env, [
 		'https_proxy',
 		'HTTPS_PROXY',
 		'all_proxy',
 		'ALL_PROXY'
 	]);
-	const noProxy = firstNamed(env, ['no_proxy', 'NO_PROXY']);
+	const noProxy = firstNonEmpty(env, ['no_proxy', 'NO_PROXY']);
 
 	return {
 		...(httpProxy !== undefined && { httpProxy }),
@@ -44,7 +48,7 @@ export function proxiesNamedBy(env: ProxyEnvironment): NamedProxies {
 
 // An empty value disables the proxy, which is how a variable is unset for one
 // command without being unset for the shell that ran it.
-function firstNamed(
+function firstNonEmpty(
 	env: ProxyEnvironment,
 	names: readonly string[]
 ): string | undefined {
@@ -69,12 +73,12 @@ type RoutedRequest = RequestInit & { readonly dispatcher?: Dispatcher };
  * Creates a proxy dispatcher from the environment, or returns `undefined` for
  * direct requests.
  *
- * The hosts `no_proxy` names go direct. That list is read by the agent, which
- * accepts a leading dot, a bare domain matched on its label boundaries, an
- * optional port, and `*` for every host.
+ * The hosts listed in `no_proxy` go direct. That list is read by the agent,
+ * which accepts a leading dot, a bare domain matched on its label boundaries,
+ * an optional port, and `*` for every host.
  */
 export function proxiedFetch(env: ProxyEnvironment): typeof fetch | undefined {
-	const proxies = proxiesNamedBy(env);
+	const proxies = proxySettingsFrom(env);
 
 	if (proxies.httpProxy === undefined && proxies.httpsProxy === undefined) {
 		return;

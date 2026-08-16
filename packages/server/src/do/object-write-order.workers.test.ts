@@ -29,7 +29,7 @@ async function settled(pending: Promise<unknown>): Promise<void> {
 
 // A bucket whose first delete of `stalledKey` parks until `release` is called,
 // then performs the real delete: the shape of a gated delete that outlasts its
-// deadline, is abandoned, and lands later as a zombie.
+// deadline, is abandoned, and reaches the object store later.
 function stallingBucket(
 	target: R2Bucket,
 	stalledKey: string
@@ -91,9 +91,10 @@ async function narInfoObjectText(
 
 // A gated narinfo-object delete that outlasts its deadline is abandoned, not
 // cancelled, and the object is path-keyed with no heal on read: without
-// ordering, the zombie delete would land after a later put at the same key and
-// destroy a live object. Every mutation orders behind the abandoned call's
-// settled-signal, so the put waits the zombie out and the object survives.
+// ordering, the abandoned delete would land after a later put at the same key
+// and destroy a live object. Every mutation orders behind the abandoned call's
+// settled-signal, so the put waits for the delete to land and the object
+// survives.
 describe('path-keyed object write ordering', () => {
 	beforeEach(resetTestServer);
 
@@ -130,7 +131,7 @@ describe('path-keyed object write ordering', () => {
 			const service = new NarInfoObjectsService(context);
 
 			// The gated delete outlasts the shortened budget: the section unwinds
-			// retryably and the delete is left running as a zombie.
+			// retryably and the delete is left running, abandoned.
 			let error: unknown;
 
 			try {
@@ -168,8 +169,8 @@ describe('path-keyed object write ordering', () => {
 				return;
 			}
 
-			// The re-commit's put arrives while the zombie is still in flight; it
-			// must not land first.
+			// The re-commit's put arrives while the abandoned delete is still in
+			// flight; it must not land first.
 			let didPutSettle = false;
 			const put = (async () => {
 				await service.putNarInfoObject(
@@ -192,7 +193,7 @@ describe('path-keyed object write ordering', () => {
 			await put;
 		});
 
-		// The put landed after the zombie delete, so the object survives and
+		// The put landed after the abandoned delete, so the object survives and
 		// matches the committed row.
 		expect(await narInfoObjectText(metadata.storePathHash)).toBe(committed);
 	});
