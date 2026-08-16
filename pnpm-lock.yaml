@@ -139,8 +139,8 @@ importers:
         version: 4.4.3
     devDependencies:
       '@sigstore/sign':
-        specifier: ^3.1.0
-        version: 3.1.0(supports-color@10.2.2)
+        specifier: ^5.0.0
+        version: 5.0.0(supports-color@10.2.2)
       '@types/semver':
         specifier: ^7.8.0
         version: 7.8.0
@@ -2346,6 +2346,10 @@ packages:
   '@sigstore/sign@3.1.0':
     resolution: {integrity: sha512-knzjmaOHOov1Ur7N/z4B1oPqZ0QX5geUfhrVaqVlu+hl0EAoL4o+l0MSULINcD5GCWe3Z0+YJO8ues6vFlW0Yw==}
     engines: {node: ^18.17.0 || >=20.5.0}
+
+  '@sigstore/sign@5.0.0':
+    resolution: {integrity: sha512-DSFivqz9/i5AkwZ5fq0YdjaJlc4o1WeS2Zffon0kqtChx0vy4W9NOjkEet9bF2vkzOufX72eVH8kZBIGtcBp1w==}
+    engines: {node: ^22.22.2 || ^24.15.0 || >=26.0.0}
 
   '@sigstore/tuf@5.0.0':
     resolution: {integrity: sha512-Zyqg9tcHps3uRAlKHLNmsW4ohsUZAjb9G+31r7lg0ICh/JOcadzmJsIRdjKljlRHpaR0K4aJ2kXXIdywdcdMlA==}
@@ -5972,6 +5976,18 @@ snapshots:
       proc-log: 5.0.0
       promise-retry: 2.0.1
     transitivePeerDependencies:
+      - supports-color
+
+  '@sigstore/sign@5.0.0(supports-color@10.2.2)':
+    dependencies:
+      '@gar/promise-retry': 1.0.3
+      '@sigstore/bundle': 5.0.0
+      '@sigstore/core': 4.0.1
+      '@sigstore/protobuf-specs': 0.5.1
+      make-fetch-happen: 16.0.1(supports-color@10.2.2)
+      proc-log: 7.0.0
+    transitivePeerDependencies:
+      - kerberos
       - supports-color
 
   '@sigstore/tuf@5.0.0(supports-color@10.2.2)':
