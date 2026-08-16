@@ -6,7 +6,7 @@ import { BuildCommandFailedError } from '../errors.ts';
 import type { BuildInvocation } from './build-push.ts';
 
 export interface CohortSequenceOptions {
-	/** The cohorts to build, in order; each settles before the next starts. */
+	/** The cohorts to build, in order; each finishes before the next starts. */
 	readonly cohorts: readonly BuildInvocation[];
 	/** The enclosing CLI run's cancellation signal. */
 	readonly signal?: AbortSignal;
@@ -16,7 +16,7 @@ export interface CohortSequenceOptions {
 	 * run never deletes the user's paths by default.
 	 */
 	readonly collectBetweenCohorts?: boolean;
-	/** Also collect once the final cohort has settled; off unless set. */
+	/** Also collect once the final cohort has finished; off unless set. */
 	readonly collectAfterLast?: boolean;
 	/**
 	 * Continue after an ordinary cohort failure; aborts and signalled children
@@ -32,7 +32,7 @@ export interface CohortFailure {
 }
 
 export interface CohortSequenceResult {
-	/** The settled cohorts' receipts, in run order. */
+	/** The finished cohorts' receipts, in run order. */
 	readonly receipts: readonly ParsedBuildReceipt[];
 	/**
 	 * The failed cohorts, in run order. The first entry carries the error the
@@ -50,8 +50,11 @@ export interface CohortSequenceDependencies {
 		invocation: BuildInvocation,
 		cohort: number
 	) => Promise<ParsedBuildReceipt>;
-	/** Recovers a receipt a failed cohort settled before raising its verdict. */
-	readonly settledReceipt?: (
+	/**
+	 * Recovers the receipt a failed cohort had already produced, or `undefined`
+	 * when it produced none.
+	 */
+	readonly recoverReceipt?: (
 		error: unknown,
 		cohort: number
 	) => Promise<ParsedBuildReceipt | undefined>;
@@ -77,8 +80,8 @@ function shouldStopSequence(error: unknown): boolean {
  * additionally configured, and never when the setting is off. An ordinary
  * cohort failure stops the sequence unless the keep-going option is set;
  * cancellation stops it either way. The result reports the failures alongside
- * the receipts that did settle, and the caller exits with the first failure's
- * error.
+ * the receipts the run did produce, and the caller exits with the first
+ * failure's error.
  */
 export async function runCohortSequence(
 	options: CohortSequenceOptions,
@@ -95,7 +98,7 @@ export async function runCohortSequence(
 		try {
 			receipts.push(await dependencies.runCohort(invocation, cohort));
 		} catch (error) {
-			const receipt = await dependencies.settledReceipt?.(error, cohort);
+			const receipt = await dependencies.recoverReceipt?.(error, cohort);
 
 			if (receipt !== undefined) {
 				receipts.push(receipt);

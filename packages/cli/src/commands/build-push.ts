@@ -339,7 +339,7 @@ export async function updateAggregateCohortRoot(
 	});
 }
 
-async function settledReceipt(
+async function writtenReceipt(
 	receiptFile: string
 ): Promise<ParsedBuildReceipt | undefined> {
 	try {
@@ -660,12 +660,12 @@ export function registerBuildPushCommand(
 						},
 						{
 							runCohort,
-							settledReceipt: (_error, cohort) => {
+							recoverReceipt: (_error, cohort) => {
 								const receiptFile = receiptFileFor(cohort);
 
 								return receiptFile === undefined
 									? Promise.resolve(undefined)
-									: settledReceipt(receiptFile);
+									: writtenReceipt(receiptFile);
 							},
 							collect: betweenCohortCollector(reporter, {
 								signal: programOptions.signal

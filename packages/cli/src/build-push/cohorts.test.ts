@@ -43,12 +43,12 @@ async function runSequence(
 	options: Omit<CohortSequenceOptions, 'cohorts'> & {
 		readonly cohorts: number;
 		readonly failing?: readonly number[];
-		readonly settledFailures?: readonly number[];
+		readonly failuresWithReceipts?: readonly number[];
 	}
 ): Promise<SequenceRun> {
 	const events: string[] = [];
 	const failing = new Set(options.failing);
-	const settledFailures = new Set(options.settledFailures);
+	const failuresWithReceipts = new Set(options.failuresWithReceipts);
 	const invocations = Array.from({ length: options.cohorts }, (_, index) =>
 		cohortInvocation(index + 1)
 	);
@@ -77,9 +77,9 @@ async function runSequence(
 
 				return receiptFor(cohort);
 			},
-			settledReceipt: (_error, cohort) =>
+			recoverReceipt: (_error, cohort) =>
 				Promise.resolve(
-					settledFailures.has(cohort) ? receiptFor(cohort) : undefined
+					failuresWithReceipts.has(cohort) ? receiptFor(cohort) : undefined
 				),
 			collect: async () => {
 				events.push('collect');
@@ -318,11 +318,11 @@ describe('runCohortSequence', () => {
 		}
 	);
 
-	it('keeps a failed cohort receipt in run order when settlement produced one', async () => {
+	it('keeps a failed cohort receipt in run order when the cohort produced one', async () => {
 		const run = await runSequence({
 			cohorts: 3,
 			failing: [2],
-			settledFailures: [2],
+			failuresWithReceipts: [2],
 			keepGoingCohorts: true
 		});
 
