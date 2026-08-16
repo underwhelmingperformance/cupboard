@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
 import {
 	selectorForCache,
@@ -21,13 +22,12 @@ import {
 } from '../../packages/cli/src/build-push/build-push.ts';
 import { preflightBuildPush } from '../../packages/cli/src/build-push/preflight.ts';
 import { storedCacheFor } from '../../packages/cli/src/client/client.ts';
-import { BuildCommandFailedError } from '../../packages/cli/src/errors.ts';
-import type { PushClient } from '../../packages/cli/src/push/push.ts';
 import {
-	createNixDaemonStoreClient,
-	discoverNixStoreConfig,
-	Nix
-} from '../../packages/nix/src/index.ts';
+	BuildCommandFailedError,
+	UntrustedDaemonError
+} from '../../packages/cli/src/errors.ts';
+import type { PushClient } from '../../packages/cli/src/push/push.ts';
+import { discoverNixStoreConfig, Nix } from '../../packages/nix/src/index.ts';
 import { defaultNixConfigEnvironment } from '../../packages/nix/src/store-config.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { temporaryRoot } from '../support/filesystem.ts';
@@ -49,6 +49,7 @@ interface DaemonlessStore {
 	readonly storeDirectory: string;
 	readonly stateDirectory: string;
 	readonly logDirectory: string;
+	readonly helperPath: string;
 }
 
 const fixture: {
@@ -102,6 +103,13 @@ const isolatedNixConfig = [
 	'builders =',
 	'sandbox = false'
 ].join('\n');
+
+const helperSource = fileURLToPath(
+	new URL(
+		'../../packages/cli/hook-helper/cupboard-hook-relay.c',
+		import.meta.url
+	)
+);
 
 // The environment a child building into the test's own store reads.
 function daemonlessEnvironment(): Record<string, string> {
@@ -188,19 +196,29 @@ interface RecordedCache {
 	readonly committed: string[];
 }
 
-// A cache that accepts everything a push offers it and records what that was.
-// Every path negotiates to an upload, so each one's NAR is read out of the
-// store the build populated.
+// A cache that requests each NAR once and records every offer. Later offers for
+// a committed path confirm that the cache already serves it.
 function recordingClient(record: RecordedCache): PushClient {
+	const served = new Set<string>();
+
 	return {
 		negotiate: (body) =>
 			Promise.resolve({
 				uploads: body.paths.map((negotiated) => {
 					record.negotiated.push(negotiated.storePath);
+					const storePathHash = negotiated.storePathHash;
+
+					if (served.has(storePathHash)) {
+						return uploadDecisionSchema.parse({
+							action: 'skip',
+							storePathHash,
+							narHash: negotiated.narHash
+						});
+					}
 
 					return uploadDecisionSchema.parse({
 						action: 'upload',
-						storePathHash: negotiated.storePathHash,
+						storePathHash,
 						narHash: negotiated.narHash,
 						uploadId: `upload-${negotiated.storePathHash}`,
 						r2Key: `staging/${negotiated.storePathHash}`,
@@ -220,6 +238,7 @@ function recordingClient(record: RecordedCache): PushClient {
 		},
 		commit: (target) => {
 			record.committed.push(target.storePathHash);
+			served.add(target.storePathHash);
 
 			return Promise.resolve({
 				storePathHash: target.storePathHash,
@@ -240,15 +259,23 @@ beforeAll(async () => {
 	const storeDirectory = path.join(workspace, 'store');
 	const stateDirectory = path.join(workspace, 'state');
 	const logDirectory = path.join(workspace, 'log');
+	const helperPath = path.join(workspace, 'cupboard-hook-relay');
 
 	await Promise.all(
 		[storeDirectory, stateDirectory, logDirectory].map((directory) =>
 			mkdir(directory, { recursive: true })
 		)
 	);
+	await runCommand('cc', ['-O2', '-o', helperPath, helperSource]);
 
 	fixture.workspace = workspace;
-	fixture.store = { workspace, storeDirectory, stateDirectory, logDirectory };
+	fixture.store = {
+		workspace,
+		storeDirectory,
+		stateDirectory,
+		logDirectory,
+		helperPath
+	};
 	fixture.server = await CupboardTestServer.start(
 		path.join(workspace, 'server')
 	);
@@ -281,9 +308,55 @@ async function instantiate(
 	return storePathSchema.parse(stdout.trim());
 }
 
-// The run a cohort makes on a machine with no daemon: preflight finds no
-// socket, so the mode selection degrades and the reconciled local run builds
-// and publishes.
+async function instantiateDependentBuild(
+	seed: string,
+	environment: Record<string, string>
+): Promise<{
+	readonly dependency: StorePathString;
+	readonly target: StorePathString;
+	readonly targetOutput: StorePathString;
+}> {
+	const expression =
+		`let dependency = builtins.derivation { ` +
+		`name = "cupboard-daemonless-dependency-${seed}"; ` +
+		`system = "${nixSystem()}"; builder = "/bin/sh"; ` +
+		`args = [ "-c" "echo dependency > $out" ]; }; ` +
+		`target = builtins.derivation { ` +
+		`name = "cupboard-daemonless-target-${seed}"; ` +
+		`system = "${nixSystem()}"; builder = "/bin/sh"; ` +
+		`args = [ "-c" "cat \${dependency} > /dev/null; echo target > $out" ]; ` +
+		`}; in { inherit dependency target; }`;
+	const { stdout: target } = await runCommand(
+		'nix-instantiate',
+		['--expr', expression, '--attr', 'target'],
+		{ env: environment }
+	);
+	const { stdout: dependency } = await runCommand(
+		'nix-instantiate',
+		[
+			'--eval',
+			'--strict',
+			'--json',
+			'--expr',
+			`(${expression}).dependency.outPath`
+		],
+		{ env: environment }
+	);
+	const { stdout: targetOutput } = await runCommand(
+		'nix-store',
+		['--query', '--outputs', target.trim()],
+		{ env: environment }
+	);
+
+	return {
+		dependency: storePathSchema.parse(JSON.parse(dependency)),
+		target: storePathSchema.parse(target.trim()),
+		targetOutput: storePathSchema.parse(targetOutput.trim())
+	};
+}
+
+// A cohort run with a private store and no daemon. The build hook creates
+// direct GC roots so outputs remain available while Cupboard uploads them.
 function daemonlessDependencies(options: {
 	readonly client: PushClient;
 	readonly nix: Nix;
@@ -292,13 +365,16 @@ function daemonlessDependencies(options: {
 	readonly invocationId: ReturnType<typeof invocationIdSchema.parse>;
 	readonly runtimeDirectory: string;
 }): BuildPushDependencies {
+	const helperPath = store().helperPath;
+	const executablePath = path.join(path.dirname(helperPath), 'cupboard');
+
 	return {
 		client: options.client,
 		store: options.nix,
 		batchStore: {
-			withConnection: (use) =>
-				createNixDaemonStoreClient(undefined, options.config).withConnection(
-					use
+			withProtectedPaths: () =>
+				Promise.reject(
+					new Error('a daemonless run must not open a daemon batch session')
 				)
 		},
 		storeDirectory: options.config.storeDirectory,
@@ -311,17 +387,25 @@ function daemonlessDependencies(options: {
 		preflight: () =>
 			preflightBuildPush({
 				config: options.config,
-				socketExists: () => false,
+				storeKind: options.nix.storeKind,
+				stateDirectory:
+					options.nix.stateDirectory ?? options.config.stateDirectory,
 				daemonTrust: () => Promise.resolve('unknown'),
 				invocationId: options.invocationId,
 				grants: [],
-				cache: selectorForCache(storedCacheFor(undefined))
-			})
+				cache: selectorForCache(storedCacheFor(undefined)),
+				helper: { executablePath },
+				runtime: {
+					environment: {},
+					temporaryDirectory: options.runtimeDirectory
+				}
+			}),
+		nextAttemptId: () => 'attempt-1'
 	};
 }
 
-// One reconciled local run of a cohort in the test's own store, named so a
-// second run of the same cohort keeps its own runtime directory and receipt.
+// One daemonless run of a cohort in the test's own store. Each run uses a
+// separate runtime directory and receipt.
 async function runDaemonlessCohort(options: {
 	readonly derivation: StorePathString;
 	readonly run: string;
@@ -352,15 +436,15 @@ async function runDaemonlessCohort(options: {
 			config,
 			environment,
 			invocationId: invocationIdSchema.parse(`daemonless-${options.run}`),
-			runtimeDirectory: prepared.workspace
+			runtimeDirectory: '/tmp'
 		})
 	);
 
 	return JSON.parse(await readFile(receiptFile, 'utf8'));
 }
 
-describe('build-push with no daemon to stream through', () => {
-	it('builds in a store of its own and publishes what the build left', async () => {
+describe('build-push without a Nix daemon', () => {
+	it('builds in a store of its own and publishes the completed output', async () => {
 		const seed = randomUUID().replaceAll('-', '');
 		const environment = daemonlessEnvironment();
 		const derivation = await instantiate(seed, environment);
@@ -386,13 +470,16 @@ describe('build-push with no daemon to stream through', () => {
 			builtLocally: info.ultimate,
 			receipt
 		}).toStrictEqual({
-			negotiated: [storePath],
+			negotiated: [storePath, storePath],
 			committed: [StorePath.hash(storePath)],
 			uploadedNars: 1,
 			builtLocally: true,
 			receipt: {
 				version: 3,
 				paths: [storePath],
+				outcomes: [{ outcome: 'built', storePath }],
+				failed: [],
+				collected: [],
 				subjects: [
 					{
 						origin: 'built',
@@ -400,7 +487,9 @@ describe('build-push with no daemon to stream through', () => {
 						narHash: info.narHash.digestHex(),
 						derivation,
 						buildStore: 'auto',
-						verification: 'build-store'
+						verification: 'local',
+						attempt: 1,
+						attemptId: 'attempt-1'
 					}
 				],
 				uploaded: [storePath],
@@ -409,9 +498,8 @@ describe('build-push with no daemon to stream through', () => {
 		});
 	}, 120_000);
 
-	// The second run of the same cohort builds nothing: the store answered for
-	// the output before the build, so the run publishes it again and claims
-	// none of it.
+	// The first run built the path, so Nix marked it as ultimate. The second run
+	// publishes the existing path and does not claim it as a build result.
 	it('claims nothing for a path the store held before it ran', async () => {
 		const seed = randomUUID().replaceAll('-', '');
 		const environment = daemonlessEnvironment();
@@ -437,13 +525,13 @@ describe('build-push with no daemon to stream through', () => {
 		const info = await nix.queryPathInfo(storePath);
 
 		expect({ negotiated: record.negotiated, receipt }).toStrictEqual({
-			negotiated: [storePath, storePath],
+			negotiated: [storePath, storePath, storePath],
 			receipt: {
 				version: 3,
 				paths: [storePath],
-				// The first run built the path, so the store registered it as
-				// its own work. The second run publishes the path again and
-				// records that registration, claiming no build of its own.
+				outcomes: [{ outcome: 'destination-served', storePath }],
+				failed: [],
+				collected: [],
 				subjects: [
 					{
 						origin: 'store-held',
@@ -453,16 +541,82 @@ describe('build-push with no daemon to stream through', () => {
 						buildStore: 'auto'
 					}
 				],
-				uploaded: [storePath],
+				uploaded: [],
 				childExitStatus: 0
 			}
 		});
 	}, 120_000);
 
-	// The tenant serves `/nix/store`, so publishing to it end to end takes a
-	// build in the host store. The run still takes the reconciled local mode:
-	// preflight is told there is no socket, exactly as on a machine with none.
-	it('publishes a host-store build to the tenant and writes its receipt', async (context) => {
+	it('protects an intermediate during collection after the target finishes', async () => {
+		const seed = randomUUID().replaceAll('-', '');
+		const environment = daemonlessEnvironment();
+		const { dependency, target, targetOutput } =
+			await instantiateDependentBuild(seed, environment);
+		const nix = Nix.open(daemonlessStoreDependencies());
+		const config = discoverNixStoreConfig(daemonlessStoreDependencies());
+		const invocationId = invocationIdSchema.parse(`daemonless-gc-${seed}`);
+		const outLink = path.join(
+			'/tmp',
+			'cupboard',
+			`${invocationId}-targets`,
+			'result'
+		);
+		const record: RecordedCache = {
+			negotiated: [],
+			uploaded: [],
+			committed: []
+		};
+		const recorded = recordingClient(record);
+		let isSurvivedCollection = false;
+		const client: PushClient = {
+			...recorded,
+			async uploadNar(r2Key, body) {
+				if (r2Key === `staging/${StorePath.hash(dependency)}`) {
+					await expect
+						.poll(() => existsSync(outLink), { timeout: 30_000 })
+						.toBe(true);
+					await runCommand('nix-store', ['--gc'], { env: environment });
+					isSurvivedCollection = existsSync(dependency);
+				}
+
+				await recorded.uploadNar(r2Key, body);
+			}
+		};
+
+		await runBuildPush(
+			{
+				invocation: {
+					kind: 'constructed',
+					build: { installables: [`${target}^*`], attempts: 1 }
+				}
+			},
+			silentReporter(),
+			daemonlessDependencies({
+				client,
+				nix,
+				config,
+				environment,
+				invocationId,
+				runtimeDirectory: '/tmp'
+			})
+		);
+
+		expect({
+			survivedCollection: isSurvivedCollection,
+			committed: record.committed
+		}).toStrictEqual({
+			survivedCollection: true,
+			committed: [StorePath.hash(dependency), StorePath.hash(targetOutput)]
+		});
+
+		await runCommand('nix-store', ['--gc'], { env: environment });
+		expect(existsSync(dependency)).toBe(false);
+	}, 120_000);
+
+	// The tenant serves paths under `/nix/store`, while the private fixture uses
+	// a different store directory. Build in the host store for this end-to-end
+	// case. The private-store cases above cover daemonless streaming.
+	it('publishes a host-store build through reconciled mode', async (context) => {
 		if (!existsSync('/nix/var/nix/daemon-socket/socket')) {
 			context.skip();
 		}
@@ -482,6 +636,15 @@ describe('build-push with no daemon to stream through', () => {
 		let thrown: unknown;
 
 		try {
+			const dependencies = daemonlessDependencies({
+				client,
+				nix,
+				config,
+				environment,
+				invocationId: invocationIdSchema.parse(`daemonless-host-${seed}`),
+				runtimeDirectory: '/tmp'
+			});
+
 			await runBuildPush(
 				{
 					invocation: {
@@ -491,14 +654,11 @@ describe('build-push with no daemon to stream through', () => {
 					receiptFile
 				},
 				silentReporter(),
-				daemonlessDependencies({
-					client,
-					nix,
-					config,
-					environment,
-					invocationId: invocationIdSchema.parse(`daemonless-host-${seed}`),
-					runtimeDirectory: workspace
-				})
+				{
+					...dependencies,
+					preflight: () =>
+						Promise.reject(new UntrustedDaemonError('not-trusted'))
+				}
 			);
 		} catch (error) {
 			thrown = error;

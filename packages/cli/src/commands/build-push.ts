@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -62,6 +61,7 @@ import {
 	CohortsFileInvalidError,
 	InvalidUploadConcurrencyError
 } from '../errors.ts';
+import { NarArchive } from '../nix/nar.ts';
 import { reportUnknownSettings } from '../nix/settings.ts';
 import { pushClientFor } from '../push/push-client.ts';
 import { parseRootName } from '../root-name.ts';
@@ -402,6 +402,12 @@ function parseStorePathFile(contents: string): readonly StorePathString[] {
 	});
 }
 
+export function createNarArchiveForStore(
+	store: Pick<Nix, 'storePathOnDisk'>
+): (storePath: string) => NarArchive {
+	return (storePath) => new NarArchive(store.storePathOnDisk(storePath));
+}
+
 export function registerBuildPushCommand(
 	program: Command,
 	programOptions: ProgramOptions = {}
@@ -417,7 +423,7 @@ export function registerBuildPushCommand(
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument(
 			'[command...]',
-			'the build command to run, after a -- separator (e.g. nix build --no-link .#target); replaced by --cohorts-file for a multi-cohort run'
+			'the build command to run after --; it must use the inherited Nix store configuration (replaced by --cohorts-file for a multi-cohort run)'
 		)
 		.option(
 			'--github-oidc',
@@ -499,6 +505,10 @@ export function registerBuildPushCommand(
 			'after',
 			[
 				'',
+				'The command must use the inherited Nix store configuration.',
+				'Do not pass --store to a nested Nix command or change NIX_REMOTE.',
+				'Cupboard cannot protect or publish outputs from another store.',
+				'',
 				'The build command runs with its output and exit status untouched: a',
 				'failed build exits with the build command status. A successful',
 				'build with failed publication or retention exits with a sysexits',
@@ -571,10 +581,8 @@ export function registerBuildPushCommand(
 
 					return daemon;
 				};
-				// The store Nix itself would read through: the daemon where one
-				// answers, and this process's own reader on a machine where none
-				// does, which is the machine a reconciled local run publishes from.
 				const nix = Nix.open();
+				const createNarArchive = createNarArchiveForStore(nix);
 
 				reportUnknownSettings(reporter, nix.unknownSettings);
 				const sequenceDirectory =
@@ -632,9 +640,18 @@ export function registerBuildPushCommand(
 							client: pushClient,
 							store: nix,
 							batchStore: {
-								withConnection: (use) => openDaemon().withConnection(use)
+								withProtectedPaths: (use) =>
+									openDaemon().withConnection((session) =>
+										use({
+											protectPath: (storePath) =>
+												session.addTempRoot(storePath),
+											queryPathInfo: (storePath) =>
+												session.queryPathInfo(storePath)
+										})
+									)
 							},
-							storeDirectory: config.storeDirectory,
+							storeDirectory: nix.storeDirectory,
+							createNarArchive,
 							invocationId,
 							settledTargets: (targets) => {
 								settledTargets.set(cohort, targets);
@@ -642,7 +659,8 @@ export function registerBuildPushCommand(
 							preflight: () =>
 								preflightBuildPush({
 									config,
-									socketExists: (socketPath) => existsSync(socketPath),
+									storeKind: nix.storeKind,
+									stateDirectory: nix.stateDirectory ?? config.stateDirectory,
 									daemonTrust: () => openDaemon().daemonTrust(),
 									invocationId,
 									grants: authorizationDetails,

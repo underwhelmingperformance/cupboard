@@ -55,7 +55,13 @@ describe.skipIf(
 		});
 		client = new NixDaemonStoreClient({ socketPath: daemon.socketPath });
 		batchStore = {
-			withConnection: (use) => client.withConnection(use)
+			withProtectedPaths: (use) =>
+				client.withConnection((session) =>
+					use({
+						protectPath: (storePath) => session.addTempRoot(storePath),
+						queryPathInfo: (storePath) => session.queryPathInfo(storePath)
+					})
+				)
 		};
 	}, 120_000);
 

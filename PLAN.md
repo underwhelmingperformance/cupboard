@@ -4892,8 +4892,12 @@ cupboard build-push <publication options> --cohorts-file <path>
 ```
 
 The cohorts file is a versioned, validated specification carrying the targets,
-their execution context, publication policy, and roots. The command is a
-foreground supervisor, not a daemon manager:
+their execution context, publication policy, and roots. A user-supplied command
+must use the inherited Nix store configuration. If it passes `--store` to a
+nested Nix command or changes `NIX_REMOTE`, Cupboard cannot protect or publish
+outputs from that other store.
+
+The command is a foreground supervisor, not a daemon manager:
 
 1. Resolve the destination, authentication, selected build store, publication
    mode, and cohort specification.
@@ -4978,6 +4982,12 @@ exposes the completed outputs in `OUT_PATHS`, space-separated, alongside
 notification only. Compression, destination queries, retries, and uploads run in
 the supervising `cupboard` process.
 
+On a daemonless store, the hook asks the local store to register each output as
+a GC root beneath its `gcroots` directory. Nix also notifies a garbage collector
+that is already running, so that collector cannot remove the output after the
+hook reports it. The supervisor removes the roots after publication and
+reconciliation finish.
+
 The hook's execution context is the store's, not the invoker's. Under a
 multi-user daemon the daemon executes the hook as root, with the daemon's
 environment plus the variables Nix sets. The invoking user's environment is
@@ -4993,20 +5003,20 @@ costs tens of milliseconds per event before doing any work, which across
 thousands of derivations adds minutes of serialised build time: a Node process
 that does nothing measures around 50 milliseconds. A `/bin/sh` script that execs
 a small compiled helper measures under 20 milliseconds, most of which is the
-shell itself. The cupboard hook is that shape. The gate on it is structural
-first: a test asserts the hook script execs the compiled helper and starts no
-language runtime, and any wall-clock assertion sits at a generous ceiling,
-because a tight timing test on shared CI produces one-off failures. Cachix pays
-the larger cost by using its own executable, which also opens the Nix store on
-every event.
+shell itself. The Cupboard hook has that shape. A daemonless hook also asks the
+local store to register a GC root for each completed output before it reports
+the event. Tests exercise the generated script and its compiled helper.
+Wall-clock assertions use a generous ceiling because a tight timing test on
+shared CI produces one-off failures.
 
 Hook failure semantics shape the error handling. When a hook exits non-zero, the
 built path stays valid but the derivation's goal fails: without `keep-going` Nix
 stops scheduling further builds, and with it, the cohort invocation's mode, the
 dependents fail while other branches continue. A transient delivery fault must
 therefore never surface as a non-zero hook exit, or it cancels real work in
-either mode. On delivery failure the hook warns and exits zero, and final
-reconciliation publishes the paths the event stream lost.
+either mode. On delivery failure the hook warns and exits zero. A constructed
+invocation can rediscover its final outputs through its out-links. A
+user-supplied command cannot recover an output whose event never arrived.
 
 The transport is a Unix socket. The supervisor creates an invocation-specific,
 owner-only directory beneath `$XDG_RUNTIME_DIR/cupboard/` where available and
@@ -5062,17 +5072,20 @@ subprocess, and depends on no substituter; preflight refuses, before the
 expensive build starts, only an installation that is missing its helper.
 
 One connection carries one message, so concurrent firings cannot interleave and
-framing stays a newline. Delivery is fire-and-forget. The hook does not wait for
-an acknowledgement, because a per-event wait multiplies by the derivation count:
-a two-second bound across five thousand derivations is most of three hours of
-serialised build time whenever the supervisor stalls. The helper runs under a
-short inactivity timeout, so a wedged supervisor cannot hold a build open beyond
-it, and connecting to an endpoint with no listener fails at once rather than
-blocking. Both outcomes are delivery failures and take the path above.
+framing stays a newline. After sending the message, the helper waits for a
+one-byte success response. For a daemon-backed build, the listener sends that
+response only after the daemon has protected the reported outputs from garbage
+collection. If the listener does not reply within three seconds, the helper
+stops waiting so a stalled supervisor cannot hold the build open indefinitely.
+Connecting to an endpoint with no listener fails at once. Both outcomes are
+delivery failures and take the path above.
 
 The generated hook executable:
 
-- parses `OUT_PATHS` as the space-separated store paths Nix guarantees;
+- reads the space-separated store paths that Nix supplies in `OUT_PATHS`;
+- asks the local store to register GC roots before reporting daemonless outputs,
+  or marks the event when root registration fails so Cupboard retries those
+  outputs after the build;
 - sends one small, versioned message naming `DRV_PATH` and the output paths to
   the invocation endpoint through the resolved helper; and
 - exits zero without performing network work, warning if delivery failed.
@@ -5114,11 +5127,12 @@ an operator's hook.
 
 Only trusted users can set `post-build-hook` through a daemon. The daemon does
 not error on an untrusted override; it ignores the setting with a warning and
-builds proceed without the hook. Preflight therefore proves effectiveness before
-the expensive build starts. The daemon handshake carries the trusted flag at
-protocol 1.35 and the `@cupboard/nix` client reads it during its handshake, so
-the check needs no subprocess; an untrusted connection gets an actionable error
-naming the `trusted-users` requirement.
+builds proceed without the hook. Before starting the build, preflight reads the
+trusted flag from the daemon handshake. Protocol 1.35 added that flag, and the
+`@cupboard/nix` client already reads it while opening the connection. An
+untrusted connection therefore selects publication after the build. Cupboard
+explains that the current user is missing from the daemon's `trusted-users`
+setting before the build starts.
 
 Nix's own post-build-hook documentation calls direct upload from the hook
 unsuitable for unreliable networks and recommends passing paths to a daemon or
@@ -5207,16 +5221,16 @@ must reuse the existing batched negotiation and commit operations and the
 established bounded R2 upload fan-out. It must not regress to one destination
 request, one D1 query, or one R2 transfer per path in series.
 
-Streamed completions arrive one at a time, so batching needs a stated mechanism:
-accepted paths accumulate behind a short debounce window, bounded by a maximum
-batch size and a maximum wait, and each flush enters the ordinary batched
-negotiation. The size bound already exists: `commitBatchMaxEntries` (100) caps a
-commit batch, and the debounce flush uses the same bound. Cachix's narinfo
-batcher (one hundred paths or half a second) and Attic's session timers (two
-quiet seconds, ten-second cap) corroborate the shape. The session-wide dedup set
-records outcomes, not enqueuings: a path whose upload fails returns to the
-candidate set, because Attic's enqueue-time marking demonstrates the
-alternative, where a failed path is silently never retried within the session.
+Streamed completions arrive one at a time. Accepted paths accumulate during a
+short debounce interval, which has a maximum batch size and a maximum wait. Each
+flush uses the ordinary batched negotiation. The size bound already exists:
+`commitBatchMaxEntries` (100) caps a commit batch, and the debounce flush uses
+the same bound. Cachix's narinfo batcher (one hundred paths or half a second)
+and Attic's session timers (two quiet seconds, ten-second cap) corroborate the
+shape. The session records only final outcomes. When an upload fails, its path
+returns to the candidate set so a later flush or final reconciliation can retry
+it. Attic instead marks paths when it enqueues them, which would suppress that
+retry within the session.
 
 A commit verdict can arrive on a socket that parks for deferred verification,
 and over an hours-long run some parked sockets will drop when the tenant Durable
@@ -5331,7 +5345,7 @@ The safe publication and collection boundary is the cohort:
 build the cohort's build set
   -> publish and verify outputs as they complete
   -> attach outputs to the run root
-  -> release upload temporary roots
+  -> release daemon temporary roots or daemonless GC roots
   -> optionally collect the store before the next cohort
 ```
 
@@ -5404,7 +5418,8 @@ The final reconciliation:
 - includes target paths that were valid before the invocation;
 - includes every accepted build-output event selected for publication;
 - re-queries the destination, making already uploaded paths cheap no-ops;
-- retries or reports paths whose streaming upload failed;
+- retries paths that failed to upload during streaming, or reports their
+  failures;
 - waits for deferred server verification when later substitution depends on the
   result;
 - applies a requested target root only when every target declared for that root
@@ -5428,26 +5443,29 @@ publication. A target settled as left upstream stays left upstream even when
 another target's build happens to realise it during the same run, so root
 contents do not depend on execution order.
 
-Paths queued for upload are protected from local garbage collection with
-temporary roots. `AddTempRoot` is a worker-protocol operation with no matching
-release: the root lives exactly as long as the connection that took it, so the
-connection is the unit of pinning and its scope decides how much the run pins.
-The supervisor therefore takes roots on a connection scoped to the upload batch
-and closes it when the batch's reads complete. The caller-controlled connection
-lifetime is a client capability the ordinary daemon client does not have: it
-opens and closes a connection per query, and a pooled `closeAll` would drop
-every root taken through it. Temporary roots also exist only behind the daemon;
-the daemonless local backend reads the store's SQLite database directly, with no
-connection to hold and no temp-root protocol, so streaming requires a
-daemon-backed store. Backend selection must honour that: the automatic backend
-prefers the local SQLite reader whenever the state directory is writable, so
-`build-push` selects the daemon whenever its socket exists, and preflight
-refuses a truly daemonless install. Nix's documented ordering applies: take the
-root first, then check validity, then read. A path that is nevertheless gone
-when its NAR read starts is a typed per-path outcome, never a batch failure: a
-vanished intermediate is recorded as collected in the receipt, a vanished target
-fails the run with that reason. Attic shows the cost of getting this wrong twice
-over, with no roots at all and one invalid path failing the whole batch plan.
+Paths queued for upload are protected from local garbage collection. With a
+daemon, `AddTempRoot` protects each path for the lifetime of the connection that
+registered it. The supervisor opens one connection before the build. When the
+listener receives an event, it registers temporary roots before sending the
+success response. The hook therefore returns only after the supervisor has
+protected the outputs. The supervisor closes the store connection after
+publication and reconciliation finish.
+
+Without a daemon, the build hook asks the local store to register each completed
+output beneath its `gcroots` directory before it reports the output. This also
+protects the output from a garbage collector that was already running. The
+supervisor removes the roots after publication and reconciliation finish. Each
+root directory has an ownership record beside it. The record contains the
+private socket that identifies its supervisor. Before a daemonless run starts,
+the supervisor removes root directories that have no ownership record or whose
+recorded socket no longer has a listener. A later run therefore releases roots
+left by a process that could not clean up.
+
+In both cases, Cupboard protects a path before it checks validity and reads the
+NAR. If a path has nevertheless disappeared when the NAR read starts, the batch
+records a typed outcome and continues. A missing intermediate is recorded as
+collected in the receipt; a missing target fails the run for that reason. Attic
+creates no roots and aborts the whole batch plan when one path is invalid.
 
 Destination-side, a streamed publication is retained by the root it belongs to,
 decided before the build and applied as the path commits. The run knows the root
@@ -5689,19 +5707,17 @@ remaining work.
    no runtime start-up, never performs network work, exits zero on delivery
    failure, and that the socket path fits `sun_path` with the documented
    fallback.
-10. Implement `cupboard build-push` for daemon-backed local stores:
-    - preflight: the daemon trust flag read in-process from the handshake, no
-      conflicting operator `post-build-hook`, and a token carrying `root:attach`
-      for the run root and `root:set` for the target roots; when a trusted
-      daemon socket exists, the build uses the daemon-backed store; otherwise,
-      reconciled local mode builds without the hook and publishes once from the
-      store populated by the build;
+10. Implement `cupboard build-push` for local stores:
+    - preflight: select temporary roots for a daemon-backed store and verify
+      that the daemon trusts the current user. Select direct GC roots for a
+      local daemonless store, and reject a store on another machine. Also check
+      for a conflicting operator `post-build-hook` and require a token carrying
+      `root:attach` for the run root and `root:set` for the target roots;
     - invocation-scoped Nix configuration through `NIX_CONFIG` in the child
       environment;
     - child process and signal supervision;
-    - batch-scoped daemon connections carrying temporary-root protection, each
-      closed as its batch's reads complete, with vanished paths as typed
-      per-path outcomes;
+    - a daemon connection that protects reported outputs until publication and
+      reconciliation finish, with vanished paths as typed per-path outcomes;
     - the run root, attached to as each batch commits and left to expire by its
       time-to-live, with the target roots replaced at reconciliation;
     - concurrent selected-path uploads behind the debounced batch window;
@@ -5904,10 +5920,9 @@ Real-Nix tests cover the foreground supervisor:
   one connection carries one message.
 - Two targets sharing a dependency in one invocation build that dependency once,
   upload it once, and retain only the target roots.
-- Nothing holds the hook open: a deliberately slow uploader does not extend it
-  beyond its send, a stalled supervisor releases it at the helper's inactivity
-  timeout, and a firing with no listener at all fails immediately rather than
-  waiting.
+- A deliberately slow uploader does not delay the hook after the event is sent.
+  If the listener does not confirm the event, the helper exits after its
+  timeout. If no listener exists, the helper fails immediately.
 - The hook completes within its budget without starting a language runtime.
 - The daemon, running the hook as root, delivers to the supervisor's own 0600
   socket inside its 0700 runtime directory.
@@ -5919,21 +5934,23 @@ Real-Nix tests cover the foreground supervisor:
 - Existing paths, substituted paths, locally built paths, unknown-output
   derivations, and mixed sets all appear correctly in the receipt.
 - A hook whose delivery fails warns, exits zero, and does not abort the
-  remaining builds; reconciliation publishes the lost path.
-- A queued path is protected by a temporary root across a concurrent
-  `nix-collect-garbage`; a path that vanishes anyway is a typed per-path
-  outcome, the batch continues, and only a vanished target fails the run.
-- A path whose streaming upload fails and whose reconciliation retry succeeds is
-  reported as uploaded, never as failed.
+  remaining builds. A constructed invocation rediscovers its final output
+  through an out-link and publishes it during reconciliation.
+- A queued path is protected by a daemon temporary root or a daemonless direct
+  GC root across concurrent garbage collection. A path that vanishes anyway is a
+  typed per-path outcome, the batch continues, and only a vanished target fails
+  the run.
+- A path that fails to upload during streaming is reported as uploaded when its
+  reconciliation retry succeeds.
 - Two concurrent invocations sharing one store each receive hook events only for
   their own builds and each publish and root their own targets.
-- A daemonless store or an untrusted daemon connection selects reconciled local
-  mode. The same cohort builds under the attempt loop without a hook, then one
-  push publishes the build results. The receipt includes only paths that the run
-  resolved and queried before building; it records a local rebuild as verified.
-  Preflight still refuses a conflicting operator `post-build-hook`, a socket
-  path that cannot fit `sun_path`, an unresolvable hook helper, or a token
-  without `root:attach` for the run root. Each error is distinct and actionable.
+- A daemonless store streams completed outputs. The hook registers GC roots
+  before reporting the outputs, and those paths survive garbage collection until
+  publication finishes. An untrusted daemon connection selects reconciled local
+  mode instead. Preflight still refuses a conflicting operator
+  `post-build-hook`, a socket path that cannot fit `sun_path`, an unresolvable
+  hook helper, or a token without `root:attach` for the run root. Each error is
+  distinct and actionable.
 - A token carrying `upload:commit` without `root:attach` cannot attach, and one
   whose `root:attach` grant names a different root or prefix is refused on the
   root it does not cover.
@@ -6038,13 +6055,13 @@ published intermediates and their storage cost.
 
 ### Risks and open gates
 
-- A Nix post-build hook blocks the build loop. Any network operation, unbounded
-  local wait, or language-runtime start-up in the hook serialises the build and
-  is a release blocker. Delivery is therefore fire-and-forget under a short
-  inactivity timeout, since any per-event wait multiplies by the derivation
-  count. A non-zero hook exit fails the derivation's goal, cancelling the rest
-  of the build without `keep-going` and the dependents with it, so hook faults
-  must warn and exit zero.
+- A Nix post-build hook blocks the build loop. Network operations and
+  language-runtime start-up in the hook would serialise the build and are
+  release blockers. The hook performs only local output protection and event
+  delivery. If the listener does not reply within three seconds, the helper
+  stops waiting. A non-zero hook exit fails the derivation's goal, cancelling
+  the rest of the build without `keep-going` and the dependants with it, so hook
+  faults must warn and exit zero.
 - The hook needs a compiled helper to reach the socket, because `/bin/sh` cannot
   write to one and the daemon's `PATH` guarantees nothing. The purpose-built C
   helper ships with both distributions, installed by the Nix package and
@@ -6054,10 +6071,10 @@ published intermediates and their storage cost.
   that CI must cover.
 - Hook configuration under a multi-user daemon depends on Nix trust settings,
   and the daemon ignores an untrusted override with only a warning. Preflight
-  must prove effectiveness through the daemon trust flag before the child
-  starts. The same silent-ignore hazard governs the `SetOptions` overrides the
-  upstream confirmation and the `unknown` re-query depend on, which is why an
-  untrusted connection may refuse a target but can never falsely confirm one.
+  must read the daemon trust flag before the child starts. The same
+  silent-ignore hazard governs the `SetOptions` overrides the upstream
+  confirmation and the `unknown` re-query depend on, which is why an untrusted
+  connection may refuse a target but can never falsely confirm one.
 - The post-build hook observes executed builds, not every already-valid or
   substituted result. Final reconciliation is required for correctness.
 - The upstream confirmation establishes availability from the permitted
@@ -6133,9 +6150,9 @@ published intermediates and their storage cost.
   the same derivation after both observe it missing, and this remains correct
   because store paths and destination publication are idempotent.
 - Streaming creates concurrency between store reads, NAR compression, uploads,
-  and Nix GC. The batch-scoped temporary-root protection described under
-  reconciliation exists only behind the daemon, so streaming requires a
-  daemon-backed store and caller-controlled connection lifetimes.
+  and Nix garbage collection. A daemon-backed store uses temporary roots on one
+  connection for the streamed run. A daemonless local store registers GC roots
+  from the build hook and removes them after publication and reconciliation.
 - Reconciliation waits for deferred server verification, and that wait has a
   known failure shape: a commit whose verdict never arrives, through an orphaned
   commit row or a dropped socket, leaves an upload that never becomes servable

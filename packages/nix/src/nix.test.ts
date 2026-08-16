@@ -357,7 +357,17 @@ describe('Nix.open', () => {
 			})
 		);
 
-		expect(nix.toStorePath(`${storePath}/bin/app`)).toBe(storePath);
+		expect({
+			storePath: nix.toStorePath(`${storePath}/bin/app`),
+			storeDirectory: nix.storeDirectory,
+			stateDirectory: nix.stateDirectory,
+			pathOnDisk: nix.storePathOnDisk(storePath)
+		}).toStrictEqual({
+			storePath,
+			storeDirectory: '/named/store',
+			stateDirectory: '/named/state',
+			pathOnDisk: '/named/real/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-app'
+		});
 	});
 
 	it('refuses a configured store directory that could hold no store path', () => {

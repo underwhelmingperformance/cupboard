@@ -22,6 +22,18 @@ describe('buildEventSchema', () => {
 		expect(buildEventSchema.parse(event)).toStrictEqual(event);
 	});
 
+	it('accepts an event whose outputs could not be protected', () => {
+		const event = {
+			version: 1,
+			invocationId: 'invocation-1',
+			derivation,
+			outputPaths: [storePath],
+			outputProtection: 'failed'
+		};
+
+		expect(buildEventSchema.parse(event)).toStrictEqual(event);
+	});
+
 	it.each([
 		{
 			name: 'an unknown format version',

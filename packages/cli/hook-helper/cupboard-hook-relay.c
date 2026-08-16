@@ -3,10 +3,9 @@
  * the invocation socket named by argv[1].
  *
  * A non-zero exit from a post-build hook fails the derivation's goal in
- * Nix, so every failure path here warns on standard error and exits zero;
- * the supervisor's final reconciliation republishes anything the event
- * stream lost. Reads and writes run under a poll-based inactivity timeout,
- * so a wedged supervisor cannot hold a build open beyond it.
+ * Nix, so every failure path here warns on standard error and exits zero.
+ * Reads and writes run under a poll-based inactivity timeout, so an
+ * unresponsive supervisor cannot hold a build open beyond it.
  */
 
 #include <errno.h>
@@ -33,6 +32,37 @@ static int warn(const char *detail)
 	return 0;
 }
 
+static int wait_for_listener(int sock)
+{
+	unsigned char response;
+
+	if (shutdown(sock, SHUT_WR) < 0)
+		return warn(strerror(errno));
+
+	for (;;) {
+		struct pollfd input = { .fd = sock, .events = POLLIN };
+
+		if (poll(&input, 1, inactivity_timeout_ms) <= 0)
+			return warn("the listener did not confirm the event");
+
+		ssize_t received = read(sock, &response, sizeof(response));
+
+		if (received < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+			continue;
+
+		if (received < 0)
+			return warn(strerror(errno));
+
+		if (received == 0)
+			return warn("Cupboard did not accept the completed outputs");
+
+		if (response == 1)
+			return 0;
+
+		return warn("Cupboard returned an invalid response");
+	}
+}
+
 static int relay(int sock)
 {
 	char buffer[4096];
@@ -48,9 +78,9 @@ static int relay(int sock)
 		if (received < 0)
 			return warn(strerror(errno));
 
-		/* End of input: the whole event went through. */
+		/* End of input: wait until the listener has accepted the event. */
 		if (received == 0)
-			return 0;
+			return wait_for_listener(sock);
 
 		size_t written = 0;
 

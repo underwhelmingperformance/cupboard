@@ -114,7 +114,7 @@ function harness(options: HarnessOptions = {}): Harness {
 	const commitFailuresLeft = new Set(options.failCommitsOnce);
 
 	const session: BatchSession = {
-		addTempRoot: (storePath) => {
+		protectPath: (storePath) => {
 			events.push(`root:${StorePath.basename(storePath)}`);
 
 			return Promise.resolve();
@@ -130,7 +130,7 @@ function harness(options: HarnessOptions = {}): Harness {
 		}
 	};
 	const store: BatchStore = {
-		withConnection: async (use) => {
+		withProtectedPaths: async (use) => {
 			events.push('open');
 			const result = await use(session);
 			events.push('close');
@@ -341,6 +341,19 @@ describe('BuildOutputBatcher', () => {
 			negotiateCount: events.filter((event) => event === 'negotiate').length,
 			candidates: batcher.candidates
 		}).toStrictEqual({ negotiateCount: 1, candidates: [] });
+	});
+
+	it('stops without starting a pending flush', async () => {
+		const { batcher, events } = harness();
+
+		batcher.enqueue(pathA);
+		await batcher.stop();
+		await vi.advanceTimersByTimeAsync(500);
+
+		expect({ events, candidates: batcher.candidates }).toStrictEqual({
+			events: [],
+			candidates: [pathA]
+		});
 	});
 
 	it('records a vanished path as collected and publishes the rest', async () => {

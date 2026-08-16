@@ -35,7 +35,13 @@ export const buildEventSchema = z.strictObject({
 	version: z.literal(1),
 	invocationId: invocationIdSchema,
 	derivation: derivationPathSchema,
-	outputPaths: z.array(storePathSchema).min(1)
+	outputPaths: z.array(storePathSchema).min(1),
+	/**
+	The hook could not protect these outputs from garbage collection. The
+	supervisor records them for publication after the build but does not stream
+	them.
+	*/
+	outputProtection: z.literal('failed').optional()
 });
 export type ParsedBuildEvent = z.output<typeof buildEventSchema>;
 

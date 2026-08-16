@@ -7,7 +7,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { createServer, type Server } from 'node:net';
+import { createServer, type Server, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -29,11 +29,13 @@ import {
 	runBuildPush
 } from '../../packages/cli/src/build-push/build-push.ts';
 import { renderHookScript } from '../../packages/cli/src/build-push/hook-script.ts';
+import { BuildEventListener } from '../../packages/cli/src/build-push/listener.ts';
 import { preflightBuildPush } from '../../packages/cli/src/build-push/preflight.ts';
 import type { ChildCommand } from '../../packages/cli/src/build-push/supervisor.ts';
 import { storedCacheFor } from '../../packages/cli/src/client/client.ts';
 import {
 	BuildCommandFailedError,
+	BuildEventHandlingError,
 	BuildPublicationFailedError
 } from '../../packages/cli/src/errors.ts';
 import type { PushClient } from '../../packages/cli/src/push/push.ts';
@@ -292,7 +294,10 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 
 			nixConfig = discoverNixStoreConfig();
 			daemon = createNixDaemonStoreClient(undefined, nixConfig);
-			nix = Nix.forStore(daemon, { storeDirectory: nixConfig.storeDirectory });
+			nix = Nix.forStore(daemon, {
+				storeDirectory: nixConfig.storeDirectory,
+				storeKind: 'daemon'
+			});
 			isDaemonTrusted = (await daemon.daemonTrust()) === 'trusted';
 		}, 120_000);
 
@@ -328,14 +333,24 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 					{
 						client: runClient,
 						store: nix,
-						batchStore: { withConnection: (use) => daemon.withConnection(use) },
+						batchStore: {
+							withProtectedPaths: (use) =>
+								daemon.withConnection((session) =>
+									use({
+										protectPath: (storePath) => session.addTempRoot(storePath),
+										queryPathInfo: (storePath) =>
+											session.queryPathInfo(storePath)
+									})
+								)
+						},
 						storeDirectory: nixConfig.storeDirectory,
 						invocationId,
 						environment: config.environment ?? { PATH: process.env.PATH },
 						preflight: () =>
 							preflightBuildPush({
 								config: nixConfig,
-								socketExists: (candidate) => existsSync(candidate),
+								storeKind: nix.storeKind,
+								stateDirectory: nix.stateDirectory ?? nixConfig.stateDirectory,
 								// The suite's runs never hand the hook to the daemon
 								// itself except in the real-build case, which is gated
 								// on the probed trust separately.
@@ -447,32 +462,97 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 			});
 		});
 
-		it('releases a stalled delivery at the inactivity timeout', async () => {
+		it('stops waiting when the listener does not confirm an event', async () => {
 			const socketPath = path.join(workspace, 'stall.sock');
-			const listener: Server = createServer(() => {
-				// Accept and stay silent: the helper's standard input never
-				// closes either, so only its inactivity timeout can end the run.
-			});
+			let accepted: Socket | undefined;
+			const listener: Server = createServer(
+				{ allowHalfOpen: true },
+				(connection) => {
+					accepted = connection;
+					connection.resume();
+				}
+			);
 			await listenOnSocket(listener, socketPath);
 
 			try {
 				const started = performance.now();
 				const helper = spawn(helperPath, [socketPath]);
-				// Standard input stays open and quiet.
+				let stderr = '';
+				helper.stderr.setEncoding('utf8');
+				helper.stderr.on('data', (chunk: string) => {
+					stderr += chunk;
+				});
+				helper.stdin.end('event\n');
 				const status = await waitForChildClose(helper);
 				const elapsedMs = performance.now() - started;
 
 				expect({
 					status,
+					warned: stderr !== '',
 					releasedAfterTimeout: elapsedMs >= 2500,
 					releasedPromptly: elapsedMs < 15_000
 				}).toStrictEqual({
 					status: 0,
+					warned: true,
 					releasedAfterTimeout: true,
 					releasedPromptly: true
 				});
 			} finally {
+				accepted?.destroy();
 				await closeServer(listener);
+			}
+		});
+
+		it('warns when the listener cannot handle an event', async () => {
+			const socketPath = path.join(workspace, 'rejected.sock');
+			const failure = new Error('protection failed');
+			const rejections: unknown[] = [];
+			const listener = await BuildEventListener.listen({
+				socketPath,
+				storeDirectory: nixConfig.storeDirectory,
+				onEvent: () => Promise.reject(failure),
+				onRejected: (error) => {
+					rejections.push(error);
+				}
+			});
+
+			try {
+				const helper = spawn(helperPath, [socketPath], {
+					stdio: ['pipe', 'ignore', 'pipe']
+				});
+				let stderr = '';
+				helper.stderr.setEncoding('utf8');
+				helper.stderr.on('data', (chunk: string) => {
+					stderr += chunk;
+				});
+				helper.stdin.end(
+					`${JSON.stringify({
+						version: 1,
+						invocationId: 'rejected-event',
+						derivation: fakeDrvPath,
+						outputPaths: [outA]
+					})}\n`
+				);
+				const status = await waitForChildClose(helper);
+				await listener.drain();
+				const [rejection] = rejections;
+
+				expect({
+					status,
+					warned: stderr !== '',
+					isHandlingError: rejection instanceof BuildEventHandlingError,
+					cause:
+						rejection instanceof BuildEventHandlingError
+							? rejection.cause
+							: undefined
+				}).toStrictEqual({
+					status: 0,
+					warned: true,
+					isHandlingError: true,
+					cause: failure
+				});
+			} finally {
+				await listener.close();
 			}
 		});
 
@@ -484,6 +564,10 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 
 				connection.on('data', (chunk: Buffer) => {
 					chunks.push(chunk);
+
+					if (chunk.includes(0x0a)) {
+						connection.end(Buffer.from([1]));
+					}
 				});
 				connection.once('error', event.reject);
 				connection.once('close', () => {
@@ -504,17 +588,19 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 
 			try {
 				const started = performance.now();
-				const [{ stdout }, eventLine] = await Promise.all([
+				const [{ stderr, stdout }, eventLine] = await Promise.all([
 					run('/bin/sh', ['-c', fireHook(scriptPath, [outA])]),
 					event.promise
 				]);
 				const elapsedMs = performance.now() - started;
 
 				expect({
+					stderr,
 					stdout,
 					withinBudget: elapsedMs < 2000,
 					event: JSON.parse(eventLine) as unknown
 				}).toStrictEqual({
+					stderr: '',
 					stdout: '',
 					withinBudget: true,
 					event: {

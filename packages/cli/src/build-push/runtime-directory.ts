@@ -1,4 +1,5 @@
-import { chmod, mkdir, rm } from 'node:fs/promises';
+import { chmod, mkdir, readdir, readlink, rm, symlink } from 'node:fs/promises';
+import { createConnection, createServer, type Server } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -15,6 +16,7 @@ export const darwinSunPathBytes = 104;
 export const linuxSunPathBytes = 108;
 
 export const socketFileName = 'hook.sock';
+const rootOwnerFileSuffix = '.cupboard-owner';
 
 export function sunPathBytes(platform: NodeJS.Platform): number {
 	return platform === 'darwin' ? darwinSunPathBytes : linuxSunPathBytes;
@@ -125,6 +127,190 @@ export async function createRuntimeDirectory(directory: string): Promise<void> {
 	// The process umask masks the mode `mkdir` applies, so the owner-only mode
 	// is asserted explicitly.
 	await chmod(directory, 0o700);
+}
+
+export interface RootLinkDirectory {
+	readonly directory: string;
+	close(): Promise<void>;
+}
+
+function rootOwnerFile(directory: string): string {
+	return path.join(
+		path.dirname(directory),
+		`.${path.basename(directory)}${rootOwnerFileSuffix}`
+	);
+}
+
+async function rootOwnerSocket(directory: string): Promise<string | undefined> {
+	try {
+		return await readlink(rootOwnerFile(directory));
+	} catch {
+		return undefined;
+	}
+}
+
+function socketAcceptsConnection(socketPath: string): Promise<boolean> {
+	return new Promise((resolve) => {
+		const socket = createConnection(socketPath);
+		let isFinished = false;
+		const finish = (isActive: boolean): void => {
+			if (isFinished) {
+				return;
+			}
+
+			isFinished = true;
+			socket.destroy();
+			resolve(isActive);
+		};
+
+		socket.once('connect', () => {
+			finish(true);
+		});
+		socket.once('error', () => {
+			finish(false);
+		});
+		socket.setTimeout(250, () => {
+			finish(false);
+		});
+	});
+}
+
+function listen(server: Server, socketPath: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		server.once('error', reject);
+		server.listen(socketPath, () => {
+			server.removeListener('error', reject);
+			resolve();
+		});
+	});
+}
+
+/**
+ * Creates a daemonless run's GC-root directory and records the private socket
+ * that identifies its owner. A later invocation removes a directory that has no
+ * owner record or whose recorded socket no longer accepts connections. This
+ * releases roots left by a process that could not clean up. The socket itself
+ * stays in the short invocation runtime directory so a long Nix state directory
+ * cannot exceed `sun_path`.
+ */
+export async function createRootLinkDirectory(
+	directory: string,
+	ownerSocket: string
+): Promise<RootLinkDirectory> {
+	const parent = path.dirname(directory);
+
+	await createRuntimeDirectory(parent);
+	const entries = await readdir(parent, { withFileTypes: true });
+
+	for (const entry of entries) {
+		if (!entry.isDirectory()) {
+			continue;
+		}
+
+		const candidate = path.join(parent, entry.name);
+		const candidateOwner = await rootOwnerSocket(candidate);
+
+		if (
+			candidateOwner !== undefined &&
+			(await socketAcceptsConnection(candidateOwner))
+		) {
+			continue;
+		}
+
+		await Promise.all([
+			removeInvocationRuntimeDirectory(candidate),
+			rm(rootOwnerFile(candidate), { force: true })
+		]);
+	}
+
+	const directoryNames = new Set(
+		entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name)
+	);
+	for (const entry of entries) {
+		if (
+			!entry.name.startsWith('.') ||
+			!entry.name.endsWith(rootOwnerFileSuffix)
+		) {
+			continue;
+		}
+
+		const directoryName = entry.name.slice(1, -rootOwnerFileSuffix.length);
+		if (directoryName === '' || directoryNames.has(directoryName)) {
+			continue;
+		}
+
+		const ownerFile = path.join(parent, entry.name);
+		let recordedSocket: string | undefined;
+		try {
+			recordedSocket = await readlink(ownerFile);
+		} catch {
+			recordedSocket = undefined;
+		}
+
+		if (
+			recordedSocket !== undefined &&
+			(await socketAcceptsConnection(recordedSocket))
+		) {
+			continue;
+		}
+
+		await rm(ownerFile, { force: true });
+	}
+
+	const server = createServer((socket) => {
+		socket.end();
+	});
+
+	await listen(server, ownerSocket);
+	await chmod(ownerSocket, 0o600);
+
+	const ownerFile = rootOwnerFile(directory);
+
+	try {
+		await symlink(ownerSocket, ownerFile);
+		await createRuntimeDirectory(directory);
+	} catch (error) {
+		await new Promise<void>((resolve) => {
+			server.close(() => {
+				resolve();
+			});
+		});
+		await Promise.all([
+			removeInvocationRuntimeDirectory(directory),
+			rm(ownerFile, { force: true })
+		]);
+		throw error;
+	}
+
+	let isClosed = false;
+
+	return {
+		directory,
+		async close() {
+			if (isClosed) {
+				return;
+			}
+
+			isClosed = true;
+			try {
+				await new Promise<void>((resolve, reject) => {
+					server.close((error) => {
+						if (error === undefined) {
+							resolve();
+							return;
+						}
+
+						reject(error);
+					});
+				});
+			} finally {
+				await Promise.all([
+					removeInvocationRuntimeDirectory(directory),
+					rm(ownerFile, { force: true })
+				]);
+			}
+		}
+	};
 }
 
 /**

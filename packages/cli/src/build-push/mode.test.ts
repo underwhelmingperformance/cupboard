@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-	DaemonRequiredError,
 	HookHelperMissingError,
 	MissingGrantError,
 	PostBuildHookConflictError,
@@ -12,9 +11,8 @@ import {
 import { selectBuildPushMode } from './mode.ts';
 import type { BuildPushPreflight } from './preflight.ts';
 
-const socketPath = '/nix/var/nix/daemon-socket/socket';
 const preflight: BuildPushPreflight = {
-	daemonSocketPath: socketPath,
+	outputProtection: { kind: 'daemon-temporary-roots' },
 	helperPath: '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-relay',
 	runtimePlan: {
 		directory: '/tmp/cupboard/invocation-1',
@@ -23,7 +21,7 @@ const preflight: BuildPushPreflight = {
 };
 
 describe('selectBuildPushMode', () => {
-	it('streams behind a preflight that proved its endpoints', async () => {
+	it('selects streamed mode when preflight succeeds', async () => {
 		await expect(
 			selectBuildPushMode(() => Promise.resolve(preflight))
 		).resolves.toStrictEqual({ kind: 'streamed', preflight });
@@ -31,18 +29,14 @@ describe('selectBuildPushMode', () => {
 
 	it.each([
 		{
-			name: 'a store with no daemon socket',
-			error: new DaemonRequiredError(socketPath)
-		},
-		{
-			name: 'a daemon that does not trust the client',
+			name: 'a daemon that does not trust the current user',
 			error: new UntrustedDaemonError('not-trusted')
 		},
 		{
 			name: 'a daemon whose trust is unknown',
 			error: new UntrustedDaemonError('unknown')
 		}
-	])('runs locally and reconciles behind $name', async ({ error }) => {
+	])('selects reconciled local mode for $name', async ({ error }) => {
 		await expect(
 			selectBuildPushMode(() => Promise.reject(error))
 		).resolves.toStrictEqual({ kind: 'reconciled-local', reason: error });
