@@ -1,6 +1,7 @@
 import { attest, buildSLSAProvenancePredicate } from '@actions/attest';
 import type { Reporter } from '@cupboard/reporter';
 import { backoffDelay } from '@cupboard/shared/retry';
+import type { InternalError } from '@sigstore/sign';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
@@ -31,19 +32,25 @@ export type StatementSigner = (
 ) => Promise<SignedAttestation>;
 
 /**
- * `@sigstore/sign` reports the stage that failed as a code on the error it
- * throws. These four codes come from a call to Fulcio or to a witness, and such
- * a call can fail because the service was briefly unreachable. The identity
- * codes (`IDENTITY_TOKEN_READ_ERROR`, `IDENTITY_TOKEN_PARSE_ERROR`) are left
- * out, because an OIDC token the job cannot read or decode is no more readable
- * a few seconds later.
+ * The stage that failed, as `@sigstore/sign` reports it on the error it throws.
+ * The package declares the union of codes but does not export it, so the type
+ * comes from the error class it does export.
  */
-const serviceCallCodes = new Set([
+export type SigningStageCode = InternalError['code'];
+
+/**
+ * The stage codes that come from a call to Fulcio or to a witness. Such a call
+ * can fail because the service was briefly unreachable. The identity codes
+ * (`IDENTITY_TOKEN_READ_ERROR`, `IDENTITY_TOKEN_PARSE_ERROR`) are left out,
+ * because an OIDC token the job cannot read or decode is no more readable a few
+ * seconds later.
+ */
+const serviceCallCodes = [
 	'CA_CREATE_SIGNING_CERTIFICATE_ERROR',
 	'TLOG_CREATE_ENTRY_ERROR',
 	'TLOG_FETCH_ENTRY_ERROR',
 	'TSA_CREATE_TIMESTAMP_ERROR'
-]);
+] as const satisfies readonly SigningStageCode[];
 
 /**
  * The statuses that mean the service could not serve the request this time.
@@ -60,7 +67,10 @@ const retryableSigningStatuses = new Set<number>([
 	StatusCodes.GATEWAY_TIMEOUT
 ]);
 
-const signingFailureSchema = z.object({ code: z.string(), cause: z.unknown() });
+const signingFailureSchema = z.object({
+	code: z.enum(serviceCallCodes),
+	cause: z.unknown()
+});
 
 const httpFailureSchema = z.object({ statusCode: z.number() });
 
@@ -73,7 +83,7 @@ const httpFailureSchema = z.object({ statusCode: z.number() });
 export function isTransientSigningFailure(error: unknown): boolean {
 	const failure = signingFailureSchema.safeParse(error);
 
-	if (!failure.success || !serviceCallCodes.has(failure.data.code)) {
+	if (!failure.success) {
 		return false;
 	}
 
