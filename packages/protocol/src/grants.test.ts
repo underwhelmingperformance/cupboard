@@ -231,9 +231,9 @@ describe('isOperationSatisfiedByPresentedActions', () => {
 });
 
 // `root:attach` retains paths under a name, which no other operation does, so
-// neither implication table may map it to a broader operation. The sweep pins
-// that structurally: across every operation, the only single-action set that
-// reaches a requested `root:attach` is `root:attach` itself.
+// neither implication table may map it to a broader operation. The test below
+// pins that structurally: across every operation, the only single-action set
+// that reaches a requested `root:attach` is `root:attach` itself.
 describe('root:attach implication', () => {
 	it.each<
 		[string, (actions: readonly Operation[], operation: Operation) => boolean]

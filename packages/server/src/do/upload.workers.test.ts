@@ -2830,14 +2830,14 @@ describe('upload flow', () => {
 		expectSingleUploadDecision(await negotiateUploads(token, [third]), third);
 	});
 
-	it('purges a swept narinfo from the edge cache during GC', async () => {
+	it('purges a collected narinfo from the edge cache during GC', async () => {
 		const token = await initialise();
 		const kept = uploadMetadata({
 			fileSize: narBytes.byteLength,
 			name: 'kept'
 		});
-		const swept = await commitVerifiablePath(token, 'swept', {
-			name: 'swept',
+		const collected = await commitVerifiablePath(token, 'collected', {
+			name: 'collected',
 			storePathHash: '22222222222222222222222222222222'
 		});
 
@@ -2845,11 +2845,11 @@ describe('upload flow', () => {
 		await setRoot(token, { name: 'main', targets: [kept.storePath] });
 
 		const cacheKeyUrl = new URL(
-			narInfoCachePath(fixtureTenant, swept.storePathHash),
+			narInfoCachePath(fixtureTenant, collected.storePathHash),
 			currentOrigin()
 		);
 		const cacheKey = cacheKeyUrl.href;
-		await readFetch(`/${swept.storePathHash}.narinfo`);
+		await readFetch(`/${collected.storePathHash}.narinfo`);
 
 		await expect(cachedResponseShape(cacheKey)).resolves.toStrictEqual({
 			cached: true,
@@ -2875,8 +2875,8 @@ describe('upload flow', () => {
 			fileSize: narBytes.byteLength,
 			name: 'kept'
 		});
-		const swept = await commitVerifiablePath(token, 'swept', {
-			name: 'swept',
+		const collected = await commitVerifiablePath(token, 'collected', {
+			name: 'collected',
 			storePathHash: '22222222222222222222222222222222'
 		});
 
@@ -2884,11 +2884,11 @@ describe('upload flow', () => {
 		await setRoot(token, { name: 'main', targets: [kept.storePath] });
 
 		const cacheKeyUrl = new URL(
-			narInfoCachePath(fixtureTenant, swept.storePathHash),
+			narInfoCachePath(fixtureTenant, collected.storePathHash),
 			currentOrigin()
 		);
 		const cacheKey = cacheKeyUrl.href;
-		await readFetch(`/${swept.storePathHash}.narinfo`);
+		await readFetch(`/${collected.storePathHash}.narinfo`);
 
 		await expect(cachedResponseShape(cacheKey)).resolves.toStrictEqual({
 			cached: true,
@@ -2897,10 +2897,11 @@ describe('upload flow', () => {
 
 		await runGcFromInternalOrigin();
 
-		// The sweep removed the narinfo object, but a cron-origin GC cannot purge
-		// the public edge cache, so the cached copy remains until its TTL lapses.
+		// The collection removed the narinfo object, but a cron-origin GC cannot
+		// purge the public edge cache, so the cached copy remains until its TTL
+		// lapses.
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(fixtureTenant, swept.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, collected.storePathHash))
 		).resolves.toBeNull();
 		await expect(cachedResponseShape(cacheKey)).resolves.toStrictEqual({
 			cached: true,
@@ -2908,7 +2909,7 @@ describe('upload flow', () => {
 		});
 	});
 
-	it('spares an in-flight reserved narinfo row from the reachability sweep', async () => {
+	it('spares an in-flight reserved narinfo row from collection', async () => {
 		const token = await initialise();
 		// A distinct NAR so the in-flight upload below stays a genuine upload rather
 		// than a reuse of this committed path's blob.
@@ -2916,8 +2917,9 @@ describe('upload flow', () => {
 
 		await setRoot(token, { name: 'main', targets: [kept.storePath] });
 
-		// An in-flight commit saga: its narinfo row is reserved but unmaterialised, so
-		// it is unreachable from the root and a sweep landing now would delete it.
+		// An in-flight commit saga: its narinfo row is reserved but unmaterialised,
+		// so it is unreachable from the root and a collection landing now would
+		// delete it.
 		const reserved = uploadMetadata({
 			fileSize: narBytes.byteLength,
 			name: 'reserved',
@@ -2933,7 +2935,7 @@ describe('upload flow', () => {
 
 		const result = await runGcResult();
 
-		// The sweep spared the reserved row, so the verify pass still drives the
+		// The collection spared the reserved row, so the verify pass still drives the
 		// preserved saga to servable.
 		await currentServer().runVerification();
 		const narInfo = await fetchNarInfo(reserved.storePathHash);
@@ -3202,7 +3204,7 @@ describe('upload flow', () => {
 			narInfoObjectKey(fixtureTenant, committed.storePathHash)
 		);
 
-		// A distinct pending upload left to expire: GC must sweep it.
+		// A distinct pending upload left to expire: GC must collect it.
 		const stale = uploadMetadata({
 			fileSize: narBytes.byteLength,
 			name: 'stale',
@@ -3842,7 +3844,7 @@ describe('upload flow', () => {
 		const hashB = storePathHashSchema.parse('22222222222222222222222222222222');
 		const hashC = storePathHashSchema.parse('33333333333333333333333333333333');
 
-		it('sweeps unreachable paths and keeps the rooted closure', async () => {
+		it('collects unreachable paths and keeps the rooted closure', async () => {
 			vi.setSystemTime(testBase);
 
 			const token = await initialise();
@@ -3977,7 +3979,7 @@ describe('upload flow', () => {
 			).resolves.toBeNull();
 		});
 
-		it('skips the sweep when no root is defined', async () => {
+		it('skips collection when no root is defined', async () => {
 			const token = await initialise();
 			const path = uploadMetadata({ fileSize: narBytes.byteLength });
 			await commitPath(token, path);
@@ -3996,14 +3998,14 @@ describe('upload flow', () => {
 			).resolves.not.toBeNull();
 		});
 
-		it('skips the sweep when roots resolve to nothing committed', async () => {
+		it('skips collection when roots resolve to nothing committed', async () => {
 			const token = await initialise();
 			const committed = uploadMetadata({ fileSize: narBytes.byteLength });
 			await commitPath(token, committed);
 
 			// Activation only allows a servable target, but that target can later be
-			// deleted, leaving the root resolving to nothing committed. The sweep must
-			// then skip the rest of the cache.
+			// deleted, leaving the root resolving to nothing committed. The
+			// collection must then skip the rest of the cache.
 			const ghost = await commitVerifiablePath(token, 'ghost', {
 				name: 'ghost',
 				storePathHash: '99999999999999999999999999999999'
@@ -4025,7 +4027,7 @@ describe('upload flow', () => {
 			).resolves.not.toBeNull();
 		});
 
-		it('sweeps a path freed by an expired root while a live root remains', async () => {
+		it('collects a path freed by an expired root while a live root remains', async () => {
 			vi.setSystemTime(testBase);
 
 			const token = await initialise();
@@ -4069,7 +4071,7 @@ describe('upload flow', () => {
 			).resolves.not.toBeNull();
 		});
 
-		it('sweeps a path freed by the last expired root', async () => {
+		it('collects a path freed by the last expired root', async () => {
 			vi.setSystemTime(testBase);
 
 			const token = await initialise();
@@ -4144,7 +4146,7 @@ describe('upload flow', () => {
 			).resolves.not.toBeNull();
 		});
 
-		it('defers a swept path NAR until the grace elapses', async () => {
+		it('defers a collected path NAR until the grace elapses', async () => {
 			vi.setSystemTime(testBase);
 
 			const token = await initialise();
@@ -4163,7 +4165,7 @@ describe('upload flow', () => {
 			await commitPath(token, c, cNar);
 			await setRoot(token, { name: 'main', targets: [a.storePath] });
 
-			// The per-tenant sweep removes the unreachable path c and retires its
+			// The per-tenant collection removes the unreachable path c and retires its
 			// edge; the now-unreferenced blob is reaped separately, Worker-side.
 			expect(await runGcResult()).toStrictEqual({
 				ok: true,

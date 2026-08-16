@@ -1129,7 +1129,7 @@ describe('cupboard cohort collection boundary', () => {
 		const skipText = stepText(skipStep);
 		const buildCohortText = stepText(buildCohortStep);
 		const releases = collectText.indexOf('rm -rf -- "${OUT_LINK_DIRECTORY}"');
-		const sweeps = collectText.indexOf('if ! nix store gc; then');
+		const collects = collectText.indexOf('if ! nix store gc; then');
 
 		expect({
 			followsTheAttachStep: attach !== -1 && skip > attach && collect > skip,
@@ -1153,8 +1153,8 @@ describe('cupboard cohort collection boundary', () => {
 			takesTheOutLinksFromBuildCohort: collectText.includes(
 				'${{ steps.build-cohort.outputs.out-link-directory }}'
 			),
-			releasesTheOutLinksBeforeSweeping:
-				releases !== -1 && sweeps !== -1 && releases < sweeps,
+			releasesTheOutLinksBeforeCollecting:
+				releases !== -1 && collects !== -1 && releases < collects,
 			warnsWithoutFailingTheJob: collectText.includes(
 				"echo '::warning::nix store gc failed"
 			)
@@ -1168,7 +1168,7 @@ describe('cupboard cohort collection boundary', () => {
 			skipReportsSelfHosted: true,
 			skipReportsDirectStore: true,
 			takesTheOutLinksFromBuildCohort: true,
-			releasesTheOutLinksBeforeSweeping: true,
+			releasesTheOutLinksBeforeCollecting: true,
 			warnsWithoutFailingTheJob: true
 		});
 	});

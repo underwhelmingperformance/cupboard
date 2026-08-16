@@ -49,7 +49,7 @@ export interface TenantRpcServices {
 	readonly roots: RootsService;
 	readonly deletionQueue: DeletionQueueService;
 	// Runs an interactive garbage-collection pass, serialised against the cron
-	// sweep and the alarm resume on this instance, and arms the continuation for
+	// pass and the alarm resume on this instance, and arms the continuation for
 	// any leftover work. The router supplies the cache scope and the caller's purge
 	// origin.
 	runGarbageCollection(

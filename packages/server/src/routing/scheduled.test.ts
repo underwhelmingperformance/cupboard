@@ -51,7 +51,7 @@ describe('runScheduledMaintenance', () => {
 		expect(calls).toStrictEqual(['gc', 'verify']);
 	});
 
-	it('runs the verify and then reports the failure when the sweep fails', async () => {
+	it('runs the verify and then reports the failure when the collection fails', async () => {
 		const { calls, pass, fail } = recorder();
 
 		let error: unknown;
@@ -68,7 +68,7 @@ describe('runScheduledMaintenance', () => {
 		});
 	});
 
-	it('does not mask the sweep when the verify fails', async () => {
+	it('does not mask the collection when the verify fails', async () => {
 		const { calls, pass, fail } = recorder();
 
 		let error: unknown;
@@ -85,7 +85,7 @@ describe('runScheduledMaintenance', () => {
 		});
 	});
 
-	it('surfaces the sweep failure first when both fail', async () => {
+	it('surfaces the collection failure first when both fail', async () => {
 		const { calls, fail } = recorder();
 
 		let error: unknown;

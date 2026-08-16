@@ -643,7 +643,7 @@ describe('refresh grant', () => {
 		});
 	});
 
-	it('reaps expired refresh tokens in the garbage-collection sweep', async () => {
+	it('reaps expired refresh tokens in the garbage-collection pass', async () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const firstExchange = await exchange(subjectToken);
 		const secondExchange = await exchange(subjectToken);

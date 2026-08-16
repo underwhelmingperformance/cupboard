@@ -722,7 +722,7 @@ cache.
     `inspect` / `remove [--force]`, backed by admin routes `GET /caches`,
     `PUT /caches/:cacheName` (upsert priority), and `DELETE /caches/:cacheName`
     (teardown — refuses the default cache and a non-empty cache without
-    `--force`, which sweeps the cache's paths through the durable removal
+    `--force`, which retires the cache's paths through the durable removal
     queue).
   - Reachability GC and retention roots are scoped per cache.
   - CLI: `--cache <name>` on `push`, `config`, `stats`, `root`, and `delete`.
@@ -783,14 +783,14 @@ in three increments:
       store paths. `cupboard root set/list/remove` (admin) create, replace, and
       drop channels. A set fully declares the channel (its targets and TTL,
       reset on each set), reports per-target presence, and is validated against
-      shared name and TTL bounds. Inert until the sweep below consumes it.
+      shared name and TTL bounds. Inert until the collection below consumes it.
 - [x] Reachability GC: the daily pass expires channels past their TTL, marks the
-      closure reachable from the live channels through `References`, and sweeps
-      unreachable committed paths through the row-first delete and durable
-      narinfo queue (so the NAR grace still applies). The sweep runs only when
-      at least one committed path is reachable, so neither an empty channel set
-      nor channels that point only at absent paths can collect the whole cache;
-      root expiry happens regardless.
+      closure reachable from the live channels through `References`, and
+      collects unreachable committed paths through the row-first delete and
+      durable narinfo queue (so the NAR grace still applies). The collection
+      runs only when at least one committed path is reachable, so neither an
+      empty channel set nor channels that point only at absent paths can collect
+      the whole cache; root expiry happens regardless.
 - [x] `push --root <name> [--ttl <dur>]` sets the named channel to exactly the
       pushed top-level paths (wholesale, after the uploads commit). A plain
       `push` instead records a durable implicit pin per top-level path, a root
@@ -1077,8 +1077,8 @@ pure lexer handles text formats such as narinfo before a schema validates them.
 - [x] Remove the dead `resolveBearer` refresh branch from the CLI client.
 - [x] Guard reusable-blob row cleanup with a committed-reference check when R2
       reports the blob missing.
-- [x] Purge swept narinfos from the edge cache on interactive GC via the
-      caller's public origin; the cron sweep arrives on the internal origin and
+- [x] Purge collected narinfos from the edge cache on interactive GC via the
+      caller's public origin; the cron pass arrives on the internal origin and
       cannot know the public URL, so it relies on the narinfo TTL and the
       orphan-blob grace window instead.
 - [x] Build NAR file entries from one opened file handle so size, contents, and
@@ -1100,7 +1100,7 @@ pure lexer handles text formats such as narinfo before a schema validates them.
       comma-separated ETags, and weak ETags.
 - [x] Worker integration tests cover malformed request bodies returning 400,
       corrupt stored metadata returning 500, reusable-blob cleanup protection,
-      and GC purging swept narinfo objects from the current colo.
+      and GC purging collected narinfo objects from the current colo.
 - [x] CLI tests cover schema validation of server responses.
 - [x] The e2e substitute flow still passes with the new narinfo renderer and
       multi-signature verification path.
@@ -1427,7 +1427,7 @@ writes only `quota_bytes` (admin config) — disjoint, so no conflict. Offboardi
 deletes a tenant's edge rows through that tenant's DO, never directly from the
 Worker.
 
-Per-tenant reachability GC stays in each DO. Sweeping a narinfo deletes the
+Per-tenant reachability GC stays in each DO. Collecting a narinfo deletes the
 matching `blob_ref` row and, on the tenant's last live reference to a `narHash`,
 its `tenant_blob` row and quota charge. The global reaper (Worker cron) is the
 only actor that sees all tenants' edges, so it alone arms and acts on
@@ -1472,7 +1472,7 @@ blob, and never a permanently leaked blob or quota charge.
 Commit is row-first and edge-last. (The earlier edge-first sketch was unsafe: an
 edge written before the row is, to the reaper, a live reference, so a crash
 before the row pinned the blob and its quota charge forever with nothing to
-sweep it.) Servability is the materialised R2 narinfo object — there is **no
+collect it.) Servability is the materialised R2 narinfo object — there is **no
 `servable` flag, in any step**. "Not yet servable" is encoded by the narinfo row
 existing without its R2 object, and in-flight/failed status lives in
 `pending_upload.verdict`; a stored flag is never needed. (Recorded deviation
@@ -1501,8 +1501,8 @@ at the points marked, never a flag or a pre-verify reservation:
 6. Only then does it materialise the tenant narinfo object (servable).
 
 A crash before step 6 leaves a not-servable narinfo row (and, before step 5, no
-D1 footprint at all) that the per-DO sweep reclaims; the reaper never sees an
-edge without a row. A recommit is an explicit read-then-transition: read the
+D1 footprint at all) that the per-DO collection reclaims; the reaper never sees
+an edge without a row. A recommit is an explicit read-then-transition: read the
 live narinfo; an identical-content re-push is idempotent and does not bump
 `generation_seq`; differing content advances `generation_seq`, updates +
 re-signs + re-materialises the narinfo in one DO critical section, reserves the
@@ -1537,12 +1537,12 @@ an interim single-tenant shape and must become bounded for the hosted fleet. A
 `blob_ref` edge whose narinfo row is absent is reconciled only by the owning
 DO's re-drive; the reaper never deletes edges. With row-first commit there is no
 commit-side rollback saga: a crashed commit is just a not-servable narinfo the
-sweep removes.
+collection removes.
 
 Because there is no `servable` flag in any step, "not-servable" is not a stored
 bit — the final serve predicate is simply that the materialised R2 narinfo
-object exists (plus admission/`readMode` at the edge). The sweep classifies a
-narinfo row by its R2 object, edge, and `blob_state`. A row whose R2 narinfo
+object exists (plus admission/`readMode` at the edge). The collection classifies
+a narinfo row by its R2 object, edge, and `blob_state`. A row whose R2 narinfo
 object is missing is in-flight or stranded and is resolved by the rest of the
 saga state: (a) no live edge, no `blob_state`, and no live `pending_upload`
 means a crashed pre-reservation commit — reclaim the row; (b) a live edge plus
@@ -1712,7 +1712,7 @@ sharding is part of this step, not a later optimisation. The per-tick tenant
 batch is bounded by a measured constant well under the budget, selecting the
 most-overdue active tenants by a `tenant.last_maintained_at` column and stamping
 them, so the table carries its own round-robin position (no separate cursor) and
-a full sweep completes within a day. The cron fires hourly (not daily) so the
+a full rotation completes within a day. The cron fires hourly (not daily) so the
 bucketing is meaningful and the latency bound holds; `wrangler.jsonc` `crons` is
 updated to match. The fan-out records per-tenant failures (count and last error)
 rather than swallowing them with bare `allSettled`. The global reaper gets its
@@ -1789,7 +1789,7 @@ New D1 database `CUPBOARD_DB`:
   `delete_after` is armed only by the reaper and cleared by promote and
   reuse-commit; an index on `delete_after` backs the reaper's candidate scan.
 
-- No cursor tables. The maintenance sweep's round-robin position lives on the
+- No cursor tables. The maintenance batch's round-robin position lives on the
   data it maintains — a `tenant.last_maintained_at` column (with a
   `(status, last_maintained_at)` index), oldest-first — and the reaper's demote
   scan keeps its resume position in a single KV value (`CRON_STATE`), cron
@@ -1974,17 +1974,17 @@ together.
 7. **Cron fan-out + global reaper + offboarding.** _(Done.)_ The hourly cron
    tick runs four sequential passes, each isolated so one stalling never holds
    back the next and their failures surface together as an `AggregateError`: the
-   maintenance sweep maintains a bounded batch of the most-overdue active
-   tenants ordered by a `tenant.last_maintained_at` column, stamping them so the
-   table carries its own round-robin position (no cursor table) and a full fleet
-   sweep completes over successive ticks within the subrequest budget (sharding
-   required not optional), the offboard drain, and the blob reaper's collect and
-   demote passes on their reserved budget after the fan-out. The reaper runs
-   Worker-side, the only actor that sees every tenant's edges: it arms and
-   collects unreferenced `blob_state` (self-draining, no stored position), and a
-   demote pass keyset-paginates `blob_state` by `nar_hash` from a resume
-   position held in a single KV value, heads each canonical object and, on
-   confirmed absence, de-materialises the referencing narinfos through their
+   maintenance batch maintains a bounded set of the most-overdue active tenants
+   ordered by a `tenant.last_maintained_at` column, stamping them so the table
+   carries its own round-robin position (no cursor table) and a full fleet
+   rotation completes over successive ticks within the subrequest budget
+   (sharding required not optional), the offboard drain, and the blob reaper's
+   collect and demote passes on their reserved budget after the fan-out. The
+   reaper runs Worker-side, the only actor that sees every tenant's edges: it
+   arms and collects unreferenced `blob_state` (self-draining, no stored
+   position), and a demote pass keyset-paginates `blob_state` by `nar_hash` from
+   a resume position held in a single KV value, heads each canonical object and,
+   on confirmed absence, de-materialises the referencing narinfos through their
    owning tenant Durable Objects before deleting the fact last, so the fact
    re-drives an interrupted demote; the `blob_state` delete is fenced on a
    `verified_at` the promote now advances, so a concurrent re-promote is left
@@ -1992,7 +1992,7 @@ together.
    plane marks the tenant `offboarding` (stopping writes at once and reads after
    the manifest TTL) and signals the Durable Object so an in-flight commit
    settling after the flip cannot re-materialise an object the drain removes;
-   the offboard pass, disjoint from the maintenance sweep, drains bounded
+   the offboard pass, disjoint from the maintenance batch, drains bounded
    batches of the tenant's `blob_ref`/`tenant_blob` rows **through its own
    Durable Object** (the single writer, so a stray commit can never resurrect a
    drained edge) and deletes its `t/<tenant>/` R2 objects through the Worker,
@@ -2002,11 +2002,11 @@ together.
    of its read credential and its usage row dropped, and the manifest
    republished without it, so admission no longer spins up an object for the
    slug and `ensureTenant` refuses to re-provision it. Finalisation is
-   purge-first and the drain tolerates an already-purged object, and the sweep
-   reconciles a manifest left stale by an interrupted finalisation, so the
-   lifecycle converges from any crash point. Object-lifecycle rules remain a
-   small-fleet optimisation, unused. **Step 7 is complete; the V5 build sequence
-   is done.**
+   purge-first and the drain tolerates an already-purged object, and the
+   offboard pass reconciles a manifest left stale by an interrupted
+   finalisation, so the lifecycle converges from any crash point.
+   Object-lifecycle rules remain a small-fleet optimisation, unused. **Step 7 is
+   complete; the V5 build sequence is done.**
 
 ### Verification
 
@@ -2684,7 +2684,7 @@ Each step leaves a working cache.
   signature fails.
 - A narinfo serves with no attestation; a required-but-absent attestation fails
   a gate closed; a lost CAS bundle does not affect narinfo servability.
-- Sweeping a narinfo removes its `attestation_ref` rows; the reaper collects a
+- Collecting a narinfo removes its `attestation_ref` rows; the reaper collects a
   bundle once unreferenced; a delete-then-recommit removes only old-generation
   edges.
 - A public-good-signed bundle verifies against public roots and a
@@ -3477,7 +3477,7 @@ each answering its own frame. The original analysis follows:
 
 An adversarially verified multi-agent review of the whole branch confirmed 47
 findings, all fixed on the branch before merge. The headline was a teardown
-presence-sweep statement binding 186 parameters against D1's cap of 100,
+presence-delete statement binding 186 parameters against D1's cap of 100,
 invisible locally because the test pool's SQLite allows 32,766; a node-level
 guard now builds every chunked statement at full width and pins its parameter
 count, closing the class. The other clusters: the gone-row and reconnect
@@ -3702,9 +3702,9 @@ failed verification is none of them: the path never became servable, and it
 receives no grace deadline. Every transition resolves the policy in force when
 it is processed, since policies keep no history; an expiry's deadline stays
 anchored to the nominal `expires_at` even when the collector runs late, so a
-delayed sweep cannot extend retention. Maintenance eligibility already wakes the
-tenant at its earliest root expiry, so processing normally follows the expiry
-closely.
+delayed collection cannot extend retention. Maintenance eligibility already
+wakes the tenant at its earliest root expiry, so processing normally follows the
+expiry closely.
 
 The first event that applies a matching grace policy also marks the cache as
 grace-managed, including a zero-grace event. This is a one-way safety boundary:
@@ -3717,9 +3717,9 @@ GC starts its reachability traversal from the targets of live roots and live
 grace deadlines. A grace deadline therefore keeps the same transitive closure
 that its target kept; there is no per-reference mutation when a distant root
 moves. This also covers a root that is created and removed entirely between
-sweeps: its former targets still carry the deadline established by the removal,
-so their recovery window does not depend on GC having observed the root while it
-was live.
+collections: its former targets still carry the deadline established by the
+removal, so their recovery window does not depend on GC having observed the root
+while it was live.
 
 Expired grace deadlines are removed before reachability is computed. Their
 expiry is a retention event, so a grace-managed cache may drain after its last
@@ -4105,16 +4105,16 @@ mode without waiting for retention grace.
   without modification; `upload:confirm` is named by the rule in its own right.
 - Grace tests cover no-policy legacy behaviour, configured zero, a new commit,
   monotonic extension, root replacement, explicit removal, expiry, a root
-  created and removed between GC sweeps, transitive reachability, collection
-  after grace expiry, collection from a cache with no roots, cache-prefix
-  selection, and publication of the earliest deadline to maintenance
-  eligibility. Policy-mutation tests prove that removal does not clear existing
-  deadlines, accepted publications retain captured grace, zero grace permanently
-  marks the cache grace-managed, and removal during a capped drain cannot
-  re-enable the empty-cache guard. A pending upload with no recorded grace
-  decision materialises without a deadline and marks nothing grace-managed.
-  Existing GC tests continue to prove that an expired grace deadline with a
-  large closure drains through deletion continuations.
+  created and removed between GC collections, transitive reachability,
+  collection after grace expiry, collection from a cache with no roots,
+  cache-prefix selection, and publication of the earliest deadline to
+  maintenance eligibility. Policy-mutation tests prove that removal does not
+  clear existing deadlines, accepted publications retain captured grace, zero
+  grace permanently marks the cache grace-managed, and removal during a capped
+  drain cannot re-enable the empty-cache guard. A pending upload with no
+  recorded grace decision materialises without a deadline and marks nothing
+  grace-managed. Existing GC tests continue to prove that an expired grace
+  deadline with a large closure drains through deletion continuations.
 - Action tests cover the safe `root` default and the opt-in `grace` mode,
   including the absence of the seed root and root grant in grace mode. Grace
   mode fails for an absent, zero, removed, or prefix-mismatched policy, while
@@ -4204,8 +4204,8 @@ mode without waiting for retention grace.
   correctness boundary.
 - GC deletion is capped and continued, but the existing reachability traversal
   and committed-row scan are not incremental. A very large cache can therefore
-  still make one sweep expensive; bounding those existing phases is separate
-  garbage-collector work.
+  still make one collection expensive; bounding those existing phases is
+  separate garbage-collector work.
 
 ## GitHub onboarding: setup, checks, and event presets
 
@@ -5301,10 +5301,10 @@ empty value selects the local store intentionally, never by omission.
 Automatic collection between cohorts is a different question from store
 selection, and it is currently answered by the wrong party. The
 `gc-between-cohorts` input lets the caller decide, while the workflow supports
-self-hosted runners, so a caller who does not own the estate can ask for a sweep
-of a store shared with everything else on that machine. Collecting a store is
-only safe where the store dies with the job, so the gate belongs on the runner
-being ephemeral, read from the trusted
+self-hosted runners, so a caller who does not own the estate can ask for a
+collection of a store shared with everything else on that machine. Collecting a
+store is only safe where the store dies with the job, so the gate belongs on the
+runner being ephemeral, read from the trusted
 [`runner.environment`][github-runner-context] value being `github-hosted` (the
 [GitHub-hosted job environment][github-hosted-runners] provisions a fresh store
 per job) rather than on a caller input. Self-hosted workflows and standalone CLI
@@ -5320,8 +5320,8 @@ enforces nothing.
 
 Remote stores remain an optional deployment mode. The local-store path is the
 primary design; it manages pressure with the runner's own capacity and, where
-collection is permitted, with a sweep between cohorts, but it does not promise a
-hard upper bound on evaluation, outputs or build scratch.
+collection is permitted, with a collection between cohorts, but it does not
+promise a hard upper bound on evaluation, outputs or build scratch.
 
 ### Peak disk and cohorts
 
@@ -5959,8 +5959,8 @@ Long-run lifecycle tests cover the hours-long shape of real cohorts:
 - An access token that expires mid-run is re-exchanged and the run completes;
   final reconciliation and root replacement authenticate with a current token.
 - Every committed path is attached to the run root in the gate that finalised
-  its generation, and a destination collection sweep during the build reclaims
-  none of them.
+  its generation, and a destination collection during the build reclaims none of
+  them.
 - The run root grows past `rootSetMaxTargets` without an attach failing, because
   the bound applies to a request and not to a root.
 - Attach is idempotent under retry and order-independent across batches, and an
@@ -6113,7 +6113,7 @@ published intermediates and their storage cost.
   the exit contract is the complete one.
 - Automatic collection has an unacceptable blast radius in a store the workflow
   does not own. Gating it on a caller input while self-hosted runners are
-  supported lets someone who does not own the estate sweep a shared store; the
+  supported lets someone who does not own the estate collect a shared store; the
   gate belongs on the runner being ephemeral.
 - Complete-closure mode can be intrinsically expensive. Its cost is explicit,
   reported, and never selected as a compatibility fallback. It also cannot use a

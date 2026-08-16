@@ -141,7 +141,7 @@ describe('root activation gating', () => {
 		});
 	});
 
-	it('keeps a rooted still-verifying path through a GC sweep', async () => {
+	it('keeps a rooted still-verifying path through a GC pass', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const upload = expectSingleUploadDecision(
@@ -152,7 +152,7 @@ describe('root activation gating', () => {
 		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
 		await setRoot(token, { name: 'main', targets: [metadata.storePath] });
 
-		// A sweep landing in the verify window must spare the reserved,
+		// A collection landing in the verify window must spare the reserved,
 		// still-unmaterialised row: the root reaches it and its upload is in flight.
 		await currentServer().runGarbageCollection();
 		await currentServer().runVerification();

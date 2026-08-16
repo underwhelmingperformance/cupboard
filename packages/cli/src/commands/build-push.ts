@@ -115,7 +115,7 @@ const cohortsFileSchema = z.strictObject({
  * Runs `nix store gc` at a cohort boundary when the run opted into collection.
  * `nix store gc` deletes only dead paths, so anything a local gc root keeps
  * alive survives. Paths already published are retained on the server, which a
- * local sweep does not touch. A boundary runs only after the cohort's
+ * local collection does not touch. A boundary runs only after the cohort's
  * publication has finished, so no batch temporary roots are held either.
  *
  * Collection is an optimisation: a failed collection is reported as a warning

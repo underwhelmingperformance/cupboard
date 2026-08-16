@@ -27,8 +27,8 @@ import { RetentionService } from './retention-service.ts';
 const uploadGraceMs = 15 * 60 * 1000;
 
 // The real wall-clock instant R2 stamps onto an object written now, recovered
-// past the harness's faked `Date`, so the sweep's clock can be moved relative to
-// an object's uploaded time.
+// past the harness's faked `Date`, so the collection's clock can be moved
+// relative to an object's uploaded time.
 async function realUploadInstant(): Promise<number> {
 	await env.BLOBS.put('probe/now', new Uint8Array([0]));
 	const head = await env.BLOBS.head('probe/now');
@@ -82,7 +82,7 @@ describe('garbage collection best-effort staging deletes', () => {
 		await clearBlobStorage();
 	});
 
-	it('keeps the outcome and runs the orphan sweep when a staging delete fails', async () => {
+	it('keeps the outcome and runs the orphan reclaim when a staging delete fails', async () => {
 		const realNow = await realUploadInstant();
 		await initialise();
 
@@ -93,7 +93,7 @@ describe('garbage collection best-effort staging deletes', () => {
 		const orphanKey = 'staging/orphan-push/orphan.nar.zst';
 		await env.BLOBS.put(orphanKey, new Uint8Array([1, 2, 3]));
 
-		// The sweep's clock sits past the upload grace so the orphan object ages
+		// The collection's clock sits past the upload grace so the orphan object ages
 		// into reclaimable range.
 		vi.setSystemTime(new Date(realNow + uploadGraceMs + 5 * 60 * 1000));
 

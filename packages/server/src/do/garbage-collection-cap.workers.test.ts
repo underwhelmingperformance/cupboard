@@ -30,14 +30,14 @@ import {
 
 import { chunk } from './bulk.ts';
 import { maxNarInfoDeletionsFlushedPerRun } from './deletion-queue-service.ts';
-import { maxPathsSweptPerRun } from './garbage-collection-service.ts';
+import { maxPathsCollectedPerRun } from './garbage-collection-service.ts';
 import { gcContinuationKey } from './server.ts';
 
 const repeated = (character: string): string => character.repeat(32);
 const defaultCache: StoredCache = DEFAULT_CACHE;
 const tenantWideContinuation = {
 	scope: 'tenant',
-	collectLimit: maxPathsSweptPerRun
+	collectLimit: maxPathsCollectedPerRun
 };
 
 async function continuation(): Promise<unknown> {
@@ -110,10 +110,10 @@ function scanProgress(state: DurableObjectState): ScanProgress | undefined {
 	};
 }
 
-describe('garbage collection sweep cap', () => {
+describe('garbage collection cap', () => {
 	beforeEach(resetTestServer);
 
-	it('caps each sweep and drains the remainder across alarm firings', async () => {
+	it('caps each collection and drains the remainder across alarm firings', async () => {
 		await useTestServer('gc-cap');
 		const { token } = await bootstrap();
 
@@ -153,11 +153,11 @@ describe('garbage collection sweep cap', () => {
 
 		expect(await collectableRemaining()).toBe(2);
 
-		// A cap of one path per sweep records a continuation.
+		// A cap of one path per collection records a continuation.
 		await currentServer().runGarbageCollection(1);
 
 		// The continuation drains the remaining collectable paths a chunk at a time
-		// and clears itself, so the bounded sweep still collects everything. The
+		// and clears itself, so the capped run still collects everything. The
 		// alarm is driven here because the test pool's delivery is racy to observe.
 		await vi.waitFor(async () => {
 			await fireAlarm();
@@ -165,7 +165,7 @@ describe('garbage collection sweep cap', () => {
 			expect(await continuation()).toBeUndefined();
 		});
 
-		// The retained path is never swept.
+		// The retained path is never collected.
 		expect(await narInfoGeneration(kept.storePathHash)).not.toBeUndefined();
 	});
 
@@ -474,9 +474,9 @@ describe('garbage collection narinfo-deletion continuation', () => {
 		const backlog = maxNarInfoDeletionsFlushedPerRun + 5;
 		await seedNarInfoDeletions(backlog);
 
-		// The sweep and the storage reads share one Durable Object turn, so the
+		// The collection and the storage reads share one Durable Object turn, so the
 		// armed continuation alarm cannot fire and drain the backlog before it is
-		// observed. No committed paths are swept, so the continuation is armed
+		// observed. No committed paths are collected, so the continuation is armed
 		// solely by the queued narinfo-deletion backlog the capped flush leaves.
 		const observed = await runInDurableObject(
 			currentServer(),

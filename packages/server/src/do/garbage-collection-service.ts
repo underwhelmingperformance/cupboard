@@ -44,11 +44,11 @@ import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type RetentionService } from './retention-service.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 
-// One sweep deletes at most this many committed paths before returning, so a
-// chunk holds the Durable Object's gate only for its own deletes. When a sweep
-// stops at this cap the caller resumes it on an alarm, draining the backlog
-// across chunks.
-export const maxPathsSweptPerRun = 1000;
+// One collection deletes at most this many committed paths before returning, so
+// a chunk holds the Durable Object's gate only for its own deletes. When a
+// collection stops at this cap the caller resumes it on an alarm, draining the
+// backlog across chunks.
+export const maxPathsCollectedPerRun = 1000;
 
 // Root expiry drains targets in bounded batches. The root row remains until its
 // last target has moved to grace, so a larger or historical root resumes safely
@@ -63,7 +63,7 @@ export const maxRootsExpiredPerRun = 32;
 // any key beneath it, including keys it never negotiated. The negotiated keys
 // have pending rows the reaper owns; the rest are orphans only this
 // reconciliation reclaims. Matching the upload TTL, an object younger than this
-// may still belong to an in-flight upload, so the sweep leaves it for a later
+// may still belong to an in-flight upload, so the reclaim leaves it for a later
 // pass; the bucket lifecycle rule is the lazy backstop for anything beyond the
 // per-run cap.
 const orphanStagingGraceMs = 15 * 60 * 1000;
@@ -71,9 +71,9 @@ const orphanStagingGraceMs = 15 * 60 * 1000;
 // One R2 `list` page; the platform caps a page at 1000 keys.
 const orphanListPageSize = 1000;
 
-// At most this many orphans are deleted per sweep, so a flood of staged objects
-// cannot make a single GC run unbounded. Whatever remains is reclaimed by the
-// next sweep and, failing that, the bucket lifecycle rule.
+// At most this many orphans are deleted per collection, so a flood of staged
+// objects cannot make a single GC run unbounded. Whatever remains is reclaimed
+// by the next collection and, failing that, the bucket lifecycle rule.
 const maxOrphanReclaim = 1000;
 
 export class GarbageCollectionService {
@@ -208,8 +208,9 @@ export class GarbageCollectionService {
 		rootTargetsExpired: number;
 		hasMoreExpiredRoots: boolean;
 	} {
-		// Expire TTL'd roots first, regardless of whether a sweep follows, so an
-		// expiring channel always lapses. A NULL expiry (permanent) never matches.
+		// Expire TTL'd roots first, regardless of whether a collection follows,
+		// so an expiring channel always lapses. A NULL expiry (permanent) never
+		// matches.
 		const expiredRootCandidates = this.context.db
 			.select({
 				name: schema.retentionRoots.name,
@@ -237,9 +238,10 @@ export class GarbageCollectionService {
 		);
 
 		// Each expiring root's targets receive a grace deadline before the root is
-		// removed, anchored to the root's nominal expiry rather than this sweep's
-		// time, so a late sweep cannot extend retention. The `lte` filter above
-		// cannot match a NULL expiry, so the narrowing here never drops a root.
+		// removed, anchored to the root's nominal expiry rather than this
+		// collection's time, so a late collection cannot extend retention. The
+		// `lte` filter above cannot match a NULL expiry, so the narrowing here
+		// never drops a root.
 		const expiredRootTargetCandidates =
 			expiredRootNames.length === 0
 				? []
@@ -715,7 +717,7 @@ export class GarbageCollectionService {
 		return hashes;
 	}
 
-	private advanceSweep(
+	private advanceCollect(
 		cache: StoredCache,
 		now: IsoTimestamp,
 		cursor: string,
@@ -804,7 +806,7 @@ export class GarbageCollectionService {
 		let expiryRemaining = budget;
 		let seedRemaining = budget;
 		let markRemaining = budget;
-		let sweepRemaining = budget;
+		let collectRemaining = budget;
 		let rootsExpired = 0;
 		let rootTargetsExpired = 0;
 		let pathsCollected = 0;
@@ -910,11 +912,16 @@ export class GarbageCollectionService {
 				continue;
 			}
 
-			const swept = this.advanceSweep(cache, now, scan.cursor, sweepRemaining);
-			sweepRemaining -= swept.used;
-			pathsCollected += swept.pathsCollected;
+			const collected = this.advanceCollect(
+				cache,
+				now,
+				scan.cursor,
+				collectRemaining
+			);
+			collectRemaining -= collected.used;
+			pathsCollected += collected.pathsCollected;
 
-			if (sweepRemaining === 0 || swept.complete) {
+			if (collectRemaining === 0 || collected.complete) {
 				break;
 			}
 		}
@@ -933,8 +940,8 @@ export class GarbageCollectionService {
 		};
 	}
 
-	// Read only when the sweep would otherwise skip an unreachable cache, so the
-	// common retained case costs no extra row.
+	// Read only when the collection would otherwise skip an unreachable cache, so
+	// the common retained case costs no extra row.
 	private cacheGraceManaged(cache: StoredCache): boolean {
 		const row = this.context.db
 			.select({ graceManaged: schema.caches.graceManaged })
@@ -946,9 +953,9 @@ export class GarbageCollectionService {
 	}
 
 	// The r2Keys of every live pending upload and attestation: the staging objects
-	// a row vouches for, which the reaper, not the orphan sweep, owns. Read once
-	// per sweep, and only when there is a staging object to reconcile, so an idle
-	// store with an empty staging root never scans the pending tables.
+	// a row vouches for, which the reaper, not the orphan reclaim, owns. Read once
+	// per collection, and only when there is a staging object to reconcile, so an
+	// idle store with an empty staging root never scans the pending tables.
 	private trackedStagingKeys(): ReadonlySet<string> {
 		return new Set<string>([
 			...this.context.db
@@ -975,10 +982,10 @@ export class GarbageCollectionService {
 	}
 
 	// Lists the staging root and gathers the orphan keys, stopping at the per-run
-	// cap. The tracked set is loaded lazily on the first object seen, so a sweep
+	// cap. The tracked set is loaded lazily on the first object seen, so a run
 	// over an empty staging root reads no rows. `wasCapped` is true when the cap
 	// was reached with orphans still unlisted, so the caller can record that the
-	// next sweep and the lifecycle rule finish the job.
+	// next collection and the lifecycle rule finish the job.
 	private async collectOrphanStagingKeys(
 		orphanBefore: number
 	): Promise<{ keys: R2ObjectKey[]; wasCapped: boolean }> {
@@ -1026,7 +1033,7 @@ export class GarbageCollectionService {
 		await deleteObjects(this.context.env.BLOBS, keys);
 
 		if (wasCapped) {
-			logger.warn('orphan staging sweep hit the per-run cap', {
+			logger.warn('orphan staging reclaim hit the per-run cap', {
 				reclaimed: keys.length
 			});
 		}
@@ -1034,7 +1041,7 @@ export class GarbageCollectionService {
 		return keys.length;
 	}
 
-	private tenantSweepCache(): StoredCache | undefined {
+	private tenantCollectionCache(): StoredCache | undefined {
 		const current = this.context.db
 			.select({ cache: schema.garbageCollectionTenantRuns.cache })
 			.from(schema.garbageCollectionTenantRuns)
@@ -1064,7 +1071,7 @@ export class GarbageCollectionService {
 		return first.cache;
 	}
 
-	private advanceTenantSweep(cache: StoredCache): boolean {
+	private advanceTenantCollection(cache: StoredCache): boolean {
 		const next = this.context.db
 			.select({ cache: schema.caches.name })
 			.from(schema.caches)
@@ -1094,7 +1101,7 @@ export class GarbageCollectionService {
 		logger: Logger,
 		cache?: StoredCache,
 		purgeOrigin?: RequestOrigin,
-		collectLimit: number = maxPathsSweptPerRun
+		collectLimit: number = maxPathsCollectedPerRun
 	): Promise<GarbageCollectionOutcome> {
 		const log = logger.with({
 			job: 'garbage-collection',
@@ -1103,20 +1110,22 @@ export class GarbageCollectionService {
 		const startedAt = new Date();
 		const now = isoTimestamp(startedAt);
 
-		// The staging objects the sweep reaps, deleted after the critical section
-		// closes so an R2 stall cannot hold the gate. The rows are removed under the
-		// gate; a delete that does not land leaves an object the orphan sweep
-		// reclaims, exactly as it backstops any untracked staging object.
+		// The staging objects this collection reaps, deleted after the critical
+		// section closes so an R2 stall cannot hold the gate. The rows are removed
+		// under the gate; a delete that does not land leaves an object the orphan
+		// reclaim deletes later, exactly as it backstops any untracked staging
+		// object.
 		let stagingKeys: R2ObjectKey[] = [];
 
 		const reaped = await this.context.criticalSection(async () => {
 			// A `pending` or `committing` upload is a live commit saga (awaiting
 			// background verification, or a crashed inline commit the verify pass
 			// re-drives), not abandoned, so it and its staged bytes must survive the
-			// sweep until the verify pass resolves it. The reapable states once expired
-			// are a null-verdict row still awaiting its bytes and the terminal verdicts
-			// (`servable`, `mismatch`, `over-quota`) whose status-observation window has
-			// passed; their staging bytes are already gone.
+			// collection until the verify pass resolves it. The reapable states once
+			// expired are a null-verdict row still awaiting its bytes and the
+			// terminal verdicts (`servable`, `mismatch`, `over-quota`) whose
+			// status-observation window has passed; their staging bytes are already
+			// gone.
 			const reapable = and(
 				lt(schema.pendingUploads.expiresAt, now),
 				or(
@@ -1154,8 +1163,8 @@ export class GarbageCollectionService {
 				.where(lt(schema.pendingAttestations.expiresAt, now))
 				.run();
 			// An expired refresh token nobody presented again still holds a row;
-			// the sweep reclaims it. A live session is untouched (rotation renews
-			// its expiry on every use).
+			// the collection reclaims it. A live session is untouched (rotation
+			// renews its expiry on every use).
 			this.context.db
 				.delete(schema.refreshTokens)
 				.where(lt(schema.refreshTokens.expiresAt, now))
@@ -1164,56 +1173,58 @@ export class GarbageCollectionService {
 			// A tenant-wide run advances through one registered cache at a time; a
 			// scoped run works only its named cache. The selected cache's persistent
 			// mark/frontier state bounds this pass without re-reading earlier chunks.
-			const sweepCache = cache ?? this.tenantSweepCache();
-			const swept =
-				sweepCache === undefined
+			const collectionCache = cache ?? this.tenantCollectionCache();
+			const collected =
+				collectionCache === undefined
 					? {
 							rootsExpired: 0,
 							pathsCollected: 0,
 							hasMoreExpiredRoots: false,
 							hasMoreWork: false
 						}
-					: this.collectUnreachable(sweepCache, now, collectLimit);
+					: this.collectUnreachable(collectionCache, now, collectLimit);
 			const hasMoreWork =
-				cache === undefined && sweepCache !== undefined && !swept.hasMoreWork
-					? this.advanceTenantSweep(sweepCache)
-					: swept.hasMoreWork;
+				cache === undefined &&
+				collectionCache !== undefined &&
+				!collected.hasMoreWork
+					? this.advanceTenantCollection(collectionCache)
+					: collected.hasMoreWork;
 
 			const narInfosDeleted =
 				await this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin);
 
-			// Queue retirement may delete the swept paths' grace rows. It runs under
+			// Queue retirement may delete the collected paths' grace rows. It runs under
 			// the same gate, so absorbing that revision here cannot hide an external
 			// mutation and prevents the scan from restarting on its own cleanup.
-			if (sweepCache !== undefined && swept.hasMoreWork) {
-				this.synchroniseScanRevision(sweepCache);
+			if (collectionCache !== undefined && collected.hasMoreWork) {
+				this.synchroniseScanRevision(collectionCache);
 			}
 
 			return {
 				pendingUploadsDeleted: expiredUploads.length,
 				pendingAttestationsDeleted: expiredAttestations.length,
-				rootsExpired: swept.rootsExpired,
-				pathsCollected: swept.pathsCollected,
-				hasMoreExpiredRoots: swept.hasMoreExpiredRoots,
+				rootsExpired: collected.rootsExpired,
+				pathsCollected: collected.pathsCollected,
+				hasMoreExpiredRoots: collected.hasMoreExpiredRoots,
 				hasMoreWork,
 				narInfosDeleted
 			};
 		});
 
-		// The reaped staging objects and the orphan sweep both delete R2 objects, so
-		// they run outside the critical section. The orphan sweep reconciles against
-		// the live pending rows by their keys, not a snapshot taken earlier, and
-		// skips anything within the upload grace, so a row created while it runs is
-		// never mistaken for an orphan.
+		// The reaped staging objects and the orphan reclaim both delete R2 objects,
+		// so they run outside the critical section. The orphan reclaim reconciles
+		// against the live pending rows by their keys, not a snapshot taken earlier,
+		// and skips anything within the upload grace, so a row created while it runs
+		// is never mistaken for an orphan.
 		//
 		// The rows were removed under the gate, so this delete is best-effort: a
-		// failure must not lose the outcome counters or skip the orphan sweep, which
-		// reclaims whatever did not land.
+		// failure must not lose the outcome counters or skip the orphan reclaim,
+		// which deletes whatever did not land.
 		try {
 			await deleteObjects(this.context.env.BLOBS, stagingKeys);
 		} catch (error) {
 			log.warn(
-				'staging object delete did not land; orphan sweep will reclaim',
+				'staging object delete did not land; orphan reclaim will delete it',
 				{
 					error,
 					stagedKeys: stagingKeys.length

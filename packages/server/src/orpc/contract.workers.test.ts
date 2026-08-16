@@ -265,7 +265,7 @@ describe('tenant contract round trip', () => {
 			cacheName: '_default',
 			hash: metadata.storePathHash
 		});
-		const swept = await client.gc.runAll();
+		const collected = await client.gc.runAll();
 
 		expect({
 			setTargets: set.targets.map((entry) => entry.present),
@@ -279,7 +279,7 @@ describe('tenant contract round trip', () => {
 				deleted: removedPath.deleted,
 				storePathHash: removedPath.storePathHash
 			},
-			sweptOk: swept.ok
+			collectedOk: collected.ok
 		}).toStrictEqual({
 			setTargets: [true],
 			listed: [{ name: 'github:owner/repo/main', targetCount: 1 }],
@@ -294,7 +294,7 @@ describe('tenant contract round trip', () => {
 			},
 			removedRoot: { name: 'github:owner/repo/main', removed: true },
 			removedPath: { deleted: true, storePathHash: metadata.storePathHash },
-			sweptOk: true
+			collectedOk: true
 		});
 	});
 

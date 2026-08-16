@@ -87,7 +87,7 @@ import { ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import {
 	maxExpiredRootTargetsPerRun,
-	maxPathsSweptPerRun,
+	maxPathsCollectedPerRun,
 	maxRootsExpiredPerRun
 } from './garbage-collection-service.ts';
 import {
@@ -108,7 +108,7 @@ import { VerificationService } from './verification-service.ts';
 const repeated = (character: string): string => character.repeat(32);
 const tenantWideContinuation = {
 	scope: 'tenant',
-	collectLimit: maxPathsSweptPerRun
+	collectLimit: maxPathsCollectedPerRun
 };
 
 // The pipeline over a live instance's context, as the server itself builds it.
@@ -225,7 +225,7 @@ async function runGc(): Promise<void> {
 describe('retention grace deadlines in garbage collection', () => {
 	beforeEach(resetTestServer);
 
-	it('keeps a live deadline and its transitive closure through a sweep', async () => {
+	it('keeps a live deadline and its transitive closure through a collection', async () => {
 		await useTestServer('grace-live-closure');
 		const { token } = await bootstrap();
 
@@ -556,7 +556,7 @@ describe('retention grace transitions', () => {
 		const remaining = await listRootTargets(token, 'channel');
 		const deadlines = await graceDeadlineRows(DEFAULT_CACHE);
 
-		// While the grace holds, a sweep leaves the released path alone.
+		// While the grace holds, a collection leaves the released path alone.
 		await runGc();
 		const wasHeldDuringGrace =
 			(await narInfoGeneration(released.storePathHash)) !== undefined;
@@ -630,7 +630,7 @@ describe('retention grace transitions', () => {
 		]);
 	});
 
-	it('grants deadlines to every target of a removed root, surviving a sweep', async () => {
+	it('grants deadlines to every target of a removed root, surviving a collection', async () => {
 		await useTestServer('transition-remove');
 		const { token } = await bootstrap();
 
@@ -671,7 +671,7 @@ describe('retention grace transitions', () => {
 		});
 	});
 
-	it('anchors an expiry transition at the nominal expiry, not the sweep', async () => {
+	it('anchors an expiry transition at the nominal expiry, not the collection', async () => {
 		await useTestServer('transition-expiry');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
@@ -689,8 +689,8 @@ describe('retention grace transitions', () => {
 			ttlSeconds: 3600
 		});
 
-		// The sweep runs an hour after the root's expiry; the deadline must still
-		// measure from the expiry itself.
+		// The collection runs an hour after the root's expiry; the deadline must
+		// still measure from the expiry itself.
 		vi.setSystemTime(new Date('2026-01-01T02:00:00.000Z'));
 		await runGc();
 
@@ -1253,7 +1253,7 @@ describe('retention grace at publication', () => {
 
 		await pushPath(token, path);
 
-		const beforeSweep = {
+		const beforeCollection = {
 			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
 			graceManaged: await graceManagedMarker(DEFAULT_CACHE)
 		};
@@ -1261,7 +1261,7 @@ describe('retention grace at publication', () => {
 		await runGc();
 
 		expect({
-			...beforeSweep,
+			...beforeCollection,
 			path: await narInfoGeneration(path.storePathHash)
 		}).toStrictEqual({
 			deadlines: [],
@@ -2994,7 +2994,7 @@ describe('grace transition atomicity', () => {
 	});
 
 	// Proves the same claim for a root transition specifically: writeRoot,
-	// removeRoot, and the GC expiry sweep all apply the grace transition inside
+	// removeRoot, and the GC expiry pass all apply the grace transition inside
 	// the same transaction as the retention delete that releases the targets,
 	// mirroring the shape those methods use (delete the root and its targets,
 	// then apply the transition, through one handle).

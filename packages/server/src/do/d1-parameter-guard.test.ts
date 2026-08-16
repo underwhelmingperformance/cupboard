@@ -117,7 +117,7 @@ describe('D1 bound-parameter guard', () => {
 		});
 	});
 
-	describe('teardown presence sweep (deletion-queue-service)', () => {
+	describe('teardown presence delete (deletion-queue-service)', () => {
 		it('credit UPDATE stays within 100 params at maxTeardownPresenceChunk', () => {
 			const { update } = teardownPresenceBatch(
 				database,

@@ -202,7 +202,7 @@ describe('dead reservation reclaim at commit', () => {
 			expect(didFail).toBe(true);
 
 			// The interrupted saga's upload row is reaped, exactly as the expiry
-			// sweep does, leaving the reservation with nothing live behind it.
+			// collection does, leaving the reservation with nothing live behind it.
 			instance.context.db
 				.delete(schema.pendingUploads)
 				.where(eq(schema.pendingUploads.id, doomed.uploadId))

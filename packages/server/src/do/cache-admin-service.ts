@@ -340,7 +340,7 @@ export class CacheAdminService {
 			// registry and in-flight uploads in one transaction. Removing every narinfo
 			// row atomically is what makes the teardown race-free: a path committed
 			// afterwards is a fresh row with no queued deletion, so no drain pass can
-			// sweep it, and a recommit of a torn-down path lands a new generation the
+			// remove it, and a recommit of a torn-down path lands a new generation the
 			// generation-fenced drain leaves alone. Only the R2 and edge retirement is
 			// chunked off the gate.
 			this.context.db.transaction((tx) => {

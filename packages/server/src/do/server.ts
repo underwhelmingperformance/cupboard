@@ -106,7 +106,7 @@ import { type DatabaseCost, withRequestCost } from './database-cost-meter.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import {
 	GarbageCollectionService,
-	maxPathsSweptPerRun
+	maxPathsCollectedPerRun
 } from './garbage-collection-service.ts';
 import {
 	capturedGraceFact,
@@ -254,7 +254,7 @@ function mergeGarbageCollectionContinuation(
 	pending: readonly GarbageCollectionContinuation[],
 	continuation: GarbageCollectionContinuation
 ): GarbageCollectionContinuation[] {
-	// One entry per cache is enough: repeated sweeps resume the same backlog. A
+	// One entry per cache is enough: repeated runs resume the same backlog. A
 	// tenant-wide entry covers every cache and collapses the list to one.
 	if (continuation.scope === 'tenant') {
 		return [continuation];
@@ -1385,7 +1385,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// chunk holds the gate only for its own deletes. The scope and cap are
 	// persisted so the alarm resumes the same work with the bound it started with.
 	private async collectGarbageOnce(
-		collectLimit: number = maxPathsSweptPerRun,
+		collectLimit: number = maxPathsCollectedPerRun,
 		cache?: StoredCache
 	): Promise<void> {
 		const continuation = garbageCollectionContinuation(cache, collectLimit);
@@ -1456,7 +1456,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return this.runExclusiveMaintenance('gc', () =>
 			this.runGarbagePass(
 				() => this.garbageCollection.collectGarbage(logger, cache, purgeOrigin),
-				garbageCollectionContinuation(cache, maxPathsSweptPerRun)
+				garbageCollectionContinuation(cache, maxPathsCollectedPerRun)
 			)
 		);
 	}
@@ -1665,7 +1665,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// The cron reaches maintenance through these Durable Object RPC methods
 	// rather than over HTTP, so no token is issued or exchanged. The `/gc` and
 	// `/verify` routes run the same passes for manual use. Called this way they
-	// sweep every cache and skip the edge-cache purge, leaving stale edge
+	// cover every cache and skip the edge-cache purge, leaving stale edge
 	// entries to the narinfo TTL and the orphan-blob grace window.
 	async runGarbageCollection(collectLimit?: number): Promise<void> {
 		await this.initialise();
@@ -1676,7 +1676,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	// Drives the bounded background loops the single DO alarm carries: reconciling
 	// the committed paths a recent negotiate queued, resuming a cache teardown, the
-	// verify backstop, and finally resuming a capped garbage-collection sweep. Each
+	// verify backstop, and finally resuming a capped garbage collection. Each
 	// re-arms the alarm while it has work left, so the backlogs converge across
 	// firings while the gate stays free between them. Garbage collection resumes
 	// last so a queued gc pass, which may wait behind an interactive or cron

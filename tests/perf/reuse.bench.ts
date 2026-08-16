@@ -25,7 +25,7 @@ const iterations = 3;
 const warmupIterations = 1;
 const commitRuns = iterations + warmupIterations;
 
-// The mixed sweep's pass/fail bar: brief overload under commit-path
+// The mixed benchmark's pass/fail bar: brief overload under commit-path
 // contention is expected and acceptable (the lookup shares the tenant's
 // single Durable Object with the commit path), but systematic refusal is a
 // failed gate, not a passing one. 20% is generous enough to absorb genuine
@@ -243,7 +243,7 @@ bench(
 );
 
 bench(
-	'mixed sweep with commit traffic',
+	'reuse narinfo probes, mixed with commit traffic',
 	async () => {
 		const harness = harnessOrThrow();
 		const batch = takeCommitBatch(harness);
@@ -275,7 +275,7 @@ bench(
 		]);
 
 		samples.push({
-			label: 'mixed sweep with commit traffic',
+			label: 'reuse narinfo probes, mixed with commit traffic',
 			durationMs: performance.now() - start,
 			requestCount: harness.hitHashes.length,
 			retryableRefusals
