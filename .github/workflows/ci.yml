@@ -163,7 +163,15 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # The tier's last leg publishes from a release archive rather than from
+      # this checkout's sources, so build one with the script the release
+      # workflow runs and name it for the tier. Without it that leg skips.
+      - id: archive
+        run: pnpm build:binary -- --version v0.0.0-ci --out-dir dist/pipeline
+
       - run: pnpm --config.verify-deps-before-run=false e2e:pipeline
+        env:
+          CUPBOARD_RELEASE_ARCHIVE: ${{ steps.archive.outputs.asset-path }}
 
   action-e2e:
     name: action e2e

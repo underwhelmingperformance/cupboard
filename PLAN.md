@@ -452,22 +452,36 @@ with the argv its `action.yml` builds, and every `cupboard` invocation is a real
 subprocess of an installation the fixture assembles. Authentication is a genuine
 GitHub Actions OIDC exchange: a stub runner token endpoint answers
 `ACTIONS_ID_TOKEN_REQUEST_URL` with an id_token the stub issuer signed, and the
-tenant verifies it against a trust rule pinned to that issuer. Three legs cover
-the runner's own store, an ssh-ng store in a container, and a padded flake whose
-derivation graph is past the captured-evaluation limit. The remote-store leg
-needs the container engine testcontainers drives and skips when none answers, so
-a machine without one still runs the other two legs. Lives in
-`tests/e2e/publish-pipeline.test.ts`.
+tenant verifies it against a trust rule pinned to that issuer. Four legs cover
+the runner's own store, an ssh-ng store in a container, a padded flake whose
+derivation graph is past the captured-evaluation limit, and an installation
+unpacked from a release archive. The remote-store leg needs the container engine
+testcontainers drives and skips when none answers, so a machine without one
+still runs the other three legs. Lives in `tests/e2e/publish-pipeline.test.ts`.
 
 The script is outside the `check:*` namespace, so a local `pnpm check` never
 runs it. Set `CUPBOARD_PIPELINE_E2E=1` to run it locally; CI runs it as a job of
 its own, in parallel with the other gates.
 
+The first three legs run `cupboard` from this checkout, through a shim that
+executes the CLI sources with Node, so nothing in them exercises the packaging
+itself. The release-archive leg does: it unpacks the archive `pnpm build:binary`
+writes and publishes from the packaged executable, which boots from an embedded
+bundle and resolves its post-build hook helper beside itself rather than beside
+a copied Node binary. The leg skips unless `CUPBOARD_RELEASE_ARCHIVE` names an
+archive, because building one takes minutes and needs a C compiler; CI's
+pipeline job builds it before it runs the tier.
+
 Two things stay outside this tier. Signing an attestation needs a real GitHub
 identity, so a run stops at the subjects the receipt records. A push signs its
 blob uploads for Cloudflare's S3 endpoint, which Miniflare does not serve, so a
 module hook replaces the uploader with one that PUTs the same bytes to a
-loopback bridge, which stages them in the bucket the worker verifies against.
+loopback bridge, which stages them in the bucket the worker verifies against. A
+single-file executable has no module to replace, so the release-archive leg
+publishes only store paths whose bytes the destination already holds: a seed run
+publishes the same file contents from differently named derivations, and the
+packaged run's new paths have the same NARs, so each negotiation commits against
+a blob the destination holds.
 
 Unlike Tier 3, these runs build in the runner's own store, because that is where
 a publication job builds. Each run seeds its derivations from a fresh
