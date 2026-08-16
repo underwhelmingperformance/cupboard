@@ -305,7 +305,7 @@ export const tenantRouter = os.router({
 });
 
 // Interactive GC purges this colo's edge cache via the caller's public
-// origin. The cron sweep arrives on the internal origin and cannot know the
+// origin. The cron pass arrives on the internal origin and cannot know the
 // public URL, so it skips purging and relies on the narinfo TTL and the
 // orphan-blob grace window instead.
 async function collectGarbage(

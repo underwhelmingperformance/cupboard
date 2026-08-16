@@ -34,7 +34,7 @@ const methodLineSchema = z.object({
 
 // Captures the row cost a direct, non-`fetch` entrypoint logs, by reading the
 // `method finished` line it emits while `run` executes.
-async function sweepCost(
+async function maintenancePassCost(
 	method: string,
 	run: () => Promise<unknown>
 ): Promise<{
@@ -88,12 +88,12 @@ describe('upload negotiation cost', () => {
 	});
 
 	// The reconcile reaches the soonest-expiring upload, attestation, root, grace
-	// deadline and key retirement through the sweep indexes, and decides "due now" by
-	// existence rather than a count, so its read count is the same handful whatever the
-	// backlog. This is what makes the synchronous per-mutation reconcile affordable and
-	// what these indexes buy: drop any index those lookups use and the matching scan
-	// becomes a full table scan, so the large-backlog figure climbs and the assertion
-	// fails.
+	// deadline and key retirement through the maintenance indexes, and decides "due
+	// now" by existence rather than a count, so its read count is the same handful
+	// whatever the backlog. This is what makes the synchronous per-mutation
+	// reconcile affordable and what these indexes buy: drop any index those lookups
+	// use and the matching scan becomes a full table scan, so the large-backlog
+	// figure climbs and the assertion fails.
 	it('reconciles without scanning the maintenance backlogs', async () => {
 		await initialise();
 
@@ -172,13 +172,13 @@ async function seedNarInfoDeletions(
 	});
 }
 
-// The maintenance sweeps bypass `fetch`, so each is wrapped in `metered()` to log
-// its row cost. Drop a wrapper and the cost goes dark, so assert each sweep emits
+// The maintenance passes bypass `fetch`, so each is wrapped in `metered()` to log
+// its row cost. Drop a wrapper and the cost goes dark, so assert each pass emits
 // its line.
-describe('maintenance sweep cost', () => {
+describe('maintenance pass cost', () => {
 	beforeEach(resetTestServer);
 
-	const sweeps = [
+	const passes = [
 		{
 			method: 'garbage-collection',
 			run: () => currentServer().runGarbageCollection()
@@ -211,10 +211,10 @@ describe('maintenance sweep cost', () => {
 		}
 	] as const;
 
-	it.each(sweeps)('logs a cost line for the $method sweep', async (sweep) => {
+	it.each(passes)('logs a cost line for the $method pass', async (pass) => {
 		await initialise();
 
-		const { isLogged } = await sweepCost(sweep.method, sweep.run);
+		const { isLogged } = await maintenancePassCost(pass.method, pass.run);
 
 		expect(isLogged).toBe(true);
 	});
@@ -222,17 +222,17 @@ describe('maintenance sweep cost', () => {
 	// The garbage collection deletes expired refresh tokens through the
 	// `refresh_token` expiry index. No reconcile reads that table, so this is the one
 	// guard on that index: drop it and the delete scans the whole token backlog, so
-	// the large-backlog sweep reads more than the small one.
+	// the large-backlog pass reads more than the small one.
 	it('sweeps expired refresh tokens without scanning the backlog', async () => {
 		await initialise();
 
 		await seedRefreshTokens(3, 'small');
-		const smallBacklog = await sweepCost('garbage-collection', () =>
+		const smallBacklog = await maintenancePassCost('garbage-collection', () =>
 			currentServer().runGarbageCollection()
 		);
 
 		await seedRefreshTokens(197, 'large');
-		const largeBacklog = await sweepCost('garbage-collection', () =>
+		const largeBacklog = await maintenancePassCost('garbage-collection', () =>
 			currentServer().runGarbageCollection()
 		);
 
@@ -250,13 +250,13 @@ describe('maintenance sweep cost', () => {
 
 		await seedLiveRoots(3, 'small');
 		await seedExpiredRoot('expired-small');
-		const smallBacklog = await sweepCost('garbage-collection', () =>
+		const smallBacklog = await maintenancePassCost('garbage-collection', () =>
 			currentServer().runGarbageCollection()
 		);
 
 		await seedLiveRoots(197, 'large');
 		await seedExpiredRoot('expired-large');
-		const largeBacklog = await sweepCost('garbage-collection', () =>
+		const largeBacklog = await maintenancePassCost('garbage-collection', () =>
 			currentServer().runGarbageCollection()
 		);
 
@@ -418,7 +418,7 @@ const syntheticStorePathHash = (() => {
 // Seeds a backlog in every table the reconcile reaches by index: the pending
 // uploads, plus the pending attestations, retention roots, retention grace
 // deadlines and retirable auth keys whose soonest-expiry lookups use the other
-// sweep indexes.
+// maintenance indexes.
 async function seedReconcileBacklog(
 	count: number,
 	label: string

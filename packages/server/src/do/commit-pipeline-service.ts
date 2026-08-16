@@ -1347,7 +1347,7 @@ export class CommitPipelineService {
 				// The row is held by a saga that has not yet committed. Leave the
 				// upload row intact, and request a prompt verification pass so the
 				// deferred socket is answered within its wait window rather than
-				// by the hourly sweep.
+				// by the hourly cron pass.
 				await this.requestVerification(logger, this.context.requireTenant());
 
 				return {
@@ -1418,7 +1418,7 @@ export class CommitPipelineService {
 		// captured decision) intact and let the verify pass arbitrate once the
 		// churn subsides. The prompt pass is requested here for the same reason
 		// as the no-winner deferral above: the socket only hears `deferred`, so
-		// without one its answer would wait on the hourly sweep.
+		// without one its answer would wait on the hourly cron pass.
 		await this.requestVerification(logger, this.context.requireTenant());
 
 		return {
@@ -1553,8 +1553,8 @@ export class CommitPipelineService {
 			if (pending.verdict === 'committing' || pending.verdict === 'pending') {
 				// Request a prompt verification pass so a retried socket is re-driven
 				// within its wait window. A `committing` reuse saga that crashed before
-				// settling never requested one, so the hourly sweep would otherwise be
-				// its only re-drive.
+				// settling never requested one, so the hourly cron pass would otherwise
+				// be its only re-drive.
 				await this.requestVerification(logger, this.context.requireTenant());
 
 				return {
