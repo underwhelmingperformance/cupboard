@@ -4,6 +4,7 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	type BuildSubjectV3,
 	type NixStoreUri,
@@ -11,7 +12,8 @@ import {
 } from '@cupboard/protocol/build';
 import { describe, expect, it } from 'vitest';
 
-import { publishedSubjects } from './origin.ts';
+import { publishedSubjects, republishedSubject } from './origin.ts';
+import type { ReferenceMetadata } from './reference.ts';
 
 const appPath = storePathSchema.parse(
 	'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
@@ -43,13 +45,13 @@ function info(
 function subjectsFor(
 	infos: readonly NixValidPathInfo[],
 	options: {
-		readonly built?: ReadonlyMap<string, BuildSubjectV3>;
+		readonly described?: ReadonlyMap<string, BuildSubjectV3>;
 		readonly servable?: ReadonlySet<string>;
 		readonly copiedFrom?: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 	} = {}
 ): readonly BuildSubjectV3[] {
 	return publishedSubjects({
-		built: options.built ?? new Map(),
+		described: options.described ?? new Map(),
 		infos,
 		servable:
 			options.servable ?? new Set(infos.map((pathInfo) => pathInfo.storePath)),
@@ -57,6 +59,62 @@ function subjectsFor(
 		copiedFrom: options.copiedFrom ?? new Map()
 	});
 }
+
+const metadataSource = 'https://cache.example.workers.dev/t/acme';
+
+function referenceMetadata(
+	overrides: Partial<ReferenceMetadata['upload']> = {},
+	signatures: readonly string[] = ['cache.example.org-1:c2ln']
+): ReferenceMetadata {
+	return {
+		upload: {
+			storePathHash: StorePath.hash(appPath),
+			storePath: appPath,
+			narHash: narHash.toString(),
+			narSize: 4,
+			references: [],
+			fileHash: narHash.toString(),
+			fileSize: 2,
+			compression: 'zstd',
+			...overrides
+		},
+		signatures
+	};
+}
+
+describe('republishedSubject', () => {
+	it('records the cache the metadata came from and what it reported', () => {
+		expect(
+			republishedSubject(
+				referenceMetadata({
+					deriver: '8123456789abcdfghijklmnpqrsvwxyz-app.drv',
+					ca: 'fixed:r:sha256:abc'
+				}),
+				metadataSource
+			)
+		).toStrictEqual({
+			origin: 'republished',
+			storePath: appPath,
+			narHash: narHash.digestHex(),
+			derivation: '/nix/store/8123456789abcdfghijklmnpqrsvwxyz-app.drv',
+			signatures: ['cache.example.org-1:c2ln'],
+			ca: 'fixed:r:sha256:abc',
+			metadataSource
+		});
+	});
+
+	it('omits what the served narinfo did not report', () => {
+		expect(
+			republishedSubject(referenceMetadata({}, []), metadataSource)
+		).toStrictEqual({
+			origin: 'republished',
+			storePath: appPath,
+			narHash: narHash.digestHex(),
+			signatures: [],
+			metadataSource
+		});
+	});
+});
 
 describe('publishedSubjects', () => {
 	const builtSubject: BuildSubjectV3 = {
@@ -157,7 +215,7 @@ describe('publishedSubjects', () => {
 	it('keeps the attribution subject for a path the run built', () => {
 		expect(
 			subjectsFor([info(appPath, { ultimate: true, deriver: appDrv })], {
-				built: new Map([[appPath, builtSubject]])
+				described: new Map([[appPath, builtSubject]])
 			})
 		).toStrictEqual([builtSubject]);
 	});
@@ -169,7 +227,7 @@ describe('publishedSubjects', () => {
 					info(libraryPath, { ultimate: true }),
 					info(appPath, { ultimate: true, deriver: appDrv })
 				],
-				{ built: new Map([[appPath, builtSubject]]) }
+				{ described: new Map([[appPath, builtSubject]]) }
 			)
 		).toStrictEqual([
 			builtSubject,

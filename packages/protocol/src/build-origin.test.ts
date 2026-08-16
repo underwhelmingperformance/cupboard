@@ -97,6 +97,17 @@ describe('buildOriginSubjectSchema', () => {
 			}
 		},
 		{
+			name: 'a path republished from another cache',
+			subject: {
+				origin: 'republished' as const,
+				storePath,
+				narHash,
+				derivation,
+				signatures: ['cache.example.org-1:c2ln'],
+				metadataSource: 'https://cache.example.test/t/acme'
+			}
+		},
+		{
 			name: 'a copied path with neither a signature nor a watched source',
 			subject: {
 				origin: 'copied' as const,

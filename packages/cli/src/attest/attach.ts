@@ -161,13 +161,16 @@ export async function readCommittedAttestationPathInfos(
 			dependencies
 		);
 
-		if (metadata.storePath !== storePath) {
-			throw new ReferencePathMismatchError(storePath, metadata.storePath);
+		if (metadata.upload.storePath !== storePath) {
+			throw new ReferencePathMismatchError(
+				storePath,
+				metadata.upload.storePath
+			);
 		}
 
 		return {
 			storePath,
-			narHash: NixSha256Hash.parse(metadata.narHash)
+			narHash: NixSha256Hash.parse(metadata.upload.narHash)
 		};
 	});
 }

@@ -62,7 +62,7 @@ export function buildOriginStatement(
  * One sentence describing where a subject came from. A path the run built names
  * the machine or store that built it. A path the store already held names that
  * store. A path the run copied names the stores it came from and the keys that
- * signed it.
+ * signed it. A republished path names the cache its metadata was read from.
  */
 export function describeBuildOrigin(subject: ParsedBuildOriginSubject): string {
 	if (subject.origin === 'store-held') {
@@ -71,6 +71,13 @@ export function describeBuildOrigin(subject: ParsedBuildOriginSubject): string {
 
 	if (subject.origin === 'copied') {
 		return describeCopied(subject);
+	}
+
+	if (subject.origin === 'republished') {
+		return `this run republished it from ${subject.metadataSource}${signedBy(
+			subject.signatures,
+			'that cache published no signature for it'
+		)}`;
 	}
 
 	if (subject.verification === 'local') {
@@ -94,13 +101,18 @@ function describeCopied(
 		subject.copiedFrom === undefined
 			? 'it was copied into the build store, but this run did not watch the copy'
 			: `this run copied it from ${subject.copiedFrom.join(', ')}`;
-	const names = NixSignature.parseAll(subject.signatures).map(
+	return `${source}${signedBy(subject.signatures, 'the store holds no signature for it')}`;
+}
+
+// The keys that signed a path, as a clause to append to its description. A path
+// with no signature takes the caller's clause, because which document should
+// have carried one differs by origin.
+function signedBy(signatures: readonly string[], unsigned: string): string {
+	const names = NixSignature.parseAll(signatures).map(
 		(signature) => signature.name
 	);
 
-	if (names.length === 0) {
-		return `${source}; the store holds no signature for it`;
-	}
-
-	return `${source}; signed by ${names.join(', ')}`;
+	return names.length === 0
+		? `; ${unsigned}`
+		: `; signed by ${names.join(', ')}`;
 }

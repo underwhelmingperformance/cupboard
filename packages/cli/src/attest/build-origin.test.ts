@@ -221,6 +221,31 @@ describe('describeBuildOrigin', () => {
 				'it was copied into the build store, but this run did not watch the copy; signed by cache.example.org-1'
 		},
 		{
+			name: 'a path republished from another cache',
+			subject: buildOriginSubjectSchema.parse({
+				origin: 'republished',
+				storePath: otherPath,
+				narHash: 'bb'.repeat(32),
+				derivation,
+				signatures: ['cache.example.org-1:c2ln'],
+				metadataSource: 'https://cache.example.test/t/acme'
+			}),
+			expected:
+				'this run republished it from https://cache.example.test/t/acme; signed by cache.example.org-1'
+		},
+		{
+			name: 'a republished path the source published no signature for',
+			subject: buildOriginSubjectSchema.parse({
+				origin: 'republished',
+				storePath: otherPath,
+				narHash: 'bb'.repeat(32),
+				signatures: [],
+				metadataSource: 'https://cache.example.test/t/acme'
+			}),
+			expected:
+				'this run republished it from https://cache.example.test/t/acme; that cache published no signature for it'
+		},
+		{
 			name: 'a copied path the store holds no signature for',
 			subject: copiedSubject({ signatures: [] }),
 			expected:

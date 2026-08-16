@@ -63,7 +63,7 @@ function respondingFetcher(
 }
 
 describe('fetchReferenceMetadata', () => {
-	it('maps a served narinfo into the negotiate and commit metadata', async () => {
+	it('maps a served narinfo into the upload fields and keeps its signatures', async () => {
 		const requests: RecordedRequest[] = [];
 		const metadata = await fetchReferenceMetadata(
 			{ url: new URL('https://cache.example.workers.dev/t/acme/') },
@@ -85,19 +85,22 @@ describe('fetchReferenceMetadata', () => {
 
 		expect({ metadata, requests }).toStrictEqual({
 			metadata: {
-				storePathHash,
-				storePath,
-				narHash,
-				narSize: 456,
-				references: [
-					'0123456789abcdfghijklmnpqrsvwxyz-first',
-					'1123456789abcdfghijklmnpqrsvwxyz-second'
-				],
-				deriver: 'd123456789abcdfghijklmnpqrsvwxyz-example.drv',
-				ca: 'fixed:r:sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
-				fileHash,
-				fileSize: 123,
-				compression: 'zstd'
+				upload: {
+					storePathHash,
+					storePath,
+					narHash,
+					narSize: 456,
+					references: [
+						'0123456789abcdfghijklmnpqrsvwxyz-first',
+						'1123456789abcdfghijklmnpqrsvwxyz-second'
+					],
+					deriver: 'd123456789abcdfghijklmnpqrsvwxyz-example.drv',
+					ca: 'fixed:r:sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+					fileHash,
+					fileSize: 123,
+					compression: 'zstd'
+				},
+				signatures: ['cupboard-1:signature']
 			},
 			requests: [
 				{
@@ -108,7 +111,7 @@ describe('fetchReferenceMetadata', () => {
 		});
 	});
 
-	it('omits the deriver and content address a narinfo does not carry', async () => {
+	it('omits the deriver and content address a narinfo does not carry, and records no signature', async () => {
 		const metadata = await fetchReferenceMetadata(
 			{ url: new URL('https://cache.example.workers.dev/t/acme') },
 			storePathHash,
@@ -116,17 +119,20 @@ describe('fetchReferenceMetadata', () => {
 		);
 
 		expect(metadata).toStrictEqual({
-			storePathHash,
-			storePath,
-			narHash,
-			narSize: 456,
-			references: [
-				'0123456789abcdfghijklmnpqrsvwxyz-first',
-				'1123456789abcdfghijklmnpqrsvwxyz-second'
-			],
-			fileHash,
-			fileSize: 123,
-			compression: 'zstd'
+			upload: {
+				storePathHash,
+				storePath,
+				narHash,
+				narSize: 456,
+				references: [
+					'0123456789abcdfghijklmnpqrsvwxyz-first',
+					'1123456789abcdfghijklmnpqrsvwxyz-second'
+				],
+				fileHash,
+				fileSize: 123,
+				compression: 'zstd'
+			},
+			signatures: []
 		});
 	});
 

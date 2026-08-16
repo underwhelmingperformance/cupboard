@@ -510,9 +510,20 @@ names the source of each copy Nix performs, so it reports only copies this run
 saw happen. A path that was already valid when the run started, or that some
 other store fetched where the run could not see it, has no source recorded.
 
+A path published by reference is recorded differently again, because no store
+the push can query holds it. The run read the path's metadata from another cache
+and asked the destination to serve the copy it already had, so the statement
+records that cache, the NAR hash the destination serves the path under, the
+deriver and content address that cache reported, and the signatures it published
+over the path. Those signatures are made over the path's fingerprint, which the
+destination serves unchanged, so a reader can check them against keys it trusts.
+The run transferred no bytes, so the statement says nothing about where the
+destination's copy came from.
+
 The statement claims nothing beyond that. It does not say that a build is
-reproducible, that a producer deserves trust, or that a copied path came from
-any substituter the run did not watch. Its predicate type is
+reproducible, that a producer deserves trust, that a copied path came from any
+substituter the run did not watch, or that a republished path's bytes came from
+the cache that served its metadata. Its predicate type is
 `https://github.com/underwhelmingperformance/cupboard/predicate/build-origin/v2`,
 and `cupboard attest verify --predicate-type` takes that value to verify it. One
 statement covers every path of the run, so verifying it for one path also

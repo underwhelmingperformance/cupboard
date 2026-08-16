@@ -25,20 +25,34 @@ export interface ReferenceFetchDependencies {
 }
 
 /**
+ * One reference entry's served narinfo, in the two forms a push needs it: the
+ * fields the negotiate and commit shapes carry, and the signatures the source
+ * published over the path.
+ *
+ * The upload fields carry no signature because the destination signs the
+ * narinfo it serves itself. The receipt records the source's signatures
+ * separately: they are made over the path's fingerprint, which the destination
+ * serves unchanged, so a reader can check them against keys it trusts.
+ */
+export interface ReferenceMetadata {
+	readonly upload: UploadPathMetadataFields;
+	readonly signatures: readonly string[];
+}
+
+/**
  * Reads one path's served narinfo from the reference source and maps it into
  * the metadata the negotiate and commit shapes carry: the path pair, NAR hash
  * and size, references as sorted basenames, the deriver basename and content
- * address, plus the blob's file hash, file size and compression. No signature
- * is copied: the server signs the destination narinfo itself. A response that
- * is not OK refuses with {@link NarInfoUnavailableError} carrying the status;
- * a body that does not parse as a narinfo refuses with
+ * address, plus the blob's file hash, file size and compression. A response
+ * that is not OK refuses with {@link NarInfoUnavailableError} carrying the
+ * status; a body that does not parse as a narinfo refuses with
  * {@link NarInfoUnparsableError}.
  */
 export async function fetchReferenceMetadata(
 	source: ReferenceSource,
 	storePathHash: StorePathHash,
 	dependencies: ReferenceFetchDependencies = {}
-): Promise<UploadPathMetadataFields> {
+): Promise<ReferenceMetadata> {
 	const fetcher = dependencies.fetch ?? resilientFetcher();
 	const target = new URL(
 		`${canonicalHref(source.url)}/${storePathHash}.narinfo`
@@ -55,7 +69,12 @@ export async function fetchReferenceMetadata(
 	const body = await response.text();
 
 	try {
-		return referenceMetadata(NarInfo.parse(body));
+		const narInfo = NarInfo.parse(body);
+
+		return {
+			upload: referenceMetadata(narInfo),
+			signatures: [...narInfo.sigs]
+		};
 	} catch (error) {
 		throw new NarInfoUnparsableError(target, { cause: error });
 	}

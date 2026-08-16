@@ -236,6 +236,25 @@ describe('buildReceiptSchema', () => {
 		expect(buildReceiptSchema.parse(receipt)).toStrictEqual(receipt);
 	});
 
+	it('accepts a receipt describing a path republished from another cache', () => {
+		const receipt = {
+			version: 3,
+			paths: [storePath],
+			subjects: [
+				{
+					origin: 'republished',
+					storePath,
+					narHash: 'aa'.repeat(32),
+					derivation,
+					signatures: ['cache.example.org-1:c2ln'],
+					metadataSource: 'https://cache.example.test/t/acme'
+				}
+			]
+		};
+
+		expect(buildReceiptSchema.parse(receipt)).toStrictEqual(receipt);
+	});
+
 	it('accepts a copied subject the run holds no signature for', () => {
 		const receipt = {
 			version: 3,
@@ -338,6 +357,37 @@ describe('buildReceiptSchema', () => {
 						narHash: 'aa'.repeat(32),
 						signatures: [],
 						buildStore: 'auto'
+					}
+				]
+			}
+		},
+		{
+			name: 'a republished subject with no metadata source',
+			value: {
+				version: 3,
+				paths: [storePath],
+				subjects: [
+					{
+						origin: 'republished',
+						storePath,
+						narHash: 'aa'.repeat(32),
+						signatures: []
+					}
+				]
+			}
+		},
+		{
+			name: 'a republished subject whose metadata source is not a URL',
+			value: {
+				version: 3,
+				paths: [storePath],
+				subjects: [
+					{
+						origin: 'republished',
+						storePath,
+						narHash: 'aa'.repeat(32),
+						signatures: [],
+						metadataSource: 'the other cache'
 					}
 				]
 			}
