@@ -44,6 +44,7 @@ import {
 	CupboardReportedError,
 	InvalidInputError,
 	MissingInputError,
+	RemoteCohortBuildFailedError,
 	type RemoteCohortBuildFailure
 } from '../errors.ts';
 import type { Environment } from '../inputs.ts';
@@ -2333,7 +2334,7 @@ describe('buildCohortAction', () => {
 		{ name: 'ordinary publication', requireProvenance: false },
 		{ name: 'provenance publication', requireProvenance: true }
 	])(
-		'resolves a streamed multi-output survivor after a sibling fails during $name',
+		'resolves a streamed multi-output survivor before reporting a sibling failure during $name',
 		async ({ requireProvenance }) => {
 			const dependencyPath = storePathSchema.parse(
 				'/nix/store/5123456789abcdfghijklmnpqrsvwxyz-dependency'
@@ -2355,6 +2356,7 @@ describe('buildCohortAction', () => {
 				);
 			});
 			const calls: (readonly string[])[] = [];
+			const failure = new CupboardReportedError(1, [], undefined, true);
 			const runCupboardMock = vi.fn<typeof runCupboard>(
 				async (binaryPath, arguments_, passedEnvironment) => {
 					calls.push(arguments_);
@@ -2413,32 +2415,34 @@ describe('buildCohortAction', () => {
 						})}\n`
 					);
 
-					throw new CupboardReportedError(1, [], undefined, true);
+					throw failure;
 				}
 			);
 
-			await buildCohortAction(
-				{
-					...baseOptions(),
-					cohortJson: remotelyQueryableCohortJson({
-						installables: [
-							'.#packages.x86_64-linux.app^out',
-							'.#packages.x86_64-linux.lib^out',
-							multiOutputInstallable
-						],
-						queryInstallables: [
-							appQueryInstallable,
-							libraryQueryInstallable,
-							multiOutputQueryInstallable
-						]
-					}),
-					push: 'true',
-					bestEffort: 'true',
-					...(requireProvenance && { requireProvenance: 'true' })
-				},
-				environment,
-				{ runCupboard: runCupboardMock, runNixBuild }
-			);
+			await expect(
+				buildCohortAction(
+					{
+						...baseOptions(),
+						cohortJson: remotelyQueryableCohortJson({
+							installables: [
+								'.#packages.x86_64-linux.app^out',
+								'.#packages.x86_64-linux.lib^out',
+								multiOutputInstallable
+							],
+							queryInstallables: [
+								appQueryInstallable,
+								libraryQueryInstallable,
+								multiOutputQueryInstallable
+							]
+						}),
+						push: 'true',
+						bestEffort: 'true',
+						...(requireProvenance && { requireProvenance: 'true' })
+					},
+					environment,
+					{ runCupboard: runCupboardMock, runNixBuild }
+				)
+			).rejects.toBe(failure);
 			const inputs = resolveBuildCohortInputs(baseOptions(), environment);
 			const targetPaths = await readFile(inputs.targetPathsFile, 'utf8');
 
@@ -5138,76 +5142,60 @@ describe('buildCohortAction publication', () => {
 		});
 	});
 
-	it('settles an all-failed remote cohort before tolerating target failures', async () => {
-		const run = await runPublicationFlow(
-			{
-				...baseOptions(),
-				cohortJson: remotelyQueryableCohortJson(),
-				push: 'true',
-				bestEffort: 'true',
-				store: 'ssh-ng://build@example.test'
-			},
-			[],
-			[remoteFailure()]
-		);
+	it('settles an all-failed remote cohort before reporting target failures', async () => {
 		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
-		const receipt: unknown = JSON.parse(await readFile(receiptFile, 'utf8'));
 
-		expect({
-			invocations: run.calls.map((call) => call[1]),
-			lifecycle: run.remoteConnection.lifecycle,
-			receiptLine: run.receiptLine,
-			receipt,
-			warnings: run.warnings
-		}).toStrictEqual({
-			invocations: ['plan', 'push'],
-			lifecycle: ['opened', 'closed'],
-			receiptLine: `receipt-file=${receiptFile}`,
-			receipt: {
-				version: 3,
-				paths: [],
-				subjects: [],
-				terminalFailure: {
-					kind: 'target-build',
-					failedTargets: [libraryQueryInstallable]
-				}
-			},
-			warnings: ['remote target build failed']
+		await expect(
+			runPublicationFlow(
+				{
+					...baseOptions(),
+					cohortJson: remotelyQueryableCohortJson(),
+					push: 'true',
+					bestEffort: 'true',
+					store: 'ssh-ng://build@example.test'
+				},
+				[],
+				[remoteFailure()]
+			)
+		).rejects.toBeInstanceOf(RemoteCohortBuildFailedError);
+
+		expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toStrictEqual({
+			version: 3,
+			paths: [],
+			subjects: [],
+			terminalFailure: {
+				kind: 'target-build',
+				failedTargets: [libraryQueryInstallable]
+			}
 		});
 	});
 
 	it('records exact failed targets alongside surviving remote outputs', async () => {
-		const run = await runPublicationFlow(
-			{
-				...baseOptions(),
-				cohortJson: remotelyQueryableCohortJson(),
-				push: 'true',
-				bestEffort: 'true',
-				store: 'ssh-ng://build@example.test'
-			},
-			[],
-			[remoteFailure(floatingQueryInstallable), remoteResult('substituted')],
-			[libraryQueryInstallable, floatingQueryInstallable]
-		);
 		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
-		const receipt: unknown = JSON.parse(await readFile(receiptFile, 'utf8'));
 
-		expect({
-			invocations: run.calls.map((call) => call[1]),
-			receipt,
-			warnings: run.warnings
-		}).toStrictEqual({
-			invocations: ['plan', 'push', 'push', 'push'],
-			receipt: {
-				version: 3,
-				paths: [libraryBuiltPath],
-				subjects: [],
-				terminalFailure: {
-					kind: 'target-build',
-					failedTargets: [floatingQueryInstallable]
-				}
-			},
-			warnings: ['remote target build failed']
+		await expect(
+			runPublicationFlow(
+				{
+					...baseOptions(),
+					cohortJson: remotelyQueryableCohortJson(),
+					push: 'true',
+					bestEffort: 'true',
+					store: 'ssh-ng://build@example.test'
+				},
+				[],
+				[remoteFailure(floatingQueryInstallable), remoteResult('substituted')],
+				[libraryQueryInstallable, floatingQueryInstallable]
+			)
+		).rejects.toBeInstanceOf(RemoteCohortBuildFailedError);
+
+		expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toStrictEqual({
+			version: 3,
+			paths: [libraryBuiltPath],
+			subjects: [],
+			terminalFailure: {
+				kind: 'target-build',
+				failedTargets: [floatingQueryInstallable]
+			}
 		});
 	});
 
