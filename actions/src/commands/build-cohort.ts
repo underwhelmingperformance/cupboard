@@ -796,70 +796,92 @@ export async function buildCohortAction(
 						materialiseGraph,
 						dependencies.signal
 					);
+					const publishRemoteResults: RemoteBuildPublisher = async (
+						results,
+						failures,
+						publicationPaths,
+						currentProvenanceRebuilds,
+						copiedFrom
+					) => {
+						const targetFailures = failures.filter(
+							(failure) => failure.kind === 'target'
+						);
+						const terminalFailure =
+							failures.length === 0
+								? undefined
+								: targetFailures.length === failures.length
+									? ({
+											kind: 'target-build',
+											failedTargets: targetFailures.map(
+												(failure) => failure.target
+											)
+										} as const)
+									: ({ kind: 'command' } as const);
 
-					await runNixWithResults(
-						remoteBindings.map((binding) => binding.target),
-						inputs.maxJobs,
-						inputs.store,
-						async (
-							results,
-							failures,
-							publicationPaths,
-							currentProvenanceRebuilds,
-							copiedFrom
-						) => {
-							const targetFailures = failures.filter(
-								(failure) => failure.kind === 'target'
-							);
-							const terminalFailure =
-								failures.length === 0
-									? undefined
-									: targetFailures.length === failures.length
-										? ({
-												kind: 'target-build',
-												failedTargets: targetFailures.map(
-													(failure) => failure.target
-												)
-											} as const)
-										: ({ kind: 'command' } as const);
-
-							if (inputs.allBestEffort) {
-								for (const failure of targetFailures) {
-									reporter.warn(
-										'remote target build failed',
-										`${failure.target}: ${failure.message}`
-									);
-								}
+						if (inputs.allBestEffort) {
+							for (const failure of targetFailures) {
+								reporter.warn(
+									'remote target build failed',
+									`${failure.target}: ${failure.message}`
+								);
 							}
-
-							await settleCohortBuild(
-								{
-									...context,
-									provenanceRebuilds: currentProvenanceRebuilds
-								},
-								{
-									built: buildResultOutputPaths(results),
-									publicationPaths,
-									resultBuilds: results,
-									copiedFrom,
-									incompleteRoots: incompleteRootsFor(members, failures),
-									...(terminalFailure !== undefined && {
-										terminalFailure
-									})
-								}
-							);
-						},
-						dependencies.signal,
-						{
-							derivations: remoteBindings.map((binding) => binding.derivation),
-							...(inputs.requireProvenance && { requireProvenance: true }),
-							copy: () =>
-								runCopy(
-									remoteBindings.map((binding) => binding.derivation),
-									inputs.store,
-									dependencies.signal
-								)
 						}
+
+						await settleCohortBuild(
+							{
+								...context,
+								provenanceRebuilds: currentProvenanceRebuilds
+							},
+							{
+								built: buildResultOutputPaths(results),
+								publicationPaths,
+								resultBuilds: results,
+								copiedFrom,
+								incompleteRoots: incompleteRootsFor(members, failures),
+								...(terminalFailure !== undefined && { terminalFailure })
+							}
+						);
+					};
+					const installablesByTarget = new Map(
+						remoteBindings.map((binding) => [
+							binding.target,
+							binding.installables.join(', ')
+						])
+					);
+
+					await reporter.progress(
+						'Building remote targets',
+						{ total: remoteBindings.length },
+						(bar) =>
+							runNixWithResults(
+								remoteBindings.map((binding) => binding.target),
+								inputs.maxJobs,
+								inputs.store,
+								publishRemoteResults,
+								dependencies.signal,
+								{
+									derivations: remoteBindings.map(
+										(binding) => binding.derivation
+									),
+									...(inputs.requireProvenance && {
+										requireProvenance: true
+									}),
+									onTargetStarted: (target) => {
+										reporter.info(
+											`Building remote target ${installablesByTarget.get(target) ?? target}`
+										);
+									},
+									onTargetCompleted: () => {
+										bar.advance();
+									},
+									copy: () =>
+										runCopy(
+											remoteBindings.map((binding) => binding.derivation),
+											inputs.store,
+											dependencies.signal
+										)
+								}
+							)
 					);
 				},
 				dependencies.signal
@@ -2888,26 +2910,28 @@ export function remoteBuildSetOptions(maxJobs: string): NixDaemonSetOptions {
 	return maxJobs === '' ? {} : { maxBuildJobs: Number(maxJobs) };
 }
 
+type RemoteBuildPublisher = (
+	results: readonly NixBuildResult[],
+	failures: readonly RemoteCohortBuildFailure[],
+	publicationPaths: readonly StorePathString[],
+	provenanceRebuilds: ReadonlySet<NixDerivedPathString>,
+	copiedFrom: ReadonlyMap<StorePathString, readonly string[]>
+) => Promise<void>;
+
 /**
  * Builds the queryable targets through one selected remote-store connection,
- * roots every settled output on that connection, and runs publication before
- * closing it. The keyed result is the current invocation's evidence: unlike
- * `--print-out-paths`, it distinguishes a build from substitution and a path
- * that became valid before Nix asked for it.
+ * roots every output that Nix returns on that connection, and runs publication
+ * before closing it. The keyed result is the current invocation's evidence:
+ * unlike `--print-out-paths`, it distinguishes a build from substitution and a
+ * path that became valid before Nix asked for it.
  */
 export async function runNixBuildWithResults(
 	installables: readonly NixDerivedPathString[],
 	maxJobs: string,
 	store: string,
-	publish: (
-		results: readonly NixBuildResult[],
-		failures: readonly RemoteCohortBuildFailure[],
-		publicationPaths: readonly StorePathString[],
-		provenanceRebuilds: ReadonlySet<NixDerivedPathString>,
-		copiedFrom: ReadonlyMap<StorePathString, readonly string[]>
-	) => Promise<void>,
+	publish: RemoteBuildPublisher,
 	signal?: AbortSignal,
-	preparation?: RemoteDerivationPreparation
+	options?: RemoteBuildSessionOptions
 ): Promise<void> {
 	const discovered = Nix.openForAvailability(undefined, {
 		storeUri: store,
@@ -2937,16 +2961,16 @@ export async function runNixBuildWithResults(
 					provenanceRebuilds,
 					nix.observedCopies()
 				),
-			preparation
+			options
 		)
 	);
 }
 
 /**
- * Work that must share one remote daemon session so copied derivations and
- * realised outputs stay protected until publication has finished.
+ * Options for work that shares the remote daemon session. The connection
+ * protects copied derivations and realised outputs until publication finishes.
  */
-export interface RemoteDerivationPreparation {
+export interface RemoteBuildSessionOptions {
 	/**
 	Top-level derivations whose copied closures the session must protect.
 	*/
@@ -2959,6 +2983,15 @@ export interface RemoteDerivationPreparation {
 	Require every successful target to have current-run build evidence.
 	*/
 	readonly requireProvenance?: boolean;
+	/**
+	Called before the daemon starts work on one target.
+	*/
+	readonly onTargetStarted?: (target: NixDerivedPathString) => void;
+	/**
+	Called after one target has returned a complete result and its outputs have
+	been protected from garbage collection.
+	*/
+	readonly onTargetCompleted?: (target: NixDerivedPathString) => void;
 }
 
 /**
@@ -2980,16 +3013,16 @@ export async function buildAndRootNixResults(
 		publicationPaths: readonly StorePathString[],
 		provenanceRebuilds: ReadonlySet<NixDerivedPathString>
 	) => Promise<void>,
-	preparation?: RemoteDerivationPreparation
+	options?: RemoteBuildSessionOptions
 ): Promise<void> {
-	if (preparation !== undefined) {
-		const derivations = new Set(preparation.derivations);
+	if (options !== undefined) {
+		const derivations = new Set(options.derivations);
 
 		for (const derivation of derivations) {
 			await session.addTempRoot(derivation);
 		}
 
-		await preparation.copy();
+		await options.copy();
 	}
 
 	const expectedBuilds = await predictableRemoteBuilds(session, installables);
@@ -3011,7 +3044,7 @@ export async function buildAndRootNixResults(
 
 	if (
 		queryCurrentValidity === undefined &&
-		preparation?.requireProvenance === true
+		options?.requireProvenance === true
 	) {
 		throw new Error(
 			'Provenance-required remote builds need selected-store validity queries'
@@ -3019,14 +3052,15 @@ export async function buildAndRootNixResults(
 	}
 
 	for (const build of expectedBuilds) {
+		options?.onTargetStarted?.(build.target);
+
 		const selectedOutputs = build.outputs.values().toArray();
 		const currentlyValid =
-			queryCurrentValidity !== undefined &&
-			preparation?.requireProvenance === true
+			queryCurrentValidity !== undefined && options?.requireProvenance === true
 				? new Set(await queryCurrentValidity.call(session, selectedOutputs))
 				: new Set<StorePathString>();
 		let buildMode: NixBuildMode =
-			preparation?.requireProvenance === true &&
+			options?.requireProvenance === true &&
 			selectedOutputs.every((output) => currentlyValid.has(output))
 				? 'check'
 				: 'normal';
@@ -3038,7 +3072,7 @@ export async function buildAndRootNixResults(
 
 		if (
 			buildMode === 'normal' &&
-			preparation?.requireProvenance === true &&
+			options?.requireProvenance === true &&
 			reconciliation.failures.length === 0 &&
 			reconciliation.results.some((result) => result.outcome.kind !== 'built')
 		) {
@@ -3060,6 +3094,7 @@ export async function buildAndRootNixResults(
 
 		results.push(...reconciliation.results);
 		failures.push(...reconciliation.failures);
+		options?.onTargetCompleted?.(build.target);
 	}
 
 	const outputPaths = buildResultOutputPaths(results);

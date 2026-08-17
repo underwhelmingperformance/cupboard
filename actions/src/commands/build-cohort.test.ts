@@ -78,8 +78,8 @@ import {
 	planReprobeArguments,
 	provenanceRebuildInstallables,
 	receiptAlreadyHeldPaths,
+	type RemoteBuildSessionOptions,
 	remoteBuildSetOptions,
-	type RemoteDerivationPreparation,
 	resolveBuildCohortInputs,
 	rootGroups,
 	runNixBuild,
@@ -1783,6 +1783,16 @@ describe('buildAndRootNixResults', () => {
 				events.push(`publish ${builds.map((build) => build.target).join(' ')}`);
 
 				return Promise.resolve();
+			},
+			{
+				derivations: [],
+				copy: () => Promise.resolve(),
+				onTargetStarted: (target) => {
+					events.push(`started ${target}`);
+				},
+				onTargetCompleted: (target) => {
+					events.push(`completed ${target}`);
+				}
 			}
 		);
 
@@ -1800,9 +1810,13 @@ describe('buildAndRootNixResults', () => {
 		expect(events).toStrictEqual([
 			`root ${libraryBuiltPath}`,
 			`root ${floatingBuiltPath}`,
+			`started ${floatingQueryInstallable}`,
 			`build ${floatingQueryInstallable}`,
+			`completed ${floatingQueryInstallable}`,
+			`started ${libraryQueryInstallable}`,
 			`build ${libraryQueryInstallable}`,
 			`root ${libraryBuiltPath}`,
+			`completed ${libraryQueryInstallable}`,
 			`publish ${libraryQueryInstallable}`
 		]);
 	});
@@ -2040,7 +2054,8 @@ interface RecordedProgress {
 // Records warnings and, when requested, quantitative progress.
 function recordingReporter(
 	warnings: string[],
-	progress: RecordedProgress[] = []
+	progress: RecordedProgress[] = [],
+	information: string[] = []
 ): Reporter {
 	return {
 		phase: (_label, body) => Promise.resolve(body({ fact: noop, warn: noop })),
@@ -2071,7 +2086,9 @@ function recordingReporter(
 		warn(label) {
 			warnings.push(label);
 		},
-		info: noop,
+		info(message) {
+			information.push(message);
+		},
 		success: noop,
 		step: noop,
 		error: noop
@@ -4080,6 +4097,8 @@ describe('buildCohortAction publication', () => {
 		readonly cohortsFile: unknown;
 		readonly nixBuilds: readonly (readonly unknown[])[];
 		readonly resultBuilds: readonly (readonly unknown[])[];
+		readonly progress: readonly RecordedProgress[];
+		readonly informationCount: number;
 		readonly warnings: readonly string[];
 		readonly remoteConnection: {
 			readonly signal: AbortSignal;
@@ -4111,6 +4130,8 @@ describe('buildCohortAction publication', () => {
 		const calls: (readonly string[])[] = [];
 		const lifecycle: string[] = [];
 		const sequence: string[] = [];
+		const progress: RecordedProgress[] = [];
+		const information: string[] = [];
 		const warnings: string[] = [];
 		const signal = new AbortController().signal;
 		const cupboardCalls: {
@@ -4267,7 +4288,7 @@ describe('buildCohortAction publication', () => {
 					copiedFrom: ReadonlyMap<StorePathString, readonly string[]>
 				) => Promise<void>,
 				receivedSignal?: AbortSignal,
-				preparation?: RemoteDerivationPreparation
+				buildOptions?: RemoteBuildSessionOptions
 			) => {
 				if (publish === undefined) {
 					throw new Error('Remote build publication callback is missing');
@@ -4312,7 +4333,7 @@ describe('buildCohortAction publication', () => {
 								provenanceRebuilds,
 								observedCopies
 							),
-						preparation
+						buildOptions
 					);
 				} finally {
 					isRemoteConnectionOpen = false;
@@ -4330,7 +4351,7 @@ describe('buildCohortAction publication', () => {
 			materialiseDerivationGraph: materialiseGraph,
 			runNixCopy,
 			withLocalDerivationRoots,
-			reporter: recordingReporter(warnings),
+			reporter: recordingReporter(warnings, progress, information),
 			signal
 		});
 
@@ -4359,6 +4380,8 @@ describe('buildCohortAction publication', () => {
 			resultBuilds: runNixBuildWithResults.mock.calls.map((call) =>
 				call.slice(0, 3)
 			),
+			progress,
+			informationCount: information.length,
 			warnings,
 			remoteConnection: {
 				signal,
@@ -5619,6 +5642,8 @@ describe('buildCohortAction publication', () => {
 			cohortsFile: run.cohortsFile,
 			nixBuilds: run.nixBuilds,
 			resultBuilds: run.resultBuilds,
+			progress: run.progress,
+			informationCount: run.informationCount,
 			remoteConnection: {
 				lifecycle: run.remoteConnection.lifecycle,
 				sequence: run.remoteConnection.sequence,
@@ -5679,6 +5704,8 @@ describe('buildCohortAction publication', () => {
 			resultBuilds: [
 				[[libraryQueryInstallable], '0', 'ssh-ng://build@example.test']
 			],
+			progress: [{ total: 1, completed: 1 }],
+			informationCount: 1,
 			remoteConnection: {
 				lifecycle: ['opened', 'closed'],
 				sequence: [
