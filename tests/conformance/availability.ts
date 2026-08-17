@@ -28,10 +28,10 @@ const hostStoreDirectory: StoreDirectory =
 /**
  * A closure queried through both clients and a signed cache that offers it.
  *
- * The paths are built in the host store, the only one that builds on every
- * platform. Both of them are needed: `built` is input-addressed, so a consumer
- * takes it only on a signature it trusts, where `dependency` is
- * content-addressed and Nix takes it whatever signs it.
+ * The paths are built in the host store, which is the only store that can build
+ * them on every platform. `builtPath` is input-addressed, so Nix requires a
+ * trusted signature. `dependencyPath` is content-addressed, so Nix accepts it
+ * regardless of its signature.
  */
 export interface AvailabilityFixture {
 	readonly root: string;
@@ -41,9 +41,9 @@ export interface AvailabilityFixture {
 	*/
 	readonly cacheUri: string;
 	/**
-	 * A local store containing the same closure, referenced by path. Nix reads a
-	 * path-shaped substituter as the store rooted there, which serves what its
-	 * database holds rather than documents.
+	 * A local store containing the same closure, referenced by path. For this
+	 * form of substituter, Nix reads path metadata from the store database rather
+	 * than from narinfo documents.
 	 */
 	readonly storeSubstituter: string;
 	/**
@@ -77,6 +77,13 @@ export class FixtureCommandFailedError extends Error {
 	) {
 		super(`preparing the availability fixture failed: ${command}`);
 		this.name = 'FixtureCommandFailedError';
+	}
+}
+
+export class BuiltClosurePathMissingError extends Error {
+	constructor(public readonly pathSuffix: string) {
+		super(`the built closure does not contain a path ending in ${pathSuffix}`);
+		this.name = 'BuiltClosurePathMissingError';
 	}
 }
 
@@ -292,7 +299,7 @@ function requisiteNamed(requisites: string, name: string): string {
 		.find((line) => line.endsWith(name));
 
 	if (found === undefined) {
-		throw new TypeError(`the built closure holds nothing named ${name}`);
+		throw new BuiltClosurePathMissingError(name);
 	}
 
 	return found;
@@ -335,8 +342,7 @@ async function generateUntrustedPublicKey(
 
 /**
  * A fresh store used as the realisation target. Its database is created before
- * the test so our client can read it
- * before Nix has opened the store itself.
+ * the test so our client can read it before Nix opens the store.
  */
 export async function createTargetStore(
 	oracle: Oracle,
@@ -361,17 +367,17 @@ export async function createTargetStore(
 
 export interface TargetStore {
 	/**
-	The store as a URI, which the oracle is pointed at.
+	The store URI passed to the oracle.
 	*/
 	readonly uri: string;
 	/**
-	Where its database sits, which our client is pointed at.
+	The state directory passed to our client.
 	*/
 	readonly stateDirectory: string;
 }
 
 /**
-What a consumer's signing policy trusts, as both sides are told it.
+The signing policy configured for both clients.
 */
 export interface SigningPolicy {
 	readonly requireSignatures: boolean;
@@ -546,7 +552,7 @@ export async function offeredPaths(
 }
 
 /**
-What realising a set of targets would require, as each side partitions it.
+The work required to realise a set of targets.
 */
 export interface RealisationPlan {
 	readonly willBuild: readonly string[];
@@ -574,10 +580,9 @@ const planHeadings: readonly {
  *
  * This is the suite's one dependency on the text of a Nix message. The dry run
  * has no structured output or equivalent API, so
- * the parse is written to be tolerant: it finds a heading by the words that
- * distinguish it and takes the paths indented under it, which leaves it
- * unaffected by figures in the heading or by other messages Nix writes
- * around them.
+ * the parser accepts minor wording changes. It identifies each heading by its
+ * distinguishing words and reads the indented paths below it. Figures in the
+ * heading and unrelated Nix messages do not affect the result.
  */
 export function parseRealisationPlan(stderr: string): RealisationPlan {
 	const sections: Record<keyof RealisationPlan, string[]> = {
@@ -595,8 +600,8 @@ export function parseRealisationPlan(stderr: string): RealisationPlan {
 			continue;
 		}
 
-		// A path sits indented under its heading; anything unindented is
-		// something else Nix had to say, and ends the section.
+		// An indented path belongs to the current heading. Any unindented output
+		// ends the section.
 		if (!/^\s+\S/u.test(line)) {
 			section = undefined;
 			continue;
@@ -615,7 +620,7 @@ export function parseRealisationPlan(stderr: string): RealisationPlan {
 }
 
 /**
-How each side partitions the work of realising the targets.
+The realisation plan reported by each client.
 */
 export async function realisationPlans(
 	oracle: Oracle,
@@ -691,7 +696,7 @@ export async function closureOutcome(
 }
 
 /**
-Fills a store with the fixture's closure, so a walk has one to compare.
+Copies the fixture closure into a store for the client to traverse.
 */
 export async function fillFromCache(
 	oracle: Oracle,

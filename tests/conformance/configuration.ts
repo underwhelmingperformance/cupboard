@@ -20,10 +20,10 @@ import type { Oracle } from './oracle.ts';
 /**
  * `nix config show` reports each effective setting, which allows comparison
  * with `discoverNixStoreConfig`.
- * Reading it needs the `nix-command` feature, which the isolated configuration
- * does not enable, so the invocation asks for it. That leaves
- * `experimental-features` assigned on the oracle's side alone, and no field
- * below reads it.
+ * Reading the settings requires the `nix-command` feature. The isolated
+ * configuration does not enable that feature, so the invocation enables it
+ * explicitly. This changes `experimental-features` only for the oracle, and no
+ * adapter below reads that setting.
  */
 const configShowArguments = [
 	'--extra-experimental-features',
@@ -57,7 +57,7 @@ export class InvalidConfigShowError extends Error {
 
 export class MissingSettingError extends Error {
 	constructor(public readonly setting: string) {
-		super(`nix config show reported no setting named ${setting}`);
+		super(`nix config show did not report the ${setting} setting`);
 		this.name = 'MissingSettingError';
 	}
 }
@@ -73,8 +73,15 @@ export class UnexpectedSettingShapeError extends Error {
 	}
 }
 
+export class MissingNixConfigDirectoryError extends Error {
+	constructor() {
+		super('the isolated environment did not define NIX_CONF_DIR');
+		this.name = 'MissingNixConfigDirectoryError';
+	}
+}
+
 /**
-The settings `nix config show` resolved, read in the shapes Nix gives them.
+The effective settings reported by `nix config show`, in Nix's data shapes.
 */
 export class OracleSettings {
 	static parse(output: string): OracleSettings {
@@ -141,7 +148,7 @@ export class OracleSettings {
 }
 
 /**
-A value either side resolves a configuration field to.
+A resolved configuration-field value.
 */
 type FieldValue = string | number | boolean | readonly string[] | undefined;
 
@@ -151,13 +158,13 @@ Resolved fields keyed by the names in {@link fieldAdapters}.
 export type FieldValues = Readonly<Record<string, FieldValue>>;
 
 /**
- * One resolved field and its corresponding Nix settings. The oracle reports
- * Nix's native shapes and units, so each
- * adapter states the arithmetic and the shape that brings the two together.
+ * One resolved field and its corresponding Nix settings. The oracle uses Nix's
+ * native data shapes and units. When a direct mapping is not possible,
+ * `fromOracle` converts those values to the domain field.
  */
 interface FieldAdapter {
 	/**
-	How the comparison names the field.
+	The field name used in the comparison.
 	*/
 	readonly field: string;
 	/**
@@ -176,8 +183,8 @@ function compareStrings(left: string, right: string): number {
 	return left < right ? -1 : 1;
 }
 
-// A setting Nix keeps as a set is reported sorted, so both sides are sorted
-// before they are compared and the comparison is over the members.
+// Nix sorts settings stored as sets. Sort both results before comparing their
+// members.
 function sorted(values: readonly string[]): readonly string[] {
 	return values.toSorted(compareStrings);
 }
@@ -218,8 +225,8 @@ const fieldAdapters: readonly FieldAdapter[] = [
 		fromClient: (config) => config.substitution.substituters
 	},
 	{
-		// Nix keeps this machine's own system apart from the further platforms it
-		// also runs; the domain field is every system a build could be taken by.
+		// Nix separates the local system from additional supported systems. The
+		// domain field contains every system that can perform a build.
 		field: 'building.systems',
 		settings: ['system', 'extra-platforms'],
 		fromOracle: (settings) =>
@@ -245,7 +252,7 @@ const fieldAdapters: readonly FieldAdapter[] = [
 		fromClient: (config) => config.fileTransfer.attempts
 	},
 	{
-		// Nix counts this one in seconds and the domain field holds milliseconds.
+		// Nix reports seconds, while the domain field uses milliseconds.
 		field: 'fileTransfer.stalledTransferTimeoutMs',
 		settings: ['stalled-download-timeout'],
 		fromOracle: (settings) =>
@@ -292,15 +299,14 @@ export const mappedSettings: readonly string[] = sorted([
 ]);
 
 /**
- * The settings that decide what these four groups describe: whether and from
- * where Nix substitutes, where it builds a derivation, how it attempts a
- * transfer, and whose signature it accepts, together with the store setting
- * that selects the backend. A setting listed here that the table does not map
- * is one the groups leave unmodelled, and the suite reports it.
+ * Settings relevant to the four configuration groups: substitution, builds,
+ * file transfers, and signatures. The list also includes `store`, which
+ * selects the backend. The suite reports each listed setting that has no field
+ * adapter.
  *
  * The list is written out rather than derived, because `nix config show`
- * does not classify settings by purpose. When Nix adds a relevant setting,
- * one of these domains therefore joins the list when the oracle is bumped.
+ * does not classify settings by purpose. When Nix adds a relevant setting, the
+ * oracle update must add it to this list.
  */
 export const settingsInScope: readonly string[] = sorted([
 	// Whether and from where Nix substitutes.
@@ -350,11 +356,11 @@ export const settingsInScope: readonly string[] = sorted([
 
 /**
  * Settings represented by `NixFileTransferSettings` but absent from the pinned
- * oracle. Nix renamed its retry settings after this oracle version, and the
- * fields use the later names, so the pinned Nix can confirm
- * neither their defaults nor how they are read. The suite asserts they are
- * still absent, which turns the rename landing in a bumped oracle into a
- * failure that requires an adapter update.
+ * oracle. Nix renamed its retry settings after this oracle version, while the
+ * domain fields use the newer names. The pinned Nix can therefore confirm
+ * neither their defaults nor their parsing rules. The suite verifies that the
+ * settings remain absent. A later oracle that includes them will fail until
+ * the adapter is updated.
  */
 export const settingsAbsentFromTheOracle: readonly string[] = [
 	'filetransfer-retry-delay',
@@ -377,7 +383,7 @@ export function unmodelledSettings(
 }
 
 /**
-In-scope settings the pinned oracle does not report at all.
+Settings in scope but absent from the pinned oracle.
 */
 export function settingsMissingFromOracle(
 	settings: OracleSettings
@@ -392,7 +398,7 @@ const maxMachineFileDepth = 16;
 
 export class BuildersTooDeeplyNestedError extends Error {
 	constructor(public readonly builders: string) {
-		super('a builders setting names machine files too deeply nested to follow');
+		super('the builders setting exceeds the supported machines-file depth');
 		this.name = 'BuildersTooDeeplyNestedError';
 	}
 }
@@ -401,10 +407,10 @@ export class BuildersTooDeeplyNestedError extends Error {
  * Expands a `builders` setting by replacing every `@file` entry with that
  * file's builders.
  *
- * `nix config show` reports the setting as it was written, and Nix follows the
- * indirection where it dispatches a build, so the comparison follows it here: a
- * `#` ends its line, each line splits on `;`, and an empty file
- * leaves no builders at all.
+ * `nix config show` reports the setting as written, but Nix follows each file
+ * reference when it dispatches a build. The comparison therefore expands the
+ * same references. A `#` starts a comment, semicolons separate entries, and an
+ * empty file produces an empty builder list.
  */
 function expandedBuilders(setting: string): string | undefined {
 	const entries = builderEntries(setting, 0);
@@ -452,15 +458,15 @@ One configuration for both sides to resolve.
 */
 export interface ConfigurationFixture {
 	/**
-	The contents of the `nix.conf` the fixture points Nix at.
+	The contents of the fixture's `nix.conf`.
 	*/
 	readonly nixConf: string;
 	/**
-	A machines file written beside it, for a `builders` setting naming one.
+	A machines file written beside `nix.conf` and referenced by `builders`.
 	*/
 	readonly machines?: string;
 	/**
-	Set as `NIX_CONFIG`, which both sides apply over the files.
+	The `NIX_CONFIG` value applied by both clients after the files.
 	*/
 	readonly inlineConfig?: string;
 	/**
@@ -480,7 +486,7 @@ export interface FieldComparison {
 }
 
 /**
-What both sides made of one fixture.
+The results from resolving one fixture through both clients.
 */
 export interface ResolvedFixture {
 	readonly oracleAccepted: boolean;
@@ -491,7 +497,7 @@ export interface ResolvedFixture {
 	readonly settings: OracleSettings | undefined;
 	readonly clientAccepted: boolean;
 	/**
-	What our client threw, absent when it accepted the configuration.
+	The client error, or `undefined` when it accepted the configuration.
 	*/
 	readonly clientError: unknown;
 	/**
@@ -502,8 +508,8 @@ export interface ResolvedFixture {
 	readonly fields: FieldComparison | undefined;
 }
 
-// Only the environment and the home directory move: the rest of discovery is
-// the same reading of the same filesystem the CLI does.
+// Override only the environment and home directory. The remaining discovery
+// operations use the same filesystem implementation as the CLI.
 function fixtureEnvironment(
 	home: string,
 	environment: NodeJS.ProcessEnv
@@ -516,7 +522,7 @@ function fixtureEnvironment(
 }
 
 /**
-Puts one fixture to the oracle and to our client, in one environment.
+Resolves one fixture through both clients in the same environment.
 */
 export async function resolveFixture(
 	oracle: Oracle,
@@ -578,7 +584,7 @@ async function writeFixture(
 			: path.join(home, fixture.configDirectory);
 
 	if (configDirectory === undefined) {
-		throw new TypeError('the isolated environment named no NIX_CONF_DIR');
+		throw new MissingNixConfigDirectoryError();
 	}
 
 	await mkdir(configDirectory, { recursive: true });
@@ -627,7 +633,7 @@ export class FixtureRejectedError extends Error {
 }
 
 /**
-The settings the oracle resolved, for a fixture it was meant to accept.
+The oracle settings from a fixture that was expected to be accepted.
 */
 export function settingsOf(resolved: ResolvedFixture): OracleSettings {
 	if (resolved.settings === undefined) {
@@ -659,7 +665,7 @@ function rejectedBy(
 }
 
 /**
-Whether each side took the configuration at all.
+Whether each client accepted the configuration.
 */
 export function acceptanceOf(resolved: ResolvedFixture): {
 	oracleAccepted: boolean;

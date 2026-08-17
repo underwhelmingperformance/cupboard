@@ -9,7 +9,7 @@ import {
 	type StoreEnvironment
 } from './store-resolution.ts';
 
-describeConformance('the store a configuration selects', (oracle) => {
+describeConformance('the store selected by a configuration', (oracle) => {
 	// Exact: both sides read one environment and select one store.
 	it.for<{ name: string; environment: StoreEnvironment }>([
 		{
@@ -17,21 +17,21 @@ describeConformance('the store a configuration selects', (oracle) => {
 			// directory can be written and whether a daemon is listening. Neither
 			// side is told which result to expect, so both must derive it from the
 			// same host state.
-			name: 'the store this machine implies',
+			name: "the store selected from this machine's state",
 			environment: () => ({})
 		},
 		{
-			name: 'a store setting naming the daemon',
+			name: 'a store setting set to the daemon',
 			environment: () => ({ NIX_CONFIG: 'store = daemon' })
 		},
 		{
-			name: 'a store setting naming a daemon socket',
+			name: 'a store setting set to a daemon socket',
 			environment: ({ socketPath }) => ({
 				NIX_CONFIG: `store = unix://${socketPath}`
 			})
 		},
 		{
-			name: 'a store setting naming the local store',
+			name: 'a store setting set to the local store',
 			environment: ({ storeDirectory, stateDirectory }) => ({
 				NIX_CONFIG: 'store = local',
 				NIX_STORE_DIR: storeDirectory,
@@ -46,11 +46,11 @@ describeConformance('the store a configuration selects', (oracle) => {
 			})
 		},
 		{
-			name: 'NIX_REMOTE naming the daemon',
+			name: 'NIX_REMOTE set to the daemon',
 			environment: () => ({ NIX_REMOTE: 'daemon' })
 		},
 		{
-			name: 'NIX_REMOTE set to nothing, over directories of its own',
+			name: 'an empty NIX_REMOTE with explicit store directories',
 			environment: ({ storeDirectory, stateDirectory }) => ({
 				NIX_REMOTE: '',
 				NIX_STORE_DIR: storeDirectory,
@@ -60,7 +60,7 @@ describeConformance('the store a configuration selects', (oracle) => {
 		{
 			// A store setting wins over NIX_REMOTE, which is only the value the
 			// setting starts at.
-			name: 'a store setting over a NIX_REMOTE naming something else',
+			name: 'a store setting that overrides NIX_REMOTE',
 			environment: ({ storeDirectory, stateDirectory }) => ({
 				NIX_REMOTE: 'daemon',
 				NIX_CONFIG: 'store = local',
@@ -77,30 +77,30 @@ describeConformance('the store a configuration selects', (oracle) => {
 			})
 		},
 		{
-			name: 'a local store naming its directories one at a time',
+			name: 'a local store with explicit store and state directories',
 			environment: ({ storeDirectory, stateDirectory }) => ({
 				NIX_CONFIG: `store = local?store=${storeDirectory}&state=${stateDirectory}`
 			})
 		},
 		{
 			// A path refers to a local store rooted at that path.
-			name: 'a store setting naming a path',
+			name: 'a store setting containing a path',
 			environment: ({ home }) => ({
 				NIX_CONFIG: `store = ${path.join(home, 'rooted')}`
 			})
 		},
 		{
-			name: 'a store setting naming a local URI',
+			name: 'a store setting containing a local URI',
 			environment: ({ home }) => ({
 				NIX_CONFIG: `store = local://${path.join(home, 'rooted')}`
 			})
 		}
 	])(
-		'selects the same store as nix for $name',
+		'selects the same store as Nix for $name',
 		async ({ environment }, context) => {
 			const selected = await resolvedStores(oracle, environment);
 
-			await context.annotate(selected.url, 'the store nix named');
+			await context.annotate(selected.url, 'Store URL reported by Nix');
 
 			expect({ kind: selected.client.kind }).toStrictEqual({
 				kind: selected.oracle.kind
@@ -111,7 +111,7 @@ describeConformance('the store a configuration selects', (oracle) => {
 	// The store Nix falls back to for a machine with no Nix directories of its
 	// own. Every machine this suite runs on has them, so the case reports why it
 	// could not be exercised rather than passing.
-	it('selects the same store as nix where nix falls back to one', async (context) => {
+	it('selects the same fallback store as Nix', async (context) => {
 		const unavailable = chrootFallbackUnavailable(oracle.system);
 
 		if (unavailable !== undefined) {
@@ -122,7 +122,7 @@ describeConformance('the store a configuration selects', (oracle) => {
 			NIX_DATA_HOME: dataHome
 		}));
 
-		await context.annotate(selected.url, 'the store nix named');
+		await context.annotate(selected.url, 'Store URL reported by Nix');
 
 		expect({ kind: selected.client.kind }).toStrictEqual({
 			kind: selected.oracle.kind

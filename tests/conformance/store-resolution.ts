@@ -18,13 +18,13 @@ import type { Oracle } from './oracle.ts';
 import type { NixSystem } from '#nix-systems';
 
 /**
- * `nix store info` reports the store a configuration resolved to, where
+ * `nix store info` reports the store selected by a configuration, while
  * `nix config show` reports the `store` setting as written. That resolution is
  * the result of `resolveStoreBackend`, so it provides the oracle value.
  *
  * Nix prints the resolved URL before it connects to the store, so a
- * configuration naming a daemon socket that is not there still says which
- * store was selected. Ignore the status because selection does not require a
+ * configuration that refers to a missing daemon socket still reports the
+ * selected store. Ignore the status because selection does not require a
  * successful connection.
  */
 const storeInfoArguments = [
@@ -42,7 +42,7 @@ export class StoreNotResolvedError extends Error {
 		public readonly stdout: string,
 		public readonly stderr: string
 	) {
-		super('nix store info named no store');
+		super('nix store info did not report a store');
 		this.name = 'StoreNotResolvedError';
 	}
 }
@@ -62,8 +62,8 @@ export interface ResolvedStore {
  * The comparison therefore uses only the selected backend.
  */
 function resolvedStoreOfUrl(url: string): ResolvedStore {
-	// Nix writes the daemon at its usual socket as `daemon` and one at any
-	// other socket as the `unix://` URL naming it. Both are the daemon store.
+	// Nix reports its usual daemon socket as `daemon` and any other socket as a
+	// `unix://` URL. Both values select the daemon store.
 	if (url === 'daemon' || url.startsWith('unix://')) {
 		return { kind: 'daemon' };
 	}
@@ -91,7 +91,7 @@ export interface FixtureDirectories {
 	*/
 	readonly socketPath: string;
 	/**
-	A data home for the store Nix falls back to where one is called for.
+	An empty data home for testing Nix's per-user fallback store.
 	*/
 	readonly dataHome: string;
 }
@@ -104,7 +104,7 @@ export type StoreEnvironment = (
 ) => Readonly<Record<string, string>>;
 
 /**
-Puts one environment to both sides and reports the store each selected.
+Applies one environment to both clients and reports the selected stores.
 */
 export async function resolvedStores(
 	oracle: Oracle,
@@ -184,7 +184,7 @@ export function chrootFallbackUnavailable(
 	system: NixSystem
 ): string | undefined {
 	if (!system.endsWith('-linux')) {
-		return 'the store Nix falls back to is compiled in for Linux alone';
+		return 'Nix compiles the per-user fallback store only on Linux';
 	}
 
 	const stateDirectory = '/nix/var/nix';

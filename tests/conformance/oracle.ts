@@ -72,9 +72,9 @@ export class Oracle {
 	}
 
 	/**
-	 * Runs one of the other tools this same `nix` ships, such as `nix-store`.
-	 * These tools sit beside the resolved binary, which avoids using another Nix
-	 * installation from `PATH`.
+	 * Runs a sibling tool from the resolved Nix installation, such as
+	 * `nix-store`. Resolving the tool beside the `nix` binary avoids using a
+	 * different Nix installation from `PATH`.
 	 */
 	runTool(
 		tool: string,

@@ -21,7 +21,7 @@ The on-disk cache fixture opened by both clients.
 */
 export type CacheFixture = {
 	/**
-	The store URI parameters both sides configure the cache with.
+	The store URI parameters configured for both clients.
 	*/
 	readonly parameters?: string;
 } & (
@@ -33,7 +33,7 @@ export type CacheFixture = {
 			readonly cacheInfo?: string;
 	  }
 	/**
-	A store URI naming a regular file, which has no cache under it at all.
+	A store URI that refers to a regular file rather than a cache directory.
 	*/
 	| { readonly kind: 'file' }
 );
@@ -49,13 +49,13 @@ export interface CacheOutcome {
 		readonly opened: boolean;
 		readonly offer: OfferFields | undefined;
 		/**
-		Why nix refused to open it, for a case that reports the refusal.
+		Nix's error output when it refused to open the cache.
 		*/
 		readonly stderr: string;
 	};
 	readonly client: {
 		/**
-		The cache as our client was configured with it.
+		The cache URI passed to our client.
 		*/
 		readonly uri: string;
 		readonly offer: OfferFields | undefined;
@@ -87,12 +87,12 @@ async function writeCache(
 }
 
 /**
- * Presents equivalent cache directories to both clients and queries the fixture path.
+ * Presents equivalent cache directories to both clients and queries the
+ * fixture path.
  *
- * Each side reads its own copy of the fixture, because opening a directory
- * cache writes into it: nix gives one serving no `nix-cache-info` the document
- * it lacks, so a shared directory would let our client read what Nix wrote rather
- * than what the case set up.
+ * Each client receives a separate copy because Nix writes a default
+ * `nix-cache-info` when a cache does not provide one. With a shared directory,
+ * our client could read the file written by Nix instead of the fixture state.
  */
 export async function openCache(
 	oracle: Oracle,

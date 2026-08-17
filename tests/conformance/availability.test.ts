@@ -22,11 +22,18 @@ import { describeConformance } from './oracle.ts';
  */
 const prepared: { fixture?: AvailabilityFixture } = {};
 
+class AvailabilityFixtureNotPreparedError extends Error {
+	constructor() {
+		super('the availability fixture was not prepared');
+		this.name = 'AvailabilityFixtureNotPreparedError';
+	}
+}
+
 function fixture(): AvailabilityFixture {
 	const current = prepared.fixture;
 
 	if (current === undefined) {
-		throw new Error('the availability fixture was not prepared');
+		throw new AvailabilityFixtureNotPreparedError();
 	}
 
 	return current;
@@ -58,9 +65,8 @@ describeConformance('what a store can obtain', (oracle) => {
 		return createTargetStore(oracle, fixture(), `target-${String(stores)}`);
 	};
 
-	// Exact: the cache either offers a path or it does not, and both sides read
-	// that from the cache itself.
-	it('reports the paths the cache offers, as nix does', async () => {
+	// Exact: both clients query the same cache for the same paths.
+	it('reports the same offered paths as Nix', async () => {
 		const current = fixture();
 		const answers = await offeredPaths(oracle, current, await freshStore(), [
 			current.builtPath,
@@ -72,9 +78,9 @@ describeConformance('what a store can obtain', (oracle) => {
 	});
 
 	// Exact: a substituter written as a path refers to the store rooted there,
-	// and both sides read path metadata from its database. A store publishes
-	// no narinfo, so neither side states a transfer size.
-	it('reports what a store-rooted substituter offers, as nix does', async () => {
+	// and both sides read path metadata from its database. A store publishes no
+	// narinfo, so neither side reports a transfer size.
+	it('reports the same store-rooted offers as Nix', async () => {
 		const current = fixture();
 		const answers = await offeredThroughStore(
 			oracle,
@@ -90,7 +96,7 @@ describeConformance('what a store can obtain', (oracle) => {
 	});
 
 	// Exact: the work required to realise the targets, partitioned into what a
-	// build has to make, what a fetch can supply, and what nobody can produce.
+	// build must produce, what a fetch can supply, and what is unobtainable.
 	it.each<{
 		name: string;
 		targets: (current: AvailabilityFixture) => readonly StorePathString[];
@@ -100,18 +106,18 @@ describeConformance('what a store can obtain', (oracle) => {
 			targets: (current) => [current.builtPath]
 		},
 		{
-			name: 'a path nothing holds and nothing offers',
+			name: 'a path absent from every store and substituter',
 			targets: (current) => [current.absentPath]
 		},
 		{
-			name: 'a derivation whose output nothing offers',
+			name: 'a derivation whose output has no substituter offer',
 			targets: (current) => [current.derivationPath]
 		},
 		{
 			name: 'a closure and an unobtainable path together',
 			targets: (current) => [current.builtPath, current.absentPath]
 		}
-	])('partitions $name the way a dry run does', async ({ targets }) => {
+	])('matches the dry-run partition for $name', async ({ targets }) => {
 		const current = fixture();
 		const plans = await realisationPlans(
 			oracle,
@@ -138,12 +144,12 @@ describeConformance('what a store can obtain', (oracle) => {
 			expected: { realised: true, verdict: 'served' }
 		},
 		{
-			name: 'a key nothing in the cache is signed with',
+			name: 'a key that did not sign the cached paths',
 			keys: (current) => [current.untrustedPublicKey],
 			expected: { realised: false, verdict: 'refused' }
 		}
 	])(
-		'settles the closure the way a realisation does, trusting $name',
+		'matches a real Nix realisation when trusting $name',
 		async ({ keys, expected }) => {
 			const current = fixture();
 			const holding = await freshStore();

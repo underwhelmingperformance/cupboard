@@ -61,7 +61,7 @@ export const fixtureStorePath: StorePathString = storePathSchema.parse(
 );
 
 /**
-The file a cache serves the fixture path's narinfo as.
+The filename used to serve the fixture path's narinfo.
 */
 export const fixtureNarinfoFile = '00000000000000000000000000000000.narinfo';
 
@@ -117,8 +117,8 @@ export interface NarinfoFixture {
 
 const wellFormedValues = new Map(wellFormedFields);
 
-// A field the well-formed document does not carry is written after it, so a
-// fixture can state one Nix reads only when it is there.
+// Append fields that are absent from the base document so fixtures can add
+// optional fields that Nix parses when present.
 export function narinfoDocument(fixture: NarinfoFixture): string {
 	const changed = fixture.fields ?? {};
 	const names = [
@@ -139,12 +139,12 @@ export function narinfoDocument(fixture: NarinfoFixture): string {
 }
 
 /**
-What one side made of a narinfo.
+One client's result for a narinfo.
 */
 export type NarinfoVerdict = 'accepted' | 'absent' | 'rejected';
 
 /**
-The fields both sides state for a path they accepted.
+The fields reported by both clients for an accepted path.
 */
 export interface OfferFields {
 	readonly narHash: string;
@@ -156,13 +156,13 @@ export interface OfferFields {
 }
 
 /**
-What both sides made of one narinfo.
+The results from reading one narinfo through both clients.
 */
 export interface NarinfoOutcome {
 	readonly oracle: NarinfoVerdict;
 	readonly client: NarinfoVerdict;
 	/**
-	Why the oracle refused it, for a case that reports the refusal.
+	Nix's error output when it rejected the document.
 	*/
 	readonly oracleStderr: string;
 	/**
@@ -170,7 +170,7 @@ export interface NarinfoOutcome {
 	*/
 	readonly fields: { oracle: OfferFields; client: OfferFields } | undefined;
 	/**
-	What our client threw, for a document it refused.
+	The error thrown by our client when it rejected the document.
 	*/
 	readonly clientError: unknown;
 }
@@ -203,7 +203,7 @@ export class UnparsablePathInfoError extends Error {
 
 export class InvalidPathInfoError extends Error {
 	constructor(public readonly issues: readonly z.core.$ZodIssue[]) {
-		super('nix path-info did not print the entry shape the suite reads');
+		super('nix path-info did not print the expected entry structure');
 		this.name = 'InvalidPathInfoError';
 	}
 }
@@ -265,7 +265,7 @@ Our client's result for the fixture cache and path.
 */
 export interface ClientAnswer {
 	/**
-	What the cache offered for the path, in the oracle's shapes.
+	The cache offer, converted to the oracle's data shapes.
 	*/
 	readonly offer: OfferFields | undefined;
 	/**
@@ -302,8 +302,8 @@ export async function askClient(
 
 	return {
 		offer: {
-			// Nix reports a NAR hash SRI-encoded, which our own hash renders from
-			// the digest it holds.
+			// Nix reports a NAR hash in SRI form. Render the client's digest in the
+			// same form before comparing it.
 			narHash: `sha256-${offer.narHash.digestBase64()}`,
 			narSize: offer.narSize,
 			downloadSize: offer.downloadSize,
@@ -409,13 +409,13 @@ function oracleVerdictOf(
  */
 export function looserThanOracle(outcome: NarinfoOutcome): readonly string[] {
 	return outcome.oracle === 'rejected' && outcome.client !== 'rejected'
-		? [`our client answered ${outcome.client} where nix refused the document`]
+		? [`our client reported ${outcome.client}, but Nix rejected the document`]
 		: [];
 }
 
 export class NarinfoNotComparedError extends Error {
 	constructor(public readonly outcome: NarinfoOutcome) {
-		super('only one side read fields out of the document');
+		super('only one client parsed fields from the document');
 		this.name = 'NarinfoNotComparedError';
 	}
 }

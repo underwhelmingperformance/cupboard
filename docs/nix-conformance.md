@@ -35,9 +35,9 @@ machine cannot build the output, the suite fails instead of skipping the
 comparison.
 
 [`tests/conformance/oracle.json`] records the expected Nix version for each
-supported system. The suite asks the resolved binary for
-`builtins.currentSystem`, then selects the corresponding version and settings
-table. It refuses to run a case when the flake produces a different version.
+supported system. The suite reads `builtins.currentSystem` from the resolved
+binary, then selects the corresponding version and settings table. It refuses to
+run a case when the flake produces a different version.
 
 Two checks keep the record consistent:
 
@@ -233,7 +233,7 @@ parses a Nix message. The parser identifies the three headings from their
 distinguishing words, accepts singular and plural forms, and reads the indented
 paths below them. It ignores the download and unpacked sizes in the headings.
 
-## The store a configuration selects
+## The store selected by a configuration
 
 `nix config show` reports the `store` setting as written, while `nix store info`
 reports the resolved store. `resolveStoreBackend` performs the same resolution,

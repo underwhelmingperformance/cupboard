@@ -4,9 +4,9 @@ import { openCache } from './cache-info.ts';
 import { describeConformance } from './oracle.ts';
 
 describeConformance('a cache directory opened as a substituter', (oracle) => {
-	// Exact: nix opens a cache serving no `nix-cache-info` with the compiled-in
+	// Exact: Nix opens a cache with no `nix-cache-info` using the compiled-in
 	// defaults, so both sides report the fixture path with the same fields.
-	it('offers what nix offers from a cache serving no cache info', async () => {
+	it('matches Nix for a cache with no cache info', async () => {
 		const outcome = await openCache(oracle, { kind: 'directory' });
 
 		expect({
@@ -20,9 +20,9 @@ describeConformance('a cache directory opened as a substituter', (oracle) => {
 		});
 	});
 
-	// Exact: nix refuses to open a cache advertising another store's prefix, and
+	// Exact: Nix refuses to open a cache advertising another store's prefix, and
 	// our client must also report that cache as unreachable.
-	it('names a cache serving another store, as nix refuses to open one', async () => {
+	it('rejects a cache for another store as Nix does', async () => {
 		const outcome = await openCache(oracle, {
 			kind: 'directory',
 			cacheInfo: 'StoreDir: /other/store\n'
@@ -46,9 +46,9 @@ describeConformance('a cache directory opened as a substituter', (oracle) => {
 		});
 	});
 
-	// Exact: a store URI's parameters are settings, and nix reads an integer
+	// Exact: a store URI's parameters are settings, and Nix reads an integer
 	// setting's entire value, so a suffix after the digits makes the URI invalid.
-	it('names a store URI stating a priority nix cannot read', async () => {
+	it('rejects a store URI whose priority Nix cannot parse', async () => {
 		const outcome = await openCache(oracle, {
 			kind: 'directory',
 			parameters: '?priority=5x'
@@ -65,10 +65,10 @@ describeConformance('a cache directory opened as a substituter', (oracle) => {
 		});
 	});
 
-	// Exact: a binary unit multiplies the number before it, so a priority nix
-	// accepts must also be accepted by this client, and the cache behaves as it would
-	// have without the parameter.
-	it('offers what nix offers under a priority stated in binary units', async () => {
+	// Exact: a binary unit multiplies the preceding number. This client must
+	// accept a priority that Nix accepts, and the parameter must not change the
+	// cache contents.
+	it('matches Nix when the priority uses a binary unit', async () => {
 		const outcome = await openCache(oracle, {
 			kind: 'directory',
 			parameters: '?priority=5K'
@@ -86,9 +86,8 @@ describeConformance('a cache directory opened as a substituter', (oracle) => {
 	});
 
 	// Exact: only ENOENT represents an absent cache document. A store URI that
-	// points to a regular file has no cache directory
-	// under it, and nix refuses to open one.
-	it('names a store URI holding a regular file, as nix refuses to open one', async () => {
+	// points to a regular file has no cache directory, so Nix refuses to open it.
+	it('rejects a regular file as a cache, as Nix does', async () => {
 		const outcome = await openCache(oracle, { kind: 'file' });
 
 		expect({

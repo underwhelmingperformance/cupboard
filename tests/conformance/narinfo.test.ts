@@ -43,7 +43,7 @@ const agreedCases: readonly NarinfoCase[] = [
 		'Deriver',
 		'Sig'
 	].map((field) => ({
-		name: `a narinfo carrying no ${field}`,
+		name: `a narinfo without ${field}`,
 		fixture: { fields: { [field]: undefined } }
 	}))
 ];
@@ -53,24 +53,24 @@ Documents that both Nix and our client must reject.
 */
 const refusedCases: readonly NarinfoCase[] = [
 	...['StorePath', 'URL', 'NarHash', 'NarSize'].map((field) => ({
-		name: `a narinfo carrying no ${field}`,
+		name: `a narinfo without ${field}`,
 		fixture: { fields: { [field]: undefined } }
 	})),
 	{
-		name: 'a signature nothing can be decoded from',
+		name: 'a malformed signature',
 		fixture: { fields: { Sig: 'not-a-signature' } }
 	},
 	{
-		name: 'a content address in no readable form',
+		name: 'a malformed content address',
 		fixture: { fields: { CA: 'not a valid content address' } }
 	},
 	{
-		name: 'a content address naming an algorithm nix does not know',
+		name: 'a content address with an unsupported hash algorithm',
 		fixture: { fields: { CA: `fixed:md4:${'a'.repeat(32)}` } }
 	},
 	{
 		// Six bits do not form a complete byte, so the signature material is invalid.
-		name: 'a signature whose material decodes to nothing',
+		name: 'a signature with incomplete encoded data',
 		fixture: { fields: { Sig: 'cache.example.org-1:A' } }
 	},
 	{
@@ -78,8 +78,8 @@ const refusedCases: readonly NarinfoCase[] = [
 		fixture: { fields: { NarHash: `sha256:eouteoute${'a'.repeat(43)}` } }
 	},
 	{
-		// A 64-character digest is the length base16 writes, so a character
-		// outside that alphabet is one no digest of that length carries.
+		// A base16-encoded SHA-256 digest has 64 characters, all from the base16
+		// alphabet. This value has the expected length but includes `z`.
 		name: 'a file hash digesting outside the base16 alphabet',
 		fixture: { fields: { FileHash: `sha256:${'z'.repeat(64)}` } }
 	},
@@ -117,26 +117,25 @@ const stricterCases: readonly NarinfoCase[] = [
 ];
 
 describeConformance('a narinfo read from a substituter', (oracle) => {
-	// Directional: whatever the oracle refuses, our client has to refuse too.
-	// Refusing a document the oracle takes is conformant, since our client
-	// targets the strictness of Nix master and the pinned oracle is behind it.
+	// Directional: our client must reject every document that the oracle rejects.
+	// It can also reject a document that the older, pinned Nix accepts because
+	// the client targets the stricter validation in Nix master.
 	it.for([...agreedCases, ...refusedCases, ...stricterCases])(
-		'is no looser than nix about $name',
+		'is no less strict than Nix for $name',
 		async ({ fixture }, context) => {
 			const outcome = await readNarinfo(oracle, fixture);
 
 			if (outcome.oracle === 'rejected') {
-				await context.annotate(outcome.oracleStderr.trim(), 'nix refused it');
+				await context.annotate(outcome.oracleStderr.trim(), 'Nix rejection');
 			}
 
 			expect(looserThanOracle(outcome)).toStrictEqual([]);
 		}
 	);
 
-	// Exact: for a document both sides took, every field the offer states has
-	// to be the field nix states.
+	// Exact: compare every field after both clients accept the document.
 	it.each(agreedCases)(
-		'states the same offer as nix for $name',
+		'reports the same offer as Nix for $name',
 		async ({ fixture }) => {
 			const fields = comparedFields(await readNarinfo(oracle, fixture));
 
@@ -146,7 +145,7 @@ describeConformance('a narinfo read from a substituter', (oracle) => {
 
 	// A missing narinfo is a normal absence for both clients, not a malformed
 	// document error.
-	it('reads a path the cache holds nothing for as an absence', async () => {
+	it('reports an absent narinfo as an absence', async () => {
 		const outcome = await readNarinfo(oracle, { served: false });
 
 		expect({ oracle: outcome.oracle, client: outcome.client }).toStrictEqual({

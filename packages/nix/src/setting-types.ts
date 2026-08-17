@@ -14,9 +14,8 @@ export interface NixSettingTable {
 }
 
 /**
- * Maps a supported Node host to the corresponding Nix system name. Returns
- * `undefined` for operating systems and architectures outside the flake's
- * supported set.
+ * Maps a supported Node platform and architecture to a Nix system. Returns
+ * `undefined` when the flake does not support the combination.
  */
 export function nixSystemFor(
 	operatingSystem: NodeJS.Platform,
@@ -54,7 +53,7 @@ export type NixSettingValueType =
 
 /**
  * Returns the value type for a setting, or `undefined` when the pinned Nix does
- * not recognise its name. Nix warns about unknown settings and ignores them.
+ * not recognise the setting. Nix warns about unknown settings and ignores them.
  */
 export function nixSettingType(name: string): NixSettingValueType | undefined {
 	return currentSettingTable?.types[name];
@@ -70,8 +69,7 @@ export function isAppendableSetting(name: string): boolean {
 	return type === 'list' || type === 'map';
 }
 
-// The spellings Nix reads a boolean setting by, which are the only values it
-// takes for one.
+// The complete set of values that Nix accepts for boolean settings.
 const booleanValues = new Set(['true', 'yes', '1', 'false', 'no', '0']);
 
 /**
@@ -157,9 +155,9 @@ function wrappedInto(value: bigint, bounds: IntegerBounds): bigint {
 }
 
 /**
- * Values accepted by specific settings beyond their general type. Nix reads
- * `max-jobs` through a setting of its own, which takes the number of jobs or
- * the word `auto` for this machine's parallelism.
+ * Values accepted by specific settings in addition to their general type.
+ * `max-jobs` accepts either an integer or `auto`, which uses the local
+ * machine's parallelism.
  */
 const wordValues = new Map([['max-jobs', new Set(['auto'])]]);
 
@@ -221,7 +219,7 @@ export function listOf(value: string): readonly string[] {
 	return value.split(/\s+/u).filter(Boolean);
 }
 
-// The stores Nix names by a word rather than by a URI or a path.
+// Store types that Nix accepts as bare words.
 const namedStores = new Set(['', 'auto', 'daemon', 'local']);
 
 /**
@@ -230,7 +228,7 @@ const namedStores = new Set(['', 'auto', 'daemon', 'local']);
  * are rejected later when the store is opened.
  */
 function isStoreReference(value: string): boolean {
-	// Nix takes the parameters off before reading what is left.
+	// Remove query parameters before parsing the store reference.
 	const parameters = value.indexOf('?');
 	const reference = parameters === -1 ? value : value.slice(0, parameters);
 
@@ -251,7 +249,7 @@ const schemePattern = /^[A-Za-z][\d+.A-Za-z-]*:/u;
  *
  * A path refers to a local store rooted at that path. Nix resolves the path
  * against the working directory, then writes it as a `local://` URI. A URI is
- * left as it is. So is every word that Nix has a store for.
+ * left unchanged, as is each recognised store type.
  *
  * Parameters are kept. An empty query is dropped, which is what Nix does.
  */
@@ -272,9 +270,8 @@ export function canonicalStoreReference(
 	return `local://${rooted}${parameters === '' ? '' : `?${parameters}`}`;
 }
 
-// Whether Nix reads the reference as a path. A path is not a URI, is not one of
-// the words Nix has a store for, and contains a separator. A value with no
-// separator is a word, and Nix has no store under that name.
+// Nix reads a reference as a path when it is neither a URI nor a recognised
+// store type and contains a separator. An unrecognised bare word is invalid.
 function isPathReference(reference: string): boolean {
 	return (
 		!namedStores.has(reference) &&
@@ -295,7 +292,7 @@ export function settingValueExpectation(
 	}
 
 	if (storeReferenceSettings.has(name)) {
-		return 'a store this client could open';
+		return 'a supported store reference';
 	}
 
 	return type === 'boolean'
