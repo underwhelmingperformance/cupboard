@@ -19,6 +19,7 @@ import {
 } from '@cupboard/protocol/build';
 import type { RootSetBody } from '@cupboard/protocol/retention';
 import {
+	commitBatchMaxEntries,
 	type ParsedUploadNegotiateResponse,
 	type UploadDecision,
 	uploadDecisionSchema
@@ -173,7 +174,10 @@ interface HarnessOptions {
 	readonly decisions?: (
 		paths: readonly { readonly storePath: string }[]
 	) => ParsedUploadNegotiateResponse['uploads'];
+	readonly failNegotiationFor?: ReadonlySet<StorePathString>;
 }
+
+class NegotiationTestError extends Error {}
 
 interface Harness {
 	readonly negotiatedPaths: string[][];
@@ -221,6 +225,14 @@ function harness(options: HarnessOptions = {}): Harness {
 	const client: PushClient = {
 		negotiate: (body) => {
 			negotiatedPaths.push(body.paths.map((path) => path.storePath));
+
+			if (
+				body.paths.some((path) =>
+					options.failNegotiationFor?.has(storePathSchema.parse(path.storePath))
+				)
+			) {
+				return Promise.reject(new NegotiationTestError());
+			}
 
 			return Promise.resolve({
 				uploads:
@@ -747,6 +759,69 @@ describe('reconcileBuild', () => {
 				reason: failure.reason
 			}))
 		}).toStrictEqual(expected);
+	});
+
+	it('negotiates final publication in bounded batches', async () => {
+		const paths = Array.from(
+			{ length: commitBatchMaxEntries + 1 },
+			(_, index) =>
+				storePathSchema.parse(
+					`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
+				)
+		);
+		const harnessed = harness({ valid: paths });
+		const result = await reconcileWith(harnessed, {
+			targets: paths.map((storePath) => target(storePath))
+		});
+
+		expect({
+			negotiatedBatchSizes: harnessed.negotiatedPaths.map(
+				(batch) => batch.length
+			),
+			failed: result.receipt.failed
+		}).toStrictEqual({
+			negotiatedBatchSizes: [commitBatchMaxEntries, 1],
+			failed: []
+		});
+	});
+
+	it('continues with later batches after one negotiation fails', async () => {
+		const paths = Array.from(
+			{ length: commitBatchMaxEntries + 1 },
+			(_, index) =>
+				storePathSchema.parse(
+					`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
+				)
+		);
+		const first = storePathSchema.parse(paths[0]);
+		const last = storePathSchema.parse(paths.at(-1));
+
+		const harnessed = harness({
+			valid: paths,
+			failNegotiationFor: new Set([first])
+		});
+		const result = await reconcileWith(harnessed, {
+			targets: paths.map((storePath) => target(storePath))
+		});
+
+		expect({
+			negotiatedBatchSizes: harnessed.negotiatedPaths.map(
+				(batch) => batch.length
+			),
+			failed: result.receipt.failed,
+			published: result.receipt.paths,
+			failureTypes: result.failures.map((failure) =>
+				failure.cause instanceof Error ? failure.cause.constructor : undefined
+			)
+		}).toStrictEqual({
+			negotiatedBatchSizes: [commitBatchMaxEntries, 1],
+			failed: paths.slice(0, commitBatchMaxEntries),
+			published: [last],
+			failureTypes: Array.from(
+				{ length: commitBatchMaxEntries },
+				() => NegotiationTestError
+			)
+		});
 	});
 
 	it('applies the declared TTL when it replaces a root', async () => {

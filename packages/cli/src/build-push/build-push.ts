@@ -1285,7 +1285,8 @@ function raiseExitContract(exit: ChildExit, result: ReconcileResult): void {
 
 	throw new BuildPublicationFailedError(
 		result.failures.map((failure) => failure.storePath),
-		publicationFailureExitCode(causes)
+		publicationFailureExitCode(causes),
+		{ cause: causes.find((cause) => cause !== undefined) }
 	);
 }
 

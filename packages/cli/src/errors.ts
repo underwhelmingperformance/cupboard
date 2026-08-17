@@ -1254,9 +1254,10 @@ export class BuildPublicationFailedError extends CliError {
 	) {
 		super(
 			failedPaths.length === 0
-				? 'Publication did not complete; the receipt records the cause'
-				: `${String(failedPaths.length)} path(s) failed to publish or ` +
-						`retain; the receipt records each cause: ${failedPaths.join(', ')}`,
+				? 'Publication did not complete.'
+				: failedPaths.length === 1
+					? 'One path was not published or retained.'
+					: `${String(failedPaths.length)} paths were not published or retained.`,
 			options
 		);
 		this.name = 'BuildPublicationFailedError';
