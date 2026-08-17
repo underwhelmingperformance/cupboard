@@ -1540,7 +1540,7 @@ export class CohortTargetOwnerMissingError extends CodedError {
 /**
 Publish-by-reference paths were requested without a reuse view.
 */
-export class ReuseViewRequiredError extends UsageError {
+export class ReuseViewRequiredError extends CodedError {
 	constructor() {
 		super('publish-by-reference paths require a reuse view');
 		this.name = 'ReuseViewRequiredError';
@@ -1550,7 +1550,7 @@ export class ReuseViewRequiredError extends UsageError {
 /**
 A planned target does not match any source installable in its cohort.
 */
-export class PlannedTargetSourceMissingError extends UsageError {
+export class PlannedTargetSourceMissingError extends CodedError {
 	constructor(public readonly target: string) {
 		super(
 			`Planned target ${target} has no matching source installable. Re-run planning so the cohort's evaluated targets remain aligned.`

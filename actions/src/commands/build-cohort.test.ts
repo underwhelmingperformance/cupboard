@@ -49,6 +49,7 @@ import {
 	LocalBuildOutputsMissingError,
 	LocalBuildOutputsOutsideCohortError,
 	MissingInputError,
+	PlannedTargetNotDerivationError,
 	ReadPasswordRequiredError,
 	ReadUserRequiredError,
 	RemoteBuildOutputPathUnknownError,
@@ -2103,6 +2104,21 @@ describe('buildCohortAction', () => {
 
 	afterEach(async () => {
 		await rm(directory, { recursive: true, force: true });
+	});
+
+	it('rejects a planned remote target that is not a derivation', async () => {
+		await expect(
+			buildCohortAction(
+				{
+					...baseOptions(),
+					cohortJson: cohortJson({
+						queryInstallables: [appPath, undefined, undefined]
+					}),
+					store: 'ssh-ng://build@example.test'
+				},
+				environment
+			)
+		).rejects.toBeInstanceOf(PlannedTargetNotDerivationError);
 	});
 
 	it.each([
