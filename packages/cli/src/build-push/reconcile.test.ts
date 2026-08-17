@@ -795,13 +795,17 @@ describe('reconcileBuild', () => {
 		);
 		const first = storePathSchema.parse(paths[0]);
 		const last = storePathSchema.parse(paths.at(-1));
+		const failedPaths = paths.slice(0, commitBatchMaxEntries);
 
 		const harnessed = harness({
 			valid: paths,
 			failNegotiationFor: new Set([first])
 		});
 		const result = await reconcileWith(harnessed, {
-			targets: paths.map((storePath) => target(storePath))
+			targets: [
+				...failedPaths.map((storePath) => target(storePath, rootOne)),
+				target(last, rootTwo)
+			]
 		});
 
 		expect({
@@ -810,13 +814,29 @@ describe('reconcileBuild', () => {
 			),
 			failed: result.receipt.failed,
 			published: result.receipt.paths,
+			outcomes: result.receipt.outcomes,
+			roots: result.roots,
+			rootReplacements: harnessed.rootReplacements,
 			failureTypes: result.failures.map((failure) =>
 				failure.cause instanceof Error ? failure.cause.constructor : undefined
 			)
 		}).toStrictEqual({
 			negotiatedBatchSizes: [commitBatchMaxEntries, 1],
-			failed: paths.slice(0, commitBatchMaxEntries),
+			failed: failedPaths,
 			published: [last],
+			outcomes: [
+				...failedPaths.map((storePath) => ({
+					outcome: 'failed' as const,
+					storePath,
+					reason: 'upload' as const
+				})),
+				{ outcome: 'destination-served', storePath: last }
+			],
+			roots: [
+				{ root: rootOne, applied: false, targets: failedPaths },
+				{ root: rootTwo, applied: true, targets: [last] }
+			],
+			rootReplacements: [{ name: rootTwo, body: { targets: [last] } }],
 			failureTypes: Array.from(
 				{ length: commitBatchMaxEntries },
 				() => NegotiationTestError

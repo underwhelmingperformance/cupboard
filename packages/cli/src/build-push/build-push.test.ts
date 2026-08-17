@@ -31,11 +31,11 @@ import {
 	BuildCommandFailedError,
 	BuildProvenanceIncompleteError,
 	BuildPublicationFailedError,
+	classifyPublicationFailures,
 	CliAbortError,
 	CliError,
 	CupboardHttpError,
 	PostBuildHookConflictError,
-	publicationFailureExitCode,
 	unavailableExitCode,
 	UntrustedDaemonError
 } from '../errors.ts';
@@ -814,22 +814,25 @@ describe('childExitCode', () => {
 	});
 });
 
-describe('publicationFailureExitCode', () => {
+describe('classifyPublicationFailures', () => {
 	it.each([
 		{
 			name: 'an authentication failure',
 			causes: [new CupboardHttpError('PUT', '/nar', 401, '')],
-			expected: 77
+			expectedExitCode: 77,
+			expectedCauseIndex: 0
 		},
 		{
 			name: 'a transient failure',
 			causes: [new CupboardHttpError('PUT', '/nar', 503, '')],
-			expected: 75
+			expectedExitCode: 75,
+			expectedCauseIndex: 0
 		},
 		{
 			name: 'an unavailable dependency',
 			causes: [new UnavailableTestError()],
-			expected: 69
+			expectedExitCode: 69,
+			expectedCauseIndex: 0
 		},
 		{
 			name: 'authentication outranking transient',
@@ -837,16 +840,35 @@ describe('publicationFailureExitCode', () => {
 				new CupboardHttpError('PUT', '/nar', 503, ''),
 				new CupboardHttpError('PUT', '/nar', 401, '')
 			],
-			expected: 77
+			expectedExitCode: 77,
+			expectedCauseIndex: 1
+		},
+		{
+			name: 'authentication outranking an earlier unclassified failure',
+			causes: [
+				new Error('lost'),
+				new CupboardHttpError('PUT', '/nar', 401, '')
+			],
+			expectedExitCode: 77,
+			expectedCauseIndex: 1
 		},
 		{
 			name: 'an unclassified failure',
 			causes: [new Error('lost')],
-			expected: 74
+			expectedExitCode: 74,
+			expectedCauseIndex: 0
 		},
-		{ name: 'no recorded cause', causes: [undefined], expected: 74 }
-	])('classifies $name', ({ causes, expected }) => {
-		expect(publicationFailureExitCode(causes)).toBe(expected);
+		{
+			name: 'no recorded cause',
+			causes: [undefined],
+			expectedExitCode: 74,
+			expectedCauseIndex: 0
+		}
+	])('classifies $name', ({ causes, expectedExitCode, expectedCauseIndex }) => {
+		expect(classifyPublicationFailures(causes)).toStrictEqual({
+			exitCode: expectedExitCode,
+			cause: causes[expectedCauseIndex]
+		});
 	});
 });
 

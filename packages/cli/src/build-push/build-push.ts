@@ -42,8 +42,8 @@ import {
 	BuildEventHandlingError,
 	BuildProvenanceIncompleteError,
 	BuildPublicationFailedError,
+	classifyPublicationFailures,
 	CliAbortError,
-	publicationFailureExitCode,
 	PushIncompleteError,
 	type UntrustedDaemonError
 } from '../errors.ts';
@@ -996,12 +996,11 @@ async function publishRealised(
 function publicationFailure(cause: unknown): BuildPublicationFailedError {
 	const failedPaths =
 		cause instanceof PushIncompleteError ? cause.failedPaths : [];
+	const classification = classifyPublicationFailures([cause]);
 
-	return new BuildPublicationFailedError(
-		failedPaths,
-		publicationFailureExitCode([cause]),
-		{ cause }
-	);
+	return new BuildPublicationFailedError(failedPaths, classification.exitCode, {
+		cause: classification.cause
+	});
 }
 
 interface RunFacts {
@@ -1169,11 +1168,11 @@ async function settleRun(
 			throw childFailure(exit);
 		}
 
-		throw new BuildPublicationFailedError(
-			[],
-			publicationFailureExitCode([error]),
-			{ cause: error }
-		);
+		const classification = classifyPublicationFailures([error]);
+
+		throw new BuildPublicationFailedError([], classification.exitCode, {
+			cause: classification.cause
+		});
 	}
 }
 
@@ -1283,10 +1282,12 @@ function raiseExitContract(exit: ChildExit, result: ReconcileResult): void {
 		throw new CliAbortError();
 	}
 
+	const classification = classifyPublicationFailures(causes);
+
 	throw new BuildPublicationFailedError(
 		result.failures.map((failure) => failure.storePath),
-		publicationFailureExitCode(causes),
-		{ cause: causes.find((cause) => cause !== undefined) }
+		classification.exitCode,
+		{ cause: classification.cause }
 	);
 }
 
