@@ -1269,8 +1269,7 @@ export class BuildPublicationFailedError extends CliError {
 }
 
 /**
- * The cause selected for a publication error, with its corresponding exit
- * code.
+ * The error cause and exit code to report when publication fails.
  */
 export interface PublicationFailureClassification {
 	readonly exitCode: number;
@@ -1278,9 +1277,10 @@ export interface PublicationFailureClassification {
 }
 
 /**
- * Chooses the cause and sysexits category for publication failures:
- * authentication first, then transient, then unavailable. Anything else is a
- * general publication failure.
+ * Chooses the cause and sysexits category to report. It prefers
+ * authentication, then transient, then unavailable failures. If no cause has
+ * one of those categories, it reports the first defined cause as a general
+ * publication failure.
  */
 export function classifyPublicationFailures(
 	causes: readonly unknown[]
