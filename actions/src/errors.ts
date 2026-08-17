@@ -24,6 +24,72 @@ export class InvalidInputError extends UsageError {
 	}
 }
 
+/**
+The `cohort-json` input is not valid JSON.
+*/
+export class CohortJsonInvalidError extends UsageError {
+	constructor(public override readonly cause: unknown) {
+		super(
+			`cohort-json is not valid JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
+			{ cause }
+		);
+		this.name = 'CohortJsonInvalidError';
+	}
+}
+
+/**
+The `cohort-json` input does not match the cohort matrix schema.
+*/
+export class CohortJsonSchemaError extends UsageError {
+	constructor(public override readonly cause: z.ZodError) {
+		super(
+			`cohort-json does not match a cohort-matrix entry:\n${z.prettifyError(cause)}`,
+			{ cause }
+		);
+		this.name = 'CohortJsonSchemaError';
+	}
+}
+
+/**
+The action received a read user without its password.
+*/
+export class ReadPasswordRequiredError extends UsageError {
+	constructor() {
+		super('read-password is required when read-user is supplied');
+		this.name = 'ReadPasswordRequiredError';
+	}
+}
+
+/**
+The action received a read password without its user.
+*/
+export class ReadUserRequiredError extends UsageError {
+	constructor() {
+		super('read-user is required when read-password is supplied');
+		this.name = 'ReadUserRequiredError';
+	}
+}
+
+/**
+The `max-jobs` input is outside Nix's supported unsigned 32-bit range.
+*/
+export class InvalidMaxJobsError extends UsageError {
+	constructor(public readonly value: string) {
+		super('max-jobs must be a non-negative 32-bit integer');
+		this.name = 'InvalidMaxJobsError';
+	}
+}
+
+/**
+The action received `run-root-ttl` without `run-root`.
+*/
+export class RunRootRequiredError extends UsageError {
+	constructor(public readonly ttl: string) {
+		super('run-root-ttl requires run-root');
+		this.name = 'RunRootRequiredError';
+	}
+}
+
 export class UnsupportedPlatformError extends UsageError {
 	constructor(
 		public readonly runtimePlatform: string,
@@ -1071,6 +1137,112 @@ export class RemoteCohortProtocolError extends CodedError {
 			`Remote Nix daemon returned an invalid keyed result batch: ${failures.map((failure) => `${failure.target} (${failure.outcome}: ${failure.message})`).join('; ')}`
 		);
 		this.name = 'RemoteCohortProtocolError';
+	}
+}
+
+/**
+Planning did not resolve a daemon derived path for a remote build target.
+*/
+export class RemotePublicationTargetUnresolvedError extends UsageError {
+	constructor(public readonly installables: readonly string[]) {
+		super(
+			`Remote publication requires a daemon derived path for every build target. The plan did not resolve ${installables.join(', ')}. Re-run planning with evaluable locked outputs or publish from the local store.`
+		);
+		this.name = 'RemotePublicationTargetUnresolvedError';
+	}
+}
+
+/**
+A remote build result does not match any member of its cohort.
+*/
+export class RemoteBuildOwnerMissingError extends UsageError {
+	constructor(public readonly target: string) {
+		super(`Remote build result ${target} has no cohort owner.`);
+		this.name = 'RemoteBuildOwnerMissingError';
+	}
+}
+
+/**
+A local build result does not match any member of its cohort.
+*/
+export class LocalBuildOwnerMissingError extends UsageError {
+	constructor(public readonly installable: string) {
+		super(`Local build result ${installable} has no cohort owner.`);
+		this.name = 'LocalBuildOwnerMissingError';
+	}
+}
+
+/**
+A cohort target path does not have a declared retention root.
+*/
+export class CohortTargetOwnerMissingError extends UsageError {
+	constructor(public readonly targetPath: string) {
+		super(`Cohort target path ${targetPath} has no declared root owner.`);
+		this.name = 'CohortTargetOwnerMissingError';
+	}
+}
+
+/**
+Publish-by-reference paths were requested without a reuse view.
+*/
+export class ReuseViewRequiredError extends UsageError {
+	constructor() {
+		super('publish-by-reference paths require a reuse view');
+		this.name = 'ReuseViewRequiredError';
+	}
+}
+
+/**
+A planned target does not match any source installable in its cohort.
+*/
+export class PlannedTargetSourceMissingError extends UsageError {
+	constructor(public readonly target: string) {
+		super(
+			`Planned target ${target} has no matching source installable. Re-run planning so the cohort's evaluated targets remain aligned.`
+		);
+		this.name = 'PlannedTargetSourceMissingError';
+	}
+}
+
+/**
+A planned remote target does not refer to a derivation.
+*/
+export class PlannedTargetNotDerivationError extends UsageError {
+	constructor(public readonly target: string) {
+		super(
+			`Planned target ${target} does not name a derivation. Re-run planning so every target has a daemon derived path.`
+		);
+		this.name = 'PlannedTargetNotDerivationError';
+	}
+}
+
+/**
+A remote target selects an output that its derivation does not declare.
+*/
+export class RemoteBuildOutputUndeclaredError extends UsageError {
+	constructor(
+		public readonly installable: string,
+		public readonly outputName: string
+	) {
+		super(
+			`Remote build target ${installable} selects output '${outputName}', which its derivation does not declare.`
+		);
+		this.name = 'RemoteBuildOutputUndeclaredError';
+	}
+}
+
+/**
+A remote target selects an output whose store path is not known before the build.
+*/
+export class RemoteBuildOutputPathUnknownError extends UsageError {
+	constructor(
+		public readonly installable: string,
+		public readonly outputName: string
+	) {
+		super(
+			`Remote build target ${installable} selects output '${outputName}', whose content-addressed path is not known before the build. Publish it from a local store until remote builds can root floating outputs atomically.`
+		);
+		this.name = 'RemoteBuildOutputPathUnknownError';
 	}
 }
 
