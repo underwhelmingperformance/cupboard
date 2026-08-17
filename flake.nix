@@ -15,12 +15,7 @@
       nixpkgs-x86_64-darwin,
     }:
     let
-      systems = [
-        "x86_64-linux"
-        "aarch64-linux"
-        "x86_64-darwin"
-        "aarch64-darwin"
-      ];
+      systems = nixpkgs.lib.importJSON ./packages/nix/src/nix-systems.json;
       forAllSystems = nixpkgs.lib.genAttrs systems;
       packageSets = forAllSystems (
         system:
@@ -155,19 +150,31 @@
       packages = forAllSystems (
         system:
         let
+          pkgs = packageSets.${system};
           cupboard = mkCupboard packageSets.${system};
+          conformanceNix = pkgs.nix.out;
         in
         {
           inherit cupboard;
           default = cupboard;
 
           # The Nix binary that the conformance suite uses as its reference. The
-          # flake pin gives every run a reproducible comparison target.
-          # `tests/conformance/oracle.json` records its version, and the suite
-          # compares the generated settings table with the binary. The `out`
-          # output contains `bin/nix`; selecting it limits the build to a single
-          # path that the suite can read directly.
-          conformanceNix = packageSets.${system}.nix.out;
+          # `out` output contains `bin/nix`; selecting it limits the build to a
+          # single path that the suite can read directly.
+          inherit conformanceNix;
+
+          conformanceOracleProbe =
+            pkgs.runCommand "cupboard-conformance-oracle-${system}"
+              {
+                nativeBuildInputs = [ pkgs.nodejs_24 ];
+              }
+              ''
+                mkdir -p "$out"
+                node --experimental-transform-types \
+                  --disable-warning=ExperimentalWarning \
+                  ${./scripts/conformance-oracle-probe.ts} \
+                  ${conformanceNix}/bin/nix ${system} > "$out/oracle.json"
+              '';
         }
       );
 

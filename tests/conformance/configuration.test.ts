@@ -405,8 +405,8 @@ describeConformance('the resolved Nix configuration', (oracle) => {
 	// only when built against libcpuid, so an empty result on such a machine
 	// describes the oracle build.
 	it('states the microarchitecture levels nix states', async (context) => {
-		if (process.platform !== 'linux' || process.arch !== 'x64') {
-			context.skip(`${process.platform}/${process.arch} states no levels`);
+		if (oracle.system !== 'x86_64-linux') {
+			context.skip(`${oracle.system} states no levels`);
 		}
 
 		const platforms = comparisonOf(

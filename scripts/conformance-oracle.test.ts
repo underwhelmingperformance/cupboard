@@ -3,23 +3,30 @@ import { describe, expect, it } from 'vitest';
 import {
 	checkConformanceOracle,
 	type GeneratedSettingsRecord,
+	IncompleteOracleProbeError,
+	IncompleteOracleUpdateError,
 	integerWidthOf,
 	InvalidFlakeLockError,
 	InvalidOracleFileError,
+	InvalidOracleProbeError,
 	type NixSettingTable,
 	type NixSettingTypes,
-	type OracleNix,
 	type OracleRecord,
+	type OracleSystem,
+	oracleSystems,
 	type OracleWorkspace,
 	parseFlakeLockRevision,
 	parseOracleRecord,
+	parseProbedOracle,
 	parseSettingTypes,
+	type ProbedOracle,
 	renderSettingTypes,
 	serialiseOracleRecord,
 	SettingTypesVersionDriftError,
 	UnknownIntegerWidthError,
 	UnparsableFlakeLockError,
 	UnparsableOracleFileError,
+	UnparsableOracleProbeError,
 	UnreadableSettingsError,
 	updateConformanceOracle
 } from './conformance-oracle.ts';
@@ -27,6 +34,13 @@ import {
 const pinnedRevision = 'b5aa0fbd538984f6e3d201be0005b4463d8b09f8';
 const pinnedVersion = 'nix (Nix) 2.34.7';
 const movedVersion = 'nix (Nix) 2.35.0';
+
+const pinnedVersions: Readonly<Record<OracleSystem, string>> = {
+	'x86_64-linux': pinnedVersion,
+	'aarch64-linux': pinnedVersion,
+	'x86_64-darwin': pinnedVersion,
+	'aarch64-darwin': pinnedVersion
+};
 
 const pinnedSettingTypes: NixSettingTypes = {
 	'keep-outputs': 'boolean',
@@ -39,9 +53,18 @@ const pinnedSettingTable: NixSettingTable = {
 	integerWidths: { 'log-lines': 'uint64' }
 };
 
-const pinnedGenerated: GeneratedSettingsRecord = {
-	version: pinnedVersion
-};
+function generatedSettings(
+	versions: Readonly<Record<OracleSystem, string>>
+): GeneratedSettingsRecord {
+	return {
+		'x86_64-linux': { generatedFromNix: versions['x86_64-linux'] },
+		'aarch64-linux': { generatedFromNix: versions['aarch64-linux'] },
+		'x86_64-darwin': { generatedFromNix: versions['x86_64-darwin'] },
+		'aarch64-darwin': { generatedFromNix: versions['aarch64-darwin'] }
+	};
+}
+
+const pinnedGenerated = generatedSettings(pinnedVersions);
 
 async function captureError<T>(
 	type: new (...parameters: never[]) => T,
@@ -81,11 +104,12 @@ function flakeLock(revision: string): string {
 /**
 A workspace initialised with the record. It captures each write.
 */
-function fakeWorkspace(
-	record: OracleRecord | undefined
-): OracleWorkspace & { writes: string[]; tables: string[] } {
+function fakeWorkspace(record: OracleRecord | undefined): OracleWorkspace & {
+	writes: string[];
+	tables: { system: OracleSystem; text: string }[];
+} {
 	const writes: string[] = [];
-	const tables: string[] = [];
+	const tables: { system: OracleSystem; text: string }[] = [];
 
 	return {
 		writes,
@@ -100,23 +124,23 @@ function fakeWorkspace(
 		writeOracleFile: (text) => {
 			writes.push(text);
 		},
-		writeSettingTypesFile: (text) => {
-			tables.push(text);
+		writeSettingTypesFile: (system, text) => {
+			tables.push({ system, text });
 		}
 	};
 }
 
-function fakeNix(version: string): OracleNix {
-	return {
-		readVersion: () => Promise.resolve(version),
-		readSettingTable: () => Promise.resolve(pinnedSettingTable)
-	};
+function fakeProbe(
+	system: OracleSystem,
+	version: string = pinnedVersion
+): ProbedOracle {
+	return { system, version, table: pinnedSettingTable };
 }
 
 describe('parseOracleRecord', () => {
 	it('accepts a well-formed record', () => {
 		const record: OracleRecord = {
-			version: pinnedVersion
+			versions: pinnedVersions
 		};
 
 		expect(parseOracleRecord(serialiseOracleRecord(record))).toStrictEqual(
@@ -143,18 +167,23 @@ describe('parseOracleRecord', () => {
 			issues: [{ code: 'invalid_type', path: [] }]
 		},
 		{
-			name: 'a missing version',
+			name: 'missing versions',
 			text: '{}',
-			issues: [{ code: 'invalid_type', path: ['version'] }]
+			issues: [{ code: 'invalid_type', path: ['versions'] }]
 		},
 		{
 			name: 'a version outside the format printed by nix --version',
-			text: '{ "version": "2.34.7" }',
-			issues: [{ code: 'invalid_format', path: ['version'] }]
+			text: `{ "versions": { "x86_64-linux": "2.34.7", "aarch64-linux": "${pinnedVersion}", "x86_64-darwin": "${pinnedVersion}", "aarch64-darwin": "${pinnedVersion}" } }`,
+			issues: [{ code: 'invalid_format', path: ['versions', 'x86_64-linux'] }]
+		},
+		{
+			name: 'a missing system',
+			text: `{ "versions": { "x86_64-linux": "${pinnedVersion}", "aarch64-linux": "${pinnedVersion}", "x86_64-darwin": "${pinnedVersion}" } }`,
+			issues: [{ code: 'custom', path: ['versions', 'aarch64-darwin'] }]
 		},
 		{
 			name: 'an obsolete nixpkgs revision',
-			text: `{ "version": "${pinnedVersion}", "nixpkgsRevision": "${pinnedRevision}" }`,
+			text: `{ "versions": ${JSON.stringify(pinnedVersions)}, "nixpkgsRevision": "${pinnedRevision}" }`,
 			issues: [{ code: 'unrecognized_keys', path: [] }]
 		}
 	])('rejects $name', async ({ text, issues }) => {
@@ -219,7 +248,7 @@ describe('parseFlakeLockRevision', () => {
 describe('checkConformanceOracle', () => {
 	it('passes when the record and generated table use the same Nix version', () => {
 		const workspace = fakeWorkspace({
-			version: pinnedVersion
+			versions: pinnedVersions
 		});
 
 		expect(() => {
@@ -231,19 +260,87 @@ describe('checkConformanceOracle', () => {
 	// version must therefore match the oracle record.
 	it('reports a table generated from another Nix version', async () => {
 		const workspace = fakeWorkspace({
-			version: pinnedVersion
+			versions: pinnedVersions
 		});
 
 		const error = await captureError(SettingTypesVersionDriftError, () => {
-			checkConformanceOracle(workspace, {
-				version: movedVersion
-			});
+			checkConformanceOracle(
+				workspace,
+				generatedSettings({
+					...pinnedVersions,
+					'aarch64-darwin': movedVersion
+				})
+			);
 		});
 
-		expect({ oracle: error.oracle, generated: error.generated }).toStrictEqual({
+		expect({
+			system: error.system,
+			oracle: error.oracle,
+			generated: error.generated
+		}).toStrictEqual({
+			system: 'aarch64-darwin',
 			oracle: pinnedVersion,
 			generated: movedVersion
 		});
+	});
+});
+
+describe('parseProbedOracle', () => {
+	it('reads a typed table from a target-system probe', () => {
+		const document = JSON.stringify({
+			system: 'x86_64-linux',
+			version: pinnedVersion,
+			settings: {
+				'keep-outputs': { value: false },
+				'log-lines': { value: 25 }
+			},
+			acceptedWidthProbes: {
+				'log-lines': {
+					negative: false,
+					unsignedThirtyTwo: true,
+					signedSixtyFour: true,
+					unsignedSixtyFour: true
+				}
+			}
+		});
+
+		expect(parseProbedOracle(document)).toStrictEqual({
+			system: 'x86_64-linux',
+			version: pinnedVersion,
+			table: {
+				types: { 'keep-outputs': 'boolean', 'log-lines': 'integer' },
+				integerWidths: { 'log-lines': 'uint64' }
+			}
+		});
+	});
+
+	it('reports invalid probe JSON with its cause', async () => {
+		const error = await captureError(UnparsableOracleProbeError, () =>
+			parseProbedOracle('{')
+		);
+
+		expect(error.cause).toBeInstanceOf(SyntaxError);
+	});
+
+	it('reports a structurally invalid probe', () => {
+		expect(() => parseProbedOracle('{}')).toThrow(InvalidOracleProbeError);
+	});
+
+	it('reports the integer setting omitted by the probe', async () => {
+		const document = JSON.stringify({
+			system: 'x86_64-linux',
+			version: pinnedVersion,
+			settings: {
+				'log-lines': { value: 25 }
+			},
+			acceptedWidthProbes: {}
+		});
+
+		const error = await captureError(IncompleteOracleProbeError, () =>
+			parseProbedOracle(document)
+		);
+
+		expect(error.setting).toBe('log-lines');
 	});
 });
 
@@ -296,7 +393,8 @@ describe('parseSettingTypes', () => {
 describe('renderSettingTypes', () => {
 	it('sorts the settings and quotes only non-identifier names', () => {
 		const rendered = renderSettingTypes(
-			{ version: pinnedVersion },
+			'x86_64-linux',
+			pinnedVersion,
 			pinnedSettingTable
 		);
 
@@ -372,59 +470,75 @@ describe('integerWidthOf', () => {
 });
 
 describe('updateConformanceOracle', () => {
-	it('does not rewrite a current oracle record', async () => {
+	it('does not rewrite a current oracle record', () => {
 		const workspace = fakeWorkspace({
-			version: pinnedVersion
+			versions: pinnedVersions
 		});
 
-		const outcome = await updateConformanceOracle(
-			workspace,
-			fakeNix(pinnedVersion)
-		);
+		const outcome = updateConformanceOracle(workspace, [
+			fakeProbe('x86_64-linux')
+		]);
 
 		expect(outcome).toStrictEqual({
 			kind: 'already-current',
-			record: { version: pinnedVersion }
+			record: { versions: pinnedVersions }
 		});
 		expect(workspace.writes).toStrictEqual([]);
-		// Refresh the table even when the oracle record is already current.
 		expect(workspace.tables).toStrictEqual([
-			renderSettingTypes({ version: pinnedVersion }, pinnedSettingTable)
+			{
+				system: 'x86_64-linux',
+				text: renderSettingTypes(
+					'x86_64-linux',
+					pinnedVersion,
+					pinnedSettingTable
+				)
+			}
 		]);
 	});
 
-	it.each<{
-		name: string;
-		recorded: OracleRecord | undefined;
-		version: string;
-		written: OracleRecord;
-	}>([
-		{
-			name: 'the flake now builds a different Nix',
-			recorded: { version: pinnedVersion },
-			version: movedVersion,
-			written: { version: movedVersion }
-		},
-		{
-			name: 'there is no record yet',
-			recorded: undefined,
-			version: pinnedVersion,
-			written: { version: pinnedVersion }
-		}
-	])('records the resolved Nix version when $name', async (testCase) => {
-		const workspace = fakeWorkspace(testCase.recorded);
+	it('updates only the selected system in an existing record', () => {
+		const workspace = fakeWorkspace({ versions: pinnedVersions });
+		const written: OracleRecord = {
+			versions: { ...pinnedVersions, 'aarch64-linux': movedVersion }
+		};
 
-		const outcome = await updateConformanceOracle(
-			workspace,
-			fakeNix(testCase.version)
-		);
+		const outcome = updateConformanceOracle(workspace, [
+			fakeProbe('aarch64-linux', movedVersion)
+		]);
 
 		expect(outcome).toStrictEqual({
 			kind: 'recorded',
-			record: testCase.written
+			record: written
 		});
 		expect(
 			workspace.writes.map((text) => parseOracleRecord(text))
-		).toStrictEqual([testCase.written]);
+		).toStrictEqual([written]);
+	});
+
+	it('creates a complete record from probes for every system', () => {
+		const workspace = fakeWorkspace(undefined);
+		const probes = oracleSystems.map((system) => fakeProbe(system));
+
+		const outcome = updateConformanceOracle(workspace, probes);
+
+		expect(outcome).toStrictEqual({
+			kind: 'recorded',
+			record: { versions: pinnedVersions }
+		});
+	});
+
+	it('reports missing systems when creating a record from a partial probe', async () => {
+		const workspace = fakeWorkspace(undefined);
+
+		const error = await captureError(IncompleteOracleUpdateError, () =>
+			updateConformanceOracle(workspace, [fakeProbe('x86_64-linux')])
+		);
+
+		expect(error.missingSystems).toStrictEqual([
+			'aarch64-linux',
+			'x86_64-darwin',
+			'aarch64-darwin'
+		]);
+		expect(workspace.tables).toStrictEqual([]);
 	});
 });

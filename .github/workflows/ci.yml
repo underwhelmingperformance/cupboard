@@ -38,6 +38,48 @@ jobs:
 
       - run: pnpm --config.verify-deps-before-run=false check
 
+  conformance:
+    name: conformance (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+          - system: x86_64-darwin
+            runner: macos-26-intel
+          - system: aarch64-darwin
+            runner: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Check the generated oracle data
+        env:
+          NIX_SYSTEM: ${{ matrix.system }}
+        run: |
+          pnpm update:conformance-oracle --system "$NIX_SYSTEM"
+          git diff --exit-code -- \
+            tests/conformance/oracle.json \
+            "packages/nix/src/setting-types.${NIX_SYSTEM}.generated.ts"
+
+      - run: pnpm --config.verify-deps-before-run=false check:conformance
+
   binary:
     name: binary smoke
     runs-on: ubuntu-24.04
@@ -131,11 +173,6 @@ jobs:
       - run: pnpm --config.verify-deps-before-run=false check:e2e
 
       - run: pnpm --config.verify-deps-before-run=false check:e2e-remote-store
-
-      # The conformance suite compares our client with the Nix binary pinned by
-      # the flake. It runs only on Ubuntu in CI; developers run the
-      # Darwin-specific configuration cases locally.
-      - run: pnpm --config.verify-deps-before-run=false check:conformance
 
   pipeline-e2e:
     name: publish pipeline e2e

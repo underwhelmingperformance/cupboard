@@ -1,3 +1,8 @@
 {
-	"version": "nix (Nix) 2.34.8"
+	"versions": {
+		"x86_64-linux": "nix (Nix) 2.34.8",
+		"aarch64-linux": "nix (Nix) 2.34.8",
+		"x86_64-darwin": "nix (Nix) 2.34.8",
+		"aarch64-darwin": "nix (Nix) 2.34.8"
+	}
 }

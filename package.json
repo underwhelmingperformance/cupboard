@@ -36,6 +36,10 @@
 	"engines": {
 		"node": ">=24"
 	},
+	"imports": {
+		"#nix-setting-types": "./packages/nix/src/setting-types.generated.ts",
+		"#nix-systems": "./packages/nix/src/nix-systems.ts"
+	},
 	"license": "AGPL-3.0-or-later",
 	"packageManager": "pnpm@11.21.0",
 	"private": true,

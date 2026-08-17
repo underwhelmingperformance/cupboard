@@ -16,11 +16,13 @@ import { CodedError, genericExitCode } from '@cupboard/shared/errors';
 import { Command } from 'commander';
 import { z } from 'zod';
 
+import { type NixSystem, nixSystems, nixSystemSchema } from '#nix-systems';
+
 /**
  * The conformance suite compares our client with the flake's `conformanceNix`
- * output from pinned nixpkgs. `oracle.json` records its version, while the
- * conformance suite compares the generated settings table with the binary's
- * reported settings. `update` rebuilds the output and records both results.
+ * outputs from pinned nixpkgs. `oracle.json` records their versions, while the
+ * suite compares each generated settings table with the binary's reported
+ * settings. `update` builds the requested probes and records their results.
  */
 export const oracleFileName = 'oracle.json';
 
@@ -41,10 +43,25 @@ The table's path relative to the repository root.
 */
 export const settingTypesFilePath = `packages/nix/src/${settingTypesFileName}`;
 
+export function systemSettingTypesFileName(system: OracleSystem): string {
+	return `setting-types.${system}.generated.ts`;
+}
+
+export function systemSettingTypesFilePath(system: OracleSystem): string {
+	return `packages/nix/src/${systemSettingTypesFileName(system)}`;
+}
+
 /**
 The flake output containing the `nix` binary used by the suite.
 */
 export const conformanceNixOutput = '.#conformanceNix';
+
+/**
+The Nix systems for which the flake provides a conformance oracle.
+*/
+export const oracleSystems = nixSystems;
+
+export type OracleSystem = NixSystem;
 
 /**
 The command that regenerates the record and settings table.
@@ -54,10 +71,25 @@ const updateCommand = 'pnpm update:conformance-oracle';
 const nixVersionSchema = z.string().regex(/^nix \(Nix\) \S+$/u);
 const gitRevisionSchema = z.string().regex(/^[\da-f]{40}$/u);
 
+const oracleSystemSchema = nixSystemSchema;
+const oracleVersionsSchema = z
+	.record(oracleSystemSchema, nixVersionSchema)
+	.superRefine((versions, context) => {
+		for (const system of oracleSystems) {
+			if (Object.hasOwn(versions, system)) {
+				continue;
+			}
+
+			context.addIssue({
+				code: 'custom',
+				message: `missing Nix version for ${system}`,
+				path: [system]
+			});
+		}
+	});
+
 const oracleRecordSchema = z
-	.object({
-		version: nixVersionSchema
-	})
+	.object({ versions: oracleVersionsSchema })
 	.strict();
 
 /**
@@ -79,7 +111,7 @@ Reads and writes the files the record is derived from and stored in.
 export interface OracleWorkspace {
 	readOracleFile(): string;
 	writeOracleFile(text: string): void;
-	writeSettingTypesFile(text: string): void;
+	writeSettingTypesFile(system: OracleSystem, text: string): void;
 }
 
 /**
@@ -120,7 +152,7 @@ export const integerWidthProbes = {
 	unsignedThirtyTwo: '4294967295',
 	signedSixtyFour: '9223372036854775807',
 	unsignedSixtyFour: '18446744073709551615'
-} as const;
+};
 
 /**
 The boundary values that a setting accepts.
@@ -189,17 +221,9 @@ export function integerWidthOf(
 /**
 The Nix version recorded in the generated settings table.
 */
-export interface GeneratedSettingsRecord {
-	readonly version: string;
-}
-
-/**
-Reads the version and setting metadata from the pinned Nix.
-*/
-export interface OracleNix {
-	readVersion(): Promise<string>;
-	readSettingTable(): Promise<NixSettingTable>;
-}
+export type GeneratedSettingsRecord = Readonly<
+	Record<OracleSystem, { readonly generatedFromNix: string }>
+>;
 
 export class UnparsableOracleFileError extends CodedError {
 	constructor(options: { cause: unknown }) {
@@ -231,12 +255,14 @@ export class InvalidFlakeLockError extends CodedError {
 
 export class SettingTypesVersionDriftError extends CodedError {
 	constructor(
+		public readonly system: OracleSystem,
 		public readonly oracle: string,
 		public readonly generated: string
 	) {
 		super(
-			`${oracleFilePath} records Nix version ${oracle}, but ` +
-				`${settingTypesFilePath} was generated from Nix version ${generated}. Run ` +
+			`${oracleFilePath} records Nix version ${oracle} for ${system}, but ` +
+				`${systemSettingTypesFilePath(system)} was generated from Nix version ` +
+				`${generated}. Run ` +
 				`\`${updateCommand}\` to refresh them.`
 		);
 		this.name = 'SettingTypesVersionDriftError';
@@ -250,17 +276,76 @@ export class UnreadableSettingsError extends CodedError {
 	}
 }
 
+export class UnparsableOracleProbeError extends CodedError {
+	constructor(options: { cause: unknown }) {
+		super('the conformance oracle probe did not produce valid JSON', options);
+		this.name = 'UnparsableOracleProbeError';
+	}
+}
+
+export class InvalidOracleProbeError extends CodedError {
+	constructor(public readonly issues: readonly z.core.$ZodIssue[]) {
+		super('the conformance oracle probe does not have the expected shape');
+		this.name = 'InvalidOracleProbeError';
+	}
+}
+
+export class IncompleteOracleProbeError extends CodedError {
+	constructor(public readonly setting: string) {
+		super(
+			`the conformance oracle probe did not report integer boundary results for '${setting}'`
+		);
+		this.name = 'IncompleteOracleProbeError';
+	}
+}
+
+export class OracleProbeSystemMismatchError extends CodedError {
+	constructor(
+		public readonly expected: OracleSystem,
+		public readonly reported: OracleSystem
+	) {
+		super(
+			`the ${expected} conformance oracle probe reported system ${reported}`
+		);
+		this.name = 'OracleProbeSystemMismatchError';
+	}
+}
+
+export class InvalidOracleSystemError extends CodedError {
+	constructor(public readonly system: string) {
+		super(
+			`'${system}' is not a supported conformance oracle system. Expected one of: ${oracleSystems.join(', ')}`
+		);
+		this.name = 'InvalidOracleSystemError';
+	}
+}
+
+export class IncompleteOracleUpdateError extends CodedError {
+	constructor(public readonly missingSystems: readonly OracleSystem[]) {
+		super(
+			`the oracle update has no data for: ${missingSystems.join(', ')}. ` +
+				'Provide probes for every system when creating the record.'
+		);
+		this.name = 'IncompleteOracleUpdateError';
+	}
+}
+
+export class UnsupportedNixSystemError extends CodedError {
+	constructor(public readonly reported: string) {
+		super(`the pinned Nix reports unsupported system '${reported}'`);
+		this.name = 'UnsupportedNixSystemError';
+	}
+}
+
 export class ConformanceNixUnavailableError extends CodedError {
 	constructor(
 		public readonly reason: string,
-		options: { cause?: unknown } = {}
+		options: { cause?: unknown; output?: string } = {}
 	) {
-		super(
-			`could not resolve the Nix binary from ${conformanceNixOutput}:\n${reason}`,
-			{
-				...(options.cause !== undefined && { cause: options.cause })
-			}
-		);
+		const output = options.output ?? conformanceNixOutput;
+		super(`could not resolve the conformance output ${output}:\n${reason}`, {
+			...(options.cause !== undefined && { cause: options.cause })
+		});
 		this.name = 'ConformanceNixUnavailableError';
 	}
 }
@@ -324,10 +409,15 @@ export function checkConformanceOracle(
 ): void {
 	const recorded = parseOracleRecord(workspace.readOracleFile());
 
-	if (generated.version !== recorded.version) {
+	for (const system of oracleSystems) {
+		if (generated[system].generatedFromNix === recorded.versions[system]) {
+			continue;
+		}
+
 		throw new SettingTypesVersionDriftError(
-			recorded.version,
-			generated.version
+			system,
+			recorded.versions[system],
+			generated[system].generatedFromNix
 		);
 	}
 }
@@ -344,7 +434,8 @@ function settingKey(name: string): string {
  * makes an oracle update show only semantic changes in its diff.
  */
 export function renderSettingTypes(
-	record: OracleRecord,
+	system: OracleSystem,
+	version: string,
 	table: NixSettingTable
 ): string {
 	const entries = Object.entries(table.types)
@@ -357,7 +448,7 @@ export function renderSettingTypes(
 		.join(',\n');
 
 	return [
-		`// Generated by \`${updateCommand}\` from the pinned Nix.`,
+		`// Generated by \`${updateCommand}\` for ${system} from the pinned Nix.`,
 		'// Run that command to refresh this file. Do not edit the table by hand.',
 		'//',
 		'// Every setting reported by Nix, with its value type.',
@@ -366,7 +457,7 @@ export function renderSettingTypes(
 		'',
 		"import type { NixIntegerWidth, NixSettingValueType } from './setting-types.ts';",
 		'',
-		`export const generatedFromNix = '${record.version}';`,
+		`export const generatedFromNix = '${version}';`,
 		'',
 		'export const nixSettingTypes: Readonly<Record<string, NixSettingValueType>> = {',
 		entries,
@@ -385,20 +476,50 @@ export type OracleUpdateOutcome =
 	| { kind: 'already-current'; record: OracleRecord }
 	| { kind: 'recorded'; record: OracleRecord };
 
-export async function updateConformanceOracle(
+export interface ProbedOracle {
+	readonly system: OracleSystem;
+	readonly version: string;
+	readonly table: NixSettingTable;
+}
+
+export function updateConformanceOracle(
 	workspace: OracleWorkspace,
-	nix: OracleNix
-): Promise<OracleUpdateOutcome> {
-	const version = await nix.readVersion();
-	const record: OracleRecord = { version };
+	probes: readonly ProbedOracle[]
+): OracleUpdateOutcome {
 	const current = recordedOrNothing(workspace);
 
-	// Always refresh the table from the same Nix build as the record.
-	workspace.writeSettingTypesFile(
-		renderSettingTypes(record, await nix.readSettingTable())
-	);
+	const recordResult = oracleRecordSchema.safeParse({
+		versions: {
+			...current?.versions,
+			...Object.fromEntries(
+				probes.map(({ system, version }) => [system, version])
+			)
+		}
+	});
 
-	if (current?.version === record.version) {
+	if (!recordResult.success) {
+		const available = new Set([
+			...Object.keys(current?.versions ?? {}),
+			...probes.map(({ system }) => system)
+		]);
+		throw new IncompleteOracleUpdateError(
+			oracleSystems.filter((system) => !available.has(system))
+		);
+	}
+
+	const record = recordResult.data;
+
+	for (const probe of probes) {
+		workspace.writeSettingTypesFile(
+			probe.system,
+			renderSettingTypes(probe.system, probe.version, probe.table)
+		);
+	}
+
+	if (
+		current !== undefined &&
+		serialiseOracleRecord(current) === serialiseOracleRecord(record)
+	) {
 		return { kind: 'already-current', record };
 	}
 
@@ -413,6 +534,61 @@ const oracleSettingSchema = z.object({
 });
 
 const oracleSettingsSchema = z.record(z.string(), oracleSettingSchema);
+const acceptedWidthProbesSchema = z
+	.object({
+		negative: z.boolean(),
+		unsignedThirtyTwo: z.boolean(),
+		signedSixtyFour: z.boolean(),
+		unsignedSixtyFour: z.boolean()
+	})
+	.strict();
+const oracleProbeSchema = z
+	.object({
+		system: oracleSystemSchema,
+		version: nixVersionSchema,
+		settings: oracleSettingsSchema,
+		acceptedWidthProbes: z.record(z.string(), acceptedWidthProbesSchema)
+	})
+	.strict();
+
+export function parseProbedOracle(document: string): ProbedOracle {
+	let parsed: unknown;
+
+	try {
+		parsed = JSON.parse(document);
+	} catch (error) {
+		throw new UnparsableOracleProbeError({ cause: error });
+	}
+
+	const result = oracleProbeSchema.safeParse(parsed);
+
+	if (!result.success) {
+		throw new InvalidOracleProbeError(result.error.issues);
+	}
+
+	const types = parseSettingTypes(JSON.stringify(result.data.settings));
+	const integerWidths: Record<string, NixIntegerWidth> = {};
+
+	for (const [name, type] of Object.entries(types)) {
+		if (type !== 'integer') {
+			continue;
+		}
+
+		const accepted = result.data.acceptedWidthProbes[name];
+
+		if (accepted === undefined) {
+			throw new IncompleteOracleProbeError(name);
+		}
+
+		integerWidths[name] = integerWidthOf(name, accepted);
+	}
+
+	return {
+		system: result.data.system,
+		version: result.data.version,
+		table: { types, integerWidths }
+	};
+}
 
 function settingValueType(value: unknown): NixSettingValueType | undefined {
 	if (typeof value === 'boolean') {
@@ -557,6 +733,56 @@ async function buildConformanceNix(root: string): Promise<NixResult> {
 	}
 }
 
+async function readFlakeOracleProbe(
+	root: string,
+	system: OracleSystem
+): Promise<ProbedOracle> {
+	const output = `.#packages.${system}.conformanceOracleProbe`;
+	let build: NixResult;
+
+	try {
+		build = await runNix(
+			'nix',
+			['build', output, '--no-link', '--print-out-paths'],
+			{ cwd: root }
+		);
+	} catch (error) {
+		if (error instanceof NixNotRunnableError) {
+			throw new ConformanceNixUnavailableError(error.message, {
+				cause: error,
+				output
+			});
+		}
+
+		throw error;
+	}
+
+	if (build.status !== 0) {
+		throw new ConformanceNixUnavailableError(build.stderr.trim(), { output });
+	}
+
+	const outputs = build.stdout.split('\n').filter(Boolean);
+	const [storePath] = outputs;
+
+	if (storePath === undefined || outputs.length !== 1) {
+		throw new ConformanceNixUnavailableError(
+			`building ${output} printed ${String(outputs.length)} store paths; ` +
+				'the updater requires exactly one',
+			{ output }
+		);
+	}
+
+	const probe = parseProbedOracle(
+		readFileSync(path.join(storePath, 'oracle.json'), 'utf8')
+	);
+
+	if (probe.system !== system) {
+		throw new OracleProbeSystemMismatchError(system, probe.system);
+	}
+
+	return probe;
+}
+
 /**
  * Builds the pinned flake output and returns its `nix` binary. The build must
  * print exactly one output store path.
@@ -597,6 +823,40 @@ export async function readNixVersion(
 	}
 
 	return printed.stdout.trim();
+}
+
+/**
+The system for which a `nix` binary was built.
+*/
+export async function readNixSystem(
+	binary: string,
+	environment?: NodeJS.ProcessEnv
+): Promise<OracleSystem> {
+	const printed = await runNix(
+		binary,
+		[
+			'--extra-experimental-features',
+			'nix-command',
+			'eval',
+			'--raw',
+			'--impure',
+			'--expr',
+			'builtins.currentSystem'
+		],
+		{ env: environment }
+	);
+
+	if (printed.status !== 0) {
+		throw new ConformanceNixUnavailableError(printed.stderr.trim());
+	}
+
+	const parsed = oracleSystemSchema.safeParse(printed.stdout.trim());
+
+	if (!parsed.success) {
+		throw new UnsupportedNixSystemError(printed.stdout.trim());
+	}
+
+	return parsed.data;
 }
 
 /**
@@ -719,49 +979,23 @@ const repoRoot = path.resolve(import.meta.dirname, '..');
 
 function repositoryWorkspace(root: string): OracleWorkspace {
 	const recordPath = path.join(root, 'tests', 'conformance', oracleFileName);
-	const tablePath = path.join(
-		root,
-		'packages',
-		'nix',
-		'src',
-		settingTypesFileName
-	);
 
 	return {
 		readOracleFile: () => readFileSync(recordPath, 'utf8'),
 		writeOracleFile: (text) => {
 			writeFileSync(recordPath, text);
 		},
-		writeSettingTypesFile: (text) => {
-			writeFileSync(tablePath, text);
-		}
-	};
-}
-
-// Build the binary once so the version and settings come from the same build.
-function flakeNix(root: string, reporter: Reporter): OracleNix {
-	const built = reporter.phase(
-		'Building the Nix binary from the flake',
-		async (context) => {
-			const binary = await resolveConformanceNixBinary(root);
-			const version = await readNixVersion(binary);
-
-			context.fact('nix', version);
-
-			return { binary, version };
-		}
-	);
-
-	return {
-		readVersion: async () => {
-			const { version } = await built;
-
-			return version;
-		},
-		readSettingTable: async () => {
-			const { binary } = await built;
-
-			return readNixSettingTable(binary);
+		writeSettingTypesFile: (system, text) => {
+			writeFileSync(
+				path.join(
+					root,
+					'packages',
+					'nix',
+					'src',
+					systemSettingTypesFileName(system)
+				),
+				text
+			);
 		}
 	};
 }
@@ -771,9 +1005,25 @@ const updateMessages: Record<
 	(record: OracleRecord) => string
 > = {
 	'already-current': () =>
-		`${oracleFilePath} already records the pinned Nix version.`,
-	recorded: (record) => `Recorded ${record.version} as the conformance oracle.`
+		`${oracleFilePath} already records the probed Nix versions.`,
+	recorded: () => `Recorded the probed Nix versions and settings.`
 };
+
+function selectedOracleSystems(values: readonly string[]): OracleSystem[] {
+	if (values.length === 0) {
+		return [...oracleSystems];
+	}
+
+	return values.map((value) => {
+		const result = oracleSystemSchema.safeParse(value);
+
+		if (!result.success) {
+			throw new InvalidOracleSystemError(value);
+		}
+
+		return result.data;
+	});
+}
 
 function scriptReporter(): Reporter {
 	return createCliUi({ mode: resolveReporterMode() }).reporter();
@@ -792,29 +1042,43 @@ function buildProgram(): Command {
 			`fail when ${oracleFilePath} and the generated settings record different Nix versions`
 		)
 		.action(async () => {
-			// The table is what `update` writes, so it is read when it is checked
-			// rather than when this program starts.
-			const { generatedFromNix } =
-				await import('../packages/nix/src/setting-types.generated.ts');
+			const { nixSettingTables } = await import('#nix-setting-types');
 
-			checkConformanceOracle(repositoryWorkspace(repoRoot), {
-				version: generatedFromNix
-			});
+			checkConformanceOracle(repositoryWorkspace(repoRoot), nixSettingTables);
 			scriptReporter().success(
-				`${oracleFilePath} and ${settingTypesFilePath} record the same Nix version.`
+				`${oracleFilePath} and the generated settings tables record the same Nix versions.`
 			);
 		});
 
 	program
 		.command('update')
-		.description(
-			`rebuild ${conformanceNixOutput} and record its Nix version and settings`
+		.description('build the requested oracle probes and record their settings')
+		.option(
+			'--system <system>',
+			'update one Nix system; repeat the option to update more than one',
+			(value, previous: string[]) => [...previous, value],
+			[]
 		)
-		.action(async () => {
+		.action(async (options: { system: string[] }) => {
 			const reporter = scriptReporter();
-			const outcome = await updateConformanceOracle(
+			const systems = selectedOracleSystems(options.system);
+			const probes = await reporter.phase(
+				`Building ${String(systems.length)} conformance oracle probe${systems.length === 1 ? '' : 's'}`,
+				async (context) => {
+					const resolved = await Promise.all(
+						systems.map((system) => readFlakeOracleProbe(repoRoot, system))
+					);
+
+					for (const probe of resolved) {
+						context.fact(probe.system, probe.version);
+					}
+
+					return resolved;
+				}
+			);
+			const outcome = updateConformanceOracle(
 				repositoryWorkspace(repoRoot),
-				flakeNix(repoRoot, reporter)
+				probes
 			);
 
 			const message = updateMessages[outcome.kind](outcome.record);
