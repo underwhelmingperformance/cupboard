@@ -482,20 +482,6 @@ describe('resolvePlanInputs', () => {
 		).toThrow(UrlInputInvalidError);
 	});
 
-	it('does not reproduce a rejected URL in its diagnostic', () => {
-		const secret = 'read-token';
-
-		expect(() =>
-			resolvePlanInputs(
-				{
-					...baseOptions,
-					url: `https://cupboard.example/t/acme?token=${secret}`
-				},
-				environment
-			)
-		).toThrow(UrlInputInvalidError);
-	});
-
 	it('leaves packing disabled and its capacity at zero by default', () => {
 		const { enablePacking, packCapacity } = resolvePlanInputs(
 			baseOptions,

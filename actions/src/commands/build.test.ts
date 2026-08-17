@@ -21,6 +21,11 @@ import { buildReceiptSchema } from '@cupboard/protocol/build';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+	BuildAttemptsInvalidError,
+	BuildInstallableInvalidError
+} from '../errors.ts';
+
+import {
 	buildAction,
 	buildActivities,
 	derivationsRequiringVerification,
@@ -156,9 +161,15 @@ describe('buildAction', () => {
 		async (installable) => {
 			await expect(
 				buildAction({ installables: [installable] }, {})
-			).rejects.toThrow('installables must not start with a hyphen');
+			).rejects.toBeInstanceOf(BuildInstallableInvalidError);
 		}
 	);
+
+	it('rejects an invalid attempt count by type', async () => {
+		await expect(
+			buildAction({ installables: ['.#app'], attempts: '0' }, {})
+		).rejects.toBeInstanceOf(BuildAttemptsInvalidError);
+	});
 
 	it('starts Nix with a publication-sized installables file', async () => {
 		const directory = await mkdtemp(

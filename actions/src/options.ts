@@ -10,7 +10,8 @@ import {
 	BooleanInputInvalidError,
 	CacheNameInvalidError,
 	ReadUserInvalidError,
-	UrlInputInvalidError
+	UrlInputInvalidError,
+	type UrlInputName
 } from './errors.ts';
 import { parseLines } from './inputs.ts';
 
@@ -70,7 +71,7 @@ export function providedCache(value: string | undefined): StoredCache {
  * only the field name because the value may contain a credential.
  */
 export function providedUrl(
-	name: string,
+	name: UrlInputName,
 	value: string | undefined
 ): URL | undefined {
 	const trimmed = provided(value);
