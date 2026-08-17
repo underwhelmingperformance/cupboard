@@ -14,7 +14,8 @@ import {
 	GithubApiError,
 	GithubEndpointInvalidError,
 	GithubEndpointOriginMismatchError,
-	MalformedReleaseDiscoveryResponseError
+	MalformedReleaseDiscoveryResponseError,
+	WorkflowShaInvalidError
 } from './errors.ts';
 
 const workflowSha = 'a'.repeat(40);
@@ -161,6 +162,14 @@ describe('resolved cupboard JSON', () => {
 });
 
 describe('resolveCupboard', () => {
+	it('rejects a workflow revision that is not a lowercase full commit ID', async () => {
+		const run = resolveCupboard(options({ workflowSha: 'A'.repeat(40) }), {
+			fetch: fetchingGraphql([])
+		});
+
+		await expect(run).rejects.toBeInstanceOf(WorkflowShaInvalidError);
+	});
+
 	it('canonicalises an arbitrary explicit release tag without resolving a colliding branch', async () => {
 		const requests: string[] = [];
 		const fetcher: typeof fetch = (input) => {

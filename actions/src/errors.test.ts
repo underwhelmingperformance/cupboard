@@ -34,6 +34,7 @@ import {
 	MissingChecksumError,
 	MissingInputError,
 	NoReleaseFoundError,
+	PlannedTargetSourceMissingError,
 	ProbeTimeoutError,
 	PublishPlanInvariantError,
 	PublishTargetsJsonError,
@@ -44,6 +45,7 @@ import {
 	ReleaseDiscoverySearchTooLargeError,
 	RemoteBuildOwnerMissingError,
 	ReuseViewPriorityError,
+	ReuseViewRequiredError,
 	RootEnsureCommandError,
 	RootEnsureResultInvalidError,
 	RootEnsureResultMissingError,
@@ -242,6 +244,12 @@ describe('action errors', () => {
 		[
 			'CohortTargetOwnerMissingError',
 			new CohortTargetOwnerMissingError('/nix/store/app'),
+			genericExitCode
+		],
+		['ReuseViewRequiredError', new ReuseViewRequiredError(), genericExitCode],
+		[
+			'PlannedTargetSourceMissingError',
+			new PlannedTargetSourceMissingError('.#app'),
 			genericExitCode
 		],
 		[
