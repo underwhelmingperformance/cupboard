@@ -319,6 +319,16 @@ describe('Nix.toStorePath', () => {
 		expect(nix.toStorePath('/home/u/result')).toBe(appPath);
 	});
 
+	it('preserves the identity of a store path which is itself a symlink', () => {
+		const linkPath =
+			'/nix/store/dddddddddddddddddddddddddddddddd-link' as const;
+		const nix = nixOver(recordingStore(), (path) =>
+			path === linkPath ? appPath : path
+		);
+
+		expect(nix.toStorePath(linkPath)).toBe(linkPath);
+	});
+
 	it('falls back to the argument when it cannot be resolved', () => {
 		const nix = nixOver(recordingStore(), () => {
 			throw new Error('ENOENT');

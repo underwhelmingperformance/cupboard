@@ -219,6 +219,19 @@ export class Nix {
 		}
 	}
 
+	private storePathContaining(path: string): StorePathString | undefined {
+		const prefix = `${this.storeDirectory}/`;
+
+		if (!path.startsWith(prefix)) {
+			return undefined;
+		}
+
+		const [entry] = path.slice(prefix.length).split('/', 1);
+		const storePath = storePathSchema.safeParse(`${prefix}${entry ?? ''}`);
+
+		return storePath.success ? storePath.data : undefined;
+	}
+
 	/**
 	Path information for the store path the argument resolves to.
 	*/
@@ -495,30 +508,30 @@ export class Nix {
 	}
 
 	/**
-	 * The store path an argument names, the way `nix path-info` does: resolve
-	 * symlinks, then take the store path containing the result. A `result`
-	 * symlink and a file inside a store path both resolve to the store path.
+	 * The store path an argument names, the way `nix path-info` does. An argument
+	 * already inside the store retains the identity of its top-level store path.
+	 * Other arguments resolve symlinks first, so a `result` symlink also refers
+	 * to its target's store path.
 	 *
 	 * The entry directly below the store directory must itself be a valid store
 	 * path, so a loose file beside the store's paths is rejected with
 	 * {@link NotInNixStoreError}.
 	 */
 	toStorePath(path: string): StorePathString {
+		const direct = this.storePathContaining(path);
+
+		if (direct !== undefined) {
+			return direct;
+		}
+
 		const resolved = this.resolveRealPath(path);
-		const prefix = `${this.storeDirectory}/`;
+		const storePath = this.storePathContaining(resolved);
 
-		if (!resolved.startsWith(prefix)) {
+		if (storePath === undefined) {
 			throw new NotInNixStoreError(resolved, this.storeDirectory);
 		}
 
-		const [entry] = resolved.slice(prefix.length).split('/', 1);
-		const storePath = storePathSchema.safeParse(`${prefix}${entry ?? ''}`);
-
-		if (!storePath.success) {
-			throw new NotInNixStoreError(resolved, this.storeDirectory);
-		}
-
-		return storePath.data;
+		return storePath;
 	}
 
 	/**
