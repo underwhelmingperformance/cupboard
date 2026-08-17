@@ -14,13 +14,18 @@ import {
 	canonicalPath,
 	detectSession,
 	fetchPaged,
+	GitHubJobRequestError,
 	hasSessionBoundary,
+	InvalidGitHubJobMetadataError,
+	InvalidGitHubJobUrlError,
+	lookbackWindow,
 	mergeBusy,
 	minPageLimit,
 	normalisePath,
 	type OperationGroup,
 	operationRows,
 	type OperationStat,
+	parseGitHubJobUrl,
 	parseSpanEvent,
 	parseTraceSummary,
 	parseWorkerLog,
@@ -34,8 +39,113 @@ import {
 	type TimeWindow,
 	type TraceSummary,
 	triggerGroup,
+	windowForGitHubJob,
 	type WorkerLog
 } from './diagnose-push.ts';
+
+const completedGitHubJob: typeof fetch = () =>
+	Promise.resolve(
+		Response.json({
+			id: 30,
+			run_id: 20,
+			started_at: '2026-08-17T08:00:00Z',
+			completed_at: '2026-08-17T08:30:00Z'
+		})
+	);
+
+const activeGitHubJob: typeof fetch = () =>
+	Promise.resolve(
+		Response.json({
+			id: 30,
+			run_id: 20,
+			started_at: '2026-08-17T08:00:00Z'
+		})
+	);
+
+describe('GitHub job window', () => {
+	it('parses a GitHub Actions job URL', () => {
+		expect(
+			parseGitHubJobUrl(
+				'https://github.com/iainlane/dotfiles/actions/runs/32007544027/job/95321136432'
+			)
+		).toStrictEqual({
+			owner: 'iainlane',
+			repository: 'dotfiles',
+			runId: '32007544027',
+			jobId: '95321136432'
+		});
+	});
+
+	it('rejects a URL that does not identify an Actions job', () => {
+		expect(() =>
+			parseGitHubJobUrl('https://github.com/iainlane/dotfiles/actions')
+		).toThrow(InvalidGitHubJobUrlError);
+	});
+
+	it('reports a refused GitHub job request as its own error type', async () => {
+		const reference = parseGitHubJobUrl(
+			'https://github.com/iainlane/dotfiles/actions/runs/20/job/30'
+		);
+		const request = windowForGitHubJob(reference, 0, () =>
+			Promise.resolve(new Response(undefined, { status: 403 }))
+		);
+
+		await expect(request).rejects.toBeInstanceOf(GitHubJobRequestError);
+	});
+
+	it('reports malformed GitHub job metadata as its own error type', async () => {
+		const reference = parseGitHubJobUrl(
+			'https://github.com/iainlane/dotfiles/actions/runs/20/job/30'
+		);
+		const metadata = { id: 30 };
+		const request = windowForGitHubJob(reference, 0, () =>
+			Promise.resolve(Response.json(metadata))
+		);
+
+		await expect(request).rejects.toBeInstanceOf(InvalidGitHubJobMetadataError);
+	});
+
+	it('uses the job timestamps and a margin for a completed job', async () => {
+		const reference = parseGitHubJobUrl(
+			'https://github.com/iainlane/dotfiles/actions/runs/20/job/30'
+		);
+		expect(
+			await windowForGitHubJob(
+				reference,
+				Date.parse('2026-08-17T09:00:00Z'),
+				completedGitHubJob
+			)
+		).toStrictEqual({
+			from: Date.parse('2026-08-17T07:58:00Z'),
+			to: Date.parse('2026-08-17T08:32:00Z')
+		});
+	});
+
+	it('ends an active job window at the current time', async () => {
+		const reference = parseGitHubJobUrl(
+			'https://github.com/iainlane/dotfiles/actions/runs/20/job/30'
+		);
+		const now = Date.parse('2026-08-17T08:30:00Z');
+
+		expect(
+			await windowForGitHubJob(reference, now, activeGitHubJob)
+		).toStrictEqual({
+			from: Date.parse('2026-08-17T07:58:00Z'),
+			to: now
+		});
+	});
+});
+
+describe('lookbackWindow', () => {
+	it('returns the requested interval', () => {
+		const now = Date.parse('2026-08-17T09:00:00Z');
+
+		expect(lookbackWindow(now, 45)).toStrictEqual({
+			from: Date.parse('2026-08-17T08:15:00Z'),
+			to: now
+		});
+	});
+});
 
 describe('normalisePath', () => {
 	it.each([
@@ -219,7 +329,7 @@ describe('parseTraceSummary', () => {
 			durationMs: 120,
 			spans: 4,
 			startMs: 5000,
-			errored: true
+			errors: ['boom']
 		});
 	});
 });
@@ -923,7 +1033,7 @@ describe('analyse', () => {
 			durationMs: 400,
 			spans: 3,
 			startMs: 1000,
-			errored: false
+			errors: []
 		},
 		{
 			traceId: 't2',
@@ -931,7 +1041,7 @@ describe('analyse', () => {
 			durationMs: 800,
 			spans: 3,
 			startMs: 2000,
-			errored: true
+			errors: ['staging object missing', 'staging object missing']
 		},
 		{
 			traceId: 't3',
@@ -939,7 +1049,7 @@ describe('analyse', () => {
 			durationMs: 100,
 			spans: 2,
 			startMs: 3000,
-			errored: false
+			errors: []
 		}
 	];
 
@@ -976,14 +1086,7 @@ describe('analyse', () => {
 	];
 
 	it('rolls traces, logs and spans up by operation, busiest first', () => {
-		const analysis = analyse(
-			'cupboard-tenant',
-			window,
-			'session',
-			logs,
-			traces,
-			spans
-		);
+		const analysis = analyse('cupboard-tenant', window, logs, traces, spans);
 
 		expect(analysis.tracingAvailable).toBe(true);
 		expect(analysis.tracedServerMs).toBe(1300);
@@ -993,6 +1096,13 @@ describe('analyse', () => {
 			rowsWritten: 25,
 			errors: 2
 		});
+		expect(analysis.traceErrors).toStrictEqual([
+			{
+				bucket: 'PUT /cache/:cache/uploads/:id',
+				message: 'staging object missing',
+				occurrences: 2
+			}
+		]);
 		expect(analysis.groups).toStrictEqual([
 			{
 				group: 'fetch',
@@ -1047,13 +1157,12 @@ describe('analyse', () => {
 			durationMs: 5000,
 			spans: 1,
 			startMs: 4000,
-			errored: false
+			errors: []
 		};
 
 		const analysis = analyse(
 			'cupboard-tenant',
 			window,
-			'session',
 			logs,
 			[...traces, queueTrace],
 			[]
@@ -1066,28 +1175,14 @@ describe('analyse', () => {
 	});
 
 	it('reports a no-trace fallback in the verdict', () => {
-		const analysis = analyse(
-			'cupboard-tenant',
-			window,
-			'session',
-			logs,
-			[],
-			[]
-		);
+		const analysis = analyse('cupboard-tenant', window, logs, [], []);
 
 		expect(analysis.tracingAvailable).toBe(false);
 		expect(analysis.verdict).toContain('No traces in the window');
 	});
 
 	it('leads the summary rows with the verdict', () => {
-		const analysis = analyse(
-			'cupboard-tenant',
-			window,
-			'session',
-			logs,
-			traces,
-			spans
-		);
+		const analysis = analyse('cupboard-tenant', window, logs, traces, spans);
 		const rows = summaryRows(analysis);
 
 		expect(rows[0]).toStrictEqual({
@@ -1106,14 +1201,7 @@ describe('analyse', () => {
 	});
 
 	it('renders an operation row with its span breakdown beneath it', () => {
-		const analysis = analyse(
-			'cupboard-tenant',
-			window,
-			'session',
-			logs,
-			traces,
-			spans
-		);
+		const analysis = analyse('cupboard-tenant', window, logs, traces, spans);
 		const fetchGroup = analysis.groups.find((group) => group.group === 'fetch');
 
 		expect(operationRows(fetchGroup?.operations ?? [])).toStrictEqual([
@@ -1228,7 +1316,6 @@ describe('renderAnalysis', () => {
 	const analysis: Analysis = {
 		worker: 'cupboard-tenant',
 		window: { from: 0, to: 10_000 },
-		windowSource: 'session',
 		invocations: 1,
 		tracedServerMs: 400,
 		wallSpanMs: 10_000,
@@ -1242,9 +1329,10 @@ describe('renderAnalysis', () => {
 				durationMs: 400,
 				spans: 3,
 				startMs: 0,
-				errored: false
+				errors: []
 			}
 		],
+		traceErrors: [],
 		totals: { rowsRead: 20, rowsWritten: 10, errors: 0 }
 	};
 
