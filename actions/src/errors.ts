@@ -137,11 +137,11 @@ export class CupboardReleaseSelectionConflictError extends UsageError {
 }
 
 /**
-The requested packing capacity is not a positive integer number of bytes.
+The `pack-capacity` input is not a positive integer byte count.
 */
 export class PackCapacityInvalidError extends UsageError {
 	constructor(public readonly value: string) {
-		super('pack-capacity must be a positive integer number of bytes');
+		super('pack-capacity must be a positive integer byte count');
 		this.name = 'PackCapacityInvalidError';
 	}
 }
@@ -358,13 +358,11 @@ export class ExactReleaseTagRequiredError extends CodedError {
 }
 
 /**
-The expected release archive digest is not a lowercase SHA-256 digest.
+The release archive digest is not a lowercase SHA-256 digest.
 */
 export class ArchiveSha256InvalidError extends CodedError {
 	constructor(public readonly value: string) {
-		super(
-			'The computed release archive digest is not a lowercase SHA-256 digest.'
-		);
+		super('The release archive digest is not a lowercase SHA-256 digest.');
 		this.name = 'ArchiveSha256InvalidError';
 	}
 }
@@ -1496,12 +1494,12 @@ export class RemoteCohortProtocolError extends CodedError {
 }
 
 /**
-Planning did not resolve a daemon derived path for a remote build target.
+Planning did not resolve a Nix derived path that the remote daemon can build.
 */
 export class RemotePublicationTargetUnresolvedError extends UsageError {
 	constructor(public readonly installables: readonly string[]) {
 		super(
-			`Remote publication requires a daemon derived path for every build target. The plan did not resolve ${installables.join(', ')}. Re-run planning with evaluable locked outputs or publish from the local store.`
+			`Remote publication requires every build target to resolve to a Nix derived path that the remote daemon can build. The plan did not resolve these targets: ${installables.join(', ')}. Re-run planning with evaluable locked outputs or publish from the local store.`
 		);
 		this.name = 'RemotePublicationTargetUnresolvedError';
 	}
@@ -1565,7 +1563,7 @@ A planned remote target does not refer to a derivation.
 export class PlannedTargetNotDerivationError extends UsageError {
 	constructor(public readonly target: string) {
 		super(
-			`Planned target ${target} does not name a derivation. Re-run planning so every target has a daemon derived path.`
+			`Planned target ${target} does not refer to a derivation. Re-run planning so every target resolves to a Nix derived path that the remote daemon can build.`
 		);
 		this.name = 'PlannedTargetNotDerivationError';
 	}
@@ -1629,7 +1627,7 @@ export class LocalBuildOutputsMissingError extends CodedError {
 }
 
 /**
-A local build result included paths absent from the completed cohort build.
+A local build result included output paths that the completed cohort build did not produce.
 */
 export class LocalBuildOutputsOutsideCohortError extends CodedError {
 	constructor(
@@ -1637,7 +1635,7 @@ export class LocalBuildOutputsOutsideCohortError extends CodedError {
 		public readonly unexpectedPaths: readonly string[]
 	) {
 		super(
-			`The local build result for ${installable} included output paths absent from the completed cohort build: ${unexpectedPaths.join(', ')}.`
+			`The local build result for ${installable} included output paths that the completed cohort build did not produce: ${unexpectedPaths.join(', ')}.`
 		);
 		this.name = 'LocalBuildOutputsOutsideCohortError';
 	}

@@ -2049,7 +2049,7 @@ interface RecordedProgress {
 	completed: number;
 }
 
-// Records warnings and, when requested, quantitative progress.
+// Records warnings, informational messages, and progress updates.
 function recordingReporter(
 	warnings: string[],
 	progress: RecordedProgress[] = [],

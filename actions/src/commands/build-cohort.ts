@@ -2988,8 +2988,8 @@ export interface RemoteBuildSessionOptions {
 	*/
 	readonly onTargetStarted?: (target: NixDerivedPathString) => void;
 	/**
-	Called after one target has returned a complete result and its outputs have
-	been protected from garbage collection.
+	Called after the daemon returns a complete result for one target and the
+	session protects that target's outputs from garbage collection.
 	*/
 	readonly onTargetCompleted?: (target: NixDerivedPathString) => void;
 }
