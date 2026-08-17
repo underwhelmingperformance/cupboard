@@ -62,10 +62,82 @@ const slowestCount = 12;
 const defaultSessionGapMs = 60 * 1000;
 const defaultSearchMinutes = 120;
 
-class DiagnoseError extends CodedError {
-	constructor(message: string, options?: { readonly cause: unknown }) {
-		super(message, options);
-		this.name = 'DiagnoseError';
+export abstract class DiagnoseError extends CodedError {}
+
+export class InvalidOutputModeError extends DiagnoseError {
+	constructor(public readonly mode: string) {
+		super(`Output mode must be terminal or json, not ${mode}`);
+		this.name = 'InvalidOutputModeError';
+	}
+}
+
+export class InvalidGitHubJobUrlError extends DiagnoseError {
+	constructor(
+		public readonly value: string,
+		options: { readonly cause?: unknown } = {}
+	) {
+		super(
+			'The positional argument must identify a GitHub Actions job',
+			options
+		);
+		this.name = 'InvalidGitHubJobUrlError';
+	}
+}
+
+export class GitHubJobRequestError extends DiagnoseError {
+	constructor(
+		public readonly reference: GitHubJobReference,
+		public readonly status: number
+	) {
+		super(`GitHub returned HTTP ${String(status)} for the selected job`);
+		this.name = 'GitHubJobRequestError';
+	}
+}
+
+export class InvalidGitHubJobMetadataError extends DiagnoseError {
+	constructor(
+		public readonly reference: GitHubJobReference,
+		public readonly metadata: unknown
+	) {
+		super('GitHub returned invalid metadata for the selected job');
+		this.name = 'InvalidGitHubJobMetadataError';
+	}
+}
+
+export class EmptyCloudflareClientIdError extends DiagnoseError {
+	constructor() {
+		super('cf_analytics_client_id is empty');
+		this.name = 'EmptyCloudflareClientIdError';
+	}
+}
+
+export class CloudflareTokenRequestError extends DiagnoseError {
+	constructor(public readonly status: number) {
+		super(`Token request failed with HTTP ${String(status)}`);
+		this.name = 'CloudflareTokenRequestError';
+	}
+}
+
+export class InvalidCloudflareTokenResponseError extends DiagnoseError {
+	constructor(public readonly issues: readonly z.core.$ZodIssue[]) {
+		super('Token response carried no access token');
+		this.name = 'InvalidCloudflareTokenResponseError';
+	}
+}
+
+interface CloudflareAccountSummary {
+	readonly id: string;
+	readonly name: string;
+}
+
+export class CloudflareAccountRequiredError extends DiagnoseError {
+	constructor(public readonly accounts: readonly CloudflareAccountSummary[]) {
+		super(
+			`Pass --account <id>; available accounts:\n${accounts
+				.map((account) => `  ${account.id}  ${account.name}`)
+				.join('\n')}`
+		);
+		this.name = 'CloudflareAccountRequiredError';
 	}
 }
 
@@ -97,7 +169,16 @@ export interface TraceSummary {
 	readonly durationMs: number;
 	readonly spans: number;
 	readonly startMs: number;
-	readonly errored: boolean;
+	readonly errors: readonly string[];
+}
+
+/**
+One trace error, grouped by operation and message.
+*/
+export interface TraceErrorStat {
+	readonly bucket: string;
+	readonly message: string;
+	readonly occurrences: number;
 }
 
 /**
@@ -168,10 +249,20 @@ export interface TimeWindow {
 	readonly to: number;
 }
 
+export function lookbackWindow(now: number, minutes: number): TimeWindow {
+	return { from: now - minutes * 60 * 1000, to: now };
+}
+
+export interface GitHubJobReference {
+	readonly owner: string;
+	readonly repository: string;
+	readonly runId: string;
+	readonly jobId: string;
+}
+
 export interface Analysis {
 	readonly worker: string;
 	readonly window: TimeWindow;
-	readonly windowSource: 'fixed' | 'session';
 	readonly invocations: number;
 	readonly tracedServerMs: number;
 	readonly wallSpanMs: number;
@@ -179,6 +270,7 @@ export interface Analysis {
 	readonly verdict: string;
 	readonly groups: readonly OperationGroup[];
 	readonly slowest: readonly TraceSummary[];
+	readonly traceErrors: readonly TraceErrorStat[];
 	readonly totals: {
 		readonly rowsRead: number;
 		readonly rowsWritten: number;
@@ -473,7 +565,7 @@ export function parseTraceSummary(trace: unknown): TraceSummary | undefined {
 		durationMs: parsed.data.traceDurationMs,
 		spans: parsed.data.spans ?? 0,
 		startMs: parsed.data.traceStartMs,
-		errored: (parsed.data.errors?.length ?? 0) > 0
+		errors: parsed.data.errors ?? []
 	};
 }
 
@@ -672,7 +764,6 @@ const topSpanKinds = 8;
 export function analyse(
 	worker: string,
 	window: TimeWindow,
-	windowSource: 'fixed' | 'session',
 	logs: readonly WorkerLog[],
 	traces: readonly TraceSummary[],
 	spans: readonly SpanEvent[]
@@ -711,8 +802,30 @@ export function analyse(
 		bucket.spanCount += trace.spans;
 		bucketByTrace.set(trace.traceId, trace.bucket);
 
-		if (trace.errored) {
+		if (trace.errors.length > 0) {
 			bucket.errors += 1;
+		}
+	}
+
+	const traceErrors = new Map<
+		string,
+		{ bucket: string; message: string; occurrences: number }
+	>();
+
+	for (const trace of traces) {
+		for (const message of trace.errors) {
+			const key = `${trace.bucket}\0${message}`;
+			const current = traceErrors.get(key);
+
+			if (current === undefined) {
+				traceErrors.set(key, {
+					bucket: trace.bucket,
+					message,
+					occurrences: 1
+				});
+			} else {
+				current.occurrences += 1;
+			}
 		}
 	}
 
@@ -821,7 +934,6 @@ export function analyse(
 	return {
 		worker,
 		window,
-		windowSource,
 		invocations: Math.max(traces.length, invocationIds.size),
 		tracedServerMs,
 		wallSpanMs: window.to - window.from,
@@ -829,6 +941,15 @@ export function analyse(
 		verdict: buildVerdict(groups, traces.length > 0),
 		groups,
 		slowest,
+		traceErrors: traceErrors
+			.values()
+			.toArray()
+			.toSorted(
+				(a, b) =>
+					b.occurrences - a.occurrences ||
+					a.bucket.localeCompare(b.bucket) ||
+					a.message.localeCompare(b.message)
+			),
 		totals: {
 			rowsRead: logs.reduce((sum, log) => sum + log.rowsRead, 0),
 			rowsWritten: logs.reduce((sum, log) => sum + log.rowsWritten, 0),
@@ -947,7 +1068,7 @@ export function summaryRows(analysis: Analysis): ResultRow[] {
 		{ label: 'Verdict', value: analysis.verdict },
 		{
 			label: 'Window',
-			value: `${from} -> ${to} (${formatMs(analysis.wallSpanMs)}, ${analysis.windowSource})`
+			value: `${from} -> ${to} (${formatMs(analysis.wallSpanMs)})`
 		},
 		{ label: 'Invocations', value: formatCount(analysis.invocations) },
 		{ label: 'Traced server time', value: formatMs(analysis.tracedServerMs) },
@@ -1014,7 +1135,14 @@ The slowest individual invocations, longest first.
 export function slowestRows(analysis: Analysis): ResultRow[] {
 	return analysis.slowest.map((trace) => ({
 		label: formatMs(trace.durationMs),
-		value: `${trace.bucket}${trace.errored ? ' (error)' : ''}`
+		value: `${trace.bucket}${trace.errors.length > 0 ? ' (error)' : ''}`
+	}));
+}
+
+export function traceErrorRows(analysis: Analysis): ResultRow[] {
+	return analysis.traceErrors.map((error) => ({
+		label: `${formatCount(error.occurrences)}× ${error.bucket}`,
+		value: error.message
 	}));
 }
 
@@ -1026,6 +1154,7 @@ interface Options {
 	readonly account: string | undefined;
 	readonly mode: ReporterMode;
 	readonly forceLogin: boolean;
+	readonly githubJob: GitHubJobReference | undefined;
 }
 
 function resolveMode(
@@ -1041,7 +1170,7 @@ function resolveMode(
 	}
 
 	if (outputMode !== undefined) {
-		throw new DiagnoseError('Output mode must be one of: terminal, json.');
+		throw new InvalidOutputModeError(outputMode);
 	}
 
 	return resolveReporterMode();
@@ -1074,6 +1203,10 @@ function parseOptions(arguments_: readonly string[]): Options {
 		.description(
 			'Explain where a slow cupboard push spent its time, from Cloudflare Workers telemetry.'
 		)
+		.argument(
+			'[github-job-url]',
+			'use the start and completion times of a GitHub Actions job'
+		)
 		.option('--worker <name>', 'Worker script to query', 'cupboard-tenant')
 		.option(
 			'--search <minutes>',
@@ -1101,6 +1234,7 @@ function parseOptions(arguments_: readonly string[]): Options {
 	program.parse(arguments_, { from: 'user' });
 
 	const flags = program.opts<ProgramFlags>();
+	const githubJobUrl = program.args[0];
 
 	return {
 		worker: flags.worker,
@@ -1109,7 +1243,99 @@ function parseOptions(arguments_: readonly string[]): Options {
 		gapMs: flags.gap * 1000,
 		account: flags.account,
 		mode: resolveMode(flags.json ?? false, flags.outputMode),
-		forceLogin: flags.login ?? false
+		forceLogin: flags.login ?? false,
+		githubJob:
+			githubJobUrl === undefined ? undefined : parseGitHubJobUrl(githubJobUrl)
+	};
+}
+
+const githubJobPath =
+	/^\/([^/]+)\/([^/]+)\/actions\/runs\/(\d+)\/job\/(\d+)\/?$/u;
+
+export function parseGitHubJobUrl(value: string): GitHubJobReference {
+	let url: URL;
+
+	try {
+		url = new URL(value);
+	} catch (error) {
+		throw new InvalidGitHubJobUrlError(value, { cause: error });
+	}
+
+	const match = githubJobPath.exec(url.pathname);
+
+	if (match === null || url.hostname !== 'github.com') {
+		throw new InvalidGitHubJobUrlError(value);
+	}
+
+	const [, owner, repository, runId, jobId] = match;
+
+	if (
+		owner === undefined ||
+		repository === undefined ||
+		runId === undefined ||
+		jobId === undefined
+	) {
+		throw new InvalidGitHubJobUrlError(value);
+	}
+
+	return { owner, repository, runId, jobId };
+}
+
+const githubJobSchema = z.object({
+	id: z.number().int(),
+	run_id: z.number().int(),
+	started_at: z.string().nullable(),
+	completed_at: z.string().nullish()
+});
+
+const githubJobWindowMarginMs = 2 * 60 * 1000;
+
+export async function windowForGitHubJob(
+	reference: GitHubJobReference,
+	now: number,
+	fetcher: typeof fetch = fetch
+): Promise<TimeWindow> {
+	const token = env.GITHUB_TOKEN ?? env.GH_TOKEN;
+	const response = await fetcher(
+		`https://api.github.com/repos/${encodeURIComponent(reference.owner)}/${encodeURIComponent(reference.repository)}/actions/jobs/${reference.jobId}`,
+		{
+			headers: {
+				accept: 'application/vnd.github+json',
+				'user-agent': 'cupboard-diagnose-push',
+				...(token !== undefined && { authorization: `Bearer ${token}` })
+			}
+		}
+	);
+
+	if (!response.ok) {
+		throw new GitHubJobRequestError(reference, response.status);
+	}
+
+	const metadata: unknown = await response.json();
+	const parsed = githubJobSchema.safeParse(metadata);
+
+	if (
+		!parsed.success ||
+		String(parsed.data.id) !== reference.jobId ||
+		String(parsed.data.run_id) !== reference.runId ||
+		parsed.data.started_at === null
+	) {
+		throw new InvalidGitHubJobMetadataError(reference, metadata);
+	}
+
+	const startedAt = Date.parse(parsed.data.started_at);
+	const completedAt =
+		parsed.data.completed_at === null || parsed.data.completed_at === undefined
+			? now
+			: Date.parse(parsed.data.completed_at) + githubJobWindowMarginMs;
+
+	if (!Number.isFinite(startedAt) || !Number.isFinite(completedAt)) {
+		throw new InvalidGitHubJobMetadataError(reference, parsed.data);
+	}
+
+	return {
+		from: startedAt - githubJobWindowMarginMs,
+		to: Math.min(now, completedAt)
 	};
 }
 
@@ -1174,7 +1400,7 @@ async function loadClientId(): Promise<string> {
 	const clientId = raw.trim();
 
 	if (clientId === '') {
-		throw new DiagnoseError('cf_analytics_client_id is empty');
+		throw new EmptyCloudflareClientIdError();
 	}
 
 	return clientId;
@@ -1188,17 +1414,13 @@ async function exchange(
 	const response = await fetch(tokenEndpoint, postForm(form));
 
 	if (!response.ok) {
-		throw new DiagnoseError(
-			`Token request failed with HTTP ${String(response.status)}`
-		);
+		throw new CloudflareTokenRequestError(response.status);
 	}
 
 	const parsed = tokenResponseSchema.safeParse(await response.json());
 
 	if (!parsed.success) {
-		throw new DiagnoseError('Token response carried no access token', {
-			cause: parsed.error
-		});
+		throw new InvalidCloudflareTokenResponseError(parsed.error.issues);
 	}
 
 	const grant: Grant = {
@@ -1313,7 +1535,7 @@ async function resolveAccountId(
 		return fromEnv;
 	}
 
-	const accounts: { readonly id: string; readonly name: string }[] = [];
+	const accounts: CloudflareAccountSummary[] = [];
 
 	for await (const account of client.accounts.list()) {
 		accounts.push({ id: account.id, name: account.name });
@@ -1325,11 +1547,7 @@ async function resolveAccountId(
 		return sole.id;
 	}
 
-	const listed = accounts.map((a) => `  ${a.id}  ${a.name}`).join('\n');
-
-	throw new DiagnoseError(
-		`Pass --account <id>; available accounts:\n${listed}`
-	);
+	throw new CloudflareAccountRequiredError(accounts);
 }
 
 function serviceFilter(worker: string): {
@@ -1957,6 +2175,26 @@ export function renderAnalysis(
 	if (analysis.slowest.length > 0) {
 		ui.note('Slowest invocations', slowestRows(analysis));
 	}
+
+	if (analysis.traceErrors.length > 0) {
+		ui.note('Trace errors', traceErrorRows(analysis));
+	}
+}
+
+async function resolveTelemetryWindow(
+	options: Options,
+	now: number,
+	reporter: Reporter
+): Promise<TimeWindow> {
+	const githubJob = options.githubJob;
+
+	if (githubJob !== undefined) {
+		return reporter.phase('Reading GitHub job timing', () =>
+			windowForGitHubJob(githubJob, now)
+		);
+	}
+
+	return lookbackWindow(now, options.sinceMinutes ?? options.searchMinutes);
 }
 
 async function main(): Promise<void> {
@@ -1967,32 +2205,26 @@ async function main(): Promise<void> {
 	const reporter = ui.reporter();
 
 	ui.intro(`Push diagnostic: ${options.worker}`);
+	const searchWindow = await resolveTelemetryWindow(options, now, reporter);
+	const shouldDetectLatestSession =
+		options.githubJob === undefined && options.sinceMinutes === undefined;
 
 	const accessToken = await authenticate(ui, options, now);
 	const client = new Cloudflare({ apiToken: accessToken });
 	const accountId = await resolveAccountId(client, options.account);
-
-	// A fixed `--since` window must be fetched in full; otherwise look back over
-	// the search window and narrow to the most recent session afterwards. Either
-	// way the fetch has to reach back as far as the window the report will cover.
-	const lookbackMinutes = Math.max(
-		options.searchMinutes,
-		options.sinceMinutes ?? 0
+	const lookbackMinutes = Math.ceil(
+		(searchWindow.to - searchWindow.from) / (60 * 1000)
 	);
-	const searchWindow: TimeWindow = {
-		from: now - lookbackMinutes * 60 * 1000,
-		to: now
-	};
 	const lookbackLabel =
-		lookbackMinutes >= 60 && lookbackMinutes % 60 === 0
-			? `${String(lookbackMinutes / 60)}h`
-			: `${String(lookbackMinutes)}m`;
+		options.githubJob === undefined
+			? lookbackMinutes >= 60 && lookbackMinutes % 60 === 0
+				? `${String(lookbackMinutes / 60)}h`
+				: `${String(lookbackMinutes)}m`
+			: 'the GitHub job window';
 
-	// Without a fixed `--since`, only the most recent session is reported, so the
-	// fetch stops at the first gap this wide rather than draining the whole
-	// search window.
-	const stopAtGapMs =
-		options.sinceMinutes === undefined ? options.gapMs : undefined;
+	// Session detection walks backwards only until it finds the previous quiet
+	// gap. A fixed manual or GitHub window must be fetched in full.
+	const stopAtGapMs = shouldDetectLatestSession ? options.gapMs : undefined;
 
 	const { rawEvents, rawTraces } = await reporter.phase(
 		`Fetching ${lookbackLabel} of logs and traces (account ${accountId})`,
@@ -2044,16 +2276,12 @@ async function main(): Promise<void> {
 	);
 
 	const analysis = await reporter.phase('Analysing', (context) => {
-		const window =
-			options.sinceMinutes === undefined
-				? (detectSession(
-						[...logs.map((l) => l.timestamp), ...traces.map((t) => t.startMs)],
-						options.gapMs
-					) ?? searchWindow)
-				: { from: now - options.sinceMinutes * 60 * 1000, to: now };
-
-		const windowSource: 'fixed' | 'session' =
-			options.sinceMinutes === undefined ? 'session' : 'fixed';
+		const window = shouldDetectLatestSession
+			? (detectSession(
+					[...logs.map((l) => l.timestamp), ...traces.map((t) => t.startMs)],
+					options.gapMs
+				) ?? searchWindow)
+			: searchWindow;
 
 		const isInWindow = (stamp: number): boolean =>
 			stamp >= window.from && stamp <= window.to;
@@ -2064,7 +2292,6 @@ async function main(): Promise<void> {
 		return analyse(
 			options.worker,
 			window,
-			windowSource,
 			logs.filter((log) => isInWindow(log.timestamp)),
 			traces.filter((trace) => isInWindow(trace.startMs)),
 			windowedSpans
