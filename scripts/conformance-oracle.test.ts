@@ -9,6 +9,7 @@ import {
 	InvalidFlakeLockError,
 	InvalidOracleFileError,
 	InvalidOracleProbeError,
+	InvalidSettingsDocumentError,
 	type NixSettingTable,
 	type NixSettingTypes,
 	type OracleRecord,
@@ -27,7 +28,7 @@ import {
 	UnparsableFlakeLockError,
 	UnparsableOracleFileError,
 	UnparsableOracleProbeError,
-	UnreadableSettingsError,
+	UnparsableSettingsDocumentError,
 	updateConformanceOracle
 } from './conformance-oracle.ts';
 
@@ -380,13 +381,27 @@ describe('parseSettingTypes', () => {
 		});
 	});
 
-	it.each([
-		{ name: 'a document that is not JSON', document: '{' },
-		{ name: 'a document of something else', document: '[]' }
-	])('refuses $name', async ({ document }) => {
-		await captureError(UnreadableSettingsError, () =>
-			parseSettingTypes(document)
+	it('reports invalid settings JSON with its cause', async () => {
+		const error = await captureError(UnparsableSettingsDocumentError, () =>
+			parseSettingTypes('{')
 		);
+
+		expect(error.cause).toBeInstanceOf(SyntaxError);
+	});
+
+	it('reports a structurally invalid settings document', async () => {
+		const error = await captureError(InvalidSettingsDocumentError, () =>
+			parseSettingTypes('[]')
+		);
+
+		expect(error.issues).toStrictEqual([
+			{
+				expected: 'record',
+				code: 'invalid_type',
+				path: [],
+				message: 'Invalid input: expected record, received array'
+			}
+		]);
 	});
 });
 

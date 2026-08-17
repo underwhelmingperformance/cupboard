@@ -19,10 +19,11 @@ import { z } from 'zod';
 import { type NixSystem, nixSystems, nixSystemSchema } from '#nix-systems';
 
 /**
- * The conformance suite compares our client with the flake's `conformanceNix`
- * outputs from pinned nixpkgs. `oracle.json` records their versions, while the
- * suite compares each generated settings table with the binary's reported
- * settings. `update` builds the requested probes and records their results.
+ * The conformance suite compares our client with the Nix binary from the
+ * flake's `conformanceNix` output. `oracle.json` records the binary's version
+ * for each supported system. The suite also compares each generated settings
+ * table with the settings reported by that binary. `update` builds the
+ * requested probes and records their results.
  */
 export const oracleFileName = 'oracle.json';
 
@@ -32,9 +33,8 @@ The record's path relative to the repository root.
 export const oracleFilePath = `tests/conformance/${oracleFileName}`;
 
 /**
- * The generated settings table used to validate client configuration. It is
- * derived from the same Nix as the oracle. An update rewrites both files, and
- * the conformance suite compares the table with the pinned binary.
+ * The module that collects the generated settings tables used to validate
+ * client configuration.
  */
 export const settingTypesFileName = 'setting-types.generated.ts';
 
@@ -64,7 +64,7 @@ export const oracleSystems = nixSystems;
 export type OracleSystem = NixSystem;
 
 /**
-The command that regenerates the record and settings table.
+The command that regenerates the oracle record and per-system settings tables.
 */
 const updateCommand = 'pnpm update:conformance-oracle';
 
@@ -106,7 +106,7 @@ const flakeLockSchema = z.object({
 });
 
 /**
-Reads and writes the files the record is derived from and stored in.
+Reads and writes the oracle record and generated settings tables.
 */
 export interface OracleWorkspace {
 	readOracleFile(): string;
@@ -170,7 +170,7 @@ export class UnknownIntegerWidthError extends CodedError {
 		public readonly accepted: AcceptedWidthProbes
 	) {
 		super(
-			`the pinned nix accepts a combination of values for '${setting}' that ` +
+			`the pinned Nix accepts a combination of values for '${setting}' that ` +
 				'does not match a supported integer width'
 		);
 		this.name = 'UnknownIntegerWidthError';
@@ -269,10 +269,27 @@ export class SettingTypesVersionDriftError extends CodedError {
 	}
 }
 
-export class UnreadableSettingsError extends CodedError {
-	constructor(public readonly reason: string) {
-		super(`the pinned nix did not report its settings:\n${reason}`);
-		this.name = 'UnreadableSettingsError';
+export class UnparsableSettingsDocumentError extends CodedError {
+	constructor(options: { cause: unknown }) {
+		super('the Nix settings document is not valid JSON', options);
+		this.name = 'UnparsableSettingsDocumentError';
+	}
+}
+
+export class InvalidSettingsDocumentError extends CodedError {
+	constructor(public readonly issues: readonly z.core.$ZodIssue[]) {
+		super('the Nix settings document does not have the expected shape');
+		this.name = 'InvalidSettingsDocumentError';
+	}
+}
+
+export class NixSettingsCommandError extends CodedError {
+	constructor(
+		public readonly status: number | null,
+		public readonly stderr: string
+	) {
+		super(`nix config show exited with status ${String(status)}:\n${stderr}`);
+		this.name = 'NixSettingsCommandError';
 	}
 }
 
@@ -285,7 +302,7 @@ export class UnparsableOracleProbeError extends CodedError {
 
 export class InvalidOracleProbeError extends CodedError {
 	constructor(public readonly issues: readonly z.core.$ZodIssue[]) {
-		super('the conformance oracle probe does not have the expected shape');
+		super('the conformance oracle probe returned data in an unexpected format');
 		this.name = 'InvalidOracleProbeError';
 	}
 }
@@ -304,9 +321,7 @@ export class OracleProbeSystemMismatchError extends CodedError {
 		public readonly expected: OracleSystem,
 		public readonly reported: OracleSystem
 	) {
-		super(
-			`the ${expected} conformance oracle probe reported system ${reported}`
-		);
+		super(`the oracle probe requested ${expected}, but reported ${reported}`);
 		this.name = 'OracleProbeSystemMismatchError';
 	}
 }
@@ -332,7 +347,7 @@ export class IncompleteOracleUpdateError extends CodedError {
 
 export class UnsupportedNixSystemError extends CodedError {
 	constructor(public readonly reported: string) {
-		super(`the pinned Nix reports unsupported system '${reported}'`);
+		super(`the pinned Nix reports the unsupported system '${reported}'`);
 		this.name = 'UnsupportedNixSystemError';
 	}
 }
@@ -622,17 +637,13 @@ export function parseSettingTypes(document: string): NixSettingTypes {
 	try {
 		parsed = JSON.parse(document);
 	} catch (error) {
-		throw new UnreadableSettingsError(
-			error instanceof Error ? error.message : String(error)
-		);
+		throw new UnparsableSettingsDocumentError({ cause: error });
 	}
 
 	const settings = oracleSettingsSchema.safeParse(parsed);
 
 	if (!settings.success) {
-		throw new UnreadableSettingsError(
-			'the reported settings are not a document of settings'
-		);
+		throw new InvalidSettingsDocumentError(settings.error.issues);
 	}
 
 	const types: Record<string, NixSettingValueType> = {};
@@ -659,7 +670,7 @@ function recordedOrNothing(
 }
 
 /**
-What a `nix` invocation produced, whether or not it succeeded.
+The status and output from a `nix` invocation.
 */
 export interface NixResult {
 	readonly status: number | null;
@@ -897,7 +908,7 @@ export async function readNixSettingTable(
 	return { types, integerWidths };
 }
 
-// Each probe runs one `nix config show`. Reading the complete table therefore
+// Each boundary probe runs `nix config show`, so reading the complete table
 // takes a few dozen seconds.
 async function readIntegerWidth(
 	binary: string,
@@ -966,7 +977,7 @@ async function readNixSettingTypes(binary: string): Promise<NixSettingTypes> {
 		);
 
 		if (printed.status !== 0) {
-			throw new UnreadableSettingsError(printed.stderr.trim());
+			throw new NixSettingsCommandError(printed.status, printed.stderr.trim());
 		}
 
 		return parseSettingTypes(printed.stdout);
@@ -1005,8 +1016,8 @@ const updateMessages: Record<
 	(record: OracleRecord) => string
 > = {
 	'already-current': () =>
-		`${oracleFilePath} already records the probed Nix versions.`,
-	recorded: () => `Recorded the probed Nix versions and settings.`
+		`${oracleFilePath} already contains the probed Nix versions.`,
+	recorded: () => `Recorded the probed Nix versions and settings tables.`
 };
 
 function selectedOracleSystems(values: readonly string[]): OracleSystem[] {

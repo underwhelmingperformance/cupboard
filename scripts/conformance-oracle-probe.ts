@@ -11,17 +11,35 @@ interface CommandResult {
 
 class InvalidSettingsDocumentError extends Error {
 	constructor() {
-		super('nix config show --json did not return an object');
+		super('nix config show --json did not return a settings object');
 		this.name = 'InvalidSettingsDocumentError';
+	}
+}
+
+class UnparsableSettingsDocumentError extends Error {
+	constructor(options: { cause: unknown }) {
+		super('nix config show --json did not return valid JSON', options);
+		this.name = 'UnparsableSettingsDocumentError';
+	}
+}
+
+class OracleProbeCommandStartError extends Error {
+	constructor(
+		public readonly binary: string,
+		options: { cause: unknown }
+	) {
+		super(`could not start ${binary}`, options);
+		this.name = 'OracleProbeCommandStartError';
 	}
 }
 
 class OracleProbeCommandError extends Error {
 	constructor(
 		public readonly operation: string,
+		public readonly status: number | null,
 		public readonly stderr: string
 	) {
-		super(`${operation} failed:\n${stderr}`);
+		super(`${operation} exited with status ${String(status)}:\n${stderr}`);
 		this.name = 'OracleProbeCommandError';
 	}
 }
@@ -38,7 +56,9 @@ class OracleProbeSystemMismatchError extends Error {
 		public readonly expected: string,
 		public readonly reported: string
 	) {
-		super(`the ${expected} probe ran with a ${reported} Nix binary`);
+		super(
+			`the oracle probe requested ${expected}, but its Nix binary reports ${reported}`
+		);
 		this.name = 'OracleProbeSystemMismatchError';
 	}
 }
@@ -65,7 +85,7 @@ function run(
 	});
 
 	if (result.error !== undefined) {
-		throw result.error;
+		throw new OracleProbeCommandStartError(binary, { cause: result.error });
 	}
 
 	return {
@@ -77,7 +97,11 @@ function run(
 
 function requireSuccess(result: CommandResult, operation: string): string {
 	if (result.status !== 0) {
-		throw new OracleProbeCommandError(operation, result.stderr.trim());
+		throw new OracleProbeCommandError(
+			operation,
+			result.status,
+			result.stderr.trim()
+		);
 	}
 
 	return result.stdout.trim();
@@ -144,7 +168,13 @@ function main(): void {
 		),
 		'reading the Nix settings'
 	);
-	const settings: unknown = JSON.parse(settingsDocument);
+	let settings: unknown;
+
+	try {
+		settings = JSON.parse(settingsDocument);
+	} catch (error) {
+		throw new UnparsableSettingsDocumentError({ cause: error });
+	}
 
 	if (!isRecord(settings)) {
 		throw new InvalidSettingsDocumentError();
