@@ -12,7 +12,8 @@ import {
 import {
 	CupboardResolutionJsonError,
 	GithubApiError,
-	InvalidInputError,
+	GithubEndpointInvalidError,
+	GithubEndpointOriginMismatchError,
 	MalformedReleaseDiscoveryResponseError
 } from './errors.ts';
 
@@ -680,43 +681,43 @@ describe('resolveCupboard', () => {
 			name: 'cross-origin GraphQL',
 			githubApiUrl: 'https://github.example/api/v3',
 			githubGraphqlUrl: 'https://attacker.example/api/graphql',
-			input: 'github-graphql-url'
+			errorType: GithubEndpointOriginMismatchError
 		},
 		{
 			name: 'insecure REST',
 			githubApiUrl: 'http://github.example/api/v3',
 			githubGraphqlUrl: 'http://github.example/api/graphql',
-			input: 'github-api-url'
+			errorType: GithubEndpointInvalidError
 		},
 		{
 			name: 'credential-bearing REST',
 			githubApiUrl: 'https://token@github.example/api/v3',
 			githubGraphqlUrl: 'https://github.example/api/graphql',
-			input: 'github-api-url'
+			errorType: GithubEndpointInvalidError
 		},
 		{
 			name: 'fragment-bearing REST',
 			githubApiUrl: 'https://github.example/api/v3#unsafe',
 			githubGraphqlUrl: 'https://github.example/api/graphql',
-			input: 'github-api-url'
+			errorType: GithubEndpointInvalidError
 		},
 		{
 			name: 'insecure GraphQL',
 			githubApiUrl: 'https://github.example/api/v3',
 			githubGraphqlUrl: 'http://github.example/api/graphql',
-			input: 'github-graphql-url'
+			errorType: GithubEndpointInvalidError
 		},
 		{
 			name: 'credential-bearing GraphQL',
 			githubApiUrl: 'https://github.example/api/v3',
 			githubGraphqlUrl: 'https://token@github.example/api/graphql',
-			input: 'github-graphql-url'
+			errorType: GithubEndpointInvalidError
 		},
 		{
 			name: 'fragment-bearing GraphQL',
 			githubApiUrl: 'https://github.example/api/v3',
 			githubGraphqlUrl: 'https://github.example/api/graphql#unsafe',
-			input: 'github-graphql-url'
+			errorType: GithubEndpointInvalidError
 		}
 	])(
 		'rejects a $name endpoint before sending credentials',
@@ -735,11 +736,7 @@ describe('resolveCupboard', () => {
 				{ fetch: fetcher }
 			);
 
-			await expect(resolution).rejects.toBeInstanceOf(InvalidInputError);
-			await expect(resolution).rejects.toMatchObject({
-				name: 'InvalidInputError',
-				input: testCase.input
-			});
+			await expect(resolution).rejects.toBeInstanceOf(testCase.errorType);
 			expect(requests).toBe(0);
 		}
 	);

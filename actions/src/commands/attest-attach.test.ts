@@ -7,9 +7,11 @@ import type { Reporter } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
 import {
+	AttestationBundlesMissingError,
 	AttestationChecksumsMismatchError,
-	InvalidInputError,
-	MissingInputError
+	MissingInputError,
+	ReadPasswordRequiredError,
+	ReadUserRequiredError
 } from '../errors.ts';
 
 import {
@@ -208,26 +210,28 @@ describe('resolveAttestAttachInputs', () => {
 		{
 			name: 'bundle',
 			overrides: { bundle: [] as readonly string[] },
-			expected: InvalidInputError
+			expected: AttestationBundlesMissingError
 		}
 	])('requires $name', ({ overrides, expected }) => {
-		let thrown: unknown;
-
-		try {
-			resolveAttestAttachInputs(options(overrides));
-		} catch (error) {
-			thrown = error;
-		}
-
-		expect(thrown).toBeInstanceOf(expected);
+		expect(() => resolveAttestAttachInputs(options(overrides))).toThrow(
+			expected
+		);
 	});
 
 	it.each([
-		{ name: 'read-user alone', overrides: { readUser: 'reader' } },
-		{ name: 'read-password alone', overrides: { readPassword: 'secret' } }
-	])('refuses $name', ({ overrides }) => {
+		{
+			name: 'read-user alone',
+			overrides: { readUser: 'reader' },
+			errorType: ReadPasswordRequiredError
+		},
+		{
+			name: 'read-password alone',
+			overrides: { readPassword: 'secret' },
+			errorType: ReadUserRequiredError
+		}
+	])('refuses $name', ({ overrides, errorType }) => {
 		expect(() => resolveAttestAttachInputs(options(overrides))).toThrow(
-			InvalidInputError
+			errorType
 		);
 	});
 });

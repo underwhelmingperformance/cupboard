@@ -18,8 +18,9 @@ import {
 } from '../attestation-signing.ts';
 import {
 	AttestationPredicateFileError,
-	InvalidInputError,
-	MissingInputError
+	AttestationSubjectsMissingError,
+	MissingInputError,
+	PredicateTypeRequiredError
 } from '../errors.ts';
 import { type Environment, setOutput } from '../inputs.ts';
 import { provided } from '../options.ts';
@@ -141,10 +142,7 @@ export function resolveAttestSignInputs(
 	const predicateType = provided(options.predicateType) ?? '';
 
 	if (predicateFile !== '' && predicateType === '') {
-		throw new InvalidInputError(
-			'predicate-type',
-			'predicate-type is required when predicate-file is supplied'
-		);
+		throw new PredicateTypeRequiredError();
 	}
 
 	// Both bundles default to the directory of the checksums file, so a caller
@@ -223,10 +221,7 @@ export async function attestSignAction(
 	const subjects = await readSubjects(inputs.checksumsFile);
 
 	if (subjects.length === 0) {
-		throw new InvalidInputError(
-			'checksums-file',
-			`${inputs.checksumsFile} lists no subject to sign`
-		);
+		throw new AttestationSubjectsMissingError(inputs.checksumsFile);
 	}
 
 	const builtSubjects = await readSubjects(inputs.builtChecksumsFile);

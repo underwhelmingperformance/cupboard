@@ -16,7 +16,9 @@ import { describe, expect, it } from 'vitest';
 import {
 	CommittedSubjectInvalidError,
 	CommittedSubjectUnavailableError,
-	InvalidInputError,
+	MissingInputError,
+	ReadPasswordRequiredError,
+	ReadUserRequiredError,
 	SubjectDeriverMovedError,
 	SubjectNarHashMovedError,
 	SubjectNotHeldError
@@ -619,19 +621,27 @@ describe('resolveAttestInputs', () => {
 				{ url: 'https://cache.example.test/t/acme' },
 				{ RUNNER_TEMP: '/runner/temp' }
 			)
-		).toThrow(InvalidInputError);
+		).toThrow(MissingInputError);
 	});
 
 	it('requires the destination URL', () => {
 		expect(() =>
 			resolveAttestInputs({ receiptFile }, { RUNNER_TEMP: '/runner/temp' })
-		).toThrow(InvalidInputError);
+		).toThrow(MissingInputError);
 	});
 
 	it.each([
-		{ name: 'read-user alone', readUser: 'reader' },
-		{ name: 'read-password alone', readPassword: 'secret' }
-	])('refuses $name', ({ readUser, readPassword }) => {
+		{
+			name: 'read-user alone',
+			readUser: 'reader',
+			errorType: ReadPasswordRequiredError
+		},
+		{
+			name: 'read-password alone',
+			readPassword: 'secret',
+			errorType: ReadUserRequiredError
+		}
+	])('refuses $name', ({ readUser, readPassword, errorType }) => {
 		expect(() =>
 			resolveAttestInputs(
 				{
@@ -642,7 +652,7 @@ describe('resolveAttestInputs', () => {
 				},
 				{ RUNNER_TEMP: '/runner/temp' }
 			)
-		).toThrow(InvalidInputError);
+		).toThrow(errorType);
 	});
 
 	it('does not require RUNNER_TEMP when the checksums file is explicit', () => {

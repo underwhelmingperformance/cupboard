@@ -14,8 +14,9 @@ import type {
 import {
 	AttestationPredicateFileError,
 	AttestationSigningError,
-	InvalidInputError,
-	MissingInputError
+	AttestationSubjectsMissingError,
+	MissingInputError,
+	PredicateTypeRequiredError
 } from '../errors.ts';
 
 import {
@@ -187,7 +188,7 @@ describe('resolveAttestSignInputs', () => {
 				predicateFile: '/runner/temp/build-origin.json',
 				githubToken: 'token'
 			},
-			expected: InvalidInputError
+			expected: PredicateTypeRequiredError
 		}
 	])('refuses inputs without $missing', ({ options: given, expected }) => {
 		expect(() => resolveAttestSignInputs(given)).toThrow(expected);
@@ -320,7 +321,7 @@ describe('attestSignAction', () => {
 					createGithubReporter(),
 					recordingSigner([])
 				)
-			).rejects.toBeInstanceOf(InvalidInputError);
+			).rejects.toBeInstanceOf(AttestationSubjectsMissingError);
 		} finally {
 			await rm(files.directory, { recursive: true, force: true });
 		}

@@ -31,15 +31,26 @@ import {
 } from '../cupboard-run.ts';
 import {
 	CommandFailedError,
+	CupboardReleaseSelectionConflictError,
 	CupboardVersionOutputMissingError,
 	GraceDeadlineMissingError,
 	GracePolicyMissingError,
-	InvalidInputError,
+	GraceWaitConflictError,
 	LegacyPushSummaryError,
 	type MissingGracePath,
 	MissingInputError,
+	PushPathsMissingError,
 	PushSummaryMissingError,
-	PushSummaryResponseError
+	PushSummaryResponseError,
+	ReferenceSourcePairingError,
+	RootGroupsJsonInvalidError,
+	RootGroupsPathsConflictError,
+	RootGroupsRetentionConflictError,
+	RootGroupsRootConflictError,
+	RootGroupsSchemaError,
+	RootRetentionConflictError,
+	RunRootRequiredError,
+	TtlRetentionConflictError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import {
@@ -281,34 +292,22 @@ export function resolvePushInputs(
 	const rootGroups = parseRootGroups(options.rootGroups);
 
 	if (rootGroups.length === 0 && options.paths.length === 0) {
-		throw new InvalidInputError(
-			'paths',
-			'paths is required and must contain at least one path'
-		);
+		throw new PushPathsMissingError();
 	}
 
 	if (rootGroups.length > 0 && options.paths.length > 0) {
-		throw new InvalidInputError(
-			'root-groups',
-			'root-groups cannot be combined with paths'
-		);
+		throw new RootGroupsPathsConflictError();
 	}
 
 	const isRetained = isEnabled('retain', options.retain, true);
 	const explicitRoot = provided(options.root);
 
 	if (explicitRoot !== undefined && rootGroups.length > 0) {
-		throw new InvalidInputError(
-			'root-groups',
-			'root-groups cannot be combined with root: each group names its own root'
-		);
+		throw new RootGroupsRootConflictError();
 	}
 
 	if (!isRetained && rootGroups.length > 0) {
-		throw new InvalidInputError(
-			'root-groups',
-			'root-groups cannot be combined with no-retain: a group publishes under its own root'
-		);
+		throw new RootGroupsRetentionConflictError();
 	}
 
 	// Unretained publication never conflicts with the action's own implicit
@@ -317,16 +316,13 @@ export function resolvePushInputs(
 	// does conflict with an EXPLICITLY named root or ttl, since those ask for
 	// retention an unretained push then refuses to record.
 	if (!isRetained && explicitRoot !== undefined) {
-		throw new InvalidInputError(
-			'root',
-			'root cannot be combined with no-retain'
-		);
+		throw new RootRetentionConflictError();
 	}
 
 	const explicitTtl = provided(options.ttl);
 
 	if (!isRetained && explicitTtl !== undefined) {
-		throw new InvalidInputError('ttl', 'ttl cannot be combined with no-retain');
+		throw new TtlRetentionConflictError();
 	}
 
 	const shouldWait = isEnabled('wait', options.wait, true);
@@ -336,30 +332,21 @@ export function resolvePushInputs(
 	// workflow always waits, so `require-grace` with an explicit `wait: false`
 	// can never be satisfied.
 	if (requiresGrace && !shouldWait) {
-		throw new InvalidInputError(
-			'require-grace',
-			'require-grace cannot be combined with wait: false'
-		);
+		throw new GraceWaitConflictError();
 	}
 
 	const referencePathsFile = provided(options.referencePathsFile);
 	const referenceSource = provided(options.referenceSource);
 
 	if ((referencePathsFile === undefined) !== (referenceSource === undefined)) {
-		throw new InvalidInputError(
-			'reference-source',
-			'reference-paths-file and reference-source must be supplied together'
-		);
+		throw new ReferenceSourcePairingError();
 	}
 
 	const runRoot = provided(options.runRoot);
 	const runRootTtl = provided(options.runRootTtl);
 
 	if (runRootTtl !== undefined && runRoot === undefined) {
-		throw new InvalidInputError(
-			'run-root-ttl',
-			'run-root-ttl requires run-root'
-		);
+		throw new RunRootRequiredError(runRootTtl);
 	}
 
 	const cupboardPath = provided(options.cupboardPath) ?? '';
@@ -374,10 +361,7 @@ export function resolvePushInputs(
 		cupboardPath !== '' &&
 		releaseSelectors.some((value) => provided(value) !== undefined)
 	) {
-		throw new InvalidInputError(
-			'cupboard-path',
-			'cupboard-path cannot be combined with release selection inputs'
-		);
+		throw new CupboardReleaseSelectionConflictError('cupboard-path');
 	}
 
 	return {
@@ -439,19 +423,13 @@ function parseRootGroups(value: string | undefined): readonly RootGroup[] {
 	try {
 		parsedJson = JSON.parse(trimmed);
 	} catch (error) {
-		throw new InvalidInputError(
-			'root-groups',
-			`root-groups is not valid JSON: ${error instanceof Error ? error.message : String(error)}`
-		);
+		throw new RootGroupsJsonInvalidError(error);
 	}
 
 	const parsed = rootGroupsSchema.safeParse(parsedJson);
 
 	if (!parsed.success) {
-		throw new InvalidInputError(
-			'root-groups',
-			`root-groups does not match {root, paths}[]:\n${z.prettifyError(parsed.error)}`
-		);
+		throw new RootGroupsSchemaError(parsed.error);
 	}
 
 	return parsed.data;

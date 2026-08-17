@@ -14,8 +14,10 @@ import {
 	waitForAbortableChildProcess
 } from '../child-process.ts';
 import {
+	BuildAttemptsInvalidError,
+	BuildInstallableInvalidError,
+	BuildInstallablesMissingError,
 	CommandFailedError,
-	InvalidInputError,
 	ProvenanceSubjectsIncompleteError
 } from '../errors.ts';
 import {
@@ -361,24 +363,15 @@ export async function buildAction(
 	}
 
 	if (installables.length === 0) {
-		throw new InvalidInputError(
-			'installables',
-			'installables must contain at least one value'
-		);
+		throw new BuildInstallablesMissingError();
 	}
 	if (!installables.every(isNixPositionalArgument)) {
-		throw new InvalidInputError(
-			'installables',
-			'installables must not start with a hyphen or contain control characters'
-		);
+		throw new BuildInstallableInvalidError(installables);
 	}
 
 	const attempts = Number(options.attempts ?? '3');
 	if (!Number.isSafeInteger(attempts) || attempts < 1) {
-		throw new InvalidInputError(
-			'attempts',
-			'attempts must be a positive integer'
-		);
+		throw new BuildAttemptsInvalidError(options.attempts ?? '3');
 	}
 
 	const isKeepGoing = isEnabled('keep-going', options.keepGoing, false);

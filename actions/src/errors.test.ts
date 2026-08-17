@@ -8,6 +8,7 @@ import {
 	AttestationVerificationFailedError,
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
+	CacheNameInvalidError,
 	CachePublicKeyEmptyResponseError,
 	CachePublicKeyRequestFailedError,
 	ChecksumMismatchError,
@@ -22,7 +23,6 @@ import {
 	GithubApiError,
 	GracePolicyMissingError,
 	InvalidChecksumLineError,
-	InvalidInputError,
 	InvalidReleaseAssetUrlError,
 	LegacyPushSummaryError,
 	MalformedReleaseDiscoveryResponseError,
@@ -51,11 +51,7 @@ import {
 describe('action errors', () => {
 	it.each([
 		['MissingInputError', new MissingInputError('cache-url'), usageExitCode],
-		[
-			'InvalidInputError',
-			new InvalidInputError('version', 'bad'),
-			usageExitCode
-		],
+		['CacheNameInvalidError', new CacheNameInvalidError('bad'), usageExitCode],
 		[
 			'UnsupportedPlatformError',
 			new UnsupportedPlatformError('sunos', 'sparc'),

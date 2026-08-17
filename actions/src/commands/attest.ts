@@ -37,7 +37,9 @@ import { fetchWithProbeDeadline } from '../cache-probe.ts';
 import {
 	CommittedSubjectInvalidError,
 	CommittedSubjectUnavailableError,
-	InvalidInputError,
+	MissingInputError,
+	ReadPasswordRequiredError,
+	ReadUserRequiredError,
 	SubjectDeriverMovedError,
 	SubjectNarHashMovedError,
 	SubjectNotHeldError
@@ -317,29 +319,23 @@ export function resolveAttestInputs(
 ): AttestInputs {
 	const receiptFile = provided(options.receiptFile);
 	if (receiptFile === undefined) {
-		throw new InvalidInputError('receipt-file', 'receipt-file is required');
+		throw new MissingInputError('receipt-file');
 	}
 	const url = providedUrl('url', options.url);
 
 	if (url === undefined) {
-		throw new InvalidInputError('url', 'url is required');
+		throw new MissingInputError('url');
 	}
 
 	const readUser = providedReadUser(options.readUser);
 	const readPassword = options.readPassword ?? '';
 
 	if (readUser !== '' && readPassword === '') {
-		throw new InvalidInputError(
-			'read-password',
-			'read-password is required when read-user is supplied'
-		);
+		throw new ReadPasswordRequiredError();
 	}
 
 	if (readPassword !== '' && readUser === '') {
-		throw new InvalidInputError(
-			'read-user',
-			'read-user is required when read-password is supplied'
-		);
+		throw new ReadUserRequiredError();
 	}
 
 	const checksumsFile =

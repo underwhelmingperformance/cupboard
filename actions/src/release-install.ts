@@ -47,16 +47,20 @@ import {
 	waitForAbortableChildProcess
 } from './child-process.ts';
 import {
+	ArchiveSha256InvalidError,
 	AttestationNotFoundError,
 	AttestationSourceMismatchError,
 	AttestationVerificationFailedError,
 	ChecksumMismatchError,
 	CommandFailedError,
+	CupboardVersionInvalidError,
 	DownloadAssetTooLargeError,
+	ExactCupboardVersionRequiredError,
+	ExactReleaseTagRequiredError,
+	ExpectedSourceCommitInvalidError,
 	GithubApiError,
 	InstalledReleaseVersionMismatchError,
 	InvalidChecksumLineError,
-	InvalidInputError,
 	InvalidReleaseAssetUrlError,
 	MalformedReleaseResponseError,
 	MissingChecksumError,
@@ -74,6 +78,7 @@ import {
 	ReleaseInstallationProcessIdentityError,
 	ReleaseInstallationRollbackError,
 	ReleaseInstallationStateError,
+	ReleaseRepositoryInvalidError,
 	UnsupportedPlatformError
 } from './errors.ts';
 import { type Environment, parseLines } from './inputs.ts';
@@ -130,10 +135,7 @@ export function normaliseVersion(version: string): string {
 	const trimmed = version.trim();
 
 	if (trimmed === '') {
-		throw new InvalidInputError(
-			'cupboard-version',
-			'cupboard-version must be latest or an exact release tag'
-		);
+		throw new CupboardVersionInvalidError(version);
 	}
 
 	return trimmed;
@@ -148,19 +150,13 @@ export function expectedSourceCommitFor(
 	}
 
 	if (exactResolvedReleaseTag(version) === 'latest') {
-		throw new InvalidInputError(
-			'cupboard-version',
-			'cupboard-version must be an exact release when expected-source-commit is set'
-		);
+		throw new ExactCupboardVersionRequiredError();
 	}
 
 	const normalised = expectedSourceCommit.trim().toLowerCase();
 
 	if (!/^[a-f\d]{40}$/u.test(normalised)) {
-		throw new InvalidInputError(
-			'expected-source-commit',
-			'expected-source-commit must be a full 40-character Git commit id'
-		);
+		throw new ExpectedSourceCommitInvalidError(expectedSourceCommit);
 	}
 
 	return normalised;
@@ -170,10 +166,7 @@ function exactResolvedReleaseTag(version: string): string {
 	const tag = version.trim();
 
 	if (tag === '') {
-		throw new InvalidInputError(
-			'cupboard-version',
-			'cupboard-version must name an exact release'
-		);
+		throw new ExactReleaseTagRequiredError();
 	}
 
 	return tag;
@@ -741,10 +734,7 @@ function assertArchiveSha256(value: string): void {
 		return;
 	}
 
-	throw new InvalidInputError(
-		'archive-sha256',
-		'archive-sha256 must be a lowercase SHA-256 digest'
-	);
+	throw new ArchiveSha256InvalidError(value);
 }
 
 async function isReleaseGenerationPresent(candidate: string): Promise<boolean> {
@@ -2420,10 +2410,7 @@ export function splitRepository(
 	const name = match?.[2];
 
 	if (owner === undefined || name === undefined) {
-		throw new InvalidInputError(
-			'release-repository',
-			`release-repository must be <owner>/<name>, got '${releaseRepository}'`
-		);
+		throw new ReleaseRepositoryInvalidError(releaseRepository);
 	}
 
 	return [owner, name];

@@ -1,7 +1,12 @@
 import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
-import { InvalidInputError } from './errors.ts';
+import {
+	BooleanInputInvalidError,
+	CacheNameInvalidError,
+	ReadUserInvalidError,
+	UrlInputInvalidError
+} from './errors.ts';
 import {
 	collectLines,
 	isEnabled,
@@ -84,12 +89,7 @@ describe('providedUrl', () => {
 		['an embedded username', 'https://ci@cache.example.test/t/acme'],
 		['embedded credentials', 'https://ci:secret@cache.example.test/t/acme']
 	])('refuses %s', (_name, value) => {
-		expect(() => providedUrl('cache-url', value)).toThrow(
-			new InvalidInputError(
-				'cache-url',
-				'cache-url must be an http(s) URL without credentials, a query, or a fragment'
-			)
-		);
+		expect(() => providedUrl('cache-url', value)).toThrow(UrlInputInvalidError);
 	});
 });
 
@@ -103,7 +103,7 @@ describe('providedCache', () => {
 	});
 
 	it('refuses a value that is not a legal cache name', () => {
-		expect(() => providedCache('Not A Cache')).toThrow(InvalidInputError);
+		expect(() => providedCache('Not A Cache')).toThrow(CacheNameInvalidError);
 	});
 });
 
@@ -117,7 +117,7 @@ describe('providedReadUser', () => {
 	});
 
 	it('refuses a name the credential format cannot carry', () => {
-		expect(() => providedReadUser('rea:der')).toThrow(InvalidInputError);
+		expect(() => providedReadUser('rea:der')).toThrow(ReadUserInvalidError);
 	});
 });
 
@@ -152,7 +152,7 @@ describe('isEnabled', () => {
 		'rejects %j with an invalid-input error',
 		(value) => {
 			expect(() => isEnabled('add-to-path', value, true)).toThrow(
-				InvalidInputError
+				BooleanInputInvalidError
 			);
 		}
 	);
