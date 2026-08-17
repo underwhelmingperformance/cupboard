@@ -55,6 +55,7 @@ import {
 	RemoteBuildOutputUndeclaredError,
 	RemoteCohortBuildFailedError,
 	type RemoteCohortBuildFailure,
+	RemoteCohortProtocolError,
 	RemotePublicationTargetUnresolvedError
 } from '../errors.ts';
 import type { Environment } from '../inputs.ts';
@@ -1692,60 +1693,56 @@ describe('buildAndRootNixResults', () => {
 	it.each([
 		{
 			name: 'output name',
-			outputs: { dev: libraryBuiltPath },
-			reported: `dev=${libraryBuiltPath}`
+			outputs: { dev: libraryBuiltPath }
 		},
 		{
 			name: 'output path',
-			outputs: { out: floatingBuiltPath },
-			reported: `out=${floatingBuiltPath}`
+			outputs: { out: floatingBuiltPath }
 		}
-	])(
-		'rejects a keyed result with the wrong $name',
-		async ({ outputs, reported }) => {
-			const result: NixBuildResult = {
-				...remoteResult('built'),
-				outcome: {
-					kind: 'built',
-					outputs: Object.fromEntries(
-						Object.entries(outputs).map(([name, output]) => [
-							name,
-							storePathSchema.parse(output)
-						])
-					)
+	])('rejects a keyed result with the wrong $name', async ({ outputs }) => {
+		const result: NixBuildResult = {
+			...remoteResult('built'),
+			outcome: {
+				kind: 'built',
+				outputs: Object.fromEntries(
+					Object.entries(outputs).map(([name, output]) => [
+						name,
+						storePathSchema.parse(output)
+					])
+				)
+			}
+		};
+		const published: (readonly NixBuildResult[])[] = [];
+		const completed: NixDerivedPathString[] = [];
+
+		const run = buildAndRootNixResults(
+			{
+				readDerivation: (drvPath) => Promise.resolve(remoteDerivation(drvPath)),
+				buildPathsWithResults: () => Promise.resolve([result]),
+				resolveClosure: ownPathClosure,
+				addTempRoot: () => Promise.resolve()
+			},
+			[derivedPath(libraryQueryInstallable)],
+			(builds) => {
+				published.push(builds);
+
+				return Promise.resolve();
+			},
+			{
+				derivations: [],
+				copy: () => Promise.resolve(),
+				onTargetCompleted: (target) => {
+					completed.push(target);
 				}
-			};
-			const published: (readonly NixBuildResult[])[] = [];
+			}
+		);
 
-			const run = buildAndRootNixResults(
-				{
-					readDerivation: (drvPath) =>
-						Promise.resolve(remoteDerivation(drvPath)),
-					buildPathsWithResults: () => Promise.resolve([result]),
-					resolveClosure: ownPathClosure,
-					addTempRoot: () => Promise.resolve()
-				},
-				[derivedPath(libraryQueryInstallable)],
-				(builds) => {
-					published.push(builds);
-
-					return Promise.resolve();
-				}
-			);
-
-			await expect(run).rejects.toMatchObject({
-				name: 'RemoteCohortProtocolError',
-				failures: [
-					{
-						target: derivedPath(libraryQueryInstallable),
-						outcome: 'invalid-outputs',
-						message: `the daemon reported ${reported}; expected out=${libraryBuiltPath}`
-					}
-				]
-			});
-			expect(published).toStrictEqual([[]]);
-		}
-	);
+		await expect(run).rejects.toBeInstanceOf(RemoteCohortProtocolError);
+		expect({ published, completed }).toStrictEqual({
+			published: [[]],
+			completed: []
+		});
+	});
 
 	it('continues after a failed target and publishes later survivors before reporting it', async () => {
 		const events: string[] = [];

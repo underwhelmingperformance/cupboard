@@ -3094,7 +3094,17 @@ export async function buildAndRootNixResults(
 
 		results.push(...reconciliation.results);
 		failures.push(...reconciliation.failures);
-		options?.onTargetCompleted?.(build.target);
+
+		const hasTargetProtocolFailure = reconciliation.failures.some(
+			(failure) =>
+				failure.kind === 'protocol' &&
+				canonicalNixDerivedPath(nixDerivedPathSchema.parse(failure.target)) ===
+					build.target
+		);
+
+		if (!hasTargetProtocolFailure) {
+			options?.onTargetCompleted?.(build.target);
+		}
 	}
 
 	const outputPaths = buildResultOutputPaths(results);
