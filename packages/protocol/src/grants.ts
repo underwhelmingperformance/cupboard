@@ -31,6 +31,7 @@ export const cacheOperations = [
 	'root:remove',
 	'cache:create',
 	'cache:delete',
+	'narinfo:read',
 	'narinfo:delete',
 	'gc:run',
 	'stats:read'
@@ -59,7 +60,10 @@ export const domainOperations = [
 	'policy:remove',
 	'reuse-view:list',
 	'reuse-view:set',
-	'reuse-view:remove'
+	'reuse-view:remove',
+	's3-credential:create',
+	's3-credential:list',
+	's3-credential:delete'
 ] as const;
 
 // Control operations that act on a specific tenant (an exact slug).
@@ -102,7 +106,11 @@ export const operationSchema = z.enum([
 	'root:remove',
 	'cache:create',
 	'cache:delete',
+	's3-credential:create',
+	's3-credential:list',
+	's3-credential:delete',
 	'cache:list',
+	'narinfo:read',
 	'narinfo:delete',
 	'gc:run',
 	'stats:read',

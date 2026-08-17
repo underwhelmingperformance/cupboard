@@ -8,6 +8,7 @@ import { policiesContract } from './policies.ts';
 import { checkContract } from './reports.ts';
 import { reuseViewsContract } from './reuse-views.ts';
 import { rootsContract } from './roots.ts';
+import { s3CredentialsContract } from './s3-credentials.ts';
 import { statsContract } from './stats.ts';
 import { uploadsContract } from './uploads.ts';
 import { verifyContract } from './verify.ts';
@@ -32,5 +33,6 @@ export const tenantContract = {
 	gc: gcContract,
 	verify: verifyContract,
 	uploads: uploadsContract,
-	attestations: attestationsContract
+	attestations: attestationsContract,
+	s3Credentials: s3CredentialsContract
 };

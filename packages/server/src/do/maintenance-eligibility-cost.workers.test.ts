@@ -82,8 +82,8 @@ describe('upload negotiation cost', () => {
 		// The read is the same handful of rows whatever the backlog: assert the exact
 		// figure, so a constant baseline regression cannot hide behind an inequality.
 		expect({ emptyBacklogCost, largeBacklogCost }).toStrictEqual({
-			emptyBacklogCost: 14,
-			largeBacklogCost: 14
+			emptyBacklogCost: 15,
+			largeBacklogCost: 15
 		});
 	});
 
@@ -104,8 +104,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await reconcileCost();
 
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
-			smallBacklogCost: 9,
-			largeBacklogCost: 9
+			smallBacklogCost: 10,
+			largeBacklogCost: 10
 		});
 	});
 
@@ -240,8 +240,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 45,
-			largeBacklogCost: 45
+			smallBacklogCost: 50,
+			largeBacklogCost: 50
 		});
 	});
 
@@ -264,8 +264,8 @@ describe('maintenance pass cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 50,
-			largeBacklogCost: 50
+			smallBacklogCost: 55,
+			largeBacklogCost: 55
 		});
 	});
 });

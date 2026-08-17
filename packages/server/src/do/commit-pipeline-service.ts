@@ -133,6 +133,8 @@ export interface TenantAccount {
 	readonly status: (typeof d1Schema.tenant.$inferSelect)['status'];
 	readonly bytes: number | null;
 	readonly casBytes: number | null;
+	readonly stagedBytes: number | null;
+	readonly multipartBytes: number | null;
 	readonly quotaBytes: number | null;
 }
 
@@ -148,6 +150,7 @@ interface CanonicalBlobFacts {
  * {@link CommitPipelineService.materialiseBatched}.
  */
 export interface MaterialiseRequest {
+	readonly uploadId?: UploadId;
 	readonly cache: StoredCache;
 	readonly metadata: ParsedUploadPathNegotiation;
 	readonly generation: NarInfoGeneration;
@@ -165,6 +168,14 @@ export interface MaterialiseRequest {
 	 * gate; `undefined` is a push that named no root and attaches nothing.
 	 */
 	readonly attachRootName: RootName | undefined;
+	/**
+	 * Returns the S3 staging key when this batch settles every pending upload that
+	 * refers to it. The charge batch then transfers those bytes from staging to
+	 * canonical storage.
+	 */
+	readonly stagingKeyToTransfer?: (
+		settlingUploadIds: ReadonlySet<UploadId>
+	) => string | undefined;
 	/**
 	 * Runs inside the flush gate before the fence; a false verdict settles the
 	 * request as `gone` (its row's fate was decided elsewhere) without charging.
@@ -258,14 +269,20 @@ export interface PrefetchedMaterialisationFacts {
 function isOverQuota(
 	account: TenantAccount,
 	isOwned: boolean,
-	fileSize: number
+	fileSize: number,
+	stagedCredit = 0
 ): boolean {
 	if (isOwned || account.quotaBytes === null) {
 		return false;
 	}
 
 	return (
-		(account.bytes ?? 0) + (account.casBytes ?? 0) + fileSize >
+		(account.bytes ?? 0) +
+			(account.casBytes ?? 0) +
+			(account.stagedBytes ?? 0) +
+			(account.multipartBytes ?? 0) +
+			fileSize -
+			stagedCredit >
 		account.quotaBytes
 	);
 }
@@ -405,10 +422,11 @@ export class CommitPipelineService {
 		// same batch charged the blob first, making the tenant its new owner. Re-probe
 		// fresh and retry exactly once before treating it as terminal; the re-probe and
 		// the retry are each idempotent.
-		isProbeFromPrefetch: boolean
+		isProbeFromPrefetch: boolean,
+		origin: string | undefined
 	): Promise<CommitOutcome> {
 		const canonicalKey = narObjectKey(metadata.narHash);
-		const reserved = await this.reserveNarInfoRow(cache, metadata);
+		const reserved = await this.reserveNarInfoRow(cache, metadata, origin);
 
 		if (reserved.kind === 'lost') {
 			return this.concedeToWinner(
@@ -599,6 +617,8 @@ export class CommitPipelineService {
 				status: d1Schema.tenant.status,
 				bytes: d1Schema.tenantUsage.bytes,
 				casBytes: d1Schema.tenantUsage.casBytes,
+				stagedBytes: d1Schema.tenantUsage.stagedBytes,
+				multipartBytes: d1Schema.tenantUsage.multipartBytes,
 				quotaBytes: d1Schema.tenantUsage.quotaBytes
 			})
 			.from(d1Schema.tenant)
@@ -674,7 +694,8 @@ export class CommitPipelineService {
 		metadata: ParsedUploadPathNegotiation,
 		generation: NarInfoGeneration,
 		blob: { readonly fileSize: number },
-		now: IsoTimestamp
+		now: IsoTimestamp,
+		stagingKey?: string
 	): BatchItem<'sqlite'>[] {
 		const activeTenantFilter = and(
 			eq(d1Schema.tenant.id, tenant),
@@ -722,8 +743,28 @@ export class CommitPipelineService {
 			eq(d1Schema.blobState.narHash, metadata.narHash),
 			tenantActive
 		);
+		const stagedScope = and(
+			eq(d1Schema.s3StagedObject.tenant, tenant),
+			eq(d1Schema.s3StagedObject.r2Key, stagingKey ?? '')
+		);
+		const stagedTransfer =
+			stagingKey === undefined
+				? []
+				: [
+						this.context.d1
+							.update(d1Schema.tenantUsage)
+							.set({
+								stagedBytes: sql`${d1Schema.tenantUsage.stagedBytes} - coalesce((select ${d1Schema.s3StagedObject.size} from ${d1Schema.s3StagedObject} where ${stagedScope}), 0)`,
+								updatedAt: now
+							})
+							.where(
+								and(eq(d1Schema.tenantUsage.tenant, tenant), tenantActive)
+							),
+						this.context.d1.delete(d1Schema.s3StagedObject).where(stagedScope)
+					];
 
 		return [
+			...stagedTransfer,
 			this.context.d1
 				.update(d1Schema.tenantUsage)
 				.set({
@@ -800,7 +841,8 @@ export class CommitPipelineService {
 		cache: StoredCache,
 		metadata: ParsedUploadPathNegotiation,
 		generation: NarInfoGeneration,
-		blob: { readonly fileSize: number }
+		blob: { readonly fileSize: number },
+		stagingKey?: string
 	): Promise<ChargeOutcome> {
 		const now = isoTimestamp(new Date());
 
@@ -811,7 +853,15 @@ export class CommitPipelineService {
 		try {
 			const [status] = await this.context.d1.batch([
 				this.tenantStatusSelect(tenant),
-				...this.chargeStatements(tenant, cache, metadata, generation, blob, now)
+				...this.chargeStatements(
+					tenant,
+					cache,
+					metadata,
+					generation,
+					blob,
+					now,
+					stagingKey
+				)
 			]);
 			statusRows = status;
 		} catch (error) {
@@ -819,12 +869,25 @@ export class CommitPipelineService {
 			// CHECK fails the loser's batch. An authoritative in-gate re-read tells
 			// that loss apart from a fault: genuinely over quota reclaims cleanly,
 			// anything else propagates.
-			const account = await this.tenantAccount(tenant);
-			const isOwned = await this.ownsHash(tenant, metadata.narHash);
+			const stagedFilter = and(
+				eq(d1Schema.s3StagedObject.tenant, tenant),
+				eq(d1Schema.s3StagedObject.r2Key, stagingKey ?? '')
+			);
+			const [account, isOwned, staged] = await Promise.all([
+				this.tenantAccount(tenant),
+				this.ownsHash(tenant, metadata.narHash),
+				stagingKey === undefined
+					? undefined
+					: this.context.d1
+							.select({ size: d1Schema.s3StagedObject.size })
+							.from(d1Schema.s3StagedObject)
+							.where(stagedFilter)
+							.get()
+			]);
 
 			if (
 				account !== undefined &&
-				isOverQuota(account, isOwned, blob.fileSize)
+				isOverQuota(account, isOwned, blob.fileSize, staged?.size ?? 0)
 			) {
 				return { kind: 'over-quota' };
 			}
@@ -856,6 +919,7 @@ export class CommitPipelineService {
 			readonly metadata: ParsedUploadPathNegotiation;
 			readonly generation: NarInfoGeneration;
 			readonly blob: CanonicalBlobFacts;
+			readonly stagingKey: string | undefined;
 		}[]
 	): Promise<BatchChargeOutcome> {
 		const now = isoTimestamp(new Date());
@@ -866,7 +930,8 @@ export class CommitPipelineService {
 				charge.metadata,
 				charge.generation,
 				charge.blob,
-				now
+				now,
+				charge.stagingKey
 			)
 		);
 
@@ -919,7 +984,8 @@ export class CommitPipelineService {
 	// everything else settles with its outcome here, before any charge.
 	private materialiseFence(
 		request: MaterialiseRequest,
-		account: TenantAccount | undefined
+		account: TenantAccount | undefined,
+		isTransferringStaging: boolean
 	):
 		| {
 				readonly outcome: Exclude<MaterialiseOutcome, { kind: 'materialised' }>;
@@ -983,7 +1049,10 @@ export class CommitPipelineService {
 		// existing encoding and so can differ from the staged size the negotiate
 		// pre-check used. Refusing here lets the caller reclaim the reserved row;
 		// the charge batch re-fences the decision.
-		if (isOverQuota(account, probe.isOwned, probe.blob.fileSize)) {
+		if (
+			!isTransferringStaging &&
+			isOverQuota(account, probe.isOwned, probe.blob.fileSize)
+		) {
 			return { outcome: { kind: 'over-quota' } };
 		}
 
@@ -1012,29 +1081,53 @@ export class CommitPipelineService {
 			readonly request: MaterialiseRequest;
 			readonly narInfo: NarInfo;
 			readonly blob: CanonicalBlobFacts;
+			readonly stagingKey: string | undefined;
 		}[] = [];
+		const settleable = requests.map(
+			(request) => request.isStillSettleable?.() ?? true
+		);
+		const settlingUploadIds = new Set(
+			requests.flatMap((request, index) =>
+				settleable.at(index) === true && request.uploadId !== undefined
+					? [request.uploadId]
+					: []
+			)
+		);
+		const transferredStagingKeys = new Set<string>();
 
 		for (const [index, request] of requests.entries()) {
-			if (
-				request.isStillSettleable !== undefined &&
-				!request.isStillSettleable()
-			) {
+			if (settleable.at(index) !== true) {
 				outcomes[index] = { kind: 'gone' };
 				continue;
 			}
 
-			const fenced = this.materialiseFence(request, account);
+			const eligibleStagingKey =
+				request.stagingKeyToTransfer?.(settlingUploadIds);
+			const stagingKey =
+				eligibleStagingKey === undefined ||
+				transferredStagingKeys.has(eligibleStagingKey)
+					? undefined
+					: eligibleStagingKey;
+			const fenced = this.materialiseFence(
+				request,
+				account,
+				eligibleStagingKey !== undefined
+			);
 
 			if ('outcome' in fenced) {
 				outcomes[index] = fenced.outcome;
 				continue;
+			}
+			if (stagingKey !== undefined) {
+				transferredStagingKeys.add(stagingKey);
 			}
 
 			chargeable.push({
 				index,
 				request,
 				narInfo: fenced.narInfo,
-				blob: fenced.blob
+				blob: fenced.blob,
+				stagingKey
 			});
 		}
 
@@ -1049,7 +1142,8 @@ export class CommitPipelineService {
 				cache: charge.request.cache,
 				metadata: charge.request.metadata,
 				generation: charge.request.generation,
-				blob: charge.blob
+				blob: charge.blob,
+				stagingKey: charge.stagingKey
 			}))
 		);
 
@@ -1060,7 +1154,8 @@ export class CommitPipelineService {
 					charge.request.cache,
 					charge.request.metadata,
 					charge.request.generation,
-					charge.blob
+					charge.blob,
+					charge.stagingKey
 				);
 				outcomes[charge.index] =
 					single.kind === 'charged'
@@ -1715,8 +1810,13 @@ export class CommitPipelineService {
 		// let an over-quota commit through.
 		const estimate = probe.blob?.fileSize ?? stagedSize;
 
+		const stagingKey = this.uploadState.stagingKeyToTransfer(
+			pending,
+			new Set([pending.id])
+		);
 		if (
 			account !== undefined &&
+			stagingKey === undefined &&
 			isOverQuota(account, probe.isOwned, estimate)
 		) {
 			throw new QuotaExceededError(tenant);
@@ -1756,7 +1856,8 @@ export class CommitPipelineService {
 				pending.attachRootName ?? undefined,
 				probe,
 				committingSessionId,
-				advisory?.prefetched !== undefined
+				advisory?.prefetched !== undefined,
+				pending.origin ?? undefined
 			);
 		}
 
@@ -1781,7 +1882,7 @@ export class CommitPipelineService {
 		// reachability scan keeps it through the verify window. The verify pass
 		// re-runs this idempotently (`mine`, same generation, no counter advance);
 		// a `lost` outcome writes no row, and the verify pass answers the waiter.
-		await this.reserveNarInfoRow(cache, metadata);
+		await this.reserveNarInfoRow(cache, metadata, pending.origin ?? undefined);
 
 		await this.requestVerification(logger, tenant);
 
@@ -1806,7 +1907,8 @@ export class CommitPipelineService {
 	// different version that won the path (`lost`).
 	async reserveNarInfoRow(
 		cache: StoredCache,
-		metadata: ParsedUploadPathNegotiation
+		metadata: ParsedUploadPathNegotiation,
+		origin: string | undefined
 	): Promise<ReserveOutcome> {
 		const now = isoTimestamp(new Date());
 		this.cacheAdmin.loadOrCreateCache(cache);
@@ -1858,6 +1960,7 @@ export class CommitPipelineService {
 					ca: metadata.ca,
 					sigsJson: JSON.stringify(sigs),
 					generation,
+					origin,
 					createdAt: now
 				} satisfies typeof schema.narInfos.$inferInsert)
 				.onConflictDoNothing()

@@ -45,6 +45,9 @@ export default defineConfig(async () => {
 									R2_BUCKET_NAME: 'cupboard-blobs',
 									R2_SECRET_ACCESS_KEY: 'test-secret-access-key',
 									PUSH_ID_SIGNING_KEY: 'test-push-id-signing-key',
+									S3_SECRET_KEY: Buffer.from(
+										'0123456789abcdef0123456789abcdef'
+									).toString('base64'),
 									TEST_MIGRATIONS: migrations
 								},
 								// The admission manifest KV the control handler reads and writes;

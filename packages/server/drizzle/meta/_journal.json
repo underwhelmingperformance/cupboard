@@ -246,6 +246,20 @@
 			"when": 1786868169112,
 			"tag": "0034_gc_scan_collect_phase",
 			"breakpoints": true
+		},
+		{
+			"idx": 35,
+			"version": "6",
+			"when": 1786875266576,
+			"tag": "0035_s3_credential",
+			"breakpoints": true
+		},
+		{
+			"idx": 36,
+			"version": "6",
+			"when": 1786875354769,
+			"tag": "0036_narinfo_origin",
+			"breakpoints": true
 		}
 	]
 }

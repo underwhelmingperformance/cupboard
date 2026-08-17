@@ -10,11 +10,13 @@ import {
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	createExecutionContext,
 	waitOnExecutionContext
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -26,6 +28,9 @@ import {
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { narObjectKey } from '../http/http.ts';
+import { createR2BlobStore } from '../s3/blob-store.ts';
+import { s3NarStagingKey } from '../s3/staging.ts';
+import { S3StagingAccounting } from '../s3/staging-accounting.ts';
 import {
 	afterGrace,
 	attemptPushToTenant,
@@ -197,6 +202,100 @@ describe('offboarding drain', () => {
 			},
 			blobState: [],
 			narObject: false
+		});
+	});
+
+	it('drains staged objects and incomplete multipart uploads before finalising', async () => {
+		vi.useRealTimers();
+		const { id } = await provisionedWritingTenant();
+		const nar = await verifiableNar('offboard-s3-staging');
+		const stagedKey = s3NarStagingKey(id, defaultCache, nar.fileHash);
+		const multipartKey = `${stagedKey}.multipart`;
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const accounting = new S3StagingAccounting(
+			database,
+			id,
+			() => testBase,
+			() => crypto.randomUUID()
+		);
+		const blobStore = createR2BlobStore(env.BLOBS);
+		const expiresAt = isoTimestamp(testBase);
+		await accounting.reserveStagedObject(
+			defaultCache,
+			stagedKey,
+			nar.narBytes.byteLength,
+			expiresAt
+		);
+		await env.BLOBS.put(stagedKey, nar.narBytes);
+		const upload = await blobStore.createMultipartUpload(multipartKey, {
+			contentType: undefined,
+			contentLength: undefined,
+			checksumSha256: undefined
+		});
+		await accounting.beginMultipart(
+			defaultCache,
+			multipartKey,
+			upload.uploadId,
+			expiresAt
+		);
+		const partBytes = new Uint8Array([1, 2, 3]);
+		const reservation = await accounting.reserveMultipartPart(
+			multipartKey,
+			upload.uploadId,
+			1,
+			partBytes.byteLength
+		);
+		const part = await blobStore.uploadPart(
+			multipartKey,
+			upload.uploadId,
+			1,
+			partBytes.byteLength,
+			new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.enqueue(partBytes);
+					controller.close();
+				}
+			})
+		);
+		await accounting.recordMultipartPart(reservation, part);
+
+		await offboardTenant(id);
+		await runOffboardBatch(rootLogger(), env);
+
+		const [stagedRows, multipartRows, partRows] = await database.batch([
+			database
+				.select()
+				.from(d1Schema.s3StagedObject)
+				.where(eq(d1Schema.s3StagedObject.tenant, id)),
+			database
+				.select()
+				.from(d1Schema.s3MultipartUpload)
+				.where(eq(d1Schema.s3MultipartUpload.tenant, id)),
+			database
+				.select()
+				.from(d1Schema.s3MultipartPart)
+				.where(eq(d1Schema.s3MultipartPart.tenant, id))
+		]);
+
+		expect({
+			row: await tenantRow(id),
+			usage: await isTenantUsagePresent(id),
+			stagedRows,
+			multipartRows,
+			partRows,
+			stagedObjectPresent: Boolean(await env.BLOBS.head(stagedKey))
+		}).toStrictEqual({
+			row: {
+				status: 'offboarded',
+				readUser: undefined,
+				readPasswordHash: undefined,
+				readPasswordSalt: undefined
+			},
+			usage: false,
+			stagedRows: [],
+			multipartRows: [],
+			partRows: [],
+			stagedObjectPresent: false
 		});
 	});
 

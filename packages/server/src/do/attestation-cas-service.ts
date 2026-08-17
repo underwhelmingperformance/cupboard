@@ -84,6 +84,8 @@ export class AttestationCasService {
 				.select({
 					bytes: d1Schema.tenantUsage.bytes,
 					casBytes: d1Schema.tenantUsage.casBytes,
+					stagedBytes: d1Schema.tenantUsage.stagedBytes,
+					multipartBytes: d1Schema.tenantUsage.multipartBytes,
 					quotaBytes: d1Schema.tenantUsage.quotaBytes
 				})
 				.from(d1Schema.tenantUsage)
@@ -247,6 +249,8 @@ export class AttestationCasService {
 			| {
 					readonly bytes: number;
 					readonly casBytes: number;
+					readonly stagedBytes: number;
+					readonly multipartBytes: number;
 					readonly quotaBytes: number | null;
 			  }
 			| undefined,
@@ -265,7 +269,14 @@ export class AttestationCasService {
 			return false;
 		}
 
-		return usage.bytes + usage.casBytes + size > usage.quotaBytes;
+		return (
+			usage.bytes +
+				usage.casBytes +
+				usage.stagedBytes +
+				usage.multipartBytes +
+				size >
+			usage.quotaBytes
+		);
 	}
 
 	async hasCapturedReference(

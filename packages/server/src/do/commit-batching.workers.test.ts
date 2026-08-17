@@ -1,7 +1,9 @@
 import { rootLogger } from '@cupboard/logger';
-import { WIRE_DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
+import { DEFAULT_CACHE, WIRE_DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
+import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	uploadCommitDecisionSchema,
+	uploadIdSchema,
 	uploadNegotiateResponseSchema
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
@@ -9,7 +11,10 @@ import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { s3NarStagingKey } from '../s3/staging.ts';
+import { S3StagingAccounting } from '../s3/staging-accounting.ts';
 import {
 	authorisedFetch,
 	commitPath,
@@ -170,6 +175,132 @@ describe('batched commit settles', () => {
 		} finally {
 			batches.mockRestore();
 		}
+	});
+
+	it('transfers one shared S3 staging charge for sibling settles', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('shared-staging-batch');
+		const paths = ['a', 'b'].map((letter, index) =>
+			uploadMetadata({
+				name: `shared-staging-${String(index)}`,
+				storePathHash: letter.repeat(32),
+				narHash: nar.narHash,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength,
+				narSize: nar.narSize
+			})
+		);
+
+		const [uploadPath, reusePath] = paths;
+		if (uploadPath === undefined || reusePath === undefined) {
+			throw new Error('the batch needs two paths');
+		}
+		await commitPath(token, uploadPath, nar);
+		const reuse = expectSingleCommitDecision(
+			await negotiateUploads(token, [reusePath]),
+			reusePath
+		);
+		await commitUpload(token, reuse.uploadId);
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const pipeline = pipelineFor(instance.context);
+				const uploadState = new UploadStateService(instance.context);
+				const tenant = instance.context.requireTenant();
+				const stagingKey = s3NarStagingKey(tenant, '', nar.fileHash);
+				const now = isoTimestamp(new Date());
+				const expiry = isoTimestamp(new Date(Date.now() + 60_000));
+				const uploads: (typeof schema.pendingUploads.$inferInsert)[] =
+					paths.map((metadata, index) => ({
+						id: uploadIdSchema.parse(`shared-${String(index)}`),
+						cache: DEFAULT_CACHE,
+						narHash: metadata.narHash,
+						r2Key: stagingKey,
+						metadataJson: JSON.stringify(metadata),
+						createdAt: now,
+						expiresAt: expiry,
+						verdict: 'pending'
+					}));
+				instance.context.db.insert(schema.pendingUploads).values(uploads).run();
+				const accounting = new S3StagingAccounting(
+					instance.context.d1,
+					tenant,
+					() => new Date(),
+					() => crypto.randomUUID()
+				);
+				await accounting.reserveStagedObject(
+					'',
+					stagingKey,
+					nar.narBytes.byteLength,
+					expiry
+				);
+
+				const [first] = paths;
+				if (first === undefined) {
+					throw new Error('the batch needs a path');
+				}
+				const probe = await pipeline.probeMaterialisation(first);
+				const generations = new Map(
+					instance.context.db
+						.select({
+							storePathHash: schema.narInfos.storePathHash,
+							generation: schema.narInfos.generation
+						})
+						.from(schema.narInfos)
+						.all()
+						.map((row) => [row.storePathHash, row.generation])
+				);
+				const batches = vi.spyOn(env.CUPBOARD_DB, 'batch');
+
+				try {
+					const outcomes = await Promise.all(
+						paths.map((metadata, index) => {
+							const upload = uploads[index];
+							const generation = generations.get(metadata.storePathHash);
+							if (upload === undefined || generation === undefined) {
+								throw new Error('the shared settle fixture is incomplete');
+							}
+
+							return pipeline.materialiseBatched(rootLogger(), {
+								uploadId: upload.id,
+								cache: '',
+								metadata,
+								generation,
+								probe,
+								mustOwnBlob: true,
+								graceDecision: undefined,
+								attachRootName: undefined,
+								stagingKeyToTransfer: (settlingUploadIds) =>
+									uploadState.stagingKeyToTransfer(upload, settlingUploadIds)
+							});
+						})
+					);
+					const usage = await instance.context.d1
+						.select({ stagedBytes: d1Schema.tenantUsage.stagedBytes })
+						.from(d1Schema.tenantUsage)
+						.get();
+
+					return {
+						outcomes: outcomes.map((outcome) => outcome.kind),
+						stagedBytes: usage?.stagedBytes,
+						stagedRows: await instance.context.d1
+							.select()
+							.from(d1Schema.s3StagedObject),
+						chargeStatements: batches.mock.calls[0]?.[0].length
+					};
+				} finally {
+					batches.mockRestore();
+				}
+			}
+		);
+
+		expect(result).toStrictEqual({
+			outcomes: ['materialised', 'materialised'],
+			stagedBytes: 0,
+			stagedRows: [],
+			chargeStatements: 13
+		});
 	});
 
 	it('reads a set of probe facts in two concurrent batches, then probes from memory', async () => {

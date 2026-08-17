@@ -316,6 +316,27 @@ describe('maintenance eligibility projection', () => {
 		});
 	});
 
+	it('uses S3 staging expiry when the Durable Object has no pending rows', async () => {
+		await runInDurableObject(currentServer(), async (instance) => {
+			await instance.context.d1.insert(d1Schema.s3StagedObject).values({
+				tenant: fixtureTenant,
+				cache: '',
+				r2Key: `staging/s3/${fixtureTenant}/_default/test.nar.zst`,
+				size: 10,
+				expiresAt: isoTimestampSchema.parse('2026-01-02T00:00:00.000Z')
+			});
+
+			const service = new MaintenanceEligibilityService(instance.context);
+			await service.reconcile(now);
+		});
+
+		expect(await eligibilityRow()).toStrictEqual({
+			tenant: fixtureTenant,
+			nextWakeAt: '2026-01-02T00:00:00.000Z',
+			reconciledAt: now.toISOString()
+		});
+	});
+
 	it('uses a live grace deadline as deferred work when nothing else is due', async () => {
 		await runInDurableObject(currentServer(), (instance) => {
 			instance.context.db

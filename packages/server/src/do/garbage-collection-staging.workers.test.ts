@@ -1,13 +1,23 @@
 import { rootLogger } from '@cupboard/logger';
-import { isoTimestampSchema } from '@cupboard/protocol/scalars';
+import {
+	DEFAULT_CACHE,
+	nixSha256HashSchema
+} from '@cupboard/nix-store/scalars';
+import { isoTimestamp, isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import * as d1Schema from '../db/d1-schema.ts';
 import { pendingUploads } from '../db/schema.ts';
 import { stagingObjectKey } from '../http/http.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
+import { createR2BlobStore } from '../s3/blob-store.ts';
+import { s3NarStagingKey } from '../s3/staging.ts';
+import { S3StagingAccounting } from '../s3/staging-accounting.ts';
 import {
 	clearBlobStorage,
 	currentServer,
@@ -23,6 +33,7 @@ import { DeletionQueueService } from './deletion-queue-service.ts';
 import { GarbageCollectionService } from './garbage-collection-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { RetentionService } from './retention-service.ts';
+import { UploadStateService } from './upload-state-service.ts';
 
 const uploadGraceMs = 15 * 60 * 1000;
 
@@ -141,7 +152,8 @@ describe('garbage collection best-effort staging deletes', () => {
 				const garbageCollection = new GarbageCollectionService(
 					instance.context,
 					deletionQueue,
-					new RetentionService(instance.context)
+					new RetentionService(instance.context),
+					new UploadStateService(instance.context)
 				);
 
 				return {
@@ -167,6 +179,108 @@ describe('garbage collection best-effort staging deletes', () => {
 				orphanStagingDeleted: 1
 			},
 			failedDeletes: 1,
+			orphanPresent: false
+		});
+	});
+
+	it('releases the staging charge after reclaiming an orphan S3 object', async () => {
+		const realNow = await realUploadInstant();
+		await initialise();
+
+		const bytes = new Uint8Array([1, 2, 3]);
+		const orphanKey = s3NarStagingKey(
+			fixtureTenant,
+			DEFAULT_CACHE,
+			nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`)
+		);
+		await env.BLOBS.put(orphanKey, bytes);
+
+		const collectionTime = new Date(realNow + uploadGraceMs + 5 * 60 * 1000);
+		const ledgerExpiry = isoTimestamp(
+			new Date(collectionTime.getTime() + 60 * 60 * 1000)
+		);
+		vi.setSystemTime(collectionTime);
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const accounting = new S3StagingAccounting(
+					instance.context.d1,
+					instance.context.requireTenant(),
+					() => new Date(),
+					() => 'unused-token'
+				);
+				await accounting.reserveStagedObject(
+					DEFAULT_CACHE,
+					orphanKey,
+					bytes.byteLength,
+					ledgerExpiry
+				);
+
+				const narInfoObjects = new NarInfoObjectsService(instance.context);
+				const attestationCas = new AttestationCasService(instance.context);
+				const attestations = new AttestationsService(
+					instance.context,
+					attestationCas,
+					narInfoObjects
+				);
+				const deletionQueue = new DeletionQueueService(
+					instance.context,
+					attestationCas,
+					attestations,
+					narInfoObjects
+				);
+				const garbageCollection = new GarbageCollectionService(
+					instance.context,
+					deletionQueue,
+					new RetentionService(instance.context),
+					new UploadStateService(instance.context),
+					{
+						cleanupExpired: (now) =>
+							accounting.cleanupExpired(
+								createR2BlobStore(instance.context.env.BLOBS),
+								now
+							),
+						releaseStagedObjects: (keys) =>
+							accounting.releaseStagedObjects(keys)
+					}
+				);
+				const outcome = await garbageCollection.collectGarbage(rootLogger());
+				const usage = await instance.context.d1
+					.select({
+						stagedBytes: d1Schema.tenantUsage.stagedBytes,
+						multipartBytes: d1Schema.tenantUsage.multipartBytes
+					})
+					.from(d1Schema.tenantUsage)
+					.where(eq(d1Schema.tenantUsage.tenant, fixtureTenant))
+					.get();
+
+				return {
+					outcome,
+					usage,
+					staged: await instance.context.d1
+						.select()
+						.from(d1Schema.s3StagedObject)
+				};
+			}
+		);
+
+		expect({
+			...result,
+			orphanPresent: (await env.BLOBS.head(orphanKey)) !== null
+		}).toStrictEqual({
+			outcome: {
+				pendingUploadsDeleted: 0,
+				pendingAttestationsDeleted: 0,
+				rootsExpired: 0,
+				pathsCollected: 0,
+				hasMoreExpiredRoots: false,
+				hasMoreWork: false,
+				narInfosDeleted: 0,
+				orphanStagingDeleted: 1
+			},
+			usage: { stagedBytes: 0, multipartBytes: 0 },
+			staged: [],
 			orphanPresent: false
 		});
 	});

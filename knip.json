@@ -7,6 +7,7 @@
 		"packages/nix-store": {},
 		"packages/protocol": {},
 		"packages/reporter": {},
+		"packages/s3": {},
 		"packages/server": {
 			"entry": ["src/do/server.ts", "src/tenant-worker.ts"]
 		}

@@ -1,0 +1,1 @@
+CREATE INDEX `blob_ref_tenant_cache_nar_hash_idx` ON `blob_ref` (`tenant`,`cache`,`nar_hash`);

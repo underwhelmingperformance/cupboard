@@ -1,4 +1,7 @@
-import { cacheNameSchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	creatableCacheNameSchema
+} from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {
@@ -29,7 +32,7 @@ export const cachesContract = {
 		.route({ method: 'PUT', path: '/caches/{cacheName}' })
 		.input(
 			z.strictObject({
-				cacheName: cacheNameSchema,
+				cacheName: creatableCacheNameSchema,
 				...cachePutBodySchema.shape
 			})
 		)

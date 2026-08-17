@@ -185,6 +185,18 @@ export type CacheName = z.infer<typeof cacheNameSchema>;
 // position, or no legal cache name could ever start with it.
 export const cacheNamePrefixPattern = /^([a-z0-9][a-z0-9._-]*)?$/;
 
+// In the S3 key space a named cache is addressed as a leading key segment
+// (`<cache>/<object>`), but NAR objects are global and content-addressed under
+// `nar/<hash>.nar.zst`. A cache named `nar` would be indistinguishable from that
+// shared NAR namespace and so could never be listed. Creation rejects `nar` to
+// prevent that ambiguity. The general cache-name schema still accepts it, so an
+// existing cache with that name can be listed and removed.
+const reservedCacheNames: ReadonlySet<string> = new Set(['nar']);
+
+export const creatableCacheNameSchema = cacheNameSchema.refine(
+	(value) => !reservedCacheNames.has(value)
+);
+
 // The default cache's name on the wire. Its stored name is the empty string,
 // which cannot appear in a `/cache/{cacheName}/` path, so contract URLs spell
 // it `_default`. The leading underscore fails `cacheNamePattern`, so the alias

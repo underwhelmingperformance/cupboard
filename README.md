@@ -135,8 +135,14 @@ Other commands share the 69, 75 and 77 categories; 74 is specific to
   substituter.
 - [docs/measuring-realisation.md](./docs/measuring-realisation.md) measures what
   publishing a flake's targets costs a cold runner, and gates that cost.
+- The [nixbuild guide] explains how to push build results directly from
+  nixbuild.net.
+- The [S3 guide] explains how to use the S3-compatible endpoint with `nix copy`,
+  the AWS CLI and `rclone`.
 - [AGENTS.md](./AGENTS.md) describes the repository layout and conventions.
 - [PLAN.md](./PLAN.md) tracks the feature plan and progress.
 
+[nixbuild guide]: ./docs/nixbuild.md
+[S3 guide]: ./docs/s3.md
 [Nix]: https://nixos.org
 [Cloudflare Workers]: https://workers.cloudflare.com
