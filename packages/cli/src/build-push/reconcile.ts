@@ -23,10 +23,12 @@ import {
 	type TargetOutcome,
 	type TerminalBuildFailure
 } from '@cupboard/protocol/build';
-import type {
-	ParsedUploadDecision,
-	UploadAttachRoot
+import {
+	commitBatchMaxEntries,
+	type ParsedUploadDecision,
+	type UploadAttachRoot
 } from '@cupboard/protocol/upload';
+import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 import type { CommitOptions } from '../client/client.ts';
@@ -418,63 +420,28 @@ async function publishDecision(
 	}
 }
 
-// Re-queries the destination over every path the run must end with servable
-// and publishes what it does not hold: an already uploaded path negotiates to
-// a cheap skip, a failed streaming upload re-drives through the ordinary
-// upload and commit steps, and a deferred verdict is awaited where the run
-// waits. It returns the store metadata it read, so the receipt can describe
-// every published path without asking the store again.
-async function publishRequired(
+async function publishInfoBatch(
+	infos: readonly NixValidPathInfo[],
 	required: ReadonlyMap<StorePathString, boolean>,
 	options: ReconcileOptions,
 	ledger: PublicationLedger
-): Promise<readonly NixValidPathInfo[]> {
-	if (required.size === 0) {
-		return [];
-	}
-
-	let infos: readonly NixValidPathInfo[];
-
-	try {
-		infos = await options.store.queryValidPathsInfo(required.keys().toArray());
-	} catch (error) {
-		for (const storePath of required.keys()) {
-			recordFailure(ledger, storePath, 'upload', error);
-		}
-
-		return [];
-	}
-
-	const present = new Set(infos.map((info) => info.storePath));
-
-	for (const [storePath, isTarget] of required) {
-		if (!present.has(storePath)) {
-			settleLocallyMissing(storePath, isTarget, options, ledger);
-		}
-	}
-
-	if (infos.length === 0) {
-		return infos;
-	}
-
+): Promise<void> {
+	const paths = infos.map((info) => prepareStorePathNegotiation(info));
 	let decisions: readonly ParsedUploadDecision[];
 
 	try {
 		const negotiation = await options.client.negotiate({
-			paths: infos.map((info) => prepareStorePathNegotiation(info)),
+			paths,
 			...(options.runRoot !== undefined && { attachRoot: options.runRoot })
 		});
 
-		decisions = exactUploadDecisions(
-			infos.map((info) => prepareStorePathNegotiation(info)),
-			negotiation.uploads
-		);
+		decisions = exactUploadDecisions(paths, negotiation.uploads);
 	} catch (error) {
 		for (const info of infos) {
 			recordFailure(ledger, info.storePath, 'upload', error);
 		}
 
-		return infos;
+		return;
 	}
 
 	const infoByHash = new Map(
@@ -512,6 +479,48 @@ async function publishRequired(
 				ledger
 			)
 	);
+}
+
+// Re-queries the destination for every path that must be available when the
+// run completes. A path already uploaded during the build receives a cheap
+// skip decision. A failed streaming upload instead goes through the ordinary
+// upload and commit steps. Each negotiation covers a bounded batch, so one
+// failed response does not prevent later batches from being published.
+//
+// The function returns the store metadata it read so the receipt can describe
+// every published path without querying the store again.
+async function publishRequired(
+	required: ReadonlyMap<StorePathString, boolean>,
+	options: ReconcileOptions,
+	ledger: PublicationLedger
+): Promise<readonly NixValidPathInfo[]> {
+	if (required.size === 0) {
+		return [];
+	}
+
+	let infos: readonly NixValidPathInfo[];
+
+	try {
+		infos = await options.store.queryValidPathsInfo(required.keys().toArray());
+	} catch (error) {
+		for (const storePath of required.keys()) {
+			recordFailure(ledger, storePath, 'upload', error);
+		}
+
+		return [];
+	}
+
+	const present = new Set(infos.map((info) => info.storePath));
+
+	for (const [storePath, isTarget] of required) {
+		if (!present.has(storePath)) {
+			settleLocallyMissing(storePath, isTarget, options, ledger);
+		}
+	}
+
+	for (const batch of chunk(infos, commitBatchMaxEntries)) {
+		await publishInfoBatch(batch, required, options, ledger);
+	}
 
 	return infos;
 }

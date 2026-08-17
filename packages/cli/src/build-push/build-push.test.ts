@@ -1752,6 +1752,26 @@ describe('runBuildPush', () => {
 		}).toStrictEqual({ isExpectedType: true, exitCode: expected.exitCode });
 	});
 
+	it('preserves the cause of a publication failure', async () => {
+		const cause = new UnavailableTestError();
+		const run = await runFlow({
+			emitEvent: true,
+			valid: [pathA],
+			action: 'upload',
+			uploadFailure: cause
+		});
+		const error = run.error;
+
+		expect(
+			error instanceof BuildPublicationFailedError
+				? { type: error.constructor, cause: error.cause }
+				: { type: error instanceof Error ? error.constructor : undefined }
+		).toStrictEqual({
+			type: BuildPublicationFailedError,
+			cause
+		});
+	});
+
 	it('exits with the child status when build and publication both failed, the receipt carrying both', async () => {
 		const run = await runFlow({ emitEvent: true, emitExitStatus: 7 });
 		const error = run.error;
