@@ -10,8 +10,10 @@ import {
 	oracleFileName,
 	oracleFilePath,
 	type OracleRecord,
+	type OracleSystem,
 	parseOracleRecord,
 	readNixSettingTable,
+	readNixSystem,
 	readNixVersion,
 	resolveConformanceNixBinary,
 	runNix
@@ -30,12 +32,14 @@ export const recordedOracle: OracleRecord = parseOracleRecord(
 
 export class OracleVersionDriftError extends Error {
 	constructor(
+		public readonly system: OracleSystem,
 		public readonly recorded: string,
 		public readonly resolved: string
 	) {
 		super(
-			`${oracleFilePath} records Nix version ${recorded}, but the flake builds ` +
-				`${resolved}. Run \`pnpm update:conformance-oracle\` to refresh it.`
+			`${oracleFilePath} records Nix version ${recorded} for ${system}, but ` +
+				`the flake builds ${resolved}. Run \`pnpm update:conformance-oracle ` +
+				`--system ${system}\` to refresh it.`
 		);
 		this.name = 'OracleVersionDriftError';
 	}
@@ -49,6 +53,7 @@ export class OracleVersionDriftError extends Error {
 export class Oracle {
 	constructor(
 		private readonly binary: string,
+		public readonly system: OracleSystem,
 		public readonly version: string
 	) {}
 
@@ -91,19 +96,31 @@ type OracleResolution =
 async function resolveOracle(): Promise<OracleResolution> {
 	const binary = await resolveConformanceNixBinary(repositoryRoot);
 
-	const version = await withTemporaryDirectory(
+	const { system, version } = await withTemporaryDirectory(
 		'cupboard-conformance-version-',
-		async (home) => readNixVersion(binary, await isolatedEnvironment(home))
+		async (home) => {
+			const environment = await isolatedEnvironment(home);
+			const [system, version] = await Promise.all([
+				readNixSystem(binary, environment),
+				readNixVersion(binary, environment)
+			]);
+
+			return { system, version };
+		}
 	);
 
-	if (version !== recordedOracle.version) {
+	if (version !== recordedOracle.versions[system]) {
 		return {
 			kind: 'drifted',
-			error: new OracleVersionDriftError(recordedOracle.version, version)
+			error: new OracleVersionDriftError(
+				system,
+				recordedOracle.versions[system],
+				version
+			)
 		};
 	}
 
-	return { kind: 'available', oracle: new Oracle(binary, version) };
+	return { kind: 'available', oracle: new Oracle(binary, system, version) };
 }
 
 // Resolving costs a flake build, so each test file does it once and every case

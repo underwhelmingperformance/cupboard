@@ -1,9 +1,49 @@
 import path from 'node:path';
+import { arch, platform } from 'node:process';
 
-import {
-	nixIntegerWidths,
-	nixSettingTypes
-} from './setting-types.generated.ts';
+import type { NixSystem } from './nix-systems.ts';
+import { nixSettingTables } from './setting-types.generated.ts';
+
+/**
+Setting metadata generated from the pinned Nix for one system.
+*/
+export interface NixSettingTable {
+	readonly generatedFromNix: string;
+	readonly types: Readonly<Record<string, NixSettingValueType>>;
+	readonly integerWidths: Readonly<Record<string, NixIntegerWidth>>;
+}
+
+/**
+ * Maps a supported Node host to the corresponding Nix system name. Returns
+ * `undefined` for operating systems and architectures outside the flake's
+ * supported set.
+ */
+export function nixSystemFor(
+	operatingSystem: NodeJS.Platform,
+	architecture: string
+): NixSystem | undefined {
+	const systemArchitecture =
+		architecture === 'x64'
+			? 'x86_64'
+			: architecture === 'arm64'
+				? 'aarch64'
+				: undefined;
+
+	if (
+		systemArchitecture === undefined ||
+		(operatingSystem !== 'linux' && operatingSystem !== 'darwin')
+	) {
+		return undefined;
+	}
+
+	return `${systemArchitecture}-${operatingSystem}`;
+}
+
+const currentNixSystem = nixSystemFor(platform, arch);
+const currentSettingTable =
+	currentNixSystem === undefined
+		? undefined
+		: nixSettingTables[currentNixSystem];
 
 /**
  * The value type reported for a Nix setting by `nix config show --json`. The
@@ -17,7 +57,7 @@ export type NixSettingValueType =
  * not recognise its name. Nix warns about unknown settings and ignores them.
  */
 export function nixSettingType(name: string): NixSettingValueType | undefined {
-	return nixSettingTypes[name];
+	return currentSettingTable?.types[name];
 }
 
 /**
@@ -77,7 +117,10 @@ const integerBounds: Readonly<Record<NixIntegerWidth, IntegerBounds>> = {
  * table includes every integer setting known to the pinned Nix.
  */
 export function nixInteger(name: string, value: string): bigint | undefined {
-	return nixIntegerOfWidth(value, nixIntegerWidths[name] ?? 'uint64');
+	return nixIntegerOfWidth(
+		value,
+		currentSettingTable?.integerWidths[name] ?? 'uint64'
+	);
 }
 
 /**

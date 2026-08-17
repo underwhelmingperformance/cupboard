@@ -1,7 +1,6 @@
 import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import process from 'node:process';
 
 import { z } from 'zod';
 
@@ -15,6 +14,8 @@ import { withTemporaryDirectory } from '../support/filesystem.ts';
 import { isolatedEnvironment } from '../support/nix.ts';
 
 import type { Oracle } from './oracle.ts';
+
+import type { NixSystem } from '#nix-systems';
 
 /**
  * `nix store info` reports the store a configuration resolved to, where
@@ -179,8 +180,10 @@ function storeInfoUrl(stdout: string): string | undefined {
  * installed and therefore normally have a state directory, so the case reports
  * why it was skipped.
  */
-export function chrootFallbackUnavailable(): string | undefined {
-	if (process.platform !== 'linux') {
+export function chrootFallbackUnavailable(
+	system: NixSystem
+): string | undefined {
+	if (!system.endsWith('-linux')) {
 		return 'the store Nix falls back to is compiled in for Linux alone';
 	}
 

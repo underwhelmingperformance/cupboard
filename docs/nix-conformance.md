@@ -14,11 +14,11 @@ whether it comes from our code or from a new Nix version.
 ## Running the suite
 
 ```sh
-pnpm test:conformance
+pnpm check:conformance
 ```
 
-The suite requires a working Nix installation. CI runs it in the `e2e` job,
-which already installs Nix.
+The suite requires a working Nix installation. CI runs it for every system in
+[`packages/nix/src/nix-systems.json`].
 
 ## The oracle
 
@@ -34,14 +34,15 @@ Each test file resolves the output once and shares it across its cases. If the
 machine cannot build the output, the suite fails instead of skipping the
 comparison.
 
-[`tests/conformance/oracle.json`] records the expected Nix version. This is the
-canonical version record. The suite refuses to run a case when the flake
-produces a version that differs from the record.
+[`tests/conformance/oracle.json`] records the expected Nix version for each
+supported system. The suite asks the resolved binary for
+`builtins.currentSystem`, then selects the corresponding version and settings
+table. It refuses to run a case when the flake produces a different version.
 
 Two checks keep the record consistent:
 
-- `pnpm check:conformance-oracle` checks that the version in the record matches
-  the version recorded in the generated settings table. It does not run Nix.
+- `pnpm check:conformance-oracle` checks that each version in the record matches
+  the corresponding generated settings table. It does not run Nix.
 - The conformance suite compares the resolved binary's `nix --version` output
   with the recorded version, then compares the complete generated settings table
   with the types reported by that binary and the widths inferred from accepted
@@ -49,10 +50,11 @@ Two checks keep the record consistent:
 
 ### The generated settings table
 
-`pnpm update:conformance-oracle` also writes
-[`packages/nix/src/setting-types.generated.ts`]. The client uses this table to
-decide whether Nix would accept a setting value. The update command derives two
-kinds of metadata from the pinned Nix binary.
+`pnpm update:conformance-oracle` also writes one generated settings table per
+system under `packages/nix/src`. The client selects the table for its current
+Node platform and architecture when it decides whether Nix would accept a
+setting value. The update command derives two kinds of metadata from each pinned
+Nix binary.
 
 First, it reads the value type for each setting from `nix config show --json`.
 
@@ -60,9 +62,9 @@ Second, it determines the fixed C++ width of each integer setting. Nix rejects
 values outside that width but does not report the width directly. The update
 command tries four boundary values for each integer setting and records the
 width indicated by the accepted values. This requires four `nix config show`
-runs per integer setting and takes about 25 seconds for the whole table. The
-oracle test performs the same probes, so a lockfile refresh fails only when the
-pinned Nix has different setting types or integer widths.
+runs per integer setting. The oracle test performs the same probes for the
+system on which it runs. A lockfile refresh therefore fails only when that
+system's pinned Nix has different setting types or integer widths.
 
 If the accepted values do not match a known width, the update fails. This forces
 the table reader to be updated when Nix adds another integer width.
@@ -81,6 +83,21 @@ If the pinned Nix version or settings table changed, regenerate the records:
 ```sh
 pnpm update:conformance-oracle
 ```
+
+The command requests a probe derivation for every supported system. Nix can
+build a probe locally, substitute it, or send it to any configured builder. The
+updater does not inspect the host system or require a particular builder
+configuration.
+
+To update one system, pass its name explicitly:
+
+```sh
+pnpm update:conformance-oracle --system x86_64-linux
+```
+
+CI uses this form in a four-system runner matrix. Each job regenerates its
+system's table before running the suite. If the checked-in data is stale,
+`git diff --exit-code` prints the patch in the job log for manual application.
 
 Inspect and commit the regenerated files with `flake.lock`. A nixpkgs update
 that leaves the selected Nix version and derived setting metadata unchanged
@@ -261,8 +278,6 @@ oracle.
 
 ## Known limitations
 
-- CI runs the suite only on Ubuntu. Developers must run the Darwin-specific
-  configuration cases locally.
 - Resolving the oracle evaluates the flake from the working tree. Uncommitted
   changes produce a harmless dirty-tree warning, and the first resolution in a
   session may take some time.
@@ -296,4 +311,5 @@ oracle.
 
 [`packages/nix/src/setting-types.generated.ts`]:
   ../packages/nix/src/setting-types.generated.ts
+[`packages/nix/src/nix-systems.json`]: ../packages/nix/src/nix-systems.json
 [`tests/conformance/oracle.json`]: ../tests/conformance/oracle.json

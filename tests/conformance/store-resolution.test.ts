@@ -112,7 +112,7 @@ describeConformance('the store a configuration selects', (oracle) => {
 	// own. Every machine this suite runs on has them, so the case reports why it
 	// could not be exercised rather than passing.
 	it('selects the same store as nix where nix falls back to one', async (context) => {
-		const unavailable = chrootFallbackUnavailable();
+		const unavailable = chrootFallbackUnavailable(oracle.system);
 
 		if (unavailable !== undefined) {
 			context.skip(unavailable);
