@@ -22,7 +22,8 @@ import {
 	commitBatchMaxEntries,
 	type ParsedUploadNegotiateResponse,
 	type UploadDecision,
-	uploadDecisionSchema
+	uploadDecisionSchema,
+	uploadNegotiateMaxPaths
 } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
@@ -761,7 +762,7 @@ describe('reconcileBuild', () => {
 		}).toStrictEqual(expected);
 	});
 
-	it('negotiates final publication in bounded batches', async () => {
+	it('does not apply the commit batch limit to negotiation', async () => {
 		const paths = Array.from(
 			{ length: commitBatchMaxEntries + 1 },
 			(_, index) =>
@@ -780,14 +781,14 @@ describe('reconcileBuild', () => {
 			),
 			failed: result.receipt.failed
 		}).toStrictEqual({
-			negotiatedBatchSizes: [commitBatchMaxEntries, 1],
+			negotiatedBatchSizes: [commitBatchMaxEntries + 1],
 			failed: []
 		});
 	});
 
 	it('continues with later batches after one negotiation fails', async () => {
 		const paths = Array.from(
-			{ length: commitBatchMaxEntries + 1 },
+			{ length: uploadNegotiateMaxPaths + 1 },
 			(_, index) =>
 				storePathSchema.parse(
 					`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
@@ -795,7 +796,7 @@ describe('reconcileBuild', () => {
 		);
 		const first = storePathSchema.parse(paths[0]);
 		const last = storePathSchema.parse(paths.at(-1));
-		const failedPaths = paths.slice(0, commitBatchMaxEntries);
+		const failedPaths = paths.slice(0, uploadNegotiateMaxPaths);
 
 		const harnessed = harness({
 			valid: paths,
@@ -821,7 +822,7 @@ describe('reconcileBuild', () => {
 				failure.cause instanceof Error ? failure.cause.constructor : undefined
 			)
 		}).toStrictEqual({
-			negotiatedBatchSizes: [commitBatchMaxEntries, 1],
+			negotiatedBatchSizes: [uploadNegotiateMaxPaths, 1],
 			failed: failedPaths,
 			published: [last],
 			outcomes: [
@@ -838,7 +839,7 @@ describe('reconcileBuild', () => {
 			],
 			rootReplacements: [{ name: rootTwo, body: { targets: [last] } }],
 			failureTypes: Array.from(
-				{ length: commitBatchMaxEntries },
+				{ length: uploadNegotiateMaxPaths },
 				() => NegotiationTestError
 			)
 		});

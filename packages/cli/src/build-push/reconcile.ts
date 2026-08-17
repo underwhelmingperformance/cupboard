@@ -24,9 +24,9 @@ import {
 	type TerminalBuildFailure
 } from '@cupboard/protocol/build';
 import {
-	commitBatchMaxEntries,
 	type ParsedUploadDecision,
-	type UploadAttachRoot
+	type UploadAttachRoot,
+	uploadNegotiateMaxPaths
 } from '@cupboard/protocol/upload';
 import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
@@ -518,7 +518,7 @@ async function publishRequired(
 		}
 	}
 
-	for (const batch of chunk(infos, commitBatchMaxEntries)) {
+	for (const batch of chunk(infos, uploadNegotiateMaxPaths)) {
 		await publishInfoBatch(batch, required, options, ledger);
 	}
 
