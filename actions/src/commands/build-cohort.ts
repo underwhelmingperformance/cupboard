@@ -60,21 +60,35 @@ import {
 } from '../cupboard-run.ts';
 import {
 	CohortEvaluationDriftError,
+	CohortJsonInvalidError,
+	CohortJsonSchemaError,
 	CohortPlanCommandError,
 	CohortPlanRefusedError,
 	CohortPlanResultInvalidError,
 	CohortPlanResultMissingError,
+	CohortTargetOwnerMissingError,
 	CommandFailedError,
 	CommandOutputTooLargeError,
 	CupboardReportedError,
-	InvalidInputError,
+	InvalidMaxJobsError,
 	LocalBuildExpectedPathMissingError,
 	LocalBuildOutputsMissingError,
 	LocalBuildOutputsOutsideCohortError,
+	LocalBuildOwnerMissingError,
 	MissingInputError,
+	PlannedTargetNotDerivationError,
+	PlannedTargetSourceMissingError,
+	ReadPasswordRequiredError,
+	ReadUserRequiredError,
+	RemoteBuildOutputPathUnknownError,
+	RemoteBuildOutputUndeclaredError,
+	RemoteBuildOwnerMissingError,
 	RemoteCohortBuildFailedError,
 	type RemoteCohortBuildFailure,
-	RemoteCohortProtocolError
+	RemoteCohortProtocolError,
+	RemotePublicationTargetUnresolvedError,
+	ReuseViewRequiredError,
+	RunRootRequiredError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import {
@@ -384,19 +398,13 @@ export function resolveBuildCohortInputs(
 	try {
 		parsedJson = JSON.parse(cohortJson);
 	} catch (error) {
-		throw new InvalidInputError(
-			'cohort-json',
-			`cohort-json is not valid JSON: ${error instanceof Error ? error.message : String(error)}`
-		);
+		throw new CohortJsonInvalidError(error);
 	}
 
 	const cohort = cohortMatrixEntrySchema.safeParse(parsedJson);
 
 	if (!cohort.success) {
-		throw new InvalidInputError(
-			'cohort-json',
-			`cohort-json does not match a cohort-matrix entry:\n${z.prettifyError(cohort.error)}`
-		);
+		throw new CohortJsonSchemaError(cohort.error);
 	}
 
 	const url = providedUrl('url', options.url);
@@ -415,17 +423,11 @@ export function resolveBuildCohortInputs(
 	const readPassword = options.readPassword ?? '';
 
 	if (readUser !== '' && readPassword === '') {
-		throw new InvalidInputError(
-			'read-password',
-			'read-password is required when read-user is supplied'
-		);
+		throw new ReadPasswordRequiredError();
 	}
 
 	if (readPassword !== '' && readUser === '') {
-		throw new InvalidInputError(
-			'read-user',
-			'read-user is required when read-password is supplied'
-		);
+		throw new ReadUserRequiredError();
 	}
 
 	const maxJobs = provided(options.maxJobs) ?? '';
@@ -434,20 +436,14 @@ export function resolveBuildCohortInputs(
 		maxJobs !== '' &&
 		(!/^\d+$/u.test(maxJobs) || BigInt(maxJobs) > maxNixBuildJobs)
 	) {
-		throw new InvalidInputError(
-			'max-jobs',
-			'max-jobs must be a non-negative 32-bit integer'
-		);
+		throw new InvalidMaxJobsError(maxJobs);
 	}
 
 	const runRoot = provided(options.runRoot) ?? '';
 	const runRootTtl = provided(options.runRootTtl) ?? '';
 
 	if (runRootTtl !== '' && runRoot === '') {
-		throw new InvalidInputError(
-			'run-root-ttl',
-			'run-root-ttl requires run-root'
-		);
+		throw new RunRootRequiredError(runRootTtl);
 	}
 
 	const runnerTemporary = requireEnvironment(environment, 'RUNNER_TEMP');
@@ -635,9 +631,8 @@ export async function buildCohortAction(
 	const isRemotePublication = inputs.push && inputs.store !== '';
 
 	if (isRemotePublication && unqueryable.length > 0) {
-		throw new InvalidInputError(
-			'cohort-json',
-			`Remote publication requires a daemon derived path for every build target; the plan did not resolve ${unqueryable.map((member) => member.attr).join(', ')}. Re-run planning with evaluable locked outputs or publish from the local store.`
+		throw new RemotePublicationTargetUnresolvedError(
+			unqueryable.map((member) => member.attr)
 		);
 	}
 
@@ -1558,10 +1553,7 @@ export function rootGroups(
 		);
 
 		if (owners.length === 0) {
-			throw new InvalidInputError(
-				'cohort-json',
-				`Remote build result ${result.target} has no cohort owner.`
-			);
+			throw new RemoteBuildOwnerMissingError(result.target);
 		}
 
 		if ('outputs' in result.outcome) {
@@ -1585,10 +1577,7 @@ export function rootGroups(
 		);
 
 		if (owners.length === 0) {
-			throw new InvalidInputError(
-				'cohort-json',
-				`Local build result ${build.installable} has no cohort owner.`
-			);
+			throw new LocalBuildOwnerMissingError(build.installable);
 		}
 
 		for (const output of build.outputs) {
@@ -1600,10 +1589,7 @@ export function rootGroups(
 
 	for (const targetPath of targetPaths) {
 		if (!rootsByPath.has(targetPath)) {
-			throw new InvalidInputError(
-				'cohort-json',
-				`Cohort target path ${targetPath} has no declared root owner.`
-			);
+			throw new CohortTargetOwnerMissingError(targetPath);
 		}
 	}
 
@@ -1786,10 +1772,7 @@ async function publishCohort(options: PublishCohortOptions): Promise<void> {
 
 			if (referencePathsFile !== '') {
 				if (referenceSource === '') {
-					throw new InvalidInputError(
-						'reuse-view',
-						'publish-by-reference paths require a reuse view'
-					);
+					throw new ReuseViewRequiredError();
 				}
 
 				await writeFile(referencePathsFile, linesOf(group.referencePaths));
@@ -1811,10 +1794,7 @@ async function publishCohort(options: PublishCohortOptions): Promise<void> {
 
 		if (group.referencePaths.length > 0) {
 			if (referenceSource === '') {
-				throw new InvalidInputError(
-					'reuse-view',
-					'publish-by-reference paths require a reuse view'
-				);
+				throw new ReuseViewRequiredError();
 			}
 
 			const reusePathsFile = `${inputs.referencePathsFile}.reuse.${String(index)}`;
@@ -2356,10 +2336,7 @@ function plannedTargetBindings(
 		});
 
 		if (matches.length === 0) {
-			throw new InvalidInputError(
-				'cohort-json',
-				`Planned target ${target} has no matching source installable. Re-run planning so the cohort's evaluated targets remain aligned.`
-			);
+			throw new PlannedTargetSourceMissingError(target);
 		}
 
 		return {
@@ -2441,10 +2418,7 @@ function derivationPathOf(target: NixDerivedPathString): StorePathString {
 	const storePath = selection === -1 ? target : target.slice(0, selection);
 
 	if (!storePath.endsWith('.drv')) {
-		throw new InvalidInputError(
-			'cohort-json',
-			`Planned target ${target} does not name a derivation. Re-run planning so every target has a daemon derived path.`
-		);
+		throw new PlannedTargetNotDerivationError(target);
 	}
 
 	return storePathSchema.parse(storePath);
@@ -3134,19 +3108,13 @@ async function predictableRemoteBuilds(
 
 		for (const outputName of selected) {
 			if (!derivation.outputs.has(outputName)) {
-				throw new InvalidInputError(
-					'cohort-json',
-					`Remote build target ${installable} selects output '${outputName}', which its derivation does not declare.`
-				);
+				throw new RemoteBuildOutputUndeclaredError(installable, outputName);
 			}
 
 			const output = derivation.outputs.get(outputName);
 
 			if (output === undefined) {
-				throw new InvalidInputError(
-					'cohort-json',
-					`Remote build target ${installable} selects output '${outputName}', whose content-addressed path is not known before the build. Publish it from a local store until remote builds can root floating outputs atomically.`
-				);
+				throw new RemoteBuildOutputPathUnknownError(installable, outputName);
 			}
 
 			outputs.set(outputName, output);

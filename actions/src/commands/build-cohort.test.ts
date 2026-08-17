@@ -36,19 +36,26 @@ import {
 } from '../child-process.ts';
 import { runCupboard } from '../cupboard-run.ts';
 import {
+	CohortJsonInvalidError,
+	CohortJsonSchemaError,
 	CohortPlanCommandError,
 	CohortPlanRefusedError,
 	CohortPlanResultInvalidError,
 	CohortPlanResultMissingError,
 	CommandOutputTooLargeError,
 	CupboardReportedError,
-	InvalidInputError,
+	InvalidMaxJobsError,
 	LocalBuildExpectedPathMissingError,
 	LocalBuildOutputsMissingError,
 	LocalBuildOutputsOutsideCohortError,
 	MissingInputError,
+	ReadPasswordRequiredError,
+	ReadUserRequiredError,
+	RemoteBuildOutputPathUnknownError,
+	RemoteBuildOutputUndeclaredError,
 	RemoteCohortBuildFailedError,
-	type RemoteCohortBuildFailure
+	type RemoteCohortBuildFailure,
+	RemotePublicationTargetUnresolvedError
 } from '../errors.ts';
 import type { Environment } from '../inputs.ts';
 
@@ -427,7 +434,7 @@ describe('resolveBuildCohortInputs', () => {
 				{ ...baseOptions(), cohortJson: '{not json' },
 				{ RUNNER_TEMP: '/tmp' }
 			)
-		).toThrow(InvalidInputError);
+		).toThrow(CohortJsonInvalidError);
 	});
 
 	it('rejects a cohort-matrix entry whose member arrays disagree in length', () => {
@@ -438,7 +445,7 @@ describe('resolveBuildCohortInputs', () => {
 				{ ...baseOptions(), cohortJson: malformed },
 				{ RUNNER_TEMP: '/tmp' }
 			)
-		).toThrow(InvalidInputError);
+		).toThrow(CohortJsonSchemaError);
 	});
 
 	it('requires url', () => {
@@ -460,17 +467,25 @@ describe('resolveBuildCohortInputs', () => {
 	});
 
 	it.each([
-		{ readUser: 'alice', readPassword: undefined },
-		{ readUser: undefined, readPassword: 'secret' }
+		{
+			readUser: 'alice',
+			readPassword: undefined,
+			expectedType: ReadPasswordRequiredError
+		},
+		{
+			readUser: undefined,
+			readPassword: 'secret',
+			expectedType: ReadUserRequiredError
+		}
 	])(
 		'rejects a read credential supplied only half (readUser: $readUser, readPassword: $readPassword)',
-		({ readUser, readPassword }) => {
+		({ readUser, readPassword, expectedType }) => {
 			expect(() =>
 				resolveBuildCohortInputs(
 					{ ...baseOptions(), readUser, readPassword },
 					{ RUNNER_TEMP: '/tmp' }
 				)
-			).toThrow(InvalidInputError);
+			).toThrow(expectedType);
 		}
 	);
 
@@ -489,7 +504,7 @@ describe('resolveBuildCohortInputs', () => {
 			return;
 		}
 
-		expect(resolve).toThrow(InvalidInputError);
+		expect(resolve).toThrow(InvalidMaxJobsError);
 	});
 });
 
@@ -1931,11 +1946,26 @@ describe('buildAndRootNixResults', () => {
 			() => Promise.resolve()
 		);
 
-		await expect(run).rejects.toMatchObject({
-			name: 'InvalidInputError',
-			input: 'cohort-json'
-		});
+		await expect(run).rejects.toBeInstanceOf(RemoteBuildOutputPathUnknownError);
 		expect(events).toStrictEqual([]);
+	});
+
+	it('refuses an output that its derivation does not declare', async () => {
+		const run = buildAndRootNixResults(
+			{
+				readDerivation: () =>
+					Promise.resolve(
+						`Derive([("out","${libraryBuiltPath}","","")],[],[],"x86_64-linux","/bin/sh",[],[])`
+					),
+				addTempRoot: () => Promise.resolve(),
+				resolveClosure: ownPathClosure,
+				buildPathsWithResults: () => Promise.resolve([])
+			},
+			[`${libraryQueryInstallable.slice(0, -3)}dev` as NixDerivedPathString],
+			() => Promise.resolve()
+		);
+
+		await expect(run).rejects.toBeInstanceOf(RemoteBuildOutputUndeclaredError);
 	});
 });
 
@@ -4750,12 +4780,7 @@ describe('buildCohortAction publication', () => {
 				environment,
 				{ runCupboard: runCupboardMock }
 			)
-		).rejects.toMatchObject({
-			name: 'InvalidInputError',
-			input: 'cohort-json',
-			message:
-				'Remote publication requires a daemon derived path for every build target; the plan did not resolve .#packages.x86_64-linux.floating. Re-run planning with evaluable locked outputs or publish from the local store.'
-		});
+		).rejects.toBeInstanceOf(RemotePublicationTargetUnresolvedError);
 		expect(runCupboardMock).not.toHaveBeenCalled();
 	});
 
