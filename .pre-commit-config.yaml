@@ -71,15 +71,16 @@ repos:
           )$
 
       - id: pnpm-check-conformance-oracle
-        name: pnpm check:conformance-oracle
-        entry: pnpm check:conformance-oracle
+        name: pnpm check:conformance oracle
+        entry: pnpm check:conformance tests/conformance/oracle.test.ts
         language: system
         pass_filenames: false
         files: >-
           (?x)^(
             flake\.lock|
+            packages/nix/src/setting-types\.generated\.ts|
             scripts/conformance-oracle\.ts|
-            tests/conformance/oracle\.json
+            tests/conformance/oracle\.(json|test\.ts|ts)
           )$
 
       - id: pnpm-check-format

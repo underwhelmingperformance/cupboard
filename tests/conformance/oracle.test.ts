@@ -1,20 +1,21 @@
 import { expect, it } from 'vitest';
 
 import {
-	describeConformance,
-	lockedNixpkgsRevision,
-	recordedOracle
-} from './oracle.ts';
+	generatedFromNix,
+	nixIntegerWidths,
+	nixSettingTypes
+} from '../../packages/nix/src/setting-types.generated.ts';
+
+import { describeConformance } from './oracle.ts';
 
 describeConformance('the conformance oracle', (oracle) => {
-	// Exact: the flake must resolve to the Nix version recorded by the oracle.
-	// Every other case in this suite reads its expectations off this binary, so
-	// a bump that moves it stops the suite here rather than in a case whose
-	// expected behaviour changed.
-	it('is the nix the record names, built from the pinned nixpkgs', () => {
-		expect({
-			nixpkgsRevision: lockedNixpkgsRevision,
-			version: oracle.version
-		}).toStrictEqual(recordedOracle);
+	it('matches the generated Nix settings table', async () => {
+		const table = await oracle.readSettingTable();
+
+		expect({ version: oracle.version, ...table }).toStrictEqual({
+			version: generatedFromNix,
+			types: nixSettingTypes,
+			integerWidths: nixIntegerWidths
+		});
 	});
 });

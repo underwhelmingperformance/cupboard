@@ -6,11 +6,12 @@ import { describe, it } from 'vitest';
 import {
 	type NixOptions,
 	type NixResult,
+	type NixSettingTable,
 	oracleFileName,
 	oracleFilePath,
 	type OracleRecord,
-	parseFlakeLockRevision,
 	parseOracleRecord,
+	readNixSettingTable,
 	readNixVersion,
 	resolveConformanceNixBinary,
 	runNix
@@ -27,20 +28,13 @@ export const recordedOracle: OracleRecord = parseOracleRecord(
 	readFileSync(path.join(import.meta.dirname, oracleFileName), 'utf8')
 );
 
-/**
-The nixpkgs revision the lockfile pins, which the oracle is built from.
-*/
-export const lockedNixpkgsRevision: string = parseFlakeLockRevision(
-	readFileSync(path.join(repositoryRoot, 'flake.lock'), 'utf8')
-);
-
 export class OracleVersionDriftError extends Error {
 	constructor(
 		public readonly recorded: string,
 		public readonly resolved: string
 	) {
 		super(
-			`${oracleFilePath} records ${recorded}, but the flake now builds ` +
+			`${oracleFilePath} records Nix version ${recorded}, but the flake builds ` +
 				`${resolved}. Run \`pnpm update:conformance-oracle\` to refresh it.`
 		);
 		this.name = 'OracleVersionDriftError';
@@ -48,8 +42,8 @@ export class OracleVersionDriftError extends Error {
 }
 
 /**
- * The `nix` a conformance case compares our client against. Every invocation
- * runs in an environment supplied by the caller to select the fixture
+ * The Nix binary used as the reference for a conformance case. Every invocation
+ * uses an environment supplied by the caller to select the fixture
  * configuration.
  */
 export class Oracle {
@@ -63,6 +57,13 @@ export class Oracle {
 		options: NixOptions = {}
 	): Promise<NixResult> {
 		return runNix(this.binary, arguments_, options);
+	}
+
+	/**
+	Reads the setting types and infers the integer widths for this Nix.
+	*/
+	readSettingTable(): Promise<NixSettingTable> {
+		return readNixSettingTable(this.binary);
 	}
 
 	/**
@@ -125,7 +126,7 @@ export function describeConformance(
 		const { error } = resolution;
 
 		describe(name, () => {
-			it('compares our client against the nix the record names', () => {
+			it('uses the Nix version recorded by the oracle', () => {
 				throw error;
 			});
 		});
