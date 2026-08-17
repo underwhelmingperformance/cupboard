@@ -1269,22 +1269,35 @@ export class BuildPublicationFailedError extends CliError {
 }
 
 /**
- * Chooses the sysexits category for a set of publication failures:
- * authentication first, then transient, then unavailable, and the publication
- * code for anything not otherwise classified.
+ * The cause selected for a publication error, with its corresponding exit
+ * code.
  */
-export function publicationFailureExitCode(causes: readonly unknown[]): number {
-	const codes = new Set(
-		causes
-			.filter((cause): cause is CliError => cause instanceof CliError)
-			.map((cause) => cause.exitCode)
-	);
+export interface PublicationFailureClassification {
+	readonly exitCode: number;
+	readonly cause: unknown;
+}
 
+/**
+ * Chooses the cause and sysexits category for publication failures:
+ * authentication first, then transient, then unavailable. Anything else is a
+ * general publication failure.
+ */
+export function classifyPublicationFailures(
+	causes: readonly unknown[]
+): PublicationFailureClassification {
 	for (const code of [authExitCode, transientExitCode, unavailableExitCode]) {
-		if (codes.has(code)) {
-			return code;
+		const cause = causes.find(
+			(candidate) =>
+				candidate instanceof CliError && candidate.exitCode === code
+		);
+
+		if (cause !== undefined) {
+			return { exitCode: code, cause };
 		}
 	}
 
-	return publicationExitCode;
+	return {
+		exitCode: publicationExitCode,
+		cause: causes.find((cause) => cause !== undefined)
+	};
 }
