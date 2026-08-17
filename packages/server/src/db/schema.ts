@@ -50,6 +50,9 @@ export const narInfos = sqliteTable(
 			.$type<NarInfoGeneration>()
 			.notNull()
 			.default(narInfoGenerationSchema.parse(0)),
+		// Identifies the S3 credential that submitted the narinfo. Null when the
+		// native API committed the path.
+		origin: text('origin'),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
@@ -91,6 +94,9 @@ export const pendingUploads = sqliteTable(
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
 		metadataJson: text('metadata_json').notNull(),
+		// The S3 credential that submitted the narinfo. The commit pipeline copies
+		// this identity to the narinfo row.
+		origin: text('origin'),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
 		// The commit-saga status of an accepted upload, the durable marker a crashed
@@ -249,6 +255,20 @@ export const signingKeys = sqliteTable('signing_key', {
 	signing: integer('signing', { mode: 'boolean' }).notNull().default(true),
 	published: integer('published', { mode: 'boolean' }).notNull().default(true),
 	createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+});
+
+// An S3 credential for this tenant, scoped to one cache and a fixed grant set.
+// SigV4 verification requires the plaintext secret, so the database stores it
+// encrypted with AES-GCM.
+export const s3Credentials = sqliteTable('s3_credential', {
+	accessKeyId: text('access_key_id').primaryKey(),
+	credentialId: text('credential_id').notNull(),
+	secretCiphertext: text('secret_ciphertext').notNull(),
+	cache: text('cache').notNull().default(''),
+	grantsJson: text('grants_json').notNull().default('[]'),
+	label: text('label').notNull(),
+	createdAt: text('created_at').notNull(),
+	expiresAt: text('expires_at')
 });
 
 export const retentionRoots = sqliteTable(

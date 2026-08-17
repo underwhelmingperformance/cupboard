@@ -28,12 +28,13 @@ import {
 	StoredReferencesNotArrayError
 } from '../errors.ts';
 import {
-	narObjectKey,
 	type R2ObjectKey,
 	r2ObjectKeySchema,
 	type RequestOrigin,
 	stagingPrefix
 } from '../http/http.ts';
+import { s3StagingPrefix, s3TenantStagingPrefix } from '../s3/staging.ts';
+import type { S3StagingCleanupOutcome } from '../s3/staging-accounting.ts';
 
 import { chunk, deleteObjects, maxInClauseValues } from './bulk.ts';
 import {
@@ -43,6 +44,7 @@ import {
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type RetentionService } from './retention-service.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
+import { type UploadStateService } from './upload-state-service.ts';
 
 // One collection deletes at most this many committed paths before returning, so
 // a chunk holds the Durable Object's gate only for its own deletes. When a
@@ -76,11 +78,33 @@ const orphanListPageSize = 1000;
 // by the next collection and, failing that, the bucket lifecycle rule.
 const maxOrphanReclaim = 1000;
 
+export interface S3StagingMaintenance {
+	cleanupExpired(now: Date): Promise<S3StagingCleanupOutcome>;
+	releaseStagedObjects(keys: readonly R2ObjectKey[]): Promise<void>;
+}
+
+function isTenantStagingObject(key: string, tenantS3Prefix: string): boolean {
+	return !key.startsWith(s3StagingPrefix) || key.startsWith(tenantS3Prefix);
+}
+
+function* tenantStagingObjects(
+	objects: readonly R2Object[],
+	tenantS3Prefix: string
+): Generator<R2Object> {
+	for (const object of objects) {
+		if (isTenantStagingObject(object.key, tenantS3Prefix)) {
+			yield object;
+		}
+	}
+}
+
 export class GarbageCollectionService {
 	constructor(
 		private readonly context: ServerContext,
 		private readonly deletionQueue: DeletionQueueService,
-		private readonly retention: RetentionService
+		private readonly retention: RetentionService,
+		private readonly uploadState: UploadStateService,
+		private readonly s3Staging?: S3StagingMaintenance
 	) {}
 
 	private currentRevision(cache: StoredCache): number {
@@ -990,6 +1014,7 @@ export class GarbageCollectionService {
 		orphanBefore: number
 	): Promise<{ keys: R2ObjectKey[]; wasCapped: boolean }> {
 		const keys: R2ObjectKey[] = [];
+		const tenantS3Prefix = s3TenantStagingPrefix(this.context.requireTenant());
 		let cursor: string | undefined;
 		let tracked: ReadonlySet<string> | undefined;
 
@@ -1000,7 +1025,10 @@ export class GarbageCollectionService {
 				limit: orphanListPageSize
 			});
 
-			for (const object of listed.objects) {
+			for (const object of tenantStagingObjects(
+				listed.objects,
+				tenantS3Prefix
+			)) {
 				if (keys.length >= maxOrphanReclaim) {
 					return { keys, wasCapped: true };
 				}
@@ -1031,6 +1059,7 @@ export class GarbageCollectionService {
 			await this.collectOrphanStagingKeys(orphanBefore);
 
 		await deleteObjects(this.context.env.BLOBS, keys);
+		await this.s3Staging?.releaseStagedObjects(keys);
 
 		if (wasCapped) {
 			logger.warn('orphan staging reclaim hit the per-run cap', {
@@ -1109,6 +1138,12 @@ export class GarbageCollectionService {
 		});
 		const startedAt = new Date();
 		const now = isoTimestamp(startedAt);
+		const s3Cleanup = await this.s3Staging?.cleanupExpired(startedAt);
+		if (s3Cleanup !== undefined && s3Cleanup.failures.length > 0) {
+			log.warn('expired S3 staging cleanup did not finish', {
+				failures: s3Cleanup.failures.length
+			});
+		}
 
 		// The staging objects this collection reaps, deleted after the critical
 		// section closes so an R2 stall cannot hold the gate. The rows are removed
@@ -1151,9 +1186,7 @@ export class GarbageCollectionService {
 			// reuse upload's r2Key is the shared canonical key, which the reaper owns,
 			// so it is left alone.
 			stagingKeys = [
-				...expiredUploads
-					.filter((upload) => upload.r2Key !== narObjectKey(upload.narHash))
-					.map((upload) => upload.r2Key),
+				...this.uploadState.stagingKeysSafeToDelete(expiredUploads),
 				...expiredAttestations.map((upload) => upload.r2Key)
 			];
 
@@ -1222,6 +1255,7 @@ export class GarbageCollectionService {
 		// which deletes whatever did not land.
 		try {
 			await deleteObjects(this.context.env.BLOBS, stagingKeys);
+			await this.s3Staging?.releaseStagedObjects(stagingKeys);
 		} catch (error) {
 			log.warn(
 				'staging object delete did not land; orphan reclaim will delete it',

@@ -32,6 +32,11 @@ import {
 	type RequestOrigin,
 	verifyClaimLeaseMs
 } from '../http/http.ts';
+import { rootLogger } from '../observability/logging.ts';
+import {
+	type UploadSettlement,
+	type UploadSettlementTarget
+} from '../s3/nix-cache-service.ts';
 
 import {
 	batchNonEmpty,
@@ -439,7 +444,8 @@ export class VerificationService {
 	): Promise<NarInfoGeneration | undefined> {
 		const reserved = await this.commitPipeline.reserveNarInfoRow(
 			pending.cache,
-			metadata
+			metadata,
+			pending.origin ?? undefined
 		);
 
 		if (reserved.kind === 'lost') {
@@ -513,8 +519,11 @@ export class VerificationService {
 		);
 
 		this.notifyWaiters(pending, 'servable');
-		this.uploadState.clearPendingUpload(pending.id);
-		await this.deleteStagingObject(pending);
+		await this.uploadState.clearPendingUploadAndStaging(
+			pending.id,
+			pending.r2Key,
+			metadata.narHash
+		);
 
 		return true;
 	}
@@ -596,12 +605,15 @@ export class VerificationService {
 		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
 
 		let outcome = await this.commitPipeline.materialiseBatched(logger, {
+			uploadId: pending.id,
 			cache: pending.cache,
 			metadata,
 			generation,
 			probe,
 			graceDecision,
 			attachRootName: pending.attachRootName ?? undefined,
+			stagingKeyToTransfer: (settlingUploadIds) =>
+				this.uploadState.stagingKeyToTransfer(pending, settlingUploadIds),
 			// A deferred settle proved its bytes: a fresh decode, or a reuse row
 			// that negotiate admitted while the presence edge existed. Ownership
 			// is not re-required here, and on the first commit of a hash the
@@ -636,6 +648,7 @@ export class VerificationService {
 			const freshProbe =
 				await this.commitPipeline.probeMaterialisation(metadata);
 			const retried = await this.commitPipeline.materialiseBatched(logger, {
+				uploadId: pending.id,
 				cache: pending.cache,
 				metadata,
 				generation,
@@ -643,6 +656,8 @@ export class VerificationService {
 				mustOwnBlob: false,
 				graceDecision,
 				attachRootName: pending.attachRootName ?? undefined,
+				stagingKeyToTransfer: (settlingUploadIds) =>
+					this.uploadState.stagingKeyToTransfer(pending, settlingUploadIds),
 				isStillSettleable: () => {
 					const current = this.context.db
 						.select()
@@ -763,8 +778,11 @@ export class VerificationService {
 			// durable evidence of success, so a settled upload leaves no residue:
 			// the row clears and the staging bytes go.
 			this.notifyWaiters(pending, 'servable');
-			this.uploadState.clearPendingUpload(pending.id);
-			await this.deleteStagingObject(pending);
+			await this.uploadState.clearPendingUploadAndStaging(
+				pending.id,
+				pending.r2Key,
+				metadata.narHash
+			);
 			return;
 		}
 
@@ -772,21 +790,11 @@ export class VerificationService {
 		// lost: clear its marker. Any blob it promoted that no edge now references is
 		// left for the reaper to collect.
 		this.notifyWaiters(pending, 'absent');
-		this.uploadState.clearPendingUpload(pending.id);
-		await this.deleteStagingObject(pending);
-	}
-
-	// Reclaims an upload's private staging object once its saga settles. A reuse
-	// row's r2Key is the shared canonical key, which the blob reaper owns and
-	// other paths reference, so it is left untouched.
-	private async deleteStagingObject(
-		pending: typeof schema.pendingUploads.$inferSelect
-	): Promise<void> {
-		if (pending.r2Key === narObjectKey(pending.narHash)) {
-			return;
-		}
-
-		await this.context.env.BLOBS.delete(pending.r2Key);
+		await this.uploadState.clearPendingUploadAndStaging(
+			pending.id,
+			pending.r2Key,
+			metadata.narHash
+		);
 	}
 
 	// Reclaims the reserved row a deferred upload never made servable and records its
@@ -1152,6 +1160,32 @@ export class VerificationService {
 			.set({ claimedAt: sql`null` })
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
+	}
+
+	// Checks that the committed path matches the cache, store-path hash and NAR
+	// hash from the S3 write. The servable version has a reference edge for the
+	// live generation, a matching narinfo object and a canonical NAR. Re-read the
+	// local row after those asynchronous probes so a concurrent recommit cannot
+	// make the result stale.
+	private async isPathServable(
+		target: UploadSettlementTarget
+	): Promise<boolean> {
+		const versions = await this.narInfoObjects.servableNarInfoVersions(
+			target.cache,
+			[target.storePathHash]
+		);
+		const version = versions.get(target.storePathHash);
+
+		if (version?.narHash !== target.narHash) {
+			return false;
+		}
+
+		const current = this.narInfoRow(target.cache, target.storePathHash);
+
+		return (
+			current?.generation === version.generation &&
+			current.narHash === version.narHash
+		);
 	}
 
 	// Reconciles a targeted set of committed paths, the per-push counterpart of the
@@ -1773,5 +1807,75 @@ export class VerificationService {
 		);
 		this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
 		this.notifyWaiters(pending, 'mismatch');
+	}
+
+	// Settles one upload before returning from an S3 narinfo PUT. It reports
+	// success only after the uploaded path is servable. Unlike the bounded sweep,
+	// this method checks one upload rather than a batch.
+	async settleUpload(
+		uploadId: UploadId,
+		target: UploadSettlementTarget
+	): Promise<UploadSettlement> {
+		const pending = this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.get();
+
+		// An earlier pass may have removed the upload row. Only report success when
+		// the committed path still matches this upload.
+		if (pending === undefined) {
+			return (await this.isPathServable(target)) ? 'servable' : 'absent';
+		}
+
+		const metadata = parseStoredUploadPathMetadata(
+			pending.id,
+			pending.metadataJson
+		);
+
+		if (
+			pending.cache !== target.cache ||
+			metadata.storePathHash !== target.storePathHash ||
+			metadata.narHash !== target.narHash
+		) {
+			return 'absent';
+		}
+
+		const prepared = await this.prepareAndPromote(pending);
+
+		if (prepared !== undefined) {
+			await this.materialiseVerified(
+				rootLogger(),
+				prepared.pending,
+				prepared.metadata,
+				prepared.generation
+			);
+		}
+
+		if (await this.isPathServable(target)) {
+			return 'servable';
+		}
+
+		const settled = this.context.db
+			.select({ verdict: schema.pendingUploads.verdict })
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.get();
+
+		switch (settled?.verdict) {
+			case 'mismatch': {
+				return 'mismatch';
+			}
+			case 'over-quota': {
+				return 'over-quota';
+			}
+			case 'pending':
+			case 'committing': {
+				return 'pending';
+			}
+			default: {
+				return 'absent';
+			}
+		}
 	}
 }

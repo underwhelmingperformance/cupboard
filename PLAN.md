@@ -6173,6 +6173,41 @@ published intermediates and their storage cost.
   retry systems do not mistake a cache failure for a build failure or vice
   versa.
 
+## S3-compatible endpoint
+
+Cupboard exposes one S3 bucket per tenant on a dedicated host. The default cache
+occupies the bucket root, and named caches use object-key prefixes. This lets
+[nixbuild.net] push build results directly from the builder and lets generic S3
+clients access the caches. See [docs/nixbuild.md](./docs/nixbuild.md) and
+[docs/s3.md](./docs/s3.md).
+
+[nixbuild.net]: https://docs.nixbuild.net/settings/
+
+- [x] Generic `@cupboard/s3` server with SigV4 verification, S3 XML responses
+      and errors, range and conditional requests, paginated listings, and
+      multipart uploads. Injected `CredentialResolver` and `ObjectStore` ports
+      separate the protocol from storage. A passthrough adapter exercises the
+      signed client and server paths together in tests.
+- [x] `NixCacheObjectStore` projects a tenant's caches into one S3 bucket. It
+      reads stored objects through the R2 relay, while the injected backend
+      handles `nix-cache-info`, listings, and writes through Cupboard's domain
+      services. A narinfo PUT completes verification before returning, which
+      provides read-after-write consistency. D1 reservations count staged and
+      multipart bytes against the tenant's quota until Cupboard commits or
+      removes them.
+- [x] Per-tenant S3 credentials in DO SQLite, with each secret encrypted under
+      `S3_SECRET_KEY` using AES-GCM. Host detection in the Worker dispatches to
+      the tenant DO, where verification happens.
+- [x] Contract-first credential admin
+      (`cupboard s3-credential create`/`list`/`revoke`), with the `create`
+      command emitting ready-to-paste nixbuild settings.
+- [x] Each committed path records the ID and label of the S3 credential used for
+      its narinfo PUT. `paths.inspect` (`cupboard inspect`) returns this
+      administrative record without treating it as build provenance.
+- [x] The `attest` action requires evidence from the current build. A direct S3
+      push records the credential used for its narinfo PUT but does not produce
+      a build receipt, so the action does not attest it.
+
 ## Later features
 
 - [ ] Import from an existing binary cache.

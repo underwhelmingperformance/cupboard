@@ -32,6 +32,7 @@ import {
 	type UploadId,
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
+import { createS3App } from '@cupboard/s3/app';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { DurableObject } from 'cloudflare:workers';
 import { eq, or } from 'drizzle-orm';
@@ -74,6 +75,15 @@ import { withSpan } from '../observability/span.ts';
 import { authoriseRequest } from '../orpc/authorise.ts';
 import { type TenantRpcServices } from '../orpc/context.ts';
 import { tenantOrpcHandler } from '../orpc/handler.ts';
+import { createR2BlobStore } from '../s3/blob-store.ts';
+import {
+	type EncryptionKeyset,
+	loadEncryptionKeyset
+} from '../s3/credentials.ts';
+import { resolveServableNar } from '../s3/nar-resolver.ts';
+import { createS3Backend } from '../s3/nix-cache-backend.ts';
+import { createNixCacheObjectStore } from '../s3/nix-cache-object-store.ts';
+import { S3StagingAccounting } from '../s3/staging-accounting.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
 import {
@@ -129,11 +139,13 @@ import {
 } from './negotiate-hints.ts';
 import { OffboardingService } from './offboarding-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
+import { PathsService } from './paths-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { ReuseViewAdminService } from './reuse-view-admin-service.ts';
 import { ReuseViewLookupService } from './reuse-view-lookup-service.ts';
 import { RootsService } from './roots-service.ts';
+import { S3CredentialAdminService } from './s3-credential-admin-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { StatsService } from './stats-service.ts';
 import {
@@ -336,6 +348,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// chain.
 	private readonly cronMaintenanceQueued = new Set<MaintenanceKind>();
 	private migrationPromise: Promise<void> | undefined;
+	private s3AppPromise: Promise<Hono | undefined> | undefined;
 
 	// Whether a mutation is waiting on the next coalesced eligibility publish,
 	// and the drain currently publishing; see
@@ -359,6 +372,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly reconcileQueue: ReconcileQueueService;
 	private readonly signingKeys: SigningKeysService;
 	private readonly stats: StatsService;
+	private readonly paths: PathsService;
 	private readonly tenantIdentity: TenantIdentityService;
 	private readonly oidcTrust: OidcTrustService;
 	private readonly retention: RetentionService;
@@ -374,6 +388,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly roots: RootsService;
 	private readonly offboarding: OffboardingService;
 	private readonly maintenanceEligibility: MaintenanceEligibilityService;
+	private readonly s3CredentialAdmin: S3CredentialAdminService;
 	readonly context: ServerContext;
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
@@ -399,6 +414,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.reconcileQueue = new ReconcileQueueService(this.context);
 		this.signingKeys = new SigningKeysService(this.context);
 		this.stats = new StatsService(this.context);
+		this.paths = new PathsService(this.context);
 		this.oidcTrust = new OidcTrustService(this.context, this.tenantIdentity);
 		this.retention = new RetentionService(this.context);
 		this.reuseViews = new ReuseViewAdminService(this.context);
@@ -408,7 +424,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.garbageCollection = new GarbageCollectionService(
 			this.context,
 			this.deletionQueue,
-			this.retention
+			this.retention,
+			this.uploadState,
+			{
+				cleanupExpired: (now) =>
+					this.s3StagingAccounting().cleanupExpired(
+						createR2BlobStore(this.env.BLOBS),
+						now
+					),
+				releaseStagedObjects: async (keys) => {
+					await this.s3StagingAccounting().releaseStagedObjects(keys);
+				}
+			}
 		);
 		this.tokenExchange = new TokenExchangeService(
 			this.context,
@@ -453,6 +480,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.maintenanceEligibility = new MaintenanceEligibilityService(
 			this.context
 		);
+		this.s3CredentialAdmin = new S3CredentialAdminService(this.context);
 
 		// Parked commit sockets answer keepalive pings without waking the
 		// hibernated object.
@@ -469,6 +497,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// Seed the request logger before any gate or route runs, so a fault refused
 		// before it matches a route is still logged with the request's fields.
 		this.app.use(loggerMiddleware);
+
+		// The S3 app must receive the original path and signed headers so it can
+		// verify the SigV4 signature. It also handles its own authentication.
+		this.app.use(async (context, next) => {
+			if (context.req.header('x-cupboard-s3') === undefined) {
+				await next();
+				return;
+			}
+
+			return this.serveS3(context.req.raw);
+		});
 
 		// An unconfigured Durable Object has no identity to issue, verify or
 		// advertise under, so every request that reaches this app is refused with
@@ -1073,6 +1112,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			reuseViews: this.reuseViews,
 			oidcTrust: this.oidcTrust,
 			stats: this.stats,
+			paths: this.paths,
 			integrityCheck: this.integrityCheck,
 			roots: this.roots,
 			deletionQueue: this.deletionQueue,
@@ -1081,7 +1121,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			uploads: this.uploads,
 			attestations: this.attestations,
 			runVerification: (logger, purgeOrigin, limit) =>
-				this.verifyInteractive(logger, purgeOrigin, limit)
+				this.verifyInteractive(logger, purgeOrigin, limit),
+			s3Credentials: this.s3CredentialAdmin
 		};
 	}
 
@@ -1259,6 +1300,86 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.migrationPromise ??= this.migrateAndSeed();
 
 		return this.migrationPromise;
+	}
+
+	private async serveS3(request: Request): Promise<Response> {
+		this.s3AppPromise ??= this.buildS3App();
+		const app = await this.s3AppPromise;
+
+		if (app === undefined) {
+			return new Response('The S3 endpoint is not configured.\n', {
+				status: 501
+			});
+		}
+
+		return app.fetch(request, this.env);
+	}
+
+	// The S3 endpoint's encryption keys, or `undefined` when none is configured so
+	// the endpoint stays disabled.
+	private encryptionKeyset(): Promise<EncryptionKeyset | undefined> {
+		return loadEncryptionKeyset(this.context.env.S3_SECRET_KEY);
+	}
+
+	private s3StagingAccounting(): S3StagingAccounting {
+		return new S3StagingAccounting(
+			this.context.d1,
+			this.context.requireTenant(),
+			() => new Date(),
+			() => crypto.randomUUID()
+		);
+	}
+
+	// Built once per object, lazily: importing the wrapping key is async, and the
+	// endpoint is disabled when no key is configured.
+	private async buildS3App(): Promise<Hono | undefined> {
+		// The secret binding is typed as always present, but an unconfigured
+		// deployment leaves it unset at runtime; treat that like the empty value so
+		// the endpoint reports as not configured rather than failing key import.
+		const keyset = await this.encryptionKeyset();
+		if (keyset === undefined) {
+			return undefined;
+		}
+
+		// Multipart handles issue their own R2 requests and therefore cannot pass
+		// through the bounded proxy. The S3 app runs outside a critical section, so
+		// use the raw binding for all operations in this request path.
+		const blobStore = createR2BlobStore(this.env.BLOBS);
+		const tenant = this.context.requireTenant();
+		const { backend, resolver } = createS3Backend({
+			db: this.context.db,
+			d1: this.context.d1,
+			tenant,
+			blobStore,
+			encryptionKeyset: keyset,
+			commit: (cache, uploadId) =>
+				this.afterHotMutation(async () => {
+					const outcome = await this.commitPipeline.commit(
+						rootLogger(),
+						cache,
+						uploadId
+					);
+					return { kind: outcome.kind };
+				}),
+			settleUpload: (uploadId, target) =>
+				this.afterHotMutation(() =>
+					this.verification.settleUpload(uploadId, target)
+				),
+			resolveServableNar: (cache, hash) =>
+				resolveServableNar(this.context.d1, tenant, cache, hash),
+			now: () => new Date(),
+			newId: () => uploadIdSchema.parse(crypto.randomUUID())
+		});
+
+		return createS3App({
+			resolver,
+			store: createNixCacheObjectStore(
+				tenant,
+				blobStore,
+				backend,
+				this.context.cacheMutations
+			)
+		});
 	}
 
 	// Fail loudly at initialisation if the runtime lacks native zstd, before

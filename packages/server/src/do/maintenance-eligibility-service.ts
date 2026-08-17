@@ -114,21 +114,44 @@ export class MaintenanceEligibilityService {
 		);
 	}
 
+	private async earliestS3Expiry(): Promise<IsoTimestamp | undefined> {
+		const tenant = this.context.requireTenant();
+		const [multipart, staged] = await this.context.d1.batch([
+			this.context.d1
+				.select({ expiresAt: d1Schema.s3MultipartUpload.expiresAt })
+				.from(d1Schema.s3MultipartUpload)
+				.where(eq(d1Schema.s3MultipartUpload.tenant, tenant))
+				.orderBy(asc(d1Schema.s3MultipartUpload.expiresAt))
+				.limit(1),
+			this.context.d1
+				.select({ expiresAt: d1Schema.s3StagedObject.expiresAt })
+				.from(d1Schema.s3StagedObject)
+				.where(eq(d1Schema.s3StagedObject.tenant, tenant))
+				.orderBy(asc(d1Schema.s3StagedObject.expiresAt))
+				.limit(1)
+		]);
+
+		return [multipart[0]?.expiresAt, staged[0]?.expiresAt]
+			.filter((value) => value !== undefined)
+			.toSorted(byCodeUnit)[0];
+	}
+
 	// The soonest deferred deadline once there is nothing due now: an upload or
 	// attestation expiry, a retention-root TTL, a retention-grace deadline, or an
 	// auth-key retirement.
-	private earliestFutureWake(): IsoTimestamp | undefined {
+	private async earliestFutureWake(): Promise<IsoTimestamp | undefined> {
 		return [
 			this.earliestUploadExpiry(),
 			this.earliestRootExpiry(),
 			this.earliestGraceExpiry(),
-			this.earliestAuthKeyRetirement()
+			this.earliestAuthKeyRetirement(),
+			await this.earliestS3Expiry()
 		]
 			.filter((value) => value !== undefined)
 			.toSorted(byCodeUnit)[0];
 	}
 
-	private nextWakeAt(): IsoTimestamp | undefined {
+	private async nextWakeAt(): Promise<IsoTimestamp | undefined> {
 		return this.hasImmediateWork()
 			? wakeImmediately
 			: this.earliestFutureWake();
@@ -155,7 +178,7 @@ export class MaintenanceEligibilityService {
 	async reconcile(now: Date = new Date()): Promise<void> {
 		const tenant = this.context.requireTenant();
 		const reconciledAt = isoTimestamp(now);
-		const nextWakeAt = this.nextWakeAt();
+		const nextWakeAt = await this.nextWakeAt();
 
 		await this.context.d1
 			.insert(d1Schema.tenantMaintenanceEligibility)

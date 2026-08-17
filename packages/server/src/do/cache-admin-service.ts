@@ -23,6 +23,8 @@ import {
 	type RequestOrigin,
 	requestOriginSchema
 } from '../http/http.ts';
+import { createR2BlobStore } from '../s3/blob-store.ts';
+import { S3StagingAccounting } from '../s3/staging-accounting.ts';
 
 import { deleteObjects } from './bulk.ts';
 import { type ServerContext } from './context.ts';
@@ -49,6 +51,15 @@ export class CacheAdminService {
 
 	private teardownKey(cache: StoredCache): string {
 		return `${teardownEntryPrefix}${cache}`;
+	}
+
+	private stagingAccounting(): S3StagingAccounting {
+		return new S3StagingAccounting(
+			this.context.d1,
+			this.context.requireTenant(),
+			() => new Date(),
+			() => crypto.randomUUID()
+		);
 	}
 
 	// Whether any teardown deletion for this cache is still queued, so the drain
@@ -297,21 +308,39 @@ export class CacheAdminService {
 		return remaining.size > 0;
 	}
 
-	// Drops a named cache: in one transaction it removes every committed narinfo
-	// row, queues each path's retirement, and clears the roots, registry and
-	// in-flight uploads. It then retires a first bounded chunk of the queue; a cache
-	// within the cap is fully gone when the call returns, while a larger one writes a
-	// durable marker and arms the alarm to drain the rest off the gate. A crash after
-	// the transaction but before the marker leaves the queued retirements for the
-	// periodic garbage collector to flush, the same backstop a single-path delete
-	// relies on. The reaper later collects the now-unreferenced shared blobs. The
-	// optional limit caps the first chunk for tests, mirroring the resume.
-	tearDownCache(
+	// Drops a named cache. It first revokes the cache's S3 credentials, aborts its
+	// multipart uploads, deletes its staged objects and releases their quota
+	// charges. It then removes the committed cache state and retires the first
+	// bounded chunk of path objects. A durable marker lets the alarm drain a larger
+	// cache after this call returns.
+	async tearDownCache(
 		cache: StoredCache,
 		origin: RequestOrigin,
 		limit: number = maxPathsTornDownPerRun
 	): Promise<void> {
-		return this.context.criticalSection(async () => {
+		await this.context.criticalSection(async () => {
+			await this.context.cacheMutations.block(cache);
+			this.context.db
+				.delete(schema.s3Credentials)
+				.where(eq(schema.s3Credentials.cache, cache))
+				.run();
+		});
+		await this.context.cacheMutations.waitForIdle(cache);
+		// R2 multipart handles cannot use the deadline-wrapped binding. Revoke the
+		// credentials under the input gate, then perform this cleanup with the raw
+		// binding after the gate has opened.
+		const cleanup = await this.stagingAccounting().cleanupCache(
+			createR2BlobStore(this.context.rawBlobs),
+			cache
+		);
+		if (cleanup.failures.length > 0) {
+			throw new AggregateError(
+				cleanup.failures,
+				'Could not remove all S3 staging objects for the cache.'
+			);
+		}
+
+		await this.context.criticalSection(async () => {
 			const now = isoTimestamp(new Date());
 			const pending = this.context.db
 				.select({
@@ -339,12 +368,12 @@ export class CacheAdminService {
 			);
 
 			// Queue every committed path's retirement and drop all the rows, roots,
-			// registry and in-flight uploads in one transaction. Removing every narinfo
-			// row atomically is what makes the teardown race-free: a path committed
-			// afterwards is a fresh row with no queued deletion, so no drain pass can
-			// remove it, and a recommit of a torn-down path lands a new generation the
-			// generation-fenced drain leaves alone. Only the R2 and edge retirement is
-			// chunked off the gate.
+			// S3 credentials, registry and in-flight uploads in one transaction.
+			// Removing every narinfo row atomically is what makes the teardown
+			// race-free: a path committed afterwards is a fresh row with no queued
+			// deletion, so no drain pass can remove it, and a recommit of a torn-down
+			// path lands a new generation the generation-fenced drain leaves alone.
+			// Only the R2 and edge retirement is chunked off the gate.
 			this.context.db.transaction((tx) => {
 				tx.run(
 					sql`INSERT INTO narinfo_deletion (cache, store_path_hash, nar_hash, generation, created_at)
@@ -367,6 +396,9 @@ export class CacheAdminService {
 				// grace-managed state, and no transition deadline applies.
 				tx.delete(schema.retentionGrace)
 					.where(eq(schema.retentionGrace.cache, cache))
+					.run();
+				tx.delete(schema.s3Credentials)
+					.where(eq(schema.s3Credentials.cache, cache))
 					.run();
 				tx.delete(schema.caches).where(eq(schema.caches.name, cache)).run();
 				// Drop in-flight uploads negotiated under this cache so a pending
@@ -391,6 +423,7 @@ export class CacheAdminService {
 				await this.context.ctx.storage.delete(this.teardownKey(cache));
 			}
 		});
+		await this.context.cacheMutations.unblock(cache);
 	}
 
 	// Resumes a teardown from the alarm: retires one more bounded chunk of the

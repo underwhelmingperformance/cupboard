@@ -28,6 +28,11 @@ export interface RealiseOptions {
 	readonly netrcFile?: string;
 }
 
+export interface CopyOptions {
+	readonly destination: string;
+	readonly environment?: Readonly<Record<string, string>>;
+}
+
 /**
  * A Nix store rooted at a known filesystem location, paired with an isolated
  * configuration so tests never touch the user's real Nix settings.
@@ -87,6 +92,64 @@ export class NixStore {
 		]);
 
 		return stdout.trim();
+	}
+
+	/**
+	 * Evaluates a derivation and obtains its output from the configured
+	 * substituter. Local and remote builders are disabled, so this fails if the
+	 * substituter cannot provide the output.
+	 */
+	async buildOnlyFromSubstituter(
+		expression: string,
+		options: RealiseOptions
+	): Promise<string> {
+		const { stdout } = await this.run('nix-build', [
+			'--expr',
+			expression,
+			'--no-out-link',
+			'--option',
+			'substituters',
+			options.substituter,
+			'--option',
+			'trusted-public-keys',
+			options.trustedPublicKeys.join(' '),
+			'--option',
+			'require-sigs',
+			options.requireSigs ? 'true' : 'false',
+			'--option',
+			'max-jobs',
+			'0',
+			'--option',
+			'builders',
+			'',
+			'--option',
+			'fallback',
+			'false',
+			...(options.netrcFile === undefined
+				? []
+				: ['--option', 'netrc-file', options.netrcFile])
+		]);
+
+		return stdout.trim();
+	}
+
+	async copyTo(
+		storePaths: readonly string[],
+		options: CopyOptions
+	): Promise<void> {
+		await runCommand(
+			'nix',
+			[
+				...this.storeArguments,
+				'copy',
+				'--to',
+				options.destination,
+				...storePaths
+			],
+			{
+				env: { ...this.environment, ...options.environment }
+			}
+		);
 	}
 
 	async pathInfo(storePath: string): Promise<NixPathInfo> {

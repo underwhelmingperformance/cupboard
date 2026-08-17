@@ -5,6 +5,7 @@ import {
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
+import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -36,6 +37,7 @@ import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
+import { VerificationService } from './verification-service.ts';
 
 describe('committed narinfo identity', () => {
 	beforeEach(resetTestServer);
@@ -133,6 +135,87 @@ function pipelineFor(context: ServerContext): CommitPipelineService {
 		new RetentionService(context)
 	);
 }
+
+function verificationFor(context: ServerContext): VerificationService {
+	const narInfoObjects = new NarInfoObjectsService(context);
+	const attestationCas = new AttestationCasService(context);
+	const attestations = new AttestationsService(
+		context,
+		attestationCas,
+		narInfoObjects
+	);
+	const deletionQueue = new DeletionQueueService(
+		context,
+		attestationCas,
+		attestations,
+		narInfoObjects
+	);
+	const uploadState = new UploadStateService(context);
+	const retention = new RetentionService(context);
+	const pipeline = new CommitPipelineService(
+		context,
+		new CacheAdminService(context, deletionQueue),
+		new SigningKeysService(context),
+		uploadState,
+		narInfoObjects,
+		retention
+	);
+
+	return new VerificationService(
+		context,
+		pipeline,
+		deletionQueue,
+		narInfoObjects,
+		uploadState,
+		retention,
+		() => {
+			throw new Error('The settlement test did not expect retention pruning');
+		}
+	);
+}
+
+describe('S3 upload settlement', () => {
+	beforeEach(resetTestServer);
+
+	it('accepts a cleared upload only while its committed generation is current', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('s3-settlement-generation');
+		const metadata = uploadMetadata({
+			name: 'settled',
+			storePathHash: 's'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+
+		await commitPath(token, metadata, nar);
+
+		const uploadId = uploadIdSchema.parse('already-cleared');
+		const target = {
+			cache: '',
+			storePathHash: metadata.storePathHash,
+			narHash: metadata.narHash
+		} as const;
+		const committed = await runInDurableObject(currentServer(), (instance) =>
+			verificationFor(instance.context).settleUpload(uploadId, target)
+		);
+
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.update(schema.narInfos)
+				.set({ generation: narInfoGenerationSchema.parse(1) })
+				.where(eq(schema.narInfos.storePathHash, metadata.storePathHash))
+				.run();
+		});
+
+		const stale = await runInDurableObject(currentServer(), (instance) =>
+			verificationFor(instance.context).settleUpload(uploadId, target)
+		);
+
+		expect([committed, stale]).toStrictEqual(['servable', 'absent']);
+	});
+});
 
 // A push that dies between reserving a narinfo row and materialising it, whose
 // upload row is then reaped, leaves the path reserved by a dead saga. A retry

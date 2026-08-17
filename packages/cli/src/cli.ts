@@ -34,6 +34,7 @@ import { registerControlKeyCommands } from './commands/control-key.ts';
 import { registerDeleteCommand } from './commands/delete.ts';
 import { registerDeployCommand } from './commands/deploy.ts';
 import { registerGithubCommands } from './commands/github.ts';
+import { registerInspectCommand } from './commands/inspect.ts';
 import { registerKeyCommands } from './commands/key.ts';
 import { registerLoginCommand } from './commands/login.ts';
 import {
@@ -46,6 +47,7 @@ import { registerPubkeyCommand } from './commands/pubkey.ts';
 import { registerPushCommand } from './commands/push.ts';
 import { registerReuseViewCommands } from './commands/reuse-view.ts';
 import { registerRootCommands } from './commands/root.ts';
+import { registerS3CredentialCommands } from './commands/s3-credential.ts';
 import { registerStatsCommand } from './commands/stats.ts';
 import { registerTenantCommands } from './commands/tenant.ts';
 import { CliError } from './errors.ts';
@@ -166,6 +168,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerPubkeyCommand(program, options);
 	registerStatsCommand(program, options);
 	registerDeleteCommand(program, options);
+	registerInspectCommand(program, options);
 	registerRootCommands(program, options);
 	registerConfirmCommand(program, options);
 	registerKeyCommands(program, options);
@@ -174,6 +177,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerControlOidcTrustCommands(program, options);
 	registerTenantCommands(program, options);
 	registerCacheCommands(program, options);
+	registerS3CredentialCommands(program, options);
 	registerPolicyCommands(program, options);
 	registerReuseViewCommands(program, options);
 	registerOidcTrustCommands(program, options);

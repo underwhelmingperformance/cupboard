@@ -4,8 +4,17 @@ import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { r2ObjectKeySchema } from '../http/http.ts';
+import { createR2BlobStore } from '../s3/blob-store.ts';
+import { s3TenantStagingPrefix } from '../s3/staging.ts';
+import { S3StagingAccounting } from '../s3/staging-accounting.ts';
 
-import { batchNonEmpty, chunk, maxInClauseValues } from './bulk.ts';
+import {
+	batchNonEmpty,
+	chunk,
+	deleteObjects,
+	maxInClauseValues
+} from './bulk.ts';
 import { type ServerContext } from './context.ts';
 
 // D1 caps a query at 100 bound parameters. A composite-key delete binds the
@@ -231,37 +240,89 @@ export class OffboardingService {
 	}
 
 	private async hasResidue(tenant: TenantId): Promise<boolean> {
-		// The terminal (fully-drained) pass checks all four tables anyway, so read
+		// The terminal (fully-drained) pass checks every table anyway, so read
 		// them in one batch.
-		const [edge, presence, attestation, casPresence] =
-			await this.context.d1.batch([
-				this.context.d1
-					.select({ tenant: d1Schema.blobReference.tenant })
-					.from(d1Schema.blobReference)
-					.where(eq(d1Schema.blobReference.tenant, tenant))
-					.limit(1),
-				this.context.d1
-					.select({ tenant: d1Schema.tenantBlob.tenant })
-					.from(d1Schema.tenantBlob)
-					.where(eq(d1Schema.tenantBlob.tenant, tenant))
-					.limit(1),
-				this.context.d1
-					.select({ tenant: d1Schema.attestationReference.tenant })
-					.from(d1Schema.attestationReference)
-					.where(eq(d1Schema.attestationReference.tenant, tenant))
-					.limit(1),
-				this.context.d1
-					.select({ tenant: d1Schema.tenantCasBlob.tenant })
-					.from(d1Schema.tenantCasBlob)
-					.where(eq(d1Schema.tenantCasBlob.tenant, tenant))
-					.limit(1)
-			]);
+		const [
+			edge,
+			presence,
+			attestation,
+			casPresence,
+			staged,
+			multipart,
+			multipartPart
+		] = await this.context.d1.batch([
+			this.context.d1
+				.select({ tenant: d1Schema.blobReference.tenant })
+				.from(d1Schema.blobReference)
+				.where(eq(d1Schema.blobReference.tenant, tenant))
+				.limit(1),
+			this.context.d1
+				.select({ tenant: d1Schema.tenantBlob.tenant })
+				.from(d1Schema.tenantBlob)
+				.where(eq(d1Schema.tenantBlob.tenant, tenant))
+				.limit(1),
+			this.context.d1
+				.select({ tenant: d1Schema.attestationReference.tenant })
+				.from(d1Schema.attestationReference)
+				.where(eq(d1Schema.attestationReference.tenant, tenant))
+				.limit(1),
+			this.context.d1
+				.select({ tenant: d1Schema.tenantCasBlob.tenant })
+				.from(d1Schema.tenantCasBlob)
+				.where(eq(d1Schema.tenantCasBlob.tenant, tenant))
+				.limit(1),
+			this.context.d1
+				.select({ tenant: d1Schema.s3StagedObject.tenant })
+				.from(d1Schema.s3StagedObject)
+				.where(eq(d1Schema.s3StagedObject.tenant, tenant))
+				.limit(1),
+			this.context.d1
+				.select({ tenant: d1Schema.s3MultipartUpload.tenant })
+				.from(d1Schema.s3MultipartUpload)
+				.where(eq(d1Schema.s3MultipartUpload.tenant, tenant))
+				.limit(1),
+			this.context.d1
+				.select({ tenant: d1Schema.s3MultipartPart.tenant })
+				.from(d1Schema.s3MultipartPart)
+				.where(eq(d1Schema.s3MultipartPart.tenant, tenant))
+				.limit(1)
+		]);
+		const stagingObjects = await this.context.env.BLOBS.list({
+			prefix: s3TenantStagingPrefix(tenant),
+			limit: 1
+		});
 
 		return (
 			edge.length > 0 ||
 			presence.length > 0 ||
 			attestation.length > 0 ||
-			casPresence.length > 0
+			casPresence.length > 0 ||
+			staged.length > 0 ||
+			multipart.length > 0 ||
+			multipartPart.length > 0 ||
+			stagingObjects.objects.length > 0
+		);
+	}
+
+	private async drainS3Staging(tenant: TenantId, limit: number): Promise<void> {
+		const accounting = new S3StagingAccounting(
+			this.context.d1,
+			tenant,
+			() => new Date(),
+			() => crypto.randomUUID()
+		);
+		await accounting.cleanupForOffboarding(
+			createR2BlobStore(this.context.rawBlobs),
+			limit
+		);
+
+		const listed = await this.context.env.BLOBS.list({
+			prefix: s3TenantStagingPrefix(tenant),
+			limit
+		});
+		await deleteObjects(
+			this.context.env.BLOBS,
+			listed.objects.map((object) => r2ObjectKeySchema.parse(object.key))
 		);
 	}
 
@@ -289,6 +350,7 @@ export class OffboardingService {
 		await this.deleteAttestationReferenceBatch(tenant, limit);
 		await this.deletePresenceBatch(tenant, limit);
 		await this.deleteCasPresenceBatch(tenant, limit);
+		await this.drainS3Staging(tenant, limit);
 
 		return { drained: !(await this.hasResidue(tenant)) };
 	}

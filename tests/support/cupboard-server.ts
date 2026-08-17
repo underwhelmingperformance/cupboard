@@ -19,6 +19,7 @@ import {
 import { Miniflare } from 'miniflare';
 import { build, type Plugin } from 'vite';
 import { type RawData, type WebSocket, WebSocketServer } from 'ws';
+import { z } from 'zod';
 
 import type { AccessCredential } from '../../packages/cli/src/client/credentials.ts';
 import type { PushClient } from '../../packages/cli/src/push/push.ts';
@@ -48,6 +49,7 @@ const harnessAdminSubject = 'harness-admin';
 export interface TenantProvisionSpec {
 	readonly readMode: 'public' | 'private';
 	readonly read?: { readonly user: string; readonly password: string };
+	readonly quotaBytes?: number;
 }
 
 export const r2Credentials = {
@@ -60,6 +62,30 @@ export const r2Credentials = {
 type MiniflareRequestInit = NonNullable<
 	Parameters<Miniflare['dispatchFetch']>[1]
 >;
+
+export interface ObservedHttpRequest {
+	readonly method: string;
+	readonly path: string;
+	readonly contentLength: number | undefined;
+	readonly contentSha256: string | undefined;
+}
+
+export interface S3StagingState {
+	readonly stagedBytes: number;
+	readonly multipartBytes: number;
+	readonly stagedObjects: number;
+	readonly multipartUploads: number;
+	readonly multipartParts: number;
+	readonly stagedR2Keys: readonly string[];
+}
+
+const s3StagingRowSchema = z.object({
+	stagedBytes: z.number().int().nonnegative(),
+	multipartBytes: z.number().int().nonnegative(),
+	stagedObjects: z.number().int().nonnegative(),
+	multipartUploads: z.number().int().nonnegative(),
+	multipartParts: z.number().int().nonnegative()
+});
 
 /**
  * A running cupboard worker backed by Miniflare, fronted by a local HTTP server
@@ -157,7 +183,9 @@ export class CupboardTestServer {
 			await worker.getD1Database('CUPBOARD_DB', 'cupboard')
 		);
 		const bucket = await worker.getR2Bucket('BLOBS', 'cupboard');
+		const observedRequests: ObservedHttpRequest[] = [];
 		const httpServer = createServer((request, response) => {
+			observedRequests.push(observeRequest(request));
 			void forwardToWorker(worker, request, response);
 		});
 		const upgrades = new WebSocketServer({ noServer: true });
@@ -170,7 +198,8 @@ export class CupboardTestServer {
 			issuer,
 			worker,
 			bucket,
-			httpServer
+			httpServer,
+			observedRequests
 		);
 
 		// Mirror a deployment: the fixture tenant is provisioned through the control
@@ -190,7 +219,8 @@ export class CupboardTestServer {
 		readonly issuer: StubOidcIssuer,
 		private readonly worker: Miniflare,
 		private readonly bucket: Awaited<ReturnType<Miniflare['getR2Bucket']>>,
-		private readonly server: Server
+		private readonly server: Server,
+		private readonly requests: readonly ObservedHttpRequest[]
 	) {}
 
 	// Mints a control admin token at the bare-host `/token`, the control issuer,
@@ -221,6 +251,63 @@ export class CupboardTestServer {
 		const payload = tokenResponseSchema.parse(await response.json());
 
 		return payload.access_token;
+	}
+
+	/**
+	Returns the HTTP requests received since this server started.
+	*/
+	observedRequests(): readonly ObservedHttpRequest[] {
+		return [...this.requests];
+	}
+
+	/**
+	Returns the durable and R2 staging state for the fixture tenant.
+	*/
+	async s3StagingState(): Promise<S3StagingState> {
+		const d1 = await this.worker.getD1Database('CUPBOARD_DB', 'cupboard');
+		const row = s3StagingRowSchema.parse(
+			await d1
+				.prepare(
+					`SELECT
+						staged_bytes AS stagedBytes,
+						multipart_bytes AS multipartBytes,
+						(SELECT count(*) FROM s3_staged_object WHERE tenant = ?) AS stagedObjects,
+						(SELECT count(*) FROM s3_multipart_upload WHERE tenant = ?) AS multipartUploads,
+						(SELECT count(*) FROM s3_multipart_part WHERE tenant = ?) AS multipartParts
+					FROM tenant_usage
+					WHERE tenant = ?`
+				)
+				.bind(fixtureTenant, fixtureTenant, fixtureTenant, fixtureTenant)
+				.first()
+		);
+		const staged = await this.bucket.list({
+			prefix: `staging/s3/${fixtureTenant}/`
+		});
+
+		return {
+			...row,
+			stagedR2Keys: staged.objects.map((object) => object.key)
+		};
+	}
+
+	/**
+	 * Checks whether R2 still accepts a part for an upload. If it does, this
+	 * method aborts the upload before it returns.
+	 */
+	async multipartUploadAcceptsPart(
+		r2Key: string,
+		uploadId: string
+	): Promise<boolean> {
+		const upload = this.bucket.resumeMultipartUpload(r2Key, uploadId);
+
+		try {
+			await upload.uploadPart(1, new Uint8Array([0]));
+		} catch {
+			return false;
+		}
+
+		await upload.abort();
+		return true;
 	}
 
 	/**
@@ -262,7 +349,8 @@ export class CupboardTestServer {
 			ownerIssuer: this.issuer.issuer,
 			ownerSubject,
 			ownerAudience,
-			...(spec.read !== undefined && { read: spec.read })
+			...(spec.read !== undefined && { read: spec.read }),
+			...(spec.quotaBytes !== undefined && { quotaBytes: spec.quotaBytes })
 		};
 		const response = await fetch(new URL('/control/tenants', this.url), {
 			method: 'POST',
@@ -571,6 +659,23 @@ async function forwardToWorker(
 		});
 		response.end(`${error instanceof Error ? error.message : String(error)}\n`);
 	}
+}
+
+function observeRequest(request: IncomingMessage): ObservedHttpRequest {
+	const contentSha256 = request.headers['x-amz-content-sha256'];
+	const rawContentLength = request.headers['content-length'];
+	const contentLength =
+		typeof rawContentLength === 'string' ? Number(rawContentLength) : undefined;
+
+	return {
+		method: request.method ?? 'GET',
+		path: request.url ?? '/',
+		contentLength:
+			contentLength !== undefined && Number.isSafeInteger(contentLength)
+				? contentLength
+				: undefined,
+		contentSha256: typeof contentSha256 === 'string' ? contentSha256 : undefined
+	};
 }
 
 type MiniflareResponse = Awaited<ReturnType<Miniflare['dispatchFetch']>>;

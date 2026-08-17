@@ -39,6 +39,9 @@ export async function makeWritable(target: string): Promise<void> {
 	} catch {
 		return;
 	}
+	if (stats.isSymbolicLink()) {
+		return;
+	}
 
 	await chmod(target, 0o700);
 

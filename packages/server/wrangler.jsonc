@@ -93,7 +93,12 @@
 		"CUPBOARD_SIGNUP_AUDIENCE": "",
 		"CUPBOARD_SIGNUP_SUBJECT": "",
 		"CUPBOARD_LOCAL_DEV": "",
-		"CUPBOARD_COLD_PATH_TTL_SECONDS": ""
+		"CUPBOARD_COLD_PATH_TTL_SECONDS": "",
+		// The hostname used for the S3-compatible endpoint, for example
+		// `s3.cupboard.example.com`. Leave it empty to disable the endpoint.
+		// `S3_SECRET_KEY` encrypts credential secrets and must be configured on the
+		// tenant Durable Object worker as a secret.
+		"S3_HOST": ""
 	},
 	"limits": {
 		"cpu_ms": 300000

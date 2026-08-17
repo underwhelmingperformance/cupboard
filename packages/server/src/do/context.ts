@@ -55,6 +55,7 @@ import { parseStored } from '../http/parse.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 
 import { boundedBlobs, boundedCache, boundedD1 } from './bounded-io.ts';
+import { CacheMutationGate } from './cache-mutation-gate.ts';
 import { DatabaseCostMeter, meteredStorage } from './database-cost-meter.ts';
 import { criticalSectionBudgetMs, withDeadlineBudget } from './deadline.ts';
 import { NegotiateHintStore } from './negotiate-hints.ts';
@@ -175,6 +176,10 @@ export class ServerContext {
 	// Sums the rows this DO's SQLite reads and writes, so a request's cost can be
 	// logged when it ends and asserted on in tests.
 	readonly dbCost = new DatabaseCostMeter();
+	readonly cacheMutations: CacheMutationGate;
+	// Multipart handles cannot use the bounded R2 proxy. Cleanup code uses this
+	// binding only outside the input gate.
+	readonly rawBlobs: R2Bucket;
 	env: RuntimeEnv;
 	readonly ctx: DurableObjectState;
 	discovery = new OidcDiscoveryStore();
@@ -193,10 +198,12 @@ export class ServerContext {
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		this.ctx = ctx;
-		// Every R2, D1 and Cache call the services make is bounded, so a stalled
-		// subrequest cannot hold this object's input gate to the ~30s
-		// `blockConcurrencyWhile` reset. R2 is reached through `env.BLOBS`, so the
-		// binding is replaced with a bounded one here rather than at every call site.
+		this.cacheMutations = new CacheMutationGate(ctx.storage);
+		this.rawBlobs = env.BLOBS;
+		// Request-path R2, D1 and Cache calls are bounded so a stalled subrequest
+		// cannot hold this object's input gate until `blockConcurrencyWhile` resets
+		// it. Services reach R2 through `env.BLOBS`, so replace that binding here
+		// rather than at every call site.
 		this.env = { ...env, BLOBS: boundedBlobs(env.BLOBS) };
 		this.db = drizzle(meteredStorage(ctx.storage, this.dbCost), { schema });
 		// The global shared-blob facts live in D1, readable and writable by every

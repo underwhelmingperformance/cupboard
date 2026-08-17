@@ -11,9 +11,11 @@ import type { DeletionQueueService } from '../do/deletion-queue-service.ts';
 import type { IntegrityCheckService } from '../do/integrity-check-service.ts';
 import type { NegotiateHints } from '../do/negotiate-hints.ts';
 import type { OidcTrustService } from '../do/oidc-trust-service.ts';
+import type { PathsService } from '../do/paths-service.ts';
 import type { RetentionService } from '../do/retention-service.ts';
 import type { ReuseViewAdminService } from '../do/reuse-view-admin-service.ts';
 import type { RootsService } from '../do/roots-service.ts';
+import type { S3CredentialAdminService } from '../do/s3-credential-admin-service.ts';
 import type { SigningKeysService } from '../do/signing-keys-service.ts';
 import type { StatsService } from '../do/stats-service.ts';
 import type { UploadsService } from '../do/uploads-service.ts';
@@ -48,6 +50,7 @@ export interface TenantRpcServices {
 	readonly integrityCheck: IntegrityCheckService;
 	readonly roots: RootsService;
 	readonly deletionQueue: DeletionQueueService;
+	readonly paths: PathsService;
 	// Runs an interactive garbage-collection pass, serialised against the cron
 	// pass and the alarm resume on this instance, and arms the continuation for
 	// any leftover work. The router supplies the cache scope and the caller's purge
@@ -66,6 +69,7 @@ export interface TenantRpcServices {
 		purgeOrigin: RequestOrigin | undefined,
 		limit: number
 	): Promise<VerifyReport>;
+	readonly s3Credentials: S3CredentialAdminService;
 }
 
 /**

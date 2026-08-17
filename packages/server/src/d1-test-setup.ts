@@ -12,6 +12,9 @@ import {
 	controlTrust,
 	globalAdmin,
 	manifestState,
+	s3MultipartPart,
+	s3MultipartUpload,
+	s3StagedObject,
 	tenant,
 	tenantBlob,
 	tenantCasBlob,
@@ -38,6 +41,9 @@ beforeEach(async () => {
 	vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
 
 	const database = drizzle(env.CUPBOARD_DB);
+	await database.delete(s3MultipartPart).run();
+	await database.delete(s3MultipartUpload).run();
+	await database.delete(s3StagedObject).run();
 	await database.delete(attestationReference).run();
 	await database.delete(blobReference).run();
 	await database.delete(tenantCasBlob).run();

@@ -88,6 +88,8 @@ export class StatsService {
 				bytes: d1Schema.tenantUsage.bytes,
 				casBlobs: d1Schema.tenantUsage.casBlobs,
 				casBytes: d1Schema.tenantUsage.casBytes,
+				stagedBytes: d1Schema.tenantUsage.stagedBytes,
+				multipartBytes: d1Schema.tenantUsage.multipartBytes,
 				quotaBytes: d1Schema.tenantUsage.quotaBytes
 			})
 			.from(d1Schema.tenantUsage)
@@ -97,6 +99,8 @@ export class StatsService {
 		const casFileSize = usage?.casBytes ?? 0;
 		const totalFileSize = narFileSize + casFileSize;
 		const quotaBytes = usage?.quotaBytes ?? undefined;
+		const reservedFileSize =
+			(usage?.stagedBytes ?? 0) + (usage?.multipartBytes ?? 0);
 
 		return {
 			narBlobs: usage?.blobs ?? 0,
@@ -108,7 +112,7 @@ export class StatsService {
 			remainingQuotaBytes:
 				quotaBytes === undefined
 					? undefined
-					: Math.max(0, quotaBytes - totalFileSize)
+					: Math.max(0, quotaBytes - totalFileSize - reservedFileSize)
 		};
 	}
 }

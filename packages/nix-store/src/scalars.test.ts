@@ -5,6 +5,7 @@ import {
 	cacheNameSchema,
 	cachePrioritySchema,
 	compressionSchema,
+	creatableCacheNameSchema,
 	DEFAULT_CACHE,
 	nixSha256HashSchema,
 	positiveIntSchema,
@@ -150,6 +151,11 @@ const acceptedCases: readonly {
 		name: 'a 63-character cache name',
 		schema: cacheNameSchema,
 		value: 'a'.repeat(63)
+	},
+	{
+		name: 'the reserved nar name in cacheNameSchema',
+		schema: cacheNameSchema,
+		value: 'nar'
 	},
 	{
 		name: 'a zero cache priority',
@@ -435,6 +441,11 @@ const rejectedCases: readonly {
 		name: 'a 64-character cache name',
 		schema: cacheNameSchema,
 		value: 'a'.repeat(64)
+	},
+	{
+		name: 'the reserved nar name in creatableCacheNameSchema',
+		schema: creatableCacheNameSchema,
+		value: 'nar'
 	},
 	{
 		name: 'a negative cache priority',

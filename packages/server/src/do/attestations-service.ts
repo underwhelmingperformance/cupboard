@@ -133,6 +133,8 @@ export class AttestationsService {
 					.select({
 						bytes: d1Schema.tenantUsage.bytes,
 						casBytes: d1Schema.tenantUsage.casBytes,
+						stagedBytes: d1Schema.tenantUsage.stagedBytes,
+						multipartBytes: d1Schema.tenantUsage.multipartBytes,
 						quotaBytes: d1Schema.tenantUsage.quotaBytes
 					})
 					.from(d1Schema.tenantUsage)

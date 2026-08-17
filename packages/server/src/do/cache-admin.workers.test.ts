@@ -19,9 +19,12 @@ import { eq } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
+import { createR2BlobStore } from '../s3/blob-store.ts';
+import { S3StagingAccounting } from '../s3/staging-accounting.ts';
 import {
 	authorisedFetch,
 	bootstrap,
@@ -83,6 +86,15 @@ async function listCaches(token: string): Promise<CacheListResponse> {
 function cacheListRequest(token: string): Request {
 	return new Request('https://cupboard.test/caches', {
 		headers: { authorization: `Bearer ${token}` }
+	});
+}
+
+function bodyOf(bytes: Uint8Array): ReadableStream<Uint8Array> {
+	return new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.enqueue(bytes);
+			controller.close();
+		}
 	});
 }
 
@@ -310,5 +322,107 @@ describe('cache registry admin', () => {
 			stagedAfter: true,
 			commit: StatusCodes.NOT_FOUND
 		});
+	});
+
+	it('removes S3 staging state and releases its quota charges', async () => {
+		await useTestServer('cache-admin-teardown-s3-staging');
+		const init = await bootstrap();
+		await putCache(init.token, 'builds', 30);
+		const blobStore = createR2BlobStore(env.BLOBS);
+		const stagedKey = 'staging/s3/v1/builds/staged.nar.zst';
+		const multipartKey = 'staging/s3/v1/builds/multipart.nar.zst';
+		const stagedBytes = new Uint8Array([1, 2, 3, 4]);
+		const partBytes = new Uint8Array([5, 6, 7]);
+		const expiresAt = isoTimestampSchema.parse('2026-01-08T00:00:00.000Z');
+		await env.BLOBS.put(stagedKey, stagedBytes);
+		const upload = await blobStore.createMultipartUpload(multipartKey, {
+			contentType: undefined,
+			contentLength: undefined,
+			checksumSha256: undefined
+		});
+
+		await runInDurableObject(currentServer(), async (instance) => {
+			const accounting = new S3StagingAccounting(
+				instance.context.d1,
+				fixtureTenant,
+				() => new Date('2026-01-01T00:00:00.000Z'),
+				() => 'part-reservation'
+			);
+			await accounting.reserveStagedObject(
+				buildsCache,
+				stagedKey,
+				stagedBytes.byteLength,
+				expiresAt
+			);
+			await accounting.beginMultipart(
+				buildsCache,
+				multipartKey,
+				upload.uploadId,
+				expiresAt
+			);
+			const reservation = await accounting.reserveMultipartPart(
+				multipartKey,
+				upload.uploadId,
+				1,
+				partBytes.byteLength
+			);
+			const part = await blobStore.uploadPart(
+				multipartKey,
+				upload.uploadId,
+				1,
+				partBytes.byteLength,
+				bodyOf(partBytes)
+			);
+			await accounting.recordMultipartPart(reservation, part);
+		});
+
+		const removed = await authorisedFetch('/caches/builds', init.token, {
+			method: 'DELETE'
+		});
+		const accountingState = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const usage = await instance.context.d1
+					.select({
+						stagedBytes: d1Schema.tenantUsage.stagedBytes,
+						multipartBytes: d1Schema.tenantUsage.multipartBytes
+					})
+					.from(d1Schema.tenantUsage)
+					.where(eq(d1Schema.tenantUsage.tenant, fixtureTenant))
+					.get();
+
+				return {
+					usage,
+					staged: await instance.context.d1
+						.select()
+						.from(d1Schema.s3StagedObject),
+					uploads: await instance.context.d1
+						.select()
+						.from(d1Schema.s3MultipartUpload),
+					parts: await instance.context.d1
+						.select()
+						.from(d1Schema.s3MultipartPart)
+				};
+			}
+		);
+
+		expect({
+			status: removed.status,
+			accountingState,
+			stagedPresent: (await env.BLOBS.head(stagedKey)) !== null
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			accountingState: {
+				usage: { stagedBytes: 0, multipartBytes: 0 },
+				staged: [],
+				uploads: [],
+				parts: []
+			},
+			stagedPresent: false
+		});
+		const retryBody = bodyOf(new Uint8Array([8]));
+		await expect(
+			blobStore.uploadPart(multipartKey, upload.uploadId, 2, 1, retryBody)
+		).rejects.toThrow();
 	});
 });

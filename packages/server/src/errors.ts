@@ -269,6 +269,24 @@ export class ControlWrappingKeyInvalidError extends ServerHttpError {
 	}
 }
 
+export class S3EncryptionKeyInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly byteLength: number) {
+		super('S3 credential encryption secret is not a 32-byte base64 key');
+		this.name = 'S3EncryptionKeyInvalidError';
+	}
+}
+
+export class S3EndpointNotConfiguredError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+
+	constructor() {
+		super('The S3 endpoint is not configured');
+		this.name = 'S3EndpointNotConfiguredError';
+	}
+}
+
 export class ControlWrappedKeyMalformedError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
@@ -648,6 +666,18 @@ export class StoredReferencesInvalidError extends ServerHttpError {
 	}
 }
 
+export class StoredUploadOriginInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(
+		public readonly storePathHash: StorePathHash,
+		public override readonly cause: Error
+	) {
+		super('Stored upload origin is invalid');
+		this.name = 'StoredUploadOriginInvalidError';
+	}
+}
+
 export class StoredReferencesJsonMalformedError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
@@ -755,6 +785,15 @@ export class UploadExpiredError extends ServerHttpError {
 	constructor(public readonly uploadId: UploadId) {
 		super('Upload expired');
 		this.name = 'UploadExpiredError';
+	}
+}
+
+export class StorePathNotFoundError extends ServerHttpError {
+	readonly status = StatusCodes.NOT_FOUND;
+
+	constructor(public readonly hash: string) {
+		super('Store path not found');
+		this.name = 'StorePathNotFoundError';
 	}
 }
 

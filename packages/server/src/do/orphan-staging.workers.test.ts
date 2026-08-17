@@ -1,9 +1,22 @@
 import { startCapture } from '@cupboard/logger/testing';
+import {
+	nixSha256HashSchema,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
+import { uploadIdSchema } from '@cupboard/protocol/upload';
+import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import * as schema from '../db/schema.ts';
+import { r2ObjectKeySchema } from '../http/http.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
+import { s3TenantStagingPrefix } from '../s3/staging.ts';
 import {
 	clearBlobStorage,
+	currentServer,
 	initialise,
 	negotiateUploads,
 	resetTestServer,
@@ -95,6 +108,85 @@ describe('orphan staging reconciliation', () => {
 			orphanStagingDeleted: result.orphanStagingDeleted,
 			orphanPresent: (await env.BLOBS.head(orphanKey)) !== null
 		}).toStrictEqual({ orphanStagingDeleted: 0, orphanPresent: true });
+	});
+
+	it("does not reclaim another tenant's S3 staging object", async () => {
+		const realNow = await realUploadInstant();
+		vi.setSystemTime(new Date(realNow + uploadGraceMs + 5 * 60 * 1000));
+
+		await initialise();
+		const currentPrefix = s3TenantStagingPrefix(
+			tenantIdSchema.parse(fixtureTenant)
+		);
+		const foreignPrefix = s3TenantStagingPrefix(
+			tenantIdSchema.parse('another-tenant')
+		);
+		const currentKey = `${currentPrefix}_default/current.nar.zst`;
+		const foreignKey = `${foreignPrefix}_default/foreign.nar.zst`;
+		await env.BLOBS.put(currentKey, new Uint8Array([1]));
+		await env.BLOBS.put(foreignKey, new Uint8Array([2]));
+
+		const result = await runGcResult();
+
+		expect({
+			orphanStagingDeleted: result.orphanStagingDeleted,
+			currentPresent: (await env.BLOBS.head(currentKey)) !== null,
+			foreignPresent: (await env.BLOBS.head(foreignKey)) !== null
+		}).toStrictEqual({
+			orphanStagingDeleted: 1,
+			currentPresent: false,
+			foreignPresent: true
+		});
+	});
+
+	it('keeps an expired upload key that a live sibling still references', async () => {
+		await initialise();
+		const tenant = tenantIdSchema.parse(fixtureTenant);
+		const sharedKey = r2ObjectKeySchema.parse(
+			`${s3TenantStagingPrefix(tenant)}_default/shared.nar.zst`
+		);
+		const hash = nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`);
+		await env.BLOBS.put(sharedKey, new Uint8Array([1, 2, 3]));
+
+		await runInDurableObject(currentServer(), (instance) => {
+			const row = (
+				id: string,
+				verdict: typeof schema.pendingUploads.$inferInsert.verdict
+			): typeof schema.pendingUploads.$inferInsert => ({
+				id: uploadIdSchema.parse(id),
+				cache: '',
+				narHash: hash,
+				r2Key: sharedKey,
+				metadataJson: '{}',
+				createdAt: isoTimestampSchema.parse('1970-01-01T00:00:00.000Z'),
+				expiresAt: isoTimestampSchema.parse('1970-01-01T00:00:00.000Z'),
+				verdict
+			});
+
+			instance.context.db
+				.insert(schema.pendingUploads)
+				.values([row('expired', undefined), row('live', 'pending')])
+				.run();
+		});
+
+		const result = await runGcResult();
+		const live = await runInDurableObject(currentServer(), (instance) =>
+			instance.context.db
+				.select({ id: schema.pendingUploads.id })
+				.from(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.id, uploadIdSchema.parse('live')))
+				.get()
+		);
+
+		expect({
+			pendingUploadsDeleted: result.pendingUploadsDeleted,
+			sharedPresent: (await env.BLOBS.head(sharedKey)) !== null,
+			live
+		}).toStrictEqual({
+			pendingUploadsDeleted: 1,
+			sharedPresent: true,
+			live: { id: 'live' }
+		});
 	});
 
 	it('caps the reclaim per run and leaves the overflow for the next run', async () => {

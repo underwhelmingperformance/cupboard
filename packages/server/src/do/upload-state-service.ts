@@ -9,12 +9,14 @@ import {
 	type UploadId
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 
 import { promoteVerifiedBlob } from '../blob/promote-blob.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
+import { s3StagingPrefix } from '../s3/staging.ts';
+import { S3StagingAccounting } from '../s3/staging-accounting.ts';
 
 import { chunk, maxInClauseValues, maxOutgoingConnections } from './bulk.ts';
 import { type ServerContext } from './context.ts';
@@ -24,6 +26,28 @@ type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
 
 export class UploadStateService {
 	constructor(private readonly context: ServerContext) {}
+
+	private stagingAccounting(): S3StagingAccounting {
+		return new S3StagingAccounting(
+			this.context.d1,
+			this.context.requireTenant(),
+			() => new Date(),
+			() => crypto.randomUUID()
+		);
+	}
+
+	private async deleteUnreferencedStaging(
+		upload: Pick<
+			typeof schema.pendingUploads.$inferSelect,
+			'id' | 'r2Key' | 'narHash'
+		>
+	): Promise<void> {
+		const [key] = this.stagingKeysSafeToDelete([upload]);
+		if (key !== undefined) {
+			await this.context.env.BLOBS.delete(key);
+			await this.stagingAccounting().releaseStagedObject(key);
+		}
+	}
 
 	// The `blob_state` rows for the hashes this tenant already owns a
 	// `tenant_blob` presence edge for. One join per chunk keeps a closure of any
@@ -79,6 +103,68 @@ export class UploadStateService {
 		);
 
 		return new Map(batches.flat().map((row) => [row.narHash, row]));
+	}
+
+	// Returns the private staging keys that can be deleted when `uploads` are
+	// removed or become terminal. Canonical NAR keys always survive. A shared S3
+	// staging key also survives while another row still awaits bytes, a commit or
+	// verification.
+	stagingKeysSafeToDelete(
+		uploads: readonly Pick<
+			typeof schema.pendingUploads.$inferSelect,
+			'id' | 'r2Key' | 'narHash'
+		>[],
+		additionalRemovedIds: ReadonlySet<UploadId> = new Set()
+	): R2ObjectKey[] {
+		const removedIds = new Set([
+			...uploads.map((upload) => upload.id),
+			...additionalRemovedIds
+		]);
+		const awaitingVerdict = or(
+			isNull(schema.pendingUploads.verdict),
+			eq(schema.pendingUploads.verdict, 'pending'),
+			eq(schema.pendingUploads.verdict, 'committing')
+		);
+		const liveRows = this.context.db
+			.select({
+				id: schema.pendingUploads.id,
+				r2Key: schema.pendingUploads.r2Key
+			})
+			.from(schema.pendingUploads)
+			.where(awaitingVerdict)
+			.all();
+		const retainedKeys = new Set<R2ObjectKey>();
+		for (const row of liveRows) {
+			if (!removedIds.has(row.id)) {
+				retainedKeys.add(row.r2Key);
+			}
+		}
+
+		const deletable = new Set<R2ObjectKey>();
+		for (const upload of uploads) {
+			if (
+				upload.r2Key !== narObjectKey(upload.narHash) &&
+				!retainedKeys.has(upload.r2Key)
+			) {
+				deletable.add(upload.r2Key);
+			}
+		}
+
+		return [...deletable];
+	}
+
+	stagingKeyToTransfer(
+		upload: Pick<
+			typeof schema.pendingUploads.$inferSelect,
+			'id' | 'r2Key' | 'narHash'
+		>,
+		settlingUploadIds: ReadonlySet<UploadId> = new Set()
+	): R2ObjectKey | undefined {
+		if (!upload.r2Key.startsWith(s3StagingPrefix)) {
+			return;
+		}
+
+		return this.stagingKeysSafeToDelete([upload], settlingUploadIds)[0];
 	}
 
 	// Un-arms the reaper grace timer for hashes a negotiate is about to offer
@@ -138,9 +224,7 @@ export class UploadStateService {
 		r2Key: R2ObjectKey,
 		narHash: NixSha256HashString
 	): Promise<void> {
-		if (r2Key !== narObjectKey(narHash)) {
-			await this.context.env.BLOBS.delete(r2Key);
-		}
+		await this.deleteUnreferencedStaging({ id: uploadId, r2Key, narHash });
 
 		this.clearPendingUpload(uploadId);
 	}
@@ -190,9 +274,7 @@ export class UploadStateService {
 		narHash: NixSha256HashString,
 		verdict: 'servable' | 'mismatch' | 'over-quota'
 	): Promise<void> {
-		if (r2Key !== narObjectKey(narHash)) {
-			await this.context.env.BLOBS.delete(r2Key);
-		}
+		await this.deleteUnreferencedStaging({ id: uploadId, r2Key, narHash });
 
 		// Refresh the observation window so the terminal verdict reliably outlives
 		// the verify pass that recorded it (the pass may run at or past the original

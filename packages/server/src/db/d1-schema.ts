@@ -10,6 +10,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import type { TrustRuleId } from '@cupboard/protocol/oidc';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
+import type { UploadId } from '@cupboard/protocol/upload';
 import type { ReadUser } from '@cupboard/shared/http';
 import { sql } from 'drizzle-orm';
 import {
@@ -75,7 +76,12 @@ export const blobReference = sqliteTable(
 				table.generation
 			]
 		}),
-		index('blob_ref_nar_hash_idx').on(table.narHash)
+		index('blob_ref_nar_hash_idx').on(table.narHash),
+		index('blob_ref_tenant_cache_nar_hash_idx').on(
+			table.tenant,
+			table.cache,
+			table.narHash
+		)
 	]
 );
 
@@ -293,15 +299,81 @@ export const tenantCasBlob = sqliteTable(
 	(table) => [primaryKey({ columns: [table.tenant, table.digest] })]
 );
 
+// Billable S3 staging objects that have not yet become a canonical NAR. One
+// row represents the current object at an R2 key, including replacement PUTs.
+export const s3StagedObject = sqliteTable(
+	's3_staged_object',
+	{
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		r2Key: text('r2_key').notNull(),
+		cache: text('cache').$type<StoredCache>().notNull(),
+		size: integer('size').notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
+		deleting: integer('deleting', { mode: 'boolean' }).notNull().default(false)
+	},
+	(table) => [
+		primaryKey({ columns: [table.tenant, table.r2Key] }),
+		index('s3_staged_object_expiry_idx').on(table.tenant, table.expiresAt)
+	]
+);
+
+// An R2 multipart upload whose parts are still billable. R2 aborts incomplete
+// uploads after seven days by default; `expires_at` lets maintenance abort them
+// explicitly and release the corresponding reservation.
+export const s3MultipartUpload = sqliteTable(
+	's3_multipart_upload',
+	{
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		uploadId: text('upload_id').$type<UploadId>().notNull(),
+		cache: text('cache').$type<StoredCache>().notNull(),
+		r2Key: text('r2_key').notNull(),
+		state: text('state', {
+			enum: ['open', 'completing', 'recovering', 'aborting']
+		})
+			.notNull()
+			.default('open'),
+		completionToken: text('completion_token'),
+		completionLeaseExpiresAt: text(
+			'completion_lease_expires_at'
+		).$type<IsoTimestamp>(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.tenant, table.uploadId] }),
+		index('s3_multipart_upload_expiry_idx').on(table.tenant, table.expiresAt)
+	]
+);
+
+// The latest stored part and quota reservation for one part number. A larger
+// replacement is reserved before R2 receives it; `size` and `etag` advance only
+// after R2 accepts the replacement.
+export const s3MultipartPart = sqliteTable(
+	's3_multipart_part',
+	{
+		tenant: text('tenant').$type<TenantId>().notNull(),
+		uploadId: text('upload_id').$type<UploadId>().notNull(),
+		partNumber: integer('part_number').notNull(),
+		size: integer('size').notNull().default(0),
+		reservedSize: integer('reserved_size').notNull(),
+		etag: text('etag'),
+		reservationToken: text('reservation_token').notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.tenant, table.uploadId, table.partNumber] })
+	]
+);
+
 // The authoritative per-tenant usage and quota counter. `bytes`/`blobs` are NAR
 // storage only, matching `tenant_blob`; `cas_bytes`/`cas_blobs` are attestation CAS
 // storage only, matching `tenant_cas_blob`. `narinfos` is the committed-narinfo
-// count. The quota applies to total charged bytes (`bytes + cas_bytes`). The
-// counters are maintained incrementally by the owning tenant's Durable Object as it
-// charges on 0-to-1 presence transitions and credits on 1-to-0 transitions, and
-// reconciled by cron roll-ups. `quota_bytes` is the admin-set limit (NULL means
-// unlimited), written only by the Worker. The CHECK makes an over-quota charge fail
-// its D1 batch, so no edge and no charge are ever stranded over quota.
+// count. The quota applies to canonical NARs, attestation CAS objects, staged NARs
+// and incomplete multipart parts. The counters are maintained incrementally by the
+// owning tenant's Durable Object as it charges on 0-to-1 presence transitions and
+// credits on 1-to-0 transitions, and reconciled by cron roll-ups. `quota_bytes` is
+// the admin-set limit (NULL means unlimited), written only by the Worker. The CHECK
+// makes an over-quota charge fail its D1 batch, so no edge and no charge are ever
+// stranded over quota.
 export const tenantUsage = sqliteTable(
 	'tenant_usage',
 	{
@@ -311,6 +383,8 @@ export const tenantUsage = sqliteTable(
 		blobs: integer('blobs').notNull().default(0),
 		casBytes: integer('cas_bytes').notNull().default(0),
 		casBlobs: integer('cas_blobs').notNull().default(0),
+		stagedBytes: integer('staged_bytes').notNull().default(0),
+		multipartBytes: integer('multipart_bytes').notNull().default(0),
 		quotaBytes: integer('quota_bytes'),
 		updatedAt: text('updated_at').$type<IsoTimestamp>().notNull()
 	},
@@ -321,8 +395,16 @@ export const tenantUsage = sqliteTable(
 		check('tenant_usage_cas_bytes_nonnegative', sql`${table.casBytes} >= 0`),
 		check('tenant_usage_cas_blobs_nonnegative', sql`${table.casBlobs} >= 0`),
 		check(
+			'tenant_usage_staged_bytes_nonnegative',
+			sql`${table.stagedBytes} >= 0`
+		),
+		check(
+			'tenant_usage_multipart_bytes_nonnegative',
+			sql`${table.multipartBytes} >= 0`
+		),
+		check(
 			'tenant_usage_within_quota',
-			sql`${table.quotaBytes} IS NULL OR ${table.bytes} + ${table.casBytes} <= ${table.quotaBytes}`
+			sql`${table.quotaBytes} IS NULL OR ${table.bytes} + ${table.casBytes} + ${table.stagedBytes} + ${table.multipartBytes} <= ${table.quotaBytes}`
 		)
 	]
 );
