@@ -781,102 +781,91 @@ export async function buildCohortAction(
 				);
 			}
 
-			try {
-				const selectedTargets = remoteTargets.map((target) =>
-					nixDerivedPathSchema.parse(target)
-				);
-				const plannedDerivations = selectedTargets.map((target) =>
-					derivationPathOf(target)
-				);
+			const selectedTargets = remoteTargets.map((target) =>
+				nixDerivedPathSchema.parse(target)
+			);
+			const plannedDerivations = selectedTargets.map((target) =>
+				derivationPathOf(target)
+			);
 
-				await withLocalDerivationRoots(
-					plannedDerivations,
-					async () => {
-						const remoteBindings = await materialisePlannedDerivations(
-							members,
-							selectedTargets,
-							runDerivationShow,
-							materialiseGraph,
-							dependencies.signal
-						);
+			await withLocalDerivationRoots(
+				plannedDerivations,
+				async () => {
+					const remoteBindings = await materialisePlannedDerivations(
+						members,
+						selectedTargets,
+						runDerivationShow,
+						materialiseGraph,
+						dependencies.signal
+					);
 
-						await runNixWithResults(
-							remoteBindings.map((binding) => binding.target),
-							inputs.maxJobs,
-							inputs.store,
-							async (
-								results,
-								failures,
-								publicationPaths,
-								currentProvenanceRebuilds,
-								copiedFrom
-							) => {
-								const targetFailures = failures.filter(
-									(failure) => failure.kind === 'target'
-								);
-								const terminalFailure =
-									failures.length === 0
-										? undefined
-										: targetFailures.length === failures.length
-											? ({
-													kind: 'target-build',
-													failedTargets: targetFailures.map(
-														(failure) => failure.target
-													)
-												} as const)
-											: ({ kind: 'command' } as const);
+					await runNixWithResults(
+						remoteBindings.map((binding) => binding.target),
+						inputs.maxJobs,
+						inputs.store,
+						async (
+							results,
+							failures,
+							publicationPaths,
+							currentProvenanceRebuilds,
+							copiedFrom
+						) => {
+							const targetFailures = failures.filter(
+								(failure) => failure.kind === 'target'
+							);
+							const terminalFailure =
+								failures.length === 0
+									? undefined
+									: targetFailures.length === failures.length
+										? ({
+												kind: 'target-build',
+												failedTargets: targetFailures.map(
+													(failure) => failure.target
+												)
+											} as const)
+										: ({ kind: 'command' } as const);
 
-								if (inputs.allBestEffort) {
-									for (const failure of targetFailures) {
-										reporter.warn(
-											'remote target build failed',
-											`${failure.target}: ${failure.message}`
-										);
-									}
+							if (inputs.allBestEffort) {
+								for (const failure of targetFailures) {
+									reporter.warn(
+										'remote target build failed',
+										`${failure.target}: ${failure.message}`
+									);
 								}
-
-								await settleCohortBuild(
-									{
-										...context,
-										provenanceRebuilds: currentProvenanceRebuilds
-									},
-									{
-										built: buildResultOutputPaths(results),
-										publicationPaths,
-										resultBuilds: results,
-										copiedFrom,
-										incompleteRoots: incompleteRootsFor(members, failures),
-										...(terminalFailure !== undefined && {
-											terminalFailure
-										})
-									}
-								);
-							},
-							dependencies.signal,
-							{
-								derivations: remoteBindings.map(
-									(binding) => binding.derivation
-								),
-								...(inputs.requireProvenance && { requireProvenance: true }),
-								copy: () =>
-									runCopy(
-										remoteBindings.map((binding) => binding.derivation),
-										inputs.store,
-										dependencies.signal
-									)
 							}
-						);
-					},
-					dependencies.signal
-				);
-			} catch (error) {
-				if (
-					!inputs.allBestEffort ||
-					!(error instanceof RemoteCohortBuildFailedError)
-				) {
-					throw error;
-				}
-			}
+
+							await settleCohortBuild(
+								{
+									...context,
+									provenanceRebuilds: currentProvenanceRebuilds
+								},
+								{
+									built: buildResultOutputPaths(results),
+									publicationPaths,
+									resultBuilds: results,
+									copiedFrom,
+									incompleteRoots: incompleteRootsFor(members, failures),
+									...(terminalFailure !== undefined && {
+										terminalFailure
+									})
+								}
+							);
+						},
+						dependencies.signal,
+						{
+							derivations: remoteBindings.map((binding) => binding.derivation),
+							...(inputs.requireProvenance && { requireProvenance: true }),
+							copy: () =>
+								runCopy(
+									remoteBindings.map((binding) => binding.derivation),
+									inputs.store,
+									dependencies.signal
+								)
+						}
+					);
+				},
+				dependencies.signal
+			);
 			return;
 		}
 
@@ -953,7 +942,7 @@ export async function buildCohortAction(
 
 		if (build.status !== 0) {
 			if (streamedFailure !== undefined) {
-				return;
+				throw streamedFailure.error;
 			}
 
 			throw new CommandFailedError('nix build', build.status);
