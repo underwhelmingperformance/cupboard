@@ -39,17 +39,21 @@ import {
 import {
 	CommandFailedError,
 	ComponentRootTargetLimitError,
-	InvalidInputError,
 	MatrixJobLimitError,
 	MeasureResultInvalidError,
 	MeasureResultMissingError,
 	MissingInputError,
+	PackCapacityInvalidError,
 	PublishRootTargetLimitError,
 	PublishTargetsJsonError,
 	PublishTargetsSchemaError,
+	ReadPasswordRequiredError,
+	ReadUserRequiredError,
+	RemoteOutputPathUnknownDuringPlanningError,
 	RootEnsureCommandError,
 	RootEnsureResultInvalidError,
 	RootEnsureResultMissingError,
+	RootNameInvalidError,
 	RootTargetsCommandError,
 	RootTargetsResultInvalidError,
 	RootTargetsResultMissingError
@@ -375,17 +379,11 @@ export function resolvePlanInputs(
 	const readPassword = options.readPassword ?? '';
 
 	if (readUser !== '' && readPassword === '') {
-		throw new InvalidInputError(
-			'read-password',
-			'read-password is required when read-user is supplied'
-		);
+		throw new ReadPasswordRequiredError();
 	}
 
 	if (readPassword !== '' && readUser === '') {
-		throw new InvalidInputError(
-			'read-user',
-			'read-user is required when read-password is supplied'
-		);
+		throw new ReadUserRequiredError();
 	}
 
 	const temporaryDirectory = requireEnvironment(environment, 'RUNNER_TEMP');
@@ -442,10 +440,7 @@ function resolvePackCapacity(
 	const parsed = Number(trimmed);
 
 	if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-		throw new InvalidInputError(
-			'pack-capacity',
-			'pack-capacity must be a positive integer number of bytes'
-		);
+		throw new PackCapacityInvalidError(trimmed);
 	}
 
 	return parsed;
@@ -462,10 +457,7 @@ function validateTargetRoots(
 			continue;
 		}
 
-		throw new InvalidInputError(
-			'root-prefix',
-			`root-prefix and rootSuffix for ${target.attr} must form a root name of at most ${String(rootNameMaxLength)} characters without control characters`
-		);
+		throw new RootNameInvalidError(target.attr, rootNameMaxLength);
 	}
 }
 
@@ -692,10 +684,7 @@ export function validateRemoteOutputPredictability(
 		return;
 	}
 
-	throw new InvalidInputError(
-		'store',
-		`Remote publication cannot build targets whose selected output paths are unknown during planning: ${unsupportedTargets.join(', ')}. Publish them from the local store until the Nix daemon can return and root newly discovered outputs atomically.`
-	);
+	throw new RemoteOutputPathUnknownDuringPlanningError(unsupportedTargets);
 }
 
 function unoptimisedPlan(targets: readonly PublishTarget[]): PublishPlan {

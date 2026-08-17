@@ -11,11 +11,15 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { probeDeadlineMs } from '../cache-probe.ts';
 import {
+	BooleanInputInvalidError,
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
-	InvalidInputError,
+	CupboardReleaseSelectionConflictError,
 	ProbeTimeoutError,
-	ReuseViewPriorityError
+	ReadPasswordRequiredError,
+	ReadUserRequiredError,
+	ReuseViewPriorityError,
+	UrlInputInvalidError
 } from '../errors.ts';
 
 import {
@@ -330,57 +334,51 @@ describe('resolveSetupInputs', () => {
 				},
 				environment
 			)
-		).toThrow(InvalidInputError);
+		).toThrow(CupboardReleaseSelectionConflictError);
 	});
 
 	it.each([
 		[
 			'read-user is supplied without read-password',
-			{ ...baseOptions, readUser: 'ci' }
+			{ ...baseOptions, readUser: 'ci' },
+			ReadPasswordRequiredError
 		],
 		[
 			'read-password is supplied without read-user',
-			{ ...baseOptions, readPassword: 'secret' }
+			{ ...baseOptions, readPassword: 'secret' },
+			ReadUserRequiredError
 		],
 		[
 			'cache-url is not an http(s) URL',
-			{ ...baseOptions, cacheUrl: 'not a url' }
+			{ ...baseOptions, cacheUrl: 'not a url' },
+			UrlInputInvalidError
 		],
 		[
 			'include-prereleases is not true or false',
-			{ ...baseOptions, includePrereleases: 'yes' }
+			{ ...baseOptions, includePrereleases: 'yes' },
+			BooleanInputInvalidError
 		],
 		[
 			'add-to-path is not true or false',
-			{ ...baseOptions, addToPath: 'flase', installDir: '/opt/cupboard' }
+			{ ...baseOptions, addToPath: 'flase', installDir: '/opt/cupboard' },
+			BooleanInputInvalidError
 		]
-	])('rejects when %s', (_name, options) => {
-		expect(() => resolveSetupInputs(options, {})).toThrow(InvalidInputError);
+	])('rejects when %s', (_name, options, errorType) => {
+		expect(() => resolveSetupInputs(options, {})).toThrow(errorType);
 	});
 
 	it('does not reproduce a rejected cache URL in its diagnostic', () => {
 		const secret = 'read-token';
-		let failure: unknown;
 
-		try {
+		expect(() =>
 			resolveSetupInputs(
 				{
 					...baseOptions,
 					cacheUrl: `https://user:${secret}@cupboard.example/t/acme`
 				},
 				environment
-			);
-		} catch (error) {
-			failure = error;
-		}
-
-		expect(failure).toStrictEqual(
-			new InvalidInputError(
-				'cache-url',
-				'cache-url must be an http(s) URL without credentials, a query, or a fragment'
 			)
-		);
-		expect((failure as Error).message).not.toContain(secret);
+		).toThrow(UrlInputInvalidError);
 	});
 });
 

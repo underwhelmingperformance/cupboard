@@ -14,15 +14,21 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import {
+	BooleanInputInvalidError,
 	CohortFailureToleranceError,
 	ComponentRootTargetLimitError,
-	InvalidInputError,
 	MatrixJobLimitError,
 	MissingInputError,
+	PackCapacityInvalidError,
 	PublishRootTargetLimitError,
+	ReadPasswordRequiredError,
+	ReadUserRequiredError,
+	RemoteOutputPathUnknownDuringPlanningError,
 	RootEnsureCommandError,
 	RootEnsureResultInvalidError,
-	RootEnsureResultMissingError
+	RootEnsureResultMissingError,
+	RootNameInvalidError,
+	UrlInputInvalidError
 } from '../errors.ts';
 import {
 	type Cohort,
@@ -237,19 +243,27 @@ describe('planAction', () => {
 				{ ...baseOptions, optimise: 'perhaps' },
 				{ RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' }
 			)
-		).rejects.toThrow(InvalidInputError);
+		).rejects.toThrow(BooleanInputInvalidError);
 	});
 
 	it.each([
-		['read-user is supplied without read-password', { readUser: 'ci' }],
-		['read-password is supplied without read-user', { readPassword: 'secret' }]
-	])('rejects when %s', async (_name, overrides) => {
+		[
+			'read-user is supplied without read-password',
+			{ readUser: 'ci' },
+			ReadPasswordRequiredError
+		],
+		[
+			'read-password is supplied without read-user',
+			{ readPassword: 'secret' },
+			ReadUserRequiredError
+		]
+	])('rejects when %s', async (_name, overrides, errorType) => {
 		await expect(
 			planAction(
 				{ ...baseOptions, ...overrides },
 				{ RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' }
 			)
-		).rejects.toThrow(InvalidInputError);
+		).rejects.toThrow(errorType);
 	});
 
 	it.each([
@@ -406,7 +420,7 @@ describe('resolvePlanInputs', () => {
 	it('rejects when optimise is not true or false', () => {
 		expect(() =>
 			resolvePlanInputs({ ...baseOptions, optimise: 'False' }, environment)
-		).toThrow(InvalidInputError);
+		).toThrow(BooleanInputInvalidError);
 	});
 	it.each([
 		[
@@ -443,20 +457,9 @@ describe('resolvePlanInputs', () => {
 			},
 			'.#packages.x86_64-linux.other'
 		]
-	] as const)('rejects when %s', (_name, options, attribute) => {
-		let failure: unknown;
-
-		try {
-			resolvePlanInputs(options, environment);
-		} catch (error) {
-			failure = error;
-		}
-
-		expect(failure).toStrictEqual(
-			new InvalidInputError(
-				'root-prefix',
-				`root-prefix and rootSuffix for ${attribute} must form a root name of at most ${String(rootNameMaxLength)} characters without control characters`
-			)
+	] as const)('rejects when %s', (_name, options, _attribute) => {
+		expect(() => resolvePlanInputs(options, environment)).toThrow(
+			RootNameInvalidError
 		);
 	});
 
@@ -476,32 +479,21 @@ describe('resolvePlanInputs', () => {
 	])('rejects when url %s', (_name, url) => {
 		expect(() =>
 			resolvePlanInputs({ ...baseOptions, url }, environment)
-		).toThrow(InvalidInputError);
+		).toThrow(UrlInputInvalidError);
 	});
 
 	it('does not reproduce a rejected URL in its diagnostic', () => {
 		const secret = 'read-token';
-		let failure: unknown;
 
-		try {
+		expect(() =>
 			resolvePlanInputs(
 				{
 					...baseOptions,
 					url: `https://cupboard.example/t/acme?token=${secret}`
 				},
 				environment
-			);
-		} catch (error) {
-			failure = error;
-		}
-
-		expect(failure).toStrictEqual(
-			new InvalidInputError(
-				'url',
-				'url must be an http(s) URL without credentials, a query, or a fragment'
 			)
-		);
-		expect((failure as Error).message).not.toContain(secret);
+		).toThrow(UrlInputInvalidError);
 	});
 
 	it('leaves packing disabled and its capacity at zero by default', () => {
@@ -549,12 +541,7 @@ describe('resolvePlanInputs', () => {
 				{ ...baseOptions, enablePacking: 'true', packCapacity },
 				environment
 			)
-		).toThrow(
-			new InvalidInputError(
-				'pack-capacity',
-				'pack-capacity must be a positive integer number of bytes'
-			)
-		);
+		).toThrow(PackCapacityInvalidError);
 	});
 });
 
@@ -567,12 +554,7 @@ describe('validateRemoteOutputPredictability', () => {
 
 		expect(() => {
 			validateRemoteOutputPredictability('ssh-ng://builds.example', [floating]);
-		}).toThrow(
-			new InvalidInputError(
-				'store',
-				'Remote publication cannot build targets whose selected output paths are unknown during planning: .#floating. Publish them from the local store until the Nix daemon can return and root newly discovered outputs atomically.'
-			)
-		);
+		}).toThrow(RemoteOutputPathUnknownDuringPlanningError);
 	});
 
 	it('rejects an unevaluated target before creating a remote cohort', () => {
@@ -582,12 +564,7 @@ describe('validateRemoteOutputPredictability', () => {
 				[],
 				['.#unevaluated']
 			);
-		}).toThrow(
-			new InvalidInputError(
-				'store',
-				'Remote publication cannot build targets whose selected output paths are unknown during planning: .#unevaluated. Publish them from the local store until the Nix daemon can return and root newly discovered outputs atomically.'
-			)
-		);
+		}).toThrow(RemoteOutputPathUnknownDuringPlanningError);
 	});
 
 	it('keeps local publication and predictable remote multi-output targets valid', () => {

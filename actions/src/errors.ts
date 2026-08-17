@@ -14,13 +14,361 @@ export class MissingInputError extends UsageError {
 	}
 }
 
-export class InvalidInputError extends UsageError {
+/**
+The `cache` input is not a valid cache name.
+*/
+export class CacheNameInvalidError extends UsageError {
+	constructor(public readonly value: string) {
+		super('cache must be a valid cache name');
+		this.name = 'CacheNameInvalidError';
+	}
+}
+
+/**
+A URL-valued action input is not a credential-safe HTTP URL.
+*/
+export class UrlInputInvalidError extends UsageError {
+	constructor(public readonly input: string) {
+		super(
+			`${input} must be an http(s) URL without credentials, a query, or a fragment`
+		);
+		this.name = 'UrlInputInvalidError';
+	}
+}
+
+/**
+The `read-user` input cannot be represented in a Basic credential.
+*/
+export class ReadUserInvalidError extends UsageError {
+	constructor(public readonly value: string) {
+		super('read-user must not contain a colon');
+		this.name = 'ReadUserInvalidError';
+	}
+}
+
+/**
+A boolean action input is neither `true` nor `false`.
+*/
+export class BooleanInputInvalidError extends UsageError {
 	constructor(
 		public readonly input: string,
-		message: string
+		public readonly value: string
 	) {
-		super(message);
-		this.name = 'InvalidInputError';
+		super(`${input} must be true or false`);
+		this.name = 'BooleanInputInvalidError';
+	}
+}
+
+/**
+The build action received no installables.
+*/
+export class BuildInstallablesMissingError extends UsageError {
+	constructor() {
+		super('installables must contain at least one value');
+		this.name = 'BuildInstallablesMissingError';
+	}
+}
+
+/**
+An installable cannot be passed to Nix as a positional argument.
+*/
+export class BuildInstallableInvalidError extends UsageError {
+	constructor(public readonly installables: readonly string[]) {
+		super(
+			'installables must not start with a hyphen or contain control characters'
+		);
+		this.name = 'BuildInstallableInvalidError';
+	}
+}
+
+/**
+The build retry count is not a positive safe integer.
+*/
+export class BuildAttemptsInvalidError extends UsageError {
+	constructor(public readonly value: string) {
+		super('attempts must be a positive integer');
+		this.name = 'BuildAttemptsInvalidError';
+	}
+}
+
+/**
+A GitHub API endpoint is not a credential-safe HTTPS URL.
+*/
+export class GithubEndpointInvalidError extends UsageError {
+	constructor(public readonly input: string) {
+		super(`${input} must be a credential-safe HTTPS URL`);
+		this.name = 'GithubEndpointInvalidError';
+	}
+}
+
+/**
+The configured GitHub REST and GraphQL endpoints have different origins.
+*/
+export class GithubEndpointOriginMismatchError extends UsageError {
+	constructor() {
+		super('github-graphql-url must have the same origin as github-api-url');
+		this.name = 'GithubEndpointOriginMismatchError';
+	}
+}
+
+/**
+The workflow revision is not a full lowercase Git commit ID.
+*/
+export class WorkflowShaInvalidError extends UsageError {
+	constructor(public readonly value: string) {
+		super('workflow-sha must be a lowercase, full 40-character Git commit id');
+		this.name = 'WorkflowShaInvalidError';
+	}
+}
+
+/**
+An explicit Cupboard executable was combined with release selection inputs.
+*/
+export class CupboardReleaseSelectionConflictError extends UsageError {
+	constructor(public readonly input: 'cupboard' | 'cupboard-path') {
+		super(`${input} cannot be combined with release selection inputs`);
+		this.name = 'CupboardReleaseSelectionConflictError';
+	}
+}
+
+/**
+The requested packing capacity is not a positive integer number of bytes.
+*/
+export class PackCapacityInvalidError extends UsageError {
+	constructor(public readonly value: string) {
+		super('pack-capacity must be a positive integer number of bytes');
+		this.name = 'PackCapacityInvalidError';
+	}
+}
+
+/**
+A root prefix and target suffix do not form a valid root name.
+*/
+export class RootNameInvalidError extends UsageError {
+	constructor(
+		public readonly target: string,
+		public readonly maximumLength: number
+	) {
+		super(
+			`root-prefix and rootSuffix for ${target} must form a root name of at most ${String(maximumLength)} characters without control characters`
+		);
+		this.name = 'RootNameInvalidError';
+	}
+}
+
+/**
+A remote build target has an output path that planning cannot determine.
+*/
+export class RemoteOutputPathUnknownDuringPlanningError extends UsageError {
+	constructor(public readonly targets: readonly string[]) {
+		super(
+			`Remote publication cannot build targets whose selected output paths are unknown during planning: ${targets.join(', ')}. Publish them from the local store until the Nix daemon can return and root newly discovered outputs atomically.`
+		);
+		this.name = 'RemoteOutputPathUnknownDuringPlanningError';
+	}
+}
+
+/**
+A push has neither positional paths nor root groups.
+*/
+export class PushPathsMissingError extends UsageError {
+	constructor() {
+		super('paths is required and must contain at least one path');
+		this.name = 'PushPathsMissingError';
+	}
+}
+
+/**
+Root groups and positional paths were supplied together.
+*/
+export class RootGroupsPathsConflictError extends UsageError {
+	constructor() {
+		super('root-groups cannot be combined with paths');
+		this.name = 'RootGroupsPathsConflictError';
+	}
+}
+
+/**
+Root groups and an explicit root were supplied together.
+*/
+export class RootGroupsRootConflictError extends UsageError {
+	constructor() {
+		super(
+			'root-groups cannot be combined with root: each group names its own root'
+		);
+		this.name = 'RootGroupsRootConflictError';
+	}
+}
+
+/**
+Root groups were supplied for an unretained push.
+*/
+export class RootGroupsRetentionConflictError extends UsageError {
+	constructor() {
+		super(
+			'root-groups cannot be combined with no-retain: a group publishes under its own root'
+		);
+		this.name = 'RootGroupsRetentionConflictError';
+	}
+}
+
+/**
+An explicit root was supplied for an unretained push.
+*/
+export class RootRetentionConflictError extends UsageError {
+	constructor() {
+		super('root cannot be combined with no-retain');
+		this.name = 'RootRetentionConflictError';
+	}
+}
+
+/**
+A retention lifetime was supplied for an unretained push.
+*/
+export class TtlRetentionConflictError extends UsageError {
+	constructor() {
+		super('ttl cannot be combined with no-retain');
+		this.name = 'TtlRetentionConflictError';
+	}
+}
+
+/**
+Grace-period verification was requested without waiting for publication.
+*/
+export class GraceWaitConflictError extends UsageError {
+	constructor() {
+		super('require-grace cannot be combined with wait: false');
+		this.name = 'GraceWaitConflictError';
+	}
+}
+
+/**
+Only one of the reference paths file and reference source was supplied.
+*/
+export class ReferenceSourcePairingError extends UsageError {
+	constructor() {
+		super(
+			'reference-paths-file and reference-source must be supplied together'
+		);
+		this.name = 'ReferenceSourcePairingError';
+	}
+}
+
+/**
+The `root-groups` input is not valid JSON.
+*/
+export class RootGroupsJsonInvalidError extends UsageError {
+	constructor(public override readonly cause: unknown) {
+		super(
+			`root-groups is not valid JSON: ${cause instanceof Error ? cause.message : String(cause)}`,
+			{ cause }
+		);
+		this.name = 'RootGroupsJsonInvalidError';
+	}
+}
+
+/**
+The `root-groups` input does not match the root-group schema.
+*/
+export class RootGroupsSchemaError extends UsageError {
+	constructor(public override readonly cause: z.ZodError) {
+		super(
+			`root-groups does not match {root, paths}[]:\n${z.prettifyError(cause)}`,
+			{ cause }
+		);
+		this.name = 'RootGroupsSchemaError';
+	}
+}
+
+/**
+A custom predicate file was supplied without its predicate type.
+*/
+export class PredicateTypeRequiredError extends UsageError {
+	constructor() {
+		super('predicate-type is required when predicate-file is supplied');
+		this.name = 'PredicateTypeRequiredError';
+	}
+}
+
+/**
+The checksums file contains no attestation subjects.
+*/
+export class AttestationSubjectsMissingError extends UsageError {
+	constructor(public readonly checksumsFile: string) {
+		super(`${checksumsFile} lists no subject to sign`);
+		this.name = 'AttestationSubjectsMissingError';
+	}
+}
+
+/**
+The attestation attachment action received no bundles.
+*/
+export class AttestationBundlesMissingError extends UsageError {
+	constructor() {
+		super('bundle is required and must name at least one attestation bundle');
+		this.name = 'AttestationBundlesMissingError';
+	}
+}
+
+/**
+The Cupboard version is neither `latest` nor an exact release tag.
+*/
+export class CupboardVersionInvalidError extends UsageError {
+	constructor(public readonly value: string) {
+		super('cupboard-version must be latest or an exact release tag');
+		this.name = 'CupboardVersionInvalidError';
+	}
+}
+
+/**
+Source-commit verification was requested without an exact Cupboard release.
+*/
+export class ExactCupboardVersionRequiredError extends UsageError {
+	constructor() {
+		super(
+			'cupboard-version must be an exact release when expected-source-commit is set'
+		);
+		this.name = 'ExactCupboardVersionRequiredError';
+	}
+}
+
+/**
+The expected source revision is not a full Git commit ID.
+*/
+export class ExpectedSourceCommitInvalidError extends UsageError {
+	constructor(public readonly value: string) {
+		super('expected-source-commit must be a full 40-character Git commit id');
+		this.name = 'ExpectedSourceCommitInvalidError';
+	}
+}
+
+/**
+An internal release selection did not contain an exact tag.
+*/
+export class ExactReleaseTagRequiredError extends UsageError {
+	constructor() {
+		super('cupboard-version must name an exact release');
+		this.name = 'ExactReleaseTagRequiredError';
+	}
+}
+
+/**
+The expected release archive digest is not a lowercase SHA-256 digest.
+*/
+export class ArchiveSha256InvalidError extends UsageError {
+	constructor(public readonly value: string) {
+		super('archive-sha256 must be a lowercase SHA-256 digest');
+		this.name = 'ArchiveSha256InvalidError';
+	}
+}
+
+/**
+The release repository is not an owner/name pair.
+*/
+export class ReleaseRepositoryInvalidError extends UsageError {
+	constructor(public readonly value: string) {
+		super(`release-repository must be <owner>/<name>, got '${value}'`);
+		this.name = 'ReleaseRepositoryInvalidError';
 	}
 }
 

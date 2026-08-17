@@ -6,10 +6,12 @@ import { z } from 'zod';
 import {
 	CupboardResolutionJsonError,
 	GithubApiError,
-	InvalidInputError,
+	GithubEndpointInvalidError,
+	GithubEndpointOriginMismatchError,
 	MalformedReleaseDiscoveryResponseError,
 	MalformedReleaseResponseError,
-	ReleaseDiscoverySearchTooLargeError
+	ReleaseDiscoverySearchTooLargeError,
+	WorkflowShaInvalidError
 } from './errors.ts';
 import {
 	fetchRelease,
@@ -177,10 +179,7 @@ function credentialSafeEndpoint(input: string, value: string): URL {
 	try {
 		endpoint = new URL(value);
 	} catch {
-		throw new InvalidInputError(
-			input,
-			`${input} must be a credential-safe HTTPS URL`
-		);
+		throw new GithubEndpointInvalidError(input);
 	}
 
 	if (
@@ -189,10 +188,7 @@ function credentialSafeEndpoint(input: string, value: string): URL {
 		endpoint.password !== '' ||
 		endpoint.hash !== ''
 	) {
-		throw new InvalidInputError(
-			input,
-			`${input} must be a credential-safe HTTPS URL`
-		);
+		throw new GithubEndpointInvalidError(input);
 	}
 
 	return endpoint;
@@ -221,10 +217,7 @@ function githubApiEndpoints(
 	const graphql = credentialSafeEndpoint('github-graphql-url', graphqlValue);
 
 	if (graphql.origin !== rest.origin) {
-		throw new InvalidInputError(
-			'github-graphql-url',
-			'github-graphql-url must have the same origin as github-api-url'
-		);
+		throw new GithubEndpointOriginMismatchError();
 	}
 
 	return { rest: restValue, graphql: graphqlValue };
@@ -351,10 +344,7 @@ function canonicalWorkflowSha(value: string): string {
 	const parsed = commitSchema.safeParse(value);
 
 	if (!parsed.success) {
-		throw new InvalidInputError(
-			'workflow-sha',
-			'workflow-sha must be a lowercase, full 40-character Git commit id'
-		);
+		throw new WorkflowShaInvalidError(value);
 	}
 
 	return parsed.data;

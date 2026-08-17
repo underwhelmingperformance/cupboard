@@ -32,10 +32,12 @@ import {
 	AttestationSourceMismatchError,
 	AttestationVerificationFailedError,
 	ChecksumMismatchError,
+	CupboardVersionInvalidError,
 	DownloadAssetTooLargeError,
+	ExactCupboardVersionRequiredError,
+	ExpectedSourceCommitInvalidError,
 	GithubApiError,
 	InstalledReleaseVersionMismatchError,
-	InvalidInputError,
 	InvalidReleaseAssetUrlError,
 	MalformedReleaseResponseError,
 	NoReleaseFoundError,
@@ -49,6 +51,7 @@ import {
 	ReleaseInstallationLockStateError,
 	ReleaseInstallationProcessIdentityError,
 	ReleaseInstallationStateError,
+	ReleaseRepositoryInvalidError,
 	UnsupportedPlatformError
 } from './errors.ts';
 import {
@@ -88,7 +91,7 @@ describe('normaliseVersion', () => {
 	});
 
 	it('rejects a blank selector', () => {
-		expect(() => normaliseVersion('  ')).toThrow(InvalidInputError);
+		expect(() => normaliseVersion('  ')).toThrow(CupboardVersionInvalidError);
 	});
 });
 
@@ -109,12 +112,15 @@ describe('expectedSourceCommitFor', () => {
 		);
 	});
 
-	it.each([
-		['latest', 'a'.repeat(40)],
-		['v1.2.3', 'short']
-	])('rejects version %s with commit %s', (version, commit) => {
-		expect(() => expectedSourceCommitFor(version, commit)).toThrow(
-			InvalidInputError
+	it('requires an exact release when a source commit is supplied', () => {
+		expect(() => expectedSourceCommitFor('latest', 'a'.repeat(40))).toThrow(
+			ExactCupboardVersionRequiredError
+		);
+	});
+
+	it('requires a full source commit', () => {
+		expect(() => expectedSourceCommitFor('v1.2.3', 'short')).toThrow(
+			ExpectedSourceCommitInvalidError
 		);
 	});
 });
@@ -1988,7 +1994,9 @@ describe('splitRepository', () => {
 		['ownerrepo'],
 		['https://github.com/owner/repo']
 	])('rejects %s', (repository) => {
-		expect(() => splitRepository(repository)).toThrow(InvalidInputError);
+		expect(() => splitRepository(repository)).toThrow(
+			ReleaseRepositoryInvalidError
+		);
 	});
 });
 

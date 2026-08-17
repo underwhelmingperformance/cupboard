@@ -6,7 +6,12 @@ import {
 import { parseBaseUrl } from '@cupboard/nix-store/url';
 import { type ReadUser, readUserInputSchema } from '@cupboard/shared/http';
 
-import { InvalidInputError } from './errors.ts';
+import {
+	BooleanInputInvalidError,
+	CacheNameInvalidError,
+	ReadUserInvalidError,
+	UrlInputInvalidError
+} from './errors.ts';
 import { parseLines } from './inputs.ts';
 
 function hasControlCharacter(value: string): boolean {
@@ -44,14 +49,14 @@ export function provided(value: string | undefined): string | undefined {
 /**
  * The cache a `cache` input addresses: the named cache after trimming, or the
  * default cache when the input is absent or blank. A value that is not a legal
- * cache name causes an {@link InvalidInputError} for that field, before the run
+ * cache name causes a {@link CacheNameInvalidError} before the run
  * constructs an endpoint for it.
  */
 export function providedCache(value: string | undefined): StoredCache {
 	const parsed = storedCacheSchema.safeParse(provided(value) ?? DEFAULT_CACHE);
 
 	if (!parsed.success) {
-		throw new InvalidInputError('cache', 'cache must be a valid cache name');
+		throw new CacheNameInvalidError(value ?? '');
 	}
 
 	return parsed.data;
@@ -61,7 +66,7 @@ export function providedCache(value: string | undefined): StoredCache {
  * The base URL specified by a URL-valued input, or `undefined` when the input is
  * absent or blank. Every endpoint derives from this URL's origin and path. A
  * query, fragment, or embedded credential therefore causes an
- * {@link InvalidInputError} before any request is made. The diagnostic includes
+ * {@link UrlInputInvalidError} before any request is made. The diagnostic includes
  * only the field name because the value may contain a credential.
  */
 export function providedUrl(
@@ -77,10 +82,7 @@ export function providedUrl(
 	try {
 		return parseBaseUrl(new URL(trimmed));
 	} catch {
-		throw new InvalidInputError(
-			name,
-			`${name} must be an http(s) URL without credentials, a query, or a fragment`
-		);
+		throw new UrlInputInvalidError(name);
 	}
 }
 
@@ -88,7 +90,7 @@ export function providedUrl(
  * The read user a `read-user` input supplies, or `''` when the input is absent.
  * The value is taken verbatim: surrounding whitespace is part of a credential.
  * A Basic credential is `user:password`, split on its first colon, so a name
- * containing a colon is refused with {@link InvalidInputError} instead of
+ * containing a colon is refused with {@link ReadUserInvalidError} instead of
  * configuring a runner with a credential no cache can match.
  */
 export function providedReadUser(value = ''): ReadUser | '' {
@@ -99,10 +101,7 @@ export function providedReadUser(value = ''): ReadUser | '' {
 	const parsed = readUserInputSchema.safeParse(value);
 
 	if (!parsed.success) {
-		throw new InvalidInputError(
-			'read-user',
-			'read-user must not contain a colon'
-		);
+		throw new ReadUserInvalidError(value);
 	}
 
 	return parsed.data;
@@ -111,7 +110,7 @@ export function providedReadUser(value = ''): ReadUser | '' {
 /**
  * A boolean option's value: `true` or `false` after trimming, with a blank or
  * absent value taking the fallback. Any other value refuses the input with
- * {@link InvalidInputError}, so a mistyped workflow value fails the run.
+ * {@link BooleanInputInvalidError}, so a mistyped workflow value fails the run.
  */
 export function isEnabled(
 	name: string,
@@ -132,7 +131,7 @@ export function isEnabled(
 		return false;
 	}
 
-	throw new InvalidInputError(name, `${name} must be true or false`);
+	throw new BooleanInputInvalidError(name, trimmed);
 }
 
 /**

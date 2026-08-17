@@ -5,8 +5,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	AttestationVerificationFailedError,
+	BuildInstallablesMissingError,
+	CacheNameInvalidError,
 	CupboardReportedError,
-	InvalidInputError,
 	RootEnsureCommandError
 } from './errors.ts';
 import {
@@ -65,7 +66,7 @@ describe('buildProgram', () => {
 				'--installables',
 				''
 			])
-		).rejects.toBeInstanceOf(InvalidInputError);
+		).rejects.toBeInstanceOf(BuildInstallablesMissingError);
 	});
 
 	it.each([
@@ -401,7 +402,7 @@ describe('runAction', () => {
 
 	it('does not annotate a failure a reporter phase already annotated', () => {
 		const annotations: string[] = [];
-		const error = new InvalidInputError('input', 'phase failed');
+		const error = new CacheNameInvalidError('not a cache');
 		markErrorReported(error);
 
 		const exitCode = reportActionFailure(

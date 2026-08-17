@@ -32,7 +32,9 @@ import {
 	CacheInfoInvalidError,
 	CachePublicKeyEmptyResponseError,
 	CachePublicKeyRequestFailedError,
-	InvalidInputError,
+	CupboardReleaseSelectionConflictError,
+	ReadPasswordRequiredError,
+	ReadUserRequiredError,
 	ReuseViewPriorityError
 } from '../errors.ts';
 import {
@@ -189,17 +191,11 @@ export function resolveSetupInputs(
 	const readPassword = options.readPassword ?? '';
 
 	if (readUser !== '' && readPassword === '') {
-		throw new InvalidInputError(
-			'read-password',
-			'read-password is required when read-user is supplied'
-		);
+		throw new ReadPasswordRequiredError();
 	}
 
 	if (readPassword !== '' && readUser === '') {
-		throw new InvalidInputError(
-			'read-user',
-			'read-user is required when read-password is supplied'
-		);
+		throw new ReadUserRequiredError();
 	}
 
 	const cacheUrl = providedUrl('cache-url', options.cacheUrl);
@@ -220,10 +216,7 @@ export function resolveSetupInputs(
 		cupboard !== undefined &&
 		releaseSelectors.some((value) => provided(value) !== undefined)
 	) {
-		throw new InvalidInputError(
-			'cupboard',
-			'cupboard cannot be combined with release selection inputs'
-		);
+		throw new CupboardReleaseSelectionConflictError('cupboard');
 	}
 
 	return {

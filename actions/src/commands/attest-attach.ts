@@ -17,9 +17,11 @@ import { runCupboard as defaultRunCupboard } from '../cupboard-run.ts';
 import {
 	AttestationAttachmentIncompleteError,
 	AttestationAttachmentResultError,
+	AttestationBundlesMissingError,
 	AttestationChecksumsMismatchError,
-	InvalidInputError,
-	MissingInputError
+	MissingInputError,
+	ReadPasswordRequiredError,
+	ReadUserRequiredError
 } from '../errors.ts';
 import { type Environment } from '../inputs.ts';
 import {
@@ -127,27 +129,18 @@ export function resolveAttestAttachInputs(
 	}
 
 	if (options.bundle.length === 0) {
-		throw new InvalidInputError(
-			'bundle',
-			'bundle is required and must name at least one attestation bundle'
-		);
+		throw new AttestationBundlesMissingError();
 	}
 
 	const readUser = providedReadUser(options.readUser);
 	const readPassword = options.readPassword ?? '';
 
 	if (readUser !== '' && readPassword === '') {
-		throw new InvalidInputError(
-			'read-password',
-			'read-password is required when read-user is supplied'
-		);
+		throw new ReadPasswordRequiredError();
 	}
 
 	if (readPassword !== '' && readUser === '') {
-		throw new InvalidInputError(
-			'read-user',
-			'read-user is required when read-password is supplied'
-		);
+		throw new ReadUserRequiredError();
 	}
 
 	return {

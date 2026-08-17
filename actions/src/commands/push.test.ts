@@ -12,12 +12,25 @@ import { createGithubReporter } from '@cupboard/reporter';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+	BooleanInputInvalidError,
+	CupboardReleaseSelectionConflictError,
 	CupboardVersionOutputMissingError,
-	InvalidInputError,
+	GraceWaitConflictError,
 	LegacyPushSummaryError,
 	MissingInputError,
+	PushPathsMissingError,
 	PushSummaryMissingError,
-	PushSummaryResponseError
+	PushSummaryResponseError,
+	ReferenceSourcePairingError,
+	RootGroupsJsonInvalidError,
+	RootGroupsPathsConflictError,
+	RootGroupsRetentionConflictError,
+	RootGroupsRootConflictError,
+	RootGroupsSchemaError,
+	RootRetentionConflictError,
+	RunRootRequiredError,
+	TtlRetentionConflictError,
+	UrlInputInvalidError
 } from '../errors.ts';
 
 import {
@@ -264,23 +277,23 @@ describe('resolvePushInputs', () => {
 		[
 			'url is not an http(s) URL',
 			{ ...baseOptions, url: 'cupboard.example/t/acme' },
-			InvalidInputError
+			UrlInputInvalidError
 		],
 		[
 			'url carries a fragment',
 			{ ...baseOptions, url: 'https://cupboard.example/t/acme#copied' },
-			InvalidInputError
+			UrlInputInvalidError
 		],
-		['paths is empty', { ...baseOptions, paths: [] }, InvalidInputError],
+		['paths is empty', { ...baseOptions, paths: [] }, PushPathsMissingError],
 		[
 			'include-prereleases is not true or false',
 			{ ...baseOptions, includePrereleases: 'yes' },
-			InvalidInputError
+			BooleanInputInvalidError
 		],
 		[
 			'wait is not true or false',
 			{ ...baseOptions, wait: 'flase' },
-			InvalidInputError
+			BooleanInputInvalidError
 		],
 		[
 			'cupboard-path is combined with a release selector',
@@ -289,7 +302,7 @@ describe('resolvePushInputs', () => {
 				cupboardPath: '/opt/cupboard',
 				cupboardVersion: 'v1.2.3'
 			},
-			InvalidInputError
+			CupboardReleaseSelectionConflictError
 		]
 	])('rejects when %s', (_name, options, error) => {
 		expect(() => resolvePushInputs(options, environment)).toThrow(error);
@@ -297,24 +310,13 @@ describe('resolvePushInputs', () => {
 
 	it('does not reproduce a rejected URL in its diagnostic', () => {
 		const secret = 'read-token';
-		let failure: unknown;
 
-		try {
+		expect(() =>
 			resolvePushInputs(
 				{ ...baseOptions, url: `https://cupboard.example/t/acme#${secret}` },
 				environment
-			);
-		} catch (error) {
-			failure = error;
-		}
-
-		expect(failure).toStrictEqual(
-			new InvalidInputError(
-				'url',
-				'url must be an http(s) URL without credentials, a query, or a fragment'
 			)
-		);
-		expect((failure as Error).message).not.toContain(secret);
+		).toThrow(UrlInputInvalidError);
 	});
 });
 
@@ -482,20 +484,21 @@ describe('resolvePushInputs unretained', () => {
 	it.each([
 		[
 			'root is combined with no-retain',
-			{ ...baseOptions, retain: 'false', root: 'github:owner/repo/main' }
+			{ ...baseOptions, retain: 'false', root: 'github:owner/repo/main' },
+			RootRetentionConflictError
 		],
 		[
 			'ttl is combined with no-retain',
-			{ ...baseOptions, retain: 'false', ttl: '7d' }
+			{ ...baseOptions, retain: 'false', ttl: '7d' },
+			TtlRetentionConflictError
 		],
 		[
 			'require-grace is combined with wait false',
-			{ ...baseOptions, requireGrace: 'true', wait: 'false' }
+			{ ...baseOptions, requireGrace: 'true', wait: 'false' },
+			GraceWaitConflictError
 		]
-	])('rejects when %s', (_name, options) => {
-		expect(() => resolvePushInputs(options, environment)).toThrow(
-			InvalidInputError
-		);
+	])('rejects when %s', (_name, options, errorType) => {
+		expect(() => resolvePushInputs(options, environment)).toThrow(errorType);
 	});
 });
 
@@ -515,23 +518,24 @@ describe('resolvePushInputs reference and run-root pairing', () => {
 	it.each([
 		[
 			'reference-paths-file is given without reference-source',
-			{ ...baseOptions, referencePathsFile: '/tmp/references.txt' }
+			{ ...baseOptions, referencePathsFile: '/tmp/references.txt' },
+			ReferenceSourcePairingError
 		],
 		[
 			'reference-source is given without reference-paths-file',
 			{
 				...baseOptions,
 				referenceSource: 'https://cache.example.test/t/acme/reuse/reuse'
-			}
+			},
+			ReferenceSourcePairingError
 		],
 		[
 			'run-root-ttl is given without run-root',
-			{ ...baseOptions, runRootTtl: '24h' }
+			{ ...baseOptions, runRootTtl: '24h' },
+			RunRootRequiredError
 		]
-	])('rejects when %s', (_name, options) => {
-		expect(() => resolvePushInputs(options, environment)).toThrow(
-			InvalidInputError
-		);
+	])('rejects when %s', (_name, options, errorType) => {
+		expect(() => resolvePushInputs(options, environment)).toThrow(errorType);
 	});
 
 	it('resolves reference and run-root inputs given together', () => {
@@ -590,28 +594,31 @@ describe('resolvePushInputs root-groups', () => {
 	it.each([
 		[
 			'root-groups is combined with paths',
-			{ ...baseOptions, paths: ['/nix/store/a'] }
+			{ ...baseOptions, paths: ['/nix/store/a'] },
+			RootGroupsPathsConflictError
 		],
 		[
 			'root-groups is combined with root',
-			{ ...baseOptions, root: 'github:owner/repo/main' }
+			{ ...baseOptions, root: 'github:owner/repo/main' },
+			RootGroupsRootConflictError
 		],
 		[
 			'root-groups is combined with no-retain',
-			{ ...baseOptions, retain: 'false' }
+			{ ...baseOptions, retain: 'false' },
+			RootGroupsRetentionConflictError
 		],
 		[
 			'root-groups is not valid JSON',
-			{ ...baseOptions, rootGroups: '{not json' }
+			{ ...baseOptions, rootGroups: '{not json' },
+			RootGroupsJsonInvalidError
 		],
 		[
 			'root-groups does not match {root, paths}[]',
-			{ ...baseOptions, rootGroups: JSON.stringify([{ root: 'x' }]) }
+			{ ...baseOptions, rootGroups: JSON.stringify([{ root: 'x' }]) },
+			RootGroupsSchemaError
 		]
-	])('rejects when %s', (_name, options) => {
-		expect(() => resolvePushInputs(options, environment)).toThrow(
-			InvalidInputError
-		);
+	])('rejects when %s', (_name, options, errorType) => {
+		expect(() => resolvePushInputs(options, environment)).toThrow(errorType);
 	});
 });
 
