@@ -18,10 +18,9 @@ import { z } from 'zod';
 
 /**
  * The conformance suite compares our client with the flake's `conformanceNix`
- * output from pinned nixpkgs. `oracle.json` records its version and nixpkgs
- * revision, so changing the oracle requires a reviewed `flake.lock` update.
- * `check` compares the recorded revision with the lockfile without running Nix;
- * `update` rebuilds the output and records the result.
+ * output from pinned nixpkgs. `oracle.json` records its version, while the
+ * conformance suite compares the generated settings table with the binary's
+ * reported settings. `update` rebuilds the output and records both results.
  */
 export const oracleFileName = 'oracle.json';
 
@@ -33,7 +32,7 @@ export const oracleFilePath = `tests/conformance/${oracleFileName}`;
 /**
  * The generated settings table used to validate client configuration. It is
  * derived from the same Nix as the oracle. An update rewrites both files, and
- * `check` rejects a table generated from another nixpkgs revision.
+ * the conformance suite compares the table with the pinned binary.
  */
 export const settingTypesFileName = 'setting-types.generated.ts';
 
@@ -55,13 +54,14 @@ const updateCommand = 'pnpm update:conformance-oracle';
 const nixVersionSchema = z.string().regex(/^nix \(Nix\) \S+$/u);
 const gitRevisionSchema = z.string().regex(/^[\da-f]{40}$/u);
 
-const oracleRecordSchema = z.object({
-	nixpkgsRevision: gitRevisionSchema,
-	version: nixVersionSchema
-});
+const oracleRecordSchema = z
+	.object({
+		version: nixVersionSchema
+	})
+	.strict();
 
 /**
-Which `nix` the conformance suite expects to find behind the flake output.
+The Nix version expected from the conformance flake output.
 */
 export type OracleRecord = z.infer<typeof oracleRecordSchema>;
 
@@ -77,7 +77,6 @@ const flakeLockSchema = z.object({
 Reads and writes the files the record is derived from and stored in.
 */
 export interface OracleWorkspace {
-	readFlakeLock(): string;
 	readOracleFile(): string;
 	writeOracleFile(text: string): void;
 	writeSettingTypesFile(text: string): void;
@@ -90,7 +89,7 @@ export type NixSettingValueType =
 	'boolean' | 'integer' | 'list' | 'map' | 'string';
 
 /**
-Every setting recognised by the pinned `nix`, with its value type.
+The value type of each setting reported by the pinned Nix.
 */
 export type NixSettingTypes = Readonly<Record<string, NixSettingValueType>>;
 
@@ -100,10 +99,13 @@ export type NixSettingTypes = Readonly<Record<string, NixSettingValueType>>;
  */
 export type NixIntegerWidth = 'uint32' | 'int64' | 'uint64';
 
+/**
+The inferred width of each integer setting.
+*/
 export type NixIntegerWidths = Readonly<Record<string, NixIntegerWidth>>;
 
 /**
-The generated setting types and integer widths for the pinned Nix.
+The setting types reported by the pinned Nix and the inferred integer widths.
 */
 export interface NixSettingTable {
 	readonly types: NixSettingTypes;
@@ -121,7 +123,7 @@ export const integerWidthProbes = {
 } as const;
 
 /**
-Which {@link integerWidthProbes} values a setting accepted.
+The boundary values that a setting accepts.
 */
 export interface AcceptedWidthProbes {
 	readonly negative: boolean;
@@ -145,9 +147,10 @@ export class UnknownIntegerWidthError extends CodedError {
 
 /**
  * Infers the declared width from accepted boundary values. An unsigned 32-bit
- * setting stops short of the 64-bit edges. An unsigned 64-bit setting reaches
- * the highest edge, while a signed 64-bit setting accepts a negative and stops
- * below the unsigned edge.
+ * setting accepts the 32-bit maximum but rejects both 64-bit maxima. An
+ * unsigned 64-bit setting accepts the unsigned 64-bit maximum. A signed 64-bit
+ * setting accepts a negative value and the signed maximum, but rejects the
+ * unsigned maximum.
  */
 export function integerWidthOf(
 	setting: string,
@@ -184,15 +187,14 @@ export function integerWidthOf(
 }
 
 /**
-The Nix build from which the settings table was generated.
+The Nix version recorded in the generated settings table.
 */
-export interface GeneratedSettingTypes {
-	readonly nixpkgsRevision: string;
+export interface GeneratedSettingsRecord {
 	readonly version: string;
 }
 
 /**
-Resolves the version and the settings the pinned flake output builds to.
+Reads the version and setting metadata from the pinned Nix.
 */
 export interface OracleNix {
 	readVersion(): Promise<string>;
@@ -227,35 +229,17 @@ export class InvalidFlakeLockError extends CodedError {
 	}
 }
 
-export class OracleRevisionDriftError extends CodedError {
+export class SettingTypesVersionDriftError extends CodedError {
 	constructor(
-		public readonly recorded: string,
-		public readonly actual: string
+		public readonly oracle: string,
+		public readonly generated: string
 	) {
 		super(
-			`${oracleFilePath} records the nix from nixpkgs\n` +
-				`${recorded}, but flake.lock now pins\n` +
-				`${actual}.\n` +
-				'The conformance suite would compare our client against a nix the ' +
-				`record does not describe. Run \`${updateCommand}\` to refresh it.`
+			`${oracleFilePath} records Nix version ${oracle}, but ` +
+				`${settingTypesFilePath} was generated from Nix version ${generated}. Run ` +
+				`\`${updateCommand}\` to refresh them.`
 		);
-		this.name = 'OracleRevisionDriftError';
-	}
-}
-
-export class SettingTypesDriftError extends CodedError {
-	constructor(
-		public readonly recorded: string,
-		public readonly actual: string
-	) {
-		super(
-			`${settingTypesFilePath} was generated from the nix in nixpkgs\n` +
-				`${recorded}, but flake.lock now pins\n` +
-				`${actual}.\n` +
-				'The client would validate a configuration against a nix nobody ' +
-				`runs. Run \`${updateCommand}\` to refresh it.`
-		);
-		this.name = 'SettingTypesDriftError';
+		this.name = 'SettingTypesVersionDriftError';
 	}
 }
 
@@ -271,9 +255,12 @@ export class ConformanceNixUnavailableError extends CodedError {
 		public readonly reason: string,
 		options: { cause?: unknown } = {}
 	) {
-		super(`the nix ${conformanceNixOutput} names did not resolve:\n${reason}`, {
-			...(options.cause !== undefined && { cause: options.cause })
-		});
+		super(
+			`could not resolve the Nix binary from ${conformanceNixOutput}:\n${reason}`,
+			{
+				...(options.cause !== undefined && { cause: options.cause })
+			}
+		);
 		this.name = 'ConformanceNixUnavailableError';
 	}
 }
@@ -311,7 +298,7 @@ export function serialiseOracleRecord(record: OracleRecord): string {
 }
 
 /**
-The nixpkgs revision the lockfile pins, which the flake output builds from.
+The nixpkgs revision recorded in `flake.lock`.
 */
 export function parseFlakeLockRevision(text: string): string {
 	let parsed: unknown;
@@ -333,22 +320,19 @@ export function parseFlakeLockRevision(text: string): string {
 
 export function checkConformanceOracle(
 	workspace: OracleWorkspace,
-	generated: GeneratedSettingTypes
+	generated: GeneratedSettingsRecord
 ): void {
 	const recorded = parseOracleRecord(workspace.readOracleFile());
-	const revision = parseFlakeLockRevision(workspace.readFlakeLock());
 
-	if (recorded.nixpkgsRevision !== revision) {
-		throw new OracleRevisionDriftError(recorded.nixpkgsRevision, revision);
-	}
-
-	if (generated.nixpkgsRevision !== revision) {
-		throw new SettingTypesDriftError(generated.nixpkgsRevision, revision);
+	if (generated.version !== recorded.version) {
+		throw new SettingTypesVersionDriftError(
+			recorded.version,
+			generated.version
+		);
 	}
 }
 
-// A setting whose name is an identifier is written as one, which is how the
-// formatter writes a key that needs no quotes.
+// Write identifier names as unquoted keys, in the same form as the formatter.
 const identifierPattern = /^[A-Za-z_$][\w$]*$/u;
 
 function settingKey(name: string): string {
@@ -356,9 +340,8 @@ function settingKey(name: string): string {
 }
 
 /**
- * The settings table as a module the client imports. The names are sorted so
- * that a bumped oracle produces a diff of what changed rather than of how the
- * settings happened to be ordered.
+ * Renders the settings table as a module for the client. Sorting the names
+ * makes an oracle update show only semantic changes in its diff.
  */
 export function renderSettingTypes(
 	record: OracleRecord,
@@ -374,27 +357,23 @@ export function renderSettingTypes(
 		.join(',\n');
 
 	return [
-		`// Generated by \`${updateCommand}\` from the nix the flake pins.`,
-		'// Run that command to refresh it; a hand-edited table states settings no',
-		'// nix has.',
+		`// Generated by \`${updateCommand}\` from the pinned Nix.`,
+		'// Run that command to refresh this file. Do not edit the table by hand.',
 		'//',
-		'// Every setting that nix reads for itself, with the kind of value it holds.',
-		'// This includes settings behind experimental features: their reported',
-		'// defaults state the value kind nix validates when the feature is enabled.',
+		'// Every setting reported by Nix, with its value type.',
+		'// Settings behind experimental features are included because their default',
+		'// values still reveal the type that Nix validates when the feature is enabled.',
 		'',
 		"import type { NixIntegerWidth, NixSettingValueType } from './setting-types.ts';",
 		'',
 		`export const generatedFromNix = '${record.version}';`,
 		'',
-		`export const generatedFromNixpkgs = '${record.nixpkgsRevision}';`,
-		'',
 		'export const nixSettingTypes: Readonly<Record<string, NixSettingValueType>> = {',
 		entries,
 		'};',
 		'',
-		'// The width nix declared each integer setting with, settled by asking the',
-		'// pinned nix which values it takes. `nix config show` states none of this,',
-		'// so a setting missing here is one no value can be bounded against.',
+		'// The width of each integer setting, inferred from the boundary values that',
+		'// the pinned Nix accepts. `nix config show` does not report these widths.',
 		'export const nixIntegerWidths: Readonly<Record<string, NixIntegerWidth>> = {',
 		widths,
 		'};',
@@ -410,9 +389,8 @@ export async function updateConformanceOracle(
 	workspace: OracleWorkspace,
 	nix: OracleNix
 ): Promise<OracleUpdateOutcome> {
-	const nixpkgsRevision = parseFlakeLockRevision(workspace.readFlakeLock());
 	const version = await nix.readVersion();
-	const record: OracleRecord = { nixpkgsRevision, version };
+	const record: OracleRecord = { version };
 	const current = recordedOrNothing(workspace);
 
 	// Always refresh the table from the same Nix build as the record.
@@ -420,10 +398,7 @@ export async function updateConformanceOracle(
 		renderSettingTypes(record, await nix.readSettingTable())
 	);
 
-	if (
-		current?.nixpkgsRevision === record.nixpkgsRevision &&
-		current.version === record.version
-	) {
+	if (current?.version === record.version) {
 		return { kind: 'already-current', record };
 	}
 
@@ -460,10 +435,10 @@ function settingValueType(value: unknown): NixSettingValueType | undefined {
 }
 
 /**
- * The settings a `nix config show --json` document reports, by the kind of
- * value type of each. The table includes settings gated by experimental features:
- * their reported defaults still state the value kind Nix validates once the
- * corresponding feature is enabled.
+ * Reads the value type of each setting in a `nix config show --json` document.
+ * The result includes settings gated by experimental features because their
+ * default values still reveal the type that Nix validates when the feature is
+ * enabled.
  */
 export function parseSettingTypes(document: string): NixSettingTypes {
 	let parsed: unknown;
@@ -496,7 +471,7 @@ export function parseSettingTypes(document: string): NixSettingTypes {
 	return types;
 }
 
-// An update repairs an absent or unreadable record from the resolved flake.
+// An update replaces an absent or invalid record with the resolved version.
 function recordedOrNothing(
 	workspace: OracleWorkspace
 ): OracleRecord | undefined {
@@ -561,8 +536,8 @@ export function runNix(
 }
 
 /**
- * Builds the pinned flake output with the ambient environment, which is what
- * carries the substituters this machine fetches the output from.
+ * Builds the pinned flake output with the ambient environment so Nix can use
+ * the substituters configured on this machine.
  *
  * A missing `nix` binary and a failed build both make the oracle unavailable.
  */
@@ -583,8 +558,8 @@ async function buildConformanceNix(root: string): Promise<NixResult> {
 }
 
 /**
- * Builds the pinned flake output and returns the `nix` inside it. The output
- * produces one store path, so the build must print exactly one line.
+ * Builds the pinned flake output and returns its `nix` binary. The build must
+ * print exactly one output store path.
  */
 export async function resolveConformanceNixBinary(
 	root: string
@@ -600,8 +575,8 @@ export async function resolveConformanceNixBinary(
 
 	if (output === undefined || printed.length > 1) {
 		throw new ConformanceNixUnavailableError(
-			`the build printed ${String(printed.length)} store paths, and the ` +
-				'suite reads one'
+			`the build printed ${String(printed.length)} store paths; the suite ` +
+				'requires exactly one'
 		);
 	}
 
@@ -662,8 +637,8 @@ export async function readNixSettingTable(
 	return { types, integerWidths };
 }
 
-// Each probe runs one `nix config show`, which completes in well under a second,
-// so a table of a few dozen integer settings is read in a few dozen seconds.
+// Each probe runs one `nix config show`. Reading the complete table therefore
+// takes a few dozen seconds.
 async function readIntegerWidth(
 	binary: string,
 	setting: string
@@ -712,7 +687,7 @@ async function willAcceptSettingValue(
 }
 
 /**
-Reads every setting recognised by the pinned Nix and its value type.
+Reads the value type of each setting reported by the pinned Nix.
 */
 async function readNixSettingTypes(binary: string): Promise<NixSettingTypes> {
 	const home = mkdtempSync(path.join(tmpdir(), 'cupboard-oracle-settings-'));
@@ -753,7 +728,6 @@ function repositoryWorkspace(root: string): OracleWorkspace {
 	);
 
 	return {
-		readFlakeLock: () => readFileSync(path.join(root, 'flake.lock'), 'utf8'),
 		readOracleFile: () => readFileSync(recordPath, 'utf8'),
 		writeOracleFile: (text) => {
 			writeFileSync(recordPath, text);
@@ -767,7 +741,7 @@ function repositoryWorkspace(root: string): OracleWorkspace {
 // Build the binary once so the version and settings come from the same build.
 function flakeNix(root: string, reporter: Reporter): OracleNix {
 	const built = reporter.phase(
-		'Building the nix the flake pins',
+		'Building the Nix binary from the flake',
 		async (context) => {
 			const binary = await resolveConformanceNixBinary(root);
 			const version = await readNixVersion(binary);
@@ -796,7 +770,8 @@ const updateMessages: Record<
 	OracleUpdateOutcome['kind'],
 	(record: OracleRecord) => string
 > = {
-	'already-current': () => `${oracleFilePath} already names the pinned nix.`,
+	'already-current': () =>
+		`${oracleFilePath} already records the pinned Nix version.`,
 	recorded: (record) => `Recorded ${record.version} as the conformance oracle.`
 };
 
@@ -808,33 +783,32 @@ function buildProgram(): Command {
 	const program = new Command('conformance-oracle');
 
 	program.description(
-		'Keep the recorded conformance oracle in step with the pinned nixpkgs.'
+		'Keep the recorded conformance oracle in step with the pinned Nix.'
 	);
 
 	program
 		.command('check')
 		.description(
-			`fail when ${oracleFilePath} records a nixpkgs flake.lock no longer pins`
+			`fail when ${oracleFilePath} and the generated settings record different Nix versions`
 		)
 		.action(async () => {
 			// The table is what `update` writes, so it is read when it is checked
 			// rather than when this program starts.
-			const { generatedFromNix, generatedFromNixpkgs } =
+			const { generatedFromNix } =
 				await import('../packages/nix/src/setting-types.generated.ts');
 
 			checkConformanceOracle(repositoryWorkspace(repoRoot), {
-				nixpkgsRevision: generatedFromNixpkgs,
 				version: generatedFromNix
 			});
 			scriptReporter().success(
-				`${oracleFilePath} and ${settingTypesFilePath} name the nix flake.lock pins.`
+				`${oracleFilePath} and ${settingTypesFilePath} record the same Nix version.`
 			);
 		});
 
 	program
 		.command('update')
 		.description(
-			`rebuild ${conformanceNixOutput} and record the nix it resolves to`
+			`rebuild ${conformanceNixOutput} and record its Nix version and settings`
 		)
 		.action(async () => {
 			const reporter = scriptReporter();

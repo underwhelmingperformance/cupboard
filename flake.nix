@@ -161,13 +161,12 @@
           inherit cupboard;
           default = cupboard;
 
-          # The `nix` the conformance suite compares our client against. Pinning
-          # it here makes the oracle the same binary on every machine, and moving
-          # it a reviewed `flake.lock` change. `tests/conformance/oracle.json`
-          # records the version this resolves to, and `pnpm
-          # check:conformance-oracle` fails when the two drift apart. The `out`
-          # output is the one holding `bin/nix`, and naming it keeps the build to
-          # a single path the suite can read straight off.
+          # The Nix binary that the conformance suite uses as its reference. The
+          # flake pin gives every run a reproducible comparison target.
+          # `tests/conformance/oracle.json` records its version, and the suite
+          # compares the generated settings table with the binary. The `out`
+          # output contains `bin/nix`; selecting it limits the build to a single
+          # path that the suite can read directly.
           conformanceNix = packageSets.${system}.nix.out;
         }
       );

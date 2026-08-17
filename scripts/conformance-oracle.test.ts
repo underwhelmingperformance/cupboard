@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	checkConformanceOracle,
-	type GeneratedSettingTypes,
+	type GeneratedSettingsRecord,
 	integerWidthOf,
 	InvalidFlakeLockError,
 	InvalidOracleFileError,
@@ -10,14 +10,13 @@ import {
 	type NixSettingTypes,
 	type OracleNix,
 	type OracleRecord,
-	OracleRevisionDriftError,
 	type OracleWorkspace,
 	parseFlakeLockRevision,
 	parseOracleRecord,
 	parseSettingTypes,
 	renderSettingTypes,
 	serialiseOracleRecord,
-	SettingTypesDriftError,
+	SettingTypesVersionDriftError,
 	UnknownIntegerWidthError,
 	UnparsableFlakeLockError,
 	UnparsableOracleFileError,
@@ -26,7 +25,6 @@ import {
 } from './conformance-oracle.ts';
 
 const pinnedRevision = 'b5aa0fbd538984f6e3d201be0005b4463d8b09f8';
-const movedRevision = 'f'.repeat(40);
 const pinnedVersion = 'nix (Nix) 2.34.7';
 const movedVersion = 'nix (Nix) 2.35.0';
 
@@ -41,8 +39,7 @@ const pinnedSettingTable: NixSettingTable = {
 	integerWidths: { 'log-lines': 'uint64' }
 };
 
-const pinnedGenerated: GeneratedSettingTypes = {
-	nixpkgsRevision: pinnedRevision,
+const pinnedGenerated: GeneratedSettingsRecord = {
 	version: pinnedVersion
 };
 
@@ -82,10 +79,9 @@ function flakeLock(revision: string): string {
 }
 
 /**
-A workspace holding the given lockfile and record, recording every write.
+A workspace initialised with the record. It captures each write.
 */
 function fakeWorkspace(
-	revision: string,
 	record: OracleRecord | undefined
 ): OracleWorkspace & { writes: string[]; tables: string[] } {
 	const writes: string[] = [];
@@ -94,7 +90,6 @@ function fakeWorkspace(
 	return {
 		writes,
 		tables,
-		readFlakeLock: () => flakeLock(revision),
 		readOracleFile: () => {
 			if (record === undefined) {
 				throw new Error('no such file');
@@ -121,7 +116,6 @@ function fakeNix(version: string): OracleNix {
 describe('parseOracleRecord', () => {
 	it('accepts a well-formed record', () => {
 		const record: OracleRecord = {
-			nixpkgsRevision: pinnedRevision,
 			version: pinnedVersion
 		};
 
@@ -150,23 +144,18 @@ describe('parseOracleRecord', () => {
 		},
 		{
 			name: 'a missing version',
-			text: `{ "nixpkgsRevision": "${pinnedRevision}" }`,
+			text: '{}',
 			issues: [{ code: 'invalid_type', path: ['version'] }]
 		},
 		{
-			name: 'a missing nixpkgs revision',
-			text: `{ "version": "${pinnedVersion}" }`,
-			issues: [{ code: 'invalid_type', path: ['nixpkgsRevision'] }]
-		},
-		{
-			name: 'a version that is not what nix reports',
-			text: `{ "nixpkgsRevision": "${pinnedRevision}", "version": "2.34.7" }`,
+			name: 'a version outside the format printed by nix --version',
+			text: '{ "version": "2.34.7" }',
 			issues: [{ code: 'invalid_format', path: ['version'] }]
 		},
 		{
-			name: 'a revision that is not a git object name',
-			text: `{ "nixpkgsRevision": "nixos-unstable", "version": "${pinnedVersion}" }`,
-			issues: [{ code: 'invalid_format', path: ['nixpkgsRevision'] }]
+			name: 'an obsolete nixpkgs revision',
+			text: `{ "version": "${pinnedVersion}", "nixpkgsRevision": "${pinnedRevision}" }`,
+			issues: [{ code: 'unrecognized_keys', path: [] }]
 		}
 	])('rejects $name', async ({ text, issues }) => {
 		const error = await captureError(InvalidOracleFileError, () =>
@@ -180,7 +169,7 @@ describe('parseOracleRecord', () => {
 });
 
 describe('parseFlakeLockRevision', () => {
-	it('reads the revision the nixpkgs input is locked to', () => {
+	it('reads the locked revision of the nixpkgs input', () => {
 		expect(parseFlakeLockRevision(flakeLock(pinnedRevision))).toBe(
 			pinnedRevision
 		);
@@ -228,9 +217,8 @@ describe('parseFlakeLockRevision', () => {
 });
 
 describe('checkConformanceOracle', () => {
-	it('passes when the record names the pinned nixpkgs', () => {
-		const workspace = fakeWorkspace(pinnedRevision, {
-			nixpkgsRevision: pinnedRevision,
+	it('passes when the record and generated table use the same Nix version', () => {
+		const workspace = fakeWorkspace({
 			version: pinnedVersion
 		});
 
@@ -239,48 +227,29 @@ describe('checkConformanceOracle', () => {
 		}).not.toThrow();
 	});
 
-	it('reports both revisions when the lockfile has moved on', async () => {
-		const workspace = fakeWorkspace(movedRevision, {
-			nixpkgsRevision: pinnedRevision,
+	// The generated table controls validation of Nix settings. Its recorded
+	// version must therefore match the oracle record.
+	it('reports a table generated from another Nix version', async () => {
+		const workspace = fakeWorkspace({
 			version: pinnedVersion
 		});
 
-		const error = await captureError(OracleRevisionDriftError, () => {
-			checkConformanceOracle(workspace, pinnedGenerated);
-		});
-
-		expect({ recorded: error.recorded, actual: error.actual }).toStrictEqual({
-			recorded: pinnedRevision,
-			actual: movedRevision
-		});
-	});
-
-	// The table decides which settings the client reads and which values it
-	// refuses, so one generated from another nixpkgs states a nix nobody runs.
-	it('reports a table generated from a nixpkgs the lockfile has moved off', async () => {
-		const workspace = fakeWorkspace(pinnedRevision, {
-			nixpkgsRevision: pinnedRevision,
-			version: pinnedVersion
-		});
-
-		const error = await captureError(SettingTypesDriftError, () => {
+		const error = await captureError(SettingTypesVersionDriftError, () => {
 			checkConformanceOracle(workspace, {
-				nixpkgsRevision: movedRevision,
 				version: movedVersion
 			});
 		});
 
-		expect({ recorded: error.recorded, actual: error.actual }).toStrictEqual({
-			recorded: movedRevision,
-			actual: pinnedRevision
+		expect({ oracle: error.oracle, generated: error.generated }).toStrictEqual({
+			oracle: pinnedVersion,
+			generated: movedVersion
 		});
 	});
 });
 
 describe('parseSettingTypes', () => {
-	// The document is written as nix writes it, with a null naming the setting
-	// no experimental feature gates.
-	it('reads the kind of value each setting holds', () => {
+	// Nix writes null in `experimentalFeature` when no feature gates a setting.
+	it('reads the value type reported for each setting', () => {
 		const document = [
 			'{',
 			'  "keep-outputs": { "value": false, "experimentalFeature": null },',
@@ -300,7 +269,7 @@ describe('parseSettingTypes', () => {
 		});
 	});
 
-	it('reads the value kind of a setting behind an experimental feature', () => {
+	it('reads the value type of a setting behind an experimental feature', () => {
 		const document = [
 			'{',
 			'  "impure-env": { "value": {}, "experimentalFeature": "configurable-impure-env" },',
@@ -325,17 +294,14 @@ describe('parseSettingTypes', () => {
 });
 
 describe('renderSettingTypes', () => {
-	it('writes the settings sorted, quoting only the names that need it', () => {
+	it('sorts the settings and quotes only non-identifier names', () => {
 		const rendered = renderSettingTypes(
-			{ nixpkgsRevision: pinnedRevision, version: pinnedVersion },
+			{ version: pinnedVersion },
 			pinnedSettingTable
 		);
 
 		expect(rendered).toContain(
 			`export const generatedFromNix = '${pinnedVersion}';`
-		);
-		expect(rendered).toContain(
-			`export const generatedFromNixpkgs = '${pinnedRevision}';`
 		);
 		expect(rendered.slice(rendered.indexOf('nixSettingTypes'))).toBe(
 			[
@@ -345,9 +311,8 @@ describe('renderSettingTypes', () => {
 				"	substituters: 'list'",
 				'};',
 				'',
-				'// The width nix declared each integer setting with, settled by asking the',
-				'// pinned nix which values it takes. `nix config show` states none of this,',
-				'// so a setting missing here is one no value can be bounded against.',
+				'// The width of each integer setting, inferred from the boundary values that',
+				'// the pinned Nix accepts. `nix config show` does not report these widths.',
 				'export const nixIntegerWidths: Readonly<Record<string, NixIntegerWidth>> = {',
 				"	'log-lines': 'uint64'",
 				'};',
@@ -389,7 +354,7 @@ describe('integerWidthOf', () => {
 			},
 			expected: 'int64'
 		}
-	])('reads $name from what it accepts', ({ accepted, expected }) => {
+	])('infers $name from the accepted probes', ({ accepted, expected }) => {
 		expect(integerWidthOf('a-setting', accepted)).toBe(expected);
 	});
 
@@ -407,9 +372,8 @@ describe('integerWidthOf', () => {
 });
 
 describe('updateConformanceOracle', () => {
-	it('leaves a current record alone', async () => {
-		const workspace = fakeWorkspace(pinnedRevision, {
-			nixpkgsRevision: pinnedRevision,
+	it('does not rewrite a current oracle record', async () => {
+		const workspace = fakeWorkspace({
 			version: pinnedVersion
 		});
 
@@ -420,48 +384,35 @@ describe('updateConformanceOracle', () => {
 
 		expect(outcome).toStrictEqual({
 			kind: 'already-current',
-			record: { nixpkgsRevision: pinnedRevision, version: pinnedVersion }
+			record: { version: pinnedVersion }
 		});
 		expect(workspace.writes).toStrictEqual([]);
 		// Refresh the table even when the oracle record is already current.
 		expect(workspace.tables).toStrictEqual([
-			renderSettingTypes(
-				{ nixpkgsRevision: pinnedRevision, version: pinnedVersion },
-				pinnedSettingTable
-			)
+			renderSettingTypes({ version: pinnedVersion }, pinnedSettingTable)
 		]);
 	});
 
 	it.each<{
 		name: string;
-		revision: string;
 		recorded: OracleRecord | undefined;
 		version: string;
 		written: OracleRecord;
 	}>([
 		{
-			name: 'the lockfile pins a different nixpkgs',
-			revision: movedRevision,
-			recorded: { nixpkgsRevision: pinnedRevision, version: pinnedVersion },
-			version: pinnedVersion,
-			written: { nixpkgsRevision: movedRevision, version: pinnedVersion }
-		},
-		{
-			name: 'the same nixpkgs now builds a different nix',
-			revision: pinnedRevision,
-			recorded: { nixpkgsRevision: pinnedRevision, version: pinnedVersion },
+			name: 'the flake now builds a different Nix',
+			recorded: { version: pinnedVersion },
 			version: movedVersion,
-			written: { nixpkgsRevision: pinnedRevision, version: movedVersion }
+			written: { version: movedVersion }
 		},
 		{
 			name: 'there is no record yet',
-			revision: pinnedRevision,
 			recorded: undefined,
 			version: pinnedVersion,
-			written: { nixpkgsRevision: pinnedRevision, version: pinnedVersion }
+			written: { version: pinnedVersion }
 		}
-	])('records the resolved nix when $name', async (testCase) => {
-		const workspace = fakeWorkspace(testCase.revision, testCase.recorded);
+	])('records the resolved Nix version when $name', async (testCase) => {
+		const workspace = fakeWorkspace(testCase.recorded);
 
 		const outcome = await updateConformanceOracle(
 			workspace,

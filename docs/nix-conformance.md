@@ -34,19 +34,18 @@ Each test file resolves the output once and shares it across its cases. If the
 machine cannot build the output, the suite fails instead of skipping the
 comparison.
 
-[`tests/conformance/oracle.json`] records the expected Nix version and the
-nixpkgs revision that provides it. This is the canonical version record. The
-suite refuses to run a case when the flake produces a version that differs from
-the record.
+[`tests/conformance/oracle.json`] records the expected Nix version. This is the
+canonical version record. The suite refuses to run a case when the flake
+produces a version that differs from the record.
 
 Two checks keep the record consistent:
 
-- `pnpm check:conformance-oracle` compares the recorded nixpkgs revision with
-  `flake.lock`. It reads only those two files and runs without Nix, so it is
-  part of `pnpm check` on every machine and in CI.
+- `pnpm check:conformance-oracle` checks that the version in the record matches
+  the version recorded in the generated settings table. It does not run Nix.
 - The conformance suite compares the resolved binary's `nix --version` output
-  with the recorded version. This catches a change in the Nix version from the
-  same nixpkgs revision.
+  with the recorded version, then compares the complete generated settings table
+  with the types reported by that binary and the widths inferred from accepted
+  boundary values.
 
 ### The generated settings table
 
@@ -61,23 +60,31 @@ Second, it determines the fixed C++ width of each integer setting. Nix rejects
 values outside that width but does not report the width directly. The update
 command tries four boundary values for each integer setting and records the
 width indicated by the accepted values. This requires four `nix config show`
-runs per integer setting and takes about 25 seconds for the whole table. It runs
-only when the pin changes.
+runs per integer setting and takes about 25 seconds for the whole table. The
+oracle test performs the same probes, so a lockfile refresh fails only when the
+pinned Nix has different setting types or integer widths.
 
 If the accepted values do not match a known width, the update fails. This forces
 the table reader to be updated when Nix adds another integer width.
 
 ### Bumping the oracle
 
-Update the pin and its generated records together:
+Update the pin, then run the conformance suite:
 
 ```sh
 nix flake update
+pnpm check:conformance
+```
+
+If the pinned Nix version or settings table changed, regenerate the records:
+
+```sh
 pnpm update:conformance-oracle
 ```
 
-Commit `flake.lock` and `tests/conformance/oracle.json` together. `pnpm check`
-fails if only one changes.
+Inspect and commit the regenerated files with `flake.lock`. A nixpkgs update
+that leaves the selected Nix version and derived setting metadata unchanged
+needs no generated file changes.
 
 After a pin update, inspect every conformance failure before changing the test
 or client. A failure may indicate that the new Nix version behaves differently
