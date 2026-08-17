@@ -68,6 +68,9 @@ import {
 	CommandOutputTooLargeError,
 	CupboardReportedError,
 	InvalidInputError,
+	LocalBuildExpectedPathMissingError,
+	LocalBuildOutputsMissingError,
+	LocalBuildOutputsOutsideCohortError,
 	MissingInputError,
 	RemoteCohortBuildFailedError,
 	type RemoteCohortBuildFailure,
@@ -909,6 +912,7 @@ export async function buildCohortAction(
 				receipt: streamedFailure.receipt,
 				inputs,
 				runNix,
+				reporter,
 				...(dependencies.signal !== undefined && {
 					signal: dependencies.signal
 				})
@@ -1022,6 +1026,7 @@ async function resolveStreamedBuildOwners(options: {
 	readonly receipt: ParsedBuildReceiptV3;
 	readonly inputs: BuildCohortInputs;
 	readonly runNix: typeof runNixBuild;
+	readonly reporter: Reporter;
 	readonly signal?: AbortSignal;
 }): Promise<{
 	readonly builds: readonly CohortOwnedBuild[];
@@ -1035,15 +1040,32 @@ async function resolveStreamedBuildOwners(options: {
 	const survivingInstallables = options.buildInstallables.filter(
 		(installable) => !failedTargets.has(installable)
 	);
-	const ownership = await resolveLocalBuildOwners({
-		members: options.members,
-		buildInstallables: survivingInstallables,
-		builtPaths: options.receipt.paths,
-		inputs: options.inputs,
-		runNix: options.runNix,
-		allowIncomplete: true,
-		...(options.signal !== undefined && { signal: options.signal })
-	});
+	const ownerCount = requestedCohortMemberCount(
+		options.members,
+		survivingInstallables
+	);
+	const resolveOwners = (onResolved?: () => void) =>
+		resolveLocalBuildOwners({
+			members: options.members,
+			buildInstallables: survivingInstallables,
+			builtPaths: options.receipt.paths,
+			inputs: options.inputs,
+			runNix: options.runNix,
+			allowIncomplete: true,
+			...(onResolved !== undefined && { onResolved }),
+			...(options.signal !== undefined && { signal: options.signal })
+		});
+	const ownership =
+		ownerCount === 0
+			? await resolveOwners()
+			: await options.reporter.progress(
+					'Identifying outputs after the build',
+					{ total: ownerCount },
+					(bar) =>
+						resolveOwners(() => {
+							bar.advance();
+						})
+				);
 	const incompleteRoots = new Set(ownership.incompleteRoots);
 
 	for (const member of options.members) {
@@ -3332,6 +3354,24 @@ export interface NixBuildCommandResult {
 	readonly copiedFrom: ReadonlyMap<StorePathString, readonly string[]>;
 }
 
+function requestedCohortMemberCount(
+	members: readonly CohortMember[],
+	buildInstallables: readonly string[]
+): number {
+	const requested = new Set(buildInstallables);
+
+	return members.filter((member) => {
+		if (requested.has(member.installable)) {
+			return true;
+		}
+
+		return (
+			member.queryInstallable !== undefined &&
+			requested.has(nixDerivedPathSchema.parse(member.queryInstallable))
+		);
+	}).length;
+}
+
 async function resolveLocalBuildOwners(options: {
 	readonly members: readonly CohortMember[];
 	readonly buildInstallables: readonly string[];
@@ -3340,6 +3380,7 @@ async function resolveLocalBuildOwners(options: {
 	readonly runNix: typeof runNixBuild;
 	readonly signal?: AbortSignal;
 	readonly allowIncomplete: boolean;
+	readonly onResolved?: () => void;
 }): Promise<{
 	readonly builds: readonly CohortOwnedBuild[];
 	readonly incompleteRoots: ReadonlySet<string>;
@@ -3373,12 +3414,13 @@ async function resolveLocalBuildOwners(options: {
 			if (!built.has(member.expectedPath)) {
 				if (options.allowIncomplete) {
 					incompleteRoots.add(member.root);
+					options.onResolved?.();
 					continue;
 				}
 
-				throw new InvalidInputError(
-					'cohort-json',
-					`Local build result for ${member.installable} omitted its expected path ${member.expectedPath}.`
+				throw new LocalBuildExpectedPathMissingError(
+					member.installable,
+					member.expectedPath
 				);
 			}
 
@@ -3386,6 +3428,7 @@ async function resolveLocalBuildOwners(options: {
 				installable: member.installable,
 				outputs: [member.expectedPath]
 			});
+			options.onResolved?.();
 			continue;
 		}
 
@@ -3405,27 +3448,40 @@ async function resolveLocalBuildOwners(options: {
 		if (result.status !== 0) {
 			if (options.allowIncomplete) {
 				incompleteRoots.add(member.root);
+				options.onResolved?.();
 				continue;
 			}
 
 			throw new CommandFailedError('nix build', result.status);
 		}
 
-		const outputs = result.paths.filter((output) => built.has(output));
+		const unexpectedPaths = result.paths.filter((output) => !built.has(output));
 
-		if (outputs.length !== result.paths.length || outputs.length === 0) {
+		if (unexpectedPaths.length > 0) {
 			if (options.allowIncomplete) {
 				incompleteRoots.add(member.root);
+				options.onResolved?.();
 				continue;
 			}
 
-			throw new InvalidInputError(
-				'cohort-json',
-				`Local build result for ${member.installable} did not resolve to this cohort's built paths.`
+			throw new LocalBuildOutputsOutsideCohortError(
+				member.installable,
+				unexpectedPaths
 			);
 		}
 
-		owners.push({ installable: member.installable, outputs });
+		if (result.paths.length === 0) {
+			if (options.allowIncomplete) {
+				incompleteRoots.add(member.root);
+				options.onResolved?.();
+				continue;
+			}
+
+			throw new LocalBuildOutputsMissingError(member.installable);
+		}
+
+		owners.push({ installable: member.installable, outputs: result.paths });
+		options.onResolved?.();
 	}
 
 	return { builds: owners, incompleteRoots };

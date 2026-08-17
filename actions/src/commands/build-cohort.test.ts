@@ -43,6 +43,9 @@ import {
 	CommandOutputTooLargeError,
 	CupboardReportedError,
 	InvalidInputError,
+	LocalBuildExpectedPathMissingError,
+	LocalBuildOutputsMissingError,
+	LocalBuildOutputsOutsideCohortError,
 	MissingInputError,
 	RemoteCohortBuildFailedError,
 	type RemoteCohortBuildFailure
@@ -1999,12 +2002,32 @@ function noop(): void {
 	// Intentionally empty test callback.
 }
 
-// Records every warning emitted through the reporter test double.
-function recordingReporter(warnings: string[]): Reporter {
+interface RecordedProgress {
+	readonly total: number;
+	completed: number;
+}
+
+// Records warnings and, when requested, quantitative progress.
+function recordingReporter(
+	warnings: string[],
+	progress: RecordedProgress[] = []
+): Reporter {
 	return {
 		phase: (_label, body) => Promise.resolve(body({ fact: noop, warn: noop })),
-		progress: (_label, _options, body) =>
-			Promise.resolve(body({ advance: noop, fact: noop, warn: noop })),
+		progress: (_label, options, body) => {
+			const recorded = { total: options.total, completed: 0 };
+			progress.push(recorded);
+
+			return Promise.resolve(
+				body({
+					advance(step = 1) {
+						recorded.completed += step;
+					},
+					fact: noop,
+					warn: noop
+				})
+			);
+		},
 		steps: (_label, body) =>
 			Promise.resolve(
 				body({
@@ -2356,6 +2379,7 @@ describe('buildCohortAction', () => {
 				);
 			});
 			const calls: (readonly string[])[] = [];
+			const progress: RecordedProgress[] = [];
 			const failure = new CupboardReportedError(1, [], undefined, true);
 			const runCupboardMock = vi.fn<typeof runCupboard>(
 				async (binaryPath, arguments_, passedEnvironment) => {
@@ -2440,7 +2464,11 @@ describe('buildCohortAction', () => {
 						...(requireProvenance && { requireProvenance: 'true' })
 					},
 					environment,
-					{ runCupboard: runCupboardMock, runNixBuild }
+					{
+						runCupboard: runCupboardMock,
+						runNixBuild,
+						reporter: recordingReporter([], progress)
+					}
 				)
 			).rejects.toBe(failure);
 			const inputs = resolveBuildCohortInputs(baseOptions(), environment);
@@ -2461,6 +2489,73 @@ describe('buildCohortAction', () => {
 				rootRetention: ['root', 'root'],
 				targetPaths: [appPath, floatingBuiltPath, floatingDevelopmentPath]
 			});
+			expect(progress).toStrictEqual([{ total: 1, completed: 1 }]);
+		}
+	);
+
+	it('reports a typed error when a local build omits its expected output', async () => {
+		const plan = planCohortSuccess(measuredCapacity, [appQueryInstallable]);
+		const reprobe = planReprobeSuccess([], [appQueryInstallable]);
+		const runCupboardMock = vi.fn<typeof runCupboard>(
+			cupboardStub({ plan, reprobe })
+		);
+		const runNixBuild = vi.fn(() =>
+			Promise.resolve({
+				paths: [libraryBuiltPath],
+				status: 0,
+				copiedFrom: new Map()
+			})
+		);
+		const run = buildCohortAction(
+			{ ...baseOptions(), push: 'true' },
+			environment,
+			{
+				runCupboard: runCupboardMock,
+				runNixBuild
+			}
+		);
+
+		await expect(run).rejects.toBeInstanceOf(
+			LocalBuildExpectedPathMissingError
+		);
+	});
+
+	it.each([
+		{
+			name: 'contains no outputs',
+			ownerPaths: [],
+			expectedType: LocalBuildOutputsMissingError
+		},
+		{
+			name: 'contains an output from outside the cohort',
+			ownerPaths: [referencePath],
+			expectedType: LocalBuildOutputsOutsideCohortError
+		}
+	])(
+		'reports a typed error when a local build result $name',
+		async ({ ownerPaths, expectedType }) => {
+			const runNixBuildMock = vi
+				.fn<typeof runNixBuild>()
+				.mockResolvedValueOnce({
+					paths: [libraryBuiltPath],
+					status: 0,
+					copiedFrom: new Map()
+				})
+				.mockResolvedValueOnce({
+					paths: ownerPaths,
+					status: 0,
+					copiedFrom: new Map()
+				});
+			const run = buildCohortAction(
+				{ ...baseOptions(), push: 'true' },
+				environment,
+				{
+					runCupboard: vi.fn<typeof runCupboard>(cupboardStub()),
+					runNixBuild: runNixBuildMock
+				}
+			);
+
+			await expect(run).rejects.toBeInstanceOf(expectedType);
 		}
 	);
 

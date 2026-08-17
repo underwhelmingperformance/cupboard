@@ -1074,6 +1074,48 @@ export class RemoteCohortProtocolError extends CodedError {
 	}
 }
 
+/**
+A local build result omitted the output path predicted during planning.
+*/
+export class LocalBuildExpectedPathMissingError extends CodedError {
+	constructor(
+		public readonly installable: string,
+		public readonly expectedPath: string
+	) {
+		super(
+			`The local build result for ${installable} omitted its expected output path ${expectedPath}.`
+		);
+		this.name = 'LocalBuildExpectedPathMissingError';
+	}
+}
+
+/**
+A local build result contained no output paths for its cohort member.
+*/
+export class LocalBuildOutputsMissingError extends CodedError {
+	constructor(public readonly installable: string) {
+		super(
+			`The local build result for ${installable} contained no output paths.`
+		);
+		this.name = 'LocalBuildOutputsMissingError';
+	}
+}
+
+/**
+A local build result included paths absent from the completed cohort build.
+*/
+export class LocalBuildOutputsOutsideCohortError extends CodedError {
+	constructor(
+		public readonly installable: string,
+		public readonly unexpectedPaths: readonly string[]
+	) {
+		super(
+			`The local build result for ${installable} included output paths absent from the completed cohort build: ${unexpectedPaths.join(', ')}.`
+		);
+		this.name = 'LocalBuildOutputsOutsideCohortError';
+	}
+}
+
 export interface CohortEvaluationMismatch {
 	readonly installable: string;
 	readonly planned: string;
