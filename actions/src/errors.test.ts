@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
+	ArchiveSha256InvalidError,
 	AttestationNotFoundError,
 	AttestationSourceMismatchError,
 	AttestationVerificationFailedError,
@@ -12,6 +13,7 @@ import {
 	CachePublicKeyEmptyResponseError,
 	CachePublicKeyRequestFailedError,
 	ChecksumMismatchError,
+	CohortTargetOwnerMissingError,
 	CommandFailedError,
 	CommandOutputTooLargeError,
 	CupboardReportedError,
@@ -20,11 +22,13 @@ import {
 	DerivationNodeMissingError,
 	DerivationRootCountError,
 	DuplicateGroupKeyError,
+	ExactReleaseTagRequiredError,
 	GithubApiError,
 	GracePolicyMissingError,
 	InvalidChecksumLineError,
 	InvalidReleaseAssetUrlError,
 	LegacyPushSummaryError,
+	LocalBuildOwnerMissingError,
 	MalformedReleaseDiscoveryResponseError,
 	MalformedReleaseResponseError,
 	MissingChecksumError,
@@ -38,6 +42,7 @@ import {
 	ReleaseAssetNotFoundError,
 	ReleaseAttestationSearchTooLargeError,
 	ReleaseDiscoverySearchTooLargeError,
+	RemoteBuildOwnerMissingError,
 	ReuseViewPriorityError,
 	RootEnsureCommandError,
 	RootEnsureResultInvalidError,
@@ -104,6 +109,16 @@ describe('action errors', () => {
 		[
 			'InvalidChecksumLineError',
 			new InvalidChecksumLineError('garbage'),
+			genericExitCode
+		],
+		[
+			'ExactReleaseTagRequiredError',
+			new ExactReleaseTagRequiredError(),
+			genericExitCode
+		],
+		[
+			'ArchiveSha256InvalidError',
+			new ArchiveSha256InvalidError('invalid'),
 			genericExitCode
 		],
 		[
@@ -212,6 +227,21 @@ describe('action errors', () => {
 		[
 			'PublishPlanInvariantError',
 			new PublishPlanInvariantError('index 0'),
+			genericExitCode
+		],
+		[
+			'RemoteBuildOwnerMissingError',
+			new RemoteBuildOwnerMissingError('.#app'),
+			genericExitCode
+		],
+		[
+			'LocalBuildOwnerMissingError',
+			new LocalBuildOwnerMissingError('.#app'),
+			genericExitCode
+		],
+		[
+			'CohortTargetOwnerMissingError',
+			new CohortTargetOwnerMissingError('/nix/store/app'),
 			genericExitCode
 		],
 		[

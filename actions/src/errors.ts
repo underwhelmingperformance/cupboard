@@ -25,10 +25,15 @@ export class CacheNameInvalidError extends UsageError {
 }
 
 /**
+The names of action inputs that accept a base URL.
+*/
+export type UrlInputName = 'cache-url' | 'url';
+
+/**
 A URL-valued action input is not a credential-safe HTTP URL.
 */
 export class UrlInputInvalidError extends UsageError {
-	constructor(public readonly input: string) {
+	constructor(public readonly input: UrlInputName) {
 		super(
 			`${input} must be an http(s) URL without credentials, a query, or a fragment`
 		);
@@ -345,9 +350,9 @@ export class ExpectedSourceCommitInvalidError extends UsageError {
 /**
 An internal release selection did not contain an exact tag.
 */
-export class ExactReleaseTagRequiredError extends UsageError {
+export class ExactReleaseTagRequiredError extends CodedError {
 	constructor() {
-		super('cupboard-version must name an exact release');
+		super('Release selection did not produce an exact tag.');
 		this.name = 'ExactReleaseTagRequiredError';
 	}
 }
@@ -355,9 +360,11 @@ export class ExactReleaseTagRequiredError extends UsageError {
 /**
 The expected release archive digest is not a lowercase SHA-256 digest.
 */
-export class ArchiveSha256InvalidError extends UsageError {
+export class ArchiveSha256InvalidError extends CodedError {
 	constructor(public readonly value: string) {
-		super('archive-sha256 must be a lowercase SHA-256 digest');
+		super(
+			'The computed release archive digest is not a lowercase SHA-256 digest.'
+		);
 		this.name = 'ArchiveSha256InvalidError';
 	}
 }
@@ -1503,7 +1510,7 @@ export class RemotePublicationTargetUnresolvedError extends UsageError {
 /**
 A remote build result does not match any member of its cohort.
 */
-export class RemoteBuildOwnerMissingError extends UsageError {
+export class RemoteBuildOwnerMissingError extends CodedError {
 	constructor(public readonly target: string) {
 		super(`Remote build result ${target} has no cohort owner.`);
 		this.name = 'RemoteBuildOwnerMissingError';
@@ -1513,7 +1520,7 @@ export class RemoteBuildOwnerMissingError extends UsageError {
 /**
 A local build result does not match any member of its cohort.
 */
-export class LocalBuildOwnerMissingError extends UsageError {
+export class LocalBuildOwnerMissingError extends CodedError {
 	constructor(public readonly installable: string) {
 		super(`Local build result ${installable} has no cohort owner.`);
 		this.name = 'LocalBuildOwnerMissingError';
@@ -1523,7 +1530,7 @@ export class LocalBuildOwnerMissingError extends UsageError {
 /**
 A cohort target path does not have a declared retention root.
 */
-export class CohortTargetOwnerMissingError extends UsageError {
+export class CohortTargetOwnerMissingError extends CodedError {
 	constructor(public readonly targetPath: string) {
 		super(`Cohort target path ${targetPath} has no declared root owner.`);
 		this.name = 'CohortTargetOwnerMissingError';

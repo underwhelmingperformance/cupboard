@@ -366,20 +366,6 @@ describe('resolveSetupInputs', () => {
 	])('rejects when %s', (_name, options, errorType) => {
 		expect(() => resolveSetupInputs(options, {})).toThrow(errorType);
 	});
-
-	it('does not reproduce a rejected cache URL in its diagnostic', () => {
-		const secret = 'read-token';
-
-		expect(() =>
-			resolveSetupInputs(
-				{
-					...baseOptions,
-					cacheUrl: `https://user:${secret}@cupboard.example/t/acme`
-				},
-				environment
-			)
-		).toThrow(UrlInputInvalidError);
-	});
 });
 
 function requestUrl(input: RequestInfo | URL): string {

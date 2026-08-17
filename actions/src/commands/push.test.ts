@@ -307,17 +307,6 @@ describe('resolvePushInputs', () => {
 	])('rejects when %s', (_name, options, error) => {
 		expect(() => resolvePushInputs(options, environment)).toThrow(error);
 	});
-
-	it('does not reproduce a rejected URL in its diagnostic', () => {
-		const secret = 'read-token';
-
-		expect(() =>
-			resolvePushInputs(
-				{ ...baseOptions, url: `https://cupboard.example/t/acme#${secret}` },
-				environment
-			)
-		).toThrow(UrlInputInvalidError);
-	});
 });
 
 describe('acquirePushCupboard', () => {

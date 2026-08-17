@@ -91,6 +91,15 @@ describe('providedUrl', () => {
 	])('refuses %s', (_name, value) => {
 		expect(() => providedUrl('cache-url', value)).toThrow(UrlInputInvalidError);
 	});
+
+	it('records the input name without storing its value', () => {
+		const error = new UrlInputInvalidError('cache-url');
+
+		expect({ type: error.constructor, input: error.input }).toStrictEqual({
+			type: UrlInputInvalidError,
+			input: 'cache-url'
+		});
+	});
 });
 
 describe('providedCache', () => {
