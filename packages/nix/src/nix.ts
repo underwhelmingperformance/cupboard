@@ -508,23 +508,25 @@ export class Nix {
 	}
 
 	/**
-	 * The store path an argument names, the way `nix path-info` does. An argument
-	 * already inside the store retains the identity of its top-level store path.
-	 * Other arguments resolve symlinks first, so a `result` symlink also refers
-	 * to its target's store path.
+	 * Resolves an argument to a store path with the same semantics as `nix
+	 * path-info`. For an argument inside the store, this method normalises dot
+	 * segments but does not resolve symlinks. This preserves the identity of the
+	 * top-level store path. For any other argument, it resolves symlinks before
+	 * selecting the store path. As a result, a `result` symlink refers to its
+	 * target in the store.
 	 *
 	 * The entry directly below the store directory must itself be a valid store
 	 * path, so a loose file beside the store's paths is rejected with
 	 * {@link NotInNixStoreError}.
 	 */
 	toStorePath(path: string): StorePathString {
-		const direct = this.storePathContaining(path);
+		const direct = this.storePathContaining(pathModule.normalize(path));
 
 		if (direct !== undefined) {
 			return direct;
 		}
 
-		const resolved = this.resolveRealPath(path);
+		const resolved = pathModule.normalize(this.resolveRealPath(path));
 		const storePath = this.storePathContaining(resolved);
 
 		if (storePath === undefined) {

@@ -329,6 +329,19 @@ describe('Nix.toStorePath', () => {
 		expect(nix.toStorePath(linkPath)).toBe(linkPath);
 	});
 
+	it('normalises parent components before selecting the store path', () => {
+		const otherPath =
+			'/nix/store/dddddddddddddddddddddddddddddddd-other' as const;
+		const nix = nixOver(recordingStore());
+
+		expect(nix.toStorePath(`${otherPath}/../${path.basename(appPath)}`)).toBe(
+			appPath
+		);
+		expect(() => nix.toStorePath(`${otherPath}/..`)).toThrow(
+			NotInNixStoreError
+		);
+	});
+
 	it('falls back to the argument when it cannot be resolved', () => {
 		const nix = nixOver(recordingStore(), () => {
 			throw new Error('ENOENT');
