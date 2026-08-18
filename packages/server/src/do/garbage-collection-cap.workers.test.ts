@@ -7,7 +7,7 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import { narInfoDeletions } from '../db/schema.ts';
 import {
@@ -17,6 +17,7 @@ import {
 import {
 	bootstrap,
 	currentServer,
+	driveToCompletion,
 	narBytes,
 	narInfoGeneration,
 	pushPath,
@@ -71,6 +72,24 @@ async function fireAlarm(): Promise<void> {
 	// The handler is invoked directly: the continuation relies on the same entry
 	// point in production, and the test pool's alarm delivery is racy to observe.
 	await runInDurableObject(currentServer(), (instance) => instance.alarm());
+}
+
+// An alarm with a collect budget of one either advances the walk by one unit
+// of work (seeding a root, marking a path, or collecting a path) or completes
+// one of the six scan phases. These fixtures hold at most three paths and two
+// roots, so a drain needs at most fourteen alarms: two root seedings, three
+// markings, three collections, and six phase completions. Sixteen leaves a
+// little slack. The bound is reached only when a drain has wedged; the
+// assertions after the loop then fail, and their output shows the state the
+// drain reached.
+const maxDrainAlarms = 16;
+
+async function drainContinuation(): Promise<void> {
+	await driveToCompletion(
+		fireAlarm,
+		async () => (await continuation()) === undefined,
+		maxDrainAlarms
+	);
 }
 
 interface ScanProgress {
@@ -159,11 +178,12 @@ describe('garbage collection cap', () => {
 		// The continuation drains the remaining collectable paths a chunk at a time
 		// and clears itself, so the capped run still collects everything. The
 		// alarm is driven here because the test pool's delivery is racy to observe.
-		await vi.waitFor(async () => {
-			await fireAlarm();
-			expect(await collectableRemaining()).toBe(0);
-			expect(await continuation()).toBeUndefined();
-		});
+		await drainContinuation();
+
+		expect({
+			collectable: await collectableRemaining(),
+			continuation: await continuation()
+		}).toStrictEqual({ collectable: 0, continuation: undefined });
 
 		// The retained path is never collected.
 		expect(await narInfoGeneration(kept.storePathHash)).not.toBeUndefined();
@@ -242,10 +262,9 @@ describe('garbage collection cap', () => {
 			}
 		});
 
-		await vi.waitFor(async () => {
-			await fireAlarm();
-			expect(await continuation()).toBeUndefined();
-		});
+		await drainContinuation();
+
+		expect(await continuation()).toBeUndefined();
 
 		const generations = {
 			parent: await narInfoGeneration(parent.storePathHash),
@@ -353,11 +372,9 @@ describe('garbage collection cap', () => {
 			}
 		});
 
-		await vi.waitFor(async () => {
-			await fireAlarm();
-			expect(await continuation()).toBeUndefined();
-		});
+		await drainContinuation();
 
+		expect(await continuation()).toBeUndefined();
 		expect(await narInfoGeneration(newlyRetained.storePathHash)).toEqual(
 			expect.any(Number)
 		);
