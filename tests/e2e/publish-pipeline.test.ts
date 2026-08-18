@@ -47,14 +47,6 @@ const isNixPresent =
 const isContainerEnginePresent =
 	spawnSync('docker', ['info'], { stdio: 'ignore' }).status === 0;
 
-function isSet(value: string | undefined): boolean {
-	return value !== undefined && value !== '' && value !== 'false';
-}
-
-// This tier is opt-in locally and always on in CI: `pnpm check` runs no part of
-// it, and `pnpm e2e:pipeline` runs it when CI or CUPBOARD_PIPELINE_E2E is set.
-const isTierEnabled = isSet(env.CI) || isSet(env.CUPBOARD_PIPELINE_E2E);
-
 // The release archive the packaged-installation leg publishes from, named by
 // `pnpm build:binary --out-dir`. Building one takes minutes and needs a C
 // compiler, so the leg never builds its own: without this variable it skips,
@@ -1011,824 +1003,809 @@ async function runRoots(prefix: string): Promise<readonly RetentionRoot[]> {
 	return roots.map((root) => ({ ...root, name: `${marker}<run>` }));
 }
 
-describe.skipIf(!isTierEnabled || !isNixPresent)(
-	'a consumer repository publish run',
-	() => {
-		beforeAll(async () => {
-			state.hostEnvironment = { ...process.env };
-			const workspace = await mkdtemp(
-				path.join(temporaryRoot, 'cupboard-publish-pipeline-')
-			);
-			const server = await CupboardTestServer.start(
-				path.join(workspace, 'server')
-			);
-			const runner = await StubRunnerTokenEndpoint.start({
-				issuer: server.issuer,
-				claims: consumerClaims
-			});
-			const cupboard = await CupboardCommand.start({
-				directory: path.join(workspace, 'bin'),
-				stage: (key, bytes) => server.stageObject(key, bytes)
-			});
-
-			// The tenant trusts the runner's identity for what a publication job
-			// does: the upload and attestation conversations, and roots beneath
-			// the consumer's own prefix. These are the `push`, `attest`, `root`
-			// and `attach` allowances a documented CI rule carries, plus
-			// `root:list`, which the plan's pre-filter uses to read a root's
-			// targets.
-			await tenantRpc(server.tenantUrl, {
-				credential: await server.ownerAdminToken()
-			}).oidcTrust.add({
-				issuer: server.issuer.issuer,
-				audience: canonicalHref(server.tenantUrl),
-				claims: { repository_owner_id: consumerClaims.repository_owner_id },
-				permittedGrants: [
-					{
-						type: 'cupboard_cache',
-						actions: [
-							'upload:negotiate',
-							'upload:status',
-							'upload:commit',
-							'upload:confirm',
-							'attestation:negotiate',
-							'attestation:attach',
-							'root:set',
-							'root:attach',
-							'root:list'
-						],
-						resources: {
-							cache: { exact: '_default', validate: 'cacheName' },
-							root: { exact: rootGrantPrefix, validate: 'rootName' }
-						}
-					}
-				]
-			});
-
-			replaceProcessEnvironment({
-				...(await isolatedEnvironment(path.join(workspace, 'home'))),
-				NIX_CONFIG: isolatedNixConfig,
-				XDG_CONFIG_HOME: path.join(workspace, 'config'),
-				...runner.environment
-			});
-
-			state.fixture = {
-				workspace,
-				server,
-				runner,
-				cupboard,
-				system: system(),
-				streams: await canStreamLocalBuild()
-			};
-		}, 600_000);
-
-		afterAll(async () => {
-			const hostEnvironment = state.hostEnvironment;
-
-			if (hostEnvironment !== undefined) {
-				replaceProcessEnvironment(hostEnvironment);
-			}
-
-			const prepared = state.fixture;
-
-			if (prepared === undefined) {
-				return;
-			}
-
-			await prepared.cupboard.stop();
-			await prepared.runner.stop();
-			await prepared.server.stop();
-			await rm(prepared.workspace, { force: true, recursive: true });
-		}, 120_000);
-
-		it('publishes from the runner store, retains both targets on rerun, and rebuilds for provenance', async () => {
-			const prepared = fixture();
-			const flakeDirectory = path.join(prepared.workspace, 'local-consumer');
-			await mkdir(flakeDirectory, { recursive: true });
-			await writeFile(
-				path.join(flakeDirectory, 'flake.nix'),
-				consumerFlake({
-					directory: flakeDirectory,
-					system: prepared.system,
-					seed: randomUUID()
-				})
-			);
-			const options = { flakeDirectory, store: '' };
-
-			const first = await runPublication('local-first', {
-				...options,
-				requireProvenance: false
-			});
-			// The destination now serves both targets, so the plan renews their
-			// roots and the cohort job never starts.
-			const rerun = await runPublication('local-rerun', {
-				...options,
-				requireProvenance: false
-			});
-			// Nothing has attached an attestation to either path, so a run with
-			// require-provenance builds them both again.
-			const provenanceRerun = await runPublication('local-provenance', {
-				...options,
-				requireProvenance: true
-			});
-			// Both packages are targets of the cohort, so a build produces
-			// nothing besides them.
-			const built = await builtPaths(flakeDirectory);
-			const receiptOptions = {
-				built,
-				targets: built,
-				store: '',
-				attribution: localAttribution()
-			};
-			const paths = built
-				.toSorted(byStorePath)
-				.map(({ storePath }) => storePath);
-			const attestation = {
-				subjectCount: String(built.length),
-				checksums: expectedChecksums(built)
-			};
-
-			expect({
-				first,
-				rerun,
-				provenanceRerun,
-				served: await servedStatuses(built),
-				roots: await targetRoots(),
-				audiences: [...new Set(prepared.runner.audiences)]
-			}).toStrictEqual({
-				first: {
-					planStatus: 0,
-					retainedCount: '0',
-					targetCount: '2',
-					cohortCount: '1',
-					cohorts: [
-						{
-							status: 0,
-							targetPaths: paths,
-							attribution: localAttribution(),
-							receipt: expectedReceipt(receiptOptions),
-							attestation
-						}
-					]
-				},
-				rerun: {
-					planStatus: 0,
-					retainedCount: '2',
-					targetCount: '0',
-					cohortCount: '0',
-					cohorts: []
-				},
-				provenanceRerun: {
-					planStatus: 0,
-					retainedCount: '0',
-					targetCount: '2',
-					cohortCount: '1',
-					cohorts: [
-						{
-							status: 0,
-							targetPaths: paths,
-							attribution: localAttribution(),
-							// The paths are the same, and the destination already
-							// serves them, so this run rebuilt and claimed them
-							// without republishing their bytes.
-							receipt: expectedReceipt({
-								...receiptOptions,
-								alreadyServed: true
-							}),
-							attestation
-						}
-					]
-				},
-				served: [200, 200],
-				roots: [
-					{
-						name: `${rootPrefix}/${prepared.system}/alpha`,
-						targets: [built[0]?.storePath]
-					},
-					{
-						name: `${rootPrefix}/${prepared.system}/beta`,
-						targets: [built[1]?.storePath]
-					}
-				],
-				audiences: [canonicalHref(prepared.server.tenantUrl)]
-			});
+describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
+	beforeAll(async () => {
+		state.hostEnvironment = { ...process.env };
+		const workspace = await mkdtemp(
+			path.join(temporaryRoot, 'cupboard-publish-pipeline-')
+		);
+		const server = await CupboardTestServer.start(
+			path.join(workspace, 'server')
+		);
+		const runner = await StubRunnerTokenEndpoint.start({
+			issuer: server.issuer,
+			claims: consumerClaims
+		});
+		const cupboard = await CupboardCommand.start({
+			directory: path.join(workspace, 'bin'),
+			stage: (key, bytes) => server.stageObject(key, bytes)
 		});
 
-		// The rule an operator actually holds is the one a preset creates, and
-		// the operations a publication needs have to be in it: `root:attach` for
-		// the run root every push binds, and `root:list` for the reconciled
-		// target list the plan's pre-filter reads before it prunes a cohort.
-		it('publishes under the trust rule the GitHub branch preset creates', async () => {
-			const prepared = fixture();
-			const preset = githubBranchAddBody(
-				prepared.server.tenantUrl,
-				consumerRepository,
+		// The tenant trusts the runner's identity for what a publication job
+		// does: the upload and attestation conversations, and roots beneath
+		// the consumer's own prefix. These are the `push`, `attest`, `root`
+		// and `attach` allowances a documented CI rule carries, plus
+		// `root:list`, which the plan's pre-filter uses to read a root's
+		// targets.
+		await tenantRpc(server.tenantUrl, {
+			credential: await server.ownerAdminToken()
+		}).oidcTrust.add({
+			issuer: server.issuer.issuer,
+			audience: canonicalHref(server.tenantUrl),
+			claims: { repository_owner_id: consumerClaims.repository_owner_id },
+			permittedGrants: [
 				{
-					repo: consumerRepository.fullName,
-					branch: consumerBranch,
-					audience: parseAudience(presetAudience)
+					type: 'cupboard_cache',
+					actions: [
+						'upload:negotiate',
+						'upload:status',
+						'upload:commit',
+						'upload:confirm',
+						'attestation:negotiate',
+						'attestation:attach',
+						'root:set',
+						'root:attach',
+						'root:list'
+					],
+					resources: {
+						cache: { exact: '_default', validate: 'cacheName' },
+						root: { exact: rootGrantPrefix, validate: 'rootName' }
+					}
 				}
-			);
-			// The preset pins GitHub's issuer, but the harness signs the tokens
-			// this test uses, so replace the issuer with the harness's.
-			await tenantRpc(prepared.server.tenantUrl, {
-				credential: await prepared.server.ownerAdminToken()
-			}).oidcTrust.add({ ...preset, issuer: prepared.server.issuer.issuer });
+			]
+		});
 
-			const flakeDirectory = path.join(prepared.workspace, 'preset-consumer');
-			await mkdir(flakeDirectory, { recursive: true });
-			await writeFile(
-				path.join(flakeDirectory, 'flake.nix'),
-				consumerFlake({
-					directory: flakeDirectory,
-					system: prepared.system,
-					seed: randomUUID()
-				})
-			);
-			const options = {
-				flakeDirectory,
-				store: '',
-				rootPrefix: presetRootPrefix,
-				audience: presetAudience,
-				requireProvenance: false
-			};
+		replaceProcessEnvironment({
+			...(await isolatedEnvironment(path.join(workspace, 'home'))),
+			NIX_CONFIG: isolatedNixConfig,
+			XDG_CONFIG_HOME: path.join(workspace, 'config'),
+			...runner.environment
+		});
 
-			const first = await runPublication('preset-first', options);
-			const rerun = await runPublication('preset-rerun', options);
-			const built = await builtPaths(flakeDirectory);
-			const paths = built
-				.toSorted(byStorePath)
-				.map(({ storePath }) => storePath);
-			const tenantRoots = await targetRoots();
-			const presetTargetRoots = tenantRoots.filter((root) =>
-				root.name.startsWith(`${presetRootPrefix}/`)
-			);
+		state.fixture = {
+			workspace,
+			server,
+			runner,
+			cupboard,
+			system: system(),
+			streams: await canStreamLocalBuild()
+		};
+	}, 600_000);
 
-			expect({
-				first,
-				rerun,
-				served: await servedStatuses(built),
-				runRoots: await runRoots(presetRootPrefix),
-				targetRoots: presetTargetRoots
-			}).toStrictEqual({
-				first: {
-					planStatus: 0,
-					retainedCount: '0',
-					targetCount: '2',
-					cohortCount: '1',
-					cohorts: [
-						{
-							status: 0,
-							targetPaths: paths,
-							attribution: localAttribution(),
-							receipt: expectedReceipt({
-								built,
-								targets: built,
-								store: '',
-								attribution: localAttribution()
-							}),
-							attestation: {
-								subjectCount: String(built.length),
-								checksums: expectedChecksums(built)
-							}
-						}
-					]
-				},
-				// The pre-filter reads each root's reconciled list before it can
-				// prune a cohort, so `targetCount` and `cohortCount` are `0` only
-				// when the rule permits that read.
-				rerun: {
-					planStatus: 0,
-					retainedCount: '2',
-					targetCount: '0',
-					cohortCount: '0',
-					cohorts: []
-				},
-				served: [200, 200],
-				// The first run's push bound this root and attached every path it
-				// committed; the rerun published nothing and bound no run root.
-				runRoots: [
-					{ name: `${presetRootPrefix}/_cupboard-run/<run>`, targets: paths }
-				],
-				targetRoots: [
+	afterAll(async () => {
+		const hostEnvironment = state.hostEnvironment;
+
+		if (hostEnvironment !== undefined) {
+			replaceProcessEnvironment(hostEnvironment);
+		}
+
+		const prepared = state.fixture;
+
+		if (prepared === undefined) {
+			return;
+		}
+
+		await prepared.cupboard.stop();
+		await prepared.runner.stop();
+		await prepared.server.stop();
+		await rm(prepared.workspace, { force: true, recursive: true });
+	}, 120_000);
+
+	it('publishes from the runner store, retains both targets on rerun, and rebuilds for provenance', async () => {
+		const prepared = fixture();
+		const flakeDirectory = path.join(prepared.workspace, 'local-consumer');
+		await mkdir(flakeDirectory, { recursive: true });
+		await writeFile(
+			path.join(flakeDirectory, 'flake.nix'),
+			consumerFlake({
+				directory: flakeDirectory,
+				system: prepared.system,
+				seed: randomUUID()
+			})
+		);
+		const options = { flakeDirectory, store: '' };
+
+		const first = await runPublication('local-first', {
+			...options,
+			requireProvenance: false
+		});
+		// The destination now serves both targets, so the plan renews their
+		// roots and the cohort job never starts.
+		const rerun = await runPublication('local-rerun', {
+			...options,
+			requireProvenance: false
+		});
+		// Nothing has attached an attestation to either path, so a run with
+		// require-provenance builds them both again.
+		const provenanceRerun = await runPublication('local-provenance', {
+			...options,
+			requireProvenance: true
+		});
+		// Both packages are targets of the cohort, so a build produces
+		// nothing besides them.
+		const built = await builtPaths(flakeDirectory);
+		const receiptOptions = {
+			built,
+			targets: built,
+			store: '',
+			attribution: localAttribution()
+		};
+		const paths = built.toSorted(byStorePath).map(({ storePath }) => storePath);
+		const attestation = {
+			subjectCount: String(built.length),
+			checksums: expectedChecksums(built)
+		};
+
+		expect({
+			first,
+			rerun,
+			provenanceRerun,
+			served: await servedStatuses(built),
+			roots: await targetRoots(),
+			audiences: [...new Set(prepared.runner.audiences)]
+		}).toStrictEqual({
+			first: {
+				planStatus: 0,
+				retainedCount: '0',
+				targetCount: '2',
+				cohortCount: '1',
+				cohorts: [
 					{
-						name: `${presetRootPrefix}/${prepared.system}/alpha`,
-						targets: [built[0]?.storePath]
-					},
-					{
-						name: `${presetRootPrefix}/${prepared.system}/beta`,
-						targets: [built[1]?.storePath]
+						status: 0,
+						targetPaths: paths,
+						attribution: localAttribution(),
+						receipt: expectedReceipt(receiptOptions),
+						attestation
 					}
 				]
-			});
-		});
-
-		it('publishes a cohort whose derivation graph exceeds the capture limit', async () => {
-			const prepared = fixture();
-			const flakeDirectory = path.join(prepared.workspace, 'large-consumer');
-			await mkdir(flakeDirectory, { recursive: true });
-			await writeFile(
-				path.join(flakeDirectory, 'flake.nix'),
-				largeGraphFlake({
-					directory: flakeDirectory,
-					system: prepared.system,
-					seed: randomUUID()
-				})
-			);
-
-			const outcome = await runPublication('large-graph', {
-				flakeDirectory,
-				store: '',
-				requireProvenance: false
-			});
-			// The chain's last derivation is the cohort's only target. Building it
-			// builds every link, and a streaming run publishes those links as
-			// intermediates.
-			const built = await builtPaths(flakeDirectory);
-			const targets = built.slice(-1);
-			const attribution = localAttribution();
-			const claimed = claimedPaths({ built, targets, attribution });
-
-			expect({
-				outcome,
-				served: await servedStatuses(claimed)
-			}).toStrictEqual({
-				outcome: {
-					planStatus: 0,
-					retainedCount: '0',
-					targetCount: '1',
-					cohortCount: '1',
-					cohorts: [
-						{
-							status: 0,
-							targetPaths: targets.map(({ storePath }) => storePath),
-							attribution,
-							receipt: expectedReceipt({
-								built,
-								targets,
-								store: '',
-								attribution
-							}),
-							attestation: {
-								subjectCount: String(claimed.length),
-								checksums: expectedChecksums(claimed)
-							}
-						}
-					]
-				},
-				served: claimed.map(() => 200)
-			});
-		});
-
-		// The other legs run `cupboard` from this checkout, through a shim that
-		// executes the CLI sources with Node. A release archive is a different
-		// installation: a single-file executable with the hook helper beside it.
-		// The CLI resolves that helper from the executable that runs it, which
-		// for the shim is a copied Node binary. This leg publishes from the
-		// packaged installation, so a defect in the release asset fails a test
-		// rather than a consumer's job.
-		describe.skipIf(releaseArchive === undefined)(
-			'installed from a release archive',
-			() => {
-				const installed: { installation?: ReleaseInstallation } = {};
-
-				beforeAll(async () => {
-					installed.installation = await unpackReleaseArchive({
-						archivePath: namedReleaseArchive(),
-						directory: path.join(fixture().workspace, 'release')
-					});
-				}, 120_000);
-
-				it('publishes a cohort the packaged executable builds and pushes', async () => {
-					const installation = installed.installation;
-
-					if (installation === undefined) {
-						throw new Error('The release archive was not unpacked');
+			},
+			rerun: {
+				planStatus: 0,
+				retainedCount: '2',
+				targetCount: '0',
+				cohortCount: '0',
+				cohorts: []
+			},
+			provenanceRerun: {
+				planStatus: 0,
+				retainedCount: '0',
+				targetCount: '2',
+				cohortCount: '1',
+				cohorts: [
+					{
+						status: 0,
+						targetPaths: paths,
+						attribution: localAttribution(),
+						// The paths are the same, and the destination already
+						// serves them, so this run rebuilt and claimed them
+						// without republishing their bytes.
+						receipt: expectedReceipt({
+							...receiptOptions,
+							alreadyServed: true
+						}),
+						attestation
 					}
+				]
+			},
+			served: [200, 200],
+			roots: [
+				{
+					name: `${rootPrefix}/${prepared.system}/alpha`,
+					targets: [built[0]?.storePath]
+				},
+				{
+					name: `${rootPrefix}/${prepared.system}/beta`,
+					targets: [built[1]?.storePath]
+				}
+			],
+			audiences: [canonicalHref(prepared.server.tenantUrl)]
+		});
+	});
 
-					const prepared = fixture();
-					const seed = randomUUID();
-					const seedDirectory = path.join(
-						prepared.workspace,
-						'release-seed-consumer'
-					);
-					const flakeDirectory = path.join(
-						prepared.workspace,
-						'release-consumer'
-					);
-					await mkdir(seedDirectory, { recursive: true });
-					await mkdir(flakeDirectory, { recursive: true });
-					await writeFile(
-						path.join(seedDirectory, 'flake.nix'),
-						consumerFlake({
-							directory: seedDirectory,
-							system: prepared.system,
-							seed
-						})
-					);
-					await writeFile(
-						path.join(flakeDirectory, 'flake.nix'),
-						consumerFlake({
-							directory: flakeDirectory,
-							system: prepared.system,
-							seed,
-							variant: 'release'
-						})
-					);
+	// The rule an operator actually holds is the one a preset creates, and
+	// the operations a publication needs have to be in it: `root:attach` for
+	// the run root every push binds, and `root:list` for the reconciled
+	// target list the plan's pre-filter reads before it prunes a cohort.
+	it('publishes under the trust rule the GitHub branch preset creates', async () => {
+		const prepared = fixture();
+		const preset = githubBranchAddBody(
+			prepared.server.tenantUrl,
+			consumerRepository,
+			{
+				repo: consumerRepository.fullName,
+				branch: consumerBranch,
+				audience: parseAudience(presetAudience)
+			}
+		);
+		// The preset pins GitHub's issuer, but the harness signs the tokens
+		// this test uses, so replace the issuer with the harness's.
+		await tenantRpc(prepared.server.tenantUrl, {
+			credential: await prepared.server.ownerAdminToken()
+		}).oidcTrust.add({ ...preset, issuer: prepared.server.issuer.issuer });
 
-					// A push signs its blob uploads for Cloudflare's S3 endpoint,
-					// which no part of this harness serves. The shim replaces the
-					// uploader through a module hook, but a single-file executable
-					// has no module to replace, so this leg publishes only paths
-					// whose bytes the destination already holds. The seed run
-					// publishes the same file contents from derivations of its own.
-					// The packaged run's store paths are new and their NARs are
-					// identical to the seed's, so every negotiation commits against
-					// a blob the destination holds and the packaged executable
-					// attempts no upload.
-					const seeded = await runPublication('release-seed', {
-						flakeDirectory: seedDirectory,
-						store: '',
-						requireProvenance: false,
-						rootPrefix: releaseSeedRootPrefix
-					});
-					const packaged = await runPublication('release', {
-						flakeDirectory,
-						store: '',
-						requireProvenance: false,
-						rootPrefix: releaseRootPrefix,
-						cupboardPath: installation.commandPath
-					});
+		const flakeDirectory = path.join(prepared.workspace, 'preset-consumer');
+		await mkdir(flakeDirectory, { recursive: true });
+		await writeFile(
+			path.join(flakeDirectory, 'flake.nix'),
+			consumerFlake({
+				directory: flakeDirectory,
+				system: prepared.system,
+				seed: randomUUID()
+			})
+		);
+		const options = {
+			flakeDirectory,
+			store: '',
+			rootPrefix: presetRootPrefix,
+			audience: presetAudience,
+			requireProvenance: false
+		};
 
-					const seedBuilt = await builtPaths(seedDirectory);
-					const built = await builtPaths(flakeDirectory);
-					const attribution = localAttribution();
-					const paths = built
-						.toSorted(byStorePath)
-						.map(({ storePath }) => storePath);
+		const first = await runPublication('preset-first', options);
+		const rerun = await runPublication('preset-rerun', options);
+		const built = await builtPaths(flakeDirectory);
+		const paths = built.toSorted(byStorePath).map(({ storePath }) => storePath);
+		const tenantRoots = await targetRoots();
+		const presetTargetRoots = tenantRoots.filter((root) =>
+			root.name.startsWith(`${presetRootPrefix}/`)
+		);
 
-					expect({
-						archive: installation.entries,
-						seeded: {
-							planStatus: seeded.planStatus,
-							cohortStatuses: seeded.cohorts.map((cohort) => cohort.status)
-						},
-						narHashes: built.map(({ narHash }) => narHash),
-						packaged,
-						served: await servedStatuses(built),
-						roots: await retentionRoots(
-							(name) =>
-								name.startsWith(`${releaseRootPrefix}/`) &&
-								!name.includes(runRootMarker)
-						)
-					}).toStrictEqual({
-						// The helper has to unpack beside the executable, because
-						// that is where the CLI looks for it.
-						archive: ['cupboard', 'cupboard-hook-relay'],
-						seeded: { planStatus: 0, cohortStatuses: [0] },
-						narHashes: seedBuilt.map(({ narHash }) => narHash),
-						packaged: {
-							planStatus: 0,
-							retainedCount: '0',
-							targetCount: '2',
-							cohortCount: '1',
-							cohorts: [
-								{
-									status: 0,
-									targetPaths: paths,
-									attribution,
-									receipt: expectedReceipt({
-										built,
-										targets: built,
-										store: '',
-										attribution
-									}),
-									attestation: {
-										subjectCount: String(built.length),
-										checksums: expectedChecksums(built)
-									}
+		expect({
+			first,
+			rerun,
+			served: await servedStatuses(built),
+			runRoots: await runRoots(presetRootPrefix),
+			targetRoots: presetTargetRoots
+		}).toStrictEqual({
+			first: {
+				planStatus: 0,
+				retainedCount: '0',
+				targetCount: '2',
+				cohortCount: '1',
+				cohorts: [
+					{
+						status: 0,
+						targetPaths: paths,
+						attribution: localAttribution(),
+						receipt: expectedReceipt({
+							built,
+							targets: built,
+							store: '',
+							attribution: localAttribution()
+						}),
+						attestation: {
+							subjectCount: String(built.length),
+							checksums: expectedChecksums(built)
+						}
+					}
+				]
+			},
+			// The pre-filter reads each root's reconciled list before it can
+			// prune a cohort, so `targetCount` and `cohortCount` are `0` only
+			// when the rule permits that read.
+			rerun: {
+				planStatus: 0,
+				retainedCount: '2',
+				targetCount: '0',
+				cohortCount: '0',
+				cohorts: []
+			},
+			served: [200, 200],
+			// The first run's push bound this root and attached every path it
+			// committed; the rerun published nothing and bound no run root.
+			runRoots: [
+				{ name: `${presetRootPrefix}/_cupboard-run/<run>`, targets: paths }
+			],
+			targetRoots: [
+				{
+					name: `${presetRootPrefix}/${prepared.system}/alpha`,
+					targets: [built[0]?.storePath]
+				},
+				{
+					name: `${presetRootPrefix}/${prepared.system}/beta`,
+					targets: [built[1]?.storePath]
+				}
+			]
+		});
+	});
+
+	it('publishes a cohort whose derivation graph exceeds the capture limit', async () => {
+		const prepared = fixture();
+		const flakeDirectory = path.join(prepared.workspace, 'large-consumer');
+		await mkdir(flakeDirectory, { recursive: true });
+		await writeFile(
+			path.join(flakeDirectory, 'flake.nix'),
+			largeGraphFlake({
+				directory: flakeDirectory,
+				system: prepared.system,
+				seed: randomUUID()
+			})
+		);
+
+		const outcome = await runPublication('large-graph', {
+			flakeDirectory,
+			store: '',
+			requireProvenance: false
+		});
+		// The chain's last derivation is the cohort's only target. Building it
+		// builds every link, and a streaming run publishes those links as
+		// intermediates.
+		const built = await builtPaths(flakeDirectory);
+		const targets = built.slice(-1);
+		const attribution = localAttribution();
+		const claimed = claimedPaths({ built, targets, attribution });
+
+		expect({
+			outcome,
+			served: await servedStatuses(claimed)
+		}).toStrictEqual({
+			outcome: {
+				planStatus: 0,
+				retainedCount: '0',
+				targetCount: '1',
+				cohortCount: '1',
+				cohorts: [
+					{
+						status: 0,
+						targetPaths: targets.map(({ storePath }) => storePath),
+						attribution,
+						receipt: expectedReceipt({
+							built,
+							targets,
+							store: '',
+							attribution
+						}),
+						attestation: {
+							subjectCount: String(claimed.length),
+							checksums: expectedChecksums(claimed)
+						}
+					}
+				]
+			},
+			served: claimed.map(() => 200)
+		});
+	});
+
+	// The other legs run `cupboard` from this checkout, through a shim that
+	// executes the CLI sources with Node. A release archive is a different
+	// installation: a single-file executable with the hook helper beside it.
+	// The CLI resolves that helper from the executable that runs it, which
+	// for the shim is a copied Node binary. This leg publishes from the
+	// packaged installation, so a defect in the release asset fails a test
+	// rather than a consumer's job.
+	describe.skipIf(releaseArchive === undefined)(
+		'installed from a release archive',
+		() => {
+			const installed: { installation?: ReleaseInstallation } = {};
+
+			beforeAll(async () => {
+				installed.installation = await unpackReleaseArchive({
+					archivePath: namedReleaseArchive(),
+					directory: path.join(fixture().workspace, 'release')
+				});
+			}, 120_000);
+
+			it('publishes a cohort the packaged executable builds and pushes', async () => {
+				const installation = installed.installation;
+
+				if (installation === undefined) {
+					throw new Error('The release archive was not unpacked');
+				}
+
+				const prepared = fixture();
+				const seed = randomUUID();
+				const seedDirectory = path.join(
+					prepared.workspace,
+					'release-seed-consumer'
+				);
+				const flakeDirectory = path.join(
+					prepared.workspace,
+					'release-consumer'
+				);
+				await mkdir(seedDirectory, { recursive: true });
+				await mkdir(flakeDirectory, { recursive: true });
+				await writeFile(
+					path.join(seedDirectory, 'flake.nix'),
+					consumerFlake({
+						directory: seedDirectory,
+						system: prepared.system,
+						seed
+					})
+				);
+				await writeFile(
+					path.join(flakeDirectory, 'flake.nix'),
+					consumerFlake({
+						directory: flakeDirectory,
+						system: prepared.system,
+						seed,
+						variant: 'release'
+					})
+				);
+
+				// A push signs its blob uploads for Cloudflare's S3 endpoint,
+				// which no part of this harness serves. The shim replaces the
+				// uploader through a module hook, but a single-file executable
+				// has no module to replace, so this leg publishes only paths
+				// whose bytes the destination already holds. The seed run
+				// publishes the same file contents from derivations of its own.
+				// The packaged run's store paths are new and their NARs are
+				// identical to the seed's, so every negotiation commits against
+				// a blob the destination holds and the packaged executable
+				// attempts no upload.
+				const seeded = await runPublication('release-seed', {
+					flakeDirectory: seedDirectory,
+					store: '',
+					requireProvenance: false,
+					rootPrefix: releaseSeedRootPrefix
+				});
+				const packaged = await runPublication('release', {
+					flakeDirectory,
+					store: '',
+					requireProvenance: false,
+					rootPrefix: releaseRootPrefix,
+					cupboardPath: installation.commandPath
+				});
+
+				const seedBuilt = await builtPaths(seedDirectory);
+				const built = await builtPaths(flakeDirectory);
+				const attribution = localAttribution();
+				const paths = built
+					.toSorted(byStorePath)
+					.map(({ storePath }) => storePath);
+
+				expect({
+					archive: installation.entries,
+					seeded: {
+						planStatus: seeded.planStatus,
+						cohortStatuses: seeded.cohorts.map((cohort) => cohort.status)
+					},
+					narHashes: built.map(({ narHash }) => narHash),
+					packaged,
+					served: await servedStatuses(built),
+					roots: await retentionRoots(
+						(name) =>
+							name.startsWith(`${releaseRootPrefix}/`) &&
+							!name.includes(runRootMarker)
+					)
+				}).toStrictEqual({
+					// The helper has to unpack beside the executable, because
+					// that is where the CLI looks for it.
+					archive: ['cupboard', 'cupboard-hook-relay'],
+					seeded: { planStatus: 0, cohortStatuses: [0] },
+					narHashes: seedBuilt.map(({ narHash }) => narHash),
+					packaged: {
+						planStatus: 0,
+						retainedCount: '0',
+						targetCount: '2',
+						cohortCount: '1',
+						cohorts: [
+							{
+								status: 0,
+								targetPaths: paths,
+								attribution,
+								receipt: expectedReceipt({
+									built,
+									targets: built,
+									store: '',
+									attribution
+								}),
+								attestation: {
+									subjectCount: String(built.length),
+									checksums: expectedChecksums(built)
 								}
-							]
-						},
-						served: [200, 200],
-						roots: [
-							{
-								name: `${releaseRootPrefix}/${prepared.system}/alpha`,
-								targets: [built[0]?.storePath]
-							},
-							{
-								name: `${releaseRootPrefix}/${prepared.system}/beta`,
-								targets: [built[1]?.storePath]
 							}
 						]
-					});
-				});
-			}
-		);
-
-		describe.skipIf(!isContainerEnginePresent)(
-			'against an ssh-ng remote store',
-			() => {
-				const remote: { store?: NixSshStoreFixture } = {};
-
-				beforeAll(async () => {
-					const store = await startNixSshStore();
-					remote.store = store;
-					// The transport `actions/prepare` configures for a job: the store
-					// URI names the host alone, and the credentials travel in the
-					// environment every Nix process inherits.
-					process.env.NIX_SSHOPTS = store.environment.NIX_SSHOPTS;
-				}, 600_000);
-
-				afterAll(async () => {
-					Reflect.deleteProperty(process.env, 'NIX_SSHOPTS');
-					await remote.store?.close();
-				}, 120_000);
-
-				it('builds and publishes every target from the remote store', async () => {
-					const store = remote.store;
-
-					if (store === undefined) {
-						throw new Error('The remote Nix store was not started');
-					}
-
-					const prepared = fixture();
-					const remoteSystem = await store.exec([
-						'nix',
-						'eval',
-						'--raw',
-						'--impure',
-						'--expr',
-						'builtins.currentSystem'
-					]);
-					const flakeDirectory = path.join(
-						prepared.workspace,
-						'remote-consumer'
-					);
-					await mkdir(flakeDirectory, { recursive: true });
-					await writeFile(
-						path.join(flakeDirectory, 'flake.nix'),
-						consumerFlake({
-							directory: flakeDirectory,
-							system: remoteSystem,
-							seed: randomUUID()
-						})
-					);
-
-					const outcome = await runPublication('remote', {
-						flakeDirectory,
-						store: store.transportConfiguredStoreUri,
-						requireProvenance: false
-					});
-					const built = await builtPaths(
-						flakeDirectory,
-						Nix.openForAvailability(undefined, {
-							storeUri: store.transportConfiguredStoreUri,
-							overrides: { substituters: '' }
-						})
-					);
-
-					expect({
-						outcome,
-						served: await servedStatuses(built)
-					}).toStrictEqual({
-						outcome: {
-							planStatus: 0,
-							retainedCount: '0',
-							targetCount: '2',
-							cohortCount: '1',
-							cohorts: [
-								{
-									status: 0,
-									targetPaths: built
-										.toSorted(byStorePath)
-										.map(({ storePath }) => storePath),
-									attribution: 'store-report',
-									receipt: expectedReceipt({
-										built,
-										targets: built,
-										store: store.transportConfiguredStoreUri,
-										attribution: 'store-report'
-									}),
-									attestation: {
-										subjectCount: String(built.length),
-										checksums: expectedChecksums(built)
-									}
-								}
-							]
+					},
+					served: [200, 200],
+					roots: [
+						{
+							name: `${releaseRootPrefix}/${prepared.system}/alpha`,
+							targets: [built[0]?.storePath]
 						},
-						served: [200, 200]
-					});
+						{
+							name: `${releaseRootPrefix}/${prepared.system}/beta`,
+							targets: [built[1]?.storePath]
+						}
+					]
 				});
+			});
+		}
+	);
 
-				it('builds a missing runtime dependency before substituting the targets', async () => {
-					const store = remote.store;
+	describe.skipIf(!isContainerEnginePresent)(
+		'against an ssh-ng remote store',
+		() => {
+			const remote: { store?: NixSshStoreFixture } = {};
 
-					if (store === undefined) {
-						throw new Error('The remote Nix store was not started');
-					}
+			beforeAll(async () => {
+				const store = await startNixSshStore();
+				remote.store = store;
+				// The transport `actions/prepare` configures for a job: the store
+				// URI names the host alone, and the credentials travel in the
+				// environment every Nix process inherits.
+				process.env.NIX_SSHOPTS = store.environment.NIX_SSHOPTS;
+			}, 600_000);
 
-					const prepared = fixture();
-					const remoteSystem = await store.exec([
-						'nix',
-						'eval',
-						'--raw',
-						'--impure',
-						'--expr',
-						'builtins.currentSystem'
-					]);
-					const flakeDirectory = path.join(
-						prepared.workspace,
-						'remote-consumer'
-					);
-					await mkdir(flakeDirectory, { recursive: true });
-					await writeFile(
-						path.join(flakeDirectory, 'flake.nix'),
-						consumerFlake({
-							directory: flakeDirectory,
-							system: remoteSystem,
-							seed: randomUUID(),
-							runtimeDependency: true
-						})
-					);
-					const evaluated = builtPathsSchema.parse(
-						JSON.parse(
-							await runNix([
-								'eval',
-								'--json',
-								`path:${flakeDirectory}#cupboardBuiltPaths`
-							])
-						)
-					);
-					const dependencyOutput = storePathSchema.parse(
+			afterAll(async () => {
+				Reflect.deleteProperty(process.env, 'NIX_SSHOPTS');
+				await remote.store?.close();
+			}, 120_000);
+
+			it('builds and publishes every target from the remote store', async () => {
+				const store = remote.store;
+
+				if (store === undefined) {
+					throw new Error('The remote Nix store was not started');
+				}
+
+				const prepared = fixture();
+				const remoteSystem = await store.exec([
+					'nix',
+					'eval',
+					'--raw',
+					'--impure',
+					'--expr',
+					'builtins.currentSystem'
+				]);
+				const flakeDirectory = path.join(prepared.workspace, 'remote-consumer');
+				await mkdir(flakeDirectory, { recursive: true });
+				await writeFile(
+					path.join(flakeDirectory, 'flake.nix'),
+					consumerFlake({
+						directory: flakeDirectory,
+						system: remoteSystem,
+						seed: randomUUID()
+					})
+				);
+
+				const outcome = await runPublication('remote', {
+					flakeDirectory,
+					store: store.transportConfiguredStoreUri,
+					requireProvenance: false
+				});
+				const built = await builtPaths(
+					flakeDirectory,
+					Nix.openForAvailability(undefined, {
+						storeUri: store.transportConfiguredStoreUri,
+						overrides: { substituters: '' }
+					})
+				);
+
+				expect({
+					outcome,
+					served: await servedStatuses(built)
+				}).toStrictEqual({
+					outcome: {
+						planStatus: 0,
+						retainedCount: '0',
+						targetCount: '2',
+						cohortCount: '1',
+						cohorts: [
+							{
+								status: 0,
+								targetPaths: built
+									.toSorted(byStorePath)
+									.map(({ storePath }) => storePath),
+								attribution: 'store-report',
+								receipt: expectedReceipt({
+									built,
+									targets: built,
+									store: store.transportConfiguredStoreUri,
+									attribution: 'store-report'
+								}),
+								attestation: {
+									subjectCount: String(built.length),
+									checksums: expectedChecksums(built)
+								}
+							}
+						]
+					},
+					served: [200, 200]
+				});
+			});
+
+			it('builds a missing runtime dependency before substituting the targets', async () => {
+				const store = remote.store;
+
+				if (store === undefined) {
+					throw new Error('The remote Nix store was not started');
+				}
+
+				const prepared = fixture();
+				const remoteSystem = await store.exec([
+					'nix',
+					'eval',
+					'--raw',
+					'--impure',
+					'--expr',
+					'builtins.currentSystem'
+				]);
+				const flakeDirectory = path.join(prepared.workspace, 'remote-consumer');
+				await mkdir(flakeDirectory, { recursive: true });
+				await writeFile(
+					path.join(flakeDirectory, 'flake.nix'),
+					consumerFlake({
+						directory: flakeDirectory,
+						system: remoteSystem,
+						seed: randomUUID(),
+						runtimeDependency: true
+					})
+				);
+				const evaluated = builtPathsSchema.parse(
+					JSON.parse(
 						await runNix([
 							'eval',
-							'--raw',
-							`path:${flakeDirectory}#cupboardDependency`
+							'--json',
+							`path:${flakeDirectory}#cupboardBuiltPaths`
 						])
-					);
-					const dependencyDerivation = storePathSchema.parse(
-						await runNix([
-							'eval',
-							'--raw',
-							`path:${flakeDirectory}#cupboardDependencyDerivation`
-						])
-					);
-					const derivations = evaluated.map(({ derivation }) =>
-						storePathSchema.parse(derivation)
-					);
-					const targetOutputs = evaluated.map(({ storePath }) =>
-						storePathSchema.parse(storePath)
-					);
-					const remoteFlakeDirectory = '/tmp/cupboard-remote-consumer';
-					await store.copyDirectory(flakeDirectory, remoteFlakeDirectory);
-					await store.exec([
-						'nix',
-						'build',
-						'--no-link',
-						`path:${remoteFlakeDirectory}#packages.${remoteSystem}.alpha`,
-						`path:${remoteFlakeDirectory}#packages.${remoteSystem}.beta`
-					]);
-					const cacheDirectory = '/tmp/cupboard-incomplete-cache';
-					await store.exec([
-						'nix',
-						'copy',
-						'--to',
-						`file://${cacheDirectory}`,
-						...targetOutputs
-					]);
-					await store.exec([
-						'rm',
-						`${cacheDirectory}/${new StorePath(dependencyOutput).hash}.narinfo`
-					]);
-					await store.exec([
-						'nix',
-						'store',
-						'delete',
-						...targetOutputs,
-						dependencyOutput,
-						...derivations,
-						dependencyDerivation
-					]);
+					)
+				);
+				const dependencyOutput = storePathSchema.parse(
+					await runNix([
+						'eval',
+						'--raw',
+						`path:${flakeDirectory}#cupboardDependency`
+					])
+				);
+				const dependencyDerivation = storePathSchema.parse(
+					await runNix([
+						'eval',
+						'--raw',
+						`path:${flakeDirectory}#cupboardDependencyDerivation`
+					])
+				);
+				const derivations = evaluated.map(({ derivation }) =>
+					storePathSchema.parse(derivation)
+				);
+				const targetOutputs = evaluated.map(({ storePath }) =>
+					storePathSchema.parse(storePath)
+				);
+				const remoteFlakeDirectory = '/tmp/cupboard-remote-consumer';
+				await store.copyDirectory(flakeDirectory, remoteFlakeDirectory);
+				await store.exec([
+					'nix',
+					'build',
+					'--no-link',
+					`path:${remoteFlakeDirectory}#packages.${remoteSystem}.alpha`,
+					`path:${remoteFlakeDirectory}#packages.${remoteSystem}.beta`
+				]);
+				const cacheDirectory = '/tmp/cupboard-incomplete-cache';
+				await store.exec([
+					'nix',
+					'copy',
+					'--to',
+					`file://${cacheDirectory}`,
+					...targetOutputs
+				]);
+				await store.exec([
+					'rm',
+					`${cacheDirectory}/${new StorePath(dependencyOutput).hash}.narinfo`
+				]);
+				await store.exec([
+					'nix',
+					'store',
+					'delete',
+					...targetOutputs,
+					dependencyOutput,
+					...derivations,
+					dependencyDerivation
+				]);
 
-					await store.writeFile(
-						'/etc/nix/nix.conf',
-						[
-							'experimental-features = nix-command flakes',
-							'sandbox = false',
-							`substituters = file://${cacheDirectory}`,
-							'substitute = true',
-							'require-sigs = false',
-							''
-						].join('\n')
-					);
-					const remoteStoreUri = store.transportConfiguredStoreUri;
-					const remoteNix = Nix.openForAvailability(undefined, {
-						storeUri: remoteStoreUri
-					});
-					const targets: NixDerivedPathString[] = derivations.map(
-						(derivation): NixDerivedPathString => `${derivation}^out`
-					);
-					await expect(remoteNix.queryMissing(targets)).resolves.toStrictEqual({
-						willBuild: [],
-						willSubstitute: [],
-						unknown: derivations.toSorted(byCodeUnit),
-						downloadSize: 0,
-						narSize: 0
-					});
-					const outputAvailability =
-						await remoteNix.queryMissing(targetOutputs);
-					const outputOffers =
-						await remoteNix.querySubstitutablePathInfos(targetOutputs);
-					let expectedDownloadSize = 0;
-					let expectedNarSize = 0;
+				await store.writeFile(
+					'/etc/nix/nix.conf',
+					[
+						'experimental-features = nix-command flakes',
+						'sandbox = false',
+						`substituters = file://${cacheDirectory}`,
+						'substitute = true',
+						'require-sigs = false',
+						''
+					].join('\n')
+				);
+				const remoteStoreUri = store.transportConfiguredStoreUri;
+				const remoteNix = Nix.openForAvailability(undefined, {
+					storeUri: remoteStoreUri
+				});
+				const targets: NixDerivedPathString[] = derivations.map(
+					(derivation): NixDerivedPathString => `${derivation}^out`
+				);
+				await expect(remoteNix.queryMissing(targets)).resolves.toStrictEqual({
+					willBuild: [],
+					willSubstitute: [],
+					unknown: derivations.toSorted(byCodeUnit),
+					downloadSize: 0,
+					narSize: 0
+				});
+				const outputAvailability = await remoteNix.queryMissing(targetOutputs);
+				const outputOffers =
+					await remoteNix.querySubstitutablePathInfos(targetOutputs);
+				let expectedDownloadSize = 0;
+				let expectedNarSize = 0;
 
-					for (const offer of outputOffers) {
-						expectedDownloadSize += offer.downloadSize;
-						expectedNarSize += offer.narSize;
-					}
+				for (const offer of outputOffers) {
+					expectedDownloadSize += offer.downloadSize;
+					expectedNarSize += offer.narSize;
+				}
 
-					expect({
-						willBuild: outputAvailability.willBuild,
-						willSubstitute: outputAvailability.willSubstitute,
-						unknown: outputAvailability.unknown,
-						downloadSize: outputAvailability.downloadSize,
-						narSize: outputAvailability.narSize
-					}).toStrictEqual({
-						willBuild: [],
-						willSubstitute: targetOutputs.toSorted(byCodeUnit),
-						unknown: [dependencyOutput],
-						downloadSize: expectedDownloadSize,
-						narSize: expectedNarSize
-					});
+				expect({
+					willBuild: outputAvailability.willBuild,
+					willSubstitute: outputAvailability.willSubstitute,
+					unknown: outputAvailability.unknown,
+					downloadSize: outputAvailability.downloadSize,
+					narSize: outputAvailability.narSize
+				}).toStrictEqual({
+					willBuild: [],
+					willSubstitute: targetOutputs.toSorted(byCodeUnit),
+					unknown: [dependencyOutput],
+					downloadSize: expectedDownloadSize,
+					narSize: expectedNarSize
+				});
 
-					const outcome = await runPublication('remote', {
-						flakeDirectory,
-						store: remoteStoreUri,
-						requireProvenance: false
-					});
-					const built = await builtPaths(flakeDirectory, remoteNix);
-					const dependencyInfo =
-						await remoteNix.queryPathInfo(dependencyOutput);
-					const dependency = {
-						storePath: dependencyOutput,
-						derivation: dependencyDerivation,
-						narHash: dependencyInfo.narHash.digestHex()
-					};
-					const published = [dependency, ...built].toSorted(byStorePath);
-					const copiedFrom = [`file://${cacheDirectory}`];
+				const outcome = await runPublication('remote', {
+					flakeDirectory,
+					store: remoteStoreUri,
+					requireProvenance: false
+				});
+				const built = await builtPaths(flakeDirectory, remoteNix);
+				const dependencyInfo = await remoteNix.queryPathInfo(dependencyOutput);
+				const dependency = {
+					storePath: dependencyOutput,
+					derivation: dependencyDerivation,
+					narHash: dependencyInfo.narHash.digestHex()
+				};
+				const published = [dependency, ...built].toSorted(byStorePath);
+				const copiedFrom = [`file://${cacheDirectory}`];
 
-					expect({
-						outcome,
-						served: await servedStatuses(built)
-					}).toStrictEqual({
-						outcome: {
-							planStatus: 0,
-							retainedCount: '0',
-							targetCount: '2',
-							cohortCount: '1',
-							cohorts: [
-								{
-									status: 0,
-									targetPaths: built
-										.toSorted(byStorePath)
-										.map(({ storePath }) => storePath),
-									attribution: 'store-report',
-									receipt: {
-										version: 3,
-										paths: published.map(({ storePath }) => storePath),
-										subjects: published.map((entry) =>
-											entry.storePath === dependencyOutput
-												? {
-														origin: 'built',
-														storePath: entry.storePath,
-														narHash: entry.narHash,
-														derivation: entry.derivation,
-														buildStore: remoteStoreUri,
-														verification: 'build-store'
-													}
-												: {
-														origin: 'copied',
-														storePath: entry.storePath,
-														narHash: entry.narHash,
-														derivation: entry.derivation,
-														copiedFrom,
-														signatures: []
-													}
-										),
-										uploaded: published.map(({ storePath }) => storePath)
-									},
-									attestation: {
-										subjectCount: String(published.length),
-										checksums: expectedChecksums(published)
-									}
+				expect({
+					outcome,
+					served: await servedStatuses(built)
+				}).toStrictEqual({
+					outcome: {
+						planStatus: 0,
+						retainedCount: '0',
+						targetCount: '2',
+						cohortCount: '1',
+						cohorts: [
+							{
+								status: 0,
+								targetPaths: built
+									.toSorted(byStorePath)
+									.map(({ storePath }) => storePath),
+								attribution: 'store-report',
+								receipt: {
+									version: 3,
+									paths: published.map(({ storePath }) => storePath),
+									subjects: published.map((entry) =>
+										entry.storePath === dependencyOutput
+											? {
+													origin: 'built',
+													storePath: entry.storePath,
+													narHash: entry.narHash,
+													derivation: entry.derivation,
+													buildStore: remoteStoreUri,
+													verification: 'build-store'
+												}
+											: {
+													origin: 'copied',
+													storePath: entry.storePath,
+													narHash: entry.narHash,
+													derivation: entry.derivation,
+													copiedFrom,
+													signatures: []
+												}
+									),
+									uploaded: published.map(({ storePath }) => storePath)
+								},
+								attestation: {
+									subjectCount: String(published.length),
+									checksums: expectedChecksums(published)
 								}
-							]
-						},
-						served: [200, 200]
-					});
-				}, 120_000);
-			}
-		);
-	}
-);
+							}
+						]
+					},
+					served: [200, 200]
+				});
+			}, 120_000);
+		}
+	);
+});

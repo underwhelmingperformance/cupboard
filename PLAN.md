@@ -460,8 +460,8 @@ testcontainers drives and skips when none answers, so a machine without one
 still runs the other three legs. Lives in `tests/e2e/publish-pipeline.test.ts`.
 
 The script is outside the `check:*` namespace, so a local `pnpm check` never
-runs it. Set `CUPBOARD_PIPELINE_E2E=1` to run it locally; CI runs it as a job of
-its own, in parallel with the other gates.
+runs it. Run `pnpm e2e:pipeline` to run it locally; CI runs it as a job of its
+own, in parallel with the other gates.
 
 The first three legs run `cupboard` from this checkout, through a shim that
 executes the CLI sources with Node, so nothing in them exercises the packaging
