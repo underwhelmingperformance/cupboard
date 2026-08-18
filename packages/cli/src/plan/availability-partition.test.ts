@@ -1526,6 +1526,99 @@ describe('partitionAvailability', () => {
 		});
 	});
 
+	it('counts only the substitutable candidate when another stopped candidate refuses substitution', async () => {
+		const appDerivation = path('11111111111111111111111111111111-app.drv');
+		const appOutput = path('22222222222222222222222222222222-app');
+		const otherDerivation = path('33333333333333333333333333333333-other.drv');
+		const otherOutput = path('44444444444444444444444444444444-other');
+		const appInstallable: NixDerivedPathString = `${appDerivation}^out`;
+		const otherInstallable: NixDerivedPathString = `${otherDerivation}^out`;
+		const otherRoot = root('github:owner/repo/main/other');
+		const store = new RecordingStore(
+			[
+				missingWith({ unknown: [appDerivation, otherDerivation] }),
+				missingWith({
+					willSubstitute: [appOutput, otherOutput],
+					downloadSize: 33,
+					narSize: 55
+				}),
+				missingWith({
+					willSubstitute: [appOutput],
+					downloadSize: 20,
+					narSize: 30
+				}),
+				missingWith({
+					willSubstitute: [otherOutput],
+					downloadSize: 13,
+					narSize: 25
+				})
+			],
+			[],
+			[],
+			[],
+			[
+				{
+					source: 'daemon',
+					storePath: appOutput,
+					references: [],
+					downloadSize: 20,
+					narSize: 30
+				},
+				{
+					source: 'daemon',
+					storePath: otherOutput,
+					references: [],
+					downloadSize: 13,
+					narSize: 25
+				}
+			]
+		);
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({
+						installable: appInstallable,
+						expectedPath: appOutput,
+						plannedLocalDerivation: appDerivation
+					}),
+					target({
+						installable: otherInstallable,
+						expectedPath: otherOutput,
+						plannedLocalDerivation: otherDerivation,
+						root: otherRoot
+					})
+				],
+				plannedLocalClosure: new Set([appDerivation, otherDerivation]),
+				plannedSubstitutableDerivations: new Set([appDerivation]),
+				store,
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+
+		expect(partition).toStrictEqual(
+			expectedPartition({
+				buildSet: [appInstallable, otherInstallable],
+				counts: { willBuild: 1, willSubstitute: 1, unknown: 0 },
+				downloadSize: 20,
+				narSize: 30,
+				ceiling: { value: 0, source: 'configured' }
+			})
+		);
+		expect({
+			missingCalls: store.missingCalls,
+			substitutableInfoCalls: store.substitutableInfoCalls
+		}).toStrictEqual({
+			missingCalls: [
+				[appInstallable, otherInstallable],
+				[appOutput, otherOutput],
+				[appOutput],
+				[otherOutput]
+			],
+			substitutableInfoCalls: [[appOutput]]
+		});
+	});
+
 	it('does not count a build when every selected output is already valid', async () => {
 		const derivation = path('11111111111111111111111111111111-target.drv');
 		const output = path('22222222222222222222222222222222-target');
