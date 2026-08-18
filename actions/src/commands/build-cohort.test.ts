@@ -6271,6 +6271,64 @@ describe('buildCohortAction publication', () => {
 		});
 	});
 
+	it('replaces a shared root when only a dependency of its targets fails', async () => {
+		const sharedRoot = 'github:owner/repo/main/shared';
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson({
+					expectedPaths: [appPath, libraryBuiltPath, floatingBuiltPath],
+					roots: [sharedRoot, sharedRoot, 'github:owner/repo/main/floating']
+				}),
+				push: 'true',
+				store: 'ssh-ng://build@example.test'
+			},
+			[],
+			[remoteFailure(appQueryInstallable), remoteResult('built')],
+			[libraryQueryInstallable],
+			undefined,
+			new Map(),
+			{
+				dependencyBuilds: [
+					{
+						path: storePathSchema.parse(appPath),
+						installables: [derivedPath(appQueryInstallable)],
+						requiredBy: [derivedPath(libraryQueryInstallable)]
+					}
+				],
+				captureBuildError: true
+			}
+		);
+		const rootPush = run.calls.find(
+			(arguments_) =>
+				arguments_[1] === 'push' &&
+				!arguments_.includes('--receipt-file') &&
+				arguments_.includes(libraryBuiltPath)
+		);
+
+		expect({
+			isBuildFailure: run.buildError instanceof RemoteCohortBuildFailedError,
+			rootPush
+		}).toStrictEqual({
+			isBuildFailure: true,
+			rootPush: [
+				'--no-colour',
+				'push',
+				url,
+				libraryBuiltPath,
+				'--github-oidc',
+				'--root',
+				sharedRoot,
+				'--store',
+				'ssh-ng://build@example.test',
+				'--reference-paths-file',
+				`${path.join(directory, 'cupboard-cohort-reference-paths.txt')}.destination.0`,
+				'--reference-source',
+				url
+			]
+		});
+	});
+
 	it('records a strict remote target failure alongside surviving outputs', async () => {
 		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
 
@@ -6451,6 +6509,51 @@ describe('buildCohortAction publication', () => {
 				kind: 'target-build',
 				failedTargets: [libraryQueryInstallable]
 			}
+		});
+	});
+
+	it('reports a command failure when a dependency fails and its target does not', async () => {
+		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
+
+		await expect(
+			runPublicationFlow(
+				{
+					...baseOptions(),
+					cohortJson: remotelyQueryableCohortJson(),
+					push: 'true',
+					store: 'ssh-ng://build@example.test'
+				},
+				[],
+				[remoteFailure(appQueryInstallable), remoteResult('built')],
+				[libraryQueryInstallable],
+				undefined,
+				new Map(),
+				{
+					dependencyBuilds: [
+						{
+							path: storePathSchema.parse(appPath),
+							installables: [derivedPath(appQueryInstallable)],
+							requiredBy: [derivedPath(libraryQueryInstallable)]
+						}
+					]
+				}
+			)
+		).rejects.toBeInstanceOf(RemoteCohortBuildFailedError);
+
+		expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toStrictEqual({
+			version: 3,
+			paths: [libraryBuiltPath],
+			subjects: [
+				{
+					origin: 'built',
+					storePath: libraryBuiltPath,
+					narHash: 'aa'.repeat(32),
+					derivation: `${libraryBuiltPath}.drv`,
+					buildStore: 'auto',
+					verification: 'local'
+				}
+			],
+			terminalFailure: { kind: 'command' }
 		});
 	});
 
@@ -6928,6 +7031,61 @@ describe('buildCohortAction publication', () => {
 				]
 			],
 			informationCount: 2,
+			resultBuilds: [
+				[[floatingQueryInstallable], '', 'ssh-ng://build@example.test']
+			]
+		});
+	});
+
+	it('copies every candidate producer of a target dependency', async () => {
+		const appDerivation = storePathSchema.parse(
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
+		);
+		const alternativeDerivation = storePathSchema.parse(
+			'/nix/store/2123456789abcdfghijklmnpqrsvwxyz-fallback-app.drv'
+		);
+		const floatingDerivation = storePathSchema.parse(
+			'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv'
+		);
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson(),
+				push: 'true',
+				store: 'ssh-ng://build@example.test'
+			},
+			[appPath, floatingBuiltPath],
+			[
+				remoteResult('built', appQueryInstallable, appPath),
+				remoteResult('built', floatingQueryInstallable, floatingBuiltPath)
+			],
+			[floatingQueryInstallable],
+			undefined,
+			new Map(),
+			{
+				dependencyBuilds: [
+					{
+						path: storePathSchema.parse(appPath),
+						installables: [
+							derivedPath(appQueryInstallable),
+							derivedPath(`${alternativeDerivation}^out`)
+						],
+						requiredBy: [derivedPath(floatingQueryInstallable)]
+					}
+				]
+			}
+		);
+
+		expect({
+			copyCalls: run.remoteConnection.copyCalls.map((call) => call.slice(0, 2)),
+			resultBuilds: run.resultBuilds
+		}).toStrictEqual({
+			copyCalls: [
+				[
+					[floatingDerivation, appDerivation, alternativeDerivation],
+					'ssh-ng://build@example.test'
+				]
+			],
 			resultBuilds: [
 				[[floatingQueryInstallable], '', 'ssh-ng://build@example.test']
 			]
