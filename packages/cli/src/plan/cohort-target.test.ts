@@ -108,4 +108,200 @@ describe('cohortPlanInputSchema', () => {
 			targets: [target]
 		});
 	});
+
+	it('parses the paths in a planned local closure', () => {
+		const target = {
+			attr: 'packages.x86_64-linux.app',
+			installable: storePath,
+			root: 'github:owner/repo/main'
+		};
+		const source =
+			'/nix/store/22222222222222222222222222222222-source' as const;
+
+		expect(
+			cohortPlanInputSchema.parse({
+				targets: [target],
+				plannedLocalClosure: [source]
+			})
+		).toStrictEqual({ targets: [target], plannedLocalClosure: [source] });
+	});
+
+	it('parses substitution policy for a copied derivation', () => {
+		const target = {
+			attr: 'packages.x86_64-linux.app',
+			installable: storePath,
+			root: 'github:owner/repo/main'
+		};
+		const input = {
+			targets: [target],
+			plannedLocalClosure: [derivation],
+			plannedSubstitutableDerivations: [derivation]
+		};
+
+		expect(cohortPlanInputSchema.parse(input)).toStrictEqual(input);
+	});
+
+	it.each([
+		{
+			name: 'is not a derivation',
+			plannedLocalClosure: [storePath],
+			plannedSubstitutableDerivations: [storePath]
+		},
+		{
+			name: 'is absent from the copied closure',
+			plannedLocalClosure: [] as const,
+			plannedSubstitutableDerivations: [derivation]
+		}
+	])(
+		'rejects substitution policy when a path $name',
+		({ plannedLocalClosure, plannedSubstitutableDerivations }) => {
+			const parsed = cohortPlanInputSchema.safeParse({
+				targets: [
+					{
+						attr: 'packages.x86_64-linux.app',
+						installable: storePath,
+						root: 'github:owner/repo/main'
+					}
+				],
+				plannedLocalClosure,
+				plannedSubstitutableDerivations
+			});
+
+			expect({
+				success: parsed.success,
+				issues: parsed.success
+					? []
+					: parsed.error.issues.map(({ code, path }) => ({ code, path }))
+			}).toStrictEqual({
+				success: false,
+				issues: [
+					{
+						code: 'custom',
+						path: ['plannedSubstitutableDerivations', 0]
+					}
+				]
+			});
+		}
+	);
+
+	it('parses an output that the action can realise from a copied derivation', () => {
+		const target = {
+			attr: 'packages.x86_64-linux.app',
+			installable: storePath,
+			root: 'github:owner/repo/main'
+		};
+		const output =
+			'/nix/store/22222222222222222222222222222222-dependency' as const;
+		const installable = `${derivation}^out` as const;
+
+		expect(
+			cohortPlanInputSchema.parse({
+				targets: [target],
+				plannedLocalClosure: [derivation],
+				plannedLocalOutputs: [{ path: output, installable }]
+			})
+		).toStrictEqual({
+			targets: [target],
+			plannedLocalClosure: [derivation],
+			plannedLocalOutputs: [{ path: output, installable }]
+		});
+	});
+
+	it('parses a floating output from a derivation in the copied closure', () => {
+		const target = {
+			attr: 'packages.x86_64-linux.app',
+			installable: storePath,
+			root: 'github:owner/repo/main'
+		};
+		const installable = `${derivation}^out` as const;
+
+		expect(
+			cohortPlanInputSchema.parse({
+				targets: [target],
+				plannedLocalClosure: [derivation],
+				plannedFloatingOutputs: [installable]
+			})
+		).toStrictEqual({
+			targets: [target],
+			plannedLocalClosure: [derivation],
+			plannedFloatingOutputs: [installable]
+		});
+	});
+
+	it('rejects a floating output whose derivation is not copied', () => {
+		const parsed = cohortPlanInputSchema.safeParse({
+			targets: [
+				{
+					attr: 'packages.x86_64-linux.app',
+					installable: storePath,
+					root: 'github:owner/repo/main'
+				}
+			],
+			plannedLocalClosure: [],
+			plannedFloatingOutputs: [`${derivation}^out`]
+		});
+
+		expect({
+			success: parsed.success,
+			issues: parsed.success
+				? []
+				: parsed.error.issues.map(({ code, path }) => ({ code, path }))
+		}).toStrictEqual({
+			success: false,
+			issues: [{ code: 'custom', path: ['plannedFloatingOutputs', 0] }]
+		});
+	});
+
+	it.each([
+		{
+			name: 'its derivation is absent from the copied closure',
+			plannedLocalClosure: [] as const,
+			installable: `${derivation}^out` as const
+		},
+		{
+			name: 'its installable does not refer to a derivation',
+			plannedLocalClosure: undefined,
+			installable: `${storePath}^out` as const
+		},
+		{
+			name: 'its installable selects every output',
+			plannedLocalClosure: [derivation] as const,
+			installable: `${derivation}^*` as const
+		},
+		{
+			name: 'its installable selects several outputs',
+			plannedLocalClosure: [derivation] as const,
+			installable: `${derivation}^out,dev` as const
+		},
+		{
+			name: 'its installable contains another selector',
+			plannedLocalClosure: [derivation] as const,
+			installable: `${derivation}^out^dev` as const
+		}
+	])('rejects an output when $name', ({ plannedLocalClosure, installable }) => {
+		const parsed = cohortPlanInputSchema.safeParse({
+			targets: [
+				{
+					attr: 'packages.x86_64-linux.app',
+					installable: storePath,
+					root: 'github:owner/repo/main'
+				}
+			],
+			...(plannedLocalClosure !== undefined && { plannedLocalClosure }),
+			plannedLocalOutputs: [{ path: storePath, installable }]
+		});
+		const issues = parsed.success
+			? []
+			: parsed.error.issues.map(({ code, path }) => ({ code, path }));
+
+		expect({ success: parsed.success, issues }).toStrictEqual({
+			success: false,
+			issues: [
+				{
+					code: 'custom',
+					path: ['plannedLocalOutputs', 0, 'installable']
+				}
+			]
+		});
+	});
 });

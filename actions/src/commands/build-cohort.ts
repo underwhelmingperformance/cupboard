@@ -226,12 +226,25 @@ function membersOf(entry: CohortMatrixEntry): readonly CohortMember[] {
 	}));
 }
 
+const dependencyBuildSchema = z.object({
+	path: storePathSchema,
+	installables: z.tuple([nixDerivedPathSchema], nixDerivedPathSchema),
+	requiredBy: z.tuple([nixDerivedPathSchema], nixDerivedPathSchema)
+});
+
+const dependencyCopySchema = z.object({
+	path: storePathSchema,
+	requiredBy: z.tuple([nixDerivedPathSchema], nixDerivedPathSchema)
+});
+
 const partitionSchema = z.object({
 	attachOnly: z.array(z.string()),
 	publishByReference: z.array(z.string()),
 	leftUpstream: z.array(z.string()),
 	alreadyValid: z.array(z.string()),
 	buildSet: z.array(nixDerivedPathSchema),
+	dependencyBuilds: z.array(dependencyBuildSchema).default([]),
+	dependencyCopies: z.array(dependencyCopySchema).default([]),
 	counts: z.object({
 		willBuild: z.number(),
 		willSubstitute: z.number(),
@@ -604,6 +617,7 @@ export interface BuildCohortDependencies {
 	readonly runNixCopy?: typeof runNixCopy;
 	readonly runNixDerivationShow?: typeof runNixDerivationShow;
 	readonly materialiseDerivationGraph?: typeof materialiseDerivationGraph;
+	readonly resolveLocalDerivationGraph?: typeof resolveLocalDerivationGraph;
 	readonly withLocalDerivationRoots?: WithLocalDerivationRoots;
 	readonly cupboardRunDependencies?: CupboardRunDependencies;
 	readonly reporter?: Reporter;
@@ -625,8 +639,8 @@ export async function buildCohortAction(
 	const unqueryable = members.filter(
 		(member) => member.queryInstallable === undefined
 	);
-	// A remote publication materialises, copies and builds its planned
-	// derivations over one rooted connection of its own; every other cohort
+	// A remote publication copies selected local closure paths, then realises
+	// dependencies and targets over one rooted connection. Every other cohort
 	// realises its build set from the runner's local store.
 	const isRemotePublication = inputs.push && inputs.store !== '';
 
@@ -645,6 +659,8 @@ export async function buildCohortAction(
 		dependencies.runNixDerivationShow ?? runNixDerivationShow;
 	const materialiseGraph =
 		dependencies.materialiseDerivationGraph ?? materialiseDerivationGraph;
+	const resolveLocalGraph =
+		dependencies.resolveLocalDerivationGraph ?? resolveLocalDerivationGraph;
 	const withLocalDerivationRoots =
 		dependencies.withLocalDerivationRoots ?? runWithLocalDerivationRoots;
 	const reporter = dependencies.reporter ?? createGithubReporter();
@@ -656,7 +672,9 @@ export async function buildCohortAction(
 					signal: dependencies.signal
 				};
 
-	const planAndBuild = async (): Promise<void> => {
+	const planAndBuild = async (execution: CohortExecution): Promise<void> => {
+		const remotePreparation =
+			execution.kind === 'remote' ? execution.preparation : undefined;
 		const result =
 			queryable.length === 0
 				? undefined
@@ -665,7 +683,8 @@ export async function buildCohortAction(
 						queryable,
 						environment,
 						runCupboard,
-						cupboardRunDependencies
+						cupboardRunDependencies,
+						remotePreparation?.graph
 					);
 
 		// Recheck build-set outputs immediately before realisation. Remove any target
@@ -766,7 +785,7 @@ export async function buildCohortAction(
 			cupboardRunDependencies
 		};
 
-		if (isRemotePublication) {
+		if (execution.kind === 'remote') {
 			if (remoteTargets.length === 0) {
 				await settleCohortBuild(context, { built: [] });
 				return;
@@ -779,112 +798,168 @@ export async function buildCohortAction(
 				);
 			}
 
-			const selectedTargets = remoteTargets.map((target) =>
-				nixDerivedPathSchema.parse(target)
+			const bindingByTarget = new Map(
+				execution.preparation.bindings.map((binding) => [
+					binding.target,
+					binding
+				])
 			);
-			const plannedDerivations = selectedTargets.map((target) =>
-				derivationPathOf(target)
-			);
+			const remoteBindings = remoteTargets.map((target) => {
+				const binding = bindingByTarget.get(target);
 
-			await withLocalDerivationRoots(
-				plannedDerivations,
-				async () => {
-					const remoteBindings = await materialisePlannedDerivations(
-						members,
-						selectedTargets,
-						runDerivationShow,
-						materialiseGraph,
-						dependencies.signal
+				if (binding === undefined) {
+					throw new PlannedTargetSourceMissingError(target);
+				}
+
+				return binding;
+			});
+			const remoteTargetSet = new Set(remoteTargets);
+			const dependencyBuilds = (partition?.dependencyBuilds ?? []).flatMap(
+				({ path, installables, requiredBy }) => {
+					const retainedOwners = requiredBy.filter((target) =>
+						remoteTargetSet.has(canonicalNixDerivedPath(target))
 					);
-					const publishRemoteResults: RemoteBuildPublisher = async (
-						results,
-						failures,
-						publicationPaths,
-						currentProvenanceRebuilds,
-						copiedFrom
-					) => {
-						const targetFailures = failures.filter(
-							(failure) => failure.kind === 'target'
-						);
-						const terminalFailure =
-							failures.length === 0
-								? undefined
-								: targetFailures.length === failures.length
-									? ({
-											kind: 'target-build',
-											failedTargets: targetFailures.map(
-												(failure) => failure.target
-											)
-										} as const)
-									: ({ kind: 'command' } as const);
 
-						if (inputs.allBestEffort) {
-							for (const failure of targetFailures) {
-								reporter.warn(
-									'remote target build failed',
-									`${failure.target}: ${failure.message}`
-								);
-							}
-						}
-
-						await settleCohortBuild(
-							{
-								...context,
-								provenanceRebuilds: currentProvenanceRebuilds
-							},
-							{
-								built: buildResultOutputPaths(results),
-								publicationPaths,
-								resultBuilds: results,
-								copiedFrom,
-								incompleteRoots: incompleteRootsFor(members, failures),
-								...(terminalFailure !== undefined && { terminalFailure })
-							}
-						);
-					};
-					const installablesByTarget = new Map(
-						remoteBindings.map((binding) => [
-							binding.target,
-							binding.installables.join(', ')
+					return retainedOwners.length === 0
+						? []
+						: [{ path, installables, requiredBy: retainedOwners }];
+				}
+			);
+			const dependencyCopies = (partition?.dependencyCopies ?? [])
+				.filter(({ requiredBy }) =>
+					requiredBy.some((target) =>
+						remoteTargetSet.has(canonicalNixDerivedPath(target))
+					)
+				)
+				.map(({ path }) => path);
+			const copiedPaths = [
+				...new Set([
+					...remoteBindings.map((binding) => binding.derivation),
+					...dependencyBuilds.flatMap(({ installables }) =>
+						installables.map((installable) => derivationPathOf(installable))
+					),
+					...dependencyCopies
+				])
+			];
+			const publishRemoteResults: RemoteBuildPublisher = async (
+				results,
+				failures,
+				publicationPaths,
+				currentProvenanceRebuilds,
+				copiedFrom
+			) => {
+				const targetResults = results.filter((result) =>
+					remoteTargetSet.has(canonicalNixDerivedPath(result.target))
+				);
+				const targetFailures = failures.filter(
+					(failure) => failure.kind === 'target'
+				);
+				const failedTargets = new Set(
+					targetFailures.map((failure) =>
+						canonicalNixDerivedPath(nixDerivedPathSchema.parse(failure.target))
+					)
+				);
+				const dependencyOwnersByProducer = new Map(
+					dependencyBuilds.flatMap(({ installables, requiredBy }) =>
+						installables.map((installable) => [
+							canonicalNixDerivedPath(installable),
+							requiredBy
 						])
+					)
+				);
+				const unscopedFailures = failures.filter((failure) => {
+					if (failure.kind === 'target') {
+						return false;
+					}
+
+					if (failure.kind !== 'dependency') {
+						return true;
+					}
+
+					const requiredBy = dependencyOwnersByProducer.get(
+						canonicalNixDerivedPath(nixDerivedPathSchema.parse(failure.target))
 					);
 
-					await reporter.progress(
-						'Building remote targets',
-						{ total: remoteBindings.length },
-						(bar) =>
-							runNixWithResults(
-								remoteBindings.map((binding) => binding.target),
-								inputs.maxJobs,
-								inputs.store,
-								publishRemoteResults,
-								dependencies.signal,
-								{
-									derivations: remoteBindings.map(
-										(binding) => binding.derivation
-									),
-									...(inputs.requireProvenance && {
-										requireProvenance: true
-									}),
-									onTargetStarted: (target) => {
-										reporter.info(
-											`Building remote target ${installablesByTarget.get(target) ?? target}`
-										);
-									},
-									onTargetCompleted: () => {
-										bar.advance();
-									},
-									copy: () =>
-										runCopy(
-											remoteBindings.map((binding) => binding.derivation),
-											inputs.store,
-											dependencies.signal
-										)
-								}
-							)
+					return (
+						requiredBy === undefined ||
+						requiredBy.some(
+							(target) => !failedTargets.has(canonicalNixDerivedPath(target))
+						)
 					);
-				},
-				dependencies.signal
+				});
+				const terminalFailure =
+					failures.length === 0
+						? undefined
+						: unscopedFailures.length === 0
+							? ({
+									kind: 'target-build',
+									failedTargets: targetFailures.map((failure) => failure.target)
+								} as const)
+							: ({ kind: 'command' } as const);
+
+				if (inputs.allBestEffort) {
+					for (const failure of targetFailures) {
+						reporter.warn(
+							'remote target build failed',
+							`${failure.target}: ${failure.message}`
+						);
+					}
+				}
+
+				await settleCohortBuild(
+					{
+						...context,
+						provenanceRebuilds: currentProvenanceRebuilds
+					},
+					{
+						built: buildResultOutputPaths(targetResults),
+						publicationPaths,
+						resultBuilds: targetResults,
+						publicationBuilds: results,
+						copiedFrom,
+						incompleteRoots: incompleteRootsFor(members, failures),
+						...(terminalFailure !== undefined && { terminalFailure })
+					}
+				);
+			};
+			const installablesByTarget = new Map(
+				remoteBindings.map((binding) => [
+					binding.target,
+					binding.installables.join(', ')
+				])
+			);
+
+			await reporter.progress(
+				'Building remote targets',
+				{ total: remoteBindings.length },
+				(bar) =>
+					runNixWithResults(
+						remoteBindings.map((binding) => binding.target),
+						inputs.maxJobs,
+						inputs.store,
+						publishRemoteResults,
+						dependencies.signal,
+						{
+							copyPaths: copiedPaths,
+							...(dependencyBuilds.length > 0 && { dependencyBuilds }),
+							...(inputs.requireProvenance && {
+								requireProvenance: true
+							}),
+							onTargetStarted: (target) => {
+								reporter.info(
+									`Building remote target ${installablesByTarget.get(target) ?? target}`
+								);
+							},
+							onDependencyStarted: (dependency) => {
+								reporter.info(`Building remote dependency ${dependency}`);
+							},
+							onTargetCompleted: () => {
+								bar.advance();
+							},
+							copy: () =>
+								runCopy(copiedPaths, inputs.store, dependencies.signal)
+						}
+					)
 			);
 			return;
 		}
@@ -970,6 +1045,40 @@ export async function buildCohortAction(
 		}
 	};
 
+	if (isRemotePublication && queryable.length > 0) {
+		const targets = queryable.map((member) =>
+			nixDerivedPathSchema.parse(member.queryInstallable)
+		);
+		const plannedDerivations = [
+			...new Set(targets.map((target) => derivationPathOf(target)))
+		];
+
+		await withLocalDerivationRoots(
+			plannedDerivations,
+			async () => {
+				const bindings = await materialisePlannedDerivations(
+					queryable,
+					targets,
+					runDerivationShow,
+					materialiseGraph,
+					dependencies.signal
+				);
+				const graph = await resolveLocalGraph(
+					plannedDerivations,
+					dependencies.signal
+				);
+
+				await planAndBuild({
+					kind: 'remote',
+					preparation: { bindings, graph }
+				});
+			},
+			dependencies.signal
+		);
+
+		return;
+	}
+
 	if (!isRemotePublication && queryable.length > 0) {
 		const targets = queryable.map((member) =>
 			nixDerivedPathSchema.parse(member.queryInstallable)
@@ -992,7 +1101,7 @@ export async function buildCohortAction(
 					materialiseGraph,
 					dependencies.signal
 				);
-				await planAndBuild();
+				await planAndBuild({ kind: 'local' });
 			},
 			dependencies.signal
 		);
@@ -1000,7 +1109,7 @@ export async function buildCohortAction(
 		return;
 	}
 
-	await planAndBuild();
+	await planAndBuild({ kind: 'local' });
 }
 
 async function settledTargetBuildFailure(
@@ -1100,18 +1209,18 @@ async function resolveStreamedBuildOwners(options: {
 
 async function writeRemoteFailureReceipt(
 	receiptFile: string,
-	built: readonly string[],
+	shouldPreservePublishedReceipt: boolean,
 	terminalFailure: ParsedTerminalBuildFailure
 ): Promise<void> {
 	let receipt: BuildReceiptV3;
 
-	if (built.length === 0) {
-		receipt = { version: 3, paths: [], subjects: [], terminalFailure };
-	} else {
+	if (shouldPreservePublishedReceipt) {
 		const settled = buildReceiptV3Schema.parse(
 			JSON.parse(await readFile(receiptFile, 'utf8'))
 		);
 		receipt = { ...settled, terminalFailure };
+	} else {
+		receipt = { version: 3, paths: [], subjects: [], terminalFailure };
 	}
 
 	await writeFile(receiptFile, `${JSON.stringify(receipt, undefined, 2)}\n`);
@@ -1139,6 +1248,7 @@ async function settleCohortBuild(
 		readonly built: readonly string[];
 		readonly publicationPaths?: readonly string[];
 		readonly resultBuilds?: readonly NixBuildResult[];
+		readonly publicationBuilds?: readonly NixBuildResult[];
 		readonly localBuilds?: readonly CohortOwnedBuild[];
 		readonly incompleteRoots?: ReadonlySet<string>;
 		readonly terminalFailure?: ParsedTerminalBuildFailure;
@@ -1164,6 +1274,7 @@ async function settleCohortBuild(
 		built,
 		publicationPaths = built,
 		resultBuilds = [],
+		publicationBuilds = resultBuilds,
 		localBuilds = [],
 		incompleteRoots = new Set<string>(),
 		terminalFailure,
@@ -1175,7 +1286,7 @@ async function settleCohortBuild(
 		path.dirname(inputs.receiptFile),
 		'observed-copies.json'
 	);
-	const claimable = claimableOutputPaths(resultBuilds, provenanceRebuilds);
+	const claimable = claimableOutputPaths(publicationBuilds, provenanceRebuilds);
 	const alreadyHeld = receiptAlreadyHeldPaths(
 		partition?.alreadyValid ?? [],
 		claimable
@@ -1266,7 +1377,11 @@ async function settleCohortBuild(
 	}
 
 	if (terminalFailure !== undefined) {
-		await writeRemoteFailureReceipt(inputs.receiptFile, built, terminalFailure);
+		await writeRemoteFailureReceipt(
+			inputs.receiptFile,
+			isReconciled,
+			terminalFailure
+		);
 	}
 
 	if (inputs.push) {
@@ -2130,7 +2245,8 @@ async function planCohort(
 	queryable: readonly CohortMember[],
 	environment: Environment,
 	runCupboard: typeof defaultRunCupboard,
-	cupboardRunDependencies: CupboardRunDependencies | undefined
+	cupboardRunDependencies: CupboardRunDependencies | undefined,
+	plannedLocalGraph: LocalDerivationGraph | undefined
 ): Promise<PlanCohortResultData> {
 	const runnerTemporary = requireEnvironment(environment, 'RUNNER_TEMP');
 	const targetsFile = path.join(
@@ -2158,7 +2274,20 @@ async function planCohort(
 						expectedPath: member.expectedPath
 					}),
 					root: member.root
-				}))
+				})),
+				...(plannedLocalGraph !== undefined && {
+					plannedLocalClosure: plannedLocalGraph.closure,
+					...(plannedLocalGraph.substitutableDerivations.length > 0 && {
+						plannedSubstitutableDerivations:
+							plannedLocalGraph.substitutableDerivations
+					}),
+					...(plannedLocalGraph.floatingOutputs.length > 0 && {
+						plannedFloatingOutputs: plannedLocalGraph.floatingOutputs
+					}),
+					...(plannedLocalGraph.outputs.length > 0 && {
+						plannedLocalOutputs: plannedLocalGraph.outputs
+					})
+				})
 			},
 			undefined,
 			2
@@ -2339,6 +2468,15 @@ interface PlannedTargetBinding {
 	readonly derivation: StorePathString;
 	readonly installables: readonly string[];
 }
+
+interface RemoteCohortPreparation {
+	readonly bindings: readonly PlannedTargetBinding[];
+	readonly graph: LocalDerivationGraph;
+}
+
+type CohortExecution =
+	| { readonly kind: 'local' }
+	| { readonly kind: 'remote'; readonly preparation: RemoteCohortPreparation };
 
 function plannedTargetBindings(
 	members: readonly CohortMember[],
@@ -2739,6 +2877,131 @@ export async function materialiseDerivationGraph(
 	}
 }
 
+/**
+An output whose path is declared by a derivation in the local graph.
+*/
+export interface LocalDerivationOutput {
+	readonly path: StorePathString;
+	readonly installable: NixDerivedPathString;
+}
+
+/**
+The local derivation graph that the action passes to cohort planning.
+*/
+export interface LocalDerivationGraph {
+	/**
+	The closure of the top-level derivations.
+	*/
+	readonly closure: readonly StorePathString[];
+	/**
+	Derivations whose own policy permits Nix to substitute their outputs.
+	*/
+	readonly substitutableDerivations: readonly StorePathString[];
+	/**
+	Derived-path installables whose output paths the derivation does not declare.
+	*/
+	readonly floatingOutputs: readonly NixDerivedPathString[];
+	/**
+	The declared outputs with known paths from the derivations in `closure`.
+	*/
+	readonly outputs: readonly LocalDerivationOutput[];
+}
+
+const maximumConcurrentGraphReads = 4;
+
+/**
+The Nix operations used to inspect a materialised local derivation graph.
+*/
+export type LocalDerivationGraphReader = Pick<
+	Nix,
+	'readDerivation' | 'resolveClosure'
+>;
+
+/**
+Dependencies for reading a materialised local derivation graph.
+*/
+export interface LocalDerivationGraphDependencies {
+	readonly openNix?: (signal?: AbortSignal) => LocalDerivationGraphReader;
+}
+
+const defaultLocalDerivationGraphReader = (
+	signal?: AbortSignal
+): LocalDerivationGraphReader =>
+	Nix.openForAvailability(undefined, {
+		...(signal !== undefined && { signal })
+	});
+
+/**
+Returns the closure of the top-level derivations, their declared outputs with
+known paths, and the derivations whose own policy permits substitution. Each
+output entry pairs its store path with the derived-path installable that selects
+it.
+*/
+export async function resolveLocalDerivationGraph(
+	derivations: readonly StorePathString[],
+	signal?: AbortSignal,
+	dependencies: LocalDerivationGraphDependencies = {}
+): Promise<LocalDerivationGraph> {
+	if (derivations.length === 0) {
+		return {
+			closure: [],
+			floatingOutputs: [],
+			substitutableDerivations: [],
+			outputs: []
+		};
+	}
+
+	const nix = (dependencies.openNix ?? defaultLocalDerivationGraphReader)(
+		signal
+	);
+	const closure = await nix.resolveClosure(derivations);
+	const derivationPaths = closure
+		.map(({ storePath }) => storePath)
+		.filter((storePath) => storePath.endsWith('.drv'));
+	const parsedDerivations = await mapWithConcurrency(
+		derivationPaths,
+		maximumConcurrentGraphReads,
+		async (derivation) => ({
+			derivation,
+			term: await nix.readDerivation(derivation)
+		})
+	);
+
+	return {
+		closure: closure.map(({ storePath }) => storePath),
+		floatingOutputs: parsedDerivations.flatMap(({ derivation, term }) =>
+			term.outputs
+				.entries()
+				.flatMap(([name, output]) =>
+					output === undefined
+						? [nixDerivedPathSchema.parse(`${derivation}^${name}`)]
+						: []
+				)
+				.toArray()
+		),
+		substitutableDerivations: parsedDerivations
+			.filter(({ term }) => term.allowsSubstitutes)
+			.map(({ derivation }) => derivation),
+		outputs: parsedDerivations.flatMap(({ derivation, term }) =>
+			term.outputs
+				.entries()
+				.flatMap(([name, output]) =>
+					output === undefined
+						? []
+						: [
+								{
+									path: output,
+									installable: nixDerivedPathSchema.parse(
+										`${derivation}^${name}`
+									)
+								}
+							]
+				)
+				.toArray()
+		)
+	};
+}
+
 export type WithLocalDerivationRoots = <T>(
 	derivations: readonly StorePathString[],
 	use: () => Promise<T>,
@@ -2842,14 +3105,14 @@ export async function runWithLocalDerivationRoots<T>(
 }
 
 /**
- * Native Nix copy argv for the complete closure of each locally materialised
- * planned derivation, preserving the selected remote store verbatim.
+ * Native Nix copy arguments for paths that the action must place in the
+ * selected remote store.
  */
 export function nixCopyArguments(
-	derivations: readonly StorePathString[],
+	paths: readonly StorePathString[],
 	store: string
 ): readonly string[] {
-	return ['copy', '--to', store, '--', ...derivations];
+	return ['copy', '--to', store, '--', ...paths];
 }
 
 /**
@@ -2879,10 +3142,10 @@ const defaultRunNixCopyDependencies: RunNixCopyDependencies = {
 };
 
 /**
-Copy the locally evaluated derivation closures to the remote build store.
-*/
+ * Copies the required local store paths to the remote build store.
+ */
 export async function runNixCopy(
-	derivations: readonly StorePathString[],
+	paths: readonly StorePathString[],
 	store: string,
 	signal?: AbortSignal,
 	dependencies: RunNixCopyDependencies = defaultRunNixCopyDependencies
@@ -2890,7 +3153,7 @@ export async function runNixCopy(
 	signal?.throwIfAborted();
 
 	const result = await waitForAbortableChildProcess(
-		dependencies.start(nixCopyArguments(derivations, store), signal),
+		dependencies.start(nixCopyArguments(paths, store), signal),
 		signal
 	);
 
@@ -2919,11 +3182,11 @@ type RemoteBuildPublisher = (
 ) => Promise<void>;
 
 /**
- * Builds the queryable targets through one selected remote-store connection,
- * roots every output that Nix returns on that connection, and runs publication
- * before closing it. The keyed result is the current invocation's evidence:
- * unlike `--print-out-paths`, it distinguishes a build from substitution and a
- * path that became valid before Nix asked for it.
+ * Copies selected local paths and realises dependencies and cohort targets
+ * through one connection to the remote store. The connection protects the
+ * copied paths and every realised output until publication finishes. Keyed
+ * results distinguish current builds from substitutions and paths that became
+ * valid before Nix started them.
  */
 export async function runNixBuildWithResults(
 	installables: readonly NixDerivedPathString[],
@@ -2946,9 +3209,9 @@ export async function runNixBuildWithResults(
 					...(signal !== undefined && { signal })
 				});
 
-	// The store reports each copy it performs over the connection that asked for
-	// the work, so by the time publication runs the client has recorded every
-	// path the build fetched.
+	// The store reports each copy on the connection that requested the build.
+	// Publication runs before that connection closes, so the client has recorded
+	// every path the build fetched.
 	await nix.withConnection((session) =>
 		buildAndRootNixResults(
 			session,
@@ -2968,17 +3231,26 @@ export async function runNixBuildWithResults(
 
 /**
  * Options for work that shares the remote daemon session. The connection
- * protects copied derivations and realised outputs until publication finishes.
+ * protects copied paths and realised outputs until publication finishes.
  */
 export interface RemoteBuildSessionOptions {
 	/**
-	Top-level derivations whose copied closures the session must protect.
+	Local store paths whose copied closures the session must protect.
 	*/
-	readonly derivations: readonly StorePathString[];
+	readonly copyPaths: readonly StorePathString[];
 	/**
-	Copies those derivation closures after their temporary roots exist.
+	Copies those paths after their temporary roots exist.
 	*/
 	copy(): Promise<void>;
+	/**
+	Derived-path installables to realise before the cohort targets. Their
+	derivations are included in `copyPaths`.
+	*/
+	readonly dependencyBuilds?: readonly RemoteDependencyBuild[];
+	/**
+	Called immediately before the store realises one dependency.
+	*/
+	readonly onDependencyStarted?: (dependency: NixDerivedPathString) => void;
 	/**
 	Require every successful target to have current-run build evidence.
 	*/
@@ -2992,6 +3264,19 @@ export interface RemoteBuildSessionOptions {
 	session protects that target's outputs from garbage collection.
 	*/
 	readonly onTargetCompleted?: (target: NixDerivedPathString) => void;
+}
+
+/**
+One output required by target substitution and the derived paths that can
+realise it.
+*/
+export interface RemoteDependencyBuild {
+	readonly path: StorePathString;
+	readonly installables: readonly [
+		NixDerivedPathString,
+		...NixDerivedPathString[]
+	];
+	readonly requiredBy?: readonly NixDerivedPathString[];
 }
 
 /**
@@ -3015,14 +3300,30 @@ export async function buildAndRootNixResults(
 	) => Promise<void>,
 	options?: RemoteBuildSessionOptions
 ): Promise<void> {
-	if (options !== undefined) {
-		const derivations = new Set(options.derivations);
+	const dependencyResults: NixBuildResult[] = [];
+	const dependencyFailures: RemoteCohortBuildFailure[] = [];
+	const failedDependencyPaths = new Map<string, StorePathString>();
 
-		for (const derivation of derivations) {
-			await session.addTempRoot(derivation);
+	if (options !== undefined) {
+		const copyPaths = new Set(options.copyPaths);
+
+		for (const path of copyPaths) {
+			await session.addTempRoot(path);
 		}
 
 		await options.copy();
+		const dependencies = await realiseRemoteDependencies(
+			session,
+			options.dependencyBuilds ?? [],
+			options.onDependencyStarted
+		);
+
+		dependencyResults.push(...dependencies.results);
+		dependencyFailures.push(...dependencies.failures);
+
+		for (const [target, path] of dependencies.failedPaths) {
+			failedDependencyPaths.set(target, path);
+		}
 	}
 
 	const expectedBuilds = await predictableRemoteBuilds(session, installables);
@@ -3037,8 +3338,8 @@ export async function buildAndRootNixResults(
 		await session.addTempRoot(output);
 	}
 
-	const results: NixBuildResult[] = [];
-	const failures: RemoteCohortBuildFailure[] = [];
+	const results: NixBuildResult[] = [...dependencyResults];
+	const targetFailures: RemoteCohortBuildFailure[] = [];
 	const provenanceRebuilds = new Set<NixDerivedPathString>();
 	const queryCurrentValidity = session.queryValidPaths;
 
@@ -3052,6 +3353,23 @@ export async function buildAndRootNixResults(
 	}
 
 	for (const build of expectedBuilds) {
+		const dependencyResult = dependencyResults.find(
+			(result) => canonicalNixDerivedPath(result.target) === build.target
+		);
+
+		if (
+			dependencyResult !== undefined &&
+			(options?.requireProvenance !== true ||
+				dependencyResult.outcome.kind === 'built')
+		) {
+			options?.onTargetCompleted?.(build.target);
+			continue;
+		}
+
+		if (dependencyResult !== undefined) {
+			results.splice(results.indexOf(dependencyResult), 1);
+		}
+
 		options?.onTargetStarted?.(build.target);
 
 		const selectedOutputs = build.outputs.values().toArray();
@@ -3093,7 +3411,7 @@ export async function buildAndRootNixResults(
 		}
 
 		results.push(...reconciliation.results);
-		failures.push(...reconciliation.failures);
+		targetFailures.push(...reconciliation.failures);
 
 		const hasTargetProtocolFailure = reconciliation.failures.some(
 			(failure) =>
@@ -3111,12 +3429,23 @@ export async function buildAndRootNixResults(
 	const publicationInfos =
 		outputPaths.length === 0 ? [] : await session.resolveClosure(outputPaths);
 	const publicationPaths = publicationInfos.map((info) => info.storePath);
+	const publicationPathSet = new Set(publicationPaths);
+	const remainingDependencyFailures = dependencyFailures.filter((failure) => {
+		if (failure.kind !== 'dependency') {
+			return true;
+		}
+
+		const failedPath = failedDependencyPaths.get(failure.target);
+
+		return failedPath === undefined || !publicationPathSet.has(failedPath);
+	});
+	const failures = [...remainingDependencyFailures, ...targetFailures];
 
 	await publish(results, failures, publicationPaths, provenanceRebuilds);
 
 	if (failures.length > 0) {
-		const protocolFailures = failures.filter(
-			(failure) => failure.kind === 'protocol'
+		const protocolFailures = failures.filter((failure) =>
+			['dependency-protocol', 'protocol'].includes(failure.kind)
 		);
 
 		if (protocolFailures.length > 0) {
@@ -3127,8 +3456,298 @@ export async function buildAndRootNixResults(
 	}
 }
 
+async function realiseRemoteDependencies(
+	session: Pick<
+		NixDaemonSession,
+		'addTempRoot' | 'buildPathsWithResults' | 'readDerivation'
+	>,
+	dependencies: readonly RemoteDependencyBuild[],
+	onStarted: ((dependency: NixDerivedPathString) => void) | undefined
+): Promise<{
+	readonly results: readonly NixBuildResult[];
+	readonly failures: readonly RemoteCohortBuildFailure[];
+	readonly failedPaths: ReadonlyMap<string, StorePathString>;
+}> {
+	if (dependencies.length === 0) {
+		return { results: [], failures: [], failedPaths: new Map() };
+	}
+
+	const states: RemoteDependencyBuildState[] = [];
+
+	for (const dependency of dependencies) {
+		states.push({
+			dependency,
+			builds: await predictableRemoteBuilds(session, dependency.installables),
+			attempted: new Set(),
+			isResolved: false,
+			isExhausted: false
+		});
+	}
+
+	const statesByDerivation = Map.groupBy(
+		states.flatMap((state) =>
+			state.builds.map((build) => ({
+				build,
+				derivation: build.derivation,
+				state
+			}))
+		),
+		({ derivation }) => derivation
+	);
+	const results: NixBuildResult[] = [];
+	const unmatchedProtocolFailures: RemoteCohortBuildFailure[] = [];
+	while (states.some((state) => !state.isResolved && !state.isExhausted)) {
+		const selection = selectRemoteDependencyBuilds(states, statesByDerivation);
+
+		if (selection.ready.length === 0 && selection.didAdvance) {
+			continue;
+		}
+
+		const ready =
+			selection.ready.length > 0
+				? selection.ready
+				: forcedRemoteDependencyBuild(states);
+
+		if (ready.length === 0) {
+			break;
+		}
+
+		for (const { build } of ready) {
+			for (const output of build.outputs.values()) {
+				await session.addTempRoot(output);
+			}
+
+			onStarted?.(build.installable);
+		}
+
+		const builds = ready.map(({ build }) => build);
+		const returned = await session.buildPathsWithResults(
+			builds.map((build) => build.installable),
+			'normal'
+		);
+		const reconciliation = reconcileBuildResults(builds, returned);
+
+		for (const output of reconciliation.outputs) {
+			await session.addTempRoot(output);
+		}
+
+		results.push(...reconciliation.results);
+		recordRemoteDependencyResults(ready, reconciliation);
+		const selectedTargets = new Set(ready.map(({ build }) => build.target));
+		unmatchedProtocolFailures.push(
+			...reconciliation.failures.flatMap((failure) => {
+				const target = canonicalNixDerivedPath(
+					nixDerivedPathSchema.parse(failure.target)
+				);
+
+				return failure.kind === 'protocol' && !selectedTargets.has(target)
+					? [{ ...failure, kind: 'dependency-protocol' as const }]
+					: [];
+			})
+		);
+
+		if (
+			unmatchedProtocolFailures.length > 0 ||
+			ready.some(({ state }) => state.hasProtocolFailure === true)
+		) {
+			break;
+		}
+	}
+
+	const failedStates = states.filter(
+		(
+			state
+		): state is RemoteDependencyBuildState & {
+			readonly lastFailure: RemoteCohortBuildFailure;
+		} => !state.isResolved && state.lastFailure !== undefined
+	);
+
+	return {
+		results,
+		failures: [
+			...failedStates.map(({ lastFailure }) => lastFailure),
+			...unmatchedProtocolFailures
+		],
+		failedPaths: new Map(
+			failedStates.map(({ dependency, lastFailure }) => [
+				lastFailure.target,
+				dependency.path
+			])
+		)
+	};
+}
+
+interface RemoteDependencyBuildState {
+	readonly dependency: RemoteDependencyBuild;
+	readonly builds: readonly ExpectedRemoteBuild[];
+	readonly attempted: Set<NixDerivedPathString>;
+	isResolved: boolean;
+	isExhausted: boolean;
+	hasProtocolFailure?: boolean;
+	lastFailure?: RemoteCohortBuildFailure;
+}
+
+interface SelectedRemoteDependencyBuild {
+	readonly state: RemoteDependencyBuildState;
+	readonly build: ExpectedRemoteBuild;
+}
+
+function selectRemoteDependencyBuilds(
+	states: readonly RemoteDependencyBuildState[],
+	statesByDerivation: ReadonlyMap<
+		StorePathString,
+		readonly {
+			readonly build: ExpectedRemoteBuild;
+			readonly state: RemoteDependencyBuildState;
+		}[]
+	>
+): {
+	readonly ready: readonly SelectedRemoteDependencyBuild[];
+	readonly didAdvance: boolean;
+} {
+	const ready: SelectedRemoteDependencyBuild[] = [];
+	let didAdvance = false;
+
+	for (const state of states) {
+		if (state.isResolved || state.isExhausted) {
+			continue;
+		}
+
+		const selection = selectRemoteDependencyBuild(state, statesByDerivation);
+		didAdvance ||= selection.didAdvance;
+
+		if (selection.build !== undefined) {
+			ready.push({ state, build: selection.build });
+		}
+	}
+
+	return { ready, didAdvance };
+}
+
+function selectRemoteDependencyBuild(
+	state: RemoteDependencyBuildState,
+	statesByDerivation: ReadonlyMap<
+		StorePathString,
+		readonly {
+			readonly build: ExpectedRemoteBuild;
+			readonly state: RemoteDependencyBuildState;
+		}[]
+	>
+): {
+	readonly build?: ExpectedRemoteBuild;
+	readonly didAdvance: boolean;
+} {
+	const attemptedBefore = state.attempted.size;
+	let hasWaitingCandidate = false;
+
+	for (const build of state.builds) {
+		if (state.attempted.has(build.target)) {
+			continue;
+		}
+
+		const prerequisites = new Set(
+			build.inputDerivations
+				.entries()
+				.flatMap(([derivation, outputNames]) =>
+					(statesByDerivation.get(derivation) ?? []).flatMap(
+						({ build: prerequisiteBuild, state: prerequisite }) =>
+							outputNames.some((outputName) =>
+								prerequisiteBuild.outputs.has(outputName)
+							)
+								? [prerequisite]
+								: []
+					)
+				)
+		);
+
+		if ([...prerequisites].some((prerequisite) => prerequisite.isExhausted)) {
+			state.attempted.add(build.target);
+			continue;
+		}
+
+		if ([...prerequisites].every((prerequisite) => prerequisite.isResolved)) {
+			return {
+				build,
+				didAdvance: state.attempted.size > attemptedBefore
+			};
+		}
+
+		hasWaitingCandidate = true;
+	}
+
+	state.isExhausted = !hasWaitingCandidate;
+
+	return {
+		didAdvance: state.attempted.size > attemptedBefore || state.isExhausted
+	};
+}
+
+function forcedRemoteDependencyBuild(
+	states: readonly RemoteDependencyBuildState[]
+): readonly SelectedRemoteDependencyBuild[] {
+	for (const state of states) {
+		if (state.isResolved || state.isExhausted) {
+			continue;
+		}
+
+		const build = state.builds.find(
+			(candidate) => !state.attempted.has(candidate.target)
+		);
+
+		if (build !== undefined) {
+			return [{ state, build }];
+		}
+	}
+
+	return [];
+}
+
+function recordRemoteDependencyResults(
+	selected: readonly SelectedRemoteDependencyBuild[],
+	reconciliation: ReconciledBuildResults
+): void {
+	const results = new Set(
+		reconciliation.results.map((result) =>
+			canonicalNixDerivedPath(result.target)
+		)
+	);
+	const failures = new Map(
+		reconciliation.failures.map((failure) => [
+			canonicalNixDerivedPath(nixDerivedPathSchema.parse(failure.target)),
+			failure
+		])
+	);
+
+	for (const { state, build } of selected) {
+		state.attempted.add(build.target);
+
+		const failure = failures.get(build.target);
+
+		if (failure === undefined && results.has(build.target)) {
+			state.isResolved = true;
+			continue;
+		}
+
+		if (failure === undefined) {
+			continue;
+		}
+
+		state.lastFailure = {
+			...failure,
+			kind: failure.kind === 'protocol' ? 'dependency-protocol' : 'dependency'
+		};
+
+		if (failure.kind === 'protocol') {
+			state.hasProtocolFailure = true;
+			state.isExhausted = true;
+		}
+	}
+}
+
 interface ExpectedRemoteBuild {
+	readonly derivation: StorePathString;
 	readonly installable: NixDerivedPathString;
+	readonly inputDerivations: ReadonlyMap<StorePathString, readonly string[]>;
 	readonly target: NixDerivedPathString;
 	readonly outputs: ReadonlyMap<string, StorePathString>;
 }
@@ -3166,7 +3785,9 @@ async function predictableRemoteBuilds(
 		}
 
 		builds.push({
+			derivation: derivationPath,
 			installable,
+			inputDerivations: derivation.inputDerivations,
 			target: canonicalNixDerivedPath(installable),
 			outputs
 		});
@@ -3186,9 +3807,11 @@ function incompleteRootsFor(
 	failures: readonly RemoteCohortBuildFailure[]
 ): ReadonlySet<string> {
 	const failedTargets = new Set(
-		failures.map((failure) =>
-			canonicalNixDerivedPath(nixDerivedPathSchema.parse(failure.target))
-		)
+		failures
+			.filter((failure) => ['protocol', 'target'].includes(failure.kind))
+			.map((failure) =>
+				canonicalNixDerivedPath(nixDerivedPathSchema.parse(failure.target))
+			)
 	);
 
 	return new Set(

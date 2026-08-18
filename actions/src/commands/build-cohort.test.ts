@@ -12,6 +12,7 @@ import {
 	type NixDerivedPathString,
 	type NixValidPathInfo
 } from '@cupboard/nix';
+import { Derivation } from '@cupboard/nix-store/derivation';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	storeDirectorySchema,
@@ -83,6 +84,7 @@ import {
 	type RemoteBuildSessionOptions,
 	remoteBuildSetOptions,
 	resolveBuildCohortInputs,
+	resolveLocalDerivationGraph,
 	rootGroups,
 	runNixBuild,
 	runNixCopy,
@@ -233,19 +235,34 @@ async function parsePushWithRealCli(
 	await program.parseAsync(['node', 'cupboard', ...arguments_]);
 }
 
-function remoteDerivation(drvPath: string): string {
-	const outputs: readonly (readonly [string, string])[] = drvPath.includes(
-		'-float.drv'
-	)
-		? [
-				['out', floatingBuiltPath],
-				['dev', floatingDevelopmentPath]
-			]
-		: drvPath.includes('-app.drv')
-			? [['out', appPath]]
-			: [['out', libraryBuiltPath]];
+function remoteDerivation(
+	drvPath: string,
+	inputDerivations: readonly (
+		string | readonly [string, readonly string[]]
+	)[] = [],
+	declaredOutputs?: readonly (readonly [string, string])[]
+): string {
+	const outputs =
+		declaredOutputs ??
+		(drvPath.includes('-float.drv')
+			? [
+					['out', floatingBuiltPath],
+					['dev', floatingDevelopmentPath]
+				]
+			: drvPath.includes('-app.drv')
+				? [['out', appPath]]
+				: [['out', libraryBuiltPath]]);
 
-	return `Derive([${outputs.map(([name, output]) => `("${name}","${output}","","")`).join(',')}],[],[],"x86_64-linux","/bin/sh",[],[])`;
+	const inputs = inputDerivations
+		.map((input) => {
+			const [path, outputNames] =
+				typeof input === 'string' ? [input, ['out']] : input;
+
+			return `("${path}",[${outputNames.map((name) => `"${name}"`).join(',')}])`;
+		})
+		.join(',');
+
+	return `Derive([${outputs.map(([name, output]) => `("${name}","${output}","","")`).join(',')}],[${inputs}],[],"x86_64-linux","/bin/sh",[],[])`;
 }
 
 function cohortObject(
@@ -1257,6 +1274,69 @@ describe('nixDerivationShowArguments', () => {
 	});
 });
 
+describe('resolveLocalDerivationGraph', () => {
+	it('retains every output and records only derivations that permit substitution', async () => {
+		const appDerivation = storePathSchema.parse(
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
+		);
+		const libraryDerivation = storePathSchema.parse(
+			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'
+		);
+		const derivations = new Map([
+			[appDerivation, Derivation.parse(remoteDerivation(appDerivation))],
+			[
+				libraryDerivation,
+				Derivation.parse(
+					remoteDerivation(
+						libraryDerivation,
+						[],
+						[
+							['out', libraryBuiltPath],
+							['dev', '']
+						]
+					).replace(',[],[])', ',[],[("allowSubstitutes","")])')
+				)
+			]
+		]);
+
+		const graph = await resolveLocalDerivationGraph(
+			[appDerivation, libraryDerivation],
+			undefined,
+			{
+				openNix: () => ({
+					resolveClosure: (paths) =>
+						Promise.resolve(paths.map((path) => remotePathInfo(path))),
+					readDerivation: (derivation) => {
+						const term = derivations.get(storePathSchema.parse(derivation));
+
+						return term === undefined
+							? Promise.reject(
+									new Error('The derivation is not in the test graph')
+								)
+							: Promise.resolve(term);
+					}
+				})
+			}
+		);
+
+		expect(graph).toStrictEqual({
+			closure: [appDerivation, libraryDerivation],
+			floatingOutputs: [derivedPath(`${libraryDerivation}^dev`)],
+			substitutableDerivations: [appDerivation],
+			outputs: [
+				{
+					path: storePathSchema.parse(appPath),
+					installable: derivedPath(`${appDerivation}^out`)
+				},
+				{
+					path: storePathSchema.parse(libraryBuiltPath),
+					installable: derivedPath(`${libraryDerivation}^out`)
+				}
+			]
+		});
+	});
+});
+
 describe('parseNixDerivationShow', () => {
 	const appDerivation = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv';
 	const libraryDerivation =
@@ -1324,7 +1404,7 @@ describe('buildAndRootNixResults', () => {
 			[derivedPath(libraryQueryInstallable)],
 			() => Promise.resolve(),
 			{
-				derivations: [],
+				copyPaths: [],
 				requireProvenance: true,
 				copy: () => Promise.resolve()
 			}
@@ -1356,7 +1436,7 @@ describe('buildAndRootNixResults', () => {
 			[derivedPath(libraryQueryInstallable)],
 			() => Promise.resolve(),
 			{
-				derivations: [],
+				copyPaths: [],
 				requireProvenance: true,
 				copy: () => Promise.resolve()
 			}
@@ -1400,7 +1480,7 @@ describe('buildAndRootNixResults', () => {
 			[target],
 			() => Promise.resolve(),
 			{
-				derivations: [],
+				copyPaths: [],
 				requireProvenance: true,
 				copy: () => Promise.resolve()
 			}
@@ -1429,7 +1509,7 @@ describe('buildAndRootNixResults', () => {
 			[derivedPath(libraryQueryInstallable)],
 			() => Promise.resolve(),
 			{
-				derivations: [],
+				copyPaths: [],
 				requireProvenance: true,
 				copy: () => Promise.resolve()
 			}
@@ -1472,7 +1552,7 @@ describe('buildAndRootNixResults', () => {
 				return Promise.resolve();
 			},
 			{
-				derivations: [],
+				copyPaths: [],
 				requireProvenance: true,
 				copy: () => Promise.resolve()
 			}
@@ -1582,7 +1662,7 @@ describe('buildAndRootNixResults', () => {
 				return Promise.resolve();
 			},
 			{
-				derivations: [libraryDerivation],
+				copyPaths: [libraryDerivation],
 				copy: () => {
 					events.push('copy');
 
@@ -1599,6 +1679,750 @@ describe('buildAndRootNixResults', () => {
 			`build ${libraryQueryInstallable}`,
 			`root ${libraryBuiltPath}`,
 			'publish'
+		]);
+	});
+
+	it('realises missing dependency outputs after copying and before the targets', async () => {
+		const appDerivation = storePathSchema.parse(
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
+		);
+		const libraryDerivation = storePathSchema.parse(
+			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'
+		);
+		const events: string[] = [];
+
+		await buildAndRootNixResults(
+			{
+				readDerivation: (drvPath) => {
+					events.push(`read ${drvPath}`);
+
+					return Promise.resolve(remoteDerivation(drvPath));
+				},
+				buildPathsWithResults: ([target]) => {
+					if (target === undefined) {
+						throw new Error('The test expected one remote build target');
+					}
+
+					events.push(`build ${target}`);
+
+					return Promise.resolve(
+						target === appQueryInstallable
+							? [remoteResult('built', appQueryInstallable, appPath)]
+							: [remoteResult('substituted')]
+					);
+				},
+				resolveClosure: ownPathClosure,
+				addTempRoot: (storePath) => {
+					events.push(`root ${storePath}`);
+
+					return Promise.resolve();
+				}
+			},
+			[derivedPath(libraryQueryInstallable)],
+			() => {
+				events.push('publish');
+
+				return Promise.resolve();
+			},
+			{
+				copyPaths: [appDerivation, libraryDerivation],
+				dependencyBuilds: [
+					{
+						path: storePathSchema.parse(appPath),
+						installables: [derivedPath(appQueryInstallable)]
+					}
+				],
+				onDependencyStarted: (dependency) => {
+					events.push(`dependency ${dependency}`);
+				},
+				copy: () => {
+					events.push('copy');
+
+					return Promise.resolve();
+				}
+			}
+		);
+
+		expect(events).toStrictEqual([
+			`root ${appDerivation}`,
+			`root ${libraryDerivation}`,
+			'copy',
+			`read ${appDerivation}`,
+			`root ${appPath}`,
+			`dependency ${appQueryInstallable}`,
+			`build ${appQueryInstallable}`,
+			`root ${appPath}`,
+			`read ${libraryDerivation}`,
+			`root ${libraryBuiltPath}`,
+			`build ${libraryQueryInstallable}`,
+			`root ${libraryBuiltPath}`,
+			'publish'
+		]);
+	});
+
+	it('builds target dependencies in dependency order and reuses their results', async () => {
+		const appDerivation = storePathSchema.parse(
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
+		);
+		const libraryDerivation = storePathSchema.parse(
+			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'
+		);
+		const buildCalls: NixDerivedPathString[] = [];
+		const completed: NixDerivedPathString[] = [];
+		const published: NixBuildResult[][] = [];
+
+		await buildAndRootNixResults(
+			{
+				readDerivation: (drvPath) =>
+					Promise.resolve(
+						remoteDerivation(
+							drvPath,
+							drvPath === appDerivation ? [libraryDerivation] : []
+						)
+					),
+				buildPathsWithResults: ([target]) => {
+					if (target === undefined) {
+						throw new Error('The test expected one remote build target');
+					}
+
+					buildCalls.push(target);
+
+					return Promise.resolve([
+						target === appQueryInstallable
+							? remoteResult('substituted', appQueryInstallable, appPath)
+							: remoteResult('built')
+					]);
+				},
+				resolveClosure: ownPathClosure,
+				addTempRoot: () => Promise.resolve()
+			},
+			[derivedPath(appQueryInstallable), derivedPath(libraryQueryInstallable)],
+			(results) => {
+				published.push([...results]);
+
+				return Promise.resolve();
+			},
+			{
+				copyPaths: [appDerivation, libraryDerivation],
+				dependencyBuilds: [
+					{
+						path: storePathSchema.parse(appPath),
+						installables: [derivedPath(appQueryInstallable)]
+					},
+					{
+						path: storePathSchema.parse(libraryBuiltPath),
+						installables: [derivedPath(libraryQueryInstallable)]
+					}
+				],
+				onTargetCompleted: (target) => {
+					completed.push(target);
+				},
+				copy: () => Promise.resolve()
+			}
+		);
+
+		expect({ buildCalls, completed, published }).toStrictEqual({
+			buildCalls: [libraryQueryInstallable, appQueryInstallable],
+			completed: [appQueryInstallable, libraryQueryInstallable],
+			published: [
+				[
+					remoteResult('built'),
+					remoteResult('substituted', appQueryInstallable, appPath)
+				]
+			]
+		});
+	});
+
+	it('does not block an output on an unused output of the same derivation', async () => {
+		const dependencyDerivation = storePathSchema.parse(
+			'/nix/store/1123456789abcdfghijklmnpqrsvwxyz-dependency.drv'
+		);
+		const consumerDerivation = storePathSchema.parse(
+			'/nix/store/2123456789abcdfghijklmnpqrsvwxyz-consumer.drv'
+		);
+		const dependencyOutput = storePathSchema.parse(
+			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-dependency'
+		);
+		const dependencyDevelopment = storePathSchema.parse(
+			'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-dependency-dev'
+		);
+		const consumerOutput = storePathSchema.parse(
+			'/nix/store/5123456789abcdfghijklmnpqrsvwxyz-consumer'
+		);
+		const dependencyInstallable = derivedPath(`${dependencyDerivation}^out`);
+		const developmentInstallable = derivedPath(`${dependencyDerivation}^dev`);
+		const consumerInstallable = derivedPath(`${consumerDerivation}^out`);
+		const buildCalls: NixDerivedPathString[][] = [];
+		const publications: {
+			readonly results: readonly NixBuildResult[];
+			readonly failures: readonly RemoteCohortBuildFailure[];
+		}[] = [];
+
+		const run = buildAndRootNixResults(
+			{
+				readDerivation: (drvPath) => {
+					if (drvPath === dependencyDerivation) {
+						return Promise.resolve(
+							remoteDerivation(
+								dependencyDerivation,
+								[],
+								[
+									['out', dependencyOutput],
+									['dev', dependencyDevelopment]
+								]
+							)
+						);
+					}
+
+					return Promise.resolve(
+						remoteDerivation(
+							consumerDerivation,
+							[[dependencyDerivation, ['out']]],
+							[['out', consumerOutput]]
+						)
+					);
+				},
+				buildPathsWithResults: (targets) => {
+					buildCalls.push([...targets]);
+
+					return Promise.resolve(
+						targets.map((target) => {
+							if (target === developmentInstallable) {
+								return remoteFailure(target);
+							}
+
+							const output =
+								target === dependencyInstallable
+									? dependencyOutput
+									: consumerOutput;
+
+							return remoteResult('built', target, output);
+						})
+					);
+				},
+				resolveClosure: ownPathClosure,
+				addTempRoot: () => Promise.resolve()
+			},
+			[],
+			(results, failures) => {
+				publications.push({ results, failures });
+
+				return Promise.resolve();
+			},
+			{
+				copyPaths: [dependencyDerivation, consumerDerivation],
+				dependencyBuilds: [
+					{ path: dependencyOutput, installables: [dependencyInstallable] },
+					{
+						path: dependencyDevelopment,
+						installables: [developmentInstallable]
+					},
+					{ path: consumerOutput, installables: [consumerInstallable] }
+				],
+				copy: () => Promise.resolve()
+			}
+		);
+
+		await expect(run).rejects.toBeInstanceOf(RemoteCohortBuildFailedError);
+		expect({
+			buildCalls,
+			publications: publications.map(({ results, failures }) => ({
+				results,
+				failures: failures.map(({ target, kind, outcome }) => ({
+					target,
+					kind,
+					outcome
+				}))
+			}))
+		}).toStrictEqual({
+			buildCalls: [
+				[dependencyInstallable, developmentInstallable],
+				[consumerInstallable]
+			],
+			publications: [
+				{
+					results: [
+						remoteResult('built', dependencyInstallable, dependencyOutput),
+						remoteResult('built', consumerInstallable, consumerOutput)
+					],
+					failures: [
+						{
+							target: developmentInstallable,
+							kind: 'dependency',
+							outcome: 'permanent-failure'
+						}
+					]
+				}
+			]
+		});
+	});
+
+	it('rebuilds a substituted dependency when its target requires provenance', async () => {
+		const libraryDerivation = storePathSchema.parse(
+			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'
+		);
+		const buildCalls: unknown[] = [];
+		const published: NixBuildResult[][] = [];
+
+		await buildAndRootNixResults(
+			{
+				readDerivation: (drvPath) => Promise.resolve(remoteDerivation(drvPath)),
+				queryValidPaths: (paths) => Promise.resolve(paths),
+				buildPathsWithResults: (targets, mode) => {
+					buildCalls.push({ targets, mode });
+
+					return Promise.resolve([
+						remoteResult(mode === 'check' ? 'built' : 'substituted')
+					]);
+				},
+				resolveClosure: ownPathClosure,
+				addTempRoot: () => Promise.resolve()
+			},
+			[derivedPath(libraryQueryInstallable)],
+			(results) => {
+				published.push([...results]);
+
+				return Promise.resolve();
+			},
+			{
+				copyPaths: [libraryDerivation],
+				dependencyBuilds: [
+					{
+						path: storePathSchema.parse(libraryBuiltPath),
+						installables: [derivedPath(libraryQueryInstallable)]
+					}
+				],
+				requireProvenance: true,
+				copy: () => Promise.resolve()
+			}
+		);
+
+		expect({ buildCalls, published }).toStrictEqual({
+			buildCalls: [
+				{ targets: [libraryQueryInstallable], mode: 'normal' },
+				{ targets: [libraryQueryInstallable], mode: 'check' }
+			],
+			published: [[remoteResult('built')]]
+		});
+	});
+
+	it('uses another producer after a dependency build fails', async () => {
+		const primaryDerivation = storePathSchema.parse(
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
+		);
+		const alternativeDerivation = storePathSchema.parse(
+			'/nix/store/2123456789abcdfghijklmnpqrsvwxyz-fallback-app.drv'
+		);
+		const alternativeInstallable = derivedPath(`${alternativeDerivation}^out`);
+		const buildCalls: NixDerivedPathString[] = [];
+		const publications: {
+			readonly results: readonly NixBuildResult[];
+			readonly failures: readonly RemoteCohortBuildFailure[];
+			readonly paths: readonly StorePathString[];
+		}[] = [];
+
+		await buildAndRootNixResults(
+			{
+				readDerivation: (drvPath) => Promise.resolve(remoteDerivation(drvPath)),
+				buildPathsWithResults: ([target]) => {
+					if (target === undefined) {
+						throw new Error('The test expected one dependency target');
+					}
+
+					buildCalls.push(target);
+
+					return Promise.resolve([
+						target === appQueryInstallable
+							? remoteFailure(appQueryInstallable)
+							: remoteResult('built', alternativeInstallable, appPath)
+					]);
+				},
+				resolveClosure: ownPathClosure,
+				addTempRoot: () => Promise.resolve()
+			},
+			[],
+			(results, failures, paths) => {
+				publications.push({ results, failures, paths });
+
+				return Promise.resolve();
+			},
+			{
+				copyPaths: [primaryDerivation, alternativeDerivation],
+				dependencyBuilds: [
+					{
+						path: storePathSchema.parse(appPath),
+						installables: [
+							derivedPath(appQueryInstallable),
+							alternativeInstallable
+						]
+					}
+				],
+				copy: () => Promise.resolve()
+			}
+		);
+
+		expect({ buildCalls, publications }).toStrictEqual({
+			buildCalls: [appQueryInstallable, alternativeInstallable],
+			publications: [
+				{
+					results: [remoteResult('built', alternativeInstallable, appPath)],
+					failures: [],
+					paths: [appPath]
+				}
+			]
+		});
+	});
+
+	it('uses a producer after another fallback supplies its dependency', async () => {
+		const appDerivation = storePathSchema.parse(
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
+		);
+		const appFallbackDerivation = storePathSchema.parse(
+			'/nix/store/2123456789abcdfghijklmnpqrsvwxyz-fallback-app.drv'
+		);
+		const libraryDerivation = storePathSchema.parse(
+			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'
+		);
+		const libraryFallbackDerivation = storePathSchema.parse(
+			'/nix/store/9123456789abcdfghijklmnpqrsvwxyz-fallback-lib.drv'
+		);
+		const appFallback = derivedPath(`${appFallbackDerivation}^out`);
+		const libraryFallback = derivedPath(`${libraryFallbackDerivation}^out`);
+		const buildCalls: (readonly NixDerivedPathString[])[] = [];
+		const publications: {
+			readonly results: readonly NixBuildResult[];
+			readonly failures: readonly RemoteCohortBuildFailure[];
+			readonly paths: readonly StorePathString[];
+		}[] = [];
+		let isLibraryAvailable = false;
+
+		await buildAndRootNixResults(
+			{
+				readDerivation: (drvPath) =>
+					Promise.resolve(
+						remoteDerivation(
+							drvPath,
+							drvPath === appFallbackDerivation ? [libraryDerivation] : []
+						)
+					),
+				buildPathsWithResults: (targets) => {
+					buildCalls.push(targets);
+
+					if (targets.length > 1) {
+						return Promise.resolve([
+							remoteFailure(appQueryInstallable),
+							remoteFailure(libraryQueryInstallable)
+						]);
+					}
+
+					if (targets[0] === libraryFallback) {
+						isLibraryAvailable = true;
+
+						return Promise.resolve([
+							remoteResult('built', libraryFallback, libraryBuiltPath)
+						]);
+					}
+
+					return Promise.resolve([
+						isLibraryAvailable
+							? remoteResult('built', appFallback, appPath)
+							: remoteFailure(appFallback, 'dependency-failed')
+					]);
+				},
+				resolveClosure: ownPathClosure,
+				addTempRoot: () => Promise.resolve()
+			},
+			[],
+			(results, failures, paths) => {
+				publications.push({ results, failures, paths });
+
+				return Promise.resolve();
+			},
+			{
+				copyPaths: [
+					appDerivation,
+					appFallbackDerivation,
+					libraryDerivation,
+					libraryFallbackDerivation
+				],
+				dependencyBuilds: [
+					{
+						path: storePathSchema.parse(appPath),
+						installables: [derivedPath(appQueryInstallable), appFallback]
+					},
+					{
+						path: storePathSchema.parse(libraryBuiltPath),
+						installables: [
+							derivedPath(libraryQueryInstallable),
+							libraryFallback
+						]
+					}
+				],
+				copy: () => Promise.resolve()
+			}
+		);
+
+		expect({ buildCalls, publications }).toStrictEqual({
+			buildCalls: [
+				[appQueryInstallable, libraryQueryInstallable],
+				[libraryFallback],
+				[appFallback]
+			],
+			publications: [
+				{
+					results: [
+						remoteResult('built', libraryFallback, libraryBuiltPath),
+						remoteResult('built', appFallback, appPath)
+					],
+					failures: [],
+					paths: [appPath, libraryBuiltPath]
+				}
+			]
+		});
+	});
+
+	it('removes a dependency failure after a target provides its output', async () => {
+		const libraryDerivation = storePathSchema.parse(
+			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'
+		);
+		const buildCalls: NixDerivedPathString[] = [];
+		const publications: {
+			readonly results: readonly NixBuildResult[];
+			readonly failures: readonly RemoteCohortBuildFailure[];
+			readonly paths: readonly StorePathString[];
+		}[] = [];
+
+		await buildAndRootNixResults(
+			{
+				readDerivation: (drvPath) => Promise.resolve(remoteDerivation(drvPath)),
+				buildPathsWithResults: ([target]) => {
+					if (target === undefined) {
+						throw new Error('The test expected one remote build target');
+					}
+
+					buildCalls.push(target);
+
+					return Promise.resolve(
+						buildCalls.length === 1
+							? [remoteFailure()]
+							: [remoteResult('built')]
+					);
+				},
+				resolveClosure: ownPathClosure,
+				addTempRoot: () => Promise.resolve()
+			},
+			[derivedPath(libraryQueryInstallable)],
+			(results, failures, paths) => {
+				publications.push({ results, failures, paths });
+
+				return Promise.resolve();
+			},
+			{
+				copyPaths: [libraryDerivation],
+				dependencyBuilds: [
+					{
+						path: storePathSchema.parse(libraryBuiltPath),
+						installables: [derivedPath(libraryQueryInstallable)]
+					}
+				],
+				copy: () => Promise.resolve()
+			}
+		);
+
+		expect({ buildCalls, publications }).toStrictEqual({
+			buildCalls: [libraryQueryInstallable, libraryQueryInstallable],
+			publications: [
+				{
+					results: [remoteResult('built')],
+					failures: [],
+					paths: [libraryBuiltPath]
+				}
+			]
+		});
+	});
+
+	it.each([
+		{
+			name: 'returns a terminal failure',
+			dependencyResults: [remoteFailure()],
+			errorType: RemoteCohortBuildFailedError,
+			expectedFailure: {
+				target: derivedPath(libraryQueryInstallable),
+				kind: 'dependency',
+				outcome: 'permanent-failure'
+			}
+		},
+		{
+			name: 'returns no result',
+			dependencyResults: [],
+			errorType: RemoteCohortProtocolError,
+			expectedFailure: {
+				target: derivedPath(libraryQueryInstallable),
+				kind: 'dependency-protocol',
+				outcome: 'no-result'
+			}
+		}
+	])(
+		'publishes successful outputs after a dependency $name',
+		async ({ dependencyResults, errorType, expectedFailure }) => {
+			const appDerivation = storePathSchema.parse(
+				'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
+			);
+			const libraryDerivation = storePathSchema.parse(
+				'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'
+			);
+			const floatingDerivation = storePathSchema.parse(
+				'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv'
+			);
+			const buildCalls: unknown[] = [];
+			const published: {
+				readonly results: readonly NixBuildResult[];
+				readonly failures: readonly RemoteCohortBuildFailure[];
+				readonly publicationPaths: readonly StorePathString[];
+				readonly provenanceRebuilds: ReadonlySet<NixDerivedPathString>;
+			}[] = [];
+			const run = buildAndRootNixResults(
+				{
+					readDerivation: (drvPath) =>
+						Promise.resolve(
+							remoteDerivation(
+								drvPath,
+								drvPath === appDerivation ? [libraryDerivation] : []
+							)
+						),
+					buildPathsWithResults: (targets, mode) => {
+						buildCalls.push({ targets, mode });
+
+						return Promise.resolve(
+							targets[0] === libraryQueryInstallable
+								? dependencyResults
+								: [
+										remoteResult(
+											'built',
+											floatingQueryInstallable,
+											floatingBuiltPath
+										)
+									]
+						);
+					},
+					resolveClosure: ownPathClosure,
+					addTempRoot: () => Promise.resolve()
+				},
+				[derivedPath(floatingQueryInstallable)],
+				(results, failures, publicationPaths, provenanceRebuilds) => {
+					published.push({
+						results,
+						failures,
+						publicationPaths,
+						provenanceRebuilds
+					});
+
+					return Promise.resolve();
+				},
+				{
+					copyPaths: [appDerivation, libraryDerivation, floatingDerivation],
+					dependencyBuilds: [
+						{
+							path: storePathSchema.parse(appPath),
+							installables: [derivedPath(appQueryInstallable)]
+						},
+						{
+							path: storePathSchema.parse(libraryBuiltPath),
+							installables: [derivedPath(libraryQueryInstallable)]
+						}
+					],
+					copy: () => Promise.resolve()
+				}
+			);
+
+			await expect(run).rejects.toThrow(errorType);
+			expect({
+				buildCalls,
+				published: published.map((publication) => ({
+					...publication,
+					failures: publication.failures.map(({ target, kind, outcome }) => ({
+						target,
+						kind,
+						outcome
+					}))
+				}))
+			}).toStrictEqual({
+				buildCalls: [
+					{ targets: [libraryQueryInstallable], mode: 'normal' },
+					{ targets: [floatingQueryInstallable], mode: 'normal' }
+				],
+				published: [
+					{
+						results: [
+							remoteResult('built', floatingQueryInstallable, floatingBuiltPath)
+						],
+						failures: [expectedFailure],
+						publicationPaths: [floatingBuiltPath],
+						provenanceRebuilds: new Set()
+					}
+				]
+			});
+		}
+	);
+
+	it('preserves an unexpected result from a dependency batch', async () => {
+		const libraryDerivation = storePathSchema.parse(
+			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'
+		);
+		const publications: {
+			readonly results: readonly NixBuildResult[];
+			readonly failures: readonly RemoteCohortBuildFailure[];
+		}[] = [];
+		const run = buildAndRootNixResults(
+			{
+				readDerivation: (drvPath) => Promise.resolve(remoteDerivation(drvPath)),
+				buildPathsWithResults: () =>
+					Promise.resolve([
+						remoteResult('built'),
+						remoteResult('built', floatingQueryInstallable, floatingBuiltPath)
+					]),
+				resolveClosure: ownPathClosure,
+				addTempRoot: () => Promise.resolve()
+			},
+			[],
+			(results, failures) => {
+				publications.push({ results, failures });
+
+				return Promise.resolve();
+			},
+			{
+				copyPaths: [libraryDerivation],
+				dependencyBuilds: [
+					{
+						path: storePathSchema.parse(libraryBuiltPath),
+						installables: [derivedPath(libraryQueryInstallable)]
+					}
+				],
+				copy: () => Promise.resolve()
+			}
+		);
+
+		await expect(run).rejects.toBeInstanceOf(RemoteCohortProtocolError);
+		expect(
+			publications.map(({ results, failures }) => ({
+				results,
+				failures: failures.map(({ target, kind, outcome }) => ({
+					target,
+					kind,
+					outcome
+				}))
+			}))
+		).toStrictEqual([
+			{
+				results: [remoteResult('built')],
+				failures: [
+					{
+						target: floatingQueryInstallable,
+						kind: 'dependency-protocol',
+						outcome: 'unexpected-result'
+					}
+				]
+			}
 		]);
 	});
 
@@ -1634,7 +2458,7 @@ describe('buildAndRootNixResults', () => {
 				return Promise.resolve();
 			},
 			{
-				derivations: [libraryDerivation],
+				copyPaths: [libraryDerivation],
 				copy: () => {
 					events.push('copy');
 
@@ -1730,7 +2554,7 @@ describe('buildAndRootNixResults', () => {
 				return Promise.resolve();
 			},
 			{
-				derivations: [],
+				copyPaths: [],
 				copy: () => Promise.resolve(),
 				onTargetCompleted: (target) => {
 					completed.push(target);
@@ -1783,7 +2607,7 @@ describe('buildAndRootNixResults', () => {
 				return Promise.resolve();
 			},
 			{
-				derivations: [],
+				copyPaths: [],
 				copy: () => Promise.resolve(),
 				onTargetStarted: (target) => {
 					events.push(`started ${target}`);
@@ -1799,8 +2623,7 @@ describe('buildAndRootNixResults', () => {
 			failures: [
 				{
 					target: derivedPath(floatingQueryInstallable),
-					outcome: 'dependency-failed',
-					message: `could not build ${floatingQueryInstallable}`
+					outcome: 'dependency-failed'
 				}
 			]
 		});
@@ -1989,7 +2812,16 @@ const measuredCapacity = { available: 1000, capacity: 2000, headroom: 100 };
 
 function planCohortSuccess(
 	capacity: unknown = measuredCapacity,
-	buildSet: readonly string[] = [libraryQueryInstallable]
+	buildSet: readonly string[] = [libraryQueryInstallable],
+	dependencyBuilds: readonly {
+		readonly path: StorePathString;
+		readonly installables: readonly NixDerivedPathString[];
+		readonly requiredBy: readonly NixDerivedPathString[];
+	}[] = [],
+	dependencyCopies: readonly {
+		readonly path: StorePathString;
+		readonly requiredBy: readonly NixDerivedPathString[];
+	}[] = []
 ): readonly ReporterResultEvent[] {
 	return [
 		{
@@ -2001,6 +2833,8 @@ function planCohortSuccess(
 					leftUpstream: [leftUpstreamPath],
 					alreadyValid: [appPath],
 					buildSet,
+					dependencyBuilds,
+					dependencyCopies,
 					counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
 					downloadSize: 100,
 					narSize: 200,
@@ -3134,6 +3968,35 @@ describe('buildCohortAction', () => {
 			})
 		).rejects.toBeInstanceOf(CohortPlanResultInvalidError);
 	});
+
+	it('rejects a dependency build with no owning target', async () => {
+		const dependencyPath = storePathSchema.parse(appPath);
+		const dependencyInstallable = derivedPath(appQueryInstallable);
+		const runCupboardMock = vi.fn<typeof runCupboard>(
+			cupboardStub({
+				plan: planCohortSuccess(
+					measuredCapacity,
+					[libraryQueryInstallable],
+					[
+						{
+							path: dependencyPath,
+							installables: [dependencyInstallable],
+							requiredBy: []
+						}
+					]
+				)
+			})
+		);
+
+		await expect(
+			buildCohortAction(baseOptions(), environment, {
+				runCupboard: runCupboardMock,
+				runNixBuild: vi.fn(() =>
+					Promise.resolve({ paths: [], status: 0, copiedFrom: new Map() })
+				)
+			})
+		).rejects.toBeInstanceOf(CohortPlanResultInvalidError);
+	});
 });
 
 // Both queryable members have expected outputs for the re-probe tests.
@@ -3514,6 +4377,8 @@ describe('withdrawFromPartition', () => {
 			derivedPath(libraryQueryInstallable),
 			derivedPath(appQueryInstallable)
 		],
+		dependencyBuilds: [],
+		dependencyCopies: [],
 		counts: { willBuild: 2, willSubstitute: 0, unknown: 0 },
 		downloadSize: 100,
 		narSize: 200,
@@ -3561,6 +4426,8 @@ describe('provenanceRebuildInstallables', () => {
 						derivedPath(appQueryInstallable),
 						derivedPath(libraryQueryInstallable)
 					],
+					dependencyBuilds: [],
+					dependencyCopies: [],
 					counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
 					downloadSize: 0,
 					narSize: 0,
@@ -3606,6 +4473,8 @@ describe('provenanceRebuildInstallables', () => {
 					leftUpstream: [],
 					alreadyValid: [],
 					buildSet: [derivedPath(row.queryInstallable)],
+					dependencyBuilds: [],
+					dependencyCopies: [],
 					counts: { willBuild: 1, willSubstitute: 0, unknown: 1 },
 					downloadSize: 0,
 					narSize: 0,
@@ -4106,6 +4975,7 @@ describe('buildCohortAction publication', () => {
 
 	interface PublicationRun {
 		readonly calls: readonly (readonly string[])[];
+		readonly planInput: unknown;
 		readonly receiptLine: string | undefined;
 		readonly cohortsFile: unknown;
 		readonly nixBuilds: readonly (readonly unknown[])[];
@@ -4113,6 +4983,7 @@ describe('buildCohortAction publication', () => {
 		readonly progress: readonly RecordedProgress[];
 		readonly informationCount: number;
 		readonly warnings: readonly string[];
+		readonly buildError: unknown;
 		readonly remoteConnection: {
 			readonly signal: AbortSignal;
 			readonly lifecycle: readonly string[];
@@ -4136,9 +5007,23 @@ describe('buildCohortAction publication', () => {
 		results: readonly NixBuildResult[] = [remoteResult('built')],
 		plannedBuildSet: readonly string[] = [libraryQueryInstallable],
 		publicationPaths?: readonly string[],
-		// The copies the remote store reported over the build session, which the
-		// real client accumulates and passes to publication.
-		observedCopies: ReadonlyMap<StorePathString, readonly string[]> = new Map()
+		// Copies that the remote store reports during the build session. The real
+		// client records them and passes them to publication.
+		observedCopies: ReadonlyMap<StorePathString, readonly string[]> = new Map(),
+		flowPlan: {
+			readonly dependencyBuilds?: readonly {
+				readonly path: StorePathString;
+				readonly installables: readonly NixDerivedPathString[];
+				readonly requiredBy: readonly NixDerivedPathString[];
+			}[];
+			readonly dependencyCopies?: readonly {
+				readonly path: StorePathString;
+				readonly requiredBy: readonly NixDerivedPathString[];
+			}[];
+			readonly reprobedBuildSet?: readonly string[];
+			readonly withdrawn?: readonly Record<string, unknown>[];
+			readonly captureBuildError?: boolean;
+		} = {}
 	): Promise<PublicationRun> {
 		const calls: (readonly string[])[] = [];
 		const lifecycle: string[] = [];
@@ -4152,6 +5037,8 @@ describe('buildCohortAction publication', () => {
 			readonly open: boolean;
 		}[] = [];
 		let isRemoteConnectionOpen = false;
+		let buildError: unknown;
+		let planInput: unknown;
 		const runCupboardMock = vi.fn<typeof runCupboard>(
 			async (_binaryPath, arguments_) => {
 				calls.push(arguments_);
@@ -4166,6 +5053,12 @@ describe('buildCohortAction publication', () => {
 
 				if (arguments_[1] === 'plan') {
 					sequence.push('plan');
+					const targetsFile =
+						arguments_[arguments_.indexOf('--targets-file') + 1];
+
+					if (targetsFile !== undefined) {
+						planInput = JSON.parse(await readFile(targetsFile, 'utf8'));
+					}
 				}
 
 				const receiptIndex = arguments_.indexOf('--receipt-file');
@@ -4203,8 +5096,16 @@ describe('buildCohortAction publication', () => {
 				}
 
 				return cupboardStub({
-					plan: planCohortSuccess(measuredCapacity, plannedBuildSet),
-					reprobe: planReprobeSuccess([], plannedBuildSet)
+					plan: planCohortSuccess(
+						measuredCapacity,
+						plannedBuildSet,
+						flowPlan.dependencyBuilds,
+						flowPlan.dependencyCopies
+					),
+					reprobe: planReprobeSuccess(
+						flowPlan.withdrawn,
+						flowPlan.reprobedBuildSet ?? plannedBuildSet
+					)
 				})(_binaryPath, arguments_, environment);
 			}
 		);
@@ -4253,6 +5154,20 @@ describe('buildCohortAction publication', () => {
 
 			return Promise.resolve();
 		};
+		const resolveLocalDerivationGraph = (
+			derivations: readonly StorePathString[]
+		) =>
+			Promise.resolve({
+				closure: [...derivations, storePathSchema.parse(referencePath)],
+				floatingOutputs: [],
+				substitutableDerivations: derivations,
+				outputs: [
+					{
+						path: storePathSchema.parse(appPath),
+						installable: derivedPath(appQueryInstallable)
+					}
+				]
+			});
 		let didCopyReceiveSignal = false;
 		const runNixCopy = vi.fn(
 			(
@@ -4312,46 +5227,53 @@ describe('buildCohortAction publication', () => {
 				lifecycle.push('opened');
 				sequence.push('session');
 
-				try {
-					await buildAndRootNixResults(
-						{
-							readDerivation: (drvPath) =>
-								Promise.resolve(remoteDerivation(drvPath)),
-							buildPathsWithResults: (targets) => {
-								const requested = new Set(
-									targets.map((target) => canonicalNixDerivedPath(target))
-								);
+				const build = buildAndRootNixResults(
+					{
+						readDerivation: (drvPath) =>
+							Promise.resolve(remoteDerivation(drvPath)),
+						buildPathsWithResults: (targets) => {
+							const requested = new Set(
+								targets.map((target) => canonicalNixDerivedPath(target))
+							);
 
-								return Promise.resolve(
-									results.filter((result) =>
-										requested.has(canonicalNixDerivedPath(result.target))
-									)
-								);
-							},
-							queryValidPaths: () => Promise.resolve([]),
-							resolveClosure: (storePaths) =>
-								Promise.resolve(
-									(publicationPaths ?? storePaths).map((storePath) =>
-										remotePathInfo(storePath)
-									)
-								),
-							addTempRoot: () => Promise.resolve()
+							return Promise.resolve(
+								results.filter((result) =>
+									requested.has(canonicalNixDerivedPath(result.target))
+								)
+							);
 						},
-						installables,
-						(builds, failures, paths, provenanceRebuilds) =>
-							publish(
-								builds,
-								failures,
-								paths,
-								provenanceRebuilds,
-								observedCopies
+						queryValidPaths: () => Promise.resolve([]),
+						resolveClosure: (storePaths) =>
+							Promise.resolve(
+								(publicationPaths ?? storePaths).map((storePath) =>
+									remotePathInfo(storePath)
+								)
 							),
-						buildOptions
-					);
-				} finally {
-					isRemoteConnectionOpen = false;
-					lifecycle.push('closed');
-					sequence.push('closed');
+						addTempRoot: () => Promise.resolve()
+					},
+					installables,
+					(builds, failures, paths, provenanceRebuilds) =>
+						publish(
+							builds,
+							failures,
+							paths,
+							provenanceRebuilds,
+							observedCopies
+						),
+					buildOptions
+				);
+				const [result] = await Promise.allSettled([build] as const);
+
+				isRemoteConnectionOpen = false;
+				lifecycle.push('closed');
+				sequence.push('closed');
+
+				if (result.status === 'rejected') {
+					if (flowPlan.captureBuildError !== true) {
+						throw result.reason;
+					}
+
+					buildError = result.reason;
 				}
 			}
 		);
@@ -4362,6 +5284,7 @@ describe('buildCohortAction publication', () => {
 			runNixBuildWithResults,
 			runNixDerivationShow,
 			materialiseDerivationGraph: materialiseGraph,
+			resolveLocalDerivationGraph,
 			runNixCopy,
 			withLocalDerivationRoots,
 			reporter: recordingReporter(warnings, progress, information),
@@ -4385,6 +5308,7 @@ describe('buildCohortAction publication', () => {
 
 		return {
 			calls,
+			planInput,
 			receiptLine: outputRaw
 				.split('\n')
 				.find((line) => line.startsWith('receipt-file=')),
@@ -4396,6 +5320,7 @@ describe('buildCohortAction publication', () => {
 			progress,
 			informationCount: information.length,
 			warnings,
+			buildError,
 			remoteConnection: {
 				signal,
 				lifecycle,
@@ -4820,9 +5745,20 @@ describe('buildCohortAction publication', () => {
 		expect(runCupboardMock).not.toHaveBeenCalled();
 	});
 
-	it('does not evaluate, copy, or open a remote store for an all-no-build partition', async () => {
-		const runNixDerivationShow = vi.fn(() => Promise.resolve([]));
+	it('resolves the local derivation graph without opening the remote store when no targets need building', async () => {
+		const runNixDerivationShow = vi.fn((installables: readonly string[]) =>
+			Promise.resolve(evaluatedDerivations(installables))
+		);
 		const materialiseGraphMock = vi.fn(() => Promise.resolve());
+		const resolveLocalDerivationGraph = vi.fn(
+			(derivations: readonly StorePathString[]) =>
+				Promise.resolve({
+					closure: derivations,
+					floatingOutputs: [],
+					substitutableDerivations: [],
+					outputs: []
+				})
+		);
 		const runNixCopy = vi.fn(() => Promise.resolve());
 		const runNixBuildWithResults = vi.fn(() => Promise.resolve());
 		const runCupboardMock = vi.fn<typeof runCupboard>(
@@ -4844,6 +5780,7 @@ describe('buildCohortAction publication', () => {
 				runCupboard: runCupboardMock,
 				runNixDerivationShow,
 				materialiseDerivationGraph: materialiseGraphMock,
+				resolveLocalDerivationGraph,
 				runNixCopy,
 				runNixBuildWithResults,
 				withLocalDerivationRoots: withoutLocalDerivationRoots
@@ -4853,22 +5790,42 @@ describe('buildCohortAction publication', () => {
 		expect({
 			materialiseCalls: materialiseGraphMock.mock.calls,
 			evaluationCalls: runNixDerivationShow.mock.calls,
+			closureCalls: resolveLocalDerivationGraph.mock.calls,
 			copyCalls: runNixCopy.mock.calls,
 			buildCalls: runNixBuildWithResults.mock.calls
 		}).toStrictEqual({
-			materialiseCalls: [],
-			evaluationCalls: [],
+			materialiseCalls: [
+				[
+					[
+						'.#packages.x86_64-linux.app^out',
+						'.#packages.x86_64-linux.lib^out',
+						'.#packages.x86_64-linux.floating^out'
+					],
+					undefined
+				]
+			],
+			evaluationCalls: [
+				[['.#packages.x86_64-linux.app^out'], undefined, false],
+				[['.#packages.x86_64-linux.lib^out'], undefined, false],
+				[['.#packages.x86_64-linux.floating^out'], undefined, false]
+			],
+			closureCalls: [
+				[
+					[
+						'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv',
+						'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
+						'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv'
+					],
+					undefined
+				]
+			],
 			copyCalls: [],
 			buildCalls: []
 		});
 	});
 
-	// The promise holds without publication too: the action materialises
-	// the planned derivations in the runner's store before planning, and
-	// `nix build --store` copies them to the remote store when it realises
-	// the build set.
 	it.each([{ push: 'true' }, { push: 'false' }])(
-		'promises a remote plan its planned local derivations when push is $push',
+		'writes the local derivation graph into the plan only when push is true (push=$push)',
 		async ({ push }) => {
 			let targetsFileContents: unknown;
 			const stub = cupboardStub({
@@ -4904,6 +5861,13 @@ describe('buildCohortAction publication', () => {
 				environment,
 				{
 					runCupboard: runCupboardMock,
+					resolveLocalDerivationGraph: (derivations) =>
+						Promise.resolve({
+							closure: [...derivations, storePathSchema.parse(referencePath)],
+							floatingOutputs: [],
+							substitutableDerivations: [],
+							outputs: []
+						}),
 					runNixBuild: vi.fn(() =>
 						Promise.resolve({ paths: [], status: 0, copiedFrom: new Map() })
 					)
@@ -4934,7 +5898,15 @@ describe('buildCohortAction publication', () => {
 							'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv',
 						root: 'github:owner/repo/main/floating'
 					}
-				]
+				],
+				...(push === 'true' && {
+					plannedLocalClosure: [
+						'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv',
+						'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
+						'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv',
+						referencePath
+					]
+				})
 			});
 		}
 	);
@@ -5018,7 +5990,11 @@ describe('buildCohortAction publication', () => {
 			)
 		).rejects.toMatchObject({
 			name: 'CohortEvaluationDriftError',
-			missing: ['/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'],
+			missing: [
+				'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv',
+				'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
+				'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv'
+			],
 			evaluated: [evaluated]
 		});
 		expect({
@@ -5027,9 +6003,20 @@ describe('buildCohortAction publication', () => {
 			copyCalls: runNixCopy.mock.calls,
 			buildCalls: runNixBuildWithResults.mock.calls
 		}).toStrictEqual({
-			materialiseCalls: [[['.#packages.x86_64-linux.lib^out'], undefined]],
+			materialiseCalls: [
+				[
+					[
+						'.#packages.x86_64-linux.app^out',
+						'.#packages.x86_64-linux.lib^out',
+						'.#packages.x86_64-linux.floating^out'
+					],
+					undefined
+				]
+			],
 			evaluationCalls: [
-				[['.#packages.x86_64-linux.lib^out'], undefined, false]
+				[['.#packages.x86_64-linux.app^out'], undefined, false],
+				[['.#packages.x86_64-linux.lib^out'], undefined, false],
+				[['.#packages.x86_64-linux.floating^out'], undefined, false]
 			],
 			copyCalls: [],
 			buildCalls: []
@@ -5207,14 +6194,16 @@ describe('buildCohortAction publication', () => {
 				[
 					[
 						'.#packages.x86_64-linux.app^out',
-						'.#packages.x86_64-linux.lib^out'
+						'.#packages.x86_64-linux.lib^out',
+						'.#packages.x86_64-linux.floating^out'
 					],
 					undefined
 				]
 			],
 			evaluationCalls: [
 				[['.#packages.x86_64-linux.app^out'], undefined, false],
-				[['.#packages.x86_64-linux.lib^out'], undefined, false]
+				[['.#packages.x86_64-linux.lib^out'], undefined, false],
+				[['.#packages.x86_64-linux.floating^out'], undefined, false]
 			],
 			copyCalls: [],
 			buildCalls: []
@@ -5233,14 +6222,51 @@ describe('buildCohortAction publication', () => {
 				[],
 				[]
 			)
-		).rejects.toMatchObject({
-			name: 'RemoteCohortProtocolError',
-			failures: [
-				{
-					target: derivedPath(libraryQueryInstallable),
-					outcome: 'no-result',
-					message: 'the daemon returned no result for this target'
-				}
+		).rejects.toBeInstanceOf(RemoteCohortProtocolError);
+	});
+
+	it('does not replace a shared root after one target has a protocol failure', async () => {
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson({
+					expectedPaths: [appPath, libraryBuiltPath, floatingBuiltPath],
+					roots: [
+						'github:owner/repo/main/app',
+						'github:owner/repo/main/shared',
+						'github:owner/repo/main/shared'
+					]
+				}),
+				push: 'true',
+				store: 'ssh-ng://build@example.test'
+			},
+			[libraryBuiltPath],
+			[remoteResult('built')],
+			[libraryQueryInstallable, floatingQueryInstallable],
+			undefined,
+			new Map(),
+			{ captureBuildError: true }
+		);
+		const rootPush = run.calls.find(
+			(arguments_) =>
+				arguments_[1] === 'push' &&
+				!arguments_.includes('--receipt-file') &&
+				arguments_.includes(libraryBuiltPath)
+		);
+
+		const isProtocolError = run.buildError instanceof RemoteCohortProtocolError;
+
+		expect({ isProtocolError, rootPush }).toStrictEqual({
+			isProtocolError: true,
+			rootPush: [
+				'--no-colour',
+				'push',
+				url,
+				libraryBuiltPath,
+				'--github-oidc',
+				'--no-retain',
+				'--store',
+				'ssh-ng://build@example.test'
 			]
 		});
 	});
@@ -5260,7 +6286,7 @@ describe('buildCohortAction publication', () => {
 				[remoteResult('substituted'), remoteFailure(floatingQueryInstallable)],
 				[libraryQueryInstallable, floatingQueryInstallable]
 			)
-		).rejects.toMatchObject({ name: 'RemoteCohortBuildFailedError' });
+		).rejects.toBeInstanceOf(RemoteCohortBuildFailedError);
 
 		expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toStrictEqual({
 			version: 3,
@@ -5314,6 +6340,165 @@ describe('buildCohortAction publication', () => {
 				[remoteFailure()]
 			)
 		).rejects.toBeInstanceOf(RemoteCohortBuildFailedError);
+
+		expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toStrictEqual({
+			version: 3,
+			paths: [],
+			subjects: [],
+			terminalFailure: {
+				kind: 'target-build',
+				failedTargets: [libraryQueryInstallable]
+			}
+		});
+	});
+
+	it('keeps a published dependency in the receipt when every target fails', async () => {
+		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
+
+		await expect(
+			runPublicationFlow(
+				{
+					...baseOptions(),
+					cohortJson: remotelyQueryableCohortJson(),
+					push: 'true',
+					bestEffort: 'true',
+					store: 'ssh-ng://build@example.test'
+				},
+				[],
+				[remoteResult('built', appQueryInstallable, appPath), remoteFailure()],
+				[libraryQueryInstallable],
+				undefined,
+				new Map(),
+				{
+					dependencyBuilds: [
+						{
+							path: storePathSchema.parse(appPath),
+							installables: [derivedPath(appQueryInstallable)],
+							requiredBy: [derivedPath(libraryQueryInstallable)]
+						}
+					]
+				}
+			)
+		).rejects.toBeInstanceOf(RemoteCohortBuildFailedError);
+
+		expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toStrictEqual({
+			version: 3,
+			paths: [appPath],
+			subjects: [
+				{
+					origin: 'built',
+					storePath: appPath,
+					narHash: 'aa'.repeat(32),
+					derivation: `${appPath}.drv`,
+					buildStore: 'auto',
+					verification: 'local'
+				}
+			],
+			terminalFailure: {
+				kind: 'target-build',
+				failedTargets: [libraryQueryInstallable]
+			}
+		});
+	});
+
+	it('attributes a dependency failure to its failed target', async () => {
+		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
+
+		await expect(
+			runPublicationFlow(
+				{
+					...baseOptions(),
+					cohortJson: remotelyQueryableCohortJson(),
+					push: 'true',
+					bestEffort: 'true',
+					store: 'ssh-ng://build@example.test'
+				},
+				[],
+				[
+					remoteFailure(appQueryInstallable),
+					remoteFailure(libraryQueryInstallable),
+					remoteResult('built', floatingQueryInstallable, floatingBuiltPath)
+				],
+				[libraryQueryInstallable, floatingQueryInstallable],
+				undefined,
+				new Map(),
+				{
+					dependencyBuilds: [
+						{
+							path: storePathSchema.parse(appPath),
+							installables: [derivedPath(appQueryInstallable)],
+							requiredBy: [derivedPath(libraryQueryInstallable)]
+						}
+					]
+				}
+			)
+		).rejects.toBeInstanceOf(RemoteCohortBuildFailedError);
+
+		expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toStrictEqual({
+			version: 3,
+			paths: [floatingBuiltPath],
+			subjects: [
+				{
+					origin: 'built',
+					storePath: floatingBuiltPath,
+					narHash: 'aa'.repeat(32),
+					derivation: `${floatingBuiltPath}.drv`,
+					buildStore: 'auto',
+					verification: 'local'
+				}
+			],
+			terminalFailure: {
+				kind: 'target-build',
+				failedTargets: [libraryQueryInstallable]
+			}
+		});
+	});
+
+	it('removes withdrawn targets from shared dependency ownership', async () => {
+		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
+
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson({
+					expectedPaths: [appPath, libraryBuiltPath, floatingBuiltPath]
+				}),
+				push: 'true',
+				bestEffort: 'true',
+				store: 'ssh-ng://build@example.test'
+			},
+			[],
+			[
+				remoteFailure(appQueryInstallable),
+				remoteFailure(libraryQueryInstallable)
+			],
+			[libraryQueryInstallable, floatingQueryInstallable],
+			undefined,
+			new Map(),
+			{
+				dependencyBuilds: [
+					{
+						path: storePathSchema.parse(appPath),
+						installables: [derivedPath(appQueryInstallable)],
+						requiredBy: [
+							derivedPath(libraryQueryInstallable),
+							derivedPath(floatingQueryInstallable)
+						]
+					}
+				],
+				reprobedBuildSet: [libraryQueryInstallable],
+				withdrawn: [
+					{
+						installable: floatingQueryInstallable,
+						storePath: floatingBuiltPath,
+						outcome: 'attachOnly'
+					}
+				],
+				captureBuildError: true
+			}
+		);
+
+		expect(run.buildError).toBeInstanceOf(RemoteCohortBuildFailedError);
 
 		expect(JSON.parse(await readFile(receiptFile, 'utf8'))).toStrictEqual({
 			version: 3,
@@ -5426,6 +6611,13 @@ describe('buildCohortAction publication', () => {
 					runNixDerivationShow: vi.fn((installables: readonly string[]) =>
 						Promise.resolve(evaluatedDerivations(installables))
 					),
+					resolveLocalDerivationGraph: (derivations) =>
+						Promise.resolve({
+							closure: derivations,
+							floatingOutputs: [],
+							substitutableDerivations: [],
+							outputs: []
+						}),
 					runNixCopy: vi.fn(() => Promise.resolve()),
 					runNixBuildWithResults,
 					withLocalDerivationRoots: withoutLocalDerivationRoots
@@ -5631,6 +6823,117 @@ describe('buildCohortAction publication', () => {
 		});
 	});
 
+	it('omits dependencies owned only by a target withdrawn before the build', async () => {
+		const floatingDerivation = storePathSchema.parse(
+			'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv'
+		);
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson({
+					expectedPaths: [appPath, libraryBuiltPath, floatingBuiltPath]
+				}),
+				push: 'true',
+				store: 'ssh-ng://build@example.test'
+			},
+			[floatingBuiltPath],
+			[remoteResult('built', floatingQueryInstallable, floatingBuiltPath)],
+			[libraryQueryInstallable, floatingQueryInstallable],
+			undefined,
+			new Map(),
+			{
+				dependencyBuilds: [
+					{
+						path: storePathSchema.parse(appPath),
+						installables: [derivedPath(appQueryInstallable)],
+						requiredBy: [derivedPath(libraryQueryInstallable)]
+					}
+				],
+				dependencyCopies: [
+					{
+						path: storePathSchema.parse(referencePath),
+						requiredBy: [derivedPath(libraryQueryInstallable)]
+					}
+				],
+				reprobedBuildSet: [floatingQueryInstallable],
+				withdrawn: [withdrawal('attachOnly')]
+			}
+		);
+
+		expect({
+			copyCalls: run.remoteConnection.copyCalls.map((call) => call.slice(0, 2)),
+			informationCount: run.informationCount,
+			resultBuilds: run.resultBuilds
+		}).toStrictEqual({
+			copyCalls: [[[floatingDerivation], 'ssh-ng://build@example.test']],
+			informationCount: 1,
+			resultBuilds: [
+				[[floatingQueryInstallable], '', 'ssh-ng://build@example.test']
+			]
+		});
+	});
+
+	it('copies the selected producer for a retained target dependency', async () => {
+		const appDerivation = storePathSchema.parse(
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
+		);
+		const floatingDerivation = storePathSchema.parse(
+			'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv'
+		);
+		const run = await runPublicationFlow(
+			{
+				...baseOptions(),
+				cohortJson: remotelyQueryableCohortJson(),
+				push: 'true',
+				store: 'ssh-ng://build@example.test'
+			},
+			[appPath, floatingBuiltPath],
+			[
+				remoteResult('built', appQueryInstallable, appPath),
+				remoteResult('built', floatingQueryInstallable, floatingBuiltPath)
+			],
+			[floatingQueryInstallable],
+			undefined,
+			new Map(),
+			{
+				dependencyBuilds: [
+					{
+						path: storePathSchema.parse(appPath),
+						installables: [derivedPath(appQueryInstallable)],
+						requiredBy: [derivedPath(floatingQueryInstallable)]
+					}
+				],
+				dependencyCopies: [
+					{
+						path: storePathSchema.parse(referencePath),
+						requiredBy: [derivedPath(floatingQueryInstallable)]
+					}
+				]
+			}
+		);
+
+		expect({
+			copyCalls: run.remoteConnection.copyCalls.map((call) => call.slice(0, 2)),
+			informationCount: run.informationCount,
+			resultBuilds: run.resultBuilds
+		}).toStrictEqual({
+			copyCalls: [
+				[
+					[
+						floatingDerivation,
+						appDerivation,
+						storePathSchema.parse(referencePath)
+					],
+					'ssh-ng://build@example.test'
+				]
+			],
+			informationCount: 2,
+			resultBuilds: [
+				[[floatingQueryInstallable], '', 'ssh-ng://build@example.test']
+			]
+		});
+	});
+
 	it('claims only the queryable remote output Nix reports this invocation built', async () => {
 		const run = await runPublicationFlow({
 			...baseOptions(),
@@ -5650,6 +6953,7 @@ describe('buildCohortAction publication', () => {
 
 		expect({
 			invocations: run.calls.map((call) => call[1]),
+			planInput: run.planInput,
 			receiptPush: run.calls[1],
 			rootPush: run.calls[2],
 			cohortsFile: run.cohortsFile,
@@ -5679,6 +6983,49 @@ describe('buildCohortAction publication', () => {
 			receiptLine: run.receiptLine
 		}).toStrictEqual({
 			invocations: ['plan', 'push', 'push'],
+			planInput: {
+				targets: [
+					{
+						attr: '.#packages.x86_64-linux.app',
+						installable: appQueryInstallable,
+						plannedLocalDerivation:
+							'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv',
+						expectedPath: appPath,
+						root: 'github:owner/repo/main'
+					},
+					{
+						attr: '.#packages.x86_64-linux.lib',
+						installable: libraryQueryInstallable,
+						plannedLocalDerivation:
+							'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
+						root: 'github:owner/repo/main'
+					},
+					{
+						attr: '.#packages.x86_64-linux.floating',
+						installable: floatingQueryInstallable,
+						plannedLocalDerivation:
+							'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv',
+						root: 'github:owner/repo/main'
+					}
+				],
+				plannedLocalClosure: [
+					'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv',
+					'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
+					'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv',
+					referencePath
+				],
+				plannedSubstitutableDerivations: [
+					'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv',
+					'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
+					'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv'
+				],
+				plannedLocalOutputs: [
+					{
+						path: appPath,
+						installable: appQueryInstallable
+					}
+				]
+			},
 			receiptPush: [
 				'--no-colour',
 				'push',
@@ -5722,11 +7069,15 @@ describe('buildCohortAction publication', () => {
 			remoteConnection: {
 				lifecycle: ['opened', 'closed'],
 				sequence: [
-					'plan',
 					'local session',
+					'local root /nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv',
 					'local root /nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv',
+					'local root /nix/store/4123456789abcdfghijklmnpqrsvwxyz-float.drv',
 					'materialise',
 					'evaluate',
+					'evaluate',
+					'evaluate',
+					'plan',
 					'session',
 					'copy',
 					'publish',
@@ -5734,7 +7085,11 @@ describe('buildCohortAction publication', () => {
 					'closed',
 					'local closed'
 				],
-				evaluationCalls: [[['.#packages.x86_64-linux.lib^out']]],
+				evaluationCalls: [
+					[['.#packages.x86_64-linux.app^out']],
+					[['.#packages.x86_64-linux.lib^out']],
+					[['.#packages.x86_64-linux.floating^out']]
+				],
 				copyCalls: [
 					[
 						['/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib.drv'],

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import process, { env } from 'node:process';
 
+import { storePathSchema } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import {
@@ -21,6 +22,7 @@ import { createBuildPushDaemon } from '../../packages/cli/src/commands/build-pus
 import { githubBranchAddBody } from '../../packages/cli/src/commands/oidc-trust.ts';
 import { discoverNixStoreConfig } from '../../packages/nix/src/index.ts';
 import { Nix } from '../../packages/nix/src/nix.ts';
+import type { NixDerivedPathString } from '../../packages/nix/src/nix-store.ts';
 import { defaultNixConfigEnvironment } from '../../packages/nix/src/store-config.ts';
 import { CupboardCommand } from '../support/cupboard-command.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
@@ -186,6 +188,7 @@ function consumerFlake(options: {
 	readonly directory: string;
 	readonly system: string;
 	readonly seed: string;
+	readonly runtimeDependency?: boolean;
 	/**
 	 * Distinguishes this flake's derivation names from those of another flake
 	 * built with the same seed. The builder writes the same bytes either way,
@@ -197,16 +200,31 @@ function consumerFlake(options: {
 		options.variant === undefined
 			? `cupboard-pipeline-${name}`
 			: `cupboard-pipeline-${options.variant}-${name}`;
+	const command = (name: string): string =>
+		options.runtimeDependency === true
+			? String.raw`printf '%s\n' $dependency > $out; echo ${name}-${options.seed} >> $out`
+			: `echo ${name}-${options.seed} > $out`;
 	const target = (name: string): string => `
     ${name} = derivation {
       name = "${derivationName(name)}";
       system = "${options.system}";
       builder = "/bin/sh";
-      args = [ "-c" "echo ${name}-${options.seed} > $out" ];
+      args = [ "-c" "${command(name)}" ];
+	  ${options.runtimeDependency === true ? 'dependency = dependency.outPath;' : ''}
     };`;
 
 	return `{
   outputs = { self }: rec {
+	${
+		options.runtimeDependency === true
+			? `dependency = derivation {
+      name = "cupboard-pipeline-dependency";
+      system = "${options.system}";
+      builder = "/bin/sh";
+      args = [ "-c" "echo ${options.seed} > $out" ];
+    };`
+			: ''
+	}
     packages.${options.system} = {${target('alpha')}${target('beta')}
     };
     cupboardBuiltPaths = builtins.map
@@ -215,6 +233,12 @@ function consumerFlake(options: {
         derivation = packages.${options.system}.\${name}.drvPath;
       })
       [ "alpha" "beta" ];
+	${
+		options.runtimeDependency === true
+			? `cupboardDependency = dependency.outPath;
+    cupboardDependencyDerivation = dependency.drvPath;`
+			: ''
+	}
     cupboardOutputs = builtins.map
       (name: {
         attr = "path:${options.directory}#packages.${options.system}.\${name}";
@@ -1596,6 +1620,214 @@ describe.skipIf(!isTierEnabled || !isNixPresent)(
 						served: [200, 200]
 					});
 				});
+
+				it('builds a missing runtime dependency before substituting the targets', async () => {
+					const store = remote.store;
+
+					if (store === undefined) {
+						throw new Error('The remote Nix store was not started');
+					}
+
+					const prepared = fixture();
+					const remoteSystem = await store.exec([
+						'nix',
+						'eval',
+						'--raw',
+						'--impure',
+						'--expr',
+						'builtins.currentSystem'
+					]);
+					const flakeDirectory = path.join(
+						prepared.workspace,
+						'remote-consumer'
+					);
+					await mkdir(flakeDirectory, { recursive: true });
+					await writeFile(
+						path.join(flakeDirectory, 'flake.nix'),
+						consumerFlake({
+							directory: flakeDirectory,
+							system: remoteSystem,
+							seed: randomUUID(),
+							runtimeDependency: true
+						})
+					);
+					const evaluated = builtPathsSchema.parse(
+						JSON.parse(
+							await runNix([
+								'eval',
+								'--json',
+								`path:${flakeDirectory}#cupboardBuiltPaths`
+							])
+						)
+					);
+					const dependencyOutput = storePathSchema.parse(
+						await runNix([
+							'eval',
+							'--raw',
+							`path:${flakeDirectory}#cupboardDependency`
+						])
+					);
+					const dependencyDerivation = storePathSchema.parse(
+						await runNix([
+							'eval',
+							'--raw',
+							`path:${flakeDirectory}#cupboardDependencyDerivation`
+						])
+					);
+					const derivations = evaluated.map(({ derivation }) =>
+						storePathSchema.parse(derivation)
+					);
+					const targetOutputs = evaluated.map(({ storePath }) =>
+						storePathSchema.parse(storePath)
+					);
+					const remoteFlakeDirectory = '/tmp/cupboard-remote-consumer';
+					await store.copyDirectory(flakeDirectory, remoteFlakeDirectory);
+					await store.exec([
+						'nix',
+						'build',
+						'--no-link',
+						`path:${remoteFlakeDirectory}#packages.${remoteSystem}.alpha`,
+						`path:${remoteFlakeDirectory}#packages.${remoteSystem}.beta`
+					]);
+					const cacheDirectory = '/tmp/cupboard-incomplete-cache';
+					await store.exec([
+						'nix',
+						'copy',
+						'--to',
+						`file://${cacheDirectory}`,
+						...targetOutputs
+					]);
+					await store.exec([
+						'rm',
+						`${cacheDirectory}/${new StorePath(dependencyOutput).hash}.narinfo`
+					]);
+					await store.exec([
+						'nix',
+						'store',
+						'delete',
+						...targetOutputs,
+						dependencyOutput,
+						...derivations,
+						dependencyDerivation
+					]);
+
+					await store.writeFile(
+						'/etc/nix/nix.conf',
+						[
+							'experimental-features = nix-command flakes',
+							'sandbox = false',
+							`substituters = file://${cacheDirectory}`,
+							'substitute = true',
+							'require-sigs = false',
+							''
+						].join('\n')
+					);
+					const remoteStoreUri = store.transportConfiguredStoreUri;
+					const remoteNix = Nix.openForAvailability(undefined, {
+						storeUri: remoteStoreUri
+					});
+					const targets: NixDerivedPathString[] = derivations.map(
+						(derivation): NixDerivedPathString => `${derivation}^out`
+					);
+					await expect(remoteNix.queryMissing(targets)).resolves.toStrictEqual({
+						willBuild: [],
+						willSubstitute: [],
+						unknown: derivations.toSorted(byCodeUnit),
+						downloadSize: 0,
+						narSize: 0
+					});
+					const outputAvailability =
+						await remoteNix.queryMissing(targetOutputs);
+					const outputOffers =
+						await remoteNix.querySubstitutablePathInfos(targetOutputs);
+					let expectedDownloadSize = 0;
+					let expectedNarSize = 0;
+
+					for (const offer of outputOffers) {
+						expectedDownloadSize += offer.downloadSize;
+						expectedNarSize += offer.narSize;
+					}
+
+					expect({
+						willBuild: outputAvailability.willBuild,
+						willSubstitute: outputAvailability.willSubstitute,
+						unknown: outputAvailability.unknown,
+						downloadSize: outputAvailability.downloadSize,
+						narSize: outputAvailability.narSize
+					}).toStrictEqual({
+						willBuild: [],
+						willSubstitute: targetOutputs.toSorted(byCodeUnit),
+						unknown: [dependencyOutput],
+						downloadSize: expectedDownloadSize,
+						narSize: expectedNarSize
+					});
+
+					const outcome = await runPublication('remote', {
+						flakeDirectory,
+						store: remoteStoreUri,
+						requireProvenance: false
+					});
+					const built = await builtPaths(flakeDirectory, remoteNix);
+					const dependencyInfo =
+						await remoteNix.queryPathInfo(dependencyOutput);
+					const dependency = {
+						storePath: dependencyOutput,
+						derivation: dependencyDerivation,
+						narHash: dependencyInfo.narHash.digestHex()
+					};
+					const published = [dependency, ...built].toSorted(byStorePath);
+					const copiedFrom = [`file://${cacheDirectory}`];
+
+					expect({
+						outcome,
+						served: await servedStatuses(built)
+					}).toStrictEqual({
+						outcome: {
+							planStatus: 0,
+							retainedCount: '0',
+							targetCount: '2',
+							cohortCount: '1',
+							cohorts: [
+								{
+									status: 0,
+									targetPaths: built
+										.toSorted(byStorePath)
+										.map(({ storePath }) => storePath),
+									attribution: 'store-report',
+									receipt: {
+										version: 3,
+										paths: published.map(({ storePath }) => storePath),
+										subjects: published.map((entry) =>
+											entry.storePath === dependencyOutput
+												? {
+														origin: 'built',
+														storePath: entry.storePath,
+														narHash: entry.narHash,
+														derivation: entry.derivation,
+														buildStore: remoteStoreUri,
+														verification: 'build-store'
+													}
+												: {
+														origin: 'copied',
+														storePath: entry.storePath,
+														narHash: entry.narHash,
+														derivation: entry.derivation,
+														copiedFrom,
+														signatures: []
+													}
+										),
+										uploaded: published.map(({ storePath }) => storePath)
+									},
+									attestation: {
+										subjectCount: String(published.length),
+										checksums: expectedChecksums(published)
+									}
+								}
+							]
+						},
+						served: [200, 200]
+					});
+				}, 120_000);
 			}
 		);
 	}

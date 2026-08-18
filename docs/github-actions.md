@@ -802,9 +802,12 @@ is stale. The partition separates targets into four groups:
 - available from an upstream substituter and deliberately left there;
 - requiring a build.
 
-Only the final group reaches `nix build --keep-going`. The job keeps its
-out-links until publication finishes so the store cannot collect the built
-closure. It publishes built targets, retained targets, and any additional built
+The job realises only the final group as cohort targets. A remote-store job may
+first realise missing output paths that the targets' substitute closures need.
+Local jobs keep their out-links until publication finishes. Remote-store jobs
+ask the remote Nix store to protect each result until publication finishes.
+These protections prevent garbage collection from removing the built closure.
+The job publishes built targets, retained targets, and any additional built
 outputs. It publishes reuse-view paths by reference and sets each target's
 retention root. Upstream paths are not copied into cupboard; the cohort records
 them in its counts and left-upstream files.
@@ -838,14 +841,27 @@ targets directly without publishing them.
 
 A `store` input containing an `ssh-ng://` URI sends the whole cohort to that
 store. The plan queries the remote store when it partitions path availability.
-For each missing target, the cohort evaluates and materialises the root
-derivation locally, verifies that it still matches the planned derivation, and
-copies its derivation closure to the selected store. It then builds through
+For each missing target, the cohort evaluates the root derivation locally and
+verifies that it still matches the planned derivation. The action materialises
+the local derivation graph, then copies the retained target derivations and any
+local paths needed by their substitute closures to the selected store. If a
+substitute refers to an output that the remote store cannot fetch, the action
+realises that output before it realises the cohort targets. It builds through
 Nix's worker protocol and adds temporary roots for the keyed result outputs.
 Before setting the declared retention roots, the workflow streams the outputs'
 metadata and NAR bytes into cupboard. The realised closure never enters the
-runner's local store, so local disk use is bounded by evaluation and the
-derivation closure.
+runner's local store, so local disk use is bounded by evaluation and the paths
+copied from the local store.
+
+An `ssh-ng://` store preserves the remote daemon's substitution settings, so the
+planner cannot read whether the remote store would substitute a copied
+derivation's outputs or build them. The plan therefore accounts for both
+possible policies: it retains the derivation in the build estimate and also
+includes the complete substitute closure in the substitution estimate. The plan
+may prepare a dependency, or refuse an unresolved dependency, that the remote
+store would not need if it built the target instead. Counting both branches
+prevents the capacity check from understating a transfer that the remote store
+may make.
 
 Every selected remote output path must be known during planning. Floating
 content-addressed outputs are rejected by the plan and must be built and

@@ -1464,30 +1464,30 @@ export class CommandFailedError extends CodedError {
 
 export interface RemoteCohortBuildFailure {
 	readonly target: string;
-	readonly kind: 'target' | 'protocol';
+	readonly kind: 'dependency' | 'dependency-protocol' | 'target' | 'protocol';
 	readonly outcome: string;
 	readonly message: string;
 }
 
 /**
-A remote keep-going build did not report one final result per target.
+One or more remote builds ended with terminal failures.
 */
 export class RemoteCohortBuildFailedError extends CodedError {
 	constructor(public readonly failures: readonly RemoteCohortBuildFailure[]) {
 		super(
-			`Remote Nix did not report exactly one final result for every requested target. Valid outputs were published before the action failed: ${failures.map((failure) => `${failure.target} (${failure.outcome}: ${failure.message})`).join('; ')}`
+			`Remote Nix did not complete every requested build. The action published any valid outputs before failing: ${failures.map((failure) => `${failure.target} (${failure.outcome}: ${failure.message})`).join('; ')}`
 		);
 		this.name = 'RemoteCohortBuildFailedError';
 	}
 }
 
 /**
-A remote daemon returned a malformed keyed result batch.
+The remote daemon returned one or more invalid keyed result batches.
 */
 export class RemoteCohortProtocolError extends CodedError {
 	constructor(public readonly failures: readonly RemoteCohortBuildFailure[]) {
 		super(
-			`Remote Nix daemon returned an invalid keyed result batch: ${failures.map((failure) => `${failure.target} (${failure.outcome}: ${failure.message})`).join('; ')}`
+			`Remote Nix returned invalid keyed build results: ${failures.map((failure) => `${failure.target} (${failure.outcome}: ${failure.message})`).join('; ')}`
 		);
 		this.name = 'RemoteCohortProtocolError';
 	}

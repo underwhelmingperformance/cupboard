@@ -30,7 +30,9 @@ export interface NixSshStoreFixture {
 		readonly mismatchedKnownHosts: string;
 	};
 	close(): Promise<void>;
+	copyDirectory(source: string, target: string): Promise<void>;
 	exec(arguments_: readonly string[]): Promise<string>;
+	writeFile(path: string, contents: string): Promise<void>;
 	waitForBlockingDaemonEvent(event: 'started' | 'stopped'): Promise<void>;
 }
 
@@ -212,8 +214,16 @@ export async function startNixSshStore(): Promise<NixSshStoreFixture> {
 			transportConfiguredStoreUri,
 			transportInputs: { privateKey, knownHosts, mismatchedKnownHosts },
 			close,
+			copyDirectory: async (source, target) => {
+				await runningContainer.copyDirectoriesToContainer([{ source, target }]);
+			},
 			exec: async (arguments_) =>
 				containerCommand(runningContainer, arguments_),
+			writeFile: async (target, contents) => {
+				await runningContainer.copyContentToContainer([
+					{ content: contents, target }
+				]);
+			},
 			waitForBlockingDaemonEvent: (event) => blockingEvents[event].wait()
 		};
 	} catch (error) {
