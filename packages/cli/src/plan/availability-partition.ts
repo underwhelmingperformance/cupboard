@@ -722,9 +722,19 @@ async function includeMissingSubstituteReferences(
 		readonly candidate: Candidate;
 		readonly partition: NixMissingPartition;
 	}
+	// The joint answer lists the outputs and substitute closures of every stopped
+	// candidate together, so it can stand in for each candidate only when every
+	// one of them is counted. A candidate whose derivation refuses substitution
+	// is left out of `substitutionAnswers` below, and its outputs would then be
+	// priced through the candidates that remain.
+	const refusedCandidateCount = stoppedCandidates.filter(
+		(candidate) => candidate.substitution === 'refused'
+	).length;
 	const shouldQueryIndividualOutputs =
 		stoppedCandidates.length > 1 &&
-		(outputAvailability?.unknown.length ?? 0) > 0;
+		((outputAvailability?.unknown.length ?? 0) > 0 ||
+			(refusedCandidateCount > 0 &&
+				refusedCandidateCount < stoppedCandidates.length));
 	const stoppedAnswers: readonly CandidateAnswer[] =
 		outputAvailability === undefined
 			? []
