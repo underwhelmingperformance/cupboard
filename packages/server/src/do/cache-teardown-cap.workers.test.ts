@@ -8,7 +8,7 @@ import { type ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
 	attestationListObjectKey,
@@ -21,6 +21,7 @@ import {
 	blobReferenceRows,
 	bootstrap,
 	currentServer,
+	driveToCompletion,
 	narBytes,
 	narInfoDeletionRows,
 	narInfoGeneration,
@@ -133,18 +134,23 @@ describe('cache teardown', () => {
 
 		expect(await rowsRemaining(paths)).toBe(0);
 
-		await vi.waitFor(async () => {
-			await currentServer().resumeCacheTeardown(1);
-			const present = await Promise.all(
-				paths.map((path) =>
-					isNarInfoObjectPresent(path.storePathHash, 'builds')
-				)
-			);
-			expect({
-				objectsLeft: present.filter(Boolean).length,
-				pending: await teardownPending('builds')
-			}).toStrictEqual({ objectsLeft: 0, pending: undefined });
-		});
+		// Each capped resume retires one queued object, and the resume that
+		// empties the queue clears the marker in the same pass, so the drain
+		// needs at most one resume per queued path.
+		await driveToCompletion(
+			() => currentServer().resumeCacheTeardown(1),
+			async () => (await teardownPending('builds')) === undefined,
+			paths.length
+		);
+
+		const present = await Promise.all(
+			paths.map((path) => isNarInfoObjectPresent(path.storePathHash, 'builds'))
+		);
+
+		expect({
+			objectsLeft: present.filter(Boolean).length,
+			pending: await teardownPending('builds')
+		}).toStrictEqual({ objectsLeft: 0, pending: undefined });
 	});
 
 	it('retires a chunk-spanning teardown with correct accounting', async () => {
@@ -241,28 +247,34 @@ describe('cache teardown', () => {
 
 		await currentServer().runCacheTeardown(buildsCache, origin, 1);
 
-		await vi.waitFor(async () => {
-			await currentServer().resumeCacheTeardown(1);
-			const usage = await tenantUsageRow();
-			expect({
-				queued: await narInfoDeletionRows(),
-				edges: await blobReferenceRows(),
-				presence: await tenantBlobRows(),
-				pending: await teardownPending('builds'),
-				object: await isNarInfoObjectPresent(path.storePathHash, 'builds'),
-				usage: {
-					bytes: usage?.bytes,
-					narinfos: usage?.narinfos,
-					blobs: usage?.blobs
-				}
-			}).toStrictEqual({
-				queued: [],
-				edges: [],
-				presence: [],
-				pending: undefined,
-				object: false,
-				usage: { bytes: 0, narinfos: 0, blobs: 0 }
-			});
+		// The queue holds the path's two generations and each capped resume
+		// retires one, so the drain needs at most two resumes.
+		await driveToCompletion(
+			() => currentServer().resumeCacheTeardown(1),
+			async () => (await teardownPending('builds')) === undefined,
+			2
+		);
+
+		const usage = await tenantUsageRow();
+
+		expect({
+			queued: await narInfoDeletionRows(),
+			edges: await blobReferenceRows(),
+			presence: await tenantBlobRows(),
+			pending: await teardownPending('builds'),
+			object: await isNarInfoObjectPresent(path.storePathHash, 'builds'),
+			usage: {
+				bytes: usage?.bytes,
+				narinfos: usage?.narinfos,
+				blobs: usage?.blobs
+			}
+		}).toStrictEqual({
+			queued: [],
+			edges: [],
+			presence: [],
+			pending: undefined,
+			object: false,
+			usage: { bytes: 0, narinfos: 0, blobs: 0 }
 		});
 	});
 

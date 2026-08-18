@@ -540,6 +540,33 @@ export async function clearAbandonedAlarms(): Promise<void> {
 }
 
 /**
+ * Drives a capped maintenance drain to completion: runs `step` until `isDone`
+ * returns true, at most `maxSteps` times. A capped pass advances only when an
+ * alarm or an explicit resume call runs it again, so a test watching one
+ * drain makes those calls itself. Every call makes progress, so the number of
+ * steps a drain needs follows from the fixture and the cap, not from how fast
+ * the machine is.
+ *
+ * The caller asserts the terminal state after the loop. If the drain has not
+ * finished within `maxSteps`, those assertions fail and their output shows
+ * the state the drain reached. If `step` throws, the error propagates
+ * immediately.
+ */
+export async function driveToCompletion(
+	step: () => Promise<void>,
+	isDone: () => Promise<boolean>,
+	maxSteps: number
+): Promise<void> {
+	for (let taken = 0; taken < maxSteps; taken += 1) {
+		if (await isDone()) {
+			return;
+		}
+
+		await step();
+	}
+}
+
+/**
  * The slug the current harness server is addressed by, for a worker-side call
  * (a queue consumer) that resolves the same Durable Object through
  * `tenantServer(env, tenant)`.
