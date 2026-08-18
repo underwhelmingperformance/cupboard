@@ -300,6 +300,11 @@ describe('root ensure hardening', () => {
 		});
 	});
 
+	// A maximum-sized root drives thousands of R2 operations through the pool:
+	// two heads and a repairing put per target, plus the gated re-read each
+	// publish makes. That settles in a couple of seconds on an idle machine and
+	// in about nine when the whole workspace runs in parallel around it, so the
+	// budget below leaves room for a runner slower again than that.
 	it('repairs a maximum-root-sized legacy object set with bounded concurrency', async () => {
 		const token = await initialise();
 		const committed = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -389,7 +394,7 @@ describe('root ensure hardening', () => {
 			servable: targets.map((target) => target.storePathHash),
 			maximumConcurrentPuts: 6
 		});
-	}, 30_000);
+	}, 120_000);
 
 	it('still answers retained when the row is rewritten to the same identity between the probe and the gate', async () => {
 		const token = await initialise();

@@ -153,6 +153,11 @@ describe('cache teardown', () => {
 		}).toStrictEqual({ objectsLeft: 0, pending: undefined });
 	});
 
+	// Seeding the paths costs far more than the teardown this asserts on, and it
+	// is the part that stretches under load: the body settles in a couple of
+	// seconds on an idle machine and in about nine when the whole workspace runs
+	// in parallel around it. The budget below leaves room for a runner slower
+	// again than that.
 	it('retires a chunk-spanning teardown with correct accounting', async () => {
 		await useTestServer('teardown-batch');
 		const { token } = await bootstrap();
@@ -226,7 +231,7 @@ describe('cache teardown', () => {
 			presence: [],
 			usage: { bytes: 0, narinfos: 0, blobs: 0 }
 		});
-	});
+	}, 120_000);
 
 	it('clears only the generations a chunk actually retired', async () => {
 		await useTestServer('teardown-generations');
