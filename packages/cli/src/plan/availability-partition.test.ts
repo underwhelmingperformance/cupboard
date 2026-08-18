@@ -2,6 +2,7 @@ import type {
 	Nix,
 	NixDerivedPathString,
 	NixMissingPartition,
+	NixSubstitutablePathInfo,
 	UnreachableSubstituter
 } from '@cupboard/nix';
 import {
@@ -16,12 +17,14 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	type AvailabilityCeilingConfig,
+	type AvailabilityPartition,
 	type AvailabilityPartitionOptions,
 	type AvailabilityTarget,
 	type DestinationProbes,
 	type LeftUpstreamCandidate,
 	type LeftUpstreamVerdict,
 	partitionAvailability,
+	RemoteFloatingOutputUnsupportedError,
 	UnknownPathsCeilingError,
 	type UnknownRequeryOutcome
 } from './availability-partition.ts';
@@ -60,6 +63,18 @@ function missingWith(
 	overrides: Partial<NixMissingPartition>
 ): NixMissingPartition {
 	return { ...emptyMissing(), ...overrides };
+}
+
+async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+	const [result] = await Promise.allSettled([promise]);
+
+	if (result.status === 'fulfilled') {
+		return;
+	}
+
+	const error: unknown = result.reason;
+
+	return error;
 }
 
 function retained(name: RootName): ParsedRootEnsureResponse {
@@ -102,19 +117,25 @@ const defaultCeiling: AvailabilityCeilingConfig = {
 class RecordingStore implements Pick<
 	Nix,
 	| 'queryMissing'
+	| 'querySubstitutablePathInfos'
 	| 'querySubstitutablePaths'
 	| 'queryValidPaths'
 	| 'unreachableSubstituters'
 > {
+	private missingIndex = 0;
+
 	readonly missingCalls: (readonly string[])[] = [];
+	readonly substitutableInfoCalls: (readonly string[])[] = [];
 	readonly substitutableCalls: (readonly string[])[] = [];
 	readonly validCalls: (readonly string[])[] = [];
 
 	constructor(
-		private readonly missing: NixMissingPartition = emptyMissing(),
+		private readonly missing:
+			NixMissingPartition | readonly NixMissingPartition[] = emptyMissing(),
 		private readonly substitutable: readonly string[] = [],
 		private readonly valid: readonly string[] = [],
-		private readonly unreachable: readonly UnreachableSubstituter[] = []
+		private readonly unreachable: readonly UnreachableSubstituter[] = [],
+		private readonly substitutableInfos: readonly NixSubstitutablePathInfo[] = []
 	) {}
 
 	unreachableSubstituters(): Promise<readonly UnreachableSubstituter[]> {
@@ -123,8 +144,11 @@ class RecordingStore implements Pick<
 
 	queryMissing(targets: readonly string[]): Promise<NixMissingPartition> {
 		this.missingCalls.push(targets);
+		const answers = 'willBuild' in this.missing ? [this.missing] : this.missing;
+		const answer = answers[this.missingIndex] ?? answers.at(-1);
+		this.missingIndex += 1;
 
-		return Promise.resolve(this.missing);
+		return Promise.resolve(answer ?? emptyMissing());
 	}
 
 	querySubstitutablePaths(
@@ -135,11 +159,48 @@ class RecordingStore implements Pick<
 		return Promise.resolve(this.substitutable);
 	}
 
+	querySubstitutablePathInfos(
+		paths: readonly string[]
+	): Promise<readonly NixSubstitutablePathInfo[]> {
+		this.substitutableInfoCalls.push(paths);
+		const requested = new Set(paths);
+
+		return Promise.resolve(
+			this.substitutableInfos.filter((info) => requested.has(info.storePath))
+		);
+	}
+
 	queryValidPaths(paths: readonly string[]): Promise<readonly string[]> {
 		this.validCalls.push(paths);
+		const requested = new Set(paths);
 
-		return Promise.resolve(this.valid);
+		return Promise.resolve(
+			this.valid.filter((storePath) => requested.has(storePath))
+		);
 	}
+}
+
+function expectedPartition(
+	overrides: Partial<AvailabilityPartition> = {}
+): AvailabilityPartition {
+	return {
+		attachOnly: [],
+		publishByReference: [],
+		leftUpstream: [],
+		leftUpstreamRejections: [],
+		buildSet: [],
+		dependencyBuilds: [],
+		dependencyCopies: [],
+		unattested: [],
+		counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
+		downloadSize: 0,
+		narSize: 0,
+		alreadyValid: [],
+		unknownCount: 0,
+		ceiling: { value: defaultCeiling.value, source: 'configured' },
+		unreachableSubstituters: [],
+		...overrides
+	};
 }
 
 function neverAsked(): Promise<UnknownRequeryOutcome> {
@@ -156,6 +217,11 @@ function baseOptions(
 	return {
 		targets: [],
 		storeIdentity: { kind: 'daemon' },
+		plannedSubstitutionPolicy: {
+			kind: 'known',
+			substitute: true,
+			alwaysAllowSubstitutes: false
+		},
 		store: new RecordingStore(),
 		destinationProbes: noProbes(),
 		rootEnsureResults: new Map(),
@@ -470,6 +536,32 @@ describe('partitionAvailability', () => {
 		}
 	);
 
+	it('does not count Nix work for an attested destination path', async () => {
+		const store = new RecordingStore(
+			missingWith({
+				willSubstitute: [appPath],
+				downloadSize: 100,
+				narSize: 200
+			})
+		);
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [target({ expectedPath: appPath, installable: appPath })],
+				destinationProbes: probesFrom({
+					destinationServed: () => Promise.resolve(new Set([appPath]))
+				}),
+				attestedServed: () => Promise.resolve(new Set([appPath])),
+				store
+			})
+		);
+
+		expect(partition).toStrictEqual(
+			expectedPartition({ attachOnly: [appPath] })
+		);
+		expect(store.missingCalls).toStrictEqual([]);
+	});
+
 	it('asks only about the attach-only paths, and adds the unattested path to the build set', async () => {
 		const asked: (readonly StorePathString[])[] = [];
 
@@ -521,6 +613,44 @@ describe('partitionAvailability', () => {
 			buildSet: [appPath],
 			unattested: [appPath]
 		});
+	});
+
+	it('does not inspect substitute references for an attach-only target', async () => {
+		const derivation = path('22222222222222222222222222222222-app.drv');
+		const dependencyOutput = path(
+			'33333333333333333333333333333333-dependency'
+		);
+		const installable: NixDerivedPathString = `${derivation}^out`;
+		const store = new RecordingStore(
+			missingWith({ unknown: [derivation, dependencyOutput] })
+		);
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({
+						expectedPath: appPath,
+						installable,
+						plannedLocalDerivation: derivation
+					})
+				],
+				plannedLocalClosure: new Set([derivation]),
+				plannedLocalOutputs: new Map([[dependencyOutput, [installable]]]),
+				destinationProbes: probesFrom({
+					destinationServed: () => Promise.resolve(new Set([appPath]))
+				}),
+				store,
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+
+		expect(partition).toStrictEqual(
+			expectedPartition({
+				attachOnly: [appPath],
+				ceiling: { value: 0, source: 'configured' }
+			})
+		);
+		expect(store.missingCalls).toStrictEqual([]);
 	});
 
 	it('re-queries only the unknown paths, and folds the fresh answer in', async () => {
@@ -673,40 +803,34 @@ describe('partitionAvailability', () => {
 			missingWith({ unknown: [unknownDerivation], downloadSize: 1, narSize: 2 })
 		);
 
-		let thrown: unknown;
+		const availability = partitionAvailability(
+			baseOptions({
+				targets: [target({ installable })],
+				store,
+				requeryUnknown: () =>
+					Promise.resolve({ kind: 'refused', reason: 'not trusted' }),
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+		const error = await rejectionOf(availability);
+		const refusal =
+			error instanceof UnknownPathsCeilingError ? error : undefined;
 
-		try {
-			await partitionAvailability(
-				baseOptions({
-					targets: [target({ installable })],
-					store,
-					requeryUnknown: () =>
-						Promise.resolve({ kind: 'refused', reason: 'not trusted' }),
-					ceiling: { value: 0, untrustedFallback: 0 }
-				})
-			);
-		} catch (error) {
-			thrown = error;
-		}
-
-		if (!(thrown instanceof UnknownPathsCeilingError)) {
-			expect.unreachable(
-				'the partition must refuse with UnknownPathsCeilingError'
-			);
-		}
-
-		// The target is attributed through its installable's store path, with
-		// the output selection stripped.
-		expect({
-			unknownCount: thrown.unknownCount,
-			unknownPaths: thrown.unknownPaths,
-			ceiling: thrown.ceiling,
-			downloadSize: thrown.downloadSize,
-			narSize: thrown.narSize,
-			exitCode: thrown.exitCode,
-			store: thrown.store,
-			unreachableSubstituters: thrown.unreachableSubstituters
-		}).toStrictEqual({
+		expect(error).toBeInstanceOf(UnknownPathsCeilingError);
+		expect(
+			refusal === undefined
+				? undefined
+				: {
+						unknownCount: refusal.unknownCount,
+						unknownPaths: refusal.unknownPaths,
+						ceiling: refusal.ceiling,
+						downloadSize: refusal.downloadSize,
+						narSize: refusal.narSize,
+						exitCode: refusal.exitCode,
+						store: refusal.store,
+						unreachableSubstituters: refusal.unreachableSubstituters
+					}
+		).toStrictEqual({
 			unknownCount: 1,
 			unknownPaths: [
 				{
@@ -759,35 +883,29 @@ describe('partitionAvailability', () => {
 		const unknownPath = path(basename);
 		const store = new RecordingStore(missingWith({ unknown: [unknownPath] }));
 
-		let thrown: unknown;
+		const availability = partitionAvailability(
+			baseOptions({
+				targets: [target({ installable: unknownPath })],
+				store,
+				requeryUnknown: () =>
+					Promise.resolve(
+						requery ?? {
+							kind: 'answered',
+							partition: missingWith({ unknown: [unknownPath] }),
+							sizes: new Map()
+						}
+					),
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+		const error = await rejectionOf(availability);
+		const unknownPaths =
+			error instanceof UnknownPathsCeilingError
+				? error.unknownPaths
+				: undefined;
 
-		try {
-			await partitionAvailability(
-				baseOptions({
-					targets: [target({ installable: unknownPath })],
-					store,
-					requeryUnknown: () =>
-						Promise.resolve(
-							requery ?? {
-								kind: 'answered',
-								partition: missingWith({ unknown: [unknownPath] }),
-								sizes: new Map()
-							}
-						),
-					ceiling: { value: 0, untrustedFallback: 0 }
-				})
-			);
-		} catch (error) {
-			thrown = error;
-		}
-
-		if (!(thrown instanceof UnknownPathsCeilingError)) {
-			expect.unreachable(
-				'the partition must refuse with UnknownPathsCeilingError'
-			);
-		}
-
-		expect(thrown.unknownPaths).toStrictEqual([
+		expect(error).toBeInstanceOf(UnknownPathsCeilingError);
+		expect(unknownPaths).toStrictEqual([
 			{
 				path: unknownPath,
 				cause: expectedCause,
@@ -810,29 +928,23 @@ describe('partitionAvailability', () => {
 			[{ uri: 'https://cache.example.test', reason: 'no-cache-info' }]
 		);
 
-		let thrown: unknown;
+		const availability = partitionAvailability(
+			baseOptions({
+				targets: [target({ installable: unknownPath })],
+				store,
+				requeryUnknown: () =>
+					Promise.resolve({ kind: 'refused', reason: 'not trusted' }),
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+		const error = await rejectionOf(availability);
+		const unreachableSubstituters =
+			error instanceof UnknownPathsCeilingError
+				? error.unreachableSubstituters
+				: undefined;
 
-		try {
-			await partitionAvailability(
-				baseOptions({
-					targets: [target({ installable: unknownPath })],
-					store,
-					requeryUnknown: () =>
-						Promise.resolve({ kind: 'refused', reason: 'not trusted' }),
-					ceiling: { value: 0, untrustedFallback: 0 }
-				})
-			);
-		} catch (error) {
-			thrown = error;
-		}
-
-		if (!(thrown instanceof UnknownPathsCeilingError)) {
-			expect.unreachable(
-				'the partition must refuse with UnknownPathsCeilingError'
-			);
-		}
-
-		expect(thrown.unreachableSubstituters).toStrictEqual([
+		expect(error).toBeInstanceOf(UnknownPathsCeilingError);
+		expect(unreachableSubstituters).toStrictEqual([
 			'https://cache.example.test'
 		]);
 	});
@@ -871,6 +983,1141 @@ describe('partitionAvailability', () => {
 			counts: { willBuild: 6, willSubstitute: 0, unknown: 0 },
 			unknownCount: 0,
 			ceiling: { value: 0, source: 'configured' }
+		});
+	});
+
+	it('refuses a local closure path with no target ownership', async () => {
+		const derivation = path('11111111111111111111111111111111-target.drv');
+		const source = path('22222222222222222222222222222222-source');
+		const store = new RecordingStore(
+			missingWith({ unknown: [derivation, source] })
+		);
+		const availabilityTarget = target({
+			installable: `${derivation}^out`,
+			plannedLocalDerivation: derivation
+		});
+		const availability = partitionAvailability(
+			baseOptions({
+				targets: [availabilityTarget],
+				plannedLocalClosure: new Set([derivation, source]),
+				store,
+				requeryUnknown: () =>
+					Promise.resolve({
+						kind: 'answered',
+						partition: missingWith({ unknown: [source] }),
+						sizes: new Map()
+					}),
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+
+		const error = await rejectionOf(availability);
+		const refusal =
+			error instanceof UnknownPathsCeilingError ? error : undefined;
+
+		expect(error).toBeInstanceOf(UnknownPathsCeilingError);
+		expect(
+			refusal === undefined
+				? undefined
+				: {
+						unknownCount: refusal.unknownCount,
+						unknownPaths: refusal.unknownPaths,
+						ceiling: refusal.ceiling,
+						downloadSize: refusal.downloadSize,
+						narSize: refusal.narSize,
+						exitCode: refusal.exitCode,
+						store: refusal.store,
+						unreachableSubstituters: refusal.unreachableSubstituters
+					}
+		).toStrictEqual({
+			unknownCount: 1,
+			unknownPaths: [
+				{
+					path: source,
+					cause: { kind: 'not-in-store-or-substituters' },
+					targets: []
+				}
+			],
+			ceiling: { value: 0, source: 'configured' },
+			downloadSize: 0,
+			narSize: 0,
+			exitCode: 75,
+			store: { kind: 'daemon' },
+			unreachableSubstituters: []
+		});
+	});
+
+	it('moves an unknown output into the dependency build set', async () => {
+		const derivation = path('11111111111111111111111111111111-target.drv');
+		const output = path('44444444444444444444444444444444-target');
+		const dependencyDerivation = path(
+			'22222222222222222222222222222222-dependency.drv'
+		);
+		const alternativeDerivation = path(
+			'55555555555555555555555555555555-dependency.drv'
+		);
+		const dependencyOutput = path(
+			'33333333333333333333333333333333-dependency'
+		);
+		const dependencyInstallable: NixDerivedPathString = `${dependencyDerivation}^out`;
+		const alternativeInstallable: NixDerivedPathString = `${alternativeDerivation}^out`;
+		const store = new RecordingStore(
+			[
+				missingWith({ unknown: [derivation] }),
+				missingWith({
+					willSubstitute: [output],
+					unknown: [dependencyOutput],
+					downloadSize: 20,
+					narSize: 30
+				})
+			],
+			[],
+			[],
+			[],
+			[
+				{
+					source: 'daemon',
+					storePath: output,
+					references: [dependencyOutput],
+					downloadSize: 20,
+					narSize: 30
+				}
+			]
+		);
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({
+						installable: `${derivation}^out`,
+						expectedPath: output,
+						plannedLocalDerivation: derivation
+					})
+				],
+				plannedLocalClosure: new Set([
+					derivation,
+					dependencyDerivation,
+					alternativeDerivation
+				]),
+				plannedSubstitutableDerivations: new Set([derivation]),
+				plannedLocalOutputs: new Map([
+					[dependencyOutput, [dependencyInstallable, alternativeInstallable]]
+				]),
+				store,
+				requeryUnknown: () => Promise.resolve({ kind: 'already-fresh' }),
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+
+		expect(partition).toStrictEqual(
+			expectedPartition({
+				buildSet: [`${derivation}^out`],
+				counts: { willBuild: 1, willSubstitute: 1, unknown: 0 },
+				dependencyBuilds: [
+					{
+						path: dependencyOutput,
+						installables: [dependencyInstallable, alternativeInstallable],
+						requiredBy: [`${derivation}^out`]
+					}
+				],
+				downloadSize: 20,
+				narSize: 30,
+				ceiling: { value: 0, source: 'configured' }
+			})
+		);
+		expect(store.missingCalls).toStrictEqual([[`${derivation}^out`], [output]]);
+	});
+
+	it('keeps a locally buildable path unresolved when no target requires it', async () => {
+		const derivation = path('11111111111111111111111111111111-target.drv');
+		const output = path('22222222222222222222222222222222-unowned');
+		const installable: NixDerivedPathString = `${derivation}^out`;
+		const store = new RecordingStore(missingWith({ unknown: [output] }));
+		const targets = [target({ installable, expectedPath: undefined })];
+		const plannedLocalClosure = new Set([derivation]);
+		const plannedLocalOutputs = new Map([[output, [installable]]]);
+
+		const error = await rejectionOf(
+			partitionAvailability(
+				baseOptions({
+					targets,
+					plannedLocalClosure,
+					plannedLocalOutputs,
+					store,
+					requeryUnknown: () => Promise.resolve({ kind: 'already-fresh' }),
+					ceiling: { value: 0, untrustedFallback: 0 }
+				})
+			)
+		);
+		const refusal =
+			error instanceof UnknownPathsCeilingError ? error : undefined;
+
+		expect(error).toBeInstanceOf(UnknownPathsCeilingError);
+		expect(
+			refusal === undefined
+				? undefined
+				: {
+						unknownPaths: refusal.unknownPaths,
+						unknownCount: refusal.unknownCount,
+						ceiling: refusal.ceiling
+					}
+		).toStrictEqual({
+			unknownPaths: [
+				{
+					path: output,
+					cause: { kind: 'not-in-store-or-substituters' },
+					targets: []
+				}
+			],
+			unknownCount: 1,
+			ceiling: { value: 0, source: 'configured' }
+		});
+	});
+
+	it('copies a local closure reference required by a target substitute', async () => {
+		const derivation = path('11111111111111111111111111111111-target.drv');
+		const output = path('22222222222222222222222222222222-target');
+		const reference = path('33333333333333333333333333333333-reference');
+		const installable: NixDerivedPathString = `${derivation}^out`;
+		const store = new RecordingStore([
+			missingWith({ unknown: [derivation] }),
+			missingWith({ willSubstitute: [output], unknown: [reference] })
+		]);
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({
+						installable,
+						expectedPath: output,
+						plannedLocalDerivation: derivation
+					})
+				],
+				plannedLocalClosure: new Set([derivation, reference]),
+				plannedSubstitutableDerivations: new Set([derivation]),
+				store,
+				requeryUnknown: () => Promise.resolve({ kind: 'already-fresh' }),
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+
+		expect(partition).toStrictEqual(
+			expectedPartition({
+				buildSet: [installable],
+				dependencyCopies: [{ path: reference, requiredBy: [installable] }],
+				counts: { willBuild: 0, willSubstitute: 1, unknown: 0 },
+				ceiling: { value: 0, source: 'configured' }
+			})
+		);
+	});
+
+	it('inspects every known output of a multi-output target', async () => {
+		const derivation = path('11111111111111111111111111111111-target.drv');
+		const output = path('22222222222222222222222222222222-target');
+		const developmentOutput = path(
+			'33333333333333333333333333333333-target-dev'
+		);
+		const dependencyDerivation = path(
+			'44444444444444444444444444444444-dependency.drv'
+		);
+		const dependencyOutput = path(
+			'55555555555555555555555555555555-dependency'
+		);
+		const installable: NixDerivedPathString = `${derivation}^out,dev`;
+		const dependencyInstallable: NixDerivedPathString = `${dependencyDerivation}^out`;
+		const store = new RecordingStore(
+			[
+				missingWith({ unknown: [derivation] }),
+				missingWith({
+					willSubstitute: [output, developmentOutput],
+					unknown: [dependencyOutput],
+					downloadSize: 20,
+					narSize: 30
+				}),
+				emptyMissing()
+			],
+			[],
+			[],
+			[],
+			[
+				{
+					source: 'daemon',
+					storePath: output,
+					references: [dependencyOutput],
+					downloadSize: 10,
+					narSize: 15
+				},
+				{
+					source: 'daemon',
+					storePath: developmentOutput,
+					references: [dependencyOutput],
+					downloadSize: 10,
+					narSize: 15
+				}
+			]
+		);
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({
+						installable,
+						plannedLocalDerivation: derivation,
+						expectedPath: undefined
+					})
+				],
+				plannedLocalClosure: new Set([derivation, dependencyDerivation]),
+				plannedSubstitutableDerivations: new Set([derivation]),
+				plannedLocalOutputs: new Map([
+					[output, [`${derivation}^out`]],
+					[developmentOutput, [`${derivation}^dev`]],
+					[dependencyOutput, [dependencyInstallable]]
+				]),
+				store,
+				requeryUnknown: () => Promise.resolve({ kind: 'already-fresh' }),
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+
+		expect(partition).toStrictEqual(
+			expectedPartition({
+				buildSet: [installable],
+				dependencyBuilds: [
+					{
+						path: dependencyOutput,
+						installables: [dependencyInstallable],
+						requiredBy: [installable]
+					}
+				],
+				counts: { willBuild: 1, willSubstitute: 2, unknown: 0 },
+				downloadSize: 20,
+				narSize: 30,
+				ceiling: { value: 0, source: 'configured' }
+			})
+		);
+		expect(store.missingCalls).toStrictEqual([
+			[installable],
+			[output, developmentOutput]
+		]);
+	});
+
+	it('counts every path in the selected output substitute closure', async () => {
+		const derivation = path('11111111111111111111111111111111-target.drv');
+		const output = path('22222222222222222222222222222222-target');
+		const reference = path('33333333333333333333333333333333-reference');
+		const installable: NixDerivedPathString = `${derivation}^out`;
+		const store = new RecordingStore(
+			[
+				missingWith({ unknown: [derivation] }),
+				missingWith({
+					willSubstitute: [output, reference],
+					downloadSize: 27,
+					narSize: 41
+				})
+			],
+			[],
+			[],
+			[],
+			[
+				{
+					source: 'daemon',
+					storePath: output,
+					references: [reference],
+					downloadSize: 20,
+					narSize: 30
+				},
+				{
+					source: 'daemon',
+					storePath: reference,
+					references: [],
+					downloadSize: 7,
+					narSize: 11
+				}
+			]
+		);
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({
+						installable,
+						expectedPath: output,
+						plannedLocalDerivation: derivation
+					})
+				],
+				plannedLocalClosure: new Set([derivation]),
+				plannedSubstitutableDerivations: new Set([derivation]),
+				store,
+				requeryUnknown: () => Promise.resolve({ kind: 'already-fresh' }),
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+
+		expect(partition).toStrictEqual(
+			expectedPartition({
+				buildSet: [installable],
+				counts: { willBuild: 0, willSubstitute: 2, unknown: 0 },
+				downloadSize: 27,
+				narSize: 41,
+				ceiling: { value: 0, source: 'configured' }
+			})
+		);
+		expect({
+			missingCalls: store.missingCalls,
+			substitutableInfoCalls: store.substitutableInfoCalls
+		}).toStrictEqual({
+			missingCalls: [[installable], [output]],
+			substitutableInfoCalls: [[output, reference]]
+		});
+	});
+
+	it('substitutes the offered outputs when the other selected outputs are already valid', async () => {
+		const derivation = path('11111111111111111111111111111111-target.drv');
+		const output = path('22222222222222222222222222222222-target');
+		const developmentOutput = path(
+			'33333333333333333333333333333333-target-dev'
+		);
+		const installable: NixDerivedPathString = `${derivation}^out,dev`;
+		const store = new RecordingStore(
+			[
+				missingWith({ unknown: [derivation] }),
+				missingWith({
+					willSubstitute: [developmentOutput],
+					downloadSize: 8,
+					narSize: 13
+				})
+			],
+			[],
+			[output],
+			[],
+			[
+				{
+					source: 'daemon',
+					storePath: developmentOutput,
+					references: [],
+					downloadSize: 8,
+					narSize: 13
+				}
+			]
+		);
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({
+						installable,
+						expectedPath: undefined,
+						plannedLocalDerivation: derivation
+					})
+				],
+				plannedLocalClosure: new Set([derivation]),
+				plannedSubstitutableDerivations: new Set([derivation]),
+				plannedLocalOutputs: new Map([
+					[output, [`${derivation}^out`]],
+					[developmentOutput, [`${derivation}^dev`]]
+				]),
+				store,
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+
+		expect(partition).toStrictEqual(
+			expectedPartition({
+				buildSet: [installable],
+				counts: { willBuild: 0, willSubstitute: 1, unknown: 0 },
+				downloadSize: 8,
+				narSize: 13,
+				ceiling: { value: 0, source: 'configured' }
+			})
+		);
+		expect({
+			missingCalls: store.missingCalls,
+			substitutableInfoCalls: store.substitutableInfoCalls,
+			validCalls: store.validCalls
+		}).toStrictEqual({
+			missingCalls: [[installable], [output, developmentOutput]],
+			substitutableInfoCalls: [[developmentOutput]],
+			validCalls: [[], [output, developmentOutput]]
+		});
+	});
+
+	it('keeps a shared derivation in the build count when only one selected output can substitute', async () => {
+		const derivation = path('11111111111111111111111111111111-target.drv');
+		const output = path('22222222222222222222222222222222-target');
+		const developmentOutput = path(
+			'33333333333333333333333333333333-target-dev'
+		);
+		const outputInstallable: NixDerivedPathString = `${derivation}^out`;
+		const developmentInstallable: NixDerivedPathString = `${derivation}^dev`;
+		const developmentRoot = root('github:owner/repo/main/dev');
+		const store = new RecordingStore(
+			[
+				missingWith({ unknown: [derivation] }),
+				missingWith({
+					willSubstitute: [output],
+					unknown: [developmentOutput],
+					downloadSize: 8,
+					narSize: 13
+				}),
+				missingWith({
+					willSubstitute: [output],
+					downloadSize: 8,
+					narSize: 13
+				}),
+				missingWith({ unknown: [developmentOutput] })
+			],
+			[],
+			[],
+			[],
+			[
+				{
+					source: 'daemon',
+					storePath: output,
+					references: [],
+					downloadSize: 8,
+					narSize: 13
+				}
+			]
+		);
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({
+						installable: outputInstallable,
+						expectedPath: output,
+						plannedLocalDerivation: derivation
+					}),
+					target({
+						installable: developmentInstallable,
+						expectedPath: developmentOutput,
+						plannedLocalDerivation: derivation,
+						root: developmentRoot
+					})
+				],
+				plannedLocalClosure: new Set([derivation]),
+				plannedSubstitutableDerivations: new Set([derivation]),
+				store,
+				requeryUnknown: () => Promise.resolve({ kind: 'already-fresh' }),
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+
+		expect(partition).toStrictEqual(
+			expectedPartition({
+				buildSet: [outputInstallable, developmentInstallable],
+				counts: { willBuild: 1, willSubstitute: 1, unknown: 0 },
+				downloadSize: 8,
+				narSize: 13,
+				ceiling: { value: 0, source: 'configured' }
+			})
+		);
+		expect({
+			missingCalls: store.missingCalls,
+			substitutableInfoCalls: store.substitutableInfoCalls
+		}).toStrictEqual({
+			missingCalls: [
+				[outputInstallable, developmentInstallable],
+				[output, developmentOutput],
+				[output],
+				[developmentOutput]
+			],
+			substitutableInfoCalls: [[output]]
+		});
+	});
+
+	it('does not count a build when every selected output is already valid', async () => {
+		const derivation = path('11111111111111111111111111111111-target.drv');
+		const output = path('22222222222222222222222222222222-target');
+		const installable: NixDerivedPathString = `${derivation}^out`;
+		const store = new RecordingStore(
+			[missingWith({ unknown: [derivation] }), emptyMissing()],
+			[],
+			[output]
+		);
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({
+						installable,
+						expectedPath: output,
+						plannedLocalDerivation: derivation
+					})
+				],
+				plannedLocalClosure: new Set([derivation]),
+				plannedSubstitutableDerivations: new Set(),
+				plannedSubstitutionPolicy: { kind: 'unknown' },
+				store,
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+
+		expect(partition).toStrictEqual(
+			expectedPartition({
+				buildSet: [installable],
+				alreadyValid: [output],
+				ceiling: { value: 0, source: 'configured' }
+			})
+		);
+		expect({
+			missingCalls: store.missingCalls,
+			substitutableInfoCalls: store.substitutableInfoCalls
+		}).toStrictEqual({
+			missingCalls: [[installable], [output]],
+			substitutableInfoCalls: []
+		});
+	});
+
+	it.each([
+		{
+			name: 'the remote policy is unknown',
+			policy: { kind: 'unknown' } as const,
+			canDerivationSubstitute: false,
+			willBuild: 1,
+			willSubstitute: 1,
+			bytes: { downloadSize: 20, narSize: 30 },
+			infoCalls: [[path('22222222222222222222222222222222-target')]]
+		},
+		{
+			name: 'the selected store always allows substitutes',
+			policy: {
+				kind: 'known',
+				substitute: true,
+				alwaysAllowSubstitutes: true
+			} as const,
+			canDerivationSubstitute: false,
+			willBuild: 0,
+			willSubstitute: 1,
+			bytes: { downloadSize: 20, narSize: 30 },
+			infoCalls: [[path('22222222222222222222222222222222-target')]]
+		},
+		{
+			name: 'the derivation refuses substitutes',
+			policy: {
+				kind: 'known',
+				substitute: true,
+				alwaysAllowSubstitutes: false
+			} as const,
+			canDerivationSubstitute: false,
+			willBuild: 1,
+			willSubstitute: 0,
+			bytes: { downloadSize: 0, narSize: 0 },
+			infoCalls: []
+		},
+		{
+			name: 'the selected store has substitution disabled',
+			policy: {
+				kind: 'known',
+				substitute: false,
+				alwaysAllowSubstitutes: true
+			} as const,
+			canDerivationSubstitute: true,
+			willBuild: 1,
+			willSubstitute: 0,
+			bytes: { downloadSize: 0, narSize: 0 },
+			infoCalls: []
+		}
+	])(
+		'accounts for the substitution policy when $name',
+		async ({
+			policy,
+			canDerivationSubstitute,
+			willBuild,
+			willSubstitute,
+			bytes,
+			infoCalls
+		}) => {
+			const derivation = path('11111111111111111111111111111111-target.drv');
+			const output = path('22222222222222222222222222222222-target');
+			const installable: NixDerivedPathString = `${derivation}^out`;
+			const store = new RecordingStore(
+				[
+					missingWith({ unknown: [derivation] }),
+					missingWith({
+						willSubstitute: [output],
+						downloadSize: 20,
+						narSize: 30
+					})
+				],
+				[],
+				[],
+				[],
+				[
+					{
+						source: 'daemon',
+						storePath: output,
+						references: [],
+						downloadSize: 20,
+						narSize: 30
+					}
+				]
+			);
+
+			const partition = await partitionAvailability(
+				baseOptions({
+					targets: [
+						target({
+							installable,
+							expectedPath: output,
+							plannedLocalDerivation: derivation
+						})
+					],
+					plannedLocalClosure: new Set([derivation]),
+					plannedSubstitutableDerivations: new Set(
+						canDerivationSubstitute ? [derivation] : []
+					),
+					plannedSubstitutionPolicy: policy,
+					store,
+					ceiling: { value: 0, untrustedFallback: 0 }
+				})
+			);
+
+			expect(partition).toStrictEqual(
+				expectedPartition({
+					buildSet: [installable],
+					counts: { willBuild, willSubstitute, unknown: 0 },
+					downloadSize: bytes.downloadSize,
+					narSize: bytes.narSize,
+					ceiling: { value: 0, source: 'configured' }
+				})
+			);
+			expect({
+				missingCalls: store.missingCalls,
+				substitutableInfoCalls: store.substitutableInfoCalls
+			}).toStrictEqual({
+				missingCalls: [[installable], [output]],
+				substitutableInfoCalls: infoCalls
+			});
+		}
+	);
+
+	it('builds every selected output when a substituter offers only some of them', async () => {
+		const derivation = path('11111111111111111111111111111111-target.drv');
+		const output = path('22222222222222222222222222222222-target');
+		const developmentOutput = path(
+			'33333333333333333333333333333333-target-dev'
+		);
+		const installable: NixDerivedPathString = `${derivation}^out,dev`;
+		const store = new RecordingStore([
+			missingWith({ unknown: [derivation] }),
+			missingWith({
+				willSubstitute: [output],
+				unknown: [developmentOutput],
+				downloadSize: 20,
+				narSize: 30
+			})
+		]);
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({
+						installable,
+						expectedPath: undefined,
+						plannedLocalDerivation: derivation
+					})
+				],
+				plannedLocalClosure: new Set([derivation]),
+				plannedSubstitutableDerivations: new Set([derivation]),
+				plannedLocalOutputs: new Map([
+					[output, [`${derivation}^out`]],
+					[developmentOutput, [`${derivation}^dev`]]
+				]),
+				store,
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+
+		expect(partition).toStrictEqual(
+			expectedPartition({
+				buildSet: [installable],
+				counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
+				ceiling: { value: 0, source: 'configured' }
+			})
+		);
+		expect(store.missingCalls).toStrictEqual([
+			[installable],
+			[output, developmentOutput]
+		]);
+	});
+
+	it('retains dependency ownership when the target derivation is already present', async () => {
+		const appDerivation = path('11111111111111111111111111111111-app.drv');
+		const appOutput = path('22222222222222222222222222222222-app');
+		const otherDerivation = path('33333333333333333333333333333333-other.drv');
+		const otherOutput = path('44444444444444444444444444444444-other');
+		const dependencyDerivation = path(
+			'55555555555555555555555555555555-dependency.drv'
+		);
+		const dependencyOutput = path(
+			'66666666666666666666666666666666-dependency'
+		);
+		const appInstallable: NixDerivedPathString = `${appDerivation}^out`;
+		const otherInstallable: NixDerivedPathString = `${otherDerivation}^out`;
+		const dependencyInstallable: NixDerivedPathString = `${dependencyDerivation}^out`;
+		const store = new RecordingStore([
+			missingWith({ unknown: [dependencyOutput] }),
+			missingWith({ unknown: [dependencyOutput] }),
+			emptyMissing(),
+			emptyMissing()
+		]);
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({
+						installable: appInstallable,
+						expectedPath: appOutput,
+						plannedLocalDerivation: appDerivation
+					}),
+					target({
+						installable: otherInstallable,
+						expectedPath: otherOutput,
+						plannedLocalDerivation: otherDerivation
+					})
+				],
+				plannedLocalClosure: new Set([
+					appDerivation,
+					otherDerivation,
+					dependencyDerivation
+				]),
+				plannedLocalOutputs: new Map([
+					[dependencyOutput, [dependencyInstallable]]
+				]),
+				store,
+				requeryUnknown: () => Promise.resolve({ kind: 'already-fresh' }),
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+
+		expect(partition).toStrictEqual(
+			expectedPartition({
+				buildSet: [appInstallable, otherInstallable],
+				dependencyBuilds: [
+					{
+						path: dependencyOutput,
+						installables: [dependencyInstallable],
+						requiredBy: [appInstallable]
+					}
+				],
+				counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
+				ceiling: { value: 0, source: 'configured' }
+			})
+		);
+		expect(store.missingCalls).toStrictEqual([
+			[appInstallable, otherInstallable],
+			[appInstallable],
+			[otherInstallable]
+		]);
+	});
+
+	it('counts a target substitution once when both availability queries find it', async () => {
+		const derivation = path('11111111111111111111111111111111-target.drv');
+		const output = path('22222222222222222222222222222222-target');
+		const installable: NixDerivedPathString = `${derivation}^out`;
+		const substitution = missingWith({
+			willSubstitute: [output],
+			downloadSize: 20,
+			narSize: 30
+		});
+		const store = new RecordingStore(
+			[
+				missingWith({
+					willSubstitute: [output],
+					unknown: [derivation],
+					downloadSize: 20,
+					narSize: 30
+				}),
+				substitution
+			],
+			[],
+			[],
+			[],
+			[
+				{
+					source: 'daemon',
+					storePath: output,
+					references: [],
+					downloadSize: 20,
+					narSize: 30
+				}
+			]
+		);
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({
+						installable,
+						expectedPath: output,
+						plannedLocalDerivation: derivation
+					}),
+					target({ installable: output, expectedPath: output })
+				],
+				plannedLocalClosure: new Set([derivation]),
+				plannedSubstitutableDerivations: new Set([derivation]),
+				plannedLocalOutputs: new Map(),
+				store,
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+
+		expect({
+			counts: partition.counts,
+			downloadSize: partition.downloadSize,
+			narSize: partition.narSize
+		}).toStrictEqual({
+			counts: { willBuild: 0, willSubstitute: 1, unknown: 0 },
+			downloadSize: 20,
+			narSize: 30
+		});
+	});
+
+	it('rejects a floating output before querying remote availability', async () => {
+		const derivation = path('11111111111111111111111111111111-target.drv');
+		const output = path('22222222222222222222222222222222-target');
+		const developmentOutput = path(
+			'33333333333333333333333333333333-target-dev'
+		);
+		const outputInstallable: NixDerivedPathString = `${derivation}^out`;
+		const developmentInstallable: NixDerivedPathString = `${derivation}^dev`;
+		const installable: NixDerivedPathString = `${derivation}^out,dev`;
+		const availabilityTarget = target({
+			installable,
+			expectedPath: developmentOutput,
+			plannedLocalDerivation: derivation
+		});
+		const plannedLocalClosure = new Set([derivation]);
+		const plannedFloatingOutputs = new Set([developmentInstallable]);
+		const plannedLocalOutputs = new Map([[output, [outputInstallable]]]);
+		const plannedSubstitutableDerivations = new Set([derivation]);
+		const store = new RecordingStore([
+			missingWith({ unknown: [derivation] }),
+			missingWith({
+				willSubstitute: [output, developmentOutput],
+				downloadSize: 20,
+				narSize: 30
+			})
+		]);
+
+		const error = await rejectionOf(
+			partitionAvailability(
+				baseOptions({
+					targets: [availabilityTarget],
+					plannedLocalClosure,
+					plannedFloatingOutputs,
+					plannedLocalOutputs,
+					plannedSubstitutableDerivations,
+					store,
+					ceiling: { value: 0, untrustedFallback: 0 }
+				})
+			)
+		);
+		const refusal =
+			error instanceof RemoteFloatingOutputUnsupportedError ? error : undefined;
+
+		expect(error).toBeInstanceOf(RemoteFloatingOutputUnsupportedError);
+		expect({
+			targets: refusal?.targets,
+			missingCalls: store.missingCalls
+		}).toStrictEqual({
+			targets: [
+				{
+					attr: 'packages.x86_64-linux.app',
+					installable,
+					floatingOutputs: [developmentInstallable]
+				}
+			],
+			missingCalls: []
+		});
+	});
+
+	it('keeps dependencies found by a fresh query with their original target', async () => {
+		const appDerivation = path('11111111111111111111111111111111-app.drv');
+		const appOutput = path('22222222222222222222222222222222-app');
+		const otherDerivation = path('33333333333333333333333333333333-other.drv');
+		const otherOutput = path('44444444444444444444444444444444-other');
+		const dependencyOutput = path(
+			'55555555555555555555555555555555-dependency'
+		);
+		const nestedDerivation = path(
+			'66666666666666666666666666666666-nested.drv'
+		);
+		const nestedOutput = path('77777777777777777777777777777777-nested');
+		const appInstallable: NixDerivedPathString = `${appDerivation}^out`;
+		const otherInstallable: NixDerivedPathString = `${otherDerivation}^out`;
+		const nestedInstallable: NixDerivedPathString = `${nestedDerivation}^out`;
+		const store = new RecordingStore([
+			missingWith({ unknown: [appDerivation, otherDerivation] }),
+			missingWith({
+				willSubstitute: [appOutput, otherOutput],
+				unknown: [dependencyOutput]
+			}),
+			missingWith({
+				willSubstitute: [appOutput],
+				unknown: [dependencyOutput]
+			}),
+			missingWith({ willSubstitute: [otherOutput] }),
+			emptyMissing()
+		]);
+		const requeryCalls: (readonly StorePathString[])[] = [];
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({
+						installable: appInstallable,
+						expectedPath: appOutput,
+						plannedLocalDerivation: appDerivation
+					}),
+					target({
+						installable: otherInstallable,
+						expectedPath: otherOutput,
+						plannedLocalDerivation: otherDerivation
+					})
+				],
+				plannedLocalClosure: new Set([
+					appDerivation,
+					otherDerivation,
+					nestedDerivation
+				]),
+				plannedSubstitutableDerivations: new Set([
+					appDerivation,
+					otherDerivation
+				]),
+				plannedLocalOutputs: new Map([[nestedOutput, [nestedInstallable]]]),
+				store,
+				requeryUnknown: (storePaths) => {
+					requeryCalls.push(storePaths);
+
+					return Promise.resolve({
+						kind: 'answered',
+						partition: missingWith({
+							willSubstitute: [dependencyOutput],
+							unknown: [nestedOutput]
+						}),
+						sizes: new Map()
+					});
+				},
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+
+		expect({ partition, requeryCalls }).toStrictEqual({
+			partition: {
+				attachOnly: [],
+				publishByReference: [],
+				leftUpstream: [],
+				leftUpstreamRejections: [],
+				buildSet: [appInstallable, otherInstallable],
+				dependencyBuilds: [
+					{
+						path: nestedOutput,
+						installables: [nestedInstallable],
+						requiredBy: [appInstallable]
+					}
+				],
+				dependencyCopies: [],
+				unattested: [],
+				counts: { willBuild: 1, willSubstitute: 3, unknown: 0 },
+				downloadSize: 0,
+				narSize: 0,
+				alreadyValid: [],
+				unknownCount: 0,
+				ceiling: { value: 0, source: 'configured' },
+				unreachableSubstituters: []
+			},
+			requeryCalls: [[dependencyOutput]]
+		});
+	});
+
+	it('realises a target output that another target substitute requires', async () => {
+		const appDerivation = path('11111111111111111111111111111111-app.drv');
+		const appOutput = path('22222222222222222222222222222222-app');
+		const libraryDerivation = path(
+			'33333333333333333333333333333333-library.drv'
+		);
+		const libraryOutput = path('44444444444444444444444444444444-library');
+		const appInstallable: NixDerivedPathString = `${appDerivation}^out`;
+		const libraryInstallable: NixDerivedPathString = `${libraryDerivation}^out`;
+		const libraryRoot = root('github:owner/repo/main/library');
+		const store = new RecordingStore(
+			[
+				missingWith({ unknown: [appDerivation] }),
+				missingWith({
+					willSubstitute: [appOutput],
+					unknown: [libraryOutput],
+					downloadSize: 20,
+					narSize: 30
+				})
+			],
+			[],
+			[],
+			[],
+			[
+				{
+					source: 'daemon',
+					storePath: appOutput,
+					references: [libraryOutput],
+					downloadSize: 20,
+					narSize: 30
+				}
+			]
+		);
+
+		const partition = await partitionAvailability(
+			baseOptions({
+				targets: [
+					target({
+						installable: appInstallable,
+						expectedPath: appOutput,
+						plannedLocalDerivation: appDerivation
+					}),
+					target({
+						installable: libraryInstallable,
+						expectedPath: libraryOutput,
+						plannedLocalDerivation: libraryDerivation,
+						root: libraryRoot
+					})
+				],
+				plannedLocalClosure: new Set([appDerivation, libraryDerivation]),
+				plannedSubstitutableDerivations: new Set([appDerivation]),
+				plannedLocalOutputs: new Map([
+					[appOutput, [appInstallable]],
+					[libraryOutput, [libraryInstallable]]
+				]),
+				destinationProbes: probesFrom({
+					destinationServed: () => Promise.resolve(new Set([libraryOutput]))
+				}),
+				store,
+				requeryUnknown: () => Promise.resolve({ kind: 'already-fresh' }),
+				ceiling: { value: 0, untrustedFallback: 0 }
+			})
+		);
+
+		expect(partition).toStrictEqual({
+			attachOnly: [libraryOutput],
+			publishByReference: [],
+			leftUpstream: [],
+			leftUpstreamRejections: [],
+			buildSet: [appInstallable],
+			dependencyBuilds: [
+				{
+					path: libraryOutput,
+					installables: [libraryInstallable],
+					requiredBy: [appInstallable]
+				}
+			],
+			dependencyCopies: [],
+			unattested: [],
+			counts: { willBuild: 1, willSubstitute: 1, unknown: 0 },
+			downloadSize: 20,
+			narSize: 30,
+			alreadyValid: [],
+			unknownCount: 0,
+			ceiling: { value: 0, source: 'configured' },
+			unreachableSubstituters: []
 		});
 	});
 

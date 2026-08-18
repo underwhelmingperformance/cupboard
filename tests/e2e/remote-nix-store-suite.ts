@@ -627,7 +627,7 @@ async function runRemoteBuild(
 			},
 			undefined,
 			{
-				derivations: [drvPath],
+				copyPaths: [drvPath],
 				copy: () =>
 					withSshOptions(store.environment.NIX_SSHOPTS, () =>
 						runNixCopy([drvPath], store.storeUri)
@@ -870,7 +870,7 @@ async function runAlreadyValidPublication(
 						() => Promise.resolve(),
 						undefined,
 						{
-							derivations: [member.derivation],
+							copyPaths: [member.derivation],
 							copy: () =>
 								withSshOptions(store.environment.NIX_SSHOPTS, () =>
 									runNixCopy([member.derivation], store.storeUri)
@@ -2373,6 +2373,8 @@ function publicationPlanResults(
 					buildSet: members
 						.map((member) => member.target)
 						.filter((target) => !isAttached(target)),
+					dependencyBuilds: [],
+					dependencyCopies: [],
 					counts: {
 						willBuild: 0,
 						willSubstitute: 0,
@@ -2410,6 +2412,8 @@ function publicationLocallyCopyablePlanResults(
 					unattested: [],
 					alreadyValid: [],
 					buildSet: members.map((member) => member.target),
+					dependencyBuilds: [],
+					dependencyCopies: [],
 					counts: {
 						willBuild: members.length,
 						willSubstitute: 0,

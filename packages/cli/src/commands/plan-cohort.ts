@@ -4,6 +4,8 @@ import { readFile, statfs, writeFile } from 'node:fs/promises';
 import {
 	discoverNixStoreConfig,
 	Nix,
+	type NixDerivedPathString,
+	type NixSubstitutionSettings,
 	offerAcceptance,
 	type ReadKeyFile
 } from '@cupboard/nix';
@@ -45,6 +47,7 @@ import {
 	type LeftUpstreamCandidate,
 	type LeftUpstreamVerdict,
 	partitionAvailability,
+	type PlannedSubstitutionPolicy,
 	UnknownPathsCeilingError,
 	type UnknownRequeryOutcome
 } from '../plan/availability-partition.ts';
@@ -59,7 +62,9 @@ import {
 } from '../plan/capacity.ts';
 import {
 	cohortPlanInputSchema,
-	type ParsedCohortTarget
+	type ParsedCohortPlanInput,
+	type ParsedCohortTarget,
+	type ParsedPlannedLocalOutput
 } from '../plan/cohort-target.ts';
 import { tenantProbesFor } from '../plan/destination-probe.ts';
 import {
@@ -132,6 +137,28 @@ export async function requeryUnknownWith(
 				{ downloadSize: offer.downloadSize, narSize: offer.narSize }
 			])
 		)
+	};
+}
+
+/**
+ * Resolves the substitution policy used to estimate work after the action
+ * copies a planned derivation. The policy is unknown when the selected store
+ * preserves settings that belong to another Nix daemon.
+ */
+export async function resolvePlannedSubstitutionPolicy(
+	store: Pick<Nix, 'honoursSubstituterSettings'>,
+	settings: NixSubstitutionSettings
+): Promise<PlannedSubstitutionPolicy> {
+	const outcome = await store.honoursSubstituterSettings();
+
+	if (!outcome.isHonoured) {
+		return { kind: 'unknown' };
+	}
+
+	return {
+		kind: 'known',
+		substitute: settings.substitute,
+		alwaysAllowSubstitutes: settings.alwaysAllowSubstitutes
 	};
 }
 
@@ -210,6 +237,7 @@ export interface PlanCohortDependencies {
 	readonly store: Pick<
 		Nix,
 		| 'queryMissing'
+		| 'querySubstitutablePathInfos'
 		| 'querySubstitutablePaths'
 		| 'queryValidPaths'
 		| 'unreachableSubstituters'
@@ -234,6 +262,11 @@ export interface PlanCohortDependencies {
 
 export interface PlanCohortRunOptions {
 	readonly targets: readonly ParsedCohortTarget[];
+	readonly plannedLocalClosure?: readonly StorePathString[];
+	readonly plannedSubstitutableDerivations?: readonly StorePathString[];
+	readonly plannedFloatingOutputs?: readonly NixDerivedPathString[];
+	readonly plannedSubstitutionPolicy: PlannedSubstitutionPolicy;
+	readonly plannedLocalOutputs?: readonly ParsedPlannedLocalOutput[];
 	readonly cacheName: string;
 	readonly ttlSeconds?: TtlSeconds;
 	/**
@@ -360,7 +393,8 @@ export function registerPlanCommands(
 		)
 		.action(async (url: URL, options: PlanCohortOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			const targets = await readCohortTargets(options.targetsFile);
+			const input = await readCohortPlanInput(options.targetsFile);
+			const { targets } = input;
 			const cacheName = selectorForCache(storedCacheFor(options.cache));
 			const uniqueRoots = [...new Set(targets.map((target) => target.root))];
 			const credential = await authenticateForPush(
@@ -399,6 +433,10 @@ export function registerPlanCommands(
 				...(credentials !== undefined && { credentials })
 			});
 			const { substitution, signatures } = discoverNixStoreConfig();
+			const plannedSubstitutionPolicy = await resolvePlannedSubstitutionPolicy(
+				nix,
+				substitution
+			);
 			// A separate store for the upstream confirmation: its substituter
 			// list holds only what a consumer elsewhere could also reach, so
 			// content the tenant alone holds never reads as available
@@ -413,6 +451,7 @@ export function registerPlanCommands(
 				{
 					targets,
 					cacheName,
+					plannedSubstitutionPolicy,
 					...(options.ttl !== undefined && { ttlSeconds: options.ttl }),
 					storeIdentity: {
 						kind: nix.storeKind,
@@ -420,6 +459,19 @@ export function registerPlanCommands(
 					},
 					storePath: options.storePath ?? defaultStorePath,
 					planFile: options.planFile ?? defaultPlanFile(),
+					...(input.plannedLocalClosure !== undefined && {
+						plannedLocalClosure: input.plannedLocalClosure
+					}),
+					...(input.plannedSubstitutableDerivations !== undefined && {
+						plannedSubstitutableDerivations:
+							input.plannedSubstitutableDerivations
+					}),
+					...(input.plannedFloatingOutputs !== undefined && {
+						plannedFloatingOutputs: input.plannedFloatingOutputs
+					}),
+					...(input.plannedLocalOutputs !== undefined && {
+						plannedLocalOutputs: input.plannedLocalOutputs
+					}),
 					...(options.requireAttested === true && { requireAttested: true }),
 					ceiling: {
 						value: options.unknownCeiling ?? defaultUnknownCeiling,
@@ -530,6 +582,28 @@ export async function runPlanCohort(
 			() =>
 				partitionAvailability({
 					targets: availabilityTargets,
+					plannedSubstitutionPolicy: options.plannedSubstitutionPolicy,
+					...(options.plannedLocalClosure !== undefined && {
+						plannedLocalClosure: new Set(options.plannedLocalClosure)
+					}),
+					...(options.plannedSubstitutableDerivations !== undefined && {
+						plannedSubstitutableDerivations: new Set(
+							options.plannedSubstitutableDerivations
+						)
+					}),
+					...(options.plannedFloatingOutputs !== undefined && {
+						plannedFloatingOutputs: new Set(options.plannedFloatingOutputs)
+					}),
+					...(options.plannedLocalOutputs !== undefined && {
+						plannedLocalOutputs: new Map(
+							Map.groupBy(options.plannedLocalOutputs, ({ path }) => path)
+								.entries()
+								.map(([path, outputs]) => [
+									path,
+									outputs.map(({ installable }) => installable)
+								])
+						)
+					}),
 					store: dependencies.store,
 					destinationProbes: {
 						destinationServed: dependencies.destinationServed,
@@ -627,6 +701,14 @@ export async function runPlanCohort(
 				value: String(partition.leftUpstream.length)
 			},
 			{ label: 'To build', value: String(partition.buildSet.length) },
+			...(partition.dependencyBuilds.length === 0
+				? []
+				: [
+						{
+							label: 'Dependencies to build',
+							value: String(partition.dependencyBuilds.length)
+						}
+					]),
 			...(partition.unattested.length === 0
 				? []
 				: [
@@ -755,12 +837,11 @@ async function ensureCohortRoots(
 }
 
 /**
- * Reads the cohort targets file every plan command over a cohort consumes: the
- * targets as `build-cohort` writes them from a plan job's cohort-matrix entry.
- */
-export async function readCohortTargets(
+Reads the complete input for a cohort plan.
+*/
+export async function readCohortPlanInput(
 	targetsFile: string
-): Promise<readonly ParsedCohortTarget[]> {
+): Promise<ParsedCohortPlanInput> {
 	let json: unknown;
 
 	try {
@@ -778,7 +859,18 @@ export async function readCohortTargets(
 		throw new InvalidCohortTargetsFileError(targetsFile, parsed.error.message);
 	}
 
-	return parsed.data.targets;
+	return parsed.data;
+}
+
+/**
+Reads the targets used by both the initial plan and the later re-probe.
+*/
+export async function readCohortTargets(
+	targetsFile: string
+): Promise<readonly ParsedCohortTarget[]> {
+	const input = await readCohortPlanInput(targetsFile);
+
+	return input.targets;
 }
 
 /**

@@ -30,7 +30,10 @@ import {
 } from '../plan/capacity.ts';
 import type { ParsedCohortTarget } from '../plan/cohort-target.ts';
 
-import { requeryUnknownWith } from './plan-cohort.ts';
+import {
+	requeryUnknownWith,
+	resolvePlannedSubstitutionPolicy
+} from './plan-cohort.ts';
 import {
 	type PlanCohortDependencies,
 	type PlanCohortRunOptions,
@@ -75,6 +78,18 @@ function emptyMissing(): NixMissingPartition {
 	};
 }
 
+async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+	const [result] = await Promise.allSettled([promise]);
+
+	if (result.status === 'fulfilled') {
+		return;
+	}
+
+	const error: unknown = result.reason;
+
+	return error;
+}
+
 function buildRequired(
 	unavailable: readonly StorePathString[]
 ): ParsedRootEnsureResponse {
@@ -86,12 +101,14 @@ function missingStore(
 ): Pick<
 	Nix,
 	| 'queryMissing'
+	| 'querySubstitutablePathInfos'
 	| 'querySubstitutablePaths'
 	| 'queryValidPaths'
 	| 'unreachableSubstituters'
 > {
 	return {
 		queryMissing: () => Promise.resolve(missing),
+		querySubstitutablePathInfos: () => Promise.resolve([]),
 		querySubstitutablePaths: () => Promise.resolve([]),
 		queryValidPaths: () => Promise.resolve([]),
 		unreachableSubstituters: () => Promise.resolve([])
@@ -136,6 +153,11 @@ function runOptions(
 		targets: [],
 		cacheName: '_default',
 		storeIdentity: { kind: 'daemon' },
+		plannedSubstitutionPolicy: {
+			kind: 'known',
+			substitute: true,
+			alwaysAllowSubstitutes: false
+		},
 		storePath: '/nix/store',
 		planFile: path.join(tmpdir(), 'unused-cupboard-plan-cohort.json'),
 		ceiling: { value: 0, untrustedFallback: 0 },
@@ -230,6 +252,8 @@ describe('runPlanCohort', () => {
 				leftUpstream: [],
 				leftUpstreamRejections: [],
 				buildSet: [],
+				dependencyBuilds: [],
+				dependencyCopies: [],
 				unattested: [],
 				counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
 				downloadSize: 0,
@@ -313,6 +337,8 @@ describe('runPlanCohort', () => {
 						leftUpstream: [],
 						leftUpstreamRejections: [],
 						buildSet: [otherPath],
+						dependencyBuilds: [],
+						dependencyCopies: [],
 						unattested: [],
 						counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
 						downloadSize: 0,
@@ -338,7 +364,16 @@ describe('runPlanCohort', () => {
 		const derivation = storePathSchema.parse(
 			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app.drv'
 		);
+		const dependencyDerivation = storePathSchema.parse(
+			'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-other.drv'
+		);
+		const alternativeDependencyDerivation = storePathSchema.parse(
+			'/nix/store/4123456789abcdfghijklmnpqrsvwxyz-alternative.drv'
+		);
 		const installable = `${derivation}^out` as const;
+		const dependencyInstallable = `${dependencyDerivation}^out` as const;
+		const alternativeDependencyInstallable =
+			`${alternativeDependencyDerivation}^out` as const;
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-plan-cohort-'));
 		const planFile = path.join(directory, 'plan.json');
 		const payloads: ResultPayload[] = [];
@@ -350,10 +385,21 @@ describe('runPlanCohort', () => {
 				leftUpstream: [],
 				leftUpstreamRejections: [],
 				buildSet: [installable],
+				dependencyBuilds: [
+					{
+						path: otherPath,
+						installables: [
+							dependencyInstallable,
+							alternativeDependencyInstallable
+						],
+						requiredBy: [installable]
+					}
+				],
+				dependencyCopies: [],
 				unattested: [],
-				counts: { willBuild: 1, willSubstitute: 0, unknown: 0 },
-				downloadSize: 0,
-				narSize: 0,
+				counts: { willBuild: 1, willSubstitute: 1, unknown: 0 },
+				downloadSize: 10,
+				narSize: 20,
 				alreadyValid: [],
 				unknownCount: 0,
 				ceiling: { value: 0, source: 'configured' },
@@ -363,6 +409,43 @@ describe('runPlanCohort', () => {
 		};
 
 		try {
+			const missingAnswers = [
+				{
+					willBuild: [],
+					willSubstitute: [],
+					unknown: [derivation],
+					downloadSize: 0,
+					narSize: 0
+				},
+				{
+					willBuild: [],
+					willSubstitute: [appPath],
+					unknown: [otherPath],
+					downloadSize: 10,
+					narSize: 20
+				}
+			] satisfies NixMissingPartition[];
+			let missingIndex = 0;
+			const store = {
+				...missingStore(emptyMissing()),
+				queryMissing: () =>
+					Promise.resolve(
+						missingAnswers[missingIndex++] ??
+							missingAnswers.at(-1) ??
+							emptyMissing()
+					),
+				querySubstitutablePathInfos: () =>
+					Promise.resolve([
+						{
+							source: 'daemon' as const,
+							storePath: appPath,
+							references: [otherPath],
+							downloadSize: 10,
+							narSize: 20
+						}
+					])
+			};
+
 			await runPlanCohort(
 				runOptions({
 					targets: [
@@ -371,6 +454,19 @@ describe('runPlanCohort', () => {
 							plannedLocalDerivation: derivation
 						})
 					],
+					plannedLocalClosure: [
+						derivation,
+						dependencyDerivation,
+						alternativeDependencyDerivation
+					],
+					plannedSubstitutableDerivations: [derivation],
+					plannedLocalOutputs: [
+						{ path: otherPath, installable: dependencyInstallable },
+						{
+							path: otherPath,
+							installable: alternativeDependencyInstallable
+						}
+					],
 					storeIdentity: { kind: 'ssh-ng' },
 					planFile,
 					ceiling: { value: 0, untrustedFallback: 0 }
@@ -378,13 +474,8 @@ describe('runPlanCohort', () => {
 				reporter(payloads),
 				dependencies({
 					rootClient,
-					store: missingStore({
-						willBuild: [],
-						willSubstitute: [],
-						unknown: [derivation],
-						downloadSize: 0,
-						narSize: 0
-					})
+					store,
+					requeryUnknown: () => Promise.resolve({ kind: 'already-fresh' })
 				})
 			);
 
@@ -401,6 +492,7 @@ describe('runPlanCohort', () => {
 							{ label: 'Reused from the tenant', value: '0' },
 							{ label: 'Left to upstream caches', value: '0' },
 							{ label: 'To build', value: '1' },
+							{ label: 'Dependencies to build', value: '1' },
 							{ label: 'Plan file', value: planFile }
 						]
 					}
@@ -428,20 +520,18 @@ describe('runPlanCohort', () => {
 			narSize: 0
 		};
 
-		let error: unknown;
-
-		try {
-			await runPlanCohort(
-				runOptions({ targets: [target({ expectedPath: undefined })] }),
-				reporter(payloads),
-				dependencies({
-					store: missingStore(missing),
-					requeryUnknown: requeryAnswering(requeryResult)
-				})
-			);
-		} catch (error_: unknown) {
-			error = error_;
-		}
+		const options = runOptions({
+			targets: [target({ expectedPath: undefined })]
+		});
+		const run = runPlanCohort(
+			options,
+			reporter(payloads),
+			dependencies({
+				store: missingStore(missing),
+				requeryUnknown: requeryAnswering(requeryResult)
+			})
+		);
+		const error = await rejectionOf(run);
 
 		expect(error).toBeInstanceOf(UnknownPathsCeilingError);
 		expect(payloads).toStrictEqual([
@@ -547,6 +637,7 @@ describe('runPlanCohort', () => {
 			rootClient: recordingRootClient([], buildRequired([appPath])),
 			store: {
 				queryMissing: () => Promise.resolve(emptyMissing()),
+				querySubstitutablePathInfos: () => Promise.resolve([]),
 				querySubstitutablePaths: () => Promise.resolve([appPath]),
 				queryValidPaths: () => Promise.resolve([appPath]),
 				unreachableSubstituters: () => Promise.resolve([])
@@ -570,6 +661,8 @@ describe('runPlanCohort', () => {
 					{ kind: 'closure-not-served', missing: otherPath, storePath: appPath }
 				],
 				buildSet: [appPath],
+				dependencyBuilds: [],
+				dependencyCopies: [],
 				unattested: [],
 				counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
 				downloadSize: 0,
@@ -624,6 +717,8 @@ describe('runPlanCohort', () => {
 					leftUpstream: [],
 					leftUpstreamRejections: [],
 					buildSet: [],
+					dependencyBuilds: [],
+					dependencyCopies: [],
 					unattested: [],
 					counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
 					downloadSize: 0,
@@ -704,6 +799,8 @@ describe('runPlanCohort', () => {
 					leftUpstream: [],
 					leftUpstreamRejections: [],
 					buildSet: row.buildSet,
+					dependencyBuilds: [],
+					dependencyCopies: [],
 					unattested: row.unattested,
 					counts: { willBuild: 0, willSubstitute: 0, unknown: 0 },
 					downloadSize: 0,
@@ -922,6 +1019,48 @@ describe('requeryUnknownWith', () => {
 				outcome: { kind: 'refused', reason },
 				opened: []
 			});
+		}
+	);
+});
+
+describe('resolvePlannedSubstitutionPolicy', () => {
+	const settings = {
+		substitute: true,
+		alwaysAllowSubstitutes: true,
+		fallback: false,
+		substituters: ['https://cache.example.test']
+	};
+
+	it.each([
+		{
+			name: 'the selected store honours the configured settings',
+			outcome: { isHonoured: true } as const,
+			expected: {
+				kind: 'known',
+				substitute: true,
+				alwaysAllowSubstitutes: true
+			}
+		},
+		{
+			name: 'the selected store preserves its own settings',
+			outcome: {
+				isHonoured: false,
+				reason: 'daemon-options-preserved',
+				trust: 'unknown'
+			} as const,
+			expected: { kind: 'unknown' }
+		}
+	])(
+		'returns the effective policy when $name',
+		async ({ outcome, expected }) => {
+			const policy = await resolvePlannedSubstitutionPolicy(
+				{
+					honoursSubstituterSettings: () => Promise.resolve(outcome)
+				},
+				settings
+			);
+
+			expect(policy).toStrictEqual(expected);
 		}
 	);
 });

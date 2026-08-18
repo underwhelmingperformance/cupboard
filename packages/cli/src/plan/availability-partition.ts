@@ -3,6 +3,7 @@ import type {
 	NixDaemonTrust,
 	NixDerivedPathString,
 	NixMissingPartition,
+	NixSubstitutablePathInfo,
 	UnreachableSubstituter
 } from '@cupboard/nix';
 import {
@@ -20,7 +21,7 @@ import {
 import type { ParsedRootEnsureResponse } from '@cupboard/protocol/retention';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
-import { CliError, transientExitCode } from '../errors.ts';
+import { CliError, CliUsageError, transientExitCode } from '../errors.ts';
 
 /**
  * The information needed to classify one manifest target: what `nix build`
@@ -39,7 +40,7 @@ export interface AvailabilityTarget {
 	readonly installable: NixDerivedPathString;
 	readonly expectedPath?: StorePathString;
 	/**
-	A planned derivation closure the caller will copy before realisation.
+	The planned derivation for this target.
 	*/
 	readonly plannedLocalDerivation?: StorePathString;
 	readonly root: RootName;
@@ -185,8 +186,44 @@ export interface AvailabilityCeiling {
 	readonly fallbackReason?: string;
 }
 
+/**
+ * Whether the selected store uses the substitution settings that the planner
+ * can read. An SSH store preserves the remote daemon's settings, so its policy
+ * is unknown until the derivation has been copied. For an unknown policy, the
+ * plan accounts for both the build and substitution branches.
+ */
+export type PlannedSubstitutionPolicy =
+	| {
+			readonly kind: 'known';
+			readonly substitute: boolean;
+			readonly alwaysAllowSubstitutes: boolean;
+	  }
+	| { readonly kind: 'unknown' };
+
 export interface AvailabilityPartitionOptions {
 	readonly targets: readonly AvailabilityTarget[];
+	/**
+	Paths that the caller can copy to the selected store before realisation.
+	*/
+	readonly plannedLocalClosure?: ReadonlySet<StorePathString>;
+	/**
+	Derivations in `plannedLocalClosure` whose own policy permits substitution.
+	*/
+	readonly plannedSubstitutableDerivations?: ReadonlySet<StorePathString>;
+	/**
+	Derived-path installables whose output paths the local derivations do not
+	declare.
+	*/
+	readonly plannedFloatingOutputs?: ReadonlySet<NixDerivedPathString>;
+	readonly plannedSubstitutionPolicy: PlannedSubstitutionPolicy;
+	/**
+	Outputs the caller can realise after it copies their derivations to the
+	selected store, keyed by their expected store path.
+	*/
+	readonly plannedLocalOutputs?: ReadonlyMap<
+		StorePathString,
+		readonly NixDerivedPathString[]
+	>;
 	/**
 	The kind and URI of the selected store, for refusal diagnostics.
 	*/
@@ -197,6 +234,7 @@ export interface AvailabilityPartitionOptions {
 	readonly store: Pick<
 		Nix,
 		| 'queryMissing'
+		| 'querySubstitutablePathInfos'
 		| 'querySubstitutablePaths'
 		| 'queryValidPaths'
 		| 'unreachableSubstituters'
@@ -236,12 +274,10 @@ export interface AvailabilityPartitionOptions {
 }
 
 /**
- * The realisation and publication partition of a manifest's targets: which
- * require only attachment to an already-servable root, which the
- * tenant already holds elsewhere and can be published by reference, which an
- * upstream substituter already serves and are deliberately left there, and
- * which must actually be built. `nix build` realises every installable it is
- * given, so `buildSet` is the only part ever handed to it.
+ * The work required to realise and publish a manifest's targets. The four
+ * target lists distinguish attachment, publication by reference, upstream
+ * availability, and realisation. `dependencyBuilds` contains output paths to
+ * realise before the targets that need them.
  */
 export interface AvailabilityPartition {
 	readonly attachOnly: readonly StorePathString[];
@@ -254,6 +290,17 @@ export interface AvailabilityPartition {
 	readonly leftUpstreamRejections: readonly LeftUpstreamRejection[];
 	readonly buildSet: readonly NixDerivedPathString[];
 	/**
+	 * Outputs to realise before the targets in `buildSet` that require them. The
+	 * owner list lets the action remove dependencies of targets withdrawn by the
+	 * final probe.
+	 */
+	readonly dependencyBuilds: readonly AvailabilityDependencyBuild[];
+	/**
+	 * Local closure paths to copy before realising the targets that require them.
+	 * The owner list lets the action omit paths used only by withdrawn targets.
+	 */
+	readonly dependencyCopies: readonly AvailabilityDependencyCopy[];
+	/**
 	 * Paths the destination cache serves without holding build provenance for
 	 * them. A run that asked for attested availability builds these targets, so
 	 * each of them is in `buildSet` by its installable and absent from
@@ -265,6 +312,12 @@ export interface AvailabilityPartition {
 		readonly willSubstitute: number;
 		readonly unknown: number;
 	};
+	/**
+	 * The estimated substitution capacity, including complete substitute
+	 * closures that become usable after their derivations are copied. When the
+	 * remote daemon's substitution policy is unknown, this is the conservative
+	 * substitution branch of the estimate.
+	 */
 	readonly downloadSize: number;
 	readonly narSize: number;
 	/**
@@ -274,8 +327,8 @@ export interface AvailabilityPartition {
 	 */
 	readonly alreadyValid: readonly StorePathString[];
 	/**
-	Equal to `counts.unknown`, flattened for a capacity preflight to read directly.
-	*/
+	 * Equal to `counts.unknown`, for direct use by the capacity preflight.
+	 */
 	readonly unknownCount: number;
 	readonly ceiling: AvailabilityCeiling;
 	/**
@@ -284,6 +337,35 @@ export interface AvailabilityPartition {
 	 * list is non-empty.
 	 */
 	readonly unreachableSubstituters: readonly UnreachableSubstituter[];
+}
+
+/**
+ * An output to realise before the cohort targets that require it. `installables`
+ * contains the candidate derived-path installables that can produce the output.
+ * `requiredBy` contains the target installables whose substitute closures refer
+ * to it.
+ */
+export interface AvailabilityDependencyBuild {
+	readonly path: StorePathString;
+	readonly installables: readonly [
+		NixDerivedPathString,
+		...NixDerivedPathString[]
+	];
+	readonly requiredBy: readonly [
+		NixDerivedPathString,
+		...NixDerivedPathString[]
+	];
+}
+
+/**
+ * A local closure path and the cohort targets whose substitutes require it.
+ */
+export interface AvailabilityDependencyCopy {
+	readonly path: StorePathString;
+	readonly requiredBy: readonly [
+		NixDerivedPathString,
+		...NixDerivedPathString[]
+	];
 }
 
 /**
@@ -322,6 +404,59 @@ export class UnknownPathsCeilingError extends CliError {
 }
 
 /**
+Reports remote targets whose selected output paths are unknown until after realisation.
+*/
+export class RemoteFloatingOutputUnsupportedError extends CliUsageError {
+	constructor(
+		public readonly targets: readonly {
+			readonly attr: string;
+			readonly installable: NixDerivedPathString;
+			readonly floatingOutputs: readonly NixDerivedPathString[];
+		}[]
+	) {
+		super(
+			`Remote builds cannot safely publish floating outputs. Nix reports each output path only after the build, and Cupboard must protect the path from garbage collection in a separate step. Garbage collection could remove the output between these steps. Build and publish these targets from the local store: ${targets.map(({ attr }) => attr).join(', ')}`
+		);
+		this.name = 'RemoteFloatingOutputUnsupportedError';
+	}
+}
+
+function emptyMissingPartition(): NixMissingPartition {
+	return {
+		willBuild: [],
+		willSubstitute: [],
+		unknown: [],
+		downloadSize: 0,
+		narSize: 0
+	};
+}
+
+function shouldQueryAvailabilityForTarget(
+	target: AvailabilityTarget,
+	destinationServedPaths: ReadonlySet<StorePathString>,
+	viewServedPaths: ReadonlySet<StorePathString>,
+	attestedServedPaths: ReadonlySet<StorePathString> | undefined,
+	rootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse>
+): boolean {
+	if (target.expectedPath === undefined) {
+		return true;
+	}
+
+	const isTargetServedByDestination =
+		destinationServedPaths.has(target.expectedPath) ||
+		isServedByRootEnsure(target, rootEnsureResults);
+
+	if (isTargetServedByDestination) {
+		return (
+			attestedServedPaths !== undefined &&
+			!attestedServedPaths.has(target.expectedPath)
+		);
+	}
+
+	return !viewServedPaths.has(target.expectedPath);
+}
+
+/**
  * Partitions a manifest's targets by what realising and publishing each one
  * actually requires. Machine-independent facts (destination- and
  * view-serving) come from the caller's HTTP probes; everything else is asked
@@ -331,19 +466,78 @@ export class UnknownPathsCeilingError extends CliError {
 export async function partitionAvailability(
 	options: AvailabilityPartitionOptions
 ): Promise<AvailabilityPartition> {
+	const floatingTargets = options.targets.flatMap((target) => {
+		const floatingOutputs = selectedFloatingOutputs(
+			target,
+			options.plannedFloatingOutputs
+		);
+
+		return floatingOutputs.length === 0
+			? []
+			: [
+					{
+						attr: target.attr,
+						installable: target.installable,
+						floatingOutputs
+					}
+				];
+	});
+
+	if (floatingTargets.length > 0) {
+		throw new RemoteFloatingOutputUnsupportedError(floatingTargets);
+	}
+
 	const knownPaths = options.targets
 		.map((target) => target.expectedPath)
 		.filter((path): path is StorePathString => path !== undefined);
-	const installables = options.targets.map((target) => target.installable);
-
-	const [destinationServedPaths, viewServedPaths, validPaths, queriedMissing] =
+	const [destinationServedPaths, viewServedPaths, validPaths] =
 		await Promise.all([
 			options.destinationProbes.destinationServed(knownPaths),
 			options.destinationProbes.viewServed(knownPaths),
-			options.store.queryValidPaths(knownPaths),
-			options.store.queryMissing(installables)
+			options.store.queryValidPaths(knownPaths)
 		]);
-	const missing = accountForLocalDerivations(queriedMissing, options.targets);
+	const servedPaths = options.targets.flatMap((target) => {
+		if (target.expectedPath === undefined) {
+			return [];
+		}
+
+		return destinationServedPaths.has(target.expectedPath) ||
+			isServedByRootEnsure(target, options.rootEnsureResults)
+			? [target.expectedPath]
+			: [];
+	});
+	const attestedServedPaths =
+		options.attestedServed === undefined
+			? undefined
+			: await options.attestedServed([...new Set(servedPaths)]);
+	const availabilityTargets = options.targets.filter((target) =>
+		shouldQueryAvailabilityForTarget(
+			target,
+			destinationServedPaths,
+			viewServedPaths,
+			attestedServedPaths,
+			options.rootEnsureResults
+		)
+	);
+	const queriedMissing =
+		availabilityTargets.length === 0
+			? emptyMissingPartition()
+			: await options.store.queryMissing(
+					availabilityTargets.map((target) => target.installable)
+				);
+	const supplemented = await includeMissingSubstituteReferences(
+		queriedMissing,
+		options,
+		availabilityTargets
+	);
+	const initiallyAccounted = accountForLocalDerivations(
+		supplemented.partition,
+		options.targets,
+		options.plannedLocalClosure,
+		options.plannedLocalOutputs,
+		supplemented.dependencyOwners,
+		false
+	);
 
 	// Substitutability is asked only about the paths this store already holds
 	// valid, because only such a path can be left upstream: the confirmation
@@ -361,7 +555,21 @@ export async function partitionAvailability(
 			)
 	);
 
-	const { partition, ceiling } = await classifyUnknowns(missing, options);
+	const classifiedUnknowns = await classifyUnknowns(
+		initiallyAccounted.partition,
+		supplemented.dependencyOwners,
+		options
+	);
+	const finallyAccounted = accountForLocalDerivations(
+		classifiedUnknowns.partition,
+		options.targets,
+		options.plannedLocalClosure,
+		options.plannedLocalOutputs,
+		classifiedUnknowns.dependencyOwners,
+		true
+	);
+	const partition = finallyAccounted.partition;
+	const ceiling = classifiedUnknowns.ceiling;
 	const unreachableSubstituters = await options.store.unreachableSubstituters();
 
 	if (partition.unknown.length > ceiling.value) {
@@ -394,7 +602,7 @@ export async function partitionAvailability(
 	const rejectedPaths = new Set(
 		rejections.map((rejection) => rejection.storePath)
 	);
-	const unattested = await unattestedPaths(classified, options);
+	const unattested = unattestedPaths(classified, attestedServedPaths);
 
 	for (const { target, classification } of classified) {
 		addToBucket(
@@ -410,6 +618,8 @@ export async function partitionAvailability(
 		leftUpstream,
 		leftUpstreamRejections: rejections,
 		buildSet,
+		dependencyBuilds: finallyAccounted.dependencyBuilds,
+		dependencyCopies: finallyAccounted.dependencyCopies,
 		unattested: unattested.values().toArray().toSorted(byCodeUnit),
 		counts: {
 			willBuild: partition.willBuild.length,
@@ -425,6 +635,359 @@ export async function partitionAvailability(
 		ceiling,
 		unreachableSubstituters
 	};
+}
+
+// A derived-path query stops when the selected store lacks the derivation. Ask
+// about its known output paths separately so Nix can inspect their substitute
+// closures. The caller will copy the missing derivation before realisation.
+async function includeMissingSubstituteReferences(
+	missing: NixMissingPartition,
+	options: AvailabilityPartitionOptions,
+	targets: readonly AvailabilityTarget[]
+): Promise<{
+	readonly partition: NixMissingPartition;
+	readonly dependencyOwners: ReadonlyMap<
+		StorePathString,
+		ReadonlySet<NixDerivedPathString>
+	>;
+}> {
+	if (
+		options.plannedLocalOutputs === undefined &&
+		options.plannedLocalClosure === undefined
+	) {
+		return {
+			partition: missing,
+			dependencyOwners: new Map()
+		};
+	}
+	const plannedLocalOutputs = options.plannedLocalOutputs ?? new Map();
+
+	const unknown = new Set(missing.unknown);
+	const candidates = targets.flatMap((target) => {
+		if (target.plannedLocalDerivation === undefined) {
+			return [];
+		}
+		const expected = expectedPathsForTarget(
+			target,
+			plannedLocalOutputs,
+			options.plannedFloatingOutputs
+		);
+
+		if (expected.paths.length === 0) {
+			return [];
+		}
+
+		return [
+			{
+				expectedPaths: expected.paths,
+				installable: target.installable,
+				outputsDeclared: expected.outputsDeclared,
+				plannedLocalDerivation: target.plannedLocalDerivation,
+				substitution: expected.outputsDeclared
+					? plannedSubstitutionVerdict(
+							options.plannedSubstitutionPolicy,
+							options.plannedSubstitutableDerivations?.has(
+								target.plannedLocalDerivation
+							) === true
+						)
+					: 'refused',
+				stoppedAtDerivation: unknown.has(target.plannedLocalDerivation)
+			}
+		];
+	});
+	if (candidates.length === 0) {
+		return {
+			partition: missing,
+			dependencyOwners: new Map()
+		};
+	}
+
+	const stoppedCandidates = candidates.filter(
+		(candidate) => candidate.stoppedAtDerivation
+	);
+	const stoppedExpectedPaths = [
+		...new Set(
+			stoppedCandidates.flatMap((candidate) => candidate.expectedPaths)
+		)
+	];
+	const [outputAvailability, validExpectedPaths] =
+		stoppedExpectedPaths.length === 0
+			? ([undefined, []] as const)
+			: await Promise.all([
+					options.store.queryMissing(stoppedExpectedPaths),
+					options.store.queryValidPaths(stoppedExpectedPaths)
+				]);
+	type Candidate = (typeof candidates)[number];
+	interface CandidateAnswer {
+		readonly candidate: Candidate;
+		readonly partition: NixMissingPartition;
+	}
+	const shouldQueryIndividualOutputs =
+		stoppedCandidates.length > 1 &&
+		(outputAvailability?.unknown.length ?? 0) > 0;
+	const stoppedAnswers: readonly CandidateAnswer[] =
+		outputAvailability === undefined
+			? []
+			: shouldQueryIndividualOutputs
+				? await mapWithConcurrency(
+						stoppedCandidates,
+						maximumConcurrentConfirmations,
+						async (candidate) => ({
+							candidate,
+							partition: await options.store.queryMissing(
+								candidate.expectedPaths
+							)
+						})
+					)
+				: stoppedCandidates.map((candidate) => ({
+						candidate,
+						partition: outputAvailability
+					}));
+	const validExpected = new Set(validExpectedPaths);
+	const resolvedAnswers = stoppedAnswers.filter(({ candidate, partition }) => {
+		if (candidate.expectedPaths.every((path) => validExpected.has(path))) {
+			return candidate.outputsDeclared;
+		}
+
+		if (candidate.substitution === 'refused') {
+			return false;
+		}
+
+		const offered = new Set(partition.willSubstitute);
+
+		return candidate.expectedPaths.every(
+			(path) => validExpected.has(path) || offered.has(path)
+		);
+	});
+	const substitutionAnswers = resolvedAnswers.filter(({ candidate }) =>
+		candidate.expectedPaths.some((path) => !validExpected.has(path))
+	);
+	const resolvedCandidates = new Set(
+		resolvedAnswers.map(({ candidate }) => candidate)
+	);
+	const dependencyOwners = new Map<
+		StorePathString,
+		Set<NixDerivedPathString>
+	>();
+	const addDependency = (
+		storePath: StorePathString,
+		owner: NixDerivedPathString
+	): void => {
+		const owners = dependencyOwners.get(storePath) ?? new Set();
+
+		owners.add(owner);
+		dependencyOwners.set(storePath, owners);
+	};
+
+	const hasAccountableUnknowns = missing.unknown.some(
+		(storePath) =>
+			plannedLocalOutputs.has(storePath) ||
+			options.plannedLocalClosure?.has(storePath) === true
+	);
+	const presentCandidates = candidates.filter(
+		(candidate) => !candidate.stoppedAtDerivation
+	);
+	const presentAnswers: readonly CandidateAnswer[] = hasAccountableUnknowns
+		? candidates.length === 1
+			? presentCandidates.map((candidate) => ({
+					candidate,
+					partition: missing
+				}))
+			: await mapWithConcurrency(
+					presentCandidates,
+					maximumConcurrentConfirmations,
+					async (candidate) => ({
+						candidate,
+						partition: await options.store.queryMissing([candidate.installable])
+					})
+				)
+		: [];
+	const referenceAnswers = [...substitutionAnswers, ...presentAnswers];
+
+	for (const { candidate, partition } of referenceAnswers) {
+		for (const storePath of partition.unknown) {
+			if (
+				!candidate.expectedPaths.includes(storePath) &&
+				storePath !== candidate.plannedLocalDerivation
+			) {
+				addDependency(storePath, candidate.installable);
+			}
+		}
+	}
+
+	if (outputAvailability === undefined) {
+		return { partition: missing, dependencyOwners };
+	}
+	const substitutingPaths = [
+		...new Set(
+			substitutionAnswers.flatMap(({ partition }) => partition.willSubstitute)
+		)
+	];
+	const alreadyCounted = new Set(missing.willSubstitute);
+	const newlySubstituting = substitutingPaths.filter(
+		(storePath) => !alreadyCounted.has(storePath)
+	);
+	const newOffers =
+		newlySubstituting.length === 0
+			? []
+			: await options.store.querySubstitutablePathInfos(newlySubstituting);
+	const newBytes = sumSubstitutableBytes(newOffers);
+	const candidatesByDerivation = Map.groupBy(
+		stoppedCandidates,
+		(candidate) => candidate.plannedLocalDerivation
+	);
+	const substitutingDerivations = new Set(
+		candidatesByDerivation
+			.entries()
+			.filter(([, derivationCandidates]) =>
+				derivationCandidates.every((candidate) => {
+					const isAlreadyValid =
+						candidate.outputsDeclared &&
+						candidate.expectedPaths.every((path) => validExpected.has(path));
+
+					return (
+						isAlreadyValid ||
+						(candidate.substitution === 'allowed' &&
+							resolvedCandidates.has(candidate))
+					);
+				})
+			)
+			.map(([derivation]) => derivation)
+	);
+
+	return {
+		partition: {
+			...missing,
+			willSubstitute: eachOnce(missing.willSubstitute, substitutingPaths),
+			unknown: eachOnce(
+				missing.unknown.filter(
+					(storePath) => !substitutingDerivations.has(storePath)
+				),
+				dependencyOwners.keys().toArray()
+			),
+			downloadSize: missing.downloadSize + newBytes.downloadSize,
+			narSize: missing.narSize + newBytes.narSize
+		},
+		dependencyOwners
+	};
+}
+
+function plannedSubstitutionVerdict(
+	policy: PlannedSubstitutionPolicy,
+	canDerivationSubstitute: boolean
+): 'allowed' | 'refused' | 'unknown' {
+	if (policy.kind === 'unknown') {
+		return 'unknown';
+	}
+
+	if (!policy.substitute) {
+		return 'refused';
+	}
+
+	if (policy.alwaysAllowSubstitutes) {
+		return 'allowed';
+	}
+
+	return canDerivationSubstitute ? 'allowed' : 'refused';
+}
+
+function expectedPathsForTarget(
+	target: AvailabilityTarget,
+	plannedLocalOutputs: ReadonlyMap<
+		StorePathString,
+		readonly NixDerivedPathString[]
+	>,
+	plannedFloatingOutputs: ReadonlySet<NixDerivedPathString> | undefined
+): {
+	readonly paths: readonly StorePathString[];
+	readonly outputsDeclared: boolean;
+} {
+	if (target.plannedLocalDerivation === undefined) {
+		return {
+			paths: target.expectedPath === undefined ? [] : [target.expectedPath],
+			outputsDeclared: false
+		};
+	}
+
+	const selection = target.installable.split('^', 2)[1];
+	const selectedNames =
+		selection === undefined || selection === '*'
+			? undefined
+			: new Set(selection.split(','));
+	const hasFloatingOutput =
+		selectedFloatingOutputs(target, plannedFloatingOutputs).length > 0;
+	const paths: StorePathString[] = [];
+
+	for (const [path, installables] of plannedLocalOutputs) {
+		const isSelectedOutput = installables.some((installable) => {
+			const [derivation, outputName] = installable.split('^', 2);
+
+			return (
+				derivation === target.plannedLocalDerivation &&
+				outputName !== undefined &&
+				(selectedNames === undefined || selectedNames.has(outputName))
+			);
+		});
+
+		if (isSelectedOutput) {
+			paths.push(path);
+		}
+	}
+
+	if (
+		target.expectedPath !== undefined &&
+		!paths.includes(target.expectedPath)
+	) {
+		paths.push(target.expectedPath);
+	}
+
+	if (paths.length > 0) {
+		return { paths, outputsDeclared: !hasFloatingOutput };
+	}
+
+	return {
+		paths: target.expectedPath === undefined ? [] : [target.expectedPath],
+		outputsDeclared: !hasFloatingOutput
+	};
+}
+
+function selectedFloatingOutputs(
+	target: AvailabilityTarget,
+	plannedFloatingOutputs: ReadonlySet<NixDerivedPathString> | undefined
+): readonly NixDerivedPathString[] {
+	if (target.plannedLocalDerivation === undefined) {
+		return [];
+	}
+
+	const selection = target.installable.split('^', 2)[1];
+	const selectedNames =
+		selection === undefined || selection === '*'
+			? undefined
+			: new Set(selection.split(','));
+
+	return [...(plannedFloatingOutputs ?? [])].filter((installable) => {
+		const [derivation, outputName] = installable.split('^', 2);
+
+		return (
+			derivation === target.plannedLocalDerivation &&
+			outputName !== undefined &&
+			(selectedNames === undefined || selectedNames.has(outputName))
+		);
+	});
+}
+
+function sumSubstitutableBytes(
+	offers: readonly NixSubstitutablePathInfo[]
+): SubstitutablePathSize {
+	let downloadSize = 0;
+	let narSize = 0;
+
+	for (const offer of offers) {
+		downloadSize += offer.downloadSize;
+		narSize += offer.narSize;
+	}
+
+	return { downloadSize, narSize };
 }
 
 function unknownPathDetails(
@@ -478,36 +1041,146 @@ function isTargetPath(
 	].includes(storePath);
 }
 
-// A remote store cannot inspect a derivation it does not hold, so queryMissing
-// reports that derivation as unknown and stops walking there. A target that
-// declares `plannedLocalDerivation` commits the caller to materialising the
-// complete planned derivation closure and copying it to the store before
-// realisation, and after that copy the derivation is ordinary build work, so
-// move it out of the unknown set and into `willBuild`. Every other unknown path
-// stays unknown and counts against the ceiling.
+// A remote store cannot inspect a derivation that it does not hold.
+// `queryMissing` therefore reports that derivation as unknown and does not
+// traverse its references. Paths in `plannedLocalClosure` can be copied before
+// realisation when the plan records a target that requires them. The action can
+// realise unknown outputs listed in `plannedLocalOutputs`. All other unknown
+// paths still count against the ceiling.
 function accountForLocalDerivations(
 	missing: NixMissingPartition,
-	targets: readonly AvailabilityTarget[]
-): NixMissingPartition {
+	targets: readonly AvailabilityTarget[],
+	plannedLocalClosure: ReadonlySet<StorePathString> | undefined,
+	plannedLocalOutputs:
+		ReadonlyMap<StorePathString, readonly NixDerivedPathString[]> | undefined,
+	dependencyOwners: ReadonlyMap<
+		StorePathString,
+		ReadonlySet<NixDerivedPathString>
+	>,
+	shouldAccountDependencies: boolean
+): {
+	readonly partition: NixMissingPartition;
+	readonly dependencyBuilds: readonly AvailabilityDependencyBuild[];
+	readonly dependencyCopies: readonly AvailabilityDependencyCopy[];
+} {
 	const localDerivations = new Set(
 		targets.flatMap(({ plannedLocalDerivation }) =>
 			plannedLocalDerivation === undefined ? [] : [plannedLocalDerivation]
 		)
 	);
-	const localMissing = missing.unknown.filter((storePath) =>
+	const copiedMissing = missing.unknown.filter((storePath) => {
+		const isOwnedClosurePath =
+			plannedLocalClosure?.has(storePath) === true &&
+			dependencyOwners.has(storePath);
+
+		if (isOwnedClosurePath) {
+			return shouldAccountDependencies;
+		}
+
+		return localDerivations.has(storePath);
+	});
+	const buildableMissing = shouldAccountDependencies
+		? missing.unknown.filter((storePath) => {
+				const requiredBy = dependencyOwners.get(storePath);
+
+				return (
+					plannedLocalOutputs?.has(storePath) === true &&
+					requiredBy !== undefined &&
+					requiredBy.size > 0
+				);
+			})
+		: [];
+	const accountedMissing = eachOnce(copiedMissing, buildableMissing);
+	const buildsByPath = new Map<
+		StorePathString,
+		{
+			readonly installables: readonly NixDerivedPathString[];
+			readonly requiredBy: Set<NixDerivedPathString>;
+		}
+	>();
+
+	for (const storePath of buildableMissing) {
+		const installables = plannedLocalOutputs?.get(storePath);
+
+		if (installables === undefined || installables.length === 0) {
+			continue;
+		}
+
+		const requiredBy = dependencyOwners.get(storePath) ?? new Set();
+		const build = buildsByPath.get(storePath) ?? {
+			installables,
+			requiredBy: new Set<NixDerivedPathString>()
+		};
+
+		for (const owner of requiredBy) {
+			build.requiredBy.add(owner);
+		}
+
+		buildsByPath.set(storePath, build);
+	}
+
+	const dependencyBuilds = [...buildsByPath].flatMap(
+		([path, { installables, requiredBy }]) => {
+			const [firstInstallable, ...remainingInstallables] = installables;
+			const [firstOwner, ...remainingOwners] = requiredBy;
+
+			return firstInstallable === undefined || firstOwner === undefined
+				? []
+				: [
+						{
+							path,
+							installables: [
+								firstInstallable,
+								...remainingInstallables
+							] as const,
+							requiredBy: [firstOwner, ...remainingOwners] as const
+						}
+					];
+		}
+	);
+	const dependencyCopies = copiedMissing.flatMap((path) => {
+		if (plannedLocalOutputs?.has(path) === true) {
+			return [];
+		}
+
+		const requiredBy = dependencyOwners.get(path);
+		const [firstOwner, ...remainingOwners] = requiredBy ?? [];
+
+		return firstOwner === undefined
+			? []
+			: [{ path, requiredBy: [firstOwner, ...remainingOwners] as const }];
+	});
+	const buildableDerivations = dependencyBuilds.map(({ installables }) => {
+		const installable = installables[0];
+		const selection = installable.indexOf('^');
+
+		return storePathSchema.parse(
+			selection === -1 ? installable : installable.slice(0, selection)
+		);
+	});
+
+	if (accountedMissing.length === 0) {
+		return { partition: missing, dependencyBuilds, dependencyCopies };
+	}
+
+	const accountedFor = new Set(accountedMissing);
+	const missingTargetDerivations = copiedMissing.filter((storePath) =>
 		localDerivations.has(storePath)
 	);
 
-	if (localMissing.length === 0) {
-		return missing;
-	}
-
-	const accountedFor = new Set(localMissing);
-
 	return {
-		...missing,
-		willBuild: eachOnce(missing.willBuild, localMissing),
-		unknown: missing.unknown.filter((storePath) => !accountedFor.has(storePath))
+		partition: {
+			...missing,
+			willBuild: eachOnce(
+				missing.willBuild,
+				eachOnce(missingTargetDerivations, buildableDerivations)
+			),
+			unknown: missing.unknown.filter(
+				(storePath) => !accountedFor.has(storePath)
+			)
+		},
+		dependencyBuilds,
+		dependencyCopies
 	};
 }
 
@@ -602,13 +1275,11 @@ function confirmed(
  * attach-only classification can change, so the query asks about the
  * attach-only paths and no others.
  */
-async function unattestedPaths(
+function unattestedPaths(
 	classified: readonly ClassifiedTarget[],
-	options: AvailabilityPartitionOptions
-): Promise<ReadonlySet<StorePathString>> {
-	const attestedServed = options.attestedServed;
-
-	if (attestedServed === undefined) {
+	attestedServedPaths: ReadonlySet<StorePathString> | undefined
+): ReadonlySet<StorePathString> {
+	if (attestedServedPaths === undefined) {
 		return new Set();
 	}
 
@@ -622,10 +1293,10 @@ async function unattestedPaths(
 		return new Set();
 	}
 
-	const attested = await attestedServed(attachOnlyPaths.values().toArray());
-
 	return new Set(
-		attachOnlyPaths.values().filter((storePath) => !attested.has(storePath))
+		attachOnlyPaths
+			.values()
+			.filter((storePath) => !attestedServedPaths.has(storePath))
 	);
 }
 
@@ -731,10 +1402,18 @@ function isServedByRootEnsure(
 // chance to answer it afresh.
 async function classifyUnknowns(
 	missing: Awaited<ReturnType<Nix['queryMissing']>>,
+	dependencyOwners: ReadonlyMap<
+		StorePathString,
+		ReadonlySet<NixDerivedPathString>
+	>,
 	options: AvailabilityPartitionOptions
 ): Promise<{
 	readonly partition: NixMissingPartition;
 	readonly ceiling: AvailabilityCeiling;
+	readonly dependencyOwners: ReadonlyMap<
+		StorePathString,
+		ReadonlySet<NixDerivedPathString>
+	>;
 }> {
 	const configured = {
 		value: options.ceiling.value,
@@ -742,47 +1421,109 @@ async function classifyUnknowns(
 	};
 
 	if (missing.unknown.length === 0) {
-		return { partition: missing, ceiling: configured };
+		return { partition: missing, ceiling: configured, dependencyOwners };
 	}
 
-	const outcome = await options.requeryUnknown(missing.unknown);
+	const groupsByOwners = new Map<
+		string,
+		{
+			readonly paths: StorePathString[];
+			readonly requiredBy: readonly NixDerivedPathString[];
+		}
+	>();
 
-	if (outcome.kind === 'refused') {
+	for (const storePath of missing.unknown) {
+		const requiredBy = [...(dependencyOwners.get(storePath) ?? [])].toSorted(
+			byCodeUnit
+		);
+		const key = JSON.stringify(requiredBy);
+		const group = groupsByOwners.get(key) ?? { paths: [], requiredBy };
+
+		group.paths.push(storePath);
+		groupsByOwners.set(key, group);
+	}
+
+	const answers = await mapWithConcurrency(
+		groupsByOwners.values().toArray(),
+		maximumConcurrentConfirmations,
+		async (group) => ({
+			...group,
+			outcome: await options.requeryUnknown(group.paths)
+		})
+	);
+	const refused = answers.find(({ outcome }) => outcome.kind === 'refused');
+
+	if (refused?.outcome.kind === 'refused') {
 		return {
 			partition: missing,
 			ceiling: {
 				value: options.ceiling.untrustedFallback,
 				source: 'untrusted-fallback',
-				fallbackReason: outcome.reason
-			}
+				fallbackReason: refused.outcome.reason
+			},
+			dependencyOwners
 		};
 	}
 
-	if (outcome.kind === 'already-fresh') {
-		return { partition: missing, ceiling: configured };
+	let partition = missing;
+	const refreshedOwners = new Map<StorePathString, Set<NixDerivedPathString>>(
+		[...dependencyOwners].map(([storePath, requiredBy]) => [
+			storePath,
+			new Set(requiredBy)
+		])
+	);
+
+	for (const { paths, requiredBy, outcome } of answers) {
+		if (outcome.kind !== 'answered') {
+			continue;
+		}
+
+		partition = mergeRequeryAnswer(partition, paths, outcome);
+
+		for (const storePath of outcome.partition.unknown) {
+			const owners = refreshedOwners.get(storePath) ?? new Set();
+
+			for (const owner of requiredBy) {
+				owners.add(owner);
+			}
+
+			if (owners.size > 0) {
+				refreshedOwners.set(storePath, owners);
+			}
+		}
 	}
 
+	return {
+		partition,
+		ceiling: configured,
+		dependencyOwners: refreshedOwners
+	};
+}
+
+function mergeRequeryAnswer(
+	missing: NixMissingPartition,
+	queriedPaths: readonly StorePathString[],
+	outcome: Extract<UnknownRequeryOutcome, { readonly kind: 'answered' }>
+): NixMissingPartition {
 	const requery = outcome.partition;
 	const toBuild = eachOnce(missing.willBuild, requery.willBuild);
 	const toSubstitute = eachOnce(missing.willSubstitute, requery.willSubstitute);
 	const classified = new Set([...toBuild, ...toSubstitute]);
 	const twice = bytesCountedTwice(missing, requery, outcome.sizes);
+	const queried = new Set(queriedPaths);
 
 	return {
-		partition: {
-			willBuild: toBuild,
-			willSubstitute: toSubstitute,
-			// The re-query walks the closures of the paths it resolved, so it can
-			// report as unknown a path the first query already put in `willBuild`
-			// or `willSubstitute`. A path either query classified is not unknown.
-			unknown: requery.unknown.filter(
-				(storePath) => !classified.has(storePath)
+		willBuild: toBuild,
+		willSubstitute: toSubstitute,
+		unknown: eachOnce(
+			missing.unknown.filter(
+				(storePath) => !queried.has(storePath) && !classified.has(storePath)
 			),
-			downloadSize:
-				missing.downloadSize + requery.downloadSize - twice.downloadSize,
-			narSize: missing.narSize + requery.narSize - twice.narSize
-		},
-		ceiling: configured
+			requery.unknown.filter((storePath) => !classified.has(storePath))
+		),
+		downloadSize:
+			missing.downloadSize + requery.downloadSize - twice.downloadSize,
+		narSize: missing.narSize + requery.narSize - twice.narSize
 	};
 }
 

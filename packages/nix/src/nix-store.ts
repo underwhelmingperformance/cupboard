@@ -102,11 +102,11 @@ export interface NixDaemonOffer extends NixOfferedPath {
 export interface NixSubstituterOffer extends NixOfferedPath {
 	readonly source: 'substituter';
 	/**
-	The NAR hash the substituter would serve the path under.
+	The NAR hash that the substituter advertises for the path.
 	*/
 	readonly narHash: NixSha256Hash;
 	/**
-	The signatures the substituter published for the path.
+	The signatures in the path's narinfo.
 	*/
 	readonly signatures: readonly string[];
 	/**

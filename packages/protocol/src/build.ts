@@ -263,11 +263,12 @@ export const targetOutcomeSchema = z.discriminatedUnion('outcome', [
 ]);
 export type ParsedTargetOutcome = z.output<typeof targetOutcomeSchema>;
 
-// The planner's partition of the requested targets. `willBuild`,
-// `willSubstitute` and `unknown` are the realisation split Nix reports; a
-// raised `unknown` count records that a substituter did not answer, so the run
-// treated those targets as ones to build. `attached`, `adopted` and
-// `leftUpstream` are the publication split the availability questions produce.
+// The planner's estimate after the action copies the selected local paths.
+// `unknown` counts store paths that neither the store nor its substituters can
+// currently provide; planning refuses when this exceeds the configured ceiling.
+// When a remote daemon keeps its own substitution policy, `willBuild` and
+// `willSubstitute` are conservative upper bounds for either possible policy.
+// `attached`, `adopted` and `leftUpstream` describe publication of the targets.
 export const plannerPartitionSchema = z.strictObject({
 	willBuild: countSchema,
 	willSubstitute: countSchema,
@@ -278,8 +279,9 @@ export const plannerPartitionSchema = z.strictObject({
 });
 export type ParsedPlannerPartition = z.output<typeof plannerPartitionSchema>;
 
-// The byte totals Nix reports for the paths the planner will substitute: the
-// compressed transfer and the unpacked NAR bytes.
+// The estimated substitution capacity after planned local paths are copied:
+// the compressed transfer and unpacked NAR bytes. These values include the
+// conservative substitution branch when the remote daemon's policy is unknown.
 export const substitutableSizesSchema = z.strictObject({
 	downloadSize: countSchema,
 	narSize: countSchema
