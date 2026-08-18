@@ -41,7 +41,7 @@
 		"#nix-systems": "./packages/nix/src/nix-systems.ts"
 	},
 	"license": "AGPL-3.0-or-later",
-	"packageManager": "pnpm@11.21.0",
+	"packageManager": "pnpm@11.22.0",
 	"private": true,
 	"scripts": {
 		"bench:push": "pnpm --filter @cupboard/server build-info && vitest bench --run --config tests/perf/vitest.config.ts",
