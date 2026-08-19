@@ -186,21 +186,7 @@ export const gcContinuationKey = 'maintenance:gc-pending';
 
 const garbageCollectionLimitSchema = z.number().int().positive();
 
-// An earlier build stored the per-run cap as `sweepLimit`. A tenant whose
-// collection stopped at the cap keeps its marker until the alarm drains it, so
-// a marker written before the rename is read as the current shape.
-function adoptStoredLimit(value: unknown): unknown {
-	if (typeof value !== 'object' || value === null || !('sweepLimit' in value)) {
-		return value;
-	}
-
-	const { sweepLimit, ...rest } = value;
-
-	return { ...rest, collectLimit: sweepLimit };
-}
-
-// The continuation as this build writes it.
-const currentContinuationSchema = z.discriminatedUnion('scope', [
+const garbageCollectionContinuationSchema = z.discriminatedUnion('scope', [
 	z.object({
 		scope: z.literal('tenant'),
 		collectLimit: garbageCollectionLimitSchema
@@ -211,10 +197,6 @@ const currentContinuationSchema = z.discriminatedUnion('scope', [
 		collectLimit: garbageCollectionLimitSchema
 	})
 ]);
-const garbageCollectionContinuationSchema = z.preprocess(
-	adoptStoredLimit,
-	currentContinuationSchema
-);
 const garbageCollectionContinuationsSchema = z
 	.array(garbageCollectionContinuationSchema)
 	.min(1);
@@ -223,15 +205,11 @@ type GarbageCollectionContinuation = z.infer<
 	typeof garbageCollectionContinuationSchema
 >;
 
+// An unreadable marker parses to no continuations at all, which drops the
+// resume; the backlog it marked is re-discovered by the next collection pass.
 function parseGarbageCollectionContinuations(
 	value: unknown
 ): GarbageCollectionContinuation[] {
-	const legacy = garbageCollectionLimitSchema.safeParse(value);
-
-	if (legacy.success) {
-		return [{ scope: 'tenant', collectLimit: legacy.data }];
-	}
-
 	const parsed = garbageCollectionContinuationsSchema.safeParse(value);
 
 	if (parsed.success) {
@@ -1597,13 +1575,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// Resumes a garbage-collection pass that stopped at its per-run cap. A run
 	// that did not stop at the cap left no continuation, so this is a no-op.
 	private async resumeGarbageCollection(): Promise<void> {
-		const pending = parseGarbageCollectionContinuations(
-			await this.ctx.storage.get(gcContinuationKey)
-		);
+		const stored = await this.ctx.storage.get(gcContinuationKey);
+		const pending = parseGarbageCollectionContinuations(stored);
 
 		// No continuation means no work: return without touching the chain, so an
-		// idle alarm costs nothing and never queues behind a concurrent pass.
+		// idle alarm costs nothing and never queues behind a concurrent pass. A
+		// marker that no longer parses is deleted on the way out; the backlog it
+		// marked is re-discovered by the next collection pass.
 		if (pending.length === 0) {
+			if (stored !== undefined) {
+				await this.ctx.storage.delete(gcContinuationKey);
+			}
+
 			return;
 		}
 

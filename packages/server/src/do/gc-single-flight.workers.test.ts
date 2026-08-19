@@ -211,7 +211,7 @@ describe('garbage-collection maintenance serialisation', () => {
 		}
 	});
 
-	it('resumes a legacy numeric continuation tenant-wide', async () => {
+	it('drops and deletes a continuation this build cannot read', async () => {
 		await initialise();
 
 		const collect = vi
@@ -222,59 +222,10 @@ describe('garbage-collection maintenance serialisation', () => {
 			const observed = await runInDurableObject(
 				currentServer(),
 				async (instance, state) => {
-					await state.storage.put(gcContinuationKey, maxPathsCollectedPerRun);
-					await instance.alarm();
-
-					const continuation = await state.storage.get(gcContinuationKey);
-					await state.storage.deleteAlarm();
-
-					return {
-						continuation,
-						calls: collect.mock.calls.map(
-							([_logger, cache, purgeOrigin, collectLimit]) => ({
-								cache,
-								purgeOrigin,
-								collectLimit
-							})
-						)
-					};
-				}
-			);
-
-			expect(observed).toStrictEqual({
-				continuation: undefined,
-				calls: [
-					{
-						cache: undefined,
-						purgeOrigin: undefined,
-						collectLimit: maxPathsCollectedPerRun
-					}
-				]
-			});
-		} finally {
-			collect.mockRestore();
-		}
-	});
-
-	it('resumes a continuation stored under the retired limit key', async () => {
-		await initialise();
-
-		const collect = vi
-			.spyOn(GarbageCollectionService.prototype, 'collectGarbage')
-			.mockResolvedValue(gcOutcome);
-
-		try {
-			const observed = await runInDurableObject(
-				currentServer(),
-				async (instance, state) => {
-					// The shape an earlier build wrote for a cache-scoped run that
-					// stopped at its cap.
+					// A marker in a shape no supported build writes. The resume drops
+					// it; the backlog it marked is re-discovered by the next pass.
 					await state.storage.put(gcContinuationKey, [
-						{
-							scope: 'cache',
-							cache: 'builds',
-							sweepLimit: maxPathsCollectedPerRun
-						}
+						{ scope: 'cache', cache: 'builds', limit: maxPathsCollectedPerRun }
 					]);
 					await instance.alarm();
 
@@ -295,7 +246,7 @@ describe('garbage-collection maintenance serialisation', () => {
 
 			expect(observed).toStrictEqual({
 				continuation: undefined,
-				calls: [{ cache: 'builds', collectLimit: maxPathsCollectedPerRun }]
+				calls: []
 			});
 		} finally {
 			collect.mockRestore();
@@ -487,7 +438,7 @@ describe('garbage-collection maintenance serialisation', () => {
 		}
 	});
 
-	it('migrates and re-arms a legacy numeric continuation when resume fails', async () => {
+	it('keeps the tenant-wide continuation and re-arms when resume fails', async () => {
 		await initialise();
 
 		class InjectedContinuationError extends Error {}
@@ -500,7 +451,7 @@ describe('garbage-collection maintenance serialisation', () => {
 			const observed = await runInDurableObject(
 				currentServer(),
 				async (instance, state) => {
-					await state.storage.put(gcContinuationKey, maxPathsCollectedPerRun);
+					await state.storage.put(gcContinuationKey, [tenantWideContinuation]);
 
 					await expect(instance.alarm()).rejects.toBeInstanceOf(
 						InjectedContinuationError
@@ -543,7 +494,7 @@ describe('garbage-collection maintenance serialisation', () => {
 			const observed = await runInDurableObject(
 				currentServer(),
 				async (instance, state) => {
-					await state.storage.put(gcContinuationKey, maxPathsCollectedPerRun);
+					await state.storage.put(gcContinuationKey, [tenantWideContinuation]);
 
 					const cron = instance.runGarbageCollection();
 					await started.promise;
