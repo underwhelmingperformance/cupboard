@@ -19,12 +19,7 @@ import { StatusCodes } from 'http-status-codes';
 import { throwIfAborted } from '../abort.ts';
 import { CupboardHttpError } from '../errors.ts';
 
-import {
-	type AccessCredential,
-	bearerHeaders,
-	isTokenProvider,
-	resolveBearer
-} from './credentials.ts';
+import { type AccessCredential, bearerAttempt } from './credentials.ts';
 import { reachableFetcher } from './transport.ts';
 
 /**
@@ -94,12 +89,12 @@ function derivedClient<C extends AnyContractRouter>(
 
 	const link = new OpenAPILink(contract, {
 		url,
-		headers: async () => {
+		headers: () => {
 			// The credential fetch is the first thing every admin command does;
 			// honour an abort here so Ctrl-C is prompt.
 			throwIfAborted(signal);
 
-			return bearerHeaders(await resolveBearer(credential));
+			return {};
 		},
 		// Bodies are buffered JSON, so cloning the request per attempt is cheap. A
 		// 401 refreshes the bearer once; a transient failure (a network fault or a
@@ -109,8 +104,9 @@ function derivedClient<C extends AnyContractRouter>(
 		// under a repeat (a re-negotiate's unused rows are reaped), so a retried
 		// call is safe.
 		fetch: async (request, init) => {
-			let current = request;
-			let isBearerRefreshed = false;
+			const requestHeaders = Object.fromEntries(request.headers.entries());
+			let attempt = await bearerAttempt(credential, requestHeaders);
+			let current = new Request(request, { headers: attempt.headers });
 			let retries = 0;
 
 			for (;;) {
@@ -129,16 +125,14 @@ function derivedClient<C extends AnyContractRouter>(
 					continue;
 				}
 
-				if (
-					!isBearerRefreshed &&
-					response.status === unauthorizedStatusCode &&
-					isTokenProvider(credential)
-				) {
-					isBearerRefreshed = true;
-					const headers = new Headers(current.headers);
-					headers.set('authorization', `Bearer ${await credential.refresh()}`);
-					current = new Request(current, { headers });
-					continue;
+				if (response.status === unauthorizedStatusCode) {
+					const refreshed = await attempt.refreshAfterAuthenticationFailure();
+
+					if (refreshed !== undefined) {
+						attempt = refreshed;
+						current = new Request(current, { headers: attempt.headers });
+						continue;
+					}
 				}
 
 				if (isTransientResponse(response) && retries < maxTransientRetries) {

@@ -465,6 +465,15 @@ export class CommitSocketProtocolError extends CliError {
 	}
 }
 
+export class TokenProviderError extends CliError {
+	constructor(cause: unknown) {
+		super('The token provider rejected with a value that is not an Error', {
+			cause
+		});
+		this.name = 'TokenProviderError';
+	}
+}
+
 // The condition a capacity wait expired under, carried as the timeout's cause.
 // `ahead` is the number of sessions the server said were before this one when
 // it last answered `queued`, and is absent when it never did. It is a

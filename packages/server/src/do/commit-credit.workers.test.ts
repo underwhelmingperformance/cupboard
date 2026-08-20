@@ -5,6 +5,8 @@ import {
 } from '@cupboard/nix-store/scalars';
 import {
 	commitAcceptCapabilitiesHeader,
+	commitAuthenticationExpiredCloseCode,
+	commitAuthenticationExpiredCloseReason,
 	commitBatchMaxEntries,
 	commitCapabilitiesValue,
 	commitCapabilitiesValueWithCredit,
@@ -237,6 +239,29 @@ function closeCode(session: CommitConversation): Promise<number> {
 	});
 }
 
+function closeDetails(
+	session: CommitConversation
+): Promise<{ readonly code: number; readonly reason: string }> {
+	return new Promise((resolve) => {
+		session.socket.addEventListener('close', (event) => {
+			resolve({ code: event.code, reason: event.reason });
+		});
+	});
+}
+
+function expireAuthentication(socket: WebSocket): void {
+	const attachment = readCommitSessionAttachment(socket);
+
+	if (attachment === undefined) {
+		throw new Error('expected an open commit session');
+	}
+
+	socket.serializeAttachment({
+		...attachment,
+		authenticatedUntil: Date.now() - 1
+	});
+}
+
 // Rewinds both of a session's stamps: when the server last heard from it, and
 // when the credit it holds began sitting unspent. A session reaches this state
 // by going that long without doing either.
@@ -423,6 +448,31 @@ describe('commit session credit', () => {
 		});
 	});
 
+	it('checks authentication expiry before it handles a commit message', async () => {
+		const token = await initialise();
+		const session = await openCommitSession(token);
+		const closed = closeDetails(session);
+
+		await runInDurableObject(currentServer(), async (instance, state) => {
+			const socket = state.getWebSockets()[0];
+
+			if (socket === undefined) {
+				throw new Error('expected an open commit session');
+			}
+
+			expireAuthentication(socket);
+			await instance.webSocketMessage(
+				socket,
+				JSON.stringify({ op: 'commit', uploadId: unknownUpload('x') })
+			);
+		});
+
+		await expect(closed).resolves.toStrictEqual({
+			code: commitAuthenticationExpiredCloseCode,
+			reason: commitAuthenticationExpiredCloseReason
+		});
+	});
+
 	// The budget governs credited work and nothing else. The alarm drives the
 	// object's other background loops after the idle close, and the close runs
 	// even for a tenant holding no socket at all, so a misconfigured budget must
@@ -503,12 +553,10 @@ describe('commit session credit', () => {
 		waiter.socket.close();
 	});
 
-	// The idle close leaves a session that never negotiated credit alone, and
-	// only a credited session joins the rotation, so a tenant holding neither has
-	// nothing for a pass to do. Re-arming for one would wake the object every
-	// idle period for as long as the socket stayed open, and a Durable Object is
-	// billed for the wake.
-	it('re-arms the idle close only while a credited session is open', async () => {
+	// Every session has an authentication deadline. A credited session also has
+	// an idle deadline, while an unpaced session arms the alarm only for its
+	// authentication deadline.
+	it('re-arms the socket close while any authenticated session is open', async () => {
 		const token = await initialise();
 		const unpaced = await openCommitSession(token);
 
@@ -518,7 +566,7 @@ describe('commit session credit', () => {
 		const isArmedForCredited = await doesAlarmRearm();
 
 		expect({ isArmedForUnpaced, isArmedForCredited }).toStrictEqual({
-			isArmedForUnpaced: false,
+			isArmedForUnpaced: true,
 			isArmedForCredited: true
 		});
 
@@ -1740,6 +1788,34 @@ describe('commit session credit', () => {
 
 		unpaced.socket.close();
 	});
+
+	it.each([
+		{ name: 'credited', open: openCredited },
+		{ name: 'unpaced', open: (token: string) => openCommitSession(token) }
+	])(
+		'closes an $name session when its access token expires',
+		async ({ open }) => {
+			const token = await initialise();
+			const session = await open(token);
+			const closed = closeDetails(session);
+
+			await runInDurableObject(currentServer(), async (instance, state) => {
+				const socket = state.getWebSockets()[0];
+
+				if (socket === undefined) {
+					throw new Error('expected an open commit session');
+				}
+
+				expireAuthentication(socket);
+				await instance.alarm();
+			});
+
+			await expect(closed).resolves.toStrictEqual({
+				code: commitAuthenticationExpiredCloseCode,
+				reason: commitAuthenticationExpiredCloseReason
+			});
+		}
+	);
 
 	// A client decides to pace itself from the declaration it sent, and the
 	// server decides to pace the session from the declaration it received, so a

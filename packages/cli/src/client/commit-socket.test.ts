@@ -3,6 +3,8 @@ import {
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import {
+	commitAuthenticationExpiredCloseCode,
+	commitAuthenticationExpiredCloseReason,
 	commitBatchMaxEntries,
 	commitCapabilitiesValue,
 	type CommitSessionFrame,
@@ -27,9 +29,11 @@ import {
 	type CommitOutcome,
 	type CommitSessionTarget,
 	type CommitSocket,
+	type CommitSocketCredentials,
 	parseCapabilities,
 	runCommitSession
 } from './commit-socket.ts';
+import type { BearerAttempt } from './credentials.ts';
 
 function frame(value: CommitSessionFrame): string {
 	return JSON.stringify(value);
@@ -105,6 +109,15 @@ interface SessionTestOptions {
 	readonly connectedAt?: number[];
 }
 
+function fixedAttempt(
+	headers: Readonly<Record<string, string>>
+): BearerAttempt {
+	return {
+		headers,
+		refreshAfterAuthenticationFailure: () => Promise.resolve(undefined)
+	};
+}
+
 // Hands the session a fresh socket per connection attempt, so a test can drop
 // one and drive the reconnect onto the next.
 function openSessionOver(
@@ -125,11 +138,16 @@ function openSessionOver(
 
 		return socket;
 	};
+	const headers = options.headers ?? {};
+	const credentials: CommitSocketCredentials = {
+		initial: fixedAttempt(headers),
+		authorise: () => Promise.resolve(fixedAttempt(headers))
+	};
 
 	return runCommitSession(
 		connect,
 		new URL(`wss://cupboard.test${path}`),
-		options.headers ?? {},
+		credentials,
 		{
 			path,
 			timeoutSeconds: options.timeoutSeconds ?? 600,
@@ -620,6 +638,30 @@ describe('runCommitSession', () => {
 		expect({ name: error.name, path: error.path }).toStrictEqual({
 			name: 'CommitSocketProtocolError',
 			path
+		});
+	});
+
+	it('reconnects after authentication expires without spending the fault budget', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const session = openSessionOver([first, second], { maxReconnects: 0 });
+		const committed = session.commit(target);
+
+		first.emit('open');
+		first.emit(
+			'close',
+			commitAuthenticationExpiredCloseCode,
+			commitAuthenticationExpiredCloseReason
+		);
+		await vi.advanceTimersByTimeAsync(maxBackoffMs);
+
+		second.emit('open');
+		second.emit('message', settledFrame(uploadId));
+
+		await expect(ackOf(committed)).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
 		});
 	});
 
@@ -1826,6 +1868,7 @@ describe('late commit after clean close', () => {
 		first.emit('close', 1000, '');
 
 		const reopened = session.commit(target);
+		await Promise.resolve();
 		second.emit('open');
 		second.emit(
 			'message',
@@ -3569,6 +3612,7 @@ describe('credit-paced commits', () => {
 		await expired;
 
 		const resumed = session.commit(targetFor('upload-2'));
+		await vi.advanceTimersByTimeAsync(0);
 		advertiseCredit(last, 1, 1);
 		last.emit('open');
 		last.emit('message', settledFrame('upload-2'));
@@ -3923,6 +3967,7 @@ describe('credit-paced commits', () => {
 
 		const wasClosedOnExpiry = first.closed;
 		const later = session.commit(targetFor('upload-2'));
+		await vi.advanceTimersByTimeAsync(0);
 		advertiseCredit(second, 1, 1);
 		second.emit('open');
 		second.emit('message', settledFrame('upload-2'));

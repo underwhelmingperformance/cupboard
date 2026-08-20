@@ -683,7 +683,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			'GET',
 			['/commit', '/cache/:cacheName/commit'],
 			this.commitSessionGuard(),
-			(context) => this.commitSession(context.req.raw, context.get('cache'))
+			(context) =>
+				this.commitSession(
+					context.req.raw,
+					context.get('cache'),
+					context.get('claims').expiresAt
+				)
 		);
 		// The serve routes stream stored objects with conditional-request
 		// handling, so they keep their Response-shaped handlers.
@@ -719,7 +724,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// `commit` is authorised by the cache the session was opened against.
 	private async commitSession(
 		request: Request,
-		cache: StoredCache
+		cache: StoredCache,
+		authenticatedUntil: Date
 	): Promise<Response> {
 		if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
 			throw new CommitUpgradeRequiredError();
@@ -759,11 +765,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.ctx.acceptWebSocket(server, [sessionId]);
 		const openingGrant = this.commitCredit.openSession(
 			server,
-			{ cache, sessionId },
+			{ cache, sessionId, authenticatedUntil: authenticatedUntil.getTime() },
 			hasNegotiatedCredit,
 			Date.now()
 		);
-		await this.armCommitSocketIdleClose();
+		await this.armCommitSocketClose();
 
 		// Advertise the optional ops on the 101 so a capable client batches only
 		// against a server that offered it; a server that does not list an op never
@@ -802,26 +808,29 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// Keeps the idle close armed while the tenant holds a commit socket the close
-	// can act on. The wake closes the sockets whose push has finished, rebuilds
-	// the credit scheduler from the socket attachments and grants what the tenant
-	// has free, so a tenant whose sessions all hold unspent credit always has
-	// an event that resumes granting.
-	//
-	// Only a session the close could still act on earns that alarm. The close
-	// leaves a session that never negotiated credit alone, and only a credited
-	// session can be in the rotation waiting for a grant, so a tenant holding
-	// nothing else would wake every idle period for a pass that can do nothing,
-	// and a Durable Object is billed for the wake.
-	private async armCommitSocketIdleClose(): Promise<void> {
-		if (!hasPacedSession(this.ctx.getWebSockets())) {
+	// Arms the shared Durable Object alarm for the earliest socket deadline. Every
+	// authenticated session contributes its token expiry. A paced session also
+	// contributes an idle deadline so the wake can reclaim unused credit.
+	private async armCommitSocketClose(): Promise<void> {
+		const sockets = this.ctx.getWebSockets();
+		const authenticationExpiry = this.commitCredit.nextAuthenticationExpiry();
+		const idleExpiry = hasPacedSession(sockets)
+			? Date.now() + commitSocketIdleMs
+			: undefined;
+		let nextClose = authenticationExpiry;
+
+		if (
+			idleExpiry !== undefined &&
+			(nextClose === undefined || idleExpiry < nextClose)
+		) {
+			nextClose = idleExpiry;
+		}
+
+		if (nextClose === undefined) {
 			return;
 		}
 
-		await armAlarmNoLaterThan(
-			this.ctx.storage,
-			Date.now() + commitSocketIdleMs
-		);
+		await armAlarmNoLaterThan(this.ctx.storage, nextClose);
 	}
 
 	// Commits one upload over the session and replies with a per-id frame. The
@@ -1158,6 +1167,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				{ id: cache },
 				() => Promise.resolve(cache)
 			);
+			context.set('claims', claims);
 
 			await next();
 		});
@@ -1738,23 +1748,25 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	// Drives the bounded background loops the single DO alarm carries: closing
-	// idle commit sockets, reconciling the committed paths a recent negotiate
-	// queued, resuming a cache teardown, the verify backstop, and finally
+	// expired or idle commit sockets, reconciling the committed paths a recent
+	// negotiate queued, resuming a cache teardown, the verify backstop, and finally
 	// resuming a capped garbage collection. Each re-arms the alarm while it has
 	// work left, so the backlogs converge across firings while the gate stays
 	// free between them. Garbage collection resumes last so a queued gc pass,
 	// which may wait behind an interactive or cron collection on the chain,
-	// cannot stall the other resume loops. The idle close runs first: it is
-	// cheap, and its wake is what a session waiting on credit depends on.
+	// cannot stall the other resume loops. The socket close runs first because it
+	// is cheap, and its wake is what a session waiting on credit depends on.
 	override async alarm(): Promise<void> {
 		await this.initialise();
 		// The alarm is a top-level entrypoint, so it seeds the logger the resume
 		// paths that log outside a metered block are threaded.
 		const logger = rootLogger().with({ trigger: 'alarm' });
-		this.commitCredit.closeIdleSessions(Date.now(), () =>
+		const now = Date.now();
+		this.commitCredit.closeExpiredSessions(now);
+		this.commitCredit.closeIdleSessions(now, () =>
 			this.uploadState.sessionsAwaitingVerdict()
 		);
-		await this.armCommitSocketIdleClose();
+		await this.armCommitSocketClose();
 		await this.reconcileNegotiatedOnce();
 		await this.resumeCacheTeardown();
 		await this.resumeVerifyBackstop(logger);
@@ -2094,6 +2106,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		if (attachment === undefined) {
 			socket.close(1011, 'missing session');
+			return;
+		}
+
+		if (
+			this.commitCredit.closeIfAuthenticationExpired(
+				socket,
+				attachment,
+				Date.now()
+			)
+		) {
 			return;
 		}
 
