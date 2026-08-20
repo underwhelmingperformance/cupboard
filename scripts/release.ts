@@ -5,7 +5,7 @@ import { env } from 'node:process';
 import { pathToFileURL } from 'node:url';
 
 import { cacheUrl, publicKeyUrl } from '@cupboard/nix-store/cache-url';
-import { type CacheName, cacheNameSchema } from '@cupboard/nix-store/scalars';
+import { cacheNameSchema } from '@cupboard/nix-store/scalars';
 import { canonicalHref, parseBaseUrl } from '@cupboard/nix-store/url';
 import {
 	CodedError,
@@ -77,10 +77,6 @@ interface Repository {
 
 interface PublishInputs {
 	readonly version: string;
-	/**
-	The cache the release's builds are pushed to, named after the tag.
-	*/
-	readonly cache: CacheName;
 	readonly githubToken: string;
 	readonly repository: Repository;
 	readonly commitish: string;
@@ -91,6 +87,7 @@ interface PublishInputs {
 
 const fallbackReleaseRepository = 'cupboard/cupboard';
 const fallbackCacheUrl = 'https://cupboard.supply/t/cupboard';
+const releaseCacheName = cacheNameSchema.parse('releases');
 const canonicalVersionPattern =
 	/^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
 
@@ -228,19 +225,18 @@ export async function fetchCachePublicKey(
  */
 export function substituterSection(options: {
 	readonly baseUrl: URL;
-	readonly cache: CacheName;
 	readonly publicKey: string;
 }): string {
 	return [
 		'## Substitute from the release cache',
 		'',
-		'This release is in a Nix binary cache. Add these lines to nix.conf to',
-		'fetch it instead of building:',
+		'Cupboard publishes every versioned release to one Nix binary cache.',
+		'Configure it once in nix.conf to fetch releases instead of building:',
 		'',
 		'```',
 		// A substituter is matched by exact string, so the URL is rendered in its
 		// one canonical form.
-		`extra-substituters = ${canonicalHref(cacheUrl(options.baseUrl, options.cache))}`,
+		`extra-substituters = ${canonicalHref(cacheUrl(options.baseUrl, releaseCacheName))}`,
 		`extra-trusted-public-keys = ${options.publicKey}`,
 		'```'
 	].join('\n');
@@ -342,7 +338,6 @@ export async function publishAction(
 
 	const body = substituterSection({
 		baseUrl: inputs.baseUrl,
-		cache: inputs.cache,
 		publicKey: await fetchCachePublicKey(inputs.baseUrl)
 	});
 
@@ -456,7 +451,6 @@ function publishInputs(environment: Environment): PublishInputs {
 
 	return {
 		version,
-		cache: releaseCache(version),
 		githubToken: input(environment, 'GITHUB_TOKEN'),
 		repository: parseRepository(
 			input(
@@ -475,19 +469,6 @@ function publishInputs(environment: Environment): PublishInputs {
 		),
 		baseUrl: parseCacheUrl(input(environment, 'CACHE_URL', fallbackCacheUrl))
 	};
-}
-
-// The release-cache workflow names the cache after the tag, so a tag that
-// cannot name a cache would point readers at a substituter no deployment can
-// serve.
-function releaseCache(version: string): CacheName {
-	const parsed = cacheNameSchema.safeParse(version);
-
-	if (!parsed.success) {
-		throw new NonCanonicalVersionError(version);
-	}
-
-	return parsed.data;
 }
 
 // Every release URL derives from this base's origin and path alone, so it is

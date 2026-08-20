@@ -666,6 +666,10 @@ describe('cupboard release cache', () => {
 
 		expect({
 			allRequiredPlatformsSettle: publishJob.includes('fail-fast: false'),
+			stableReleaseCache: publishJob.includes('cache: releases'),
+			versionedRetentionRoot: publishJob.includes(
+				'root: github:${{ github.repository }}/${{ github.event.release.tag_name }}'
+			),
 			callerTolerance: publishJob.includes('continue-on-error:'),
 			callerBestEffort: /best-?effort/iu.test(publishJob),
 			reusableTolerance: reusablePublish.includes('continue-on-error:'),
@@ -676,6 +680,8 @@ describe('cupboard release cache', () => {
 			flakehubRequiresCacheMatrix: flakehubJob.includes('    needs: publish')
 		}).toStrictEqual({
 			allRequiredPlatformsSettle: true,
+			stableReleaseCache: true,
+			versionedRetentionRoot: true,
 			callerTolerance: false,
 			callerBestEffort: false,
 			reusableTolerance: false,
