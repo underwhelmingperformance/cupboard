@@ -594,10 +594,15 @@ describe.skipIf(!isDaemonSocketPresent || !isCompilerPresent)(
 				]);
 				const elapsedMs = performance.now() - started;
 
+				// The relay bounds every socket wait with its 3-second inactivity
+				// timeout and warns on stderr when one expires, so a hung delivery
+				// fails the empty-stderr assertion. The wall-clock bound catches
+				// only indefinite blocking, and it is generous because a loaded
+				// runner can stretch the healthy path past any tight margin.
 				expect({
 					stderr,
 					stdout,
-					withinBudget: elapsedMs < 2000,
+					withinBudget: elapsedMs < 10_000,
 					event: JSON.parse(eventLine) as unknown
 				}).toStrictEqual({
 					stderr: '',
