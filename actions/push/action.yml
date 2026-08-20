@@ -65,7 +65,8 @@ inputs:
     required: false
     default: 'true'
   wait-timeout:
-    description: Wait timeout for deferred blobs.
+    description:
+      Wait timeout, applied separately to commit capacity and to deferred blobs.
     required: false
     default: 10m
   attestations:

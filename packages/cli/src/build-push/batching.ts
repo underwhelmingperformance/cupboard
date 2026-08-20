@@ -11,6 +11,8 @@ import {
 } from '@cupboard/protocol/upload';
 
 import type { CommitOptions } from '../client/client.ts';
+import type { CommitSession } from '../client/commit-socket.ts';
+import { commitOverSession } from '../client/commit-via.ts';
 import { PushNarMetadataMismatchError } from '../errors.ts';
 import { compressNarToStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
@@ -70,6 +72,12 @@ export interface BuildOutputBatcherOptions {
 	*/
 	readonly runRoot?: UploadAttachRoot;
 	readonly commitOptions?: CommitOptions;
+	/**
+	 * The run's shared commit session. When it is present, every flush commits
+	 * over it, so the whole publication holds one socket and the server paces it
+	 * as one run.
+	 */
+	readonly session?: CommitSession;
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
 	readonly compressNar?: CompressNar;
 	readonly maxEntries?: number;
@@ -276,14 +284,11 @@ export class BuildOutputBatcher {
 			// uses upload metadata and does not read the store path.
 			for (const { decision, info } of commits) {
 				try {
-					await this.options.client.commit(
-						{
-							uploadId: decision.uploadId,
-							storePathHash: decision.storePathHash,
-							narHash: decision.narHash
-						},
-						this.options.commitOptions ?? {}
-					);
+					await commitOverSession(this.options, {
+						uploadId: decision.uploadId,
+						storePathHash: decision.storePathHash,
+						narHash: decision.narHash
+					});
 					remaining.delete(info.storePath);
 					this.recordOutcome({
 						outcome: 'published',

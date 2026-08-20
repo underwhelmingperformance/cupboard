@@ -7,6 +7,7 @@ import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	type RootName,
 	rootNameSchema,
+	type StorePathHash,
 	storePathSchema,
 	type StorePathString,
 	ttlSecondsSchema
@@ -27,7 +28,11 @@ import {
 } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
-import type { CommitOutcome } from '../client/commit-socket.ts';
+import type {
+	CommitOutcome,
+	CommitSession,
+	CommitSessionTarget
+} from '../client/commit-socket.ts';
 import {
 	UploadNegotiationMismatchError,
 	UploadVerificationFailedError
@@ -184,6 +189,10 @@ interface Harness {
 	readonly negotiatedPaths: string[][];
 	readonly rootReplacements: { name: string; body: RootSetBody }[];
 	readonly uploadedKeys: string[];
+	/**
+	The paths committed through the client rather than over a shared session.
+	*/
+	readonly clientCommits: StorePathHash[];
 	readonly store: ReconcileOptions['store'];
 	readonly client: PushClient;
 }
@@ -192,6 +201,7 @@ function harness(options: HarnessOptions = {}): Harness {
 	const negotiatedPaths: string[][] = [];
 	const rootReplacements: { name: string; body: RootSetBody }[] = [];
 	const uploadedKeys: string[] = [];
+	const clientCommits: StorePathHash[] = [];
 	const valid = new Set(options.valid);
 	const substituted = new Set(options.substituted);
 	const pathByHash = new Map(
@@ -262,6 +272,7 @@ function harness(options: HarnessOptions = {}): Harness {
 			return Promise.resolve();
 		},
 		commit: (commitTarget) => {
+			clientCommits.push(commitTarget.storePathHash);
 			const storePath = pathByHash.get(commitTarget.storePathHash);
 			const behaviour =
 				storePath === undefined
@@ -295,7 +306,14 @@ function harness(options: HarnessOptions = {}): Harness {
 		}
 	};
 
-	return { negotiatedPaths, rootReplacements, uploadedKeys, store, client };
+	return {
+		negotiatedPaths,
+		rootReplacements,
+		uploadedKeys,
+		clientCommits,
+		store,
+		client
+	};
 }
 
 function reconcileWith(
@@ -786,64 +804,72 @@ describe('reconcileBuild', () => {
 		});
 	});
 
-	it('continues with later batches after one negotiation fails', async () => {
-		const paths = Array.from(
-			{ length: uploadNegotiateMaxPaths + 1 },
-			(_, index) =>
-				storePathSchema.parse(
-					`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
+	// The fixture cannot shrink: a second batch exists only past
+	// `uploadNegotiateMaxPaths`, which is a wire constant, so this test builds
+	// a hundred thousand paths and needs more than the default timeout on a
+	// loaded runner.
+	it(
+		'continues with later batches after one negotiation fails',
+		{ timeout: 30_000 },
+		async () => {
+			const paths = Array.from(
+				{ length: uploadNegotiateMaxPaths + 1 },
+				(_, index) =>
+					storePathSchema.parse(
+						`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
+					)
+			);
+			const first = storePathSchema.parse(paths[0]);
+			const last = storePathSchema.parse(paths.at(-1));
+			const failedPaths = paths.slice(0, uploadNegotiateMaxPaths);
+
+			const harnessed = harness({
+				valid: paths,
+				failNegotiationFor: new Set([first])
+			});
+			const result = await reconcileWith(harnessed, {
+				targets: [
+					...failedPaths.map((storePath) => target(storePath, rootOne)),
+					target(last, rootTwo)
+				]
+			});
+
+			expect({
+				negotiatedBatchSizes: harnessed.negotiatedPaths.map(
+					(batch) => batch.length
+				),
+				failed: result.receipt.failed,
+				published: result.receipt.paths,
+				outcomes: result.receipt.outcomes,
+				roots: result.roots,
+				rootReplacements: harnessed.rootReplacements,
+				failureTypes: result.failures.map((failure) =>
+					failure.cause instanceof Error ? failure.cause.constructor : undefined
 				)
-		);
-		const first = storePathSchema.parse(paths[0]);
-		const last = storePathSchema.parse(paths.at(-1));
-		const failedPaths = paths.slice(0, uploadNegotiateMaxPaths);
-
-		const harnessed = harness({
-			valid: paths,
-			failNegotiationFor: new Set([first])
-		});
-		const result = await reconcileWith(harnessed, {
-			targets: [
-				...failedPaths.map((storePath) => target(storePath, rootOne)),
-				target(last, rootTwo)
-			]
-		});
-
-		expect({
-			negotiatedBatchSizes: harnessed.negotiatedPaths.map(
-				(batch) => batch.length
-			),
-			failed: result.receipt.failed,
-			published: result.receipt.paths,
-			outcomes: result.receipt.outcomes,
-			roots: result.roots,
-			rootReplacements: harnessed.rootReplacements,
-			failureTypes: result.failures.map((failure) =>
-				failure.cause instanceof Error ? failure.cause.constructor : undefined
-			)
-		}).toStrictEqual({
-			negotiatedBatchSizes: [uploadNegotiateMaxPaths, 1],
-			failed: failedPaths,
-			published: [last],
-			outcomes: [
-				...failedPaths.map((storePath) => ({
-					outcome: 'failed' as const,
-					storePath,
-					reason: 'upload' as const
-				})),
-				{ outcome: 'destination-served', storePath: last }
-			],
-			roots: [
-				{ root: rootOne, applied: false, targets: failedPaths },
-				{ root: rootTwo, applied: true, targets: [last] }
-			],
-			rootReplacements: [{ name: rootTwo, body: { targets: [last] } }],
-			failureTypes: Array.from(
-				{ length: uploadNegotiateMaxPaths },
-				() => NegotiationTestError
-			)
-		});
-	});
+			}).toStrictEqual({
+				negotiatedBatchSizes: [uploadNegotiateMaxPaths, 1],
+				failed: failedPaths,
+				published: [last],
+				outcomes: [
+					...failedPaths.map((storePath) => ({
+						outcome: 'failed' as const,
+						storePath,
+						reason: 'upload' as const
+					})),
+					{ outcome: 'destination-served', storePath: last }
+				],
+				roots: [
+					{ root: rootOne, applied: false, targets: failedPaths },
+					{ root: rootTwo, applied: true, targets: [last] }
+				],
+				rootReplacements: [{ name: rootTwo, body: { targets: [last] } }],
+				failureTypes: Array.from(
+					{ length: uploadNegotiateMaxPaths },
+					() => NegotiationTestError
+				)
+			});
+		}
+	);
 
 	it('applies the declared TTL when it replaces a root', async () => {
 		const harnessed = harness({ valid: [pathA] });
@@ -993,6 +1019,60 @@ describe('reconcileBuild', () => {
 			outcomes: [{ outcome: 'failed', storePath: pathC, reason: 'build' }],
 			roots: [{ root: rootOne, applied: false, targets: [pathC] }],
 			negotiatedPaths: []
+		});
+	});
+});
+
+// A run opens one commit session and threads it through every phase, so
+// reconciliation must commit over it rather than opening its own. The client's
+// own `commit` is the fallback for a client that opens no session at all, and
+// reaching it here would mean a second socket per run.
+describe('reconcileBuild over a shared commit session', () => {
+	it('commits over the session and never through the client', async () => {
+		const sessionCommits: CommitSessionTarget[] = [];
+		const session: CommitSession = {
+			commit: (target) => {
+				sessionCommits.push(target);
+
+				return Promise.resolve({
+					storePathHash: target.storePathHash,
+					narHash: target.narHash,
+					status: 'committed' as const,
+					settled: Promise.resolve()
+				});
+			},
+			close: () => {
+				throw new Error('the run closes the session, not reconciliation');
+			}
+		};
+		const harnessed = harness({
+			valid: [pathA],
+			actions: new Map([[pathA, 'upload' as const]])
+		});
+
+		const result = await reconcileBuild({
+			targets: [target(pathA)],
+			outcomes: new Map<StorePathString, BatchPathOutcome>(),
+			candidates: [pathA],
+			snapshot: { derivations: new Map() },
+			store: harnessed.store,
+			client: harnessed.client,
+			session,
+			createNarArchive: () => emptyStream(),
+			compressNar: () => ({
+				body: emptyStream(),
+				digest: () => ({ narHash, narSize: 4 })
+			})
+		});
+
+		expect({
+			sessionCommits: sessionCommits.map((target) => target.storePathHash),
+			clientCommits: harnessed.clientCommits,
+			publishedPaths: result.receipt.paths.length
+		}).toStrictEqual({
+			sessionCommits: [StorePath.hash(pathA)],
+			clientCommits: [],
+			publishedPaths: 1
 		});
 	});
 });

@@ -465,6 +465,58 @@ export class CommitSocketProtocolError extends CliError {
 	}
 }
 
+// The condition a capacity wait expired under, carried as the timeout's cause.
+// `ahead` is the number of sessions the server said were before this one when
+// it last answered `queued`, and is absent when it never did. It is a
+// diagnostic and nothing decides anything on it: the server's rotation moves as
+// soon as any entry settles, so it is neither a queue position nor an estimate
+// of how long the wait had left.
+//
+// A session that spent the wait being refused an upgrade passes that refusal as
+// this error's own cause, so the status and body the server gave reach the
+// operator through the timeout's cause chain. A wait during which the cache
+// made no progress and refused no upgrade, which is a cache that accepts the
+// session and grants it nothing, has no such cause.
+export class CommitCapacityQueuedError extends CliError {
+	constructor(
+		public readonly ahead?: number,
+		options?: { readonly cause?: Error }
+	) {
+		super(
+			ahead === undefined
+				? 'The server granted no capacity to commit under'
+				: `The server last reported ${String(ahead)} session(s) ahead`,
+			options
+		);
+		this.name = 'CommitCapacityQueuedError';
+	}
+}
+
+// A publication gave up waiting for capacity to commit under. `waitedSeconds`
+// covers one unbroken stretch during which the cache gave the session no
+// progress. A grant, or an entry the cache answers, starts the measurement
+// again, so a cache that keeps granting credit, however slowly, never reaches
+// this error. `totalWaitedSeconds` sums every such stretch over the session and
+// is a diagnostic only. Only the paths still queued fail; paths already
+// committing are unaffected.
+export class CommitCapacityTimeoutError extends CliError {
+	constructor(
+		public readonly timeoutSeconds: number,
+		public readonly waitedSeconds: number,
+		public override readonly cause: CommitCapacityQueuedError,
+		public readonly totalWaitedSeconds?: number
+	) {
+		super(
+			`Timed out after ${String(waitedSeconds)}s of a ${String(timeoutSeconds)}s budget waiting to commit`
+		);
+		this.name = 'CommitCapacityTimeoutError';
+	}
+
+	override get exitCode(): number {
+		return transientExitCode;
+	}
+}
+
 export class UploadWaitTimeoutError extends CliError {
 	constructor(
 		public readonly pending: number,

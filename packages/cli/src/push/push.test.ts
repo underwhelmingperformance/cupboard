@@ -3105,9 +3105,17 @@ describe('runPush', () => {
 			...deferredDependencies()
 		});
 
-		expect({ events, commitOptions }).toStrictEqual({
+		expect({
+			events,
+			commitOptions: commitOptions.map((options) => ({
+				timeoutSeconds: options.timeoutSeconds,
+				// The session reports its capacity waits, so a push held up by a
+				// busy cache says so rather than sitting silent.
+				reportsWaiting: typeof options.onWaiting === 'function'
+			}))
+		}).toStrictEqual({
 			events: ['negotiate', 'uploadNar', 'commit', 'setRoot'],
-			commitOptions: [{ timeoutSeconds: 30 }]
+			commitOptions: [{ timeoutSeconds: 30, reportsWaiting: true }]
 		});
 	});
 

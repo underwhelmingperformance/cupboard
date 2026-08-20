@@ -36,6 +36,8 @@ import {
 import { genericExitCode } from '@cupboard/shared/errors';
 
 import { isAbortError } from '../abort.ts';
+import type { CommitOptions } from '../client/client.ts';
+import type { CommitSession } from '../client/commit-socket.ts';
 import type { WaitTimeoutSeconds } from '../duration.ts';
 import {
 	BuildCommandFailedError,
@@ -47,6 +49,7 @@ import {
 	PushIncompleteError,
 	type UntrustedDaemonError
 } from '../errors.ts';
+import { capacityWaitReporter } from '../push/capacity-wait.ts';
 import { PublicationCollection } from '../push/publication.ts';
 import {
 	type CompressNar,
@@ -376,6 +379,16 @@ async function runProtectedStreamedBuildPush(
 
 	let maxQueueDepth = 0;
 	const hookScriptPath = path.join(plan.directory, hookScriptFileName);
+	// One session for the whole run: the streaming flushes and the
+	// reconciliation that follows them commit over the same socket, so the cache
+	// paces the run as a whole and sees one publication rather than two.
+	const commitOptions: CommitOptions = {
+		...(options.waitTimeoutSeconds !== undefined && {
+			timeoutSeconds: options.waitTimeoutSeconds
+		}),
+		onWaiting: capacityWaitReporter(reporter)
+	};
+	const session = await dependencies.client.openCommitSession?.(commitOptions);
 
 	try {
 		if (rootLinkDirectory !== undefined) {
@@ -405,9 +418,8 @@ async function runProtectedStreamedBuildPush(
 			store: batchStore,
 			client: dependencies.client,
 			...(options.runRoot !== undefined && { runRoot: options.runRoot }),
-			...(options.waitTimeoutSeconds !== undefined && {
-				commitOptions: { timeoutSeconds: options.waitTimeoutSeconds }
-			}),
+			commitOptions,
+			...(session !== undefined && { session }),
 			...(dependencies.createNarArchive !== undefined && {
 				createNarArchive: dependencies.createNarArchive
 			}),
@@ -449,6 +461,7 @@ async function runProtectedStreamedBuildPush(
 		try {
 			await roots?.close();
 		} finally {
+			session?.close();
 			await Promise.all([
 				removeInvocationRuntimeDirectory(plan.directory),
 				removeInvocationRuntimeDirectory(targetLinkDirectory)
@@ -503,6 +516,8 @@ async function runProtectedStreamedBuildPush(
 			mode: 'streamed',
 			exit,
 			batcher,
+			commitOptions,
+			...(session !== undefined && { session }),
 			maxQueueDepth,
 			eventPaths,
 			subjects,
@@ -516,6 +531,7 @@ async function runProtectedStreamedBuildPush(
 		} finally {
 			try {
 				await batcher.stop();
+				session?.close();
 			} finally {
 				try {
 					await roots?.close();
@@ -1007,6 +1023,11 @@ interface RunFacts {
 	readonly mode: BuildSummary['mode'];
 	readonly exit: ChildExit;
 	readonly batcher: BuildOutputBatcher;
+	readonly commitOptions: CommitOptions;
+	/**
+	The run's shared commit session, absent for a client that opens none.
+	*/
+	readonly session?: CommitSession;
 	readonly maxQueueDepth: number;
 	readonly eventPaths: readonly StorePathString[];
 	readonly subjects: readonly BuildSubjectV3[];
@@ -1111,9 +1132,8 @@ async function settleRun(
 						ttlSeconds: options.ttlSeconds
 					}),
 					...(options.wait !== undefined && { wait: options.wait }),
-					...(options.waitTimeoutSeconds !== undefined && {
-						commitOptions: { timeoutSeconds: options.waitTimeoutSeconds }
-					}),
+					commitOptions: facts.commitOptions,
+					...(facts.session !== undefined && { session: facts.session }),
 					...(options.uploadConcurrency !== undefined && {
 						uploadConcurrency: options.uploadConcurrency
 					}),
