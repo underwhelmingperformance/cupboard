@@ -25,7 +25,6 @@ import {
 	commitCreditCapability,
 	type UploadId
 } from '@cupboard/protocol/upload';
-import { StatusCodes } from 'http-status-codes';
 import { WebSocket } from 'ws';
 import { z } from 'zod';
 
@@ -42,14 +41,10 @@ import {
 	type CommitOutcome,
 	type CommitSession,
 	type CommitSocketConnect,
+	type CommitSocketCredentials,
 	runCommitSession
 } from './commit-socket.ts';
-import {
-	type AccessCredential,
-	bearerHeaders,
-	isTokenProvider,
-	resolveBearer
-} from './credentials.ts';
+import { type AccessCredential, bearerAttempt } from './credentials.ts';
 import { resilientFetcher } from './transport.ts';
 
 export { type AccessCredential, type TokenProvider } from './credentials.ts';
@@ -128,7 +123,7 @@ export class CupboardClient {
 	}
 
 	private connectCommitSession(
-		bearer: string | undefined,
+		credentials: CommitSocketCredentials,
 		options: CommitOptions
 	): CommitSession {
 		const path = this.selectorScoped('/commit');
@@ -136,16 +131,7 @@ export class CupboardClient {
 		return runCommitSession(
 			this.connectSocket,
 			this.socketUrl(path),
-			{
-				...bearerHeaders(bearer),
-				// Declaring `commit-credit` is what lets the server pace this session
-				// by granted credit rather than leaving the pacing to the window this
-				// client keeps. A session that has declared paces itself even when
-				// the 101 comes back without the token, and drops back to the window
-				// only when the server rejects `request-credit` as unsupported, so
-				// the declaration is safe to send to any server.
-				[commitAcceptCapabilitiesHeader]: `${commitBatchCapability},${commitCreditCapability}`
-			},
+			credentials,
 			{
 				path,
 				timeoutSeconds: options.timeoutSeconds ?? defaultCommitWaitSeconds,
@@ -154,6 +140,21 @@ export class CupboardClient {
 				onWaiting: options.onWaiting
 			}
 		);
+	}
+
+	private async commitSocketCredentials(
+		credential: AccessCredential
+	): Promise<CommitSocketCredentials> {
+		// The client starts pacing from its own `commit-credit` declaration because
+		// an intermediary can remove the capability from the upgrade response. If
+		// the server does not support credit, its `unsupported` frame moves the
+		// connection back to the client's local window.
+		const headers = {
+			[commitAcceptCapabilitiesHeader]: `${commitBatchCapability},${commitCreditCapability}`
+		};
+		const authorise = () => bearerAttempt(credential, headers);
+
+		return { initial: await authorise(), authorise };
 	}
 
 	// A failed token grant fails the whole CI run or push behind it. The client's
@@ -239,7 +240,10 @@ export class CupboardClient {
 	): Promise<CommitSession> {
 		throwIfAborted(this.signal);
 
-		return this.connectCommitSession(await resolveBearer(token), options);
+		return this.connectCommitSession(
+			await this.commitSocketCredentials(token),
+			options
+		);
 	}
 
 	/**
@@ -253,10 +257,11 @@ export class CupboardClient {
 	): Promise<CommitOutcome> {
 		throwIfAborted(this.signal);
 
-		const settle = async (
-			bearer: string | undefined
-		): Promise<CommitOutcome> => {
-			const session = this.connectCommitSession(bearer, options);
+		const settle = async (): Promise<CommitOutcome> => {
+			const session = this.connectCommitSession(
+				await this.commitSocketCredentials(token),
+				options
+			);
 
 			let outcome: CommitOutcome;
 			try {
@@ -288,20 +293,7 @@ export class CupboardClient {
 			return outcome;
 		};
 
-		try {
-			return await settle(await resolveBearer(token));
-		} catch (error) {
-			// A long push can outlive the exchanged JWT; refresh once and retry.
-			if (
-				error instanceof CupboardHttpError &&
-				error.status === unauthorizedStatus &&
-				isTokenProvider(token)
-			) {
-				return settle(await token.refresh());
-			}
-
-			throw error;
-		}
+		return settle();
 	}
 
 	/**
@@ -435,9 +427,6 @@ export interface CommitOptions {
 	readonly onWaiting?: (isWaitingForCapacity: boolean) => void;
 }
 
-// Widened to `number` so a comparison against a plain response status is not an
-// enum-versus-number mismatch.
-const unauthorizedStatus: number = StatusCodes.UNAUTHORIZED;
 const defaultCommitWaitSeconds = 600;
 
 const connectCommitSocket: CommitSocketConnect = (url, headers) =>

@@ -199,7 +199,18 @@ describe('publications that oversubscribe the server budget', () => {
 			const session = runCommitSession(
 				server.connect,
 				new URL(`wss://cupboard.test${path}`),
-				{},
+				{
+					initial: {
+						headers: {},
+						refreshAfterAuthenticationFailure: () => Promise.resolve(undefined)
+					},
+					authorise: () =>
+						Promise.resolve({
+							headers: {},
+							refreshAfterAuthenticationFailure: () =>
+								Promise.resolve(undefined)
+						})
+				},
 				{ path, timeoutSeconds: 600 }
 			);
 

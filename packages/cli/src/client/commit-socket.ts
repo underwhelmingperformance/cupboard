@@ -4,6 +4,8 @@ import {
 } from '@cupboard/nix-store/scalars';
 import {
 	commitAcceptCapabilitiesHeader,
+	commitAuthenticationExpiredCloseCode,
+	commitAuthenticationExpiredCloseReason,
 	commitBatchCapability,
 	commitBatchMaxEntries,
 	commitCapabilitiesHeader,
@@ -26,9 +28,12 @@ import {
 	CommitCapacityTimeoutError,
 	CommitSocketProtocolError,
 	CupboardHttpError,
+	TokenProviderError,
 	UploadVerificationFailedError,
 	UploadWaitTimeoutError
 } from '../errors.ts';
+
+import type { BearerAttempt } from './credentials.ts';
 
 /**
 A received frame or body chunk; `ws` hands these over as `Buffer`s.
@@ -86,6 +91,16 @@ export type CommitSocketConnect = (
 	url: URL,
 	headers: Readonly<Record<string, string>>
 ) => CommitSocket;
+
+/**
+ * Supplies authentication for the first commit connection and each reconnect.
+ * The session obtains a new attempt after an expiry close and refreshes the
+ * current attempt once if an upgrade returns 401.
+ */
+export interface CommitSocketCredentials {
+	readonly initial: BearerAttempt;
+	authorise(): Promise<BearerAttempt>;
+}
 
 /**
  * A path to commit over the session, with the identity from negotiation. Set
@@ -206,6 +221,7 @@ interface SessionEntry {
  */
 type DropCause =
 	| { readonly kind: 'connection' }
+	| { readonly kind: 'authentication-expired' }
 	| { readonly kind: 'refusal'; readonly minimumDelayMs?: number };
 
 const connectionDrop: DropCause = { kind: 'connection' };
@@ -451,13 +467,13 @@ function hasRetentionMarker(
 export function runCommitSession(
 	connect: CommitSocketConnect,
 	url: URL,
-	headers: Readonly<Record<string, string>>,
+	credentials: CommitSocketCredentials,
 	options: CommitSessionOptions
 ): CommitSession {
 	const outstanding = new Map<UploadId, SessionEntry>();
 	const maxReconnects = options.maxReconnects ?? defaultMaxReconnects;
 	const backoffBase = options.reconnectBackoffMs ?? defaultReconnectBackoffMs;
-	const isCreditDeclared = isCommitCreditDeclared(headers);
+	const isCreditDeclared = isCommitCreditDeclared(credentials.initial.headers);
 
 	let socket: CommitSocket | undefined;
 	// Counts the connections this session has opened, so each connection's
@@ -472,6 +488,8 @@ export function runCommitSession(
 	let failure: Error | undefined;
 	let keepalive: NodeJS.Timeout | undefined;
 	let reconnectTimer: NodeJS.Timeout | undefined;
+	let isAuthorising = false;
+	let connectionAttempt = credentials.initial;
 	// Bounds how long the body of a refused upgrade is read. It is held here
 	// rather than in the handler that arms it so that a session which is torn
 	// down, or which has moved to another connection, can clear it.
@@ -1394,10 +1412,62 @@ export function runCommitSession(
 		reconnectTimer = setTimeout(
 			() => {
 				reconnectTimer = undefined;
-				openConnection();
+				authoriseAndOpenConnection();
 			},
 			Math.max(reconnectDelay(reconnectAttempt, backoffBase), minimumDelayMs)
 		);
+	};
+
+	const authoriseAndOpenConnection = (): void => {
+		if (isClosed || isAuthorising) {
+			return;
+		}
+
+		isAuthorising = true;
+		isDormant = false;
+		void credentials
+			.authorise()
+			.then((attempt) => {
+				isAuthorising = false;
+
+				if (!isClosed) {
+					openConnection(attempt);
+				}
+			})
+			.catch((error: unknown) => {
+				isAuthorising = false;
+				failSession(asError(error));
+			});
+	};
+
+	const refreshAndOpenConnection = (refusal: Error): void => {
+		if (isClosed || isAuthorising) {
+			return;
+		}
+
+		isAuthorising = true;
+		isDormant = false;
+		void connectionAttempt
+			.refreshAfterAuthenticationFailure()
+			.then((attempt) => {
+				isAuthorising = false;
+
+				if (isClosed) {
+					return;
+				}
+
+				if (attempt === undefined) {
+					failSession(refusal);
+
+					return;
+				}
+
+				openConnection(attempt);
+			})
+			.catch((error: unknown) => {
+				isAuthorising = false;
+				failSession(asError(error));
+			});
 	};
 
 	// Opens the connection a commit needs when the session is dormant. A server
@@ -1408,7 +1478,7 @@ export function runCommitSession(
 		const remaining = earliestDialAt - Date.now();
 
 		if (remaining <= 0) {
-			openConnection();
+			authoriseAndOpenConnection();
 
 			return;
 		}
@@ -1418,7 +1488,7 @@ export function runCommitSession(
 		isDormant = false;
 		reconnectTimer = setTimeout(() => {
 			reconnectTimer = undefined;
-			openConnection();
+			authoriseAndOpenConnection();
 		}, remaining);
 	};
 
@@ -1509,6 +1579,13 @@ export function runCommitSession(
 			return;
 		}
 
+		if (cause.kind === 'authentication-expired') {
+			reconnectAttempt = 0;
+			authoriseAndOpenConnection();
+
+			return;
+		}
+
 		// A paced session that was owed no answer reconnects for free, because the
 		// clock that owns the work it left behind bounds it: the capacity deadline
 		// for entries the cache has not taken, and each parked entry's verdict
@@ -1580,13 +1657,14 @@ export function runCommitSession(
 		}
 	}
 
-	function openConnection(): void {
+	function openConnection(attempt: BearerAttempt): void {
 		// This connection supersedes any the drop path still has pending, so a
 		// timer left armed must not open a second one behind it. A refusal still
 		// being read belongs to the connection this one replaces, and `refuse`
 		// ignores a refusal that old, so its drain has nothing left to decide.
 		clearReconnectTimer();
 		clearRefusalDrain();
+		connectionAttempt = attempt;
 		connectionGeneration += 1;
 		const generation = connectionGeneration;
 		// A superseded socket keeps its listeners and can still deliver events:
@@ -1636,7 +1714,7 @@ export function runCommitSession(
 		// Named as well as stored, so a handler that outlives this connection
 		// acts on the connection it belongs to rather than on the session's
 		// current one.
-		const connection = connect(url, headers);
+		const connection = connect(url, connectionAttempt.headers);
 		socket = connection;
 
 		// The upgrade response precedes the open, so the capability is known
@@ -1718,11 +1796,21 @@ export function runCommitSession(
 		});
 
 		connection.on('close', (code, reason) => {
+			const reasonText = reason.toString();
 			const message =
 				code === nonRetryableCloseCode
-					? `server closed the connection: ${String(code)} ${reason.toString()}`
+					? `server closed the connection: ${String(code)} ${reasonText}`
 					: 'the socket closed before every commit settled';
-			dropOnce(code, new CommitSocketProtocolError(options.path, message));
+			const cause: DropCause =
+				code === commitAuthenticationExpiredCloseCode &&
+				reasonText === commitAuthenticationExpiredCloseReason
+					? { kind: 'authentication-expired' }
+					: connectionDrop;
+			dropOnce(
+				code,
+				new CommitSocketProtocolError(options.path, message),
+				cause
+			);
 		});
 
 		connection.on('error', (error) => {
@@ -1793,6 +1881,13 @@ export function runCommitSession(
 					return;
 				}
 
+				if (status === 401) {
+					hasDropped = true;
+					refreshAndOpenConnection(refusal);
+
+					return;
+				}
+
 				failSession(refusal);
 			};
 
@@ -1822,7 +1917,7 @@ export function runCommitSession(
 		onAbort();
 	} else {
 		options.signal?.addEventListener('abort', onAbort, { once: true });
-		openConnection();
+		openConnection(connectionAttempt);
 	}
 
 	const commit = (target: CommitSessionTarget): Promise<CommitOutcome> => {
@@ -1885,6 +1980,10 @@ export function runCommitSession(
 	};
 
 	return { commit, close };
+}
+
+function asError(value: unknown): Error {
+	return value instanceof Error ? value : new TokenProviderError(value);
 }
 
 // Exponential back-off with full jitter, capped. The jittered delay never

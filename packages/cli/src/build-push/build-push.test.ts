@@ -859,7 +859,17 @@ function pacedSession(
 	return runCommitSession(
 		connect,
 		new URL(`wss://cupboard.test${commitPath}`),
-		{},
+		{
+			initial: {
+				headers: {},
+				refreshAfterAuthenticationFailure: () => Promise.resolve(undefined)
+			},
+			authorise: () =>
+				Promise.resolve({
+					headers: {},
+					refreshAfterAuthenticationFailure: () => Promise.resolve(undefined)
+				})
+		},
 		{
 			path: commitPath,
 			timeoutSeconds: 100,

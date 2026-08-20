@@ -5,6 +5,8 @@ import {
 import type { TokenResponse } from '@cupboard/protocol/oidc';
 import type { SignupResponse } from '@cupboard/protocol/signup';
 import {
+	commitAuthenticationExpiredCloseCode,
+	commitAuthenticationExpiredCloseReason,
 	type CommitSessionFrame,
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
@@ -581,6 +583,57 @@ describe('CupboardClient.commit', () => {
 					authorization: 'Bearer fresh-token'
 				}
 			]
+		});
+		await expect(settled).resolves.toBeUndefined();
+	});
+
+	it('resolves the current token when the server expires an open commit socket', async () => {
+		const { client, connections } = commitClient([
+			(socket) => {
+				socket.emit('open');
+				socket.emit(
+					'close',
+					commitAuthenticationExpiredCloseCode,
+					commitAuthenticationExpiredCloseReason
+				);
+			},
+			(socket) => {
+				sendFrame(socket, { ev: 'settled', uploadId: 'upload-app', response });
+			}
+		]);
+		const get = vi
+			.fn<() => Promise<string>>()
+			.mockResolvedValueOnce('initial-token')
+			.mockResolvedValue('renewed-token');
+		const refresh = vi.fn(() => Promise.resolve('forced-token'));
+		const provider: TokenProvider = { get, refresh };
+
+		const { settled, verdictGrace, ...result } = await client.commit(
+			provider,
+			target('upload-app')
+		);
+
+		expect({
+			result,
+			verdictGraceKind: typeof verdictGrace,
+			connections: connections(),
+			getCalls: get.mock.calls.length,
+			refreshCalls: refresh.mock.calls.length
+		}).toStrictEqual({
+			result: response,
+			verdictGraceKind: 'function',
+			connections: [
+				{
+					url: 'wss://cupboard.test/cache/_default/commit',
+					authorization: 'Bearer initial-token'
+				},
+				{
+					url: 'wss://cupboard.test/cache/_default/commit',
+					authorization: 'Bearer renewed-token'
+				}
+			],
+			getCalls: 2,
+			refreshCalls: 0
 		});
 		await expect(settled).resolves.toBeUndefined();
 	});

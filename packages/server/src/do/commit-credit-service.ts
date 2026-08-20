@@ -3,6 +3,8 @@ import {
 	storedCacheSchema
 } from '@cupboard/nix-store/scalars';
 import {
+	commitAuthenticationExpiredCloseCode,
+	commitAuthenticationExpiredCloseReason,
 	commitBatchMaxEntries,
 	type SessionId,
 	sessionIdSchema
@@ -54,16 +56,16 @@ const commitCreditStateSchema = z.object({
 });
 type CommitCreditState = z.infer<typeof commitCreditStateSchema>;
 
-// What a commit session socket carries across a hibernation wake: the cache it
-// was opened against, the id the verify pass routes its verdicts to, its credit
-// state, and when the object last heard from it. `credit` is absent for a
-// session that did not negotiate credit, and for one accepted before this
-// accounting existed; the server neither debits nor paces such a session.
-// Everything the scheduler needs is here, so a cold start rebuilds the whole
-// picture from `getWebSockets()`.
+// What a commit session socket carries across a hibernation wake: its cache and
+// id, the expiry of the token used for the upgrade, whether the server is
+// closing it, its credit state, and when the object last heard from it.
+// `credit` is absent when the server does not pace the session. The optional
+// fields are absent from attachments written by older deployments.
 export const commitSessionAttachmentSchema = z.object({
 	cache: storedCacheSchema,
 	sessionId: sessionIdSchema,
+	authenticatedUntil: epochMillisSchema.optional(),
+	isClosing: z.boolean().optional(),
 	credit: commitCreditStateSchema.optional(),
 	lastActivityAt: epochMillisSchema.optional()
 });
@@ -106,9 +108,15 @@ export function readCommitSessionAttachment(
  * way.
  */
 export function unpacedSessions(sockets: readonly WebSocket[]): number {
-	return sockets.filter(
-		(socket) => readCommitSessionAttachment(socket)?.credit === undefined
-	).length;
+	return sockets.filter((socket) => {
+		const attachment = readCommitSessionAttachment(socket);
+
+		return (
+			attachment !== undefined &&
+			attachment.credit === undefined &&
+			!isSessionClosing(attachment)
+		);
+	}).length;
 }
 
 /**
@@ -127,7 +135,11 @@ function countedCredit(
 ): CommitCreditState | undefined {
 	const credit = attachment?.credit;
 
-	return credit === undefined || credit.isClosing === true ? undefined : credit;
+	return attachment === undefined ||
+		credit === undefined ||
+		isSessionClosing(attachment)
+		? undefined
+		: credit;
 }
 
 /**
@@ -138,7 +150,7 @@ function countedCredit(
  * for.
  */
 export function isSessionClosing(attachment: CommitSessionAttachment): boolean {
-	return attachment.credit?.isClosing === true;
+	return attachment.isClosing === true || attachment.credit?.isClosing === true;
 }
 
 /**
@@ -380,36 +392,34 @@ export class CommitCreditService {
 		return index === -1 ? this.rotation.length : index;
 	}
 
-	// Zeroes the credit recorded against a session whose socket this object still
-	// lists, and marks the session as closing. A socket the server has closed
-	// stays listed until the client completes the handshake, and every later sum
-	// reads its attachment, so credit left there would be counted both for this
-	// session and for the session it has just been handed to.
+	// Marks a session as closing and zeroes its credit when it has any. A socket
+	// the server has closed stays listed until the client completes the close
+	// handshake. Every later sum reads the attachment, so credit left there would
+	// be counted both for this session and for the session that received it next.
 	//
-	// The mark is what tells every later reader that the session is finished with
-	// the accounting: the totals and the rotation skip it, a message that crosses
-	// the close is answered with the close alone, and the idle pass leaves it
-	// where it is. A peer that never answers its close leaves the socket listed
-	// for good, and the alarm is armed for sockets the close could still act on,
-	// so without the mark such a socket would wake the object every idle period
-	// for ever, and credit granted to it would never come back.
-	private clearCredit(sessionId: SessionId): void {
+	// The mark also covers an unpaced session closed at its authentication
+	// deadline. The alarm skips marked sessions even if the peer never completes
+	// the close handshake.
+	private markSessionClosing(sessionId: SessionId): void {
 		const socket = this.context.ctx.getWebSockets(sessionId)[0];
 		const attachment =
 			socket === undefined ? undefined : readCommitSessionAttachment(socket);
 
-		if (socket === undefined || attachment?.credit === undefined) {
+		if (socket === undefined || attachment === undefined) {
 			return;
 		}
 
 		writeCommitSessionAttachment(socket, {
 			...attachment,
-			credit: {
-				...attachment.credit,
-				granted: 0,
-				demand: 0,
-				isClosing: true
-			}
+			isClosing: true,
+			...(attachment.credit !== undefined && {
+				credit: {
+					...attachment.credit,
+					granted: 0,
+					demand: 0,
+					isClosing: true
+				}
+			})
 		});
 	}
 
@@ -454,6 +464,7 @@ export class CommitCreditService {
 		session: {
 			readonly cache: StoredCache;
 			readonly sessionId: SessionId;
+			readonly authenticatedUntil: number;
 		},
 		hasNegotiated: boolean,
 		now: number
@@ -651,7 +662,7 @@ export class CommitCreditService {
 	 * still returns its own credit when its commit finishes.
 	 */
 	closeSession(sessionId: SessionId, now: number): void {
-		this.clearCredit(sessionId);
+		this.markSessionClosing(sessionId);
 		// Recompute from the attachments rather than adjusting a running total: a
 		// closing socket may or may not still be listed when its close is handled,
 		// and a sum that excludes the session is right either way. Sessions close
@@ -659,6 +670,69 @@ export class CommitCreditService {
 		// same time.
 		this.grantedTotal = this.sumGranted(sessionId);
 		this.grantWaiting(now);
+	}
+
+	/**
+	 * The earliest access-token expiry among sessions that remain open.
+	 */
+	nextAuthenticationExpiry(): number | undefined {
+		let earliest: number | undefined;
+
+		for (const socket of this.context.ctx.getWebSockets()) {
+			const attachment = readCommitSessionAttachment(socket);
+			const expiresAt = attachment?.authenticatedUntil;
+
+			if (
+				attachment === undefined ||
+				expiresAt === undefined ||
+				isSessionClosing(attachment)
+			) {
+				continue;
+			}
+
+			earliest =
+				earliest === undefined ? expiresAt : Math.min(earliest, expiresAt);
+		}
+
+		return earliest;
+	}
+
+	/**
+	 * Closes one session if the access token from its upgrade has expired.
+	 * Returns whether the caller must stop processing the session.
+	 */
+	closeIfAuthenticationExpired(
+		socket: WebSocket,
+		attachment: CommitSessionAttachment,
+		now: number
+	): boolean {
+		if (
+			attachment.authenticatedUntil === undefined ||
+			attachment.authenticatedUntil > now
+		) {
+			return false;
+		}
+
+		this.closeSession(attachment.sessionId, now);
+		socket.close(
+			commitAuthenticationExpiredCloseCode,
+			commitAuthenticationExpiredCloseReason
+		);
+
+		return true;
+	}
+
+	/**
+	 * Closes every session whose upgrade token has expired.
+	 */
+	closeExpiredSessions(now: number): void {
+		for (const socket of this.context.ctx.getWebSockets()) {
+			const attachment = readCommitSessionAttachment(socket);
+
+			if (attachment !== undefined && !isSessionClosing(attachment)) {
+				this.closeIfAuthenticationExpired(socket, attachment, now);
+			}
+		}
 	}
 
 	/**
@@ -723,10 +797,7 @@ export class CommitCreditService {
 			// answers or the runtime reaps it, which for a peer that never answers
 			// is never, so testing it again would repeat a recompute and a verdict
 			// read on every firing for as long as it hangs about.
-			if (
-				attachment?.credit === undefined ||
-				attachment.credit.isClosing === true
-			) {
+			if (attachment?.credit === undefined || isSessionClosing(attachment)) {
 				continue;
 			}
 

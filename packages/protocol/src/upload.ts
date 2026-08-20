@@ -97,6 +97,12 @@ export type UploadId = z.infer<typeof uploadIdSchema>;
 export const sessionIdSchema = z.string().brand('SessionId');
 export type SessionId = z.infer<typeof sessionIdSchema>;
 
+// The server closes a commit connection when the access token from its upgrade
+// expires. The client matches both values before it treats the close as an
+// authentication expiry rather than another policy failure.
+export const commitAuthenticationExpiredCloseCode = 1008;
+export const commitAuthenticationExpiredCloseReason = 'access token expired';
+
 // A temporary R2 S3 credential: the access-key triple a standard S3 client
 // signs with, where to send the requests, and when the credential expires.
 // This is the one declaration of that shape, used by the server helper that

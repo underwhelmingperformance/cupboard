@@ -16,7 +16,7 @@ export interface TenantHonoEnv {
 	Bindings: RuntimeEnv;
 	Variables: {
 		logger: Logger;
-		claims?: AccessClaims;
+		claims: AccessClaims;
 		cache: StoredCache;
 	};
 }
