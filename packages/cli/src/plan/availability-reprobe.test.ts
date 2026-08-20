@@ -62,7 +62,7 @@ function baseOptions(
 }
 
 describe('reprobeAvailability', () => {
-	it('leaves the build set unchanged when nothing has become available', async () => {
+	it('keeps the build set unchanged when no target became available', async () => {
 		const reprobe = await reprobeAvailability(
 			baseOptions({
 				targets: [target(), target({ installable: otherPath })]
@@ -75,7 +75,7 @@ describe('reprobeAvailability', () => {
 		});
 	});
 
-	it('asks each question once over the whole build set', async () => {
+	it('queries the destination and reuse view once for the complete build set', async () => {
 		const destinationCalls: (readonly StorePathString[])[] = [];
 		const viewCalls: (readonly StorePathString[])[] = [];
 

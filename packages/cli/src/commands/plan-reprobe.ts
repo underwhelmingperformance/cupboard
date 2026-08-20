@@ -27,15 +27,14 @@ export interface PlanReprobeOptions {
 
 export interface PlanReprobeRunOptions {
 	/**
-	The build set as it stands, one entry per target Nix is about to realise.
+	The current build set, with one entry for each target Nix will realise.
 	*/
 	readonly targets: readonly ParsedCohortTarget[];
 }
 
 /**
- * What {@link runPlanReprobe} needs from this run's environment, injectable so
- * a command test drives it with doubles: the destination-side probes for the
- * same tenant and cache the partition asked.
+ * The destination probes for the same tenant and cache used by the initial
+ * partition. Tests can inject these dependencies.
  */
 export interface PlanReprobeDependencies {
 	readonly destinationProbes: DestinationProbes;
@@ -86,11 +85,10 @@ export function registerPlanReprobeCommand(
 }
 
 /**
- * Re-asks the availability questions over a planned build set and reports what
- * has become available since the partition ran. The answer is a
- * confirmation and never a second partition: no retention root is reconciled,
- * no unknown ceiling applies, and a build set nothing has caught up with is
- * reported unchanged.
+ * Queries a planned build set again and reports paths that became available
+ * after the initial partition. It only confirms availability; it does not
+ * update retention, apply the unknown-path ceiling, or repartition the plan. If
+ * no target became available, it reports the original build set unchanged.
  */
 export async function runPlanReprobe(
 	options: PlanReprobeRunOptions,

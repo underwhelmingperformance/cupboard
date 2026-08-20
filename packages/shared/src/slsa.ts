@@ -61,9 +61,9 @@ const slsaProvenanceSchema = z.object({
 });
 
 /**
- * The git commit recorded for a source repository among a provenance
- * predicate's resolved dependencies. Returns undefined unless exactly one
- * dependency matches that repository and carries a commit.
+ * Returns the Git commit for `sourceRepository` from the predicate's resolved
+ * dependencies. Returns `undefined` unless exactly one dependency refers to
+ * that repository and records a commit.
  */
 function resolvedSourceCommit(
 	dependencies: readonly SlsaDependency[],
@@ -82,10 +82,10 @@ function resolvedSourceCommit(
 }
 
 /**
- * The git commit a SLSA provenance predicate was built from, taken from the
- * resolved dependency whose URI is the given source repository on GitHub.
- * Returns undefined when the predicate is not SLSA provenance, or does not
- * record exactly one such dependency carrying a commit.
+ * Returns the source commit recorded by a SLSA provenance predicate for a
+ * GitHub repository. Returns `undefined` if the predicate is not SLSA
+ * provenance or does not contain exactly one matching dependency with a Git
+ * commit.
  */
 export function slsaSourceCommit(
 	predicate: unknown,
@@ -119,10 +119,9 @@ export interface SlsaProvenanceSummary {
 }
 
 /**
- * Summarise the build identity a SLSA provenance predicate records: the source
- * repository, ref and commit, the workflow and its trigger, the builder, and
- * the run that produced it. Returns undefined when the predicate records none
- * of these fields, which is what a predicate other than SLSA provenance does.
+ * Summarises the build identity recorded by a SLSA provenance predicate,
+ * including its source, workflow, builder, and invocation. Returns `undefined`
+ * when none of those fields is present.
  */
 export function slsaProvenanceSummary(
 	predicate: unknown

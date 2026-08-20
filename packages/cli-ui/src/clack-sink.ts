@@ -51,10 +51,8 @@ function renderProperty(key: string, value: unknown): string {
 	return `${key} ${String(value)}`;
 }
 
-// The record's properties as a dimmed, single-line summary, rendered the same
-// way as the facts on a spinner title: the variable data goes here so the
-// message itself stays constant and low-cardinality. Undefined values are
-// skipped.
+// Renders properties as a dimmed, single-line suffix after the constant
+// message. Undefined values are skipped.
 function renderFields(
 	properties: Record<string, unknown>,
 	colours: Colours
@@ -72,9 +70,8 @@ function renderFields(
 
 /**
  * A LogTape {@link Sink} that renders CLI diagnostics through `@clack/prompts`.
- * The constant message carries the emphasis; the record's properties trail it as
- * a dimmed field summary. Levels map to clack channels so warnings and errors
- * stay distinct from ordinary narration.
+ * It appends record properties as a dimmed field summary. Levels map to Clack
+ * channels so warnings and errors remain distinct from ordinary narration.
  */
 export function clackSink(colours: Colours): Sink {
 	return (record) => {

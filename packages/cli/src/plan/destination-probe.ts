@@ -47,9 +47,8 @@ export function destinationServedPaths(
 }
 
 /**
- * Which of `paths` a named tenant reuse view serves. A separate fact from
- * destination availability: it says where a shared output can be
- * substituted from, never whether the destination retains it.
+ * Which of `paths` a named tenant reuse view serves. This is separate from
+ * destination availability and does not indicate destination retention.
  */
 export function viewServedPaths(
 	options: DestinationProbeOptions & {
@@ -84,9 +83,9 @@ export function attestedServedPaths(
 }
 
 /**
- * What the destination and reuse-view probes are bound to: one tenant, cache
- * and credential. A run with no reuse view configured answers an empty set
- * without a request, since there is no view to ask.
+ * Configuration that binds probes to one tenant, cache and credential. When no
+ * reuse view is configured, the view probe returns an empty set without making
+ * a request.
  */
 export interface TenantProbeOptions {
 	readonly baseUrl: URL;
@@ -97,9 +96,8 @@ export interface TenantProbeOptions {
 }
 
 /**
- * The destination-side probes for one tenant and cache: the two availability
- * questions a partition or a re-probe asks, plus the attestation question that
- * a plan requiring attested availability asks.
+ * Destination probes for partitioning and reprobing: destination availability,
+ * reuse-view availability, and build-provenance availability.
  */
 export interface TenantProbes extends DestinationProbes {
 	readonly attestedServed: (
@@ -132,9 +130,8 @@ export function tenantProbesFor(options: TenantProbeOptions): TenantProbes {
 	};
 }
 
-// A cache addresses a path by its hash part alone, so grouping by hash needs
-// one request per distinct hash and its answer applies to every path in that
-// group.
+// Cache indexes paths by their hash component. Send one request per distinct
+// hash and apply its result to every path in that group.
 function pathsByStorePathHash(
 	paths: readonly StorePathString[]
 ): ReadonlyMap<StorePathHash, readonly StorePathString[]> {

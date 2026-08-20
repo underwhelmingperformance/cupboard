@@ -62,7 +62,7 @@ export interface NixValidPathInfo {
 	readonly signatures: readonly string[];
 	/**
 	 * Whether this store registered the path as ultimately trusted, which Nix
-	 * sets for paths it built locally. A substituted path carries the
+	 * sets for paths it built locally. A substituted path records the
 	 * substituter's signatures instead.
 	 */
 	readonly ultimate: boolean;
@@ -95,9 +95,9 @@ export interface NixDaemonOffer extends NixOfferedPath {
 }
 
 /**
- * An offer read from a substituter's own narinfo, which every substituter
- * publishes in full: the path's NAR hash and each signature made over it, so a
- * consumer's checks can run against what this substituter would serve.
+ * An offer parsed from a substituter's narinfo. It includes the advertised NAR
+ * hash and every signature, which lets a consumer apply the same checks before
+ * fetching the path.
  */
 export interface NixSubstituterOffer extends NixOfferedPath {
 	readonly source: 'substituter';
@@ -206,16 +206,16 @@ export interface NixStoreClient {
 	): Promise<readonly NixValidPathInfo[]>;
 	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo>;
 	/**
-	 * Path information for every given path, in argument order. A path the
-	 * store does not hold fails the whole query with
+	 * Path information for every given path, in argument order. A path absent
+	 * from the store fails the whole query with
 	 * {@link NixStorePathNotFoundError}.
 	 */
 	queryPathsInfo(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly NixValidPathInfo[]>;
 	/**
-	 * Path information for the given paths the store holds, in argument
-	 * order; absent paths are omitted.
+	 * Path information for the given paths that are valid in the store, in
+	 * argument order. Invalid or absent paths are omitted.
 	 */
 	queryValidPathsInfo(
 		storePaths: readonly StorePathString[]
@@ -259,10 +259,9 @@ export interface NixStoreClient {
 		targets: readonly NixDerivedPathString[]
 	): Promise<NixMissingPartition>;
 	/**
-	 * The serialised text of the derivation at the given path. A derivation is
-	 * one regular file in the store, so a backend that reaches those files
-	 * reads it directly and one that reaches the store only over the worker
-	 * protocol extracts it from the path's NAR.
+	 * The serialised derivation at the given path. Local backends read the
+	 * regular file directly; worker-protocol backends extract the file from the
+	 * path's NAR.
 	 */
 	readDerivation(drvPath: StorePathString): Promise<string>;
 	/**
@@ -279,10 +278,9 @@ export interface NixStoreClient {
 		mode?: NixBuildMode
 	): Promise<readonly NixBuildResult[]>;
 	/**
-	 * Whether the daemon connection this client uses is trusted, so a caller
-	 * can tell whether a setting override it sent (such as a negative-cache
-	 * bypass) actually took effect. Only a daemon-backed store has a
-	 * connection to ask; a backend without one leaves this undefined.
+	 * Reports whether the daemon connection is trusted, allowing callers to
+	 * check whether overrides such as a negative-cache bypass took effect.
+	 * Non-daemon backends omit this method.
 	 */
 	daemonTrust?(): Promise<NixDaemonTrust>;
 	/**
@@ -295,9 +293,8 @@ export interface NixStoreClient {
 }
 
 /**
- * Validates a store path reported by a backend. Later stages use this path as
- * an index, hash input and upload key, so invalid values are rejected before
- * reaching them.
+ * Validates a store path reported by a backend before later stages use it as an
+ * index, hash input, or upload key.
  */
 export function requireStorePath(reported: string): StorePathString {
 	const storePath = storePathSchema.safeParse(reported);
@@ -319,11 +316,10 @@ export function requireStorePath(reported: string): StorePathString {
 export const defaultClosureConcurrency = 16;
 
 /**
- * Resolve the closure of `roots` by walking references breadth-first, visiting
- * each path once and returning them sorted by store path. The backend supplies
- * how a single path's info is fetched, so the daemon and local stores share one
- * traversal. The walk queries each frontier with up to `concurrency` queries in
- * flight, so `queryPathInfo` must be safe to call that many times concurrently.
+ * Walks references breadth-first, visits each path once, and returns paths
+ * sorted by store path. The injected `queryPathInfo` operation lets daemon and
+ * local stores share the traversal. Each frontier runs at most `concurrency`
+ * queries, so the callback must support that concurrency.
  */
 export async function resolveClosureBy(
 	roots: readonly StorePathString[],
@@ -356,10 +352,9 @@ export async function resolveClosureBy(
 		.toSorted((left, right) => byCodeUnit(left.storePath, right.storePath));
 }
 
-// The candidates not yet claimed, in order and deduplicated, marking each one
-// claimed so a path reachable by several edges is queried once. A path is
-// claimed when it joins a frontier, before it is queried, so the next frontier
-// never re-schedules a path already in flight.
+// Return unseen candidates in input order without duplicates, and add them to
+// claimed before querying. Claiming at frontier construction prevents another
+// edge from scheduling an in-flight path again.
 export function claimUnseen(
 	candidates: readonly StorePathString[],
 	claimed: Set<string>
@@ -432,10 +427,10 @@ export class NixConfigIncludeError extends NixStoreError {
 }
 
 /**
- * A configuration line Nix cannot parse. Nix takes a line's
- * whitespace-separated tokens and requires `<name> = <value…>`, refusing the
- * whole configuration over anything else. This client also rejects malformed
- * lines so it cannot proceed under a configuration Nix would refuse.
+ * A configuration line Nix cannot parse. Nix tokenises the line on whitespace
+ * and requires `<name> = <value…>`. It rejects the complete configuration for
+ * any other form. This client also rejects malformed lines so it cannot
+ * proceed under a configuration Nix would reject.
  */
 export class NixConfigSyntaxError extends NixStoreError {
 	constructor(
@@ -473,12 +468,12 @@ const machineFileFailureDescriptions: Readonly<
 
 /**
  * A `builders` value whose `@file` entries could not be expanded. A machines
- * file may name another, so a chain of them can be followed only so far.
+ * file may include another, so a chain of them can be followed only so far.
  */
 export class NixMachineFileError extends NixStoreError {
 	constructor(
 		/**
-		The builders value, or the machines file, the failure is about.
+		The builders value or machines file that caused the failure.
 		*/
 		public readonly source: string,
 		public readonly reason: NixMachineFileFailure,

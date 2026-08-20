@@ -2027,7 +2027,7 @@ describe('runBuildPush', () => {
 		});
 	});
 
-	it('exits with the child status when build and publication both failed, the receipt carrying both', async () => {
+	it('returns the child status when build and publication both fail and records both failures in the receipt', async () => {
 		const run = await runFlow({ emitEvent: true, emitExitStatus: 7 });
 		const error = run.error;
 		const receipt: unknown = JSON.parse(

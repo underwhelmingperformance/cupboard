@@ -1836,7 +1836,7 @@ export async function attemptPushToTenant(
 	}
 
 	try {
-		await settleCommitSession(
+		await completeCommitSession(
 			commitSessionFromResponse(upgraded),
 			decision.uploadId,
 			() => tenantServer(env, tenant).runVerification(),
@@ -1956,7 +1956,7 @@ export function commitSessionFromResponse(
 
 	if (socket === null) {
 		throw new CommitSocketProtocolError(
-			'the upgrade answered without a socket'
+			'the upgrade response did not include a WebSocket'
 		);
 	}
 
@@ -2043,7 +2043,7 @@ export async function openCommitSession(
 // Closes a session socket and waits for the close handshake to complete, so
 // the server has handled the close before the caller opens another session; a
 // close still in flight counts against the commit sockets the tenant holds.
-function closeSettled(socket: WebSocket): Promise<void> {
+function closeSessionAndWait(socket: WebSocket): Promise<void> {
 	if (socket.readyState === WebSocket.READY_STATE_CLOSED) {
 		return Promise.resolve();
 	}
@@ -2056,12 +2056,11 @@ function closeSettled(socket: WebSocket): Promise<void> {
 	});
 }
 
-// The frame exchange the commit helpers share: send the commit op, settle on
-// the reply, or drive the verification pass (the queue would run it in
-// production) and settle on the verdict; `wait: false` returns the deferral as
-// `pending`. The session stays open across a deferral, so the helper closes it
-// on settle.
-async function settleCommitSession(
+// Sends a commit operation and waits for its response. For a deferred upload,
+// the helper runs the verification pass that the queue runs in production and
+// waits for the verdict. With `wait: false`, it returns `pending` immediately.
+// The helper closes the session after receiving the final result.
+async function completeCommitSession(
 	conversation: CommitConversation,
 	uploadId: UploadId,
 	runVerification: () => Promise<void>,
@@ -2072,23 +2071,23 @@ async function settleCommitSession(
 	const first = await nextFrame();
 
 	if (first.ev === 'settled') {
-		await closeSettled(socket);
+		await closeSessionAndWait(socket);
 
 		return first.response;
 	}
 
 	if (first.ev === 'error') {
-		await closeSettled(socket);
+		await closeSessionAndWait(socket);
 		throw new CommitSocketError(first.status, first.message);
 	}
 
 	if (first.ev !== 'deferred') {
-		await closeSettled(socket);
+		await closeSessionAndWait(socket);
 		throw new CommitSocketProtocolError(`unexpected first frame: ${first.ev}`);
 	}
 
 	if (options.wait === false) {
-		await closeSettled(socket);
+		await closeSessionAndWait(socket);
 
 		return {
 			storePathHash: first.storePathHash,
@@ -2099,7 +2098,7 @@ async function settleCommitSession(
 
 	await runVerification();
 	const verdict = await nextFrame();
-	await closeSettled(socket);
+	await closeSessionAndWait(socket);
 
 	if (verdict.ev !== 'verdict') {
 		throw new CommitSocketProtocolError(`unexpected frame: ${verdict.ev}`);
@@ -2133,7 +2132,7 @@ export async function commitUpload(
 ): Promise<CommitResponse> {
 	const conversation = await openCommitSession(token, cache);
 
-	return settleCommitSession(
+	return completeCommitSession(
 		conversation,
 		uploadId,
 		() => currentServer().runVerification(),
@@ -2142,9 +2141,8 @@ export async function commitUpload(
 }
 
 /**
- * Drives a commit the server is expected to refuse, returning the error it
- * settles with so a test can assert on it structurally. Fails if the commit
- * unexpectedly succeeds.
+ * Runs a commit that the server is expected to refuse. Returns the rejection so
+ * the test can compare it structurally. Fails if the commit succeeds.
  */
 export async function commitUploadRejection(
 	token: string,
@@ -2197,7 +2195,7 @@ export async function commitUploadViaWorker(
 		headers: { upgrade: 'websocket' }
 	});
 
-	return settleCommitSession(
+	return completeCommitSession(
 		commitSessionFromResponse(response),
 		uploadId,
 		() => tenantServer(env, tenant).runVerification(),

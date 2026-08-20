@@ -61,10 +61,9 @@ export interface ReconcileTarget {
 }
 
 /**
- * The publication split the planner settled before the build. Reconciliation
- * treats it as authoritative: a target the planner left upstream stays left
- * upstream even when another target's build realised it, so root contents do
- * not depend on which targets share a run.
+ * The publication classification from before the build. Reconciliation
+ * preserves `leftUpstream` even when another target's build realises the same
+ * path, so root contents do not depend on cohort composition.
  */
 export interface ReconcilePartition {
 	readonly attachOnly: readonly StorePathString[];
@@ -585,12 +584,10 @@ function targetOutcome(
 		: { outcome: 'destination-served', storePath: first };
 }
 
-// Whether a target is confirmed: every target of a declared root must be
-// confirmed before the root is replaced. A target the planner classified as
-// anything other than `publish` was decided before the build, so it counts as
-// confirmed without this run publishing anything for it. That includes a
-// left-upstream target, which the destination deliberately does not serve and
-// which contributes nothing to the root's contents.
+// Every target of a declared root must be confirmed before the root is replaced.
+// A pre-build classification other than `publish` needs no publication from
+// this run and is already confirmed. A `left-upstream` target contributes no
+// destination root paths.
 function isConfirmed(
 	resolved: ResolvedTarget,
 	ledger: PublicationLedger
@@ -607,7 +604,7 @@ function isConfirmed(
 }
 
 // The paths a target resolves to, whichever cache ends up serving them.
-function answeredPathsOf(resolved: ResolvedTarget): readonly StorePathString[] {
+function resolvedPathsOf(resolved: ResolvedTarget): readonly StorePathString[] {
 	if (resolved.resolution.kind === 'resolved') {
 		return resolved.resolution.paths;
 	}
@@ -615,24 +612,22 @@ function answeredPathsOf(resolved: ResolvedTarget): readonly StorePathString[] {
 	return [fallbackPath(resolved.target)];
 }
 
-// The paths a target contributes to its root's contents: what the destination
-// is to hold on the root's behalf. A left-upstream target contributes nothing,
-// because a consumer fetches it from elsewhere.
+// The paths a target adds to its destination root. A `left-upstream` target adds
+// none because an external substituter serves it.
 function rootContentsOf(resolved: ResolvedTarget): readonly StorePathString[] {
 	if (resolved.classification === 'left-upstream') {
 		return [];
 	}
 
-	return answeredPathsOf(resolved);
+	return resolvedPathsOf(resolved);
 }
 
-// Replaces the target list of each declared target root once every one of its
-// targets is confirmed, in a single call per root, with the paths the
-// destination is to hold; a root with any unconfirmed target is left exactly as
-// it was. When every target of a root was left upstream the new list is empty,
-// which releases the paths the root previously retained. The run root is not
-// among these roots: it was bound at negotiate, commit by commit, and
-// reconciliation does not touch it.
+// Replaces each target root only after all of its targets are confirmed. If any
+// target remains unconfirmed, reconciliation does not modify the root. If every
+// target was excluded from publication because an upstream substituter serves
+// it, reconciliation replaces the root with an empty path list and releases
+// its previous paths. The run root is attached during commit and is not
+// modified here.
 async function applyTargetRoots(
 	resolvedTargets: readonly ResolvedTarget[],
 	options: ReconcileOptions,
@@ -658,7 +653,7 @@ async function applyTargetRoots(
 		const targets = new Set(group.flatMap((item) => rootContentsOf(item)))
 			.values()
 			.toArray();
-		const answered = group.flatMap((item) => answeredPathsOf(item));
+		const resolvedPaths = group.flatMap((item) => resolvedPathsOf(item));
 
 		if (group.some((item) => !isConfirmed(item, ledger))) {
 			roots.push({ root, applied: false, targets });
@@ -674,10 +669,9 @@ async function applyTargetRoots(
 			});
 			roots.push({ root, applied: true, targets });
 		} catch (error) {
-			// Recorded against every path the group's targets answer for, not
-			// just the settled contents, so a root that settles over nothing
-			// still reports the refusal against the targets it was declared for.
-			for (const storePath of answered) {
+			// Record the refusal against every resolved target path, not only the
+			// new root contents. A root with an empty target list can still fail.
+			for (const storePath of resolvedPaths) {
 				recordFailure(ledger, storePath, 'retention', error);
 			}
 

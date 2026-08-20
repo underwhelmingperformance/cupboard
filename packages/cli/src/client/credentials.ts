@@ -15,7 +15,8 @@ Either a fixed bearer token or a provider that can refresh one.
 export type AccessCredential = string | TokenProvider;
 
 /**
- * The headers and optional refresh for one authenticated transport attempt.
+ * Describes one authenticated HTTP request or WebSocket upgrade. `headers`
+ * includes the bearer token and any transport headers supplied by the caller.
  */
 export interface BearerAttempt {
 	readonly headers: Readonly<Record<string, string>>;

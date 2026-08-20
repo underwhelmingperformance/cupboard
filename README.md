@@ -6,9 +6,9 @@ for NAR bytes and a Durable Object per tenant for the metadata, signing keys,
 and retention bookkeeping. One deployment hosts many independent tenants, each
 with its own caches, keys, and access rules.
 
-The `cupboard` CLI both stands a deployment up and operates it day to day: it
-pushes store paths, manages tenants and their keys, configures retention, and
-prints the `nix.conf` a client needs to substitute from a cache.
+The `cupboard` CLI provisions and operates a deployment. It pushes store paths,
+manages tenants and their keys, configures retention, and prints the `nix.conf`
+a client needs to substitute from a cache.
 
 ## Two roles
 
@@ -41,8 +41,8 @@ These commands address the tenant, so their URL carries the tenant slug:
 
 ## URL forms
 
-A command's URL says what it acts on. Operator and control-plane commands take
-the deployment's bare host:
+The URL passed to a command identifies its target. Operator and control-plane
+commands take the deployment's bare host:
 
 ```
 https://cupboard.example.workers.dev
@@ -101,14 +101,13 @@ is a separate choice: `--colour` and `--no-colour` force ANSI on or off, and
 
 ## Exit codes for `cupboard build-push`
 
-`cupboard build-push` runs a build command under streaming publication and
-settles the run with a final reconciliation. Its exit contract is numeric, so a
-retry system can branch on it without parsing output. A failed build exits with
-the build command's own status (or 128 plus the signal number when a signal
-killed it), and a successful build whose publication or retention did not
-complete exits with the sysexits vocabulary. A cache failure never presents as a
-build failure or vice versa; the build receipt records both causes when both
-fail.
+`cupboard build-push` streams publication while the build runs, then reconciles
+the final build and publication results. Its numeric exit status lets retry
+systems distinguish build failures from publication and retention failures
+without parsing output. A build failure returns the build command's status, or
+128 plus the signal number. If the build succeeds but publication or retention
+fails, the command returns a sysexits status. The receipt records both causes
+when both phases fail.
 
 The build command must use the inherited Nix store configuration. Do not pass
 `--store` to a nested Nix command or change `NIX_REMOTE`. Cupboard cannot

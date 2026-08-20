@@ -2139,7 +2139,7 @@ describe('credit-paced commits', () => {
 	// bounds the attempt. What the operator needs from the failure is the
 	// refusal, not just the length of the wait, so the timeout carries the last
 	// one the session met.
-	it('carries the refusal it kept meeting into an expired wait', async () => {
+	it('includes the last upgrade refusal in a capacity timeout', async () => {
 		vi.spyOn(Math, 'random').mockReturnValue(0);
 
 		const sockets = [

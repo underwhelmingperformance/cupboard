@@ -73,22 +73,22 @@ export interface AvailabilityCeilingConfig {
 }
 
 /**
- * A target the classification would leave upstream, paired with the path it
- * resolved to, as the confirmation receives it. The installable is included as
- * well as the path because a derivation can disable substitutes for its own
- * outputs, and that setting cannot be read from the store path alone.
+ * A target that may be excluded from publication because an upstream
+ * substituter serves it. The candidate includes the installable because a
+ * derivation can disable substitutes for its own outputs, and that setting
+ * cannot be read from the store path alone.
  */
-export interface LeftUpstreamCandidate {
+export interface UpstreamAvailabilityCandidate {
 	readonly installable: NixDerivedPathString;
 	readonly storePath: StorePathString;
 }
 
 /**
- * The result of confirming a left-upstream candidate. Only `confirmed` leaves
- * the target upstream. Every other result records why the target must be built
- * or published instead.
+ * The result of checking whether an upstream substituter can serve a candidate.
+ * Only `confirmed` excludes the target from publication. Every other result
+ * records why the target must be built or published.
  */
-export type LeftUpstreamVerdict =
+export type UpstreamAvailabilityVerdict =
 	| { readonly kind: 'confirmed' }
 	/**
 	The `substitute` setting is off, so Nix would not fetch the path.
@@ -148,7 +148,7 @@ export type LeftUpstreamVerdict =
 One rejected candidate, as the partition reports it.
 */
 export type LeftUpstreamRejection = Exclude<
-	LeftUpstreamVerdict,
+	UpstreamAvailabilityVerdict,
 	{ readonly kind: 'confirmed' }
 > & { readonly storePath: StorePathString };
 
@@ -267,9 +267,9 @@ export interface AvailabilityPartitionOptions {
 	 * Asked only of the targets the classification would otherwise leave
 	 * upstream. Other targets do not require this verification.
 	 */
-	readonly confirmLeftUpstream: (
-		candidate: LeftUpstreamCandidate
-	) => Promise<LeftUpstreamVerdict>;
+	readonly confirmUpstreamAvailability: (
+		candidate: UpstreamAvailabilityCandidate
+	) => Promise<UpstreamAvailabilityVerdict>;
 	readonly ceiling: AvailabilityCeilingConfig;
 }
 
@@ -539,11 +539,10 @@ export async function partitionAvailability(
 		false
 	);
 
-	// Substitutability is asked only about the paths this store already holds
-	// valid, because only such a path can be left upstream: the confirmation
-	// below compares what a substituter offers against the NAR hashes this
-	// store recorded, and a path Nix has still to build or fetch has no
-	// recorded hash to compare against.
+	// Check substitutability only for paths that this store already holds. The
+	// confirmation compares each substituter's offer with the NAR hash recorded
+	// by this store, which is not available for a path that Nix still has to
+	// build or fetch.
 	const substitutableRaw =
 		await options.store.querySubstitutablePaths(validPaths);
 	const substitutableExternal = new Set(
@@ -1217,17 +1216,17 @@ interface ClassifiedTarget {
  */
 const maximumConcurrentConfirmations = 4;
 
-// Only a target the classification would leave upstream is worth confirming.
-// Two targets can resolve to the same store path through different
-// installables, and a derivation can disable substitutes for its own outputs,
-// so each distinct path-and-installable pair is confirmed on its own.
+// Confirm only targets that could be excluded from publication because an
+// upstream substituter serves them. Two targets can resolve to the same store
+// path through different installables, and a derivation can disable substitutes
+// for its own outputs, so confirm each path-and-installable pair separately.
 async function confirmCandidates(
 	classified: readonly ClassifiedTarget[],
 	options: AvailabilityPartitionOptions
 ): Promise<readonly LeftUpstreamRejection[]> {
 	const candidates = new Map<
 		StorePathString,
-		Map<NixDerivedPathString, LeftUpstreamCandidate>
+		Map<NixDerivedPathString, UpstreamAvailabilityCandidate>
 	>();
 
 	for (const { target, classification } of classified) {
@@ -1237,7 +1236,7 @@ async function confirmCandidates(
 
 		const aliases =
 			candidates.get(classification.path) ??
-			new Map<NixDerivedPathString, LeftUpstreamCandidate>();
+			new Map<NixDerivedPathString, UpstreamAvailabilityCandidate>();
 		aliases.set(target.installable, {
 			installable: target.installable,
 			storePath: classification.path
@@ -1254,7 +1253,7 @@ async function confirmCandidates(
 		maximumConcurrentConfirmations,
 		async (candidate) => ({
 			storePath: candidate.storePath,
-			verdict: await options.confirmLeftUpstream(candidate)
+			verdict: await options.confirmUpstreamAvailability(candidate)
 		})
 	);
 
@@ -1263,8 +1262,8 @@ async function confirmCandidates(
 	);
 }
 
-// A candidate the confirmation refused is not left upstream: it falls back to
-// the build set, where it would have gone had no substituter offered it.
+// If confirmation fails, put the candidate in the build set as though no
+// substituter had offered it.
 function confirmed(
 	classification: Classification,
 	rejectedPaths: ReadonlySet<StorePathString>

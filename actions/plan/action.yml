@@ -41,16 +41,15 @@ inputs:
     default: 'true'
   enable-packing:
     description: >-
-      Opt in to measured cohort packing: price candidate cohort groupings from
-      measured store sizes under pack-capacity, rather than building one cohort
-      job per manifest cohort. Off by default; never repartitions a manifest
-      without a measurement to price the result against.
+      Use measured store sizes to combine cohort candidates that fit within
+      pack-capacity. Disabled by default. The action does not repartition a
+      cohort without a measurement.
     required: false
     default: 'false'
   pack-capacity:
     description: >-
-      Disk budget, in bytes, that measured cohort packing prices candidate
-      groupings against. Required when enable-packing is true.
+      Disk budget in bytes for measured cohort packing. Required when
+      enable-packing is true.
     required: false
   store:
     description: >-
@@ -63,7 +62,7 @@ inputs:
     required: false
   require-provenance:
     description: >-
-      Keep cached targets on the build set so this invocation executes their
+      Include cached targets in the build set so this invocation executes their
       final derivations and can attest every published target.
     required: false
     default: 'false'

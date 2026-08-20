@@ -1254,10 +1254,8 @@ export class DuplicateGroupKeyError extends CodedError {
 }
 
 /**
- * Two targets name the same cohort but declare different execution contexts
- * (system, os, remote). A cohort is the manifest's own statement that its
- * members run together in one job, so members that could never share a job
- * are a manifest error, not a planning decision to resolve either way.
+ * A cohort label requires its targets to run in one job. Targets with that label
+ * must therefore have the same execution context (system, os, and remote).
  */
 export class CohortExecutionContextError extends UsageError {
 	constructor(
@@ -1352,13 +1350,9 @@ export class PublishRootTargetLimitError extends UsageError {
 }
 
 /**
- * A component-publication target declares more components than a retention
- * root accepts in one write (`rootSetMaxTargets`), which binds `root:set` and
- * `roots.ensure` identically. A larger set cannot be published today. Paging
- * that write loses the all-or-nothing `retained` property that retention
- * depends on, and a paged write would need a retention mechanism built on
- * attach with a generation marker, which cupboard does not yet have. The
- * target is therefore refused, not paged or truncated.
+ * A component target exceeds the atomic `root:set` limit. Do not page this
+ * update: retention requires one all-or-nothing target list. Supporting larger
+ * lists requires generation-aware attachment.
  */
 export class ComponentRootTargetLimitError extends UsageError {
 	constructor(
@@ -1667,10 +1661,9 @@ export class CohortEvaluationDriftError extends CodedError {
 }
 
 /**
- * The cupboard binary exited non-zero. It has already reported the cause
- * through its own output, so this error adds no diagnosis of its own: it
- * carries the exit status the action adopts and any result events the run
- * recorded before it failed.
+ * The cupboard binary exited non-zero after reporting the cause. This error
+ * stores the exit status adopted by the action and any result events recorded
+ * before failure. It adds no diagnostic.
  */
 export class CupboardReportedError extends CodedError {
 	constructor(

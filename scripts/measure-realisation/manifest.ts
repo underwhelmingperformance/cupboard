@@ -8,7 +8,7 @@ import {
 } from '../../actions/src/publish-plan.ts';
 
 /**
-A misuse of the fixture: a manifest it cannot read or measure.
+Invalid fixture input: a manifest that cannot be parsed or measured.
 */
 export abstract class ManifestError extends UsageError {}
 
@@ -34,10 +34,9 @@ export class DuplicateTargetAttributeError extends ManifestError {
 }
 
 /**
- * The manifest this fixture measures: the publish workflow's own `--targets`
- * array, or that same array under a `targets` key, the shape the planner's
- * own targets files carry. Both spellings parse to the array, so a caller
- * points the fixture at the manifest its workflow already uses.
+ * The target manifest accepted by this fixture. It can be the publish
+ * workflow's `--targets` array directly or an object with that array under a
+ * `targets` key. Both forms produce the same target list.
  */
 export const measurementManifestSchema = z.union([
 	publishTargetsSchema,
@@ -47,9 +46,8 @@ export const measurementManifestSchema = z.union([
 ]);
 
 /**
- * The targets a manifest declares, component-publication targets expanded
- * into the components published in their place, so what the fixture measures
- * is what a run would realise.
+ * Parses the manifest targets and expands component-publication targets into
+ * the components the workflow would realise.
  */
 export function parseManifest(source: string): readonly PublishTarget[] {
 	let value: unknown;
@@ -75,9 +73,8 @@ export function parseManifest(source: string): readonly PublishTarget[] {
 	return targets;
 }
 
-// Every measurement in the report is keyed by its target's attr, and a
-// baseline looks a budget up by that key, so two targets sharing one attr
-// would overwrite each other's numbers.
+// Reports and baselines use the target attr as their key. Reject duplicate
+// attributes so one target cannot overwrite another target's measurement.
 function assertDistinctAttributes(targets: readonly PublishTarget[]): void {
 	const seen = new Set<string>();
 
@@ -91,7 +88,7 @@ function assertDistinctAttributes(targets: readonly PublishTarget[]): void {
 }
 
 /**
-The targets one `cohort` label puts in a single job.
+Targets assigned to the same cohort job.
 */
 export interface TargetGroup {
 	readonly key: string;
@@ -99,12 +96,10 @@ export interface TargetGroup {
 }
 
 /**
- * The manifest's declared cohorts that hold more than one target, in key
- * order. A target with no `cohort` label is its own cohort, and a cohort of
- * one costs the same measured apart as together, so only the cohorts whose
- * membership makes the comparison meaningful become groups. The key is the
- * manifest's own label, so a baseline written against one manifest keeps
- * naming the same group when the manifest grows.
+ * Returns the manifest cohorts with at least two members, sorted by cohort
+ * key. Unlabelled targets form one-member cohorts, which cost the same measured
+ * separately or together and do not need a group comparison. The manifest
+ * label remains the stable baseline key when targets are added.
  */
 export function declaredGroups(
 	targets: readonly PublishTarget[]

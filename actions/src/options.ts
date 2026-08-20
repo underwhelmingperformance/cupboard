@@ -48,10 +48,9 @@ export function provided(value: string | undefined): string | undefined {
 }
 
 /**
- * The cache a `cache` input addresses: the named cache after trimming, or the
- * default cache when the input is absent or blank. A value that is not a legal
- * cache name causes a {@link CacheNameInvalidError} before the run
- * constructs an endpoint for it.
+ * Parses a `cache` input after trimming it. An absent or blank value selects the
+ * default cache. An invalid cache name causes a {@link CacheNameInvalidError}
+ * before the run constructs an endpoint.
  */
 export function providedCache(value: string | undefined): StoredCache {
 	const parsed = storedCacheSchema.safeParse(provided(value) ?? DEFAULT_CACHE);

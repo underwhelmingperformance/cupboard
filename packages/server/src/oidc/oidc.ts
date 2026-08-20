@@ -172,7 +172,9 @@ export async function fetchOidcDiscovery(
 
 	if (issuerUrl === undefined) {
 		throw new OidcDiscoveryError(issuer, {
-			cause: new Error('issuer must be an https URL (http only for loopback)')
+			cause: new Error(
+				'issuer must use HTTPS, except that a loopback issuer may use HTTP'
+			)
 		});
 	}
 

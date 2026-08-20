@@ -83,25 +83,23 @@ export class CommitUpgradeRequiredError extends ServerHttpError {
 	readonly status = StatusCodes.UPGRADE_REQUIRED;
 
 	constructor() {
-		super('The commit endpoint is a WebSocket; upgrade the request');
+		super(
+			'The commit endpoint accepts WebSocket upgrades. Upgrade this request.'
+		);
 		this.name = 'CommitUpgradeRequiredError';
 	}
 }
 
-// An upgrade was refused because the tenant already holds as many commit
-// sockets as it may. Two bounds produce this refusal, and neither is a capacity
-// bound: credit paces the work a session admits, so a legitimate publication is
-// never turned away for want of capacity.
+// An upgrade is refused when the tenant reaches either commit-session limit.
+// Neither limit expresses publication capacity because entry credit paces the
+// work admitted by a legitimate session.
 //
-// Every session counts against the anti-abuse ceiling, which sits orders of
-// magnitude above any real publication, so only a runaway client meets it. A
-// session that did not negotiate credit counts against a much smaller bound as
-// well: the server cannot pace such a client, so the number of them one tenant
-// may hold at once is the only thing bounding the work they can park in the
-// object.
+// Every session counts towards the high anti-abuse limit. Sessions that did not
+// negotiate credit also count towards a smaller limit because the server cannot
+// pace their work.
 //
-// Either refusal is retryable: the turned-away client polls the upload status,
-// or retries once a session closes.
+// The client can poll upload status while it waits and retry after another
+// session closes.
 export class CommitSessionLimitError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 5;
@@ -116,7 +114,7 @@ export class CacheNotEmptyError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
 	constructor(public readonly cache: StoredCache) {
-		super('Cache is not empty; pass force to tear it down');
+		super('The cache contains store paths. Pass force to delete it.');
 		this.name = 'CacheNotEmptyError';
 	}
 }
@@ -188,7 +186,9 @@ export class GlobalAdminAlreadyClaimedError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
 	constructor() {
-		super('Global admin has already been claimed by another principal');
+		super(
+			'The deployment has already assigned the global administrator role to another principal.'
+		);
 		this.name = 'GlobalAdminAlreadyClaimedError';
 	}
 }
@@ -206,7 +206,7 @@ export class TenantNotFoundError extends ServerHttpError {
 	readonly status = StatusCodes.NOT_FOUND;
 
 	constructor(public readonly id: string) {
-		super('No such tenant');
+		super('The requested tenant does not exist.');
 		this.name = 'TenantNotFoundError';
 	}
 }
@@ -243,9 +243,9 @@ export class TenantWritesStoppedError extends ServerHttpError {
 	}
 }
 
-// An offboarded tenant is a terminal tombstone: its slug is retired and can never be
-// re-provisioned or moved back to another status. A status mutation targeting it
-// is refused as Gone.
+// An offboarded tenant has a terminal tombstone. Its slug cannot be provisioned
+// again or restored to another status. A status change for this tenant returns
+// 410 Gone.
 export class TenantRetiredError extends ServerHttpError {
 	readonly status = StatusCodes.GONE;
 
@@ -255,9 +255,9 @@ export class TenantRetiredError extends ServerHttpError {
 	}
 }
 
-// Resume only moves a suspended tenant back to active. A tenant that is already
-// active cannot be resumed (an offboarding or offboarded one is a
-// `TenantRetiredError`). The mutation is refused as a conflict.
+// Resume changes only a suspended tenant to active. An active tenant returns a
+// conflict. An offboarding or offboarded tenant returns
+// `TenantRetiredError`.
 export class TenantNotSuspendedError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
@@ -301,7 +301,7 @@ export class ControlWrappedKeyMalformedError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
 	constructor() {
-		super('Stored control signing key could not be unwrapped');
+		super('The server cannot unwrap the stored control signing key.');
 		this.name = 'ControlWrappedKeyMalformedError';
 	}
 }
@@ -319,7 +319,9 @@ export class OwnerRuleImmutableError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
 	constructor(public readonly id: string) {
-		super('Cannot change the owner rule; update deploy config instead');
+		super(
+			'The owner rule is configured at deployment. Update the deployment configuration to change it.'
+		);
 		this.name = 'OwnerRuleImmutableError';
 	}
 }
@@ -368,17 +370,16 @@ export class RootTargetsUnavailableError extends ServerHttpError {
 		public readonly targets: readonly StorePathString[]
 	) {
 		super(
-			`Cannot set root: ${String(targets.length)} target(s) have no uploaded path`
+			`The cache does not serve ${String(targets.length)} ${targets.length === 1 ? 'target' : 'targets'}, so the root cannot be set.`
 		);
 		this.name = 'RootTargetsUnavailableError';
 	}
 }
 
-// A binary cache serves one store directory: the directory its
-// `nix-cache-info` advertises. A path from another store has a different
-// identity, because the store directory is an input to the path hash, and no
-// client of this cache could substitute it. The upload and root routes refuse
-// such a path on the way in, before doing any work with it.
+// A binary cache serves the store directory advertised by `nix-cache-info`. The
+// directory contributes to the store-path hash, so a path from another store has
+// a different identity and cannot be substituted from this cache. Upload and
+// root routes reject such paths before processing them.
 export class StorePathNotServedError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 
@@ -794,7 +795,9 @@ export class UploadCacheMismatchError extends ServerHttpError {
 		public readonly negotiatedCache: StoredCache,
 		public readonly requestedCache: StoredCache
 	) {
-		super('Upload committed under a different cache than it negotiated');
+		super(
+			'The request tried to commit the upload to a different cache from the one used during negotiation.'
+		);
 		this.name = 'UploadCacheMismatchError';
 	}
 }
@@ -861,14 +864,14 @@ export class TenantDispatchInterruptedError extends ServerHttpError {
 	}
 }
 
-// A storage subrequest (R2, D1 or the Cache API) did not settle within its
-// deadline. The caller abandons the call and refuses retryably. Otherwise a
-// stalled call holds the Durable Object's input gate until the runtime resets
-// the object at the ~30s `blockConcurrencyWhile` limit, and that reset fails
-// every concurrent request. The abandoned call is idempotent, so the client's
-// retry resumes safely. The `subrequest` label names the operation that timed
-// out, for observability. `abandoned` resolves once the abandoned call finally
-// settles, and is absent when the call was never started.
+// A storage subrequest to R2, D1, or the Cache API exceeded its deadline. The
+// caller stops waiting and returns a retryable refusal. Without this deadline, a
+// stalled call can keep the Durable Object's input gate until the runtime resets
+// the object at the approximately 30-second `blockConcurrencyWhile` limit. That
+// reset fails every concurrent request. The abandoned call is idempotent, so a
+// client can retry safely. `subrequest` identifies the timed-out operation for
+// observability. `abandoned` resolves when the call finishes and is absent when
+// the call never started.
 export class SubrequestTimeoutError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 5;
@@ -909,7 +912,7 @@ export class AttestationUploadCacheMismatchError extends ServerHttpError {
 		public readonly requestedCache: StoredCache
 	) {
 		super(
-			'Attestation upload attached under a different cache than it negotiated'
+			'The request tried to attach the attestation to a different cache from the one used during negotiation.'
 		);
 		this.name = 'AttestationUploadCacheMismatchError';
 	}

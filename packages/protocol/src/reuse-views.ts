@@ -8,10 +8,9 @@ import { z } from 'zod';
 
 import { isoTimestampSchema } from './scalars.ts';
 
-// A reuse view's name shares a cache name's shape (lowercase, bounded), since
-// it is served beneath its own path segment the same way a cache name is, but
-// it is not a cache name itself: the brand keeps the two from being confused
-// at a call site that takes one or the other.
+// Reuse-view names use the same lowercase and length constraints as cache names
+// because both appear as path segments. A separate brand prevents a reuse-view
+// name from being passed where code expects a cache name.
 export const reuseViewNameSchema = z
 	.string()
 	.regex(cacheNamePattern)
@@ -39,7 +38,7 @@ export const reuseViewSelectorSchema = z
 			cacheSelectorSchema.safeParse(selector.pattern).success,
 		{
 			message:
-				"an exact selector's pattern must be a valid cache name or '_default'"
+				"An exact selector pattern must be a valid cache name or '_default'"
 		}
 	)
 	.refine(
@@ -47,15 +46,13 @@ export const reuseViewSelectorSchema = z
 			selector.kind !== 'prefix' ||
 			cacheNamePrefixPattern.test(selector.pattern),
 		{
-			message:
-				"a prefix selector's pattern must be a prefix of a valid cache name"
+			message: 'A prefix selector pattern must be a valid cache-name prefix'
 		}
 	);
 export type ParsedReuseViewSelector = z.output<typeof reuseViewSelectorSchema>;
 
-// Bounds a view's source list the same way a push's closure and a confirm's
-// path list are bounded: well above any real definition, so the cap rejects
-// only an abusive body.
+// A reuse view accepts at most 32 source selectors. This is above expected
+// definitions and bounds abusive request bodies.
 export const reuseViewMaxSelectors = 32;
 
 function hasDuplicateSelector(
@@ -73,13 +70,12 @@ export const reuseViewSelectorsSchema = z
 	.min(1)
 	.max(reuseViewMaxSelectors)
 	.refine((selectors) => !hasDuplicateSelector(selectors), {
-		message: 'selectors must not repeat the same kind and pattern'
+		message: 'Selectors must not contain duplicate kind and pattern pairs'
 	});
 
-// A Nix substituter priority, the same shape as a cache's own
-// `cachePrioritySchema`: a non-negative integer where lower is preferred. A
-// view's priority is its own domain, so it carries its own brand and cannot
-// stand in for a cache's priority.
+// A reuse view has its own branded Nix substituter priority, where lower numbers
+// are preferred. The brand prevents a view priority from being passed where code
+// expects a cache priority.
 export const reuseViewPrioritySchema = z
 	.number()
 	.int()
@@ -88,10 +84,10 @@ export const reuseViewPrioritySchema = z
 	.brand('ReuseViewPriority');
 export type ReuseViewPriority = z.output<typeof reuseViewPrioritySchema>;
 
-// Ten past the cache registry's own default priority of 40. The anchor is
-// fixed rather than derived from that default, since a view spans caches
-// whose individual priorities may differ; a view's priority only has to sit
-// behind the caches it draws from, not track any one of them.
+// The default is 50, ten lower in preference than the cache-registry default of
+// 40. A fixed value is appropriate because source caches can have different
+// priorities. The view needs to follow its sources but does not track any one
+// source priority.
 export const reuseViewDefaultPriority = reuseViewPrioritySchema.parse(50);
 
 export const reuseViewSetBodySchema = z.strictObject({
@@ -100,9 +96,9 @@ export const reuseViewSetBodySchema = z.strictObject({
 });
 export type ParsedReuseViewSetBody = z.output<typeof reuseViewSetBodySchema>;
 
-// A reuse view's definition revision, issued by its own persistent counter and
-// raised on every definition change. Its own brand keeps it from being confused
-// with a narinfo generation or any other counter.
+// A persistent counter assigns a strictly increasing revision whenever a
+// reuse-view definition changes. A separate brand distinguishes this revision
+// from narinfo generations and other counters.
 export const reuseViewRevisionSchema = z
 	.number()
 	.int()

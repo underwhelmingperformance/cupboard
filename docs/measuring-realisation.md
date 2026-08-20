@@ -17,12 +17,11 @@ recorded.
 
 ## What it measures against
 
-Every measurement is planned against a store that keeps the machine's real
-logical store directory but holds its contents in a fresh, empty directory. The
-logical directory has to stay `/nix/store` because a store path's hash covers
-it. If Nix is pointed at a plain directory instead, every derivation hash
-changes, so nothing substitutes and the measurement describes a store that no
-runner would ever have.
+Every measurement uses a fresh, empty physical store directory while preserving
+the machine's logical store directory. The logical directory must remain
+`/nix/store` because it contributes to store-path hashes. Pointing Nix at
+another logical directory changes every derivation hash, so the result no longer
+represents a real runner.
 
 Nix cannot plan a build in a store that holds none of the derivations, so the
 command copies each target's derivation closure into the empty store before
@@ -30,17 +29,15 @@ measuring. That copy is local disk to local disk and costs a real runner
 nothing: a runner evaluates the flake into the same store it builds in, so its
 derivations are already there.
 
-The substituter list is replaced rather than extended, so the answer does not
-depend on what the machine running the command happens to have configured. A
-developer machine with an `ssh://` substituter would otherwise open an ssh
-connection for every availability query.
+The command replaces the substituter list, so the result does not depend on the
+machine's existing configuration. A developer machine with an `ssh://`
+substituter would otherwise open an SSH connection for every availability query.
 
-The counts and byte totals come back over the Nix store protocol, through this
-repository's own daemon client: the command starts `nix daemon --stdio` on the
-diverted store and asks the daemon what realising each set of installables would
-require. Evaluating a flake attribute and copying a derivation closure are not
-operations that protocol offers, so those two go through the `nix` command, in
-`scripts/measure-realisation/diverted-store.ts` and nowhere else.
+The command obtains counts and byte totals through this repository's daemon
+client. It starts `nix daemon --stdio` for the diverted store and queries the
+cost of realising each set of installables. The store protocol cannot evaluate
+flake attributes or copy derivation closures, so only those operations invoke
+`nix` directly, in `scripts/measure-realisation/diverted-store.ts`.
 
 ## Running it
 
@@ -106,16 +103,14 @@ pnpm measure:realisation \
   --tolerance 0.05
 ```
 
-Each of `willBuild`, `willSubstitute`, `downloadSize` and `narSize` is held to
-the value the baseline recorded, plus the tolerance. A measurement above that is
-a breach, and the run prints which measurement breached, what its budget was,
-and by how much it went over, then exits 65. `unknown` is not held to a budget:
-it counts the paths that no substituter answered for, which depends on the
-network the measurement ran on.
+Each of `willBuild`, `willSubstitute`, `downloadSize` and `narSize` has a budget
+equal to its baseline value plus the tolerance. If a measurement exceeds its
+budget, the command reports the measurement, budget and excess, then exits 65.
+`unknown` has no budget because it counts paths unavailable from every queried
+substituter and therefore depends on network state.
 
-A target or group with no entry in the baseline is reported as unbudgeted and
-never breaches a budget, so adding a target does not fail the first run that
-includes it; record a new baseline to give the target a budget.
+A target or group with no baseline entry is reported as unbudgeted and does not
+breach a budget. Record a new baseline to give it a budget.
 
 The report also records evaluation and planning times. They show which phase of
 a slow run takes the time. They are not held to a budget, because they are not
@@ -123,10 +118,9 @@ reproducible the way the counts are.
 
 ## Tests
 
-The parsing, the aggregation and the `nix` command construction are covered by
-unit tests in `scripts/measure-realisation`, which need no Nix: the planner is
-an interface and the suites drive it with injected answers.
-`tests/e2e/measure-realisation.test.ts` runs the real thing and skips when `nix`
-is not on the path. It measures `hello` and `cowsay` from the exact nixpkgs
-revision in `flake.lock`; use the command's `--flake` option for experiments
-against another flake.
+Unit tests in `scripts/measure-realisation` cover parsing, aggregation and `nix`
+command construction. They inject a planner implementation, so they do not
+require Nix. `tests/e2e/measure-realisation.test.ts` runs the real thing and
+skips when `nix` is not on the path. It measures `hello` and `cowsay` from the
+exact nixpkgs revision in `flake.lock`; use the command's `--flake` option for
+experiments against another flake.

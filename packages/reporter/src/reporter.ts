@@ -28,10 +28,9 @@ export function wasErrorReported(error: unknown): boolean {
 export interface PhaseContext {
 	fact(label: string, value: string | number): void;
 	/**
-	 * Raise a durable warning that belongs to this unit of work. It is shown as
-	 * soon as the renderer can do so without disturbing the animation and then
-	 * persisted once the unit ends, so it survives a spinner or task log that
-	 * clears on completion.
+	 * Records a warning for this unit. The renderer emits it without interrupting
+	 * an active animation and repeats it when the unit ends, so clearing a spinner
+	 * or task log does not remove the warning.
 	 */
 	warn(label: string, value?: string): void;
 }
@@ -49,7 +48,7 @@ export interface ProgressHandle {
 	*/
 	fact(label: string, value: string | number): void;
 	/**
-	Raise a durable warning that belongs to this unit; see {@link PhaseContext.warn}.
+	Records a warning for this unit; see {@link PhaseContext.warn}.
 	*/
 	warn(label: string, value?: string): void;
 }
@@ -77,7 +76,7 @@ export interface StepLog {
 	message(message: string): void;
 	group(name: string): StepGroup;
 	/**
-	Raise a durable warning that belongs to this task; see {@link PhaseContext.warn}.
+	Records a warning for this task; see {@link PhaseContext.warn}.
 	*/
 	warn(label: string, value?: string): void;
 }
@@ -88,19 +87,17 @@ export interface ResultRow {
 }
 
 /**
- * A command's result, carried in both shapes the two modes need. Terminal mode
- * renders `rows` as a card; JSON mode emits `{event:'result', kind, data}`,
- * where `kind` is a stable machine name for the result and `data` is the typed
- * value behind it, so a consumer can address it without re-parsing the rows.
+ * A command result with terminal rows and a typed machine payload. Terminal
+ * mode renders `rows` as a card. JSON mode emits `{event:'result', kind, data}`.
+ * `kind` is the stable result identifier and `data` is the typed value.
  */
 export interface ResultPayload<T = unknown> {
 	readonly kind: string;
 	readonly data: T;
 	readonly rows: readonly ResultRow[];
 	/**
-	 * Shown in terminal mode when `rows` is empty, in place of an empty card, so a
-	 * list command can always emit a result (an empty `data` for machine
-	 * consumers) while still reading nicely for a person ("No tenants.").
+	 * Text to render in terminal mode when `rows` is empty. Machine mode still
+	 * emits the empty `data` value.
 	 */
 	readonly empty?: string;
 }
@@ -161,9 +158,9 @@ Terminal (clack), line-delimited JSON, or GitHub Actions output.
 export type ReporterMode = 'terminal' | 'json' | 'github';
 
 /**
- * The phases `cupboard build-push` reports, in run order, each with the label
- * its {@link Reporter.phase} unit carries in every mode. A machine consumer of
- * the JSON stream addresses a phase event by its label.
+ * The phases `cupboard build-push` reports, in run order. Each value is the
+ * phase label emitted in every reporter mode. JSON consumers identify phase
+ * events by this label.
  */
 export const buildPushPhases = {
 	build: 'Building',
@@ -298,9 +295,8 @@ function warnText(label: string, value?: string): string {
 	return value === undefined ? label : `${label}: ${value}`;
 }
 
-// A long progress phase emits an interim `progress` event at most this often, so
-// a machine consumer (a CI log) sees a transfer advancing continuously, without
-// one event per byte.
+// A long progress phase emits an interim `progress` event at most this often.
+// CI receives periodic updates without receiving one event for every byte.
 const progressIntervalMs = 2000;
 
 /**
@@ -317,10 +313,10 @@ export function createReporter(options: ReporterOptions = {}): Reporter {
 }
 
 /**
- * The GitHub Actions reporter: phases and tasks become collapsible log groups,
- * facts and results plain `label: value` lines within them, warnings, successes
- * and failures the matching workflow-command annotations. Its output is the
- * run log on stdout; it participates in the result file like the other modes.
+ * The GitHub Actions reporter renders phases and tasks as collapsible log
+ * groups. It renders facts and results as `label: value` lines, maps warnings,
+ * successes and failures to workflow-command annotations, writes the run log to
+ * stdout, and records results in the configured result file.
  */
 export function createGithubReporter(options: ReporterOptions = {}): Reporter {
 	return buildGithubReporter(

@@ -30,9 +30,9 @@ function consoleMethodFor(
 	}
 }
 
-// The record's message flattened to a string. With method-call syntax and no
-// placeholders this is the constant message verbatim; the interleaved form is
-// joined for completeness.
+// Returns the record's message as a string. Method-call syntax without
+// placeholders already produces a constant string. This also joins interleaved
+// message parts.
 function messageOf(record: LogRecord): string {
 	return record.message
 		.map((part) => (typeof part === 'string' ? part : String(part)))
@@ -64,11 +64,10 @@ function renderValue(value: unknown): string {
 	return Object.prototype.toString.call(value);
 }
 
-// Walks an error's `cause` chain, so a wrapped error surfaces the underlying
-// fault rather than only its wrapper. A driver such as drizzle rethrows a
-// D1 failure as `Failed query: …` with the real error on `cause`, so without this
-// the message that actually explains the failure never reaches the logs. Bounded
-// to guard against a cyclic chain.
+// Follows an error's `cause` chain and returns the underlying messages. Drizzle,
+// for example, wraps a D1 error in `Failed query: …` and stores the original
+// error in `cause`. Without this traversal, the log would contain only the
+// wrapper. The traversal stops after eight causes or when it detects a cycle.
 function causeChain(
 	error: Error
 ): { readonly message: string; readonly stack?: string } | undefined {
@@ -101,8 +100,8 @@ function causeChain(
 	};
 }
 
-// Explodes an `error` field into indexed sub-fields, so its name, message, stack
-// and underlying cause are each queryable in Workers Logs.
+// Expands an `error` field into indexed fields for the error name, message,
+// stack, and cause. Workers Logs can then query each field separately.
 function expandError(
 	properties: Record<string, unknown>
 ): Record<string, unknown> {
@@ -150,10 +149,10 @@ export interface ConsoleLike {
 }
 
 /**
- * A sink that hands a plain object to a console, so Cloudflare Workers Logs
- * indexes every field. The message stays a constant string under `msg`; all
- * variable data goes in the object's other keys. The console is injectable
- * for tests and defaults to the global one.
+ * Writes each record to the console as a plain object, which lets Cloudflare
+ * Workers Logs index every field. The constant message uses the `msg` field,
+ * and the remaining fields contain variable data. Tests can inject a console
+ * implementation.
  */
 export function cloudflareSink(target: ConsoleLike = console): Sink {
 	return (record) => {
@@ -162,9 +161,9 @@ export function cloudflareSink(target: ConsoleLike = console): Sink {
 }
 
 /**
- * A sink that writes one JSON object per line through `write`, for the CLI's
- * machine mode. The caller supplies the writer (typically stderr) so this stays
- * free of any Node import and safe to bundle in the Worker alongside
+ * Writes one JSON object per line through `write` for the CLI's machine-readable
+ * mode. The caller usually supplies stderr. Accepting a writer keeps this module
+ * free of Node imports, so the Worker can bundle it with
  * {@link cloudflareSink}.
  */
 export function jsonLinesSink(write: (line: string) => void): Sink {
@@ -224,11 +223,9 @@ function emitToActions(
 }
 
 /**
- * A sink that emits records as GitHub Actions workflow commands: warnings and
- * errors become annotations, trace and debug become `::debug::` (shown only when
- * step debugging is enabled), and info prints as an ordinary log line. This is
- * the action's counterpart to the Workers {@link cloudflareSink} and the CLI's
- * {@link jsonLinesSink}.
+ * Emits records as GitHub Actions workflow commands. Warnings and errors become
+ * annotations. Trace and debug records use `::debug::` and appear only when step
+ * debugging is enabled. Informational records use ordinary log lines.
  */
 export function githubActionsSink(streams: WorkflowCommandStreams = {}): Sink {
 	const commands = workflowCommands(streams);

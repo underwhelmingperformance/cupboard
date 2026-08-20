@@ -1,7 +1,7 @@
 # Reuse views
 
-What a named reuse view is, what its reads guarantee, and how the flake publish
-workflow uses one to adopt earlier builds. The setup steps are in
+This document defines named reuse views, their read guarantees, and their use in
+the flake publish workflow. The setup steps are in
 [docs/github-actions.md](./github-actions.md).
 
 A named reuse view is a set of caches a reader may substitute from, defined once
@@ -56,15 +56,13 @@ assuming a default.
 
 ## Use by the flake publish workflow
 
-Passing `reuse-view` to `cupboard-flake-publish.yml` opts the run's
-`actions/setup` and cohort jobs into that view. `actions/setup` adds the view as
-a second Nix substituter, after the destination cache, so a cohort's build can
-substitute shared work through the view instead of rebuilding it. Each cohort
-job's own partition also probes the view for its targets' expected output paths:
-a target the view alone already serves is published by reference, so the
-destination adopts it without the bytes travelling through the runner. A hit in
-the view does not retain anything on its own: only the destination retains
-paths. The cohort's push still roots every target in the destination as usual.
+Passing `reuse-view` to `cupboard-flake-publish.yml` configures both
+`actions/setup` and the cohort jobs to use that view. `actions/setup` adds it as
+a second Nix substituter, after the destination cache. Each cohort also probes
+the view for the expected output paths. If only the view serves a target, the
+workflow publishes it by reference. The destination then reuses its existing
+bytes and retains the path under the target root. A view hit does not retain the
+path by itself.
 
 ## Adopting pull-request builds into a branch
 
@@ -98,7 +96,7 @@ The tag pin selects that immutable published release. Set `cupboard-version`
 only when you deliberately want to run a release other than the one the workflow
 is pinned to.
 
-If the merged commit's outputs already sit in the PR's cache from CI, the cohort
-job publishes them by reference through the view, and the destination adopts and
-roots them under `main`'s own roots without rebuilding. A target the PR never
-built plans and builds exactly as it would without a view.
+If CI already published the merged commit's outputs to a matching pull-request
+cache, the cohort job publishes them by reference. The destination then serves
+them under `main`'s retention roots without rebuilding. Targets absent from the
+pull-request caches follow normal planning and build.

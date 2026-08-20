@@ -419,7 +419,7 @@ async function graceCoverage(
 describe('grace coverage', () => {
 	beforeEach(resetTestServer);
 
-	it('resolves the longest matching prefix per cache and answers misses as uncovered', async () => {
+	it('resolves the longest matching prefix and reports unmatched caches as uncovered', async () => {
 		const token = await initialise();
 		await addGracePolicy(token, { cachePrefix: '', graceSeconds: 86_400 });
 		await addGracePolicy(token, { cachePrefix: 'pr-', graceSeconds: 3600 });

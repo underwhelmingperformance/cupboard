@@ -104,9 +104,10 @@ Choose an immutable cupboard release from the [releases page][] and replace
 
 ### 2. Configure the tenant
 
-One idempotent command writes everything the runs depend on: a 24-hour retention
-grace period for every cache, the `pull-requests` reuse view over the per-PR
-caches, and trust rules for this repository's PR and `main` runs:
+One idempotent command writes all tenant configuration required by these runs: a
+24-hour retention grace period for every cache, the `pull-requests` reuse view
+over the per-PR caches, and trust rules for this repository's PR and `main`
+runs:
 
 ```bash
 cupboard github setup "$tenant" --repo "$repo" \
@@ -119,18 +120,16 @@ release and source commit agree before installation. The pattern makes
 cupboard's release publishers part of the tenant's trust boundary, but it needs
 to be configured only once.
 
-Re-running converges state that already matches. A different grace policy or
-reuse view is reported as drift and never replaced. The tag-pattern trust rules
-already cover later matching releases. What each piece of this configuration is,
-and the commands to write it by hand, are under
-[Manual configuration](#manual-configuration).
+Re-running the command leaves matching state unchanged. It reports a different
+grace policy or reuse view as drift and does not replace it. The tag-pattern
+trust rules already cover later matching releases. The commands that write each
+setting individually are under [Manual configuration](#manual-configuration).
 
-One consequence deserves stating before you run that command: the grace policy
-changes how the covered caches are collected, permanently. The first publication
-accepted under the policy marks its cache grace-managed. `policy remove-grace`
-does not remove that marker. When the last deadline on a grace-managed cache
-lapses, collection may empty it; a cache without the marker is never emptied
-that way.
+The grace policy permanently changes collection for the covered caches. The
+first publication accepted under the policy marks its cache as grace-managed.
+`policy remove-grace` does not remove that marker. When the last deadline on a
+grace-managed cache lapses, collection may empty it; a cache without the marker
+is never emptied that way.
 
 ### 3. Declare the targets
 
@@ -287,12 +286,10 @@ The empty grace prefix covers the default cache and every named cache, including
 the per-PR caches. The grace period must be long enough for the workflow's plan
 and cohort jobs to finish.
 
-The view's priority of 50 sits above the destination cache's priority, which
-defaults to 40 on the server; Nix tries substituters lowest-priority-first, so
-this keeps the destination preferred. 50 is also the CLI's default. It is
-written out here because the required relationship is that the view's priority
-is strictly greater than the destination's: setup refuses a view whose priority
-ties with or falls below the destination's.
+The view priority is 50, which is greater than the destination's default
+priority of 40. Nix queries lower numeric priorities first, so this ordering
+keeps the destination preferred. The CLI also defaults view priorities to 50.
+Setup rejects a view with a priority equal to or lower than the destination's.
 
 The trust commands resolve and pin the repository's immutable GitHub ids. The PR
 rule confines each pull request to its own cache and root; the branch rule
@@ -454,14 +451,13 @@ steps:
 newline-delimited file and passed as `installables-file`, which avoids runner
 limits on the size of action inputs and environment variables. The build action
 retries three times and outputs the realised `paths`, a `paths-file`, and the
-`receipt-file` consumed by the attest action. The receipt describes every path
-the run published and says where each one came from: the paths the run built,
-the paths the build store had already registered as its own work, and the paths
-that entered the store by copy. Only the first group counts as built. Outputs
-returned by a remote builder are rebuilt and compared with `nix build --rebuild`
-before they qualify. When the run built nothing, no build provenance is signed
-and `bundle-path` is empty. `actions/push` treats an empty `bundle-path` as a
-push with no attestations.
+`receipt-file` consumed by the attest action. The receipt records every path
+published by the run and classifies its origin: built during this run, already
+registered in the build store as local work, or copied into the store. Only the
+first class counts as built. Outputs returned by a remote builder are rebuilt
+and compared with `nix build --rebuild` before they qualify. When the run built
+nothing, no build provenance is signed and `bundle-path` is empty.
+`actions/push` treats an empty `bundle-path` as a push with no attestations.
 
 Set `require-provenance` when publication must not succeed without provenance
 for every final output. If a final output came from a cache or was already
@@ -478,37 +474,33 @@ bundle; `checksums-file` and `subject-count` describe the build-origin bundle.
 `attestations: write` records the attestations on the repository, so
 `gh attestation verify` finds them.
 
-The action signs both statements itself, so that a failed signing attempt can be
-made again. A workflow cannot retry a `uses:` step, and neither
-`actions/attest-build-provenance` nor `actions/attest` takes a retry input, so
-with those actions a transparency log that stops answering once the signature is
-made fails the whole publication. Each statement gets up to four attempts, with
-exponential back-off between them, and every attempt signs from the beginning
-with a new key, certificate and log entry. The action attempts again only after
-a call to Fulcio or to a witness that got no answer at all, or that was answered
-with 408, 429 or a 5xx status. It stops at once when the OIDC token cannot be
-read or decoded, or when Fulcio refuses to issue the certificate. Once the
-attempts run out the step fails, so a publication never continues without a
-bundle.
+The action signs both statements directly so it can retry transient signing
+failures. A workflow cannot retry a `uses:` step, and neither
+`actions/attest-build-provenance` nor `actions/attest` accepts a retry input.
+Each statement gets up to four attempts with exponential back-off. Every attempt
+starts with a new key, certificate and log entry. The action retries only when
+Fulcio or a witness does not respond, or responds with 408, 429 or a 5xx status.
+It stops immediately when the OIDC token cannot be read or decoded, or when
+Fulcio refuses to issue the certificate. If all attempts fail, the step fails
+and publication does not continue without a bundle.
 
-The two bundles cover different subjects and state different things. The SLSA
-build-provenance bundle claims that this workflow produced its subjects, so it
-covers the paths the run built, and it states how the run happened: the
-repository, the commit, the workflow file and the runner it ran on.
+The two bundles make different claims over different subjects. The SLSA
+build-provenance bundle covers paths built by the workflow. It records the
+repository, commit, workflow file and runner.
 
-The build-origin bundle covers every path the run published and records where
-each one came from, which only the receipt knows. For a path the run built, it
-records the store path, the NAR hash, the derivation that produced it, the store
-where the build ran, whether the coordinating machine watched the build or the
-build store reported it, and the builder from the activity log when there was
-one. For a path the build store had already registered as its own work, it
-records the store and that the run did not build the path. For a path that
-entered the store by copy, it records the signatures the store holds over the
-path, the content address when the path has one, and the stores the run watched
-the path being copied from. That last field comes from Nix's activity log, which
-names the source of each copy Nix performs, so it reports only copies this run
-saw happen. A path that was already valid when the run started, or that some
-other store fetched where the run could not see it, has no source recorded.
+The build-origin bundle covers every path published by the run and records its
+origin from the receipt. For a path the run built, it records the store path,
+the NAR hash, the derivation that produced it, the store where the build ran,
+whether the coordinating machine watched the build or the build store reported
+it, and the builder from the activity log when there was one. For a path the
+build store had already registered as its own work, it records the store and
+that the run did not build the path. For a path that entered the store by copy,
+it records the signatures the store holds over the path, the content address
+when the path has one, and the stores the run watched the path being copied
+from. That last field comes from Nix's activity log, which names the source of
+each copy Nix performs, so it reports only copies this run saw happen. A path
+that was already valid when the run started, or that some other store fetched
+where the run could not see it, has no source recorded.
 
 A path published by reference is recorded differently again, because no store
 the push can query holds it. The run read the path's metadata from another cache
@@ -517,13 +509,12 @@ records that cache, the NAR hash the destination serves the path under, the
 deriver and content address that cache reported, and the signatures it published
 over the path. Those signatures are made over the path's fingerprint, which the
 destination serves unchanged, so a reader can check them against keys it trusts.
-The run transferred no bytes, so the statement says nothing about where the
-destination's copy came from.
+The run transferred no bytes, so the statement does not record the origin of the
+destination's copy.
 
-The statement claims nothing beyond that. It does not say that a build is
-reproducible, that a producer deserves trust, that a copied path came from any
-substituter the run did not watch, or that a republished path's bytes came from
-the cache that served its metadata. Its predicate type is
+The statement does not claim reproducibility, producer trust, an unobserved copy
+source, or that a republished path's bytes came from the cache that served its
+metadata. Its predicate type is
 `https://github.com/underwhelmingperformance/cupboard/predicate/build-origin/v2`,
 and `cupboard attest verify --predicate-type` takes that value to verify it. One
 statement covers every path of the run, so verifying it for one path also
@@ -585,7 +576,7 @@ steps:
 
 `setup` adds the cache as a substituter, `build-paths` records what this run
 built, `push` commits the paths, `attest` verifies and signs those paths' NAR
-hashes, and `attest-attach` files the bundle against them. Pushing needs a trust
+hashes, and `attest-attach` attaches the bundle to them. Pushing needs a trust
 rule on the tenant that accepts this repository's GitHub Actions token, added
 with `cupboard oidc-trust`; see [docs/trust-rules.md](./trust-rules.md).
 
@@ -613,17 +604,17 @@ jobs:
       ttl: 14d
 ```
 
-`cache`, `root`, and `ttl` say where the paths land and how long they are kept.
-In this example every pull request publishes to its own `pr-<number>` cache, and
-the pushed paths expire two weeks after the last push. A cache is created the
-first time something is pushed to it, so per-PR and per-release caches need no
-setup step.
+`cache`, `root`, and `ttl` specify the destination cache, retention root and
+retention duration. In this example every pull request publishes to its own
+`pr-<number>` cache, and the pushed paths expire two weeks after the last push.
+A cache is created the first time something is pushed to it, so per-PR and
+per-release caches need no setup step.
 
 The workflow appends the builder's Nix system to `root`, so this example retains
 under `github:acme/app/pr-7/x86_64-linux`. A root retains a single build; a
-later push replaces its paths. Appending the system keeps platforms out of each
-other's way, so a Linux build and a macOS build of the same pull request each
-stay retained under their own root.
+later push replaces its paths. Appending the system prevents a later push for
+one platform from replacing retained paths for another. A Linux build and a
+macOS build of the same pull request therefore remain under separate roots.
 
 The remaining inputs: `installable` picks what to build (the default is `.`, the
 flake at the repository root), `attest` turns provenance signing off for tenants
@@ -698,12 +689,12 @@ in [
 ]
 ```
 
-`rootDrvPath` must be a derivation path for strict targets. The helper evaluates
-those directly, preserving Nix's error when one cannot be evaluated. It catches
-a best-effort target's evaluation failure and omits the field; the planner then
-sends that target to a direct build, where its own job reports the full error.
-When `push` is false, the workflow removes every `rootDrvPath` without forcing
-it, preserving build-only mode's lack of derivation inspection.
+Strict targets must provide a derivation path in `rootDrvPath`. The helper
+evaluates those paths directly, so evaluation failures retain Nix's diagnostic.
+For a best-effort target, it catches an evaluation failure and omits the field;
+the planner then schedules a direct build and the target job reports the error.
+When `push` is false, the workflow removes every `rootDrvPath` without
+evaluating it. Build-only mode therefore does not inspect derivations.
 
 `outputs` defaults to `["out"]` and `bestEffort` to `false`. A best-effort
 target does not fail the whole matrix when its build fails. Targets grouped by
@@ -779,9 +770,9 @@ input credentials and pins never enter the builder or direct-store
 configuration.
 
 For a tenant whose reads are private, also pass `read_user` and `read_password`
-as workflow secrets. `actions/setup`'s netrc file only covers Nix's own
-substituter reads, so the plan job's own cache probes need the same credentials
-passed through separately: `actions/plan` accepts them as
+as workflow secrets. `actions/setup`'s netrc file covers only Nix substituter
+reads. The plan job also probes the cache directly, outside Nix, so pass the
+same credentials separately: `actions/plan` accepts them as
 `read-user`/`read-password` and sends them as an HTTP `Authorization: Basic`
 header on every narinfo probe.
 
@@ -799,7 +790,7 @@ is stale. The partition separates targets into four groups:
 - already in the destination and needing only retention;
 - present elsewhere in the tenant and publishable by reference through the reuse
   view;
-- available from an upstream substituter and deliberately left there;
+- available from an upstream substituter and excluded from Cupboard publication;
 - requiring a build.
 
 The job realises only the final group as cohort targets. A remote-store job may
@@ -809,8 +800,8 @@ ask the remote Nix store to protect each result until publication finishes.
 These protections prevent garbage collection from removing the built closure.
 The job publishes built targets, retained targets, and any additional built
 outputs. It publishes reuse-view paths by reference and sets each target's
-retention root. Upstream paths are not copied into cupboard; the cohort records
-them in its counts and left-upstream files.
+retention root. Upstream paths are not copied into Cupboard. The cohort records
+them in its counts and `left-upstream` files.
 
 When cohorts share a dependency, each cohort still requests it. Nix substitutes
 the dependency after an earlier cohort publishes it to the destination or
@@ -824,8 +815,8 @@ and retained, but the receipt does not record it as built by this run.
 
 `reuse-view` opts the run into reading shared intermediates through a named
 tenant reuse view when the destination is missing them; see
-[docs/reuse-views.md](./reuse-views.md). Empty, the default, keeps planning and
-substitution destination-only.
+[docs/reuse-views.md](./reuse-views.md). When `reuse-view` is empty (the
+default), planning and substitution query only the destination.
 
 `cupboard-version` optionally overrides the CLI derived from the workflow pin.
 `maximise-space` (default `false`) reclaims runner disk space before building by
@@ -875,10 +866,11 @@ Upload timing differs from a local build: the remote store reports its exact
 build results when the build completes, so upload starts after result discovery
 rather than overlapping the build.
 
-Because the paths never touch the runner's filesystem, the plan skips the local
-store-capacity preflight and records `capacity: {"skipped": "remote-store"}` in
-its plan file: ssh cannot measure the remote filesystem, and using a remote
-store is already the way to run a build that a runner's own disk cannot hold.
+The plan skips the local store-capacity preflight because remote outputs never
+enter the runner's filesystem. It records
+`capacity: {"skipped": "remote-store"}` in its plan file. SSH does not expose
+remote filesystem capacity, and direct-store mode is intended for builds that
+exceed the runner's disk capacity.
 
 Direct-store mode and classic `builders` delegation are separate choices and
 cannot be enabled together. A selected store keeps its daemon's default build
@@ -954,24 +946,24 @@ by declaring `components` instead:
 }
 ```
 
-With `components` present, cupboard never evaluates, queries, or builds the
-aggregate's own `attr`: each component is published as its own target instead,
-so the runner's peak disk use falls from the whole environment's closure to the
-largest component's own input closure. Every component publishes under the
-aggregate's own `rootSuffix`, one retention root whose target list is every
-component's path; a manifest declaring more components than a root accepts in
-one write (1000) is refused before anything builds, because splitting that write
-across pages would lose the all-or-nothing property that retention depends on.
-Components inherit the aggregate's system, os, remote, best-effort flag and
-cohort label, so by default each is its own cohort and its own job, and a shared
-`cohort` label on the aggregate groups them into one job exactly as it would for
-ordinary targets.
+With `components` present, Cupboard does not evaluate, query or build the
+aggregate attribute. It publishes each component as a separate target. This
+reduces the runner's peak disk use from the whole environment closure to the
+largest component input closure. Every component publishes under the aggregate's
+`rootSuffix`, with one retention root containing every component path. If a
+manifest exceeds the 1,000-path root limit, the workflow refuses it before
+building because paging would not preserve atomic replacement. Components
+inherit the aggregate's system, os, remote, best-effort flag and cohort label,
+so by default each is its own cohort and its own job, and a shared `cohort`
+label on the aggregate groups them into one job exactly as it would for ordinary
+targets.
 
 The machine that activates the environment (a NixOS host running
 `nixos-rebuild switch`, a home-manager user running `home-manager switch`)
 substitutes the components from the cache and assembles the aggregate locally.
-cupboard never builds or attests the aggregate, because it was never realised
-here; each realised component is an ordinary attested cohort target otherwise.
+Cupboard does not build or attest the aggregate because it is not realised. The
+workflow otherwise treats each realised component as an ordinary attested cohort
+target.
 
 ## Common tasks
 
@@ -1022,15 +1014,19 @@ tenant state as unchanged. The equivalent individual commands are in
 
 `cupboard oidc-trust list "$tenant"` prints every rule with its claims and
 grants. Rules are immutable: to change one, add the corrected rule and remove
-the old one. What each claim pins, and how to restrict a rule further, is
-[docs/trust-rules.md](./trust-rules.md).
+the old one. See [docs/trust-rules.md](./trust-rules.md) for how each claim
+restricts a rule and how to narrow it further.
 
 ### A `main` run rebuilt something a PR already built
 
-Check, in order: the run passed `reuse-view` (the quickstart's caller sets it
-for `push` events only); the PR's cache still exists and still matches the
-view's `pr-` prefix; the PR actually published the path (its own run's target
-jobs succeeded); and the grace or TTL window has not lapsed. If several PR
-caches hold semantically different results for the same path, the view returns a
-miss and the run builds locally; [docs/reuse-views.md](./reuse-views.md)
-explains that conflict rule.
+Check these conditions in order:
+
+- The run passed `reuse-view`. The quickstart caller sets it for `push` events
+  only.
+- The PR cache still exists and matches the view's `pr-` prefix.
+- The PR run published the path.
+- The grace or TTL window has not lapsed.
+
+If several PR caches hold semantically different results for the same path, the
+view returns a miss and the run builds locally.
+[docs/reuse-views.md](./reuse-views.md) explains that conflict rule.

@@ -241,10 +241,10 @@ export interface TargetEvaluation {
 }
 
 /**
- * One manifest-declared cohort: the targets that run together in one job. A
- * target without an explicit `cohort` label is its own cohort. Cohorts
- * partition the whole manifest exactly as declared, retained targets included,
- * and membership never depends on what the destination already holds.
+ * One cohort from the manifest: the targets that run together in one job. A
+ * target without an explicit `cohort` label is its own cohort. Before checking
+ * destination availability, cohorts form a complete partition of the manifest,
+ * including retained targets. Destination contents do not affect membership.
  */
 export interface Cohort {
 	readonly key: string;
@@ -586,12 +586,12 @@ const derivationInputsFieldSchema = z.looseObject({
 });
 const derivationOutputSchema = z.looseObject({ path: z.string().optional() });
 
-// One derivation as `nix derivation show` prints it. Only the fields the plan
-// reads are named; the derivation carries many others, so the object is loose.
+// One derivation as `nix derivation show` prints it. The schema declares only
+// the fields used by planning and allows additional fields.
 // `inputs.drvs` is the current spelling and `inputDrvs` the older one. An
-// output's store path is either its own `path` or the path `env` records under
-// the output name; a content-addressed output carries a placeholder there
-// instead, which is not a store path and leaves the output pathless.
+// output's store path comes from `path` or from the matching value in `env`. A
+// content-addressed placeholder is not a store path, so that output remains
+// unresolved.
 const derivationNodeBaseSchema = z.looseObject({
 	inputs: derivationInputsFieldSchema.optional(),
 	inputDrvs: derivationInputsSchema.optional(),

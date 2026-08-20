@@ -14,10 +14,9 @@ import type {
 import { declaredGroups, type TargetGroup } from './manifest.ts';
 
 /**
- * What realising a set of installables against an empty store would cost:
- * the planner's own partition counts and the byte totals for the paths it
- * would substitute, the two halves a build receipt already records
- * separately.
+ * The estimated cost of realising installables from an empty store: partition
+ * counts plus the download and uncompressed NAR byte totals for substitutable
+ * paths. Build receipts record the counts and sizes separately.
  */
 export const realisationMeasurementSchema = plannerPartitionSchema
 	.pick({ willBuild: true, willSubstitute: true, unknown: true })
@@ -27,9 +26,9 @@ export type RealisationMeasurement = z.output<
 >;
 
 /**
- * The metrics a budget is set on. `unknown` is left out: it counts the paths
- * no substituter answered for, which is a property of the network the
- * measurement ran on rather than of the flake being measured.
+ * The metrics a budget covers. `unknown` counts paths for which no substituter
+ * returned an offer. This depends on network state rather than the flake, so
+ * `budgetedMetrics` excludes it.
  */
 export const budgetedMetrics = [
 	'willBuild',
@@ -45,7 +44,7 @@ The difference between two measurements, metric by metric.
 export type MeasurementDelta = Readonly<Record<BudgetedMetric, number>>;
 
 /**
-The derivation a target's attr evaluates to, and what evaluating cost.
+The derivation produced by evaluating a target attr, and the evaluation time.
 */
 export interface ResolvedDerivation {
 	readonly drvPath: StorePathString;
@@ -53,22 +52,22 @@ export interface ResolvedDerivation {
 }
 
 /**
- * The store the fixture plans against. Split from the measurement itself so
- * the whole report can be produced from injected answers, with no Nix, no
- * store and no network.
+ * The store interface used for planning. Keeping this interface separate lets
+ * tests produce a complete report from injected results without Nix, a store,
+ * or a network.
  */
 export interface RealisationPlanner {
 	/**
-	The derivation this target's attr names, evaluated if need be.
+		Evaluates the target attr when necessary and returns its derivation.
 	*/
 	resolve(target: PublishTarget): Promise<ResolvedDerivation>;
 	/**
-	 * Put the given derivations within the store's reach, so it can plan
-	 * against them. A store with no derivations cannot plan at all.
+	 * Adds the derivations to the store so it can plan against them. A store
+	 * without the derivations cannot plan the installables.
 	 */
 	seed(drvPaths: readonly StorePathString[]): Promise<void>;
 	/**
-	What realising the given installables would require.
+		Returns the work required to realise the installables.
 	*/
 	plan(
 		installables: readonly NixDerivedPathString[]
@@ -93,9 +92,9 @@ export interface TargetMeasurement {
 }
 
 /**
- * What a group costs measured together against what its members cost
- * measured one at a time. The saving is the whole point of grouping: members
- * that share a closure pay for it once together and once each apart.
+ * Compares the cost of measuring group members together with the sum of
+ * measuring each member separately. Shared closure paths count once in the
+ * group measurement but once per member in the separate measurements.
  */
 export interface GroupComparison {
 	readonly apart: MeasurementDelta;
@@ -112,10 +111,9 @@ export interface GroupMeasurement {
 }
 
 /**
- * One run's numbers. `combined` measures every target in the manifest as a
- * single group, present whenever there is more than one target to combine;
- * `groups` measures each cohort the manifest declares with more than one
- * member.
+ * Measurements from one run. `combined` is present when the manifest contains
+ * more than one target. `groups` contains the declared cohorts with more than
+ * one member.
  */
 export interface RealisationReport {
 	readonly flake: string;
@@ -141,10 +139,9 @@ The key the whole manifest is reported under when measured as one group.
 export const combinedGroupKey = 'all-targets';
 
 /**
- * Measures every target on its own and every group of targets together,
- * against a store that holds no realisation of any of them. Targets are
- * resolved and planned one at a time: the report carries each target's own
- * evaluation and planning times, which overlapping work would blur.
+ * Measures each target separately and each multi-target group together against
+ * an empty store. Resolve and plan targets sequentially so the report retains
+ * each target's evaluation and planning times.
  */
 export async function measureRealisation(
 	options: MeasureOptions
@@ -261,7 +258,7 @@ async function timedPlan(
 }
 
 /**
-The report's measurement of a partition the store answered with.
+Converts a Nix missing-work partition into report metrics.
 */
 export function measurementFrom(
 	partition: NixMissingPartition
@@ -276,7 +273,7 @@ export function measurementFrom(
 }
 
 /**
-The derived path naming a target's outputs on its evaluated derivation.
+The derived installable for the outputs selected by a target.
 */
 export function installableFor(
 	target: PublishTarget,
@@ -325,9 +322,9 @@ function subtract(
 	};
 }
 
-// Every attr in these lookups was put there from the same target list being
-// walked, so an absent one is a defect in this module rather than anything a
-// caller can cause.
+// These maps are built from the target list immediately before lookup. A
+// missing key therefore indicates an internal invariant violation, not caller
+// input.
 function requireResolution(
 	resolutions: ReadonlyMap<string, ResolvedDerivation>,
 	attribute: string

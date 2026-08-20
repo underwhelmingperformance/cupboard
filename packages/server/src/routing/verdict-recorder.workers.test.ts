@@ -37,7 +37,7 @@ describe('VerdictRecorder', () => {
 		});
 		resolvers.at(1)?.(2);
 
-		const applied = await recorder.settle();
+		const applied = await recorder.finishRecording();
 
 		expect({ applied, batches }).toStrictEqual({
 			applied: 3,
@@ -68,7 +68,7 @@ describe('VerdictRecorder', () => {
 
 		recorder.add(verdict('a'));
 
-		const applied = await recorder.settle();
+		const applied = await recorder.finishRecording();
 
 		// The failed attempt retries in place with the same batch, so the pass's
 		// decode is not wasted on a transient blip.
@@ -84,12 +84,12 @@ describe('VerdictRecorder', () => {
 		const recorder = new VerdictRecorder(rootLogger(), record, 3, 0);
 
 		recorder.add(verdict('a'));
-		await expect(recorder.settle()).rejects.toBe(outage);
+		await expect(recorder.finishRecording()).rejects.toBe(outage);
 
 		// A verdict reached after the failure buffers without spinning fresh
 		// RPCs against a DO that is down, and the failure keeps surfacing.
 		recorder.add(verdict('b'));
-		await expect(recorder.settle()).rejects.toBe(outage);
+		await expect(recorder.finishRecording()).rejects.toBe(outage);
 
 		expect(record.mock.calls).toStrictEqual([
 			[[verdict('a')]],
@@ -103,6 +103,6 @@ describe('VerdictRecorder', () => {
 			Promise.resolve(0)
 		);
 
-		expect(await recorder.settle()).toBe(0);
+		expect(await recorder.finishRecording()).toBe(0);
 	});
 });

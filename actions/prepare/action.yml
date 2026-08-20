@@ -1,8 +1,8 @@
 name: Prepare a cupboard publish runner
 description:
-  Ready a runner for flake publish jobs, covering private flake input SSH,
-  optional disk-space reclamation, Nix installation and configuration, and
-  optional remote builders.
+  Configure a runner for flake publication with private-input SSH, optional
+  disk-space reclamation, Nix installation and configuration, and optional
+  remote builders.
 inputs:
   ssh-key:
     description:
@@ -17,7 +17,7 @@ inputs:
   nix-config:
     description:
       Flake installable that evaluates to extra nix.conf text for builders.
-      Empty skips.
+      Leave empty to skip this configuration.
     required: false
   maximise-space:
     description:

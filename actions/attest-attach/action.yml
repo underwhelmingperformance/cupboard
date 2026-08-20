@@ -1,9 +1,8 @@
 name: Attach cupboard attestation bundles
 description:
-  Attach a signed Sigstore provenance bundle to the published store paths a
-  build receipt records, through `cupboard attest attach`. The bundle is
-  produced by actions/attest after publication, so this step files it against
-  the paths the cache already serves.
+  Attach signed Sigstore bundles to the published paths recorded in a build
+  receipt. actions/attest produces bundles after publication, so this action
+  attaches them only to paths that the destination already serves.
 inputs:
   url:
     description: cupboard Worker URL.

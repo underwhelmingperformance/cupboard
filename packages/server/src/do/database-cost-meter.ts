@@ -7,15 +7,15 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 //
 // A read cursor's `rowsRead` is final only once its rows have been read out, and a
 // write reports its `rowsWritten` as it runs. Drizzle's Durable Object session
-// drains each cursor to completion inside the fielded `.all()`/`.get()` call that
-// issued it, so a statement's totals are settled by the time the next statement
-// starts. The meter folds the outstanding cursor's totals in on each new statement
-// and settles the last at the request boundary. A write (`run`) does not iterate a
-// cursor at all, but `exec` reports its `rowsWritten` as it runs, so the figure is
-// final the moment the statement returns. This holds for the query builder; a raw
-// fieldless `db.get(sql`...`)`, which streams its cursor lazily, would settle before
-// it is drained, but the schema layer issues no such call. The real cursor is never
-// wrapped, so the query layer sees the platform object unchanged.
+// drains each cursor to completion inside the fielded `.all()` or `.get()` call
+// that issued it. A statement's totals are therefore final before the next
+// statement starts. The meter records the outstanding cursor's totals before
+// each new statement and records the last cursor at the request boundary. A
+// write (`run`) does not iterate a cursor, but `exec` reports `rowsWritten` as it
+// runs, so the total is final when the statement returns. This holds for the
+// query builder. A fieldless `db.get(sql`...`)` streams its cursor lazily and
+// would be recorded before it was drained, but the schema layer does not make
+// such a call. The query layer receives the original platform cursor.
 type AnyCursor = SqlStorageCursor<Record<string, SqlStorageValue>>;
 
 export interface DatabaseCost {
@@ -28,12 +28,12 @@ export class DatabaseCostMeter {
 	rowsRead = 0;
 	rowsWritten = 0;
 
-	// Records a statement's cursor and settles the previous one, whose query has
-	// since finished consuming it. Returns the cursor untouched for the caller.
+	// Records a statement's cursor and accounts for the previous one after its
+	// query has finished consuming it. Returns the cursor unchanged.
 	track<T extends Record<string, SqlStorageValue>>(
 		cursor: SqlStorageCursor<T>
 	): SqlStorageCursor<T> {
-		this.settle();
+		this.recordOutstanding();
 		this.outstanding = cursor;
 
 		return cursor;
@@ -42,7 +42,7 @@ export class DatabaseCostMeter {
 	// Folds the outstanding cursor's final totals into the running counts. Called
 	// before each new statement and once at the request boundary; a no-op when no
 	// cursor is outstanding.
-	settle(): void {
+	recordOutstanding(): void {
 		if (this.outstanding === undefined) {
 			return;
 		}
@@ -65,8 +65,9 @@ export class DatabaseCostMeter {
 // the object logs that figure once as the cold-start cost.
 const requestMeter = new AsyncLocalStorage<DatabaseCostMeter>();
 
-// Runs `body` within a fresh request-scoped meter, settles it at the boundary,
-// and reports the exact rows the body's statements read and wrote.
+// Runs `body` within a fresh request-scoped meter. At the boundary, it records
+// the final cursor and reports the exact rows read and written by the body's
+// statements.
 export async function withRequestCost<T>(
 	body: () => Promise<T>,
 	report: (cost: DatabaseCost) => void
@@ -77,7 +78,7 @@ export async function withRequestCost<T>(
 		try {
 			return await body();
 		} finally {
-			meter.settle();
+			meter.recordOutstanding();
 			report({ rowsRead: meter.rowsRead, rowsWritten: meter.rowsWritten });
 		}
 	});

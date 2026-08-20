@@ -110,7 +110,7 @@ describe('layered admission gate', () => {
 		});
 	});
 
-	it('reports how many live tenants the rebuild now carries, excluding offboarded', async () => {
+	it('reports how many live tenants the rebuilt manifest contains, excluding offboarded', async () => {
 		await ensureTenant(database(), createBody('acme'), now);
 		await ensureTenant(database(), createBody('beta'), now);
 		await database()

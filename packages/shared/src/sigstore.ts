@@ -45,10 +45,9 @@ export interface VerifyTlogEntry {
 }
 
 /**
- * The trust evidence a Sigstore verification rested on: when the signature was
- * recorded, the transparency-log entries it was found in, and how many signed
- * timestamps backed it. The verifier enforces the configured thresholds; this
- * reports what it actually matched.
+ * The trust evidence that Sigstore used to verify a bundle. This records the
+ * signing time, matching transparency-log entries, and the number of verified
+ * signed timestamps. The verifier enforces the configured thresholds.
  */
 export interface VerifyTrust {
 	readonly signedAt?: string;
@@ -64,9 +63,8 @@ export interface VerifyResult {
 	readonly signerIssuer?: string;
 	readonly provenance?: SlsaProvenanceSummary;
 	/**
-	 * The predicate the statement carries; absent when the bundle carries none.
-	 * A caller that understands its own predicate type reads it from here; this
-	 * package interprets SLSA provenance and nothing else.
+	 * The Statement predicate, if present. Callers can interpret predicates they
+	 * recognise. This package additionally parses SLSA provenance.
 	 */
 	readonly predicate?: unknown;
 	readonly trust: VerifyTrust;
@@ -186,10 +184,11 @@ export function identityPolicy(
 }
 
 /**
- * Express an identity policy as a Sigstore verification policy. An exact term
- * is anchored and escaped so the verifier's regex match on the subject
- * alternative name becomes an exact comparison; a regex issuer is omitted
- * because the verifier matches certificate extensions by exact value only.
+ * Converts an identity policy to Sigstore's verification policy. Exact
+ * identities become anchored, escaped regular expressions because Sigstore
+ * matches subject alternative names with a regular expression. Regex issuers
+ * are omitted here because Sigstore compares certificate issuer extensions by
+ * exact value.
  */
 export function verificationPolicy(
 	policy: VerifiedIdentityPolicy

@@ -7,15 +7,12 @@ import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';
 
-// Each wire shape here is declared once and exposed two ways. The plain alias
-// is what a builder assembles: the hook putting together an event, the build
-// command putting together a receipt. The `Parsed…` output is what a
-// successful parse yields, and code that consumes a validated value takes that
-// branded form.
+// Each wire format has one schema. Builders use the input type to create events
+// and receipts. Consumers use the branded output type after successful
+// validation.
 
-// A derivation's own store path: the `.drv` file a build event and a receipt
-// subject name their derivation by. Its own brand keeps it distinct from the
-// output paths the derivation produces.
+// The store path of the derivation itself. A separate brand distinguishes the
+// `.drv` path from its output paths.
 export const derivationPathSchema = storePathSchema
 	.refine((value) => value.endsWith('.drv'))
 	.brand('DerivationPath');
@@ -26,11 +23,10 @@ export type DerivationPath = z.output<typeof derivationPathSchema>;
 export const invocationIdSchema = z.string().min(1).brand('InvocationId');
 export type InvocationId = z.output<typeof invocationIdSchema>;
 
-// The post-build hook's wire message: one per executed build, naming the
-// derivation and the completed output paths, delivered to the supervising
-// invocation's local endpoint. The format is private to the hook and its
-// supervisor and deliberately small; the version field is what lets it evolve,
-// so a reader can refuse a message from a hook it does not understand.
+// The post-build hook sends one message for each executed build. The message
+// contains the derivation and completed output paths and goes to the
+// supervisor's local endpoint. The hook and supervisor own this private format.
+// A version field lets the receiver reject formats it does not understand.
 export const buildEventSchema = z.strictObject({
 	version: z.literal(1),
 	invocationId: invocationIdSchema,
@@ -68,17 +64,13 @@ The value recorded when Nix selects the store.
 */
 export const autoBuildStore = 'auto';
 
-// What a `built` subject rests on: which producer built the path, and how the
-// run knows.
+// How the run established that a producer built this subject.
 //
-// `local` means a supervised attempt built it on the coordinating machine
-// and the activity log recorded that build. `build-store` means the selected
-// store holds the path as its own work; the run did not watch that build, so
-// the store's report is the only evidence. When the activity log recorded a
-// builder for the deriver, the subject also records that builder in
-// `machine`. A subject records which producer the path came from and nothing
-// more. Deciding whether to trust that producer is left to whoever reads the
-// receipt.
+// `local` means the activity log recorded a supervised attempt on the
+// coordinating machine. `build-store` means the selected store reported the
+// path as one of its builds, but the run did not observe that build. When
+// available, `machine` identifies the builder from the activity log. The receipt
+// records the producer but does not determine whether that producer is trusted.
 export const subjectVerificationSchema = z.enum(['local', 'build-store']);
 export type SubjectVerification = z.output<typeof subjectVerificationSchema>;
 
@@ -91,11 +83,10 @@ export const subjectSignatureSchema = z
 	.brand('SubjectSignature');
 export type SubjectSignature = z.output<typeof subjectSignatureSchema>;
 
-// A path's content address as the store recorded it, in Nix's own form:
+// The content address recorded by Nix, in its own form:
 // `fixed:r:sha256:…` for a fixed-output path, `text:sha256:…` for a file added
-// to the store. A reader can recompute the address from the NAR the
-// destination serves, which gives it something to check for a copied path that
-// carries no signature.
+// to the store. A reader can recompute this value from the served NAR and use it
+// to verify a copied path that has no signature.
 export const subjectContentAddressSchema = z
 	.string()
 	.min(1)
@@ -111,28 +102,25 @@ export type SubjectContentAddress = z.output<
 export const nixStoreUriSchema = z.string().min(1).brand('NixStoreUri');
 export type NixStoreUri = z.output<typeof nixStoreUriSchema>;
 
-// A subject's `origin` records where a published path came from, as far as the
-// run can establish.
+// A subject's `origin` records the source of a published path as far as the run
+// can determine it.
 //
 // `built` means the run realised the path itself. `store-held` means the store
-// registered the path as its own work, but nothing the run saw shows that this
-// invocation is what realised it; a store kept between runs may have built the
-// path earlier. `copied` means the store did not build the path at all, so it
-// entered the store from somewhere else. `republished` means no store the push
-// could query held the path: the run read the path's metadata from another
-// cache, and the destination serves the copy it already had.
+// registered the path as one of its builds, but the run did not observe when it
+// was built. `copied` means the path entered the store from another source.
+// `republished` means the run found the path's metadata in another cache because
+// no queried store contained it. The destination already contained the bytes.
 
-// Every subject records the path and the NAR hash the destination serves it
-// under, whatever its origin. The attestation step checks both against the
-// destination's committed narinfo before signing.
+// Every subject records its store path and NAR hash. Before signing, the
+// attestation step compares both values with the destination's committed
+// narinfo.
 const subjectIdentityFields = {
 	storePath: storePathSchema,
 	narHash: sha256HexDigestSchema
 };
 
-// A path the run realised: the derivation that produced it, the store it was
-// realised in, the evidence behind the claim, and the builder from the activity
-// log when the log recorded one.
+// A path realised by the run, including its derivation, build store, verification
+// method, and the builder recorded by the activity log when available.
 export const builtOriginFields = {
 	...subjectIdentityFields,
 	derivation: derivationPathSchema,
@@ -141,27 +129,22 @@ export const builtOriginFields = {
 	verification: subjectVerificationSchema
 };
 
-// A path the store registered as its own work, without the run watching the
-// build. That registration is all the evidence there is: the subject records
-// the store, and no field says when the build ran.
+// A path the store registered as one of its builds without the run observing the
+// build. The subject records the store but contains no build time.
 export const storeHeldOriginFields = {
 	...subjectIdentityFields,
 	derivation: derivationPathSchema.optional(),
 	buildStore: buildStoreSchema
 };
 
-// A path that entered the store from elsewhere. The subject carries the
-// signatures the store holds over the path, and the content address when the
-// path has one. A reader can check both for itself.
+// A path copied into the store. `signatures` contains the signatures recorded by
+// the store, and `ca` contains its content address when available. A reader can
+// verify both values.
 //
-// `copiedFrom` names the stores the run watched the path being copied from, in
-// the order the activity log recorded them. It is an observation of this run
-// and not a property of the path: the store keeps no record of which
-// substituter served a path, so a path that was already valid before the run
-// started, or that some other store fetched where the run could not see it, has
-// no entry. A path has more than one entry when the run copied it more than
-// once, which happens when Nix moves on to the next substituter after a fetch
-// fails.
+// `copiedFrom` lists the source stores observed by this run in activity-log
+// order. Nix does not persist the source substituter, so the field is absent when
+// the run did not observe the copy. The list contains several entries when Nix
+// tried another substituter after a fetch failed.
 export const copiedOriginFields = {
 	...subjectIdentityFields,
 	derivation: derivationPathSchema.optional(),
@@ -170,11 +153,10 @@ export const copiedOriginFields = {
 	copiedFrom: z.array(nixStoreUriSchema).min(1).optional()
 };
 
-// A path published by reference. No store the push can query holds it, so the
-// run read the path's metadata from another cache instead. `metadataSource` is
-// that cache, and the signatures are the ones it published over the path. The
-// run transferred no bytes: the destination already held the path, and no field
-// here describes where the destination's copy came from.
+// A path published by reference. No store queried by the push contains the path,
+// so the run reads its metadata from `metadataSource`. The signatures are those
+// published by that cache. The destination already contains the bytes, and this
+// record does not identify their source.
 export const republishedOriginFields = {
 	...subjectIdentityFields,
 	derivation: derivationPathSchema.optional(),
@@ -194,10 +176,9 @@ export const observedCopiesSchema = z.record(
 export type ParsedObservedCopies = z.output<typeof observedCopiesSchema>;
 export type ObservedCopies = z.input<typeof observedCopiesSchema>;
 
-// One receipt subject: one published path and the origin the run established
-// for it. A supervised build records the attempt that produced the path; a
-// reconciled build leaves the attempt fields out, because it inspects the store
-// after the build and never watches the build itself.
+// One published path and its observed origin. A supervised build includes the
+// attempt that produced the path. A reconciled build inspects the store after
+// completion and therefore omits the attempt fields.
 export const buildSubjectV3Schema = z.discriminatedUnion('origin', [
 	z.strictObject({
 		origin: z.literal('built'),

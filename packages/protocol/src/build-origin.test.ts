@@ -166,7 +166,7 @@ describe('buildOriginSubjectSchema', () => {
 			value: { ...localSubject(), machine: '' }
 		},
 		{
-			name: 'the attempt fields a receipt subject carries',
+			name: 'attempt fields on a receipt subject',
 			value: { ...localSubject(), attempt: 1, attemptId: 'attempt-1' }
 		}
 	])('rejects $name', ({ value }) => {

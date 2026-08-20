@@ -206,9 +206,9 @@ export async function enqueueMaintenanceJobs(
 	return messages;
 }
 
-// One or more maintenance queue batches failed to send. It carries the
-// underlying send failures so a partial send is observable, distinct from the
-// per-tenant pass failures the cron also aggregates.
+// Raised when one or more maintenance queue batches fail to send. The aggregate
+// contains the underlying send errors, distinct from the tenant maintenance
+// failures that cron also collects.
 export class QueueBatchSendError extends AggregateError {
 	constructor(failures: readonly unknown[]) {
 		super(failures);
@@ -426,9 +426,8 @@ export function runCasReaperDemote(
 	);
 }
 
-// The demote scan's resume position, held as one KV value: it is cron bookkeeping,
-// not shared-blob data, so it lives outside the relational schema. Absent or empty
-// means start from the beginning.
+// Stores the demotion scan cursor in KV because it is cron state, not shared-blob
+// data. A missing or empty value restarts the scan from the beginning.
 function demoteCursor(env: Env): DemoteCursor {
 	return {
 		read: async () => (await env.CRON_STATE.get(demoteCursorKey)) ?? '',
@@ -480,13 +479,12 @@ class TenantCasReferenceDemoter implements CasReferenceDemoter {
 }
 
 /**
- * Drives the offboarding drain for a bounded batch of tenants. Each draining tenant
- * sheds a bounded batch of its reference and presence rows through its own Durable
- * Object (the single writer of those rows) and a bounded batch of its R2 objects
- * through the Worker; a tenant whose rows and objects are both gone is finalised into
- * its terminal scrubbed tombstone. Offboarding tenants are disjoint from the
- * maintenance batch (which serves only active tenants), so the two never contend for
- * one tenant. Per-tenant failures are all surfaced.
+ * Drains a bounded batch of offboarding tenants. Each tenant removes a bounded
+ * batch of reference and presence rows through its Durable Object, which is the
+ * only writer for those rows. The Worker removes a bounded batch of R2 objects.
+ * After both stores are empty, the tenant is finalised as a scrubbed tombstone.
+ * Maintenance selects only active tenants, so it cannot process the same tenant.
+ * The function reports every tenant failure.
  */
 export async function runOffboardBatch(
 	logger: Logger,
@@ -577,13 +575,10 @@ async function hasRemainingTenantObjects(
 	return listed.truncated;
 }
 
-// Finalises a fully drained tenant: wipe its Durable Object storage (keys, identity,
-// narinfos), then scrub its registry row to the terminal `offboarded` tombstone with
-// its usage row dropped. Purging first and tolerating an already-purged object in the
-// drain makes an interrupted finalisation converge on the next tick. The membership
-// marker is deleted here, since it tracks `status != 'offboarded'`; the next filter
-// rebuild then drops the slug, and an interrupted finalisation leaves only a
-// harmless tombstone the rebuild reconciles.
+// Finalises a tenant after all data has been drained. First purge its Durable
+// Object storage. Then write the terminal `offboarded` registry tombstone,
+// remove its usage row, and delete its membership marker. Repeating these steps
+// after an interruption is safe.
 async function finaliseTenant(env: Env, id: TenantId): Promise<void> {
 	await tenantServer(env, id).purgeStorage();
 
@@ -593,12 +588,11 @@ async function finaliseTenant(env: Env, id: TenantId): Promise<void> {
 }
 
 /**
- * Drives one hourly cron tick: maintains the most-overdue active tenants and stamps
- * them, so the table's own `last_maintained_at` carries the round-robin position and
- * the whole fleet is covered over successive ticks. Per-tenant failures are collected
- * and all surfaced, so a fleet-wide stall is observable; the batch is stamped
- * regardless of per-tenant outcome, so one failing tenant does not stall the
- * rotation.
+ * Maintains the active tenants with the oldest `last_maintained_at` values, then
+ * updates that timestamp for the selected batch. Successive ticks therefore
+ * rotate through the fleet. The function reports every tenant failure and still
+ * advances the selected timestamps so one failing tenant does not prevent later
+ * tenants from running.
  */
 export async function runMaintenanceBatch(
 	logger: Logger,
@@ -696,14 +690,11 @@ const promotionBatchAttempts = 3;
 const promotionBatchRetryDelayMs = 500;
 
 /**
- * Buffers verdicts as they are reached and records them incrementally: one
- * `recordVerifications` RPC in flight at a time, verdicts completing meanwhile
- * coalescing into the next. Progress is monotonic: an invocation that dies
- * mid-pass loses at most the batch in flight plus the buffer, and every
- * verdict recorded before that stays settled. A flush the retries cannot land
- * stops the recorder and surfaces from `settle`, failing the queue message so
- * the platform redelivers it; the applies are idempotent, so the redelivered
- * pass re-records safely.
+ * Buffers completed verdicts and records them incrementally. Only one
+ * `recordVerifications` RPC runs at a time, and verdicts completed during that
+ * call form the next batch. If the invocation stops, it loses at most the active
+ * batch and the buffer. A failed RPC preserves its batch and makes
+ * `finishRecording` reject. The queue can then retry the idempotent writes.
  */
 export class VerdictRecorder {
 	private buffer: VerificationResult[] = [];
@@ -730,7 +721,8 @@ export class VerdictRecorder {
 			} catch (error) {
 				// The batch could not record: keep it buffered (ahead of anything
 				// added meanwhile, preserving order) and stop to avoid spinning
-				// against a DO that is down. `settle` surfaces the failure.
+				// against a Durable Object that is down. `finishRecording` reports
+				// the failure to the caller.
 				this.buffer = [...batch, ...this.buffer];
 				this.failure = { error };
 				break;
@@ -778,7 +770,7 @@ export class VerdictRecorder {
 	 * applied. Rethrows a recording failure the in-flush retries could not
 	 * clear, so the pass's queue message fails and redelivers.
 	 */
-	async settle(): Promise<number> {
+	async finishRecording(): Promise<number> {
 		// A verdict added while a flush is in flight starts a fresh one when it
 		// ends, so quiescence means waiting out each successor in turn.
 		while (this.flushing !== undefined) {
@@ -793,10 +785,9 @@ export class VerdictRecorder {
 	}
 }
 
-// A claim whose R2 promote has succeeded, holding the `blob_state` upsert for
-// the pass to apply as one batch. The verdict is deferred until the batch
-// settles, so every claim receives a verdict even when the batch faults:
-// {@link onSuccess} once the fact lands, {@link onFailure} otherwise.
+// A claim whose R2 promotion has succeeded. The pass applies its `blob_state`
+// upsert as part of one batch, then records `onSuccess`. If the batch fails, it
+// records `onFailure` instead.
 interface PendingPromotion {
 	readonly upsert: BlobStateUpsert;
 	readonly onSuccess: VerificationResult;
@@ -808,11 +799,10 @@ type PromotionOutcome =
 	| { readonly kind: 'verdict'; readonly result: VerificationResult }
 	| { readonly kind: 'promotion'; readonly promotion: PendingPromotion };
 
-// Promotes one fresh claim's verified bytes and returns either a verdict to
-// record now or a pending promotion whose upsert the pass batches. A promote the
-// consumer completed spares the settle its own; one whose R2 work fails falls
-// back to the plain verified verdict, so the decode is never wasted and the
-// settle runs its own promote on the DO thread.
+// Verifies and promotes one claimed upload. If R2 promotion succeeds, return the
+// D1 upsert for the caller's batch. If R2 promotion fails, return the verified
+// result without an upsert; the Durable Object will perform promotion while
+// applying that result.
 async function stagePromotionForClaim(
 	database: CronDatabase,
 	blobs: R2Bucket,
@@ -854,11 +844,11 @@ async function stagePromotionForClaim(
 	}
 }
 
-// Applies a pass's collected `blob_state` upserts as one D1 batch, with retries
-// on transient faults and a per-statement fallback if retries are exhausted.
-// Reports each claim's success verdict when its upsert lands, and its failure
-// verdict when it does not. The upserts are idempotent `onConflictDoUpdate`s, so
-// retrying and falling back per-statement are both safe.
+// Applies the collected `blob_state` upserts in one D1 batch, with retries for
+// transient failures and a per-statement fallback after the retries. Each claim
+// receives a success verdict if its upsert succeeds and a failure verdict if it
+// fails. The upserts are idempotent `onConflictDoUpdate` statements, so both
+// retry paths are safe.
 async function recordPromotionBatch(
 	logger: Logger,
 	database: CronDatabase,
@@ -1067,16 +1057,12 @@ export async function verifyTenant(
 
 	await recordPromotionBatch(logger, database, recorder, freshPromotions);
 
-	const applied = await recorder.settle();
+	const applied = await recorder.finishRecording();
 
-	// One verify message can coalesce a whole push's deferrals, and a pass
-	// claims a bounded chunk, so a larger backlog is left behind by design. A
-	// truncated claim means rows remain; chain another pass to drain them now,
-	// through the object's single-flight so this continuation and a concurrent
-	// deferral collapse onto one message that claims each row once. Continue only
-	// after a verdict actually applied: a batch whose reads or applies all fail (a
-	// transient fault leaving every row pending) backs off to the cron,
-	// avoiding a continuation that re-claims and re-fails the same rows.
+	// One verification message can combine all deferrals from a push, while each
+	// pass claims only a bounded chunk. Request another pass only when rows remain
+	// and at least one verdict was applied. If no verdict was applied, leave the
+	// retry to cron so a continuation does not repeatedly claim the same rows.
 	const isProgressed = applied > 0;
 
 	if (truncated && isProgressed) {
@@ -1287,10 +1273,10 @@ async function stampMaintained(
 }
 
 /**
- * Drives the maintenance passes for one tenant from the cron tick. Each runs
- * every tick, independent of the others' outcomes: a failing verification pass
- * never holds back collection or key retirement. A garbage-collection failure
- * is surfaced first, its cleanup being the more time-sensitive pass.
+ * Runs the maintenance passes for one tenant. Each pass runs independently, so
+ * a verification failure does not prevent collection or key retirement. If
+ * several passes fail, the function reports the garbage-collection failure
+ * first because that cleanup is more time-sensitive.
  */
 export async function runScheduledMaintenance(
 	runGarbageCollection: () => Promise<void>,
@@ -1312,10 +1298,9 @@ export async function runScheduledMaintenance(
 	}
 }
 
-// Runs the optional key-retirement pass after collection and verification have
-// settled, capturing its outcome as a settled result so the caller can surface
-// it alongside the other passes without short-circuiting them. An
-// absent pass settles as a fulfilled no-op.
+// Runs the optional key-retirement pass after collection and verification
+// finish. Returning a settled result lets the caller report its failure with the
+// other pass failures. An omitted callback produces a fulfilled result.
 async function settleAuthKeyRetirement(
 	runAuthKeyRetirement: (() => Promise<void>) | undefined
 ): Promise<PromiseSettledResult<void>> {

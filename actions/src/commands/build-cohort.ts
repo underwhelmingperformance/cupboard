@@ -597,7 +597,7 @@ export function registerBuildCohortCommand(
 		)
 		.option(
 			'--left-upstream-file <path>',
-			'where to record targets deliberately left upstream'
+			'where to record targets excluded from publication because an upstream substituter serves them'
 		)
 		.option(
 			'--counts-file <path>',
@@ -2118,7 +2118,7 @@ async function reprobeCohort(
 		cupboardRunDependencies?.signal?.throwIfAborted();
 
 		reporter.warn(
-			"Building the cohort's whole build set: the availability confirmation failed",
+			'Availability confirmation failed; building the complete cohort build set',
 			error instanceof Error ? error.message : String(error)
 		);
 
@@ -2226,7 +2226,7 @@ function planReprobeResult(
 		}
 
 		reporter.warn(
-			"Building the cohort's whole build set: the availability confirmation reported an unreadable result",
+			'Availability confirmation returned an invalid result; building the complete cohort build set',
 			z.prettifyError(parsed.error)
 		);
 
@@ -2234,7 +2234,7 @@ function planReprobeResult(
 	}
 
 	reporter.warn(
-		"Building the cohort's whole build set: the availability confirmation reported no result"
+		'Availability confirmation returned no result; building the complete cohort build set'
 	);
 
 	return undefined;

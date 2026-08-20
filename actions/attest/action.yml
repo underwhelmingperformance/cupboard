@@ -1,11 +1,11 @@
 name: Attest cupboard store paths
 description:
-  Produce two Sigstore bundles over the NAR hashes a current-run build receipt
-  records, ready to attach with the push action. GitHub's SLSA build provenance
-  covers the paths the run built. A cupboard build-origin statement covers every
-  path the run published and records where each one came from. Every subject is
-  checked against the destination cache's live, committed narinfo before
-  signing; the build store need no longer exist.
+  Produce two Sigstore bundles for the NAR hashes in a current-run build
+  receipt. GitHub's SLSA build provenance covers the paths built by the run. A
+  cupboard build-origin statement covers every published path and records its
+  origin. Before signing, the action checks every subject against the
+  destination cache's live, committed narinfo. The build store is no longer
+  required.
 inputs:
   receipt-file:
     description: Current-run receipt produced by a cupboard build action.
@@ -147,16 +147,9 @@ runs:
           --read-user "$READ_USER" \
           --read-password "$READ_PASSWORD"
 
-    # The two statements cover different subjects. GitHub's SLSA build
-    # provenance claims that this workflow produced its subjects, so it covers
-    # the paths the run built. Cupboard's build-origin statement records where
-    # each published path came from, which only the receipt knows.
-    #
-    # This step signs them itself so that a failed signing attempt can be made
-    # again. A workflow cannot retry a `uses:` step, and neither
-    # actions/attest-build-provenance nor actions/attest takes a retry input, so
-    # a Sigstore witness that stops answering once the signature is made would
-    # fail the whole publication.
+    # Sign directly because workflows cannot retry a `uses:` step and the
+    # upstream attestation actions accept no retry input. Restart signing after
+    # a transient Fulcio or witness failure.
     - name: Sign the attestation statements
       id: attest
       if: ${{ steps.subjects.outputs.subject-count != '0' }}
