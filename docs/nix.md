@@ -38,9 +38,9 @@ movement only. FlakeHub resolves the range when the input is locked, so
 `nix flake update` is what moves you to a newer release, and `flake.lock` pins
 the exact release you got until the next update.
 
-Each release's GitHub notes include the `nix.conf` lines for a binary cache that
-serves that release's builds, so moving to a new release does not mean building
-it from source. Alternatively pin a tag directly
+Every release is published to the same Nix binary cache. Each release's GitHub
+notes repeat the cache's `nix.conf` lines, so configure them once to substitute
+the current release and later releases. Alternatively pin a tag directly
 (`github:underwhelmingperformance/cupboard/v1.2.3`) and bump it yourself.
 
 [FlakeHub]: https://flakehub.com

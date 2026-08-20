@@ -2,8 +2,9 @@
 # drafts the release, and writes the substituter instructions into the draft's
 # notes; publishing that draft creates the tag and fires this workflow, which
 # builds the tagged revision through the flake on every supported system,
-# pushes the builds to the cache named in those notes, and publishes the flake
-# release to FlakeHub so consumers can track versions with a semver range.
+# pushes the builds to the shared release cache named in those notes, and
+# publishes the flake release to FlakeHub so consumers can track versions with
+# a semver range.
 name: release cache
 
 on:
@@ -39,7 +40,7 @@ jobs:
     with:
       runs-on: ${{ matrix.runs-on }}
       url: https://cupboard.supply/t/cupboard
-      cache: ${{ github.event.release.tag_name }}
+      cache: releases
       root: github:${{ github.repository }}/${{ github.event.release.tag_name }}
       cupboard-version: ${{ github.event.release.tag_name }}
 

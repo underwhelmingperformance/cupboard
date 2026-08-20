@@ -189,27 +189,28 @@ build jobs run inside cupboard's workflow, so their tokens carry cupboard's file
 in `job_workflow_ref`. The caller is still pinned, by the repository ids and the
 `ref` claim the preset sets.
 
-## Capture rules
+## Release caches
 
-Release builds usually go to a cache named after the tag, and no preset covers
-that. `--capture` builds the rule instead: it reads a value out of a token claim
-using a pattern with a named group, and that value fills the `{...}`
-placeholders in `--cache-template` and `--root-template`. The pattern also acts
-as a filter: a token whose claim does not match is refused. This rule sends a
-build of tag `v1.2.3` to a cache called `v1.2.3`:
+`add-github-tag` captures the tag from the workflow token. By default, it uses
+the tag for both the cache name and the retention-root suffix. To give users one
+substituter URL for every release, use a fixed cache and keep the tag only in
+the root:
 
 ```bash
-cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
-  --issuer https://token.actions.githubusercontent.com \
-  --audience https://cupboard.example.workers.dev/t/acme \
-  --claim repository_id=123456 \
-  --claim repository_owner_id=7890 \
+cupboard oidc-trust add-github-tag https://cupboard.example.workers.dev/t/acme \
+  --repo acme/infra \
   --job-workflow-ref acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main \
-  --capture 'ref=^refs/tags/(?<tag>v[0-9][A-Za-z0-9.+-]*)$' \
-  --cache-template '{tag}' \
-  --root-template 'github:acme/infra/{tag}/' \
-  --allow push --allow attest --allow root
+  --cache-template releases \
+  --root-template 'github:acme/infra/{tag}/'
 ```
 
-The two numeric id claims pin the repository the same way the presets do.
-`gh api repos/<owner>/<repo>` prints both: `.id` and `.owner.id`.
+The cache serves every release path at `/cache/releases`. The distinct roots
+retain each tag independently, so publishing a later version does not release an
+earlier version's paths.
+
+## Capture rules
+
+For a provider or claim shape without a preset, `--capture` reads a value from a
+token claim using a pattern with a named group. The captured value fills the
+matching `{...}` placeholders in `--cache-template` and `--root-template`. The
+pattern also filters tokens: a token whose claim does not match is refused.

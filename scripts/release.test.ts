@@ -1,4 +1,3 @@
-import { cacheNameSchema } from '@cupboard/nix-store/scalars';
 import { parseBaseUrl } from '@cupboard/nix-store/url';
 import { describe, expect, it } from 'vitest';
 
@@ -168,18 +167,17 @@ describe('substituterSection', () => {
 		expect(
 			substituterSection({
 				baseUrl: base,
-				cache: cacheNameSchema.parse('v1.2.3'),
 				publicKey: 'cupboard-1:abc123='
 			})
 		).toBe(
 			[
 				'## Substitute from the release cache',
 				'',
-				'This release is in a Nix binary cache. Add these lines to nix.conf to',
-				'fetch it instead of building:',
+				'Cupboard publishes every versioned release to one Nix binary cache.',
+				'Configure it once in nix.conf to fetch releases instead of building:',
 				'',
 				'```',
-				'extra-substituters = https://cupboard.example/t/acme/cache/v1.2.3',
+				'extra-substituters = https://cupboard.example/t/acme/cache/releases',
 				'extra-trusted-public-keys = cupboard-1:abc123=',
 				'```'
 			].join('\n')
