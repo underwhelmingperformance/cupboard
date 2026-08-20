@@ -200,6 +200,7 @@ export class CupboardTestServer {
 			void forwardToWorker(worker, request, response);
 		});
 		const upgrades = new WebSocketServer({ noServer: true });
+		upgrades.on('headers', forwardWorkerUpgradeHeaders);
 		const commitCounters: CommitSessionCounters = {
 			upgrades: 0,
 			creditFrames: 0,
@@ -638,6 +639,43 @@ async function forwardToWorker(
 type MiniflareResponse = Awaited<ReturnType<Miniflare['dispatchFetch']>>;
 type WorkerSocket = NonNullable<MiniflareResponse['webSocket']>;
 
+// The worker's 101 carries the capability headers a client reads to learn what
+// this connection offers, the commit credit grant among them. ws completes the
+// client handshake with headers of its own, so the worker's must be carried
+// across the bridge explicitly. Without them the two ends negotiate different
+// protocols: the worker reads the client's declaration from the request, which
+// crosses the bridge intact, while the client finds no offer in the response
+// and falls back.
+const upgradeResponseHeaders = new WeakMap<
+	IncomingMessage,
+	readonly string[]
+>();
+
+function forwardWorkerUpgradeHeaders(
+	headers: string[],
+	request: IncomingMessage
+): void {
+	const workerHeaders = upgradeResponseHeaders.get(request);
+
+	if (workerHeaders !== undefined) {
+		headers.push(...workerHeaders);
+	}
+}
+
+function capabilityHeaderLines(
+	headers: Awaited<ReturnType<Miniflare['dispatchFetch']>>['headers']
+): readonly string[] {
+	const lines: string[] = [];
+
+	headers.forEach((value, name) => {
+		if (name.startsWith('x-cupboard-')) {
+			lines.push(`${name}: ${value}`);
+		}
+	});
+
+	return lines;
+}
+
 // Bridges a WebSocket upgrade to the worker: the upgrade request (with its
 // Authorization header) dispatches into Miniflare; an accepted socket relays
 // frames both ways, and a refusal is written back as the plain HTTP response
@@ -665,6 +703,10 @@ async function forwardUpgradeToWorker(
 		}
 
 		workerSocket.accept();
+		upgradeResponseHeaders.set(
+			request,
+			capabilityHeaderLines(response.headers)
+		);
 
 		if (requestUrl.pathname.endsWith('/commit')) {
 			counters.upgrades += 1;
