@@ -52,6 +52,24 @@ export class ColdPathTtlConfigurationInvalidError extends ServerHttpError {
 	}
 }
 
+export class CommitCreditBudgetInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly value: string) {
+		super('CUPBOARD_COMMIT_ENTRY_CREDIT_BUDGET is not a valid credit budget');
+		this.name = 'CommitCreditBudgetInvalidError';
+	}
+}
+
+export class CommitSocketCeilingInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly value: string) {
+		super('CUPBOARD_COMMIT_SOCKET_CEILING is not a valid socket ceiling');
+		this.name = 'CommitSocketCeilingInvalidError';
+	}
+}
+
 export class OwnerConfigurationInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
@@ -70,10 +88,20 @@ export class CommitUpgradeRequiredError extends ServerHttpError {
 	}
 }
 
-// One tenant's Durable Object holds a bounded set of live commit sockets. A
-// socket is an optimisation over durable status polling, so an upgrade past
-// the bound is refused retryably: the turned-away client polls the upload
-// status, or retries once a session closes.
+// An upgrade was refused because the tenant already holds as many commit
+// sockets as it may. Two bounds produce this refusal, and neither is a capacity
+// bound: credit paces the work a session admits, so a legitimate publication is
+// never turned away for want of capacity.
+//
+// Every session counts against the anti-abuse ceiling, which sits orders of
+// magnitude above any real publication, so only a runaway client meets it. A
+// session that did not negotiate credit counts against a much smaller bound as
+// well: the server cannot pace such a client, so the number of them one tenant
+// may hold at once is the only thing bounding the work they can park in the
+// object.
+//
+// Either refusal is retryable: the turned-away client polls the upload status,
+// or retries once a session closes.
 export class CommitSessionLimitError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 5;

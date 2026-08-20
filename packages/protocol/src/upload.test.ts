@@ -7,6 +7,9 @@ import { describe, expect, it } from 'vitest';
 import {
 	commitBatchCapabilityToken,
 	commitCapabilitiesValue,
+	commitCapabilitiesValueWithCredit,
+	commitCreditCapability,
+	commitCreditCapabilityToken,
 	commitSessionFrameSchema,
 	commitSessionRequestSchema,
 	retentionMarkerAttribute,
@@ -475,7 +478,8 @@ describe('response schemas', () => {
 describe('commit session schemas', () => {
 	it.each([
 		{ op: 'commit', uploadId: 'upload-1' },
-		{ op: 'subscribe', uploadIds: ['upload-1', 'upload-2'] }
+		{ op: 'subscribe', uploadIds: ['upload-1', 'upload-2'] },
+		{ op: 'request-credit', entries: 42 }
 	])('accepts the $op request', (value) => {
 		expect(commitSessionRequestSchema.parse(value)).toStrictEqual(value);
 	});
@@ -495,7 +499,10 @@ describe('commit session schemas', () => {
 		},
 		{ ev: 'deferred', uploadId: 'upload-1', storePathHash, narHash },
 		{ ev: 'verdict', uploadId: 'upload-1', status: 'servable' },
-		{ ev: 'error', uploadId: 'upload-1', status: 500, message: 'boom' }
+		{ ev: 'error', uploadId: 'upload-1', status: 500, message: 'boom' },
+		{ ev: 'credit', grant: 100 },
+		{ ev: 'queued', ahead: 0 },
+		{ ev: 'queued', ahead: 3 }
 	])('accepts the $ev frame', (value) => {
 		expect(commitSessionFrameSchema.parse(value)).toStrictEqual(value);
 	});
@@ -505,6 +512,55 @@ describe('commit session schemas', () => {
 			commitSessionFrameSchema.safeParse({ ev: 'verdict', status: 'servable' })
 				.success
 		).toBe(false);
+	});
+
+	// Credit counts entries. A declaration of no entries asks for nothing, and a
+	// negative or fractional count is a broken client rather than a small demand.
+	it.each([
+		{ shape: 'no entries', request: { op: 'request-credit', entries: 0 } },
+		{
+			shape: 'a negative count',
+			request: { op: 'request-credit', entries: -1 }
+		},
+		{
+			shape: 'a fractional count',
+			request: { op: 'request-credit', entries: 1.5 }
+		}
+	])('rejects a request-credit op declaring $shape', ({ request }) => {
+		expect(commitSessionRequestSchema.safeParse(request).success).toBe(false);
+	});
+
+	// A grant of nothing is sent as `queued`, so a `credit` frame always carries
+	// entries the session may spend.
+	it.each([
+		{
+			shape: 'a credit frame granting nothing',
+			frame: { ev: 'credit', grant: 0 }
+		},
+		{
+			shape: 'a queued frame counting fewer than no sessions ahead',
+			frame: { ev: 'queued', ahead: -1 }
+		}
+	])('rejects $shape', ({ frame }) => {
+		expect(commitSessionFrameSchema.safeParse(frame).success).toBe(false);
+	});
+
+	// The opening grant is carried on the token, so a client reads its first
+	// grant from the same header that carries the batch bound, with no further
+	// round trip. A saturated tenant advertises `grant=0` and the session waits
+	// for a `credit` frame.
+	it('advertises the credit token with the opening grant', () => {
+		expect({
+			capability: commitCreditCapability,
+			granted: commitCreditCapabilityToken(200),
+			saturated: commitCreditCapabilityToken(0),
+			header: commitCapabilitiesValueWithCredit(200)
+		}).toStrictEqual({
+			capability: 'commit-credit',
+			granted: 'commit-credit;grant=200',
+			saturated: 'commit-credit;grant=0',
+			header: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue},subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue},commit-credit;grant=200`
+		});
 	});
 
 	it.each([

@@ -36,7 +36,6 @@ import {
 } from '../test-support.ts';
 
 import { teardownEntryPrefix } from './cache-admin-service.ts';
-import { maxCommitSessionsPerTenant } from './server.ts';
 
 const buildsCache = cacheNameSchema.parse('builds');
 const origin = requestOriginSchema.parse('https://cache.example');
@@ -189,9 +188,9 @@ describe('cache teardown', () => {
 		// The paths are independent, so seed them with bounded concurrency: the
 		// sequential negotiate/upload/commit round-trips, not the teardown under
 		// test, dominate the wall-clock. The bound keeps the commit fan-in well
-		// short of a D1 overload of its own and within the per-tenant commit
-		// session cap, so no seeding push is turned away.
-		const pushConcurrency = maxCommitSessionsPerTenant;
+		// short of a D1 overload of its own and below the commit sockets one
+		// tenant may hold at once, so no seeding push is turned away.
+		const pushConcurrency = 8;
 		for (
 			let start = 0;
 			start < pathsWithNars.length;

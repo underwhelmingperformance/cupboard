@@ -1009,8 +1009,13 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 		const workspace = await mkdtemp(
 			path.join(temporaryRoot, 'cupboard-publish-pipeline-')
 		);
+		// The tier runs against a deliberately small credit budget, so that any
+		// publication outgrows it and the whole tier exercises the pacing a busy
+		// tenant imposes. Pacing changes how long a publication takes and nothing
+		// about what it publishes, so every leg asserts what it always did.
 		const server = await CupboardTestServer.start(
-			path.join(workspace, 'server')
+			path.join(workspace, 'server'),
+			{ bindings: { CUPBOARD_COMMIT_ENTRY_CREDIT_BUDGET: '2' } }
 		);
 		const runner = await StubRunnerTokenEndpoint.start({
 			issuer: server.issuer,
@@ -1363,6 +1368,68 @@ describe.skipIf(!isNixPresent)('a consumer repository publish run', () => {
 				]
 			},
 			served: claimed.map(() => 200)
+		});
+	});
+
+	// A publication whose demand far outruns the tenant's budget of commit
+	// credit. The server paces it rather than refusing any of it: every path
+	// still lands, the `credit` frames prove the run really was paced rather
+	// than merely small, and the single upgrade proves it waited on the socket
+	// it already held rather than re-dialling for capacity.
+	//
+	// A `queued` answer needs the budget to be exhausted at the instant a
+	// session asks for more, which needs entries in flight from more than one
+	// commit at a time. A run publishes its paths a few at a time, so whether
+	// that happens here depends on the machine rather than on the arrangement.
+	// The CLI-level oversubscription test arranges the contention directly and
+	// asserts the `queued` answer there.
+	it('publishes a cohort whose demand exceeds the tenant credit budget', async () => {
+		const prepared = fixture();
+		const flakeDirectory = path.join(prepared.workspace, 'oversubscribed');
+		await mkdir(flakeDirectory, { recursive: true });
+		await writeFile(
+			path.join(flakeDirectory, 'flake.nix'),
+			largeGraphFlake({
+				directory: flakeDirectory,
+				system: prepared.system,
+				seed: randomUUID()
+			})
+		);
+
+		const before = prepared.server.commitSessions;
+		const outcome = await runPublication('oversubscribed', {
+			flakeDirectory,
+			store: '',
+			requireProvenance: false
+		});
+		const observed = prepared.server.commitSessions;
+		const built = await builtPaths(flakeDirectory);
+		const claimed = claimedPaths({
+			built,
+			targets: built.slice(-1),
+			attribution: localAttribution()
+		});
+
+		expect({
+			cohortStatuses: outcome.cohorts.map((cohort) => cohort.status),
+			served: await servedStatuses(claimed),
+			upgrades: observed.upgrades - before.upgrades,
+			wasPaced: observed.creditFrames > before.creditFrames
+		}).toStrictEqual({
+			cohortStatuses: [0],
+			served: claimed.map(() => 200),
+			// The streamed build-push always opens one session: the seeded paths
+			// are new, so it has entries to commit. The retention push that
+			// follows is a separate process, and it opens a session of its own
+			// only when a path's verdict is still pending when it negotiates;
+			// when every path has settled by then, the negotiation answers skip
+			// for each and the push never dials. A client that re-dialled for
+			// capacity would add an upgrade per starved wait on top.
+			upgrades: expect.toSatisfy(
+				(count: number) => count === 1 || count === 2,
+				'one session per committing process'
+			) as number,
+			wasPaced: true
 		});
 	});
 

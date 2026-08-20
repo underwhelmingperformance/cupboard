@@ -9,7 +9,7 @@ import {
 	type UploadId
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm';
 
 import { promoteVerifiedBlob } from '../blob/promote-blob.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -165,6 +165,28 @@ export class UploadStateService {
 			.set({ sessionId })
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
+	}
+
+	// The commit sessions holding at least one upload that still awaits its
+	// verdict. Such a session has already been answered for that upload and is
+	// waiting for the verify pass, which may take longer than the idle period,
+	// so it is parked rather than stale. The verdict index covers the filter, so
+	// this reads the in-flight rows rather than the whole table.
+	sessionsAwaitingVerdict(): ReadonlySet<SessionId> {
+		const rows = this.context.db
+			.selectDistinct({ sessionId: schema.pendingUploads.sessionId })
+			.from(schema.pendingUploads)
+			.where(
+				and(
+					isNotNull(schema.pendingUploads.sessionId),
+					inArray(schema.pendingUploads.verdict, ['pending', 'committing'])
+				)
+			)
+			.all();
+
+		return new Set(
+			rows.flatMap((row) => (row.sessionId === null ? [] : [row.sessionId]))
+		);
 	}
 
 	// Marks an inline commit in progress before it reserves the narinfo row, so a

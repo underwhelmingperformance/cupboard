@@ -53,6 +53,10 @@ import {
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	acceptCapabilitiesHeader,
+	commitAcceptCapabilitiesHeader,
+	commitBatchCapability,
+	commitCapabilitiesHeader,
+	commitCreditCapability,
 	type CommitResponse,
 	commitSessionFrameSchema,
 	type CommitSessionRequest,
@@ -1939,6 +1943,9 @@ export interface CommitConversation {
 	readonly socket: WebSocket;
 	readonly send: (request: CommitSessionRequest) => void;
 	readonly nextFrame: () => Promise<ParsedCommitSessionFrame>;
+	// The capability header the 101 carried, which is where a credited session's
+	// opening grant is advertised.
+	readonly capabilities: string | null;
 }
 
 export function commitSessionFromResponse(
@@ -1999,20 +2006,34 @@ export function commitSessionFromResponse(
 		socket.send(JSON.stringify(request));
 	};
 
-	return { socket, send, nextFrame };
+	return {
+		socket,
+		send,
+		nextFrame,
+		capabilities: response.headers.get(commitCapabilitiesHeader)
+	};
 }
+
+// What a client declares on the upgrade to be paced by the server's credit. A
+// session that declares nothing is admitted the way an older client is: it
+// spends no credit and the server does not pace it.
+export const commitCreditAccept = `${commitBatchCapability},${commitCreditCapability}`;
 
 /**
 Opens a push's commit session WebSocket against the Durable Object stub.
 */
 export async function openCommitSession(
 	token: string,
-	cache: string = DEFAULT_CACHE
+	cache: string = DEFAULT_CACHE,
+	accepted?: string
 ): Promise<CommitConversation> {
 	const response = await fetchPath(cacheScopedPath(cache, '/commit'), {
 		headers: {
 			authorization: `Bearer ${token}`,
-			upgrade: 'websocket'
+			upgrade: 'websocket',
+			...(accepted !== undefined && {
+				[commitAcceptCapabilitiesHeader]: accepted
+			})
 		}
 	});
 
@@ -2021,7 +2042,7 @@ export async function openCommitSession(
 
 // Closes a session socket and waits for the close handshake to complete, so
 // the server has handled the close before the caller opens another session; a
-// close still in flight counts against the per-tenant commit session bound.
+// close still in flight counts against the commit sockets the tenant holds.
 function closeSettled(socket: WebSocket): Promise<void> {
 	if (socket.readyState === WebSocket.READY_STATE_CLOSED) {
 		return Promise.resolve();
