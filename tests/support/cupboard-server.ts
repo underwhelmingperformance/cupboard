@@ -71,12 +71,18 @@ export interface CommitSessionObservations {
 	readonly upgrades: number;
 	readonly creditFrames: number;
 	readonly queuedFrames: number;
+	/**
+	 * Upgrades the worker accepted that never reached a client, because the
+	 * client had gone by the time the handshake completed.
+	 */
+	readonly abandonedUpgrades: number;
 }
 
 interface CommitSessionCounters {
 	upgrades: number;
 	creditFrames: number;
 	queuedFrames: number;
+	abandonedUpgrades: number;
 }
 
 // Counts a frame the worker sent. The keepalive answer is not a frame and the
@@ -204,7 +210,8 @@ export class CupboardTestServer {
 		const commitCounters: CommitSessionCounters = {
 			upgrades: 0,
 			creditFrames: 0,
-			queuedFrames: 0
+			queuedFrames: 0,
+			abandonedUpgrades: 0
 		};
 		httpServer.on('upgrade', (request, socket, head) => {
 			void forwardUpgradeToWorker(
@@ -702,19 +709,35 @@ async function forwardUpgradeToWorker(
 			return;
 		}
 
+		const isCommitUpgrade = requestUrl.pathname.endsWith('/commit');
 		workerSocket.accept();
 		upgradeResponseHeaders.set(
 			request,
 			capabilityHeaderLines(response.headers)
 		);
 
-		if (requestUrl.pathname.endsWith('/commit')) {
-			counters.upgrades += 1;
-		}
-
 		upgrades.handleUpgrade(request, socket, head, (client) => {
+			if (isCommitUpgrade) {
+				counters.upgrades += 1;
+			}
+
 			relaySockets(client, workerSocket, counters);
 		});
+
+		// Dispatching to the worker is asynchronous, so a client that opens a
+		// session and finishes with it at once can be gone by the time the worker
+		// answers. `ws` abandons the handshake for a socket it can no longer write
+		// to, and it does so without calling back: what it leaves behind is a
+		// destroyed socket, where a handshake it completed leaves one it writes
+		// frames over. Without this, the worker socket accepted above would stay
+		// open with nothing on the other end of it, holding whatever its upgrade
+		// granted until the server's own idle close.
+		if (socket.writable) {
+			return;
+		}
+
+		counters.abandonedUpgrades += 1;
+		workerSocket.close();
 	} catch (error) {
 		socket.destroy(error instanceof Error ? error : new Error(String(error)));
 	}
