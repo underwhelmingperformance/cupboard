@@ -67,6 +67,9 @@ describe('renderHookScript', () => {
 		}
 	])(
 		'reports both outputs after $name',
+		// Each case runs the rendered script against a real `nix-store`, and a
+		// loaded runner can hold that spawn past the default five-second budget.
+		{ timeout: 30_000 },
 		async ({
 			rootDirectoryExists,
 			failedPath,
