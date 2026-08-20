@@ -1,14 +1,20 @@
-import { WIRE_DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
+import { DEFAULT_CACHE, WIRE_DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
+import { commitAcceptCapabilitiesHeader } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+	commitSocketCeiling,
+	maxUncreditedCommitSessions
+} from '../policy/commit-sockets.ts';
+import {
 	authorisedFetch,
 	type CommitConversation,
+	commitCreditAccept,
+	commitSessionFromResponse,
 	currentServer,
-	deferFreshUpload,
 	initialise,
 	negotiateUploads,
 	openCommitSession,
@@ -16,8 +22,6 @@ import {
 	resetTestServer,
 	uploadMetadata
 } from '../test-support.ts';
-
-import { maxCommitSessionsPerTenant } from './server.ts';
 
 // The D1 overload text the binding injects when it sheds load. Only this test
 // file and the detection helper in transient.ts ever reference this text; the
@@ -67,12 +71,13 @@ describe('commit socket overload handling', () => {
 
 async function openSessions(
 	token: string,
-	count: number
+	count: number,
+	accepted?: string
 ): Promise<CommitConversation[]> {
 	const sessions: CommitConversation[] = [];
 
 	for (let index = 0; index < count; index += 1) {
-		sessions.push(await openCommitSession(token));
+		sessions.push(await openCommitSession(token, DEFAULT_CACHE, accepted));
 	}
 
 	return sessions;
@@ -84,9 +89,14 @@ function closeAll(sessions: readonly CommitConversation[]): void {
 	}
 }
 
-function attemptUpgrade(token: string): Promise<Response> {
+function attemptUpgrade(token: string, accepted?: string): Promise<Response> {
 	return authorisedFetch(`/cache/${WIRE_DEFAULT_CACHE}/commit`, token, {
-		headers: { upgrade: 'websocket' }
+		headers: {
+			upgrade: 'websocket',
+			...(accepted !== undefined && {
+				[commitAcceptCapabilitiesHeader]: accepted
+			})
+		}
 	});
 }
 
@@ -97,14 +107,18 @@ async function liveSocketCount(): Promise<number> {
 	);
 }
 
-describe('commit session cap', () => {
+// The ceiling the test environment binds, well below the deployed one so a
+// suite can reach it with a handful of sockets.
+const ceiling = commitSocketCeiling(env);
+
+describe('commit socket ceiling', () => {
 	beforeEach(resetTestServer);
 
-	it('accepts sessions up to the cap and refuses the next upgrade retryably', async () => {
+	it('accepts sessions up to the ceiling and refuses the next upgrade retryably', async () => {
 		const token = await initialise();
-		const sessions = await openSessions(token, maxCommitSessionsPerTenant);
+		const sessions = await openSessions(token, ceiling, commitCreditAccept);
 
-		const refused = await attemptUpgrade(token);
+		const refused = await attemptUpgrade(token, commitCreditAccept);
 
 		expect({
 			accepted: sessions.length,
@@ -112,7 +126,7 @@ describe('commit session cap', () => {
 			retryAfter: refused.headers.get('retry-after'),
 			cacheControl: refused.headers.get('cache-control')
 		}).toStrictEqual({
-			accepted: maxCommitSessionsPerTenant,
+			accepted: ceiling,
 			status: StatusCodes.SERVICE_UNAVAILABLE,
 			retryAfter: '5',
 			cacheControl: 'no-store'
@@ -121,11 +135,12 @@ describe('commit session cap', () => {
 		closeAll(sessions);
 	});
 
-	it('frees a slot once a session closes', async () => {
+	it('frees a place once a session closes', async () => {
 		const token = await initialise();
 		const [first, ...rest] = await openSessions(
 			token,
-			maxCommitSessionsPerTenant
+			ceiling,
+			commitCreditAccept
 		);
 
 		if (first === undefined) {
@@ -134,39 +149,41 @@ describe('commit session cap', () => {
 
 		first.socket.close();
 		await vi.waitFor(async () => {
-			expect(await liveSocketCount()).toBe(maxCommitSessionsPerTenant - 1);
+			expect(await liveSocketCount()).toBe(ceiling - 1);
 		});
 
-		const reopened = await openCommitSession(token);
+		const reopened = await openCommitSession(
+			token,
+			DEFAULT_CACHE,
+			commitCreditAccept
+		);
 
 		closeAll([reopened, ...rest]);
 	});
 
-	it('counts a parked deferred session against the cap', async () => {
+	// A session that does not negotiate credit sends as fast as it likes, so the
+	// tenant holds only a few of them at once; a credited session is still
+	// admitted at that point, since the server paces it.
+	it('admits fewer sessions that credit cannot pace', async () => {
 		const token = await initialise();
-		const parked = await openCommitSession(token);
-		const { uploadId } = await deferFreshUpload(
-			token,
-			'parked',
-			'c'.repeat(32)
-		);
+		const unpaced = await openSessions(token, maxUncreditedCommitSessions);
 
-		parked.send({ op: 'commit', uploadId });
-		const frame = await parked.nextFrame();
-
-		const others = await openSessions(token, maxCommitSessionsPerTenant - 1);
 		const refused = await attemptUpgrade(token);
+		const credited = await attemptUpgrade(token, commitCreditAccept);
+		const creditedSession = commitSessionFromResponse(credited);
 
 		expect({
-			deferred: frame.ev,
-			status: refused.status,
-			retryAfter: refused.headers.get('retry-after')
+			opened: unpaced.length,
+			refused: refused.status,
+			retryAfter: refused.headers.get('retry-after'),
+			credited: credited.status
 		}).toStrictEqual({
-			deferred: 'deferred',
-			status: StatusCodes.SERVICE_UNAVAILABLE,
-			retryAfter: '5'
+			opened: maxUncreditedCommitSessions,
+			refused: StatusCodes.SERVICE_UNAVAILABLE,
+			retryAfter: '5',
+			credited: StatusCodes.SWITCHING_PROTOCOLS
 		});
 
-		closeAll([parked, ...others]);
+		closeAll([creditedSession, ...unpaced]);
 	});
 });

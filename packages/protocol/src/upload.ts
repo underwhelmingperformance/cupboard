@@ -384,10 +384,40 @@ export const subscribeIdentityCapability = 'subscribe-identity';
 // `commit-batch` op ever having been.
 export const subscribeIdentityCapabilityToken = `${subscribeIdentityCapability};${retentionMarkerAttribute}=${retentionMarkerAttributeValue}`;
 
-// The full value of the `x-cupboard-commit-capabilities` header the server
-// sends on every 101 response. Build from the shared constants so no call site
-// hand-codes the combined string.
+// The capability name for credit-based admission. A client looks this up in the
+// parsed capability map; the server advertises it with the connection's opening
+// grant as an attribute. Advertised, it tells the client that this server bounds
+// the session by granted credit rather than by a client-side window: the client
+// may send `request-credit`, and every entry it sends must be covered by credit
+// it holds.
+//
+// Wire-freeze: this token covers the `request-credit` op and the `credit` and
+// `queued` frames. Any change to their shapes needs a new capability token.
+export const commitCreditCapability = 'commit-credit';
+
+// The attribute carrying the credit the server grants the session at upgrade
+// time, so an uncontended tenant starts committing without a further round trip.
+export const commitCreditGrantAttribute = 'grant';
+
+// The credit token for one connection. Unlike the tokens above it varies from
+// one 101 to the next, since the opening grant depends on how much of the
+// tenant's budget is free when the upgrade arrives.
+export function commitCreditCapabilityToken(openingGrant: number): string {
+	return `${commitCreditCapability};${commitCreditGrantAttribute}=${String(openingGrant)}`;
+}
+
+// The connection-independent part of the `x-cupboard-commit-capabilities`
+// header. Build from the shared constants so no call site hand-codes the
+// combined string.
 export const commitCapabilitiesValue = `${commitBatchCapabilityToken},${subscribeIdentityCapabilityToken}`;
+
+// The full header value a 101 carries for a session the server admits under
+// credit: the fixed tokens plus this connection's opening grant.
+export function commitCapabilitiesValueWithCredit(
+	openingGrant: number
+): string {
+	return `${commitCapabilitiesValue},${commitCreditCapabilityToken(openingGrant)}`;
+}
 
 // One identity-carrying entry shared by `commit-batch` and `subscribe-identity`.
 // Carries the upload to settle or resume plus the path identity the client holds
@@ -426,6 +456,14 @@ export const commitSessionRequestSchema = z.discriminatedUnion('op', [
 	z.strictObject({
 		op: z.literal('subscribe-identity'),
 		entries: z.array(commitBatchEntrySchema).min(1).max(commitBatchMaxEntries)
+	}),
+	// Declares how many entries the session has queued and cannot send for want
+	// of credit. The declaration is absolute and replaces the previous one, so a
+	// client re-sends it as its queue grows without the server accumulating
+	// stale demand. Sent only against a server that advertised `commit-credit`.
+	z.strictObject({
+		op: z.literal('request-credit'),
+		entries: positiveIntSchema
 	})
 ]);
 export type ParsedCommitSessionRequest = z.output<
@@ -470,6 +508,24 @@ export const commitSessionFrameSchema = z.discriminatedUnion('ev', [
 	z.strictObject({
 		ev: z.literal('unsupported'),
 		op: z.string()
+	}),
+	// Grants the session credit for `grant` further entries. The server pushes
+	// this frame both in answer to `request-credit` and unprompted, whenever
+	// another session's entry releases credit the tenant can pass on. A grant of
+	// zero is never sent; `queued` answers a request the server can grant nothing
+	// against.
+	z.strictObject({
+		ev: z.literal('credit'),
+		grant: positiveIntSchema
+	}),
+	// Answers a `request-credit` the tenant's budget cannot cover yet. `ahead`
+	// counts the sessions before this one in the server's rotation at the moment
+	// the frame was built. It is diagnostic only, for logs and for a timeout
+	// error's cause: the rotation moves on as soon as any entry settles, so a
+	// client must never render it as a queue position or an estimated wait.
+	z.strictObject({
+		ev: z.literal('queued'),
+		ahead: countSchema
 	})
 ]);
 export type ParsedCommitSessionFrame = z.output<

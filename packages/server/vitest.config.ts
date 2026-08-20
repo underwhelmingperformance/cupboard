@@ -45,6 +45,10 @@ export default defineConfig(async () => {
 									R2_BUCKET_NAME: 'cupboard-blobs',
 									R2_SECRET_ACCESS_KEY: 'test-secret-access-key',
 									PUSH_ID_SIGNING_KEY: 'test-push-id-signing-key',
+									// A ceiling a test can reach with a handful of sockets. It
+									// must stay above the concurrency any other suite pushes
+									// with, or that suite's seeding would be refused.
+									CUPBOARD_COMMIT_SOCKET_CEILING: '10',
 									TEST_MIGRATIONS: migrations
 								},
 								// The admission manifest KV the control handler reads and writes;

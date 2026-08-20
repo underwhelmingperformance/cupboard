@@ -62,6 +62,45 @@ type MiniflareRequestInit = NonNullable<
 >;
 
 /**
+ * What the commit sessions of a run did, as counted at the socket the worker
+ * answered on. A test that needs to prove a publication waited on the socket it
+ * already held, rather than re-dialling, reads the upgrade count; one that needs
+ * to prove the credit budget was genuinely exhausted reads the queued count.
+ */
+export interface CommitSessionObservations {
+	readonly upgrades: number;
+	readonly creditFrames: number;
+	readonly queuedFrames: number;
+}
+
+interface CommitSessionCounters {
+	upgrades: number;
+	creditFrames: number;
+	queuedFrames: number;
+}
+
+// Counts a frame the worker sent. The keepalive answer is not a frame and the
+// socket carries nothing else that is not JSON, so anything unparseable is
+// simply not a frame worth counting.
+function countWorkerFrame(counters: CommitSessionCounters, data: string): void {
+	try {
+		const frame: unknown = JSON.parse(data);
+
+		if (typeof frame !== 'object' || frame === null || !('ev' in frame)) {
+			return;
+		}
+
+		if (frame.ev === 'credit') {
+			counters.creditFrames += 1;
+		} else if (frame.ev === 'queued') {
+			counters.queuedFrames += 1;
+		}
+	} catch {
+		// Not a frame: the keepalive answer, or a control message.
+	}
+}
+
+/**
  * A running cupboard worker backed by Miniflare, fronted by a local HTTP server
  * so that Nix can reach it over a real socket. A push's NAR bytes are written
  * straight into the bound R2 bucket because the real upload signs with a
@@ -161,8 +200,20 @@ export class CupboardTestServer {
 			void forwardToWorker(worker, request, response);
 		});
 		const upgrades = new WebSocketServer({ noServer: true });
+		const commitCounters: CommitSessionCounters = {
+			upgrades: 0,
+			creditFrames: 0,
+			queuedFrames: 0
+		};
 		httpServer.on('upgrade', (request, socket, head) => {
-			void forwardUpgradeToWorker(worker, upgrades, request, socket, head);
+			void forwardUpgradeToWorker(
+				worker,
+				upgrades,
+				request,
+				socket,
+				head,
+				commitCounters
+			);
 		});
 		const url = await listen(httpServer);
 		const instance = new CupboardTestServer(
@@ -170,7 +221,8 @@ export class CupboardTestServer {
 			issuer,
 			worker,
 			bucket,
-			httpServer
+			httpServer,
+			commitCounters
 		);
 
 		// Mirror a deployment: the fixture tenant is provisioned through the control
@@ -190,7 +242,8 @@ export class CupboardTestServer {
 		readonly issuer: StubOidcIssuer,
 		private readonly worker: Miniflare,
 		private readonly bucket: Awaited<ReturnType<Miniflare['getR2Bucket']>>,
-		private readonly server: Server
+		private readonly server: Server,
+		private readonly commitCounters: CommitSessionCounters
 	) {}
 
 	// Mints a control admin token at the bare-host `/token`, the control issuer,
@@ -221,6 +274,15 @@ export class CupboardTestServer {
 		const payload = tokenResponseSchema.parse(await response.json());
 
 		return payload.access_token;
+	}
+
+	/**
+	 * What the commit sessions have done so far. A test that spans one run reads
+	 * this before and after it and compares, since the counts are the server's
+	 * and outlive any one run.
+	 */
+	get commitSessions(): CommitSessionObservations {
+		return { ...this.commitCounters };
 	}
 
 	/**
@@ -585,7 +647,8 @@ async function forwardUpgradeToWorker(
 	upgrades: WebSocketServer,
 	request: IncomingMessage,
 	socket: Duplex,
-	head: Buffer
+	head: Buffer,
+	counters: CommitSessionCounters
 ): Promise<void> {
 	try {
 		const requestUrl = new URL(request.url ?? '/', localOrigin(request));
@@ -602,15 +665,24 @@ async function forwardUpgradeToWorker(
 		}
 
 		workerSocket.accept();
+
+		if (requestUrl.pathname.endsWith('/commit')) {
+			counters.upgrades += 1;
+		}
+
 		upgrades.handleUpgrade(request, socket, head, (client) => {
-			relaySockets(client, workerSocket);
+			relaySockets(client, workerSocket, counters);
 		});
 	} catch (error) {
 		socket.destroy(error instanceof Error ? error : new Error(String(error)));
 	}
 }
 
-function relaySockets(client: WebSocket, workerSocket: WorkerSocket): void {
+function relaySockets(
+	client: WebSocket,
+	workerSocket: WorkerSocket,
+	counters: CommitSessionCounters
+): void {
 	client.on('message', (data, isBinary) => {
 		const bytes = rawDataBytes(data);
 		workerSocket.send(
@@ -625,6 +697,10 @@ function relaySockets(client: WebSocket, workerSocket: WorkerSocket): void {
 	});
 
 	workerSocket.addEventListener('message', (event) => {
+		if (typeof event.data === 'string') {
+			countWorkerFrame(counters, event.data);
+		}
+
 		client.send(event.data);
 	});
 	workerSocket.addEventListener('close', (event) => {

@@ -50,7 +50,14 @@
 	"vars": {
 		"CUPBOARD_AUTH_ISSUER": "cupboard",
 		"CUPBOARD_AUTH_AUDIENCE": "cupboard",
-		"CUPBOARD_COLD_PATH_TTL_SECONDS": ""
+		"CUPBOARD_COLD_PATH_TTL_SECONDS": "",
+		// Empty means the built-in anti-abuse ceiling on a tenant's commit
+		// sockets. The tests bind a small value so a suite can reach it without
+		// opening hundreds of sockets.
+		"CUPBOARD_COMMIT_SOCKET_CEILING": "",
+		// Empty means the built-in budget of commit-entry credit. A test binds a
+		// small value so that it can saturate the budget by arrangement.
+		"CUPBOARD_COMMIT_ENTRY_CREDIT_BUDGET": ""
 	},
 	"migrations": [
 		{

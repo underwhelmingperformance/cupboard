@@ -22,8 +22,11 @@ import { isoTimestamp } from '@cupboard/protocol/scalars';
 import {
 	commitCapabilitiesHeader,
 	commitCapabilitiesValue,
+	commitCapabilitiesValueWithCredit,
+	commitCreditCapability,
 	commitSessionRequestSchema,
 	type ParsedCommitBatchEntry,
+	type ParsedCommitSessionRequest,
 	type SessionId,
 	sessionIdSchema,
 	uploadCapabilitiesHeader,
@@ -74,6 +77,11 @@ import { withSpan } from '../observability/span.ts';
 import { authoriseRequest } from '../orpc/authorise.ts';
 import { type TenantRpcServices } from '../orpc/context.ts';
 import { tenantOrpcHandler } from '../orpc/handler.ts';
+import { commitEntryCreditBudget } from '../policy/commit-credit.ts';
+import {
+	commitSocketCeiling,
+	maxUncreditedCommitSessions
+} from '../policy/commit-sockets.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
 import {
@@ -90,6 +98,14 @@ import {
 } from './blob-reaper-service.ts';
 import { maxOutgoingConnections } from './bulk.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
+import {
+	CommitCreditService,
+	commitSocketIdleMs,
+	hasPacedSession,
+	isSessionClosing,
+	readCommitSessionAttachment,
+	unpacedSessions
+} from './commit-credit-service.ts';
 import {
 	CommitPipelineService,
 	type PrefetchedMaterialisationFacts,
@@ -162,20 +178,6 @@ function reuseNotFound(): Response {
 		}
 	});
 }
-
-// What a commit session socket carries across a hibernation wake: the cache it
-// was opened against and the id the verify pass routes its verdicts to.
-const commitSessionAttachmentSchema = z.object({
-	cache: storedCacheSchema,
-	sessionId: sessionIdSchema
-});
-
-// Bounds the commit sockets one tenant holds at once, parked hibernating ones
-// included. A socket is an optimisation over durable status polling, so an
-// upgrade past the bound is refused retryably and the turned-away client polls
-// instead. The cap sits on sessions per tenant: root selectors admit
-// unboundedly many root names, so a per-root cap would bound nothing.
-export const maxCommitSessionsPerTenant = 8;
 
 // A storage key marking that a bounded garbage collection stopped at its
 // per-run cap with work left over. The alarm reads it to resume, so a large
@@ -350,6 +352,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		maxOutgoingConnections
 	);
 
+	// Admits commit work against the tenant's entry-credit budget, which is what
+	// bounds the parsed backlog; the semaphore above bounds only what executes.
+	private readonly commitCredit: CommitCreditService;
+
 	private readonly authKeys: AuthKeysService;
 	private readonly attestationCas: AttestationCasService;
 	private readonly attestations: AttestationsService;
@@ -453,6 +459,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.maintenanceEligibility = new MaintenanceEligibilityService(
 			this.context
 		);
+		this.commitCredit = new CommitCreditService(this.context);
 
 		// Parked commit sockets answer keepalive pings without waking the
 		// hibernated object.
@@ -732,18 +739,38 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// the socket so the message handlers have them after a hibernation wake. The
 	// guard authenticates the upgrade as plain HTTP before any socket exists; each
 	// `commit` is authorised by the cache the session was opened against.
-	private commitSession(request: Request, cache: StoredCache): Response {
+	private async commitSession(
+		request: Request,
+		cache: StoredCache
+	): Promise<Response> {
 		if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
 			throw new CommitUpgradeRequiredError();
 		}
 
-		// Counted before the accept, while the refusal is still plain HTTP, so
-		// it reaches the client with the retryable status, Retry-After and
-		// no-store through the ordinary error handler. Parked hibernating
-		// sockets are live and count; a closed socket leaves the set once its
-		// close event is handled.
-		if (this.ctx.getWebSockets().length >= maxCommitSessionsPerTenant) {
-			throw new CommitSessionLimitError(maxCommitSessionsPerTenant);
+		// Credit is enforced only against a client that declared it understands
+		// credit. A client that predates it paces itself by a fixed window of
+		// messages, which the server releases per entry, so a large push of such
+		// a client would routinely exceed any grant and be closed for overdrawing.
+		// That is a capacity condition surfacing as a fatal error, which is what
+		// credit exists to prevent, so those sessions are left unpaced and keep
+		// the bound they have always had.
+		//
+		// This gate is transitional. Remove it, and admit every session under
+		// credit, once no deployed client without the `commit-credit` capability
+		// remains.
+		const hasNegotiatedCredit = hasAcceptedCapability(
+			request,
+			commitCreditCapability
+		);
+		this.refuseCommitSessionPastBound(hasNegotiatedCredit);
+
+		if (hasNegotiatedCredit) {
+			// Read the tenant's budget before accepting anything. A misconfigured
+			// value throws, and the socket an accept adds to `getWebSockets()`
+			// outlives the upgrade that failed, so a deployment configured this way
+			// would spend one socket of its ceiling on every dial. A session that
+			// negotiates no credit never reads the budget.
+			commitEntryCreditBudget(this.context.env);
 		}
 
 		const pair = new WebSocketPair();
@@ -752,18 +779,71 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const sessionId = sessionIdSchema.parse(crypto.randomUUID());
 
 		this.ctx.acceptWebSocket(server, [sessionId]);
-		server.serializeAttachment(
-			commitSessionAttachmentSchema.parse({ cache, sessionId })
+		const openingGrant = this.commitCredit.openSession(
+			server,
+			{ cache, sessionId },
+			hasNegotiatedCredit,
+			Date.now()
 		);
+		await this.armCommitSocketIdleClose();
 
 		// Advertise the optional ops on the 101 so a capable client batches only
 		// against a server that offered it; a server that does not list an op never
-		// receives it.
+		// receives it. The credit token carries this session's opening grant, so a
+		// credited client commits at once without asking for credit first.
 		return new Response(undefined, {
 			status: 101,
 			webSocket: client,
-			headers: { [commitCapabilitiesHeader]: commitCapabilitiesValue }
+			headers: {
+				[commitCapabilitiesHeader]: hasNegotiatedCredit
+					? commitCapabilitiesValueWithCredit(openingGrant)
+					: commitCapabilitiesValue
+			}
 		});
+	}
+
+	// Refuses an upgrade the tenant has no room for. Counted before the accept,
+	// while the refusal is still plain HTTP, so it reaches the client with the
+	// retryable status, Retry-After and no-store through the ordinary error
+	// handler. Parked hibernating sockets are live and count; a closed socket
+	// leaves the set once its close event is handled.
+	private refuseCommitSessionPastBound(hasNegotiatedCredit: boolean): void {
+		const sockets = this.ctx.getWebSockets();
+		const ceiling = commitSocketCeiling(this.context.env);
+
+		if (sockets.length >= ceiling) {
+			throw new CommitSessionLimitError(ceiling);
+		}
+
+		if (hasNegotiatedCredit) {
+			return;
+		}
+
+		if (unpacedSessions(sockets) >= maxUncreditedCommitSessions) {
+			throw new CommitSessionLimitError(maxUncreditedCommitSessions);
+		}
+	}
+
+	// Keeps the idle close armed while the tenant holds a commit socket the close
+	// can act on. The wake closes the sockets whose push has finished, rebuilds
+	// the credit scheduler from the socket attachments and grants what the tenant
+	// has free, so a tenant whose sessions all hold unspent credit always has
+	// an event that resumes granting.
+	//
+	// Only a session the close could still act on earns that alarm. The close
+	// leaves a session that never negotiated credit alone, and only a credited
+	// session can be in the rotation waiting for a grant, so a tenant holding
+	// nothing else would wake every idle period for a pass that can do nothing,
+	// and a Durable Object is billed for the wake.
+	private async armCommitSocketIdleClose(): Promise<void> {
+		if (!hasPacedSession(this.ctx.getWebSockets())) {
+			return;
+		}
+
+		await armAlarmNoLaterThan(
+			this.ctx.storage,
+			Date.now() + commitSocketIdleMs
+		);
 	}
 
 	// Commits one upload over the session and replies with a per-id frame. The
@@ -1674,18 +1754,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// Drives the bounded background loops the single DO alarm carries: reconciling
-	// the committed paths a recent negotiate queued, resuming a cache teardown, the
-	// verify backstop, and finally resuming a capped garbage collection. Each
-	// re-arms the alarm while it has work left, so the backlogs converge across
-	// firings while the gate stays free between them. Garbage collection resumes
-	// last so a queued gc pass, which may wait behind an interactive or cron
-	// collection on the chain, cannot stall the other resume loops.
+	// Drives the bounded background loops the single DO alarm carries: closing
+	// idle commit sockets, reconciling the committed paths a recent negotiate
+	// queued, resuming a cache teardown, the verify backstop, and finally
+	// resuming a capped garbage collection. Each re-arms the alarm while it has
+	// work left, so the backlogs converge across firings while the gate stays
+	// free between them. Garbage collection resumes last so a queued gc pass,
+	// which may wait behind an interactive or cron collection on the chain,
+	// cannot stall the other resume loops. The idle close runs first: it is
+	// cheap, and its wake is what a session waiting on credit depends on.
 	override async alarm(): Promise<void> {
 		await this.initialise();
 		// The alarm is a top-level entrypoint, so it seeds the logger the resume
 		// paths that log outside a metered block are threaded.
 		const logger = rootLogger().with({ trigger: 'alarm' });
+		this.commitCredit.closeIdleSessions(Date.now(), () =>
+			this.uploadState.sessionsAwaitingVerdict()
+		);
+		await this.armCommitSocketIdleClose();
 		await this.reconcileNegotiatedOnce();
 		await this.resumeCacheTeardown();
 		await this.resumeVerifyBackstop(logger);
@@ -2021,12 +2107,25 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		socket: WebSocket,
 		message: string | ArrayBuffer
 	): Promise<void> {
-		const attachment = commitSessionAttachmentSchema.safeParse(
-			socket.deserializeAttachment()
-		);
+		const attachment = readCommitSessionAttachment(socket);
 
-		if (!attachment.success) {
+		if (attachment === undefined) {
 			socket.close(1011, 'missing session');
+			return;
+		}
+
+		if (isSessionClosing(attachment)) {
+			// The server closed this session and took its credit back. The socket
+			// stays listed until the peer answers the close, so a message the client
+			// sent before it read the close still arrives here; the server repeats
+			// the close and runs nothing. Serving the message would commit
+			// entries for a session that is gone, with every frame it answers
+			// unsendable, and credit granted to the session again would never return
+			// to the tenant: the idle close skips a session it has finished with,
+			// and a peer that never answers its close fires no close event. The code
+			// is 1001 rather than 1002 because this close is the server's own doing,
+			// so the client may reconnect at once.
+			socket.close(1001, 'closed');
 			return;
 		}
 
@@ -2051,7 +2150,69 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 
 		const request = parsed.data;
-		const { cache, sessionId } = attachment.data;
+		const { cache, sessionId } = attachment;
+
+		if (request.op === 'request-credit') {
+			const hasNegotiated = this.commitCredit.declareDemand(
+				socket,
+				attachment,
+				request.entries,
+				Date.now()
+			);
+
+			if (!hasNegotiated) {
+				// This session was accepted without credit, so either the declaration
+				// the client believes it made did not reach the upgrade, or the client
+				// is speaking a protocol this session never agreed to. The answer is
+				// the one an op this server does not know gets, which is a reply the
+				// client already falls back from: it drops to its own window and
+				// commits unpaced, which is what this session was accepted as.
+				sendCommitSessionFrame(socket, {
+					ev: 'unsupported',
+					op: request.op
+				});
+			}
+
+			return;
+		}
+
+		const decision = this.commitCredit.admitMessage(
+			socket,
+			attachment,
+			commitEntryCount(request),
+			Date.now()
+		);
+
+		// Both closes below reclaim first, in this same event. A socket the server
+		// has closed stays listed until the client completes the handshake, so
+		// waiting for the close event would leave the session's credit and its
+		// rotation entry standing, and a grant could land on a socket that is on
+		// its way out.
+		if (decision === 'overdrawn') {
+			// Credit is bound to the connection and the server hands out every unit
+			// of it. This session has asked for credit and been answered, so it
+			// knows what it holds, and a message naming more entries than that can
+			// only be a client bug. 1002 is the close a client treats as final
+			// rather than retrying.
+			this.commitCredit.closeSession(sessionId, Date.now());
+			socket.close(1002, 'commit credit exceeded');
+			return;
+		}
+
+		if (decision === 'refused') {
+			// Serving this message would take the session out of the credit
+			// accounting, and the tenant already holds every unpaced session it
+			// allows. 1013 tells the client to come back, which is what an upgrade
+			// refused at the same bound tells it, so a client whose grant was lost
+			// reconnects and negotiates again.
+			this.commitCredit.closeSession(sessionId, Date.now());
+			socket.close(1013, 'too many unpaced commit sessions');
+			return;
+		}
+
+		// Each accounted entry returns its credit to the tenant as its first frame
+		// is sent, which is the instant it stops occupying this object.
+		const isAccounted = decision === 'accounted';
 
 		if (request.op === 'commit') {
 			// The socket message is a top-level entrypoint, so it seeds the logger the
@@ -2072,6 +2233,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				);
 			} finally {
 				this.commitEntrySemaphore.release();
+
+				if (isAccounted) {
+					this.commitCredit.release(sessionId, Date.now());
+				}
 			}
 
 			return;
@@ -2106,34 +2271,79 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				// D1 fault: degrade to per-entry reads.
 			}
 
-			await mapWithConcurrency(
-				request.commits,
-				maxOutgoingConnections,
-				async (entry) => {
-					await this.commitEntrySemaphore.acquire();
+			// The message was debited for every entry at once, and an entry returns
+			// its own credit only if it runs: `mapWithConcurrency` starts none of
+			// the entries behind one that rejects. Count what the entries returned
+			// and return the rest here, so the tenant gets the whole message's
+			// credit back however the message ends.
+			let released = 0;
+			const answered = new Set<UploadId>();
 
-					try {
-						await this.runSessionCommit(
-							logger,
-							socket,
-							cache,
-							sessionId,
-							entry.uploadId,
-							{
-								storePathHash: entry.storePathHash,
-								narHash: entry.narHash,
-								retention: entry.retention
-							},
-							{
-								prefetched: batchPrefetched?.get(entry.narHash),
-								account: batchAccount
+			try {
+				await mapWithConcurrency(
+					request.commits,
+					maxOutgoingConnections,
+					async (entry) => {
+						await this.commitEntrySemaphore.acquire();
+
+						try {
+							await this.runSessionCommit(
+								logger,
+								socket,
+								cache,
+								sessionId,
+								entry.uploadId,
+								{
+									storePathHash: entry.storePathHash,
+									narHash: entry.narHash,
+									retention: entry.retention
+								},
+								{
+									prefetched: batchPrefetched?.get(entry.narHash),
+									account: batchAccount
+								}
+							);
+							answered.add(entry.uploadId);
+						} finally {
+							this.commitEntrySemaphore.release();
+
+							if (isAccounted) {
+								released += 1;
+								this.commitCredit.release(sessionId, Date.now());
 							}
-						);
-					} finally {
-						this.commitEntrySemaphore.release();
+						}
 					}
+				);
+			} catch (error) {
+				// A commit answers its own entry whatever the outcome, so a fault that
+				// reaches here escaped one entry and stopped the entries behind it
+				// from starting. Every entry the client is still waiting on is
+				// answered retryably, so it re-sends them as soon as it reads the
+				// frame instead of holding them until its own deadline expires. The
+				// frames carry no detail of the fault, so this line is the only record
+				// of what failed.
+				logger.error('a commit batch failed outside an entry frame', { error });
+
+				for (const entry of request.commits) {
+					if (answered.has(entry.uploadId)) {
+						continue;
+					}
+
+					sendCommitSessionFrame(socket, {
+						ev: 'error',
+						uploadId: entry.uploadId,
+						status: StatusCodes.SERVICE_UNAVAILABLE,
+						message: 'the commit batch stopped before this entry was answered'
+					});
 				}
-			);
+			} finally {
+				const abandoned = request.commits.length - released;
+
+				if (isAccounted && abandoned > 0) {
+					this.commitCredit.release(sessionId, Date.now(), abandoned);
+				}
+			}
+
 			return;
 		}
 
@@ -2150,15 +2360,48 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.replaySubscribe(socket, cache, sessionId, request.uploadIds);
 	}
 
-	// A waiter that hangs up needs no bookkeeping (the hibernation API drops it
-	// from `getWebSockets`); closing our end completes the handshake.
+	// A waiter that hangs up needs no bookkeeping of its own (the hibernation API
+	// drops it from `getWebSockets`); closing our end completes the handshake.
+	// Its credit is another matter, and goes back to the tenant here.
 	webSocketClose(socket: WebSocket): void {
+		reclaimCommitCredit(this.commitCredit, socket);
 		socket.close();
 	}
 
 	webSocketError(socket: WebSocket): void {
+		reclaimCommitCredit(this.commitCredit, socket);
 		socket.close(1011, 'socket error');
 	}
+}
+
+// A session's unspent credit goes back to the tenant as soon as its socket is
+// gone, so the server never has to expire a grant or ask for one back.
+function reclaimCommitCredit(
+	credit: CommitCreditService,
+	socket: WebSocket
+): void {
+	const attachment = readCommitSessionAttachment(socket);
+
+	if (attachment === undefined) {
+		return;
+	}
+
+	credit.closeSession(attachment.sessionId, Date.now());
+}
+
+// The entries one client message commits, which is what the session's credit is
+// debited by. The subscribe ops re-attach to durable rows rather than commit
+// anything, so they cost no credit and keep their own bounds.
+function commitEntryCount(request: ParsedCommitSessionRequest): number {
+	if (request.op === 'commit') {
+		return 1;
+	}
+
+	if (request.op === 'commit-batch') {
+		return request.commits.length;
+	}
+
+	return 0;
 }
 
 function safeJsonParse(text: string): unknown {
