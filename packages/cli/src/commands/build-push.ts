@@ -473,7 +473,7 @@ export function registerBuildPushCommand(
 		)
 		.option(
 			'--wait-timeout <duration>',
-			'how long to wait for deferred blobs to become servable (e.g. 10m, 1h); default 10m',
+			'how long to wait for commit capacity, and separately how long to wait for deferred blobs to become servable (e.g. 10m, 1h); default 10m',
 			parseWaitTimeout
 		)
 		.option(

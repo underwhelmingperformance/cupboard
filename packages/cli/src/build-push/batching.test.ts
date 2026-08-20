@@ -17,6 +17,10 @@ import {
 } from '@cupboard/protocol/upload';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type {
+	CommitSession,
+	CommitSessionTarget
+} from '../client/commit-socket.ts';
 import type { PushClient } from '../push/push.ts';
 
 import {
@@ -104,6 +108,11 @@ interface HarnessOptions {
 		paths: NegotiateBody['paths']
 	) => ParsedUploadNegotiateResponse['uploads'];
 	readonly maxEntries?: number;
+	/**
+	 * The run's shared commit session. When it is present, the flush must commit
+	 * over it and never reach the client's own `commit`.
+	 */
+	readonly commitSession?: CommitSession;
 }
 
 function harness(options: HarnessOptions = {}): Harness {
@@ -206,6 +215,9 @@ function harness(options: HarnessOptions = {}): Harness {
 			digest: () => ({ narHash, narSize: 4 })
 		}),
 		...(options.maxEntries !== undefined && { maxEntries: options.maxEntries }),
+		...(options.commitSession !== undefined && {
+			session: options.commitSession
+		}),
 		onOutcome: (outcome) => {
 			outcomes.push(outcome);
 		},
@@ -445,6 +457,45 @@ describe('BuildOutputBatcher', () => {
 			outcomes: [],
 			failedPaths: [pathA, pathB],
 			candidates: [pathA, pathB]
+		});
+	});
+});
+
+// A run opens one commit session and threads it through every phase, so a
+// flush must commit over it rather than through the client. Reaching the
+// client's own `commit` here would mean a second socket per run.
+describe('BuildOutputBatcher over a shared commit session', () => {
+	it('commits over the session and never through the client', async () => {
+		const sessionCommits: CommitSessionTarget[] = [];
+		const commitSession: CommitSession = {
+			commit: (target) => {
+				sessionCommits.push(target);
+
+				return Promise.resolve({
+					storePathHash: target.storePathHash,
+					narHash: target.narHash,
+					status: 'committed' as const,
+					settled: Promise.resolve()
+				});
+			},
+			close: () => {
+				throw new Error('the run closes the session, not a flush');
+			}
+		};
+		const { batcher, events, outcomes } = harness({ commitSession });
+
+		batcher.enqueue(pathA);
+		await vi.advanceTimersByTimeAsync(500);
+		await batcher.settled();
+
+		expect({
+			sessionCommits: sessionCommits.map((target) => target.storePathHash),
+			clientCommits: events.filter((event) => event.startsWith('commit:')),
+			outcomes
+		}).toStrictEqual({
+			sessionCommits: [StorePath.hash(pathA)],
+			clientCommits: [],
+			outcomes: [{ outcome: 'published', storePath: pathA }]
 		});
 	});
 });

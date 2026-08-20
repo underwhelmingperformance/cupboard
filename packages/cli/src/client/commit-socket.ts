@@ -3,9 +3,12 @@ import {
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import {
+	commitAcceptCapabilitiesHeader,
 	commitBatchCapability,
 	commitBatchMaxEntries,
 	commitCapabilitiesHeader,
+	commitCreditCapability,
+	commitCreditGrantAttribute,
 	commitSessionFrameSchema,
 	type CommitSessionRequest,
 	type ParsedUploadGraceFact,
@@ -19,6 +22,8 @@ import { z } from 'zod';
 
 import { abortReason } from '../abort.ts';
 import {
+	CommitCapacityQueuedError,
+	CommitCapacityTimeoutError,
 	CommitSocketProtocolError,
 	CupboardHttpError,
 	UploadVerificationFailedError,
@@ -33,12 +38,16 @@ export interface CommitSocketData {
 }
 
 /**
-The HTTP response a refused upgrade carries (a `ws` `IncomingMessage`).
-*/
+ * The HTTP response a refused upgrade carries (a `ws` `IncomingMessage`). `ws`
+ * hands a refused connection to the listener and does nothing further with it,
+ * so the session closes it through `destroy` once it has read the refusal.
+ */
 export interface UpgradeFailure {
 	readonly statusCode?: number;
+	readonly headers: Readonly<Record<string, string | string[] | undefined>>;
 	on(event: 'data', listener: (chunk: CommitSocketData) => void): unknown;
 	on(event: 'end', listener: () => void): unknown;
+	destroy(): void;
 }
 
 /**
@@ -126,6 +135,13 @@ export interface CommitSessionOptions {
 	 * the 101 response. Useful for logging the negotiated mode.
 	 */
 	readonly onCapabilities?: (capabilities: AdvertisedCapabilities) => void;
+	/**
+	 * Called when the session starts waiting for the server to grant it capacity
+	 * to commit under, and again when it stops. It reports the fact only: the
+	 * server's queue moves as soon as any entry settles anywhere, so there is no
+	 * position or estimate to report and none is passed.
+	 */
+	readonly onWaiting?: (isWaitingForCapacity: boolean) => void;
 }
 
 /**
@@ -182,6 +198,18 @@ interface SessionEntry {
 	verdictGrace?: ParsedUploadGraceFact;
 }
 
+/**
+ * Why a connection ended, for the parts of the drop path that treat a server
+ * refusing the upgrade differently from a connection that failed. A refusal
+ * carries the wait the server asked for before the next dial, when it sent one
+ * the client could read.
+ */
+type DropCause =
+	| { readonly kind: 'connection' }
+	| { readonly kind: 'refusal'; readonly minimumDelayMs?: number };
+
+const connectionDrop: DropCause = { kind: 'connection' };
+
 const defaultKeepaliveMs = 30_000;
 const defaultMaxReconnects = 5;
 const defaultReconnectBackoffMs = 500;
@@ -192,16 +220,41 @@ const keepaliveResponse = 'pong';
 // heal it, so the session fails immediately on this code.
 const nonRetryableCloseCode = 1002;
 
-// Maximum number of commit-batch messages in flight at once. Once this many
-// are outstanding, further chunks queue until any frame for an in-flight chunk
-// arrives (the ANY-frame rule: one frame means the server parsed the message
-// and is processing its entries concurrently, so it counts as done for windowing
-// purposes).
+// Maximum number of commit-batch messages in flight at once, for a server that
+// does not pace the session itself. Once this many are outstanding, further
+// chunks queue until any frame for an in-flight chunk arrives (the ANY-frame
+// rule: one frame means the server parsed the message and is processing its
+// entries concurrently, so it counts as done for windowing purposes).
+//
+// A server advertising `commit-credit` grants the session what it may send, and
+// that replaces this window entirely for the connection.
 const maxInFlightBatchMessages = 2;
 
+// The longest delay a timer can hold. A runtime truncates anything longer to a
+// millisecond, so a deadline past this is armed in instalments, each measuring
+// what is left afresh.
+const maxTimerDelayMs = 2 ** 31 - 1;
+
 // Status codes that indicate a transient server overload: a short per-entry
-// backoff and re-send may succeed where an immediate retry would not.
+// backoff and re-send may succeed where an immediate retry would not. An error
+// frame is written by the tenant's own object, which reports every transient
+// condition of its own as one of these two.
 const retryableErrorStatuses = new Set([429, 503]);
+
+// The longest wait a refused upgrade can ask of the session before it dials
+// again. A server sends `Retry-After` to ask for a longer gap than the
+// back-off would take, so a cap much above the five-second back-off ceiling is
+// needed for the header to mean anything; a minute keeps a nonsense value from
+// spending the session's whole capacity deadline on one gap.
+const maxRetryAfterMs = 60_000;
+
+// How long the session reads a refusal body before it gives up on the response.
+// A refusal body is a short message already on its way, so five seconds is far
+// longer than a working peer needs. It bounds the two cases that produce no
+// further event: a body truncated and then half-closed, and headers whose
+// stated length never arrives. Either would otherwise leave the session waiting
+// on a connection nothing will speak on again.
+const refusalDrainMs = 5000;
 // How many times one entry is re-sent before its error is treated as terminal.
 const maxEntryRetries = 3;
 // Base delay in ms before the first entry retry; doubles per attempt (no jitter,
@@ -216,7 +269,9 @@ const knownEvs = new Set([
 	'deferred',
 	'verdict',
 	'error',
-	'unsupported'
+	'unsupported',
+	'credit',
+	'queued'
 ]);
 
 // Awaits a promise solely to observe a rejection no caller did, so an unawaited
@@ -325,6 +380,46 @@ function resolvedBatchSize(
 	return Math.min(parsed, commitBatchMaxEntries);
 }
 
+// The credit this connection opens with, or `undefined` when the 101 carried no
+// `commit-credit` token. A token with no readable grant opens at zero, which
+// costs one `request-credit` round trip and nothing else.
+function resolvedOpeningGrant(
+	capabilities: AdvertisedCapabilities
+): number | undefined {
+	const attributes = capabilities.get(commitCreditCapability);
+
+	if (attributes === undefined) {
+		return undefined;
+	}
+
+	const grant = Number(attributes[commitCreditGrantAttribute]);
+
+	if (!Number.isSafeInteger(grant) || grant < 0) {
+		return 0;
+	}
+
+	return grant;
+}
+
+// Whether these upgrade request headers declare `commit-credit`. The server
+// decides to pace a session from this declaration alone and closes it for
+// overdrawing, so a session that declares the token has to pace itself even
+// when the 101 comes back without it: an intermediary that answers the upgrade
+// itself can drop the response header.
+function isCommitCreditDeclared(
+	headers: Readonly<Record<string, string>>
+): boolean {
+	for (const [name, value] of Object.entries(headers)) {
+		if (name.toLowerCase() !== commitAcceptCapabilitiesHeader) {
+			continue;
+		}
+
+		return parseCapabilities(value).has(commitCreditCapability);
+	}
+
+	return false;
+}
+
 // Whether the server advertised the retention-marker attribute on the given
 // capability token, so a client can set `retention: true` on an entry of the
 // op that token names without risking a `strictObject` rejection from a
@@ -362,14 +457,34 @@ export function runCommitSession(
 	const outstanding = new Map<UploadId, SessionEntry>();
 	const maxReconnects = options.maxReconnects ?? defaultMaxReconnects;
 	const backoffBase = options.reconnectBackoffMs ?? defaultReconnectBackoffMs;
+	const isCreditDeclared = isCommitCreditDeclared(headers);
 
 	let socket: CommitSocket | undefined;
+	// Counts the connections this session has opened, so each connection's
+	// handlers can tell whether they are still the current one.
+	let connectionGeneration = 0;
 	let isOpened = false;
 	let isClosed = false;
+	// The server closes a socket it has heard nothing on for a long time. With
+	// nothing outstanding that costs the session nothing, so it goes dormant
+	// rather than closed and the next commit opens a fresh connection.
+	let isDormant = false;
 	let failure: Error | undefined;
 	let keepalive: NodeJS.Timeout | undefined;
 	let reconnectTimer: NodeJS.Timeout | undefined;
+	// Bounds how long the body of a refused upgrade is read. It is held here
+	// rather than in the handler that arms it so that a session which is torn
+	// down, or which has moved to another connection, can clear it.
+	let refusalDrainTimer: NodeJS.Timeout | undefined;
+	// The clock time before which the session does not dial again, set when a
+	// server refuses an upgrade and asks for a wait. It outlives a dormancy,
+	// since the dial it applies to is usually the one the next commit makes.
+	let earliestDialAt = 0;
 	let reconnectsLeft = maxReconnects;
+	// Reconnects since the server last answered an entry. The back-off is drawn
+	// from this rather than from `reconnectsLeft`, so a reconnect that spends no
+	// budget still backs off further than the one before it.
+	let reconnectAttempt = 0;
 	// Effective batch size for the current connection: a positive integer when the
 	// server advertised `commit-batch` (possibly with a `max` attribute), or
 	// `undefined` when it did not.
@@ -385,6 +500,44 @@ export function runCommitSession(
 	// answers with the path's stored grace fact rather than none.
 	let hasBatchRetentionMarker = false;
 	let hasIdentityRetentionMarker = false;
+	// The entries this connection may still send, and the demand it last
+	// declared. Both are per connection: a fresh 101 carries a fresh grant, and
+	// the server keeps no demand for a session that has gone. `undefined` credit
+	// means the server did not advertise `commit-credit` and does not pace this
+	// session, which leaves the window above in charge.
+	let creditAvailable: number | undefined;
+	let declaredDemand = 0;
+	// Whether this session is paced by credit. It starts from the client's own
+	// declaration, for the same reason the missing-token fallback does: the
+	// server pins pacing to that declaration, so the client must not wait for a
+	// 101 to agree. A session that cannot reach the cache at all therefore still
+	// has a capacity clock. Only a server that rejects `request-credit` takes the
+	// session off credit, and only for the connection that rejected it.
+	let isCreditPaced = isCreditDeclared;
+	// Entries the caller has committed that the server has not acknowledged with
+	// a durable row. An acked entry is bounded by its own verdict deadline
+	// instead. Kept as a count because the capacity wait consults it on every
+	// frame.
+	let unackedEntries = 0;
+
+	// The wait the capacity timeout measures, and the sum of every wait the
+	// session has had. See {@link isWaitingForCapacity}.
+	let accruedWaitMs = 0;
+	let totalWaitedMs = 0;
+	let waitingSince: number | undefined;
+	let capacityTimer: NodeJS.Timeout | undefined;
+	let isWaitingReported = false;
+	// The rotation count the server last reported, carried into the timeout's
+	// cause as a diagnostic and read for nothing else.
+	let lastAhead: number | undefined;
+	// The last upgrade refusal the session was given and went on dialling
+	// through. A wait that expires having only met refusals reports this one, so
+	// the status and body reach the operator rather than a wait time on its own.
+	// It belongs to the wait it was met during, so it is cleared by progress of
+	// any kind, in `noteCapacityProgress`, and by the ends of that wait: the
+	// expiry that has just reported it, and a dormancy, which leaves the session
+	// with nothing outstanding to wait for.
+	let lastRefusal: CupboardHttpError | undefined;
 
 	const sendNow = (request: CommitSessionRequest): void => {
 		socket?.send(JSON.stringify(request));
@@ -401,15 +554,7 @@ export function runCommitSession(
 	const uploadIdToChunkKey = new Map<UploadId, string>();
 	let pendingBatchChunks: CommitSessionTarget[][] = [];
 
-	const sendBatchChunk = (batch: readonly CommitSessionTarget[]): void => {
-		const chunkKey = batch[0]?.uploadId ?? '';
-		const ids = new Set(batch.map((t) => t.uploadId));
-		inFlightChunks.set(chunkKey, ids);
-
-		for (const id of ids) {
-			uploadIdToChunkKey.set(id, chunkKey);
-		}
-
+	const sendBatchMessage = (batch: readonly CommitSessionTarget[]): void => {
 		sendNow({
 			op: 'commit-batch',
 			commits: batch.map((target) => ({
@@ -420,6 +565,19 @@ export function runCommitSession(
 					hasBatchRetentionMarker && { retention: true as const })
 			}))
 		});
+	};
+
+	const sendBatchChunk = (batch: readonly CommitSessionTarget[]): void => {
+		const chunkKey = batch[0]?.uploadId ?? '';
+		const ids = new Set(batch.map((t) => t.uploadId));
+		inFlightChunks.set(chunkKey, ids);
+
+		for (const id of ids) {
+			uploadIdToChunkKey.set(id, chunkKey);
+			inFlightEntries.add(id);
+		}
+
+		sendBatchMessage(batch);
 	};
 
 	const releaseChunkForUploadId = (uploadId: UploadId): void => {
@@ -448,9 +606,235 @@ export function runCommitSession(
 		}
 	};
 
+	// The targets this connection has not sent yet for want of credit. Cleared on
+	// reconnect, since `replayOutstanding` re-queues everything outstanding.
+	let queuedTargets: CommitSessionTarget[] = [];
+
+	// The entries this connection has sent that the server has not answered. An
+	// entry leaves on its first frame, `deferred` included, because that is when
+	// the server returns its credit. Cleared on reconnect, since the replay sends
+	// everything outstanding again.
+	const inFlightEntries = new Set<UploadId>();
+
+	// Removes a target whose entry has already finished. A retry re-queues an
+	// entry, and its verdict can arrive while it waits there; without this the
+	// queue would go on counting it as a path waiting for capacity.
+	const removeQueuedTarget = (uploadId: UploadId): void => {
+		const index = queuedTargets.findIndex(
+			(target) => target.uploadId === uploadId
+		);
+
+		if (index === -1) {
+			return;
+		}
+
+		queuedTargets.splice(index, 1);
+	};
+
+	// Whether the session is waiting for capacity: a paced session holding work
+	// the cache has not let it send, with nothing sent that the cache still owes
+	// an answer for.
+	//
+	// This deliberately ignores the state of the connection. The cache makes
+	// no progress for the session whether it is refusing credit, dropping the
+	// socket or refusing the dial, so the deadline stays armed through a
+	// disconnection and a partition ends at the budget like any other wait
+	// without progress. It
+	// reads `outstanding` rather than the queue for the same reason: the queue
+	// belongs to a connection, and a reconnect empties it.
+	//
+	// The deadline measures one unbroken wait. A grant or an answered entry
+	// starts it again from zero. `accruedWaitMs` holds the wait still running and
+	// `totalWaitedMs` sums every wait the session has had.
+	const isWaitingForCapacity = (): boolean =>
+		!isClosed &&
+		isCreditPaced &&
+		unackedEntries > 0 &&
+		inFlightEntries.size === 0;
+
+	// Adds the wait still running to both counters and returns the wait so far.
+	const accrueCapacityWait = (): number => {
+		if (waitingSince === undefined) {
+			return accruedWaitMs;
+		}
+
+		const waited = Date.now() - waitingSince;
+		accruedWaitMs += waited;
+		totalWaitedMs += waited;
+		waitingSince = undefined;
+
+		return accruedWaitMs;
+	};
+
+	const clearCapacityDeadline = (): void => {
+		if (capacityTimer === undefined) {
+			return;
+		}
+
+		clearTimeout(capacityTimer);
+		capacityTimer = undefined;
+	};
+
+	// How long the session has waited, including the part still running.
+	const waitedSoFar = (): number =>
+		accruedWaitMs +
+		(waitingSince === undefined ? 0 : Date.now() - waitingSince);
+
+	// Arms the deadline for what is left of the budget. The runtime truncates a
+	// delay past `maxTimerDelayMs` to one millisecond, so a longer budget is
+	// armed in instalments and each instalment measures the wait again.
+	const armCapacityDeadline = (): void => {
+		const remaining = options.timeoutSeconds * 1000 - waitedSoFar();
+
+		capacityTimer =
+			remaining > maxTimerDelayMs
+				? setTimeout(armCapacityDeadline, maxTimerDelayMs)
+				: setTimeout(expireCapacityWait, Math.max(0, remaining));
+		capacityTimer.unref();
+	};
+
+	// The cache granted capacity or answered an entry, so the next wait starts
+	// from zero.
+	const noteCapacityProgress = (): void => {
+		accrueCapacityWait();
+		accruedWaitMs = 0;
+		clearCapacityDeadline();
+		lastRefusal = undefined;
+	};
+
+	// Fails the work the cache never let the session send, once the wait reaches
+	// the budget. This can fire while the session is disconnected, so it rejects
+	// from `outstanding` rather than from the queue a reconnect has emptied. An
+	// entry parked on its verdict is left alone: the server holds a durable row
+	// for it, and its own deadline bounds it.
+	const expireCapacityWait = (): void => {
+		capacityTimer = undefined;
+		const waited = accrueCapacityWait();
+		queuedTargets = [];
+		const error = new CommitCapacityTimeoutError(
+			options.timeoutSeconds,
+			Math.round(waited / 1000),
+			new CommitCapacityQueuedError(lastAhead, { cause: lastRefusal }),
+			Math.round(totalWaitedMs / 1000)
+		);
+
+		for (const [uploadId, entry] of outstanding) {
+			if (entry.acked) {
+				continue;
+			}
+
+			finishEntry(uploadId, (expiring) => {
+				expiring.rejectAck(error);
+			});
+		}
+
+		// With nothing left outstanding there is nothing to reconnect for, and
+		// the pending reconnect goes with the session, so a run that gave up
+		// during a partition stops holding the process open.
+		if (outstanding.size === 0) {
+			goDormant();
+		} else {
+			abandonConnection();
+		}
+
+		// A later commit waits from zero on whichever connection comes next.
+		// `totalWaitedMs` keeps this wait, since it covers the whole session.
+		accruedWaitMs = 0;
+		lastRefusal = undefined;
+		updateCapacityWait();
+	};
+
+	// Starts, stops and reports the capacity wait as the session's work and
+	// credit change. Called after anything that can alter either.
+	const updateCapacityWait = (): void => {
+		const isWaiting = isWaitingForCapacity();
+
+		if (isWaiting && waitingSince === undefined) {
+			waitingSince = Date.now();
+			armCapacityDeadline();
+		}
+
+		if (!isWaiting && waitingSince !== undefined) {
+			accrueCapacityWait();
+			clearCapacityDeadline();
+		}
+
+		if (isWaiting !== isWaitingReported) {
+			isWaitingReported = isWaiting;
+			options.onWaiting?.(isWaiting);
+		}
+	};
+
+	// Tells the server how many entries are queued, so it can grant against a
+	// real figure. The declaration is absolute and replaces the last one, and is
+	// re-sent only when the queue has grown past it, so a steady drain sends one
+	// declaration rather than one per path.
+	const declareDemand = (): void => {
+		if (creditAvailable === undefined || !isOpened || isClosed) {
+			return;
+		}
+
+		if (
+			queuedTargets.length === 0 ||
+			creditAvailable > 0 ||
+			queuedTargets.length <= declaredDemand
+		) {
+			return;
+		}
+
+		declaredDemand = queuedTargets.length;
+		sendNow({ op: 'request-credit', entries: declaredDemand });
+	};
+
+	// Sends as much of the queue as the session holds credit for, in messages of
+	// at most the connection's batch size.
+	const drainCredit = (): void => {
+		while (
+			isOpened &&
+			!isClosed &&
+			creditAvailable !== undefined &&
+			creditAvailable > 0 &&
+			queuedTargets.length > 0
+		) {
+			const drained = queuedTargets.splice(
+				0,
+				Math.min(effectiveBatchSize ?? 1, creditAvailable)
+			);
+			// A queued target whose entry has since finished names a row the
+			// server has already answered, and re-sending it would spend credit
+			// on a commit for an upload the session no longer holds. Only the
+			// survivors are sent, and only they are paid for.
+			const batch = drained.filter((target) =>
+				outstanding.has(target.uploadId)
+			);
+
+			if (batch.length === 0) {
+				continue;
+			}
+
+			creditAvailable -= batch.length;
+
+			for (const target of batch) {
+				inFlightEntries.add(target.uploadId);
+			}
+
+			if (effectiveBatchSize === undefined) {
+				for (const target of batch) {
+					sendNow({ op: 'commit', uploadId: target.uploadId });
+				}
+			} else {
+				sendBatchMessage(batch);
+			}
+		}
+
+		declareDemand();
+		updateCapacityWait();
+	};
+
 	// Sends a set of commits in the shape this connection speaks: one
 	// `commit-batch` op per bounded chunk when the server offered it, a per-id
-	// `commit` op each otherwise.
+	// `commit` op each otherwise. A server that paces the session takes what its
+	// grant covers and the rest waits in the queue.
 	//
 	// On a reconnect without `commit-batch`, a bare re-sent op may try to commit
 	// a row that already settled and cleared between the drop and the replay. The
@@ -459,8 +843,16 @@ export function runCommitSession(
 	// `commit-batch`, so this asymmetry is inherent to the non-batching path.
 	// Entry deadlines bound the window in which it can occur.
 	const sendCommits = (targets: readonly CommitSessionTarget[]): void => {
+		if (creditAvailable !== undefined) {
+			queuedTargets.push(...targets);
+			drainCredit();
+
+			return;
+		}
+
 		if (effectiveBatchSize === undefined) {
 			for (const target of targets) {
+				inFlightEntries.add(target.uploadId);
 				sendNow({ op: 'commit', uploadId: target.uploadId });
 			}
 
@@ -518,13 +910,33 @@ export function runCommitSession(
 		keepalive = undefined;
 	};
 
+	const clearReconnectTimer = (): void => {
+		if (reconnectTimer === undefined) {
+			return;
+		}
+
+		clearTimeout(reconnectTimer);
+		reconnectTimer = undefined;
+	};
+
+	const clearRefusalDrain = (): void => {
+		if (refusalDrainTimer === undefined) {
+			return;
+		}
+
+		clearTimeout(refusalDrainTimer);
+		refusalDrainTimer = undefined;
+	};
+
 	const teardown = (): void => {
 		clearKeepalive();
-
-		if (reconnectTimer !== undefined) {
-			clearTimeout(reconnectTimer);
-			reconnectTimer = undefined;
-		}
+		clearCapacityDeadline();
+		clearReconnectTimer();
+		clearRefusalDrain();
+		// The session is closed, so a wait it was reporting has ended and the
+		// caller is told so here. Whether capacity arrived or the session gave
+		// up is carried by each path's outcome, not by this call.
+		updateCapacityWait();
 
 		for (const entry of outstanding.values()) {
 			if (entry.deadline !== undefined) {
@@ -538,6 +950,29 @@ export function runCommitSession(
 
 		options.signal?.removeEventListener('abort', onAbort);
 		socket?.close();
+	};
+
+	// Closes the connection but keeps the session's entries. The server holds a
+	// session's declared demand and its granted credit in the socket alone, so
+	// closing returns both to the tenant. The session sends nothing until a
+	// connection is up again, opened either by the drop path's reconnect or by
+	// the next commit.
+	const abandonConnection = (): void => {
+		clearKeepalive();
+		isOpened = false;
+		creditAvailable = undefined;
+		declaredDemand = 0;
+		inFlightEntries.clear();
+		socket?.close();
+	};
+
+	// Closes the connection with nothing left outstanding on it. No reconnect
+	// follows; the next commit opens a connection and negotiates again.
+	const goDormant = (): void => {
+		clearReconnectTimer();
+		isDormant = true;
+		lastRefusal = undefined;
+		abandonConnection();
 	};
 
 	// A failure the session cannot recover from (a refused upgrade, exhausted
@@ -587,7 +1022,23 @@ export function runCommitSession(
 		}
 
 		outstanding.delete(uploadId);
+
+		if (!entry.acked) {
+			unackedEntries -= 1;
+		}
+
+		// No id is ever in flight and queued at once: the drain splices a target
+		// out of the queue as it sends it, and the retry and deferred paths take
+		// an id out of the in-flight set before it can be re-queued. The queue
+		// scan therefore only runs for an entry that was never sent.
+		if (!inFlightEntries.delete(uploadId)) {
+			removeQueuedTarget(uploadId);
+		}
+
 		settle(entry);
+		// The session may have been waiting on this entry's reply to bring credit
+		// back, so a finished entry can start the capacity wait.
+		updateCapacityWait();
 	};
 
 	const onFrame = (text: string): void => {
@@ -618,19 +1069,39 @@ export function runCommitSession(
 			return;
 		}
 
-		// A valid frame is progress, so a later drop gets the full reconnect budget
-		// again; only a run of drops with nothing in between exhausts it.
-		reconnectsLeft = maxReconnects;
 		const frame = parsed.data;
 
-		// Any frame for an upload id counts as an ack for that chunk's window slot,
-		// releasing the next queued batch chunk. The unsupported ev carries no id.
+		// Any frame naming an upload counts as an ack for that chunk's window
+		// slot, releasing the next queued batch chunk (the ANY-frame rule).
 		if ('uploadId' in frame) {
 			releaseChunkForUploadId(frame.uploadId);
 		}
 
+		// Only the first answer to an entry the session still holds restores the
+		// reconnect budget. A repeated `deferred` frame does not, because the
+		// replay asks for one on every reconnect, and a cache that accepts an
+		// entry, repeats its answer and dies would be reconnected to for ever.
+		const answered =
+			'uploadId' in frame ? outstanding.get(frame.uploadId) : undefined;
+
+		if (
+			answered !== undefined &&
+			!(frame.ev === 'deferred' && answered.acked)
+		) {
+			reconnectsLeft = maxReconnects;
+			reconnectAttempt = 0;
+		}
+
 		switch (frame.ev) {
 			case 'settled': {
+				// A frame for an id the session no longer holds returns no credit,
+				// so it must not reach `noteCapacityProgress` below.
+				if (!outstanding.has(frame.uploadId)) {
+					return;
+				}
+
+				noteCapacityProgress();
+
 				// An immediate commit (a reuse or an inline verify) is already
 				// servable, so its verdict settles at once.
 				finishEntry(frame.uploadId, (entry) => {
@@ -656,6 +1127,11 @@ export function runCommitSession(
 					return;
 				}
 
+				// A reconnect resubscribes every parked entry and the server answers
+				// each with a fresh `deferred` frame, so only the first one for an
+				// entry returns credit.
+				const isFirstDeferral = !entry.acked;
+
 				// The server holds a durable row now: ack the disposition so the
 				// caller can record retention, and keep the entry to carry the
 				// verdict its `settled` promise resolves on.
@@ -670,6 +1146,14 @@ export function runCommitSession(
 					verdictGrace: () => entry.verdictGrace
 				});
 
+				if (isFirstDeferral) {
+					unackedEntries -= 1;
+					noteCapacityProgress();
+				}
+
+				inFlightEntries.delete(frame.uploadId);
+				updateCapacityWait();
+
 				return;
 			}
 
@@ -679,6 +1163,8 @@ export function runCommitSession(
 				if (entry === undefined) {
 					return;
 				}
+
+				noteCapacityProgress();
 
 				if (frame.status === 'pending') {
 					failSession(
@@ -747,6 +1233,11 @@ export function runCommitSession(
 					entry.retryAttempts += 1;
 					const attempt = entry.retryAttempts;
 					const delay = entryRetryBaseMs * 2 ** (attempt - 1);
+
+					if (entry.retryTimer !== undefined) {
+						clearTimeout(entry.retryTimer);
+					}
+
 					entry.retryTimer = setTimeout(() => {
 						entry.retryTimer = undefined;
 
@@ -755,8 +1246,16 @@ export function runCommitSession(
 						}
 					}, delay);
 					entry.retryTimer.unref();
+
+					// The error frame is this entry's first answer, so it leaves the
+					// set even though the retry will queue the target again.
+					inFlightEntries.delete(errorUploadId);
+					updateCapacityWait();
+
 					return;
 				}
+
+				noteCapacityProgress();
 
 				finishEntry(errorUploadId, (finishing) => {
 					const error = new CupboardHttpError(
@@ -776,10 +1275,55 @@ export function runCommitSession(
 				return;
 			}
 
+			case 'credit': {
+				noteCapacityProgress();
+
+				// The grant covers entries this session may now send. The server
+				// decremented the demand it holds for this session by the same
+				// amount, so the client's own record follows it and a queue that is
+				// still longer declares the remainder on the next drain.
+				creditAvailable = (creditAvailable ?? 0) + frame.grant;
+				declaredDemand = Math.max(0, declaredDemand - frame.grant);
+				drainCredit();
+
+				return;
+			}
+
+			case 'queued': {
+				// The server has no capacity to grant yet. The count goes into the
+				// timeout's cause and nothing reads it otherwise. The wait is
+				// already running, since the session had a queue and no credit
+				// before it asked.
+				lastAhead = frame.ahead;
+
+				return;
+			}
+
 			case 'unsupported': {
-				// The session only sends ops the server advertised, so a rejection
-				// means the server is broken; every outstanding commit depended on
-				// that op being accepted.
+				// `request-credit` is the one op the session sends on its own
+				// declaration rather than on something the server advertised, so a
+				// server that does not know it is simply older. Such a server does
+				// not pace the session at all, so the session falls back to its own
+				// window of in-flight messages and sends the queue through that.
+				if (frame.op === 'request-credit') {
+					const queued = queuedTargets;
+					queuedTargets = [];
+					creditAvailable = undefined;
+					isCreditPaced = false;
+					declaredDemand = 0;
+					// The credited wait ends with the pacing: what the session
+					// waited for is not coming from this server, and a later
+					// connection that paces it again measures its own wait.
+					noteCapacityProgress();
+					updateCapacityWait();
+					sendCommits(queued);
+
+					return;
+				}
+
+				// Every other op is sent only when the server advertised it, so a
+				// rejection means the server is broken; every outstanding commit
+				// depended on that op being accepted.
 				failSession(
 					new CommitSocketProtocolError(
 						options.path,
@@ -836,23 +1380,119 @@ export function runCommitSession(
 		}
 	};
 
-	// A drop on an established socket is treated as transient: reconnect and
-	// replay, so a network blip does not lose the whole push. Code 1002 means the
-	// server rejected the request deliberately; reconnecting cannot fix it. A
-	// refused upgrade is handled separately, as it will not heal on retry.
-	const onDrop = (code: number, error: Error): void => {
+	// Reopens after a back-off. This timer only exists while entries are
+	// outstanding, and between the drop and the reopen it can be the process's
+	// only handle: the session's other timers are unref'd and no socket exists.
+	// Unref it and a run whose remaining work all waits on this session exits
+	// with its awaits unsettled instead of reconnecting.
+	//
+	// A wait the server asked for never shortens the back-off the attempt count
+	// has reached, so a session that keeps failing still dials less often the
+	// longer it fails.
+	const scheduleReconnect = (minimumDelayMs = 0): void => {
+		reconnectAttempt += 1;
+		reconnectTimer = setTimeout(
+			() => {
+				reconnectTimer = undefined;
+				openConnection();
+			},
+			Math.max(reconnectDelay(reconnectAttempt, backoffBase), minimumDelayMs)
+		);
+	};
+
+	// Opens the connection a commit needs when the session is dormant. A server
+	// that refused the last dial and asked for a wait is given it, since a
+	// dormant session dials the moment a commit arrives and the timing of that
+	// commit is the caller's, not the server's.
+	const openDormantConnection = (): void => {
+		const remaining = earliestDialAt - Date.now();
+
+		if (remaining <= 0) {
+			openConnection();
+
+			return;
+		}
+
+		// The dial is pending from here, so a further commit registers its entry
+		// and waits for it rather than opening a second connection.
+		isDormant = false;
+		reconnectTimer = setTimeout(() => {
+			reconnectTimer = undefined;
+			openConnection();
+		}, remaining);
+	};
+
+	// A drop is treated as transient: reconnect and replay, so a network blip
+	// does not lose the whole push. Code 1002 means the server rejected the
+	// request deliberately, which reconnecting cannot fix. An upgrade refused
+	// with a retryable status arrives here too, since a cache that refuses this
+	// dial may still accept the next one.
+	const onDrop = (
+		code: number,
+		error: Error,
+		cause: DropCause = connectionDrop
+	): void => {
 		if (isClosed) {
 			return;
 		}
 
+		const minimumDelayMs =
+			cause.kind === 'refusal' ? (cause.minimumDelayMs ?? 0) : 0;
+
+		// Every route out of this drop honours the wait a refusal asked for: the
+		// reconnect scheduled below takes it directly, and recording it here
+		// carries it to a dial that comes some other way. An expiring capacity
+		// wait cancels a pending reconnect and leaves the session dormant, and
+		// the dial the next commit makes is then the one that owes the server
+		// the rest of its wait.
+		if (cause.kind === 'refusal') {
+			earliestDialAt = Math.max(earliestDialAt, Date.now() + minimumDelayMs);
+		}
+
+		// Whether the connection died owing the session an answer. That is the one
+		// state a drop is evidence about: the cache had taken an entry and was to
+		// answer it. Read before the set below is cleared, so a dial that fails
+		// before it opens is classified by the state that survived it.
+		const wasAnswerOwed = inFlightEntries.size > 0;
+
 		isOpened = false;
 		clearKeepalive();
+		inFlightEntries.clear();
+		updateCapacityWait();
 
-		// The server closes the socket once nothing is outstanding; that is a clean
-		// end, not a drop to recover from.
+		// `replayOutstanding` re-sends every un-acked entry on the fresh
+		// connection, so a retry armed on the old one would send its entry a
+		// second time.
+		for (const entry of outstanding.values()) {
+			if (entry.retryTimer === undefined) {
+				continue;
+			}
+
+			clearTimeout(entry.retryTimer);
+			entry.retryTimer = undefined;
+		}
+
+		// The server closes a socket once nothing is outstanding on it, which is
+		// what its idle close does to a session whose push has gone quiet.
+		// Nothing was lost, so the session stays usable and the next commit opens
+		// a fresh connection, renegotiating its capabilities and its grant. A
+		// caller that is finished closes the session itself, which takes the
+		// branch above.
 		if (outstanding.size === 0) {
-			isClosed = true;
-			teardown();
+			isDormant = true;
+			creditAvailable = undefined;
+			reconnectsLeft = maxReconnects;
+			lastRefusal = undefined;
+
+			// The back-off reached so far outlives a dormancy a refusal caused,
+			// since the server declined to serve this session and the next dial
+			// is the same session asking again. An idle close is the server
+			// saying the opposite: it took this session and closed it only
+			// because it had gone quiet, and it will take the next connection
+			// whenever one comes, so that dial starts afresh.
+			if (cause.kind !== 'refusal') {
+				reconnectAttempt = 0;
+			}
 
 			return;
 		}
@@ -869,6 +1509,21 @@ export function runCommitSession(
 			return;
 		}
 
+		// A paced session that was owed no answer reconnects for free, because the
+		// clock that owns the work it left behind bounds it: the capacity deadline
+		// for entries the cache has not taken, and each parked entry's verdict
+		// deadline for the ones it has, both of which run through a
+		// disconnection. Spending the budget there would fail work the server
+		// holds durably, over a link that is merely flaky.
+		//
+		// An unpaced session has no capacity deadline, so the budget is the only
+		// bound it has and every drop spends one, a failed dial included.
+		if (!wasAnswerOwed && isCreditPaced) {
+			scheduleReconnect(minimumDelayMs);
+
+			return;
+		}
+
 		if (reconnectsLeft <= 0) {
 			failSession(error);
 
@@ -876,27 +1531,47 @@ export function runCommitSession(
 		}
 
 		reconnectsLeft -= 1;
-		reconnectTimer = setTimeout(
-			() => {
-				reconnectTimer = undefined;
-				openConnection();
-			},
-			reconnectDelay(maxReconnects - reconnectsLeft, backoffBase)
-		);
-		reconnectTimer.unref();
+		scheduleReconnect(minimumDelayMs);
 	};
 
+	// Fails a deferred entry whose verdict never arrives. A budget longer than a
+	// timer can hold is armed in instalments, each measuring what is left of it,
+	// and only the last one fails the entry.
 	function armDeadline(uploadId: UploadId): NodeJS.Timeout {
-		const deadline = setTimeout(() => {
-			finishEntry(uploadId, (entry) => {
-				entry.settleFailed(
-					new UploadWaitTimeoutError(1, options.timeoutSeconds)
-				);
-			});
-		}, options.timeoutSeconds * 1000);
-		deadline.unref();
+		const expiresAt = Date.now() + options.timeoutSeconds * 1000;
 
-		return deadline;
+		const armInstalment = (): NodeJS.Timeout => {
+			const remaining = expiresAt - Date.now();
+
+			if (remaining > maxTimerDelayMs) {
+				const instalment = setTimeout(() => {
+					const entry = outstanding.get(uploadId);
+
+					if (entry !== undefined) {
+						entry.deadline = armInstalment();
+					}
+				}, maxTimerDelayMs);
+				instalment.unref();
+
+				return instalment;
+			}
+
+			const deadline = setTimeout(
+				() => {
+					finishEntry(uploadId, (entry) => {
+						entry.settleFailed(
+							new UploadWaitTimeoutError(1, options.timeoutSeconds)
+						);
+					});
+				},
+				Math.max(0, remaining)
+			);
+			deadline.unref();
+
+			return deadline;
+		};
+
+		return armInstalment();
 	}
 
 	function onAbort(): void {
@@ -906,7 +1581,35 @@ export function runCommitSession(
 	}
 
 	function openConnection(): void {
+		// This connection supersedes any the drop path still has pending, so a
+		// timer left armed must not open a second one behind it. A refusal still
+		// being read belongs to the connection this one replaces, and `refuse`
+		// ignores a refusal that old, so its drain has nothing left to decide.
+		clearReconnectTimer();
+		clearRefusalDrain();
+		connectionGeneration += 1;
+		const generation = connectionGeneration;
+		// A superseded socket keeps its listeners and can still deliver events:
+		// `ws` emits `error` and `close` for the same fault, and a socket the
+		// session has moved on from goes on running its own handshake. Session
+		// state belongs to the current connection alone.
+		const isCurrent = (): boolean => generation === connectionGeneration;
+		let hasDropped = false;
+		const dropOnce = (
+			code: number,
+			error: Error,
+			cause: DropCause = connectionDrop
+		): void => {
+			if (hasDropped || !isCurrent()) {
+				return;
+			}
+
+			hasDropped = true;
+			onDrop(code, error, cause);
+		};
+
 		isOpened = false;
+		isDormant = false;
 		effectiveBatchSize = undefined;
 		hasSubscribeIdentity = false;
 		hasBatchRetentionMarker = false;
@@ -916,14 +1619,33 @@ export function runCommitSession(
 		inFlightChunks.clear();
 		uploadIdToChunkKey.clear();
 		pendingBatchChunks = [];
+		// Credit belongs to the connection the server granted it on, and the
+		// server holds no demand for a session that has gone. The wait already
+		// spent is not reset here: it is the session's, not the connection's.
+		creditAvailable = undefined;
+		declaredDemand = 0;
+		queuedTargets = [];
+		inFlightEntries.clear();
 		// Captured per connection, so `onCapabilities` reports the negotiation of
 		// the connection whose `open` fired.
 		let connectionCaps: AdvertisedCapabilities = new Map();
-		socket = connect(url, headers);
+		// The capacity this connection's 101 offered. A dial that never opens
+		// leaves it unread, which is what keeps an offer from counting as
+		// progress.
+		let openingGrant = 0;
+		// Named as well as stored, so a handler that outlives this connection
+		// acts on the connection it belongs to rather than on the session's
+		// current one.
+		const connection = connect(url, headers);
+		socket = connection;
 
 		// The upgrade response precedes the open, so the capability is known
 		// before anything is sent on this connection.
-		socket.on('upgrade', (response) => {
+		connection.on('upgrade', (response) => {
+			if (!isCurrent()) {
+				return;
+			}
+
 			const raw = response.headers[commitCapabilitiesHeader];
 			const headerValue = Array.isArray(raw) ? raw.join(',') : (raw ?? '');
 			connectionCaps = parseCapabilities(headerValue);
@@ -937,20 +1659,55 @@ export function runCommitSession(
 				connectionCaps,
 				subscribeIdentityCapability
 			);
+			// A session that declared credit is paced whether or not the grant
+			// token survived the hop back, so an unreadable offer opens at zero
+			// and the first `request-credit` asks for what the queue needs.
+			creditAvailable =
+				resolvedOpeningGrant(connectionCaps) ??
+				(isCreditDeclared ? 0 : undefined);
+			// Each connection negotiates for itself, so a session an older server
+			// took off credit is back on it for the next one.
+			isCreditPaced = creditAvailable !== undefined;
+			openingGrant = creditAvailable ?? 0;
 		});
 
-		socket.on('open', () => {
+		connection.on('open', () => {
+			if (!isCurrent()) {
+				return;
+			}
+
 			isOpened = true;
 			options.onCapabilities?.(connectionCaps);
+
+			// Capacity the session can now spend is progress, the same as a
+			// `credit` frame is, so the wait this connection opened during ends
+			// here and the next one runs a whole budget. An offer on a 101 whose
+			// handshake the client then rejects never reaches this line, which is
+			// why the reset lives here rather than beside the header it was read
+			// from. A cache that takes the session and grants it nothing has made
+			// no progress for it, so its wait carries on.
+			//
+			// This runs before the replay, which sends what the grant covers and
+			// re-arms the deadline for whatever is still queued. After it, the
+			// reset would clear the deadline the replay had just armed and
+			// nothing would arm another until the next frame.
+			if (openingGrant > 0) {
+				noteCapacityProgress();
+			}
+
 			replayOutstanding();
 
 			keepalive = setInterval(() => {
-				socket?.send(keepaliveRequest);
+				connection.send(keepaliveRequest);
 			}, options.keepaliveMs ?? defaultKeepaliveMs);
 			keepalive.unref();
 		});
 
-		socket.on('message', (data) => {
+		connection.on('message', (data) => {
+			if (!isCurrent()) {
+				return;
+			}
+
 			const text = data.toString();
 
 			if (text === keepaliveResponse) {
@@ -960,33 +1717,103 @@ export function runCommitSession(
 			onFrame(text);
 		});
 
-		socket.on('close', (code, reason) => {
+		connection.on('close', (code, reason) => {
 			const message =
 				code === nonRetryableCloseCode
 					? `server closed the connection: ${String(code)} ${reason.toString()}`
 					: 'the socket closed before every commit settled';
-			onDrop(code, new CommitSocketProtocolError(options.path, message));
+			dropOnce(code, new CommitSocketProtocolError(options.path, message));
 		});
 
-		socket.on('error', (error) => {
-			onDrop(0, error);
+		connection.on('error', (error) => {
+			dropOnce(0, error);
 		});
 
-		socket.on('unexpected-response', (_request, response) => {
+		connection.on('unexpected-response', (_request, response) => {
+			if (!isCurrent()) {
+				return;
+			}
+
 			const chunks: string[] = [];
+
+			// Ends the refusal, reclaiming the connection and then deciding what
+			// the session does next.
+			//
+			// `ws` hands the connection to this listener and abandons it there,
+			// still in its handshake, so the session is what gives it back:
+			// destroying the response releases a body still being read, and
+			// closing the socket ends the connection itself. Destroying alone
+			// leaves a read that finished holding an open connection, and a
+			// session dialling against a busy cache for minutes would then hold
+			// one per refusal, each a ref'd handle that keeps a finished run
+			// from exiting.
+			//
+			// The server refuses an upgrade with a retryable status when it is
+			// loaded or has just reset, and this session dials often enough to
+			// meet one: after a drop, after going dormant, and after its idle
+			// close. So a retryable refusal goes through the drop path, where the
+			// session's own bounds decide how long it keeps trying. A refusal
+			// that asks for a delay in `Retry-After` also holds the next dial
+			// back at least that long. Any other status is a refusal of this
+			// request rather than of its timing.
+			const refuse = (minimumDelayMs: number | undefined): void => {
+				response.destroy();
+				connection.close();
+
+				// The body can take long enough that the session has left the
+				// connection this refusal condemns by the time it is read: a
+				// capacity wait that expires abandons a connection mid-handshake,
+				// and the session reconnects and carries on. Acting on the refusal
+				// then would end a session over a dial it has already replaced,
+				// whatever the status said. The drain is cleared below rather
+				// than here, because by this point the timer can belong to the
+				// connection the session moved to.
+				if (hasDropped || !isCurrent()) {
+					return;
+				}
+
+				clearRefusalDrain();
+
+				const status = response.statusCode ?? 0;
+				const refusal = new CupboardHttpError(
+					'GET',
+					options.path,
+					status,
+					chunks.join('')
+				);
+
+				if (isRetryableRefusal(status)) {
+					// Kept so that a wait which only ever meets refusals fails
+					// naming this one. A cache that goes on to make progress for the
+					// session clears it, so the refusal reported is always one the
+					// session was still being given when it gave up.
+					lastRefusal = refusal;
+					dropOnce(0, refusal, { kind: 'refusal', minimumDelayMs });
+
+					return;
+				}
+
+				failSession(refusal);
+			};
+
+			// A peer can leave the body unfinished in the ways `refusalDrainMs`
+			// describes, none of which produce another event on this connection,
+			// so the read is bounded. The status arrived with the headers, so the
+			// refusal is answered on what was received. A `Retry-After` on a
+			// response whose body never finished is not honoured, and the
+			// back-off decides the next dial.
+			//
+			// This timer is not unref'd, since until it fires nothing else will
+			// move the session on.
+			refusalDrainTimer = setTimeout(() => {
+				refuse(undefined);
+			}, refusalDrainMs);
 
 			response.on('data', (chunk) => {
 				chunks.push(chunk.toString());
 			});
 			response.on('end', () => {
-				failSession(
-					new CupboardHttpError(
-						'GET',
-						options.path,
-						response.statusCode ?? 0,
-						chunks.join('')
-					)
-				);
+				refuse(requestedRetryDelayMs(response));
 			});
 		});
 	}
@@ -1009,6 +1836,14 @@ export function runCommitSession(
 			);
 		}
 
+		// A dormant session was closed by the server with nothing outstanding, so
+		// this commit opens a fresh connection and `replayOutstanding` sends it
+		// once that connection is up. The caller's `close` runs first if it came
+		// first, since it sets `isClosed` and the guard above rejects.
+		if (isDormant) {
+			openDormantConnection();
+		}
+
 		return new Promise<CommitOutcome>((resolveAck, rejectAck) => {
 			const { settled, settleServable, settleFailed } = deferredSettle();
 			// A caller that never awaits `settled` (a `--no-wait` push, or an ack
@@ -1025,12 +1860,17 @@ export function runCommitSession(
 				acked: false,
 				retryAttempts: 0
 			});
+			unackedEntries += 1;
 
 			// An open socket enqueues onto the coalescing flush; before the first
 			// open (or mid-reconnect) the op waits and `replayOutstanding` sends it
-			// when the socket comes up.
+			// when the socket comes up. Nothing will carry it until then, so the
+			// capacity clock starts here rather than on a connection this session
+			// may never get.
 			if (isOpened) {
 				enqueueSend(target);
+			} else {
+				updateCapacityWait();
 			}
 		});
 	};
@@ -1054,6 +1894,39 @@ function reconnectDelay(attempt: number, base: number): number {
 	const ceiling = Math.min(base * 2 ** (attempt - 1), maxReconnectBackoffMs);
 
 	return ceiling / 2 + Math.random() * (ceiling / 2);
+}
+
+/**
+ * Whether a refused upgrade refuses the timing of this dial rather than the
+ * request itself. An upgrade is answered by whatever stands in front of the
+ * Worker, so the gateway conditions an edge reports (a 502 during a redeploy, a
+ * 504 on an origin timeout, Cloudflare's own 52x pages) belong here beside the
+ * server's own overload statuses, and every other 5xx is a fault the next dial
+ * may well not meet. Below 500 only a rate limit passes: an authorisation or
+ * routing failure reads the same however often the session dials.
+ *
+ * This is wider than {@link retryableErrorStatuses}, which answers the same
+ * question for a frame the server itself wrote.
+ */
+function isRetryableRefusal(status: number): boolean {
+	return status === 429 || status >= 500;
+}
+
+/**
+ * The wait a refused upgrade asked for in `Retry-After`, in milliseconds and
+ * capped at {@link maxRetryAfterMs}. Only the delay-seconds form is read. For
+ * an HTTP date, or a value that is not a positive number of seconds, this
+ * returns `undefined` and the back-off decides the delay on its own.
+ */
+function requestedRetryDelayMs(failure: UpgradeFailure): number | undefined {
+	const stated = failure.headers['retry-after'];
+	const seconds = Number(Array.isArray(stated) ? stated[0] : stated);
+
+	if (!Number.isFinite(seconds) || seconds <= 0) {
+		return;
+	}
+
+	return Math.min(seconds * 1000, maxRetryAfterMs);
 }
 
 function safeJsonParse(text: string): unknown {

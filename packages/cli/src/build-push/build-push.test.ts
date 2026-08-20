@@ -10,8 +10,10 @@ import {
 import { Derivation } from '@cupboard/nix-store/derivation';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
+	nixSha256HashSchema,
 	rootNameSchema,
 	storeDirectorySchema,
+	storePathHashSchema,
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
@@ -22,11 +24,18 @@ import {
 } from '@cupboard/protocol/build';
 import {
 	type UploadDecision,
-	uploadDecisionSchema
+	uploadDecisionSchema,
+	uploadIdSchema
 } from '@cupboard/protocol/upload';
 import type { Reporter, ResultPayload } from '@cupboard/reporter';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { FakeCommitSocket } from '../client/commit-socket.test-support.ts';
+import {
+	type CommitSession,
+	type CommitSocket,
+	runCommitSession
+} from '../client/commit-socket.ts';
 import {
 	BuildCommandFailedError,
 	BuildProvenanceIncompleteError,
@@ -34,11 +43,14 @@ import {
 	classifyPublicationFailures,
 	CliAbortError,
 	CliError,
+	CommitCapacityQueuedError,
+	CommitCapacityTimeoutError,
 	CupboardHttpError,
 	PostBuildHookConflictError,
 	unavailableExitCode,
 	UntrustedDaemonError
 } from '../errors.ts';
+import { capacityWaitReporter } from '../push/capacity-wait.ts';
 import type { PushClient } from '../push/push.ts';
 
 import {
@@ -782,6 +794,201 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 	};
 }
 
+function ignore(): void {
+	return;
+}
+
+// A reporter that counts the lines written to it and does nothing else.
+function infoReporter(info: { lines: number }): Reporter {
+	return {
+		phase: (_label, body) =>
+			Promise.resolve(body({ fact: ignore, warn: ignore })),
+		progress: (_label, _options, body) =>
+			Promise.resolve(body({ advance: ignore, fact: ignore, warn: ignore })),
+		steps: (_label, body) =>
+			Promise.resolve(
+				body({
+					message: ignore,
+					group: () => ({
+						message: ignore,
+						success: ignore,
+						error: ignore
+					}),
+					warn: ignore
+				})
+			),
+		result: ignore,
+		data: ignore,
+		warn: ignore,
+		info: () => {
+			info.lines += 1;
+		},
+		success: ignore,
+		step: ignore,
+		error: ignore
+	};
+}
+
+const commitPath = '/cache/_default/commit';
+const commitTarget = {
+	uploadId: uploadIdSchema.parse('upload-app'),
+	storePathHash: storePathHashSchema.parse('0123456789abcdfghijklmnpqrsvwxyz'),
+	narHash: nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`)
+};
+
+// A real commit session over scripted sockets, reporting its waits through the
+// reporter under test.
+function pacedSession(
+	sockets: readonly FakeCommitSocket[],
+	onWaiting: (isWaitingForCapacity: boolean) => void
+): CommitSession {
+	let attempt = 0;
+	const connect = (): CommitSocket => {
+		const socket = sockets[attempt];
+		attempt += 1;
+
+		if (socket === undefined) {
+			throw new Error(
+				`no socket scripted for connection attempt ${String(attempt)}`
+			);
+		}
+
+		return socket;
+	};
+
+	return runCommitSession(
+		connect,
+		new URL(`wss://cupboard.test${commitPath}`),
+		{},
+		{
+			path: commitPath,
+			timeoutSeconds: 100,
+			// Long enough that no keepalive fires during the run below.
+			keepaliveMs: 600_000,
+			onWaiting
+		}
+	);
+}
+
+// The server's side of an upgrade that paces the session by credit and has
+// none to give it.
+function grantNothing(socket: FakeCommitSocket): void {
+	socket.emit('upgrade', {
+		headers: {
+			'x-cupboard-commit-capabilities':
+				'commit-batch;max=1,commit-credit;grant=0'
+		}
+	});
+}
+
+describe('capacityWaitReporter', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	// A cache granting one entry at a time leaves the session waiting before
+	// each path, which is ordinary pacing and not worth a line per path. The end
+	// of each wait cancels the announcement the reporter was holding, so the run
+	// stays quiet however long it continues afterwards.
+	it('prints nothing for a wait that ends promptly', () => {
+		const info = { lines: 0 };
+		const report = capacityWaitReporter(infoReporter(info));
+
+		for (const _path of ['a', 'b', 'c']) {
+			report(true);
+			vi.advanceTimersByTime(100);
+			report(false);
+		}
+
+		vi.advanceTimersByTime(60_000);
+
+		expect(info).toStrictEqual({ lines: 0 });
+	});
+
+	// A wait that lasts is announced, and its ending is not: a run that carries
+	// on shows that capacity arrived, and a run that gave up reports the reason
+	// in its failure. A later wait is announced in its turn, so a run that waits
+	// twice prints two lines and nothing else.
+	it('reports each wait that lasts, and nothing when one ends', () => {
+		const info = { lines: 0 };
+		const report = capacityWaitReporter(infoReporter(info));
+
+		report(true);
+		vi.advanceTimersByTime(5000);
+		const whileWaiting = info.lines;
+
+		report(false);
+		const afterEnding = info.lines;
+
+		report(true);
+		vi.advanceTimersByTime(5000);
+		const whileWaitingAgain = info.lines;
+
+		report(false);
+		vi.advanceTimersByTime(60_000);
+
+		expect({
+			whileWaiting,
+			afterEnding,
+			whileWaitingAgain,
+			atRunEnd: info.lines
+		}).toStrictEqual({
+			whileWaiting: 1,
+			afterEnding: 1,
+			whileWaitingAgain: 2,
+			atRunEnd: 2
+		});
+	});
+
+	// The reporter and the session have to compose, and each half proves only
+	// its own side. Here a cache accepts the session and drops it, so every
+	// connected window is shorter than the delay the reporter holds its
+	// announcement for: a wait reported per connection would reach five seconds
+	// on none of them, and the user would sit out the whole budget in silence.
+	it('announces a wait the session holds across drops, and prints nothing when that wait expires', async () => {
+		const info = { lines: 0 };
+		const dropped = [new FakeCommitSocket(), new FakeCommitSocket()];
+		const last = new FakeCommitSocket();
+		const session = pacedSession(
+			[...dropped, last],
+			capacityWaitReporter(infoReporter(info))
+		);
+		const commit = session.commit(commitTarget);
+		let isRejected = false;
+		void commit.catch(() => {
+			isRejected = true;
+		});
+
+		for (const socket of dropped) {
+			grantNothing(socket);
+			socket.emit('open');
+			await vi.advanceTimersByTimeAsync(2000);
+			socket.emit('close', 1006, '');
+			await vi.advanceTimersByTimeAsync(2000);
+		}
+
+		const afterDrops = info.lines;
+
+		grantNothing(last);
+		last.emit('open');
+		await vi.advanceTimersByTimeAsync(100_000);
+
+		expect({
+			afterDrops,
+			atExpiry: info.lines,
+			rejected: isRejected
+		}).toStrictEqual({
+			afterDrops: 1,
+			atExpiry: 1,
+			rejected: true
+		});
+	});
+});
+
 describe('childExitCode', () => {
 	it.each([
 		{
@@ -851,6 +1058,22 @@ describe('classifyPublicationFailures', () => {
 			],
 			expectedExitCode: 77,
 			expectedCauseIndex: 1
+		},
+		{
+			// A run that gave up waiting for capacity is transient: the paths it
+			// could not commit are still publishable, and a later run may find the
+			// tenant idle. The condition itself stays in the cause chain, which the
+			// reporter renders under the failure.
+			name: 'a capacity timeout',
+			causes: [
+				new CommitCapacityTimeoutError(
+					600,
+					600,
+					new CommitCapacityQueuedError(2)
+				)
+			],
+			expectedExitCode: 75,
+			expectedCauseIndex: 0
 		},
 		{
 			name: 'an unclassified failure',

@@ -52,6 +52,7 @@ export class FakeCommitSocket
 	extends FakeEmitter<CommitSocketEvents>
 	implements CommitSocket
 {
+	private isOpen = false;
 	readonly sent: string[] = [];
 	closed = false;
 
@@ -66,12 +67,50 @@ export class FakeCommitSocket
 		});
 	}
 
+	override emit<E extends keyof CommitSocketEvents>(
+		event: E,
+		...eventArguments: CommitSocketEvents[E]
+	): void {
+		if (event === 'open') {
+			this.isOpen = true;
+		}
+
+		super.emit(event, ...eventArguments);
+	}
+
 	send(data: string): void {
 		this.sent.push(data);
 	}
 
+	/**
+	 * Closes the connection as `ws` does, so that a session which closes a
+	 * connection itself still sees the events a real close delivers. A socket
+	 * still in its handshake is aborted, which `ws` reports as an error followed
+	 * by an abnormal close; an open socket reports the close alone, with the
+	 * status `ws` uses when no close frame carried one. Both events arrive after
+	 * the caller's turn, so a test can reach the state where a late event from a
+	 * superseded connection meets the session's guards.
+	 */
 	close(): void {
+		if (this.closed) {
+			return;
+		}
+
 		this.closed = true;
+		const wasOpen = this.isOpen;
+
+		queueMicrotask(() => {
+			if (!wasOpen) {
+				this.emit(
+					'error',
+					new Error(
+						'WebSocket was closed before the connection was established'
+					)
+				);
+			}
+
+			this.emit('close', wasOpen ? 1005 : 1006, '');
+		});
 	}
 }
 
@@ -82,7 +121,18 @@ export class FakeUpgradeFailure
 	extends FakeEmitter<UpgradeFailureEvents>
 	implements UpgradeFailure
 {
-	constructor(readonly statusCode?: number) {
+	destroyed = false;
+
+	constructor(
+		readonly statusCode?: number,
+		readonly headers: Readonly<
+			Record<string, string | string[] | undefined>
+		> = {}
+	) {
 		super({ data: [], end: [] });
+	}
+
+	destroy(): void {
+		this.destroyed = true;
 	}
 }

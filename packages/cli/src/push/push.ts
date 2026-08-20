@@ -89,6 +89,7 @@ import { compressNarToStream, type NarUploadStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 
+import { capacityWaitReporter } from './capacity-wait.ts';
 import { exactUploadDecisions } from './negotiation.ts';
 import { publishedSubjects, republishedSubject } from './origin.ts';
 import {
@@ -977,7 +978,8 @@ async function runPushFlow(
 		...negotiation.uploads.filter((decision) => isReusedBlobCommit(decision))
 	].filter((decision) => !failedUploadIds.has(decision.uploadId));
 	const commitOptions: CommitOptions = {
-		timeoutSeconds: waitTimeoutSeconds
+		timeoutSeconds: waitTimeoutSeconds,
+		onWaiting: capacityWaitReporter(reporter)
 	};
 	const session = await client.openCommitSession?.(commitOptions);
 	// Keyed by store-path hash and updated in place as a deferred path's verdict

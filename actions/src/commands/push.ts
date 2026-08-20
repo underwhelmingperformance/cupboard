@@ -242,7 +242,10 @@ export function registerPushCommand(
 			'--wait <value>',
 			'wait for deferred blobs to become servable: true or false'
 		)
-		.option('--wait-timeout <timeout>', 'wait timeout for deferred blobs')
+		.option(
+			'--wait-timeout <timeout>',
+			'wait timeout, applied separately to commit capacity and to deferred blobs'
+		)
 		.option(
 			'--attestations <path>',
 			'local Sigstore DSSE bundle to attach (repeatable, or newline-delimited)',

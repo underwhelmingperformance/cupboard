@@ -32,6 +32,8 @@ import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 import type { CommitOptions } from '../client/client.ts';
+import type { CommitSession } from '../client/commit-socket.ts';
+import { commitOverSession } from '../client/commit-via.ts';
 import { PushNarMetadataMismatchError } from '../errors.ts';
 import { compressNarToStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
@@ -123,6 +125,12 @@ export interface ReconcileOptions {
 	*/
 	readonly wait?: boolean;
 	readonly commitOptions?: CommitOptions;
+	/**
+	 * The run's shared commit session. When it is present, every path
+	 * reconciliation publishes commits over it, sharing the socket the streaming
+	 * phase used.
+	 */
+	readonly session?: CommitSession;
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
 	readonly compressNar?: CompressNar;
 	readonly uploadConcurrency?: number;
@@ -395,14 +403,11 @@ async function publishDecision(
 	}
 
 	try {
-		const outcome = await options.client.commit(
-			{
-				uploadId: decision.uploadId,
-				storePathHash: decision.storePathHash,
-				narHash: decision.narHash
-			},
-			options.commitOptions ?? {}
-		);
+		const outcome = await commitOverSession(options, {
+			uploadId: decision.uploadId,
+			storePathHash: decision.storePathHash,
+			narHash: decision.narHash
+		});
 
 		if (outcome.status !== 'already-present') {
 			ledger.published.add(info.storePath);

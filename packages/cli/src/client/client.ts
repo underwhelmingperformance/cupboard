@@ -22,6 +22,7 @@ import {
 import {
 	commitAcceptCapabilitiesHeader,
 	commitBatchCapability,
+	commitCreditCapability,
 	type UploadId
 } from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
@@ -137,13 +138,20 @@ export class CupboardClient {
 			this.socketUrl(path),
 			{
 				...bearerHeaders(bearer),
-				[commitAcceptCapabilitiesHeader]: commitBatchCapability
+				// Declaring `commit-credit` is what lets the server pace this session
+				// by granted credit rather than leaving the pacing to the window this
+				// client keeps. A session that has declared paces itself even when
+				// the 101 comes back without the token, and drops back to the window
+				// only when the server rejects `request-credit` as unsupported, so
+				// the declaration is safe to send to any server.
+				[commitAcceptCapabilitiesHeader]: `${commitBatchCapability},${commitCreditCapability}`
 			},
 			{
 				path,
 				timeoutSeconds: options.timeoutSeconds ?? defaultCommitWaitSeconds,
 				signal: this.signal,
-				onCapabilities: options.onCapabilities
+				onCapabilities: options.onCapabilities,
+				onWaiting: options.onWaiting
 			}
 		);
 	}
@@ -410,14 +418,21 @@ export interface CommitTarget {
 
 export interface CommitOptions {
 	/**
-	Bounds how long a parked upload waits for its verdict.
-	*/
+	 * Bounds how long a parked upload waits for its verdict, and how long the
+	 * session as a whole waits for the server to grant it capacity to commit
+	 * under.
+	 */
 	readonly timeoutSeconds?: number;
 	/**
 	 * Called on each connection with the capabilities the server advertised in
 	 * the 101 response. Useful for logging the negotiated mode.
 	 */
 	readonly onCapabilities?: (capabilities: AdvertisedCapabilities) => void;
+	/**
+	 * Called when the session starts waiting for capacity to commit under, and
+	 * again when it stops, so a progress display can report the fact.
+	 */
+	readonly onWaiting?: (isWaitingForCapacity: boolean) => void;
 }
 
 // Widened to `number` so a comparison against a plain response status is not an
