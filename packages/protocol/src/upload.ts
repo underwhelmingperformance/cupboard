@@ -71,23 +71,23 @@ export type ParsedUploadPathMetadata = z.output<
 	typeof uploadPathMetadataSchema
 >;
 
-// An identifier for one push, signed and handed out by the server when it issues
-// the push's upload credential. It namespaces the push's staging objects under
-// `staging/<pushId>/`, so one credential scoped to that prefix covers every
-// upload the push stages, including the fresh keys a re-negotiated slot creates.
-// The wire shape is constrained to url-safe characters with no slash or dot, so
-// a pushId can never widen the staging key past its prefix; the server checks
-// the signature itself, the schema only bounds the wire format.
+// An identifier signed by the server when it issues upload credentials. The
+// identifier scopes staging objects to `staging/<pushId>/`, so one credential
+// can cover every upload in the push. The restricted wire format prevents the
+// identifier from escaping that prefix. The schema validates only the format;
+// the server separately verifies the signature.
 export const pushIdSchema = z
 	.string()
-	.regex(/^[A-Za-z0-9-]{1,128}$/, 'pushId must be url-safe')
+	.regex(
+		/^[A-Za-z0-9-]{1,128}$/,
+		'pushId must contain 1 to 128 ASCII letters, digits, or hyphens'
+	)
 	.brand('PushId');
 export type PushId = z.infer<typeof pushIdSchema>;
 
-// A deferred upload's server-issued opaque id. The server hands it out with the
-// negotiate decision; the client presents it again to commit or poll. It keys
-// the upload's pending row and its private staging object. Opaque: the brand is
-// its only constraint, so it cannot be swapped for another id of the same type.
+// An opaque upload identifier issued during negotiation. The client returns it
+// when committing or polling the pending upload. A brand prevents code from
+// substituting another string identifier.
 export const uploadIdSchema = z.string().brand('UploadId');
 export type UploadId = z.infer<typeof uploadIdSchema>;
 
@@ -98,15 +98,14 @@ export const sessionIdSchema = z.string().brand('SessionId');
 export type SessionId = z.infer<typeof sessionIdSchema>;
 
 // The server closes a commit connection when the access token from its upgrade
-// expires. The client matches both values before it treats the close as an
-// authentication expiry rather than another policy failure.
+// expires. The client checks both values to distinguish an expired token from
+// another policy failure.
 export const commitAuthenticationExpiredCloseCode = 1008;
 export const commitAuthenticationExpiredCloseReason = 'access token expired';
 
-// A temporary R2 S3 credential: the access-key triple a standard S3 client
-// signs with, where to send the requests, and when the credential expires.
-// This is the one declaration of that shape, used by the server helper that
-// builds the credential and by the wire response that returns it.
+// The temporary S3-compatible credentials for direct R2 uploads, including the
+// endpoint, bucket, and expiry. Both the server's credential builder and the
+// protocol response use this schema.
 export const r2CredentialSchema = z.strictObject({
 	accessKeyId: z.string(),
 	secretAccessKey: z.string(),
@@ -129,17 +128,15 @@ export const pushCredentialSchema = z.strictObject({
 export type ParsedPushCredential = z.output<typeof pushCredentialSchema>;
 export type PushCredential = z.input<typeof pushCredentialSchema>;
 
-// One negotiate carries a store-path closure, bounded by the store itself. The
-// cap is far above any real closure, so it rejects only an abusive body, not a
-// legitimate push.
+// One negotiation request can contain at most 100,000 store paths. This limit is
+// above expected closure sizes and bounds abusive request bodies.
 export const uploadNegotiateMaxPaths = 100_000;
 
-// The retention grace fact a capable negotiation reports per decision.
-// `retainUntil` is the deadline an already-present path was extended to before
-// the decision returned. `graceSeconds` is the matched policy's grace: either
-// the captured grace a planned upload applies when it materialises, or the
-// grace a read-only decision resolved (zero included). When both are absent, no
-// grace policy matched.
+// The retention-grace result returned for one negotiation decision.
+// `retainUntil` is the updated deadline for a path that was already present.
+// `graceSeconds` is the matched policy's grace period for a planned upload or a
+// read-only decision, including zero. If both fields are absent, no grace policy
+// matched.
 export const uploadGraceFactSchema = z
 	.strictObject({
 		retainUntil: z.string().optional(),
@@ -148,7 +145,7 @@ export const uploadGraceFactSchema = z
 	.refine(
 		(fact) => fact.retainUntil === undefined || fact.graceSeconds === undefined,
 		{
-			message: 'a grace fact carries a deadline or a captured grace, never both'
+			message: 'Set either retainUntil or graceSeconds, not both'
 		}
 	);
 export type ParsedUploadGraceFact = z.output<typeof uploadGraceFactSchema>;
@@ -219,11 +216,10 @@ export type ParsedUploadNegotiateResponse = z.output<
 	typeof uploadNegotiateResponseSchema
 >;
 
-// The preview request carries no pushId: a dry run creates no upload credential,
-// so no push id has been signed yet by the time it runs. Preview's
-// existence-oracle protection is the cache-scoped bearer grant plus the
-// classification's owned-edge check (it never reveals another tenant's blobs),
-// so it needs no separate proof of a live push.
+// A preview creates no upload credentials, so it has no signed `pushId`. The
+// cache-scoped bearer grant and ownership check prevent the response from
+// disclosing another tenant's blobs. Preview therefore needs no separate proof
+// of a live push.
 export const uploadPreviewRequestSchema = z.strictObject({
 	paths: z.array(uploadPathNegotiationSchema).max(uploadNegotiateMaxPaths)
 });
@@ -231,11 +227,10 @@ export type ParsedUploadPreviewRequest = z.output<
 	typeof uploadPreviewRequestSchema
 >;
 
-// A preview decision reports the same action negotiate would plan, without the
-// fields a real decision needs in order to carry the upload out (`uploadId`,
-// `r2Key`, `expiresAt`): preview creates no staging object for them to refer
-// to. `grace` is present when the request accepted upload grace facts; without
-// that capability, decisions retain their legacy shape.
+// A preview decision reports the action that negotiation would plan. It omits
+// `uploadId`, `r2Key`, and `expiresAt` because preview creates no staging object.
+// `grace` is present when the request accepts upload grace facts. Without that
+// capability, decisions retain their legacy shape.
 export const uploadPreviewDecisionSchema = z.strictObject({
 	action: z.enum(['skip', 'commit', 'upload']),
 	storePathHash: storePathHashSchema,
@@ -253,11 +248,9 @@ export type ParsedUploadPreviewResponse = z.output<
 	typeof uploadPreviewResponseSchema
 >;
 
-// One confirm request carries a bounded slice of a closure. Every distinct
-// hash costs an identity re-check and a monotonic extension inside chunked
-// statements on the tenant's single Durable Object, so the bound keeps one
-// request's work to a dozen or so transactions; the CLI splits a larger
-// closure across sequential requests.
+// A confirmation request accepts at most 1,000 store-path hashes. Each hash
+// requires an identity check and a monotonic deadline update. The CLI splits
+// larger closures across sequential requests.
 export const uploadConfirmMaxPaths = 1000;
 
 export const uploadConfirmRequestSchema = z.strictObject({
@@ -267,9 +260,8 @@ export type ParsedUploadConfirmRequest = z.output<
 	typeof uploadConfirmRequestSchema
 >;
 
-// One confirmed path: `confirmed` is false for a store path with no committed
-// narinfo row (nothing to confirm), in which case `grace` is always absent,
-// since no extension happened.
+// `confirmed` is false when the cache has no committed narinfo for the path. In
+// that case no deadline was extended, so `grace` is absent.
 export const uploadConfirmedPathSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	confirmed: z.boolean(),
@@ -293,10 +285,10 @@ export const commitResponseSchema = z.strictObject({
 });
 export type ParsedCommitResponse = z.output<typeof commitResponseSchema>;
 
-// The status of a deferred upload. `servable` once verification committed it,
-// `pending` while it still verifies, the terminal `mismatch`/`over-quota` on
-// failure, and `absent` once the upload is gone (its observation window
-// passed, or another upload of the same path settled it).
+// The status of a deferred upload. `servable` means verification committed the
+// upload. `pending` means verification is still running. `mismatch` and
+// `over-quota` are terminal failures. `absent` means the observation window
+// expired or another upload of the same path completed first.
 export const uploadStatusSchema = z.enum([
 	'servable',
 	'pending',
@@ -312,12 +304,9 @@ export type ParsedUploadStatusResponse = z.output<
 >;
 export type UploadStatusResponse = z.input<typeof uploadStatusResponseSchema>;
 
-// The multiplexed commit session: one socket per push carries every path's
-// commit, so each request and frame names the upload it concerns. The client
-// sends `commit` to settle one id, `commit-batch` to settle a chunk of ids in
-// one message, and `subscribe` to re-attach a reconnected socket to ids still
-// outstanding; the server answers with a per-id frame whose `ev` mirrors the
-// single-socket protocol's events.
+// One WebSocket handles all commits for a push. Every request and response
+// identifies its upload. The client uses `commit`, `commit-batch`, or `subscribe`;
+// the server sends one result frame for each upload.
 const uploadIdsSchema = z.array(uploadIdSchema);
 
 // The response header on the commit session's 101 listing the optional ops this

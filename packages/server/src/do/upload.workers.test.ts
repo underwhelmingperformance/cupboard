@@ -1722,7 +1722,7 @@ describe('upload flow', () => {
 		});
 	});
 
-	it('answers a re-sent entry as absent when the pending row is gone but only a reservation holds the path', async () => {
+	it('returns absent for a repeated commit when the pending row is gone and only a reservation remains', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({
 			storePathHash: 'c'.repeat(32),

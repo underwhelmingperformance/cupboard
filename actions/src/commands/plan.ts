@@ -1145,12 +1145,10 @@ function cohortMatrix(
 	}));
 }
 
-// Packing is opt-in and off by default, so a disabled run never calls the
-// measurer and the emitted matrix is byte-for-byte what the manifest's own
-// cohorts produce. When packing is enabled but a cohort has no measurement,
-// that cohort stays untouched, the same way `packCohorts` treats any other
-// unpriced cohort, since an unpriced repartition would be a heuristic, not a
-// measurement.
+// Packing is opt-in. When disabled, the action does not call the measurer and
+// emits the cohorts from the manifest unchanged. When a cohort lacks a
+// measurement, `packCohorts` leaves it unchanged because measured packing has
+// no basis for repartitioning it.
 async function packedCohortsFor(
 	inputs: PlanInputs,
 	cohorts: readonly Cohort[],
@@ -1172,9 +1170,9 @@ async function packedCohortsFor(
 	return packed?.cohorts ?? cohorts;
 }
 
-// One measured target as `cupboard plan measure` reports it: the daemon's own
-// substitutable pricing of that target's installable, asked per target so the
-// answer is the target's own bytes rather than a grouping's union.
+// One target measurement returned by `cupboard plan measure`. Each query
+// measures one target, so the byte count does not include other targets in the
+// group.
 const measurementSchema = z.object({
 	downloadSize: z.number(),
 	narSize: z.number()
@@ -1189,12 +1187,10 @@ interface MeasurableTarget {
 }
 
 /**
- * The production packing measurer: it prices each surviving cohort target's own
- * substitutable NAR size by running `cupboard plan measure` against the store
- * the cohorts build against, one target at a time, using the same store queries
- * the cohort partition makes. It is best-effort. A failed measurement returns
- * no measurements at all, so packing leaves every cohort exactly as the
- * manifest declared it and the plan still succeeds.
+ * Measures each surviving target's substitutable NAR size by invoking
+ * `cupboard plan measure` once per target against the selected store. If any
+ * measurement fails, returns an empty map; the planner retains the cohorts from
+ * the manifest and succeeds.
  */
 export function packingMeasurer(
 	inputs: PlanInputs,
@@ -1229,7 +1225,7 @@ export function packingMeasurer(
 			signal?.throwIfAborted();
 
 			reporter.warn(
-				'Leaving every cohort as the manifest declared it: the packing measurement failed',
+				'Packing measurement failed; using the cohorts from the manifest',
 				error instanceof Error ? error.message : String(error)
 			);
 

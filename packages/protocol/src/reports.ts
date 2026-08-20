@@ -40,11 +40,10 @@ export const checkReportSchema = z.strictObject({
 });
 export type ParsedCheckReport = z.output<typeof checkReportSchema>;
 
-// One bounded pass of background verification: how many narinfo rows it
-// scanned, how many missing narinfo objects it re-materialised, and how many
-// dangling narinfos (their NAR gone) it removed. `cursorCache` and `cursor`
-// together are the resume position. Both are empty once the scan has wrapped,
-// so the next pass starts at the first cache's lowest store path hash.
+// One bounded background-verification pass. The report counts scanned narinfo
+// rows, reconstructed narinfo objects, and removed narinfos whose NAR is
+// missing. `cursorCache` and `cursor` identify the next row. Both are empty after
+// the scan wraps.
 export const verifyReportSchema = z.strictObject({
 	scanned: countSchema,
 	narInfoObjectsRestored: countSchema,
@@ -55,11 +54,10 @@ export const verifyReportSchema = z.strictObject({
 });
 export type ParsedVerifyReport = z.output<typeof verifyReportSchema>;
 
-// Whether the R2 credentials bound to the tenant script produce signatures R2
-// accepts. The credential values cannot be read back, so the deployment checks
-// them by making a signed probe request. The probe runs inside a tenant's
-// Durable Object, which is the script that holds the credentials, so a
-// deployment with no tenants yet has nowhere to run it.
+// Checks whether R2 accepts requests signed with the tenant Worker's
+// credentials. Bindings do not expose the credential values, so the Worker
+// sends a signed probe request. The probe requires a tenant Durable Object; a
+// deployment with no tenants reports `no-tenant`.
 export const r2CredentialCheckSchema = z.discriminatedUnion('result', [
 	z.strictObject({ result: z.literal('ok') }),
 	z.strictObject({ result: z.literal('rejected'), status: z.number().int() }),
@@ -107,17 +105,14 @@ export const pushFailureSchema = z.strictObject({
 });
 export type ParsedPushFailure = z.output<typeof pushFailureSchema>;
 
-// One path's outcome and retention fact, mirroring `commitResponseSchema`'s
-// status values: `already-present` is a negotiate skip (already committed
-// before this push touched it); `committed` is a fresh upload or a reused blob
-// that settled; `pending` is a deferred upload the push did not wait for
-// (`--no-wait`); `collected` is an intermediate the store no longer held when
-// its metadata or NAR was read, so nothing was published for it. `grace`
-// carries a materialised `retainUntil` for `already-present` and `committed`
-// outcomes, or the captured `graceSeconds` for a `pending` one whose deadline
-// is not yet known; absent for a `collected` path, when no policy matched, or
-// when the push carried no retention plan at all (an older server's legacy
-// response).
+// One path's publication outcome and retention result. `already-present` means
+// the path was committed before this push. `committed` means a fresh upload or a
+// reused blob completed. `pending` means `--no-wait` returned before background
+// verification completed. `collected` means the store removed an intermediate
+// before its metadata or NAR could be read. `grace` contains `retainUntil` for a
+// committed path or `graceSeconds` while a pending path has no deadline. It is
+// absent for collected paths, unmatched policies, and legacy responses without
+// a retention plan.
 export const pushSummaryPathSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	storePath: storePathSchema.optional(),
@@ -144,11 +139,11 @@ export type ParsedPushSummary = z.output<typeof pushSummarySchema>;
 // summary by this name.
 export const attestationAttachSummaryResultKind = 'attestation-attach-summary';
 
-// One named path's attachment outcome: `attached` filed at least one bundle
-// for the path, `reused` found every bundle for it already held, and
-// `unservable` means the cache serves no committed copy of the path, so its
-// bundles could not be recorded. Only the paths a bundle's subjects cover
-// appear; a requested path that no bundle describes is left out.
+// One named path's attachment outcome. `attached` means at least one bundle was
+// newly attached to the path. `reused` means every requested bundle was already
+// attached. `unservable` means the cache has no committed copy of the path, so
+// no bundle was attached. The response includes only paths referenced by a
+// bundle subject.
 export const attestationAttachPathSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	storePath: storePathSchema.optional(),

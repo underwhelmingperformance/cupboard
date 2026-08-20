@@ -9,8 +9,8 @@ import type {
 import { derivationPathOf } from '@cupboard/nix-store/derivation';
 
 import type {
-	LeftUpstreamCandidate,
-	LeftUpstreamVerdict
+	UpstreamAvailabilityCandidate,
+	UpstreamAvailabilityVerdict
 } from './availability-partition.ts';
 import {
 	isReachableElsewhere,
@@ -18,13 +18,11 @@ import {
 } from './substituter-reach.ts';
 
 /**
- * The store a confirmation asks, opened with settings that list only the
- * substituters a consumer elsewhere could also reach. Cupboard's own
- * destination cache and the tenant's reuse views are left out: they are
- * configured on the runner, but a path only they serve is the tenant's own
- * content, which is no reason to leave a target upstream. So are the
- * substituters that serve this runner alone, such as a directory on its disk or
- * a cache on its own network.
+ * A confirmation store configured with only the substituters available to an
+ * external consumer. It excludes Cupboard's destination cache and the tenant's
+ * reuse views because they contain tenant-owned content that the workflow
+ * should publish or retain. It also excludes runner-local and private-network
+ * substituters.
  *
  * The store also reports whether the daemon trusts the connection, because a
  * daemon applies a client's settings only for a client it trusts.
@@ -43,27 +41,25 @@ export interface UpstreamConfirmationOptions {
 	readonly substitution: NixSubstitutionSettings;
 	readonly store: PermittedSubstituterStore;
 	/**
-	 * Whether a consumer would accept a substituter's offer of a path, under the
-	 * consumer's own signature policy. An offer a consumer would refuse proves
-	 * nothing about availability.
+	 * Whether the consumer's signature policy accepts a substituter's offer. A
+	 * rejected offer does not establish availability.
 	 */
 	readonly accepts: AcceptsOffer;
 	readonly closure?: SubstitutableClosureOptions;
 }
 
 /**
- * Builds the check a target must pass before it is finally classed as left
- * upstream: the daemon has to trust the connection carrying the confirmation's
- * settings, Nix has to be willing to substitute the target, and the permitted
- * substituters have to hold the whole closure this store recorded for it.
- *
- * The walk reads each path's narinfo from the substituter serving it and checks
- * that every path of that closure is offered under the NAR hash this store
- * holds and signed by a key the configuration trusts.
+ * Creates the confirmation required before excluding a target from publication
+ * because an upstream substituter serves it. Confirmation requires a trusted
+ * connection, substitution eligibility, and a complete matching closure from
+ * permitted substituters. It reads each narinfo, verifies that its NAR hash
+ * matches the local store, and checks that the signature policy accepts it.
  */
-export function confirmLeftUpstreamWith(
+export function confirmUpstreamAvailabilityWith(
 	options: UpstreamConfirmationOptions
-): (candidate: LeftUpstreamCandidate) => Promise<LeftUpstreamVerdict> {
+): (
+	candidate: UpstreamAvailabilityCandidate
+) => Promise<UpstreamAvailabilityVerdict> {
 	// The trust answer is the same for every candidate this confirmation
 	// checks, so the store is asked once and the answer reused.
 	let honoured: Promise<SubstituterSettingsOutcome> | undefined;
@@ -140,8 +136,8 @@ export interface UpstreamConfirmationOverrideOptions {
  * from those substituters.
  *
  * A daemon honours these for a trusted client only, so
- * {@link confirmLeftUpstreamWith} checks the connection's trust before using
- * any result to decide a verdict.
+ * {@link confirmUpstreamAvailabilityWith} checks the connection's trust before
+ * using any result to decide a verdict.
  */
 export function upstreamConfirmationOverrides(
 	substitution: NixSubstitutionSettings,
@@ -183,9 +179,9 @@ function isTenantEndpoint(substituter: string, tenantUrl: URL): boolean {
 // derivation read is required. Plain store-path installables also have no
 // derivation option to inspect.
 async function derivationRefusal(
-	candidate: LeftUpstreamCandidate,
+	candidate: UpstreamAvailabilityCandidate,
 	options: UpstreamConfirmationOptions
-): Promise<LeftUpstreamVerdict | undefined> {
+): Promise<UpstreamAvailabilityVerdict | undefined> {
 	if (options.substitution.alwaysAllowSubstitutes) {
 		return undefined;
 	}

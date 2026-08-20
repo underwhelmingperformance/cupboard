@@ -44,12 +44,12 @@ import {
 	type AvailabilityCeilingConfig,
 	type AvailabilityPartition,
 	type AvailabilityTarget,
-	type LeftUpstreamCandidate,
-	type LeftUpstreamVerdict,
 	partitionAvailability,
 	type PlannedSubstitutionPolicy,
 	UnknownPathsCeilingError,
-	type UnknownRequeryOutcome
+	type UnknownRequeryOutcome,
+	type UpstreamAvailabilityCandidate,
+	type UpstreamAvailabilityVerdict
 } from '../plan/availability-partition.ts';
 import {
 	type CapacityCheckResult,
@@ -68,7 +68,7 @@ import {
 } from '../plan/cohort-target.ts';
 import { tenantProbesFor } from '../plan/destination-probe.ts';
 import {
-	confirmLeftUpstreamWith,
+	confirmUpstreamAvailabilityWith,
 	upstreamConfirmationOverrides
 } from '../plan/upstream-confirmation.ts';
 import { parseReadUser } from '../read-user.ts';
@@ -245,9 +245,9 @@ export interface PlanCohortDependencies {
 	readonly requeryUnknown: (
 		storePaths: readonly StorePathString[]
 	) => Promise<UnknownRequeryOutcome>;
-	readonly confirmLeftUpstream: (
-		candidate: LeftUpstreamCandidate
-	) => Promise<LeftUpstreamVerdict>;
+	readonly confirmUpstreamAvailability: (
+		candidate: UpstreamAvailabilityCandidate
+	) => Promise<UpstreamAvailabilityVerdict>;
 	readonly destinationServed: (
 		paths: readonly StorePathString[]
 	) => Promise<ReadonlySet<StorePathString>>;
@@ -511,14 +511,12 @@ export function registerPlanCommands(
 								}),
 							storePaths
 						),
-					confirmLeftUpstream: confirmLeftUpstreamWith({
+					confirmUpstreamAvailability: confirmUpstreamAvailabilityWith({
 						substitution,
 						store: permittedStore,
-						// A target is left upstream on the promise that a
-						// consumer can fetch it, and a consumer refuses a path
-						// whose signatures it cannot verify, so the same policy
-						// decides here, over the signatures each substituter
-						// published for the path.
+						// Exclude a target from publication only if a consumer
+						// would accept the signatures published by its upstream
+						// substituter. Use the consumer's signature policy here.
 						accepts: offerAcceptance(signatures, readKeyFile),
 						closure:
 							programOptions.signal === undefined
@@ -615,7 +613,7 @@ export async function runPlanCohort(
 					rootEnsureResults,
 					storeIdentity: options.storeIdentity,
 					requeryUnknown: dependencies.requeryUnknown,
-					confirmLeftUpstream: dependencies.confirmLeftUpstream,
+					confirmUpstreamAvailability: dependencies.confirmUpstreamAvailability,
 					ceiling: options.ceiling
 				})
 		);

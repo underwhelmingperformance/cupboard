@@ -21,12 +21,12 @@ import {
 	type AvailabilityPartitionOptions,
 	type AvailabilityTarget,
 	type DestinationProbes,
-	type LeftUpstreamCandidate,
-	type LeftUpstreamVerdict,
 	partitionAvailability,
 	RemoteFloatingOutputUnsupportedError,
 	UnknownPathsCeilingError,
-	type UnknownRequeryOutcome
+	type UnknownRequeryOutcome,
+	type UpstreamAvailabilityCandidate,
+	type UpstreamAvailabilityVerdict
 } from './availability-partition.ts';
 
 function path(basename: string): StorePathString {
@@ -207,7 +207,7 @@ function neverAsked(): Promise<UnknownRequeryOutcome> {
 	throw new Error('The unknown paths were re-queried unexpectedly');
 }
 
-function alwaysConfirms(): Promise<LeftUpstreamVerdict> {
+function alwaysConfirms(): Promise<UpstreamAvailabilityVerdict> {
 	return Promise.resolve({ kind: 'confirmed' });
 }
 
@@ -226,7 +226,7 @@ function baseOptions(
 		destinationProbes: noProbes(),
 		rootEnsureResults: new Map(),
 		requeryUnknown: neverAsked,
-		confirmLeftUpstream: alwaysConfirms,
+		confirmUpstreamAvailability: alwaysConfirms,
 		ceiling: defaultCeiling,
 		...overrides
 	};
@@ -341,7 +341,7 @@ describe('partitionAvailability', () => {
 			[appPath, otherPath],
 			[appPath, otherPath]
 		);
-		const asked: LeftUpstreamCandidate[] = [];
+		const asked: UpstreamAvailabilityCandidate[] = [];
 
 		const partition = await partitionAvailability(
 			baseOptions({
@@ -355,7 +355,7 @@ describe('partitionAvailability', () => {
 				destinationProbes: probesFrom({
 					destinationServed: () => Promise.resolve(new Set([otherPath]))
 				}),
-				confirmLeftUpstream: (candidate) => {
+				confirmUpstreamAvailability: (candidate) => {
 					asked.push(candidate);
 
 					return Promise.resolve({ kind: 'confirmed' });
@@ -378,7 +378,7 @@ describe('partitionAvailability', () => {
 
 	it('builds every alias of a shared path when any installable refuses substitution', async () => {
 		const store = new RecordingStore(emptyMissing(), [appPath], [appPath]);
-		const asked: LeftUpstreamCandidate[] = [];
+		const asked: UpstreamAvailabilityCandidate[] = [];
 		const substitutable: NixDerivedPathString = `${path(
 			'33333333333333333333333333333333-first.drv'
 		)}^out`;
@@ -393,7 +393,7 @@ describe('partitionAvailability', () => {
 					target({ expectedPath: appPath, installable: nonSubstitutable })
 				],
 				store,
-				confirmLeftUpstream: (candidate) => {
+				confirmUpstreamAvailability: (candidate) => {
 					asked.push(candidate);
 
 					return Promise.resolve(
@@ -460,7 +460,7 @@ describe('partitionAvailability', () => {
 						target({ expectedPath: appPath, installable: `${appPath}^out` })
 					],
 					store,
-					confirmLeftUpstream: () => Promise.resolve(verdict)
+					confirmUpstreamAvailability: () => Promise.resolve(verdict)
 				})
 			);
 

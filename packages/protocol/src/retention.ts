@@ -12,19 +12,18 @@ import { z } from 'zod';
 import { countSchema } from './internal/counts.ts';
 import { isoTimestampSchema } from './scalars.ts';
 
-// One root names a bounded target list. Ensuring a root probes each distinct
-// target's narinfo object and canonical NAR in R2, then rewrites the root's
-// target rows. The bound keeps one request's probe fan-out and statement size
-// within what a single Durable Object request can serve.
+// A root can contain at most 1,000 targets. Updating a root probes the narinfo
+// and canonical NAR for each distinct target, then replaces its target rows. The
+// limit bounds both R2 requests and SQL statement size within one Durable Object
+// request.
 export const rootSetMaxTargets = 1000;
 
 const rootTargetListSchema = z.array(storePathSchema).max(rootSetMaxTargets);
 
-// A root write declares the channel's whole contents, so the declared list may
-// be empty: a channel whose current generation is served from elsewhere has no
-// target in this cache. An empty write clears the root's target rows, keeps the
-// root row and its expiry, and releases the paths the root held under the
-// ordinary retention grace.
+// A root update replaces the complete target list. The list may be empty when
+// another cache serves the channel generation. An empty update deletes the
+// target rows but preserves the root and its expiry. Released paths enter the
+// normal retention grace period.
 export const rootSetBodySchema = z.strictObject({
 	targets: rootTargetListSchema,
 	ttlSeconds: ttlSecondsSchema.optional()
@@ -74,10 +73,9 @@ export type ParsedRootEnsureResponse = z.output<
 	typeof rootEnsureResponseSchema
 >;
 
-// Bounds one listing page. A targets page probes each target's serve state (a
-// narinfo-object check per distinct path), so the bound keeps one request's
-// probe fan-out within what a single Durable Object request can serve. The
-// roots listing reuses the same bound to keep its own response a sensible size.
+// A target page probes the narinfo object for each distinct path. A page contains
+// at most 200 targets so one request remains below the internal subrequest
+// limit. Root listings use the same page size to bound response size.
 export const rootListPageSize = 200;
 
 // A continuation for a listing with more pages: opaque to the client, passed
@@ -179,23 +177,20 @@ export type ParsedRetentionPolicyRemoveResponse = z.output<
 	typeof retentionPolicyRemoveResponseSchema
 >;
 
-// A retention grace policy applies its grace period to every path published to
-// a cache whose name starts with `cachePrefix`; the empty prefix is the
-// tenant-wide default, and the longest matching prefix wins. The prefix is
-// bounded by a cache name's own maximum length, since a longer prefix could
-// never match one.
+// A retention-grace policy applies to paths published in caches whose names
+// start with `cachePrefix`. The empty prefix is the tenant-wide default, and the
+// longest matching prefix wins. A prefix cannot exceed the maximum cache-name
+// length because a longer value could not match a cache.
 const gracePrefixMaxLength = 63;
 
 export const gracePolicyAddBodySchema = z.strictObject({
-	// The prefix must be a prefix of some legal cache name, or the policy could
-	// never match anything. A typo such as an uppercase letter would otherwise
-	// be stored, and it would silently defeat the retention guarantee that grace
-	// mode provides.
+	// The prefix must also be the prefix of a valid cache name. This rejects values
+	// such as uppercase cache names that could never match.
 	cachePrefix: z
 		.string()
 		.max(gracePrefixMaxLength)
 		.regex(cacheNamePrefixPattern, {
-			message: 'cachePrefix must be a prefix of a valid cache name'
+			message: 'cachePrefix must be a valid cache-name prefix'
 		}),
 	graceSeconds: graceSecondsSchema
 });

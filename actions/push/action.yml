@@ -81,8 +81,8 @@ inputs:
   intermediate-paths-file:
     description:
       Newline-delimited store paths to publish alongside the targets without
-      retaining them as targets. Carried by only the first push when root-groups
-      declares more than one root.
+      retaining them as targets. When root-groups contains more than one root,
+      only the first push includes these paths.
     required: false
   reference-paths-file:
     description:
@@ -92,22 +92,22 @@ inputs:
     required: false
   reference-source:
     description:
-      Served cache endpoint the reference paths are read from. Required together
+      Cache endpoint from which the reference paths are read. Required together
       with reference-paths-file.
     required: false
   run-root:
     description:
-      Bind a run root, so every pushed path also joins this root as it commits;
-      independent of root or root-groups.
+      Attach each pushed path to this run root when committed. Independent of
+      root or root-groups.
     required: false
   run-root-ttl:
     description: Expire the run root after this duration. Requires run-root.
     required: false
   root-groups:
     description: >-
-      JSON array of {root, paths} objects: one push per group, replacing the
-      flat paths and root inputs. Use when a cohort declares more than one
-      target root. Each root is replaced atomically.
+      JSON array of {root, paths} objects. The action makes one push per group
+      and atomically replaces each root. This input replaces the flat paths and
+      root inputs.
     required: false
 outputs:
   cupboard-path:

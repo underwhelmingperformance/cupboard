@@ -18,8 +18,8 @@ import { githubActionsSink, jsonLinesSink } from './sinks.ts';
 export type { Logger, LogLevel, LogRecord, Sink } from '@logtape/logtape';
 export { getLogger } from '@logtape/logtape';
 
-// The root category every cupboard logger descends from; request- and
-// operation-scoped loggers extend it with `.with(fields)`.
+// The root category for all Cupboard loggers. Request- and operation-scoped
+// loggers add fields with `.with(fields)`.
 export const loggerCategory = ['cupboard'] as const;
 
 /**
@@ -27,8 +27,8 @@ Options for {@link configureLogging}.
 */
 export interface LoggingOptions {
 	/**
-	 * Where records are written; one of the sinks from `@cupboard/logger/sinks`.
-	 * Omit it to have {@link resolveSink} choose from the environment.
+	 * The sink that receives log records. If this is omitted, {@link resolveSink}
+	 * selects a sink from the environment.
 	 */
 	readonly sink?: Sink;
 	/**
@@ -38,10 +38,10 @@ export interface LoggingOptions {
 }
 
 /**
- * The sink for a run with no explicit choice: GitHub Actions workflow commands
- * under a runner, otherwise line-delimited JSON on stderr. An entrypoint that
- * knows its sink (the Worker, the CLI in a chosen output mode) passes one to
- * {@link configureLogging} instead.
+ * Selects a sink when the caller does not specify one. GitHub Actions receives
+ * workflow commands, and other environments receive line-delimited JSON on
+ * stderr. Entrypoints that select their own output format pass a sink to
+ * {@link configureLogging}.
  */
 export function resolveSink(streams: WorkflowCommandStreams = {}): Sink {
 	if (isGithubActions(streams.environment)) {
@@ -54,11 +54,11 @@ export function resolveSink(streams: WorkflowCommandStreams = {}): Sink {
 }
 
 /**
- * Configures LogTape once for the current isolate or process. Idempotent: a
- * second call is a no-op, so several entrypoints sharing an isolate cannot
- * clobber one another's configuration. Per-request context is layered on with
- * `.with(...)` children, never by reconfiguring. Uses the synchronous path
- * because every cupboard sink is synchronous.
+ * Configures LogTape once for the current isolate or process. Later calls return
+ * without changing the existing configuration, which lets several entrypoints
+ * share an isolate. Callers add request context through `.with(...)` child
+ * loggers. Every Cupboard sink is synchronous, so this function uses LogTape's
+ * synchronous configuration API.
  */
 export function configureLogging(options: LoggingOptions = {}): void {
 	if (getConfig() !== null) {
@@ -83,8 +83,8 @@ export function configureLogging(options: LoggingOptions = {}): void {
 }
 
 /**
- * The application's root logger. Callers derive request- and operation-scoped
- * loggers from it with `.with(fields)` and pass those down as the first argument.
+ * The application's root logger. Callers add request or operation fields with
+ * `.with(fields)`, then pass the resulting logger to downstream functions.
  */
 export function rootLogger(): Logger {
 	return getLogger(loggerCategory);

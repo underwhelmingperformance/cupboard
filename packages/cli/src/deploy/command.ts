@@ -266,7 +266,7 @@ async function showServerFault(dependencies: {
 
 	const forRay = ray === undefined ? '' : ` (ray ${ray})`;
 	ui.warn(
-		`${lead} Read it${forRay} with \`wrangler tail ${worker} --format json\`, ` +
+		`${lead} Read the Worker logs${forRay} with \`wrangler tail ${worker} --format json\`, ` +
 			'or the dashboard Logs tab, then re-run `cupboard init`.'
 	);
 }
@@ -1594,9 +1594,9 @@ async function deployFlow(
 
 		case 'identity-unproven': {
 			ui.warn(
-				`The plan makes ${outcome.owner.subject} the admin, but this ` +
-					'session used a raw API token, which carries no identity, so ' +
-					'it cannot prove that you are them. Re-run `cupboard init` and ' +
+				`The plan assigns ${outcome.owner.subject} as the admin, but a ` +
+					'raw API token has no user identity. This session cannot prove ' +
+					'that you match the configured admin. Re-run `cupboard init` and ' +
 					'log in through the browser to finish setting up.'
 			);
 			ui.outro('Deployed.');
@@ -1626,7 +1626,7 @@ async function deployFlow(
 
 		case 'claim-cancelled': {
 			ui.info(
-				'Nothing was claimed without the claim secret. Re-run ' +
+				'The deployment was not claimed because no claim secret was supplied. Re-run ' +
 					'`cupboard init` to finish setting up when you have it.'
 			);
 			ui.outro('Deployed.');

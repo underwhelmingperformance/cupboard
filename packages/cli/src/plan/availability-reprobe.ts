@@ -9,14 +9,14 @@ import {
 } from './availability-partition.ts';
 
 /**
-The bucket a withdrawn target moved into, named as the partition names it.
+The destination bucket assigned to a target removed from the build set.
 */
 export type WithdrawnOutcome = 'attachOnly' | 'publishByReference';
 
 /**
- * One target the re-probe took out of the build set: the installable Nix is no
- * longer asked to realise, the store path that is now available, and the bucket
- * the target moved into.
+ * One target removed from the build set. This includes the installable no
+ * longer passed to Nix, the now-available store path, and the destination
+ * bucket.
  */
 export interface WithdrawnTarget {
 	readonly installable: NixDerivedPathString;
@@ -26,14 +26,14 @@ export interface WithdrawnTarget {
 
 export interface AvailabilityReprobeOptions {
 	/**
-	The build set as it stands, one entry per target Nix is about to realise.
+	The current build set, with one entry for each target Nix will realise.
 	*/
 	readonly targets: readonly AvailabilityTarget[];
 	readonly destinationProbes: DestinationProbes;
 }
 
 /**
-The build set as the re-probe leaves it, with what it took out of it.
+The remaining build set and the targets removed from it.
 */
 export interface AvailabilityReprobe {
 	readonly buildSet: readonly NixDerivedPathString[];
@@ -46,21 +46,18 @@ export interface AvailabilityReprobe {
 const noRootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse> =
 	new Map();
 
-// Only the partition's confirmation may leave a target upstream: it proves a
-// consumer could fetch exactly what this run holds before anyone is sent to a
-// substituter for it. The re-probe therefore passes an empty substitutable
-// set, so it never leaves a target upstream itself.
+// Only the initial partition can exclude a target from publication because an
+// upstream substituter serves it. That decision requires confirmation that a
+// consumer can fetch the exact path held by this run. The re-probe therefore
+// passes an empty set of substitutable paths.
 const noSubstitutableExternal: ReadonlySet<StorePathString> = new Set();
 
 /**
- * Confirms, immediately before the build set is dispatched, that every target
- * in it still needs realising. The exact requested outputs are asked of the
- * destination and of the reuse view, in one batch per question however large
- * the build set is. A target either of them has gained since the partition ran
- * is withdrawn, to be attached to its root or published by reference.
- * Every other target keeps its place in the build set. Availability is racy: a
- * path can disappear again immediately after the answer, and Nix reports the
- * resulting failure as it reports any other.
+ * Immediately before dispatch, queries the predictable output paths in the
+ * destination and reuse view. A target that has become available is removed
+ * from the build set so it can be attached to its root or published by
+ * reference. All other targets remain. Availability can change again after
+ * this query, in which case Nix reports the resulting build failure normally.
  */
 export async function reprobeAvailability(
 	options: AvailabilityReprobeOptions

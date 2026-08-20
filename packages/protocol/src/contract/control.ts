@@ -37,10 +37,9 @@ const controlProcedure = oc.$meta<AuthzMeta>({}).errors({
 });
 
 /**
- * The control-plane admin API: the operator surface the bare host serves
- * under `/control`, declared once. Paths are relative to that prefix. The
- * server implements this contract and the CLI derives its client from it, so
- * the two cannot drift.
+ * The administrative API served under `/control` on the bare host. Paths in
+ * this contract are relative to `/control`. The server implements this contract,
+ * and the CLI derives its client from the same definition.
  */
 export const controlContract = {
 	check: controlProcedure
@@ -141,19 +140,19 @@ export const controlContract = {
 	},
 
 	membership: {
-		// Reassert every live tenant's admission marker and rebuild the filter
-		// from the registry. The deploy runs this so a change to the admission
-		// representation does not leave the gate rejecting existing tenants until
-		// the hourly cron; it touches only the KV gate, never any tenant's data.
+		// Rebuilds the admission filter and republishes each live tenant's marker
+		// from the registry. Deployment calls this procedure after an admission-format
+		// change so existing tenants remain admitted before the next hourly cron. It
+		// changes only the KV admission data.
 		rebuild: controlProcedure
 			.meta({ requires: 'membership:rebuild' })
 			.route({ method: 'POST', path: '/membership/rebuild' })
 			.output(membershipRebuildResponseSchema)
 	},
 
-	// The control plane's own trust rules: which external identity may exchange
-	// for control grants. The bootstrap owner is seeded; scoped control
-	// identities are managed here.
+	// The control plane's OIDC trust rules determine which external identities can
+	// request control grants. Deployment configuration creates the bootstrap owner
+	// rule. Administrators manage additional scoped identities here.
 	oidcTrust: {
 		list: controlProcedure
 			.meta({ requires: 'control-oidc-trust:list' })

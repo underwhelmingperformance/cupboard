@@ -31,7 +31,7 @@ describe('bridgedError', () => {
 		expect(bridged).toMatchObject({
 			code: 'CACHE_NOT_EMPTY',
 			status: StatusCodes.CONFLICT,
-			message: 'Cache is not empty; pass force to tear it down',
+			message: 'The cache contains store paths. Pass force to delete it.',
 			data: { cache: 'builds' }
 		});
 		expect(capture.logs).toStrictEqual([]);

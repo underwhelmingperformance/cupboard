@@ -296,12 +296,12 @@ async function reconcileCost(): Promise<number> {
 	return runInDurableObject(currentServer(), async (instance) => {
 		const service = new MaintenanceEligibilityService(instance.context);
 		const { dbCost } = instance.context;
-		dbCost.settle();
+		dbCost.recordOutstanding();
 		const before = dbCost.rowsRead;
 
 		await service.reconcile();
 
-		dbCost.settle();
+		dbCost.recordOutstanding();
 
 		return dbCost.rowsRead - before;
 	});
@@ -352,13 +352,13 @@ async function negotiateCost(
 ): Promise<number> {
 	return runInDurableObject(currentServer(), async (instance) => {
 		const { dbCost } = instance.context;
-		dbCost.settle();
+		dbCost.recordOutstanding();
 		const before = dbCost.rowsRead;
 
 		const response = await negotiateViaInstance(instance, token, storePathHash);
 		expect(response.status).toBe(StatusCodes.OK);
 
-		dbCost.settle();
+		dbCost.recordOutstanding();
 
 		return dbCost.rowsRead - before;
 	});

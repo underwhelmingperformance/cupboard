@@ -26,9 +26,9 @@ import { measureRealisation, type RealisationReport } from './measurement.ts';
 import { renderBudgetResult, renderSummary } from './summary.ts';
 
 /**
- * The public cache every Nix installation reads by default. It is the list a
- * run measures against unless the caller names its own, so the numbers are
- * the ones a runner with no extra configuration would pay.
+ * The public substituter configured by default on Nix installations. Unless a
+ * caller supplies another substituter, measurements use this list to model a
+ * runner with no additional cache configuration.
  */
 export const defaultSubstituters = ['https://cache.nixos.org'] as const;
 

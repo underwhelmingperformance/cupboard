@@ -721,9 +721,9 @@ async function ensureWorkerR2(dependencies: {
 			ui.success('The R2 credentials on the Worker are working.');
 		} else {
 			ui.warn(
-				'The new pair is set and checks out against R2, but the Worker ' +
-					'is still answering with the old one. It should settle ' +
-					'shortly; re-run `cupboard init` to re-check.'
+				'The new credential pair is stored and valid in R2, but the Worker ' +
+					'still uses the previous credentials. Allow the deployment to ' +
+					'propagate, then re-run `cupboard init`.'
 			);
 		}
 
@@ -732,9 +732,10 @@ async function ensureWorkerR2(dependencies: {
 }
 
 /**
- * Settles the claim secret the signup must present: the value this deploy
- * already knows, the one the operator types when only the Worker holds it,
- * or none at all. A dismissed prompt withholds the claim.
+ * Resolves the claim secret used during signup. It reuses a value known to the
+ * current deployment, prompts the operator when only the Worker has the
+ * configured secret, or continues without a claim. Cancelling the prompt
+ * returns `withheld`.
  */
 async function resolveClaimSecret(
 	ui: DeployUi,
@@ -839,11 +840,10 @@ async function claimAdmin(
 }
 
 /**
- * Prompts for a slug (no default: the name is the operator's to choose) and
- * creates the tenant under it. The create call is the arbiter of ownership:
- * a slug can be claimed between the prompt and the request landing, and the
- * conflict answer re-prompts. Re-creating an identical tenant is idempotent
- * on the server, so a re-run converges by entering the same slug.
+ * Prompts for a slug and creates the tenant. The server decides ownership
+ * because another caller can claim the slug before this request arrives. If the
+ * server reports a conflict, it prompts again. Recreating an identical tenant
+ * is idempotent, so a rerun with the same slug returns the existing tenant.
  */
 async function createFirstTenant(
 	ui: DeployUi,

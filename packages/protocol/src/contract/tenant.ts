@@ -13,11 +13,9 @@ import { uploadsContract } from './uploads.ts';
 import { verifyContract } from './verify.ts';
 
 /**
- * The tenant admin API: every JSON procedure a tenant deployment answers,
- * declared once. Paths are relative to the tenant base (`/t/<slug>` behind
- * the worker; the Durable Object serves them at its root). The server
- * implements this contract and the CLI derives its client from it, so the
- * two cannot drift.
+ * The tenant administrative API. Paths are relative to the tenant base:
+ * `/t/<slug>` at the Worker and `/` inside the Durable Object. The server and
+ * CLI both derive their implementations from this contract.
  */
 export const tenantContract = {
 	caches: cachesContract,

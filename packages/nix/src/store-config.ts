@@ -47,7 +47,7 @@ export interface NixStoreConfig {
 	readonly stateDirectory: string;
 	readonly daemonSocketPath: string;
 	/**
-	The discovered settings the daemon's SetOptions frame carries directly.
+	The discovered settings encoded directly in the daemon's SetOptions frame.
 	*/
 	readonly daemonSetOptions: NixDaemonSetOptions;
 	/**
@@ -76,15 +76,15 @@ export interface NixStoreConfig {
 	 */
 	readonly unknownSettings: readonly string[];
 	/**
-	 * The effective `post-build-hook` setting from the merged configuration.
-	 * Nix supports exactly one post-build hook, so a caller about to apply its
-	 * own checks this field first and rejects an existing operator hook.
+	 * The effective `post-build-hook` setting from the merged configuration. Nix
+	 * supports exactly one hook. Callers that need to install another hook must
+	 * reject a non-empty value.
 	 */
 	readonly postBuildHook?: string;
 }
 
 /**
-The settings the daemon protocol's SetOptions frame carries as fields.
+Settings encoded as fields in the daemon protocol's SetOptions frame.
 */
 export interface NixDaemonSetOptions {
 	readonly keepFailed?: boolean;
@@ -154,11 +154,10 @@ export interface NixBuildSettings {
 }
 
 /**
- * The effective settings deciding how Nix attempts an HTTP transfer and how it
- * waits before attempting one again. Nix retries a transient failure, doubling
- * the wait each time up to a ceiling and never coming back sooner than a
- * server requested. It applies jitter so that clients receiving the same
- * response do not all return at the same moment.
+ * The effective settings for HTTP transfers. Nix doubles the retry delay after
+ * each transient failure, up to the configured maximum. `Retry-After` can
+ * extend the delay. Jitter prevents clients that receive the same response
+ * from retrying simultaneously.
  */
 export interface NixFileTransferSettings {
 	/**
@@ -214,9 +213,10 @@ export interface NixFileTransferSettings {
 const defaultSubstituters = ['https://cache.nixos.org/'];
 
 /**
- * The effective settings deciding whether Nix would accept a path another
- * store offers. Nix takes a path with at least one signature from a key it
- * trusts, and with `require-sigs` off takes one however it is signed.
+ * The effective signature policy for paths offered by another store. With
+ * `require-sigs` enabled, Nix accepts a path only when a trusted key verifies
+ * at least one signature. With `require-sigs` disabled, Nix accepts the path
+ * without a valid signature.
  */
 export interface NixSignatureSettings {
 	/**
@@ -316,10 +316,9 @@ const rosettaRuntime = '/Library/Apple/usr/libexec/oah/libRosettaRuntime';
  * supports, and an aarch64-darwin machine runs x86_64-darwin ones once Rosetta
  * 2 is installed.
  *
- * These describe the machine, so they come from what this machine reports
- * rather than from the effective `system` setting: Nix compiles its own system
- * double in and probes the running kernel, neither of which a configuration
- * moves.
+ * These defaults describe the host rather than the effective `system` setting.
+ * Nix uses its compile-time system and probes the running kernel; configuration
+ * does not change either value.
  */
 function defaultExtraPlatforms(
 	machineSystem: string | undefined,
@@ -442,7 +441,7 @@ const defaultStateDirectory = '/nix/var/nix';
 const maxIncludeDepth = 16;
 
 /**
-What an error names as the source of an inline `NIX_CONFIG` line.
+The source label used for inline `NIX_CONFIG` errors.
 */
 const inlineConfigSource = 'NIX_CONFIG';
 
@@ -455,7 +454,7 @@ type ConfigSource =
 	| { readonly kind: 'file'; readonly filePath: string }
 	| { readonly kind: 'inline' };
 
-// What an error names a source as.
+// The source label used in a configuration error.
 function sourceName(source: ConfigSource): string {
 	return source.kind === 'inline' ? inlineConfigSource : source.filePath;
 }
@@ -480,8 +479,8 @@ export const defaultMachineProbes: NixMachineProbes = {
 		}
 	},
 	isFilePresent: (filePath) => existsSync(filePath),
-	// A guest reports the kernel's support as its host's, so Nix asks whether
-	// this machine is itself a guest first and answers no when it is.
+	// A guest reports the host's virtualisation support. Nix first checks that
+	// this machine is not itself a guest.
 	hasHardwareVirtualisation: () =>
 		platform === 'darwin' &&
 		sysctlInteger('kern.hv_vmm_present') !== 1 &&
@@ -528,7 +527,7 @@ export function microarchitectureLevelsOf(
  *
  * Three names differ between the two spellings. `PNI` is SSE3 under the name
  * Linux prints it by; `FMA3` is the three-operand FMA that Linux prints as
- * `fma`; and `ABM` is the bit that carries LZCNT, which Intel and AMD both
+ * `fma`; and `ABM` includes LZCNT support, which Intel and AMD both
  * report and Linux prints under AMD's name for it. Libcpuid separately asks
  * for `OSXSAVE`, but Linux only publishes `avx` here when the operating system
  * has enabled the XSAVE state AVX needs. Requiring another `/proc/cpuinfo`
@@ -1347,9 +1346,9 @@ class EffectiveBuildSettings {
 
 // The compiled-in `builders` value is the machines file in the configuration
 // directory, so a machine that declares its builders there and never mentions
-// the setting still has them. `NIX_REMOTE_SYSTEMS` names files instead,
-// colon-separated. When set to an empty value it selects no files, and the
-// machines file is not consulted either.
+// the setting still has them. `NIX_REMOTE_SYSTEMS` instead specifies a
+// colon-separated list of files. When set to an empty value it selects no
+// files, and the machines file is not consulted either.
 function defaultBuilders(
 	dependencies: NixConfigEnvironment
 ): string | undefined {
@@ -1366,8 +1365,8 @@ function defaultBuilders(
 	return `@${path.join(systemConfigDirectory(dependencies), 'machines')}`;
 }
 
-// Nix takes its configuration directory from `NIX_CONF_DIR` when that names
-// one, and reads both `nix.conf` and the machines file from there.
+// When `NIX_CONF_DIR` is non-empty, Nix reads both `nix.conf` and the machines
+// file from that directory.
 function systemConfigDirectory(dependencies: NixConfigEnvironment): string {
 	return (
 		nonEmpty(dependencies.env.NIX_CONF_DIR) ?? defaultSystemConfigDirectory
@@ -1398,10 +1397,9 @@ function resolvedBuilders(
 const maxMachineFileDepth = 16;
 
 /**
- * The builder entries a `builders` value expands to, the way Nix expands one:
- * a `#` ends its line, each line then splits on `;`, and an entry starting
- * with `@` is replaced by the entries of the file it names, expanded the same
- * way.
+ * Expands a `builders` value using Nix's rules: `#` starts a comment,
+ * semicolons separate entries, and `@file` recursively inserts entries from
+ * the named file.
  */
 function expandBuilderLines(
 	builders: string,
@@ -1430,9 +1428,9 @@ function expandBuilderLines(
 }
 
 /**
- * Reads the lines represented by an `@file` entry. Nix ignores a machines file that is
- * not there and raises whatever else the filesystem said, so a file this
- * process may not read makes the configuration unresolvable rather than empty.
+ * Reads a machines file referenced by `@file`. Nix treats a missing file as
+ * empty but propagates other filesystem errors. An unreadable file therefore
+ * makes the configuration unresolved.
  */
 function machineFileText(
 	filePath: string,
@@ -1578,11 +1576,9 @@ class EffectiveSubstitutionSettings {
 }
 
 /**
- * Overrides under the canonical names a daemon connection carries. Nix
- * resolves a setting against every source it read and forwards the resolved
- * value under the setting's own name, so a daemon that receives an override
- * takes the value this client resolved instead of appending to a list of its
- * own.
+ * Overrides to send in SetOptions under canonical setting names. Nix resolves
+ * each setting across all sources before forwarding it. Send that resolved
+ * value so the daemon does not append to its own list.
  */
 class EffectiveDaemonOverrides {
 	private readonly appendable = new Map<string, EffectiveList>();
@@ -1702,9 +1698,8 @@ function forwardedSettingName(canonicalName: string): string {
 }
 
 /**
- * The name the pinned Nix knows a setting by: the name this client reads it
- * under, spelled the way that Nix spells it. A daemon and the settings table
- * both answer to this name.
+ * The spelling that the pinned Nix uses for a setting. Both the daemon
+ * protocol and the generated settings table use this name.
  */
 function pinnedSettingName(name: string): string {
 	return forwardedSettingName(canonicalSettingName(name));
@@ -1781,9 +1776,9 @@ export function isEnabledSettingValue(name: string, value: string): boolean {
 }
 
 /**
- * The number an integer setting holds, read the way Nix reads one: a sign,
- * digits, and an optional binary unit, bounded by the width Nix declared the
- * setting with.
+ * Parses an integer setting using Nix's grammar: an optional sign, digits, and
+ * an optional binary unit. The value must fit the width declared for the
+ * setting.
  *
  * Two of Nix's setting widths are 64 bits, which covers values beyond the range
  * a JavaScript number represents exactly. A value beyond that range is rounded

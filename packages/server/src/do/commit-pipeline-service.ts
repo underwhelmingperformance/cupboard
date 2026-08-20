@@ -995,12 +995,12 @@ export class CommitPipelineService {
 		};
 	}
 
-	// Settles one flush of materialisations inside the caller's gate: each
-	// request's settleable check and synchronous fence run first, then every
-	// surviving charge joins one combined D1 batch. A batch a quota race rolled
-	// back re-runs each charge on its own, so only the offenders refuse.
+	// Processes one batch of materialisations inside the caller's gate. Each
+	// request's eligibility check and synchronous fence run first, then every
+	// surviving charge joins one D1 batch. If a quota race rolls the batch back,
+	// each charge runs again on its own so only the requests over quota fail.
 	// Returns one outcome per request, in order.
-	private async settleMaterialiseFlushLocked(
+	private async processMaterialiseFlushLocked(
 		requests: readonly MaterialiseRequest[],
 		account: TenantAccount | undefined
 	): Promise<(BatchedMaterialiseOutcome | undefined)[]> {
@@ -1228,7 +1228,7 @@ export class CommitPipelineService {
 		try {
 			await this.context.criticalSection(async () => {
 				batch = this.materialiseQueue.splice(0, materialiseFlushCap);
-				outcomes = await this.settleMaterialiseFlushLocked(
+				outcomes = await this.processMaterialiseFlushLocked(
 					batch.map((item) => item.request),
 					account
 				);

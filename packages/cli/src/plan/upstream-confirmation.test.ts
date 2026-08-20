@@ -10,9 +10,9 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
-import type { LeftUpstreamVerdict } from './availability-partition.ts';
+import type { UpstreamAvailabilityVerdict } from './availability-partition.ts';
 import {
-	confirmLeftUpstreamWith,
+	confirmUpstreamAvailabilityWith,
 	type PermittedSubstituterStore,
 	upstreamConfirmationOverrides
 } from './upstream-confirmation.ts';
@@ -102,7 +102,7 @@ const acceptEveryOffer: AcceptsOffer = () => Promise.resolve(true);
 interface ClosureRefusalCase {
 	readonly name: string;
 	readonly closure: SubstitutableClosureVerdict;
-	readonly expected: LeftUpstreamVerdict;
+	readonly expected: UpstreamAvailabilityVerdict;
 }
 
 const closureRefusalCases: readonly ClosureRefusalCase[] = [
@@ -143,11 +143,11 @@ const closureRefusalCases: readonly ClosureRefusalCase[] = [
 	}
 ];
 
-describe('confirmLeftUpstreamWith', () => {
+describe('confirmUpstreamAvailabilityWith', () => {
 	it('confirms a candidate whose whole closure the permitted substituters hold', async () => {
 		const store = storeDouble();
 
-		const verdict = await confirmLeftUpstreamWith({
+		const verdict = await confirmUpstreamAvailabilityWith({
 			substitution: defaultSubstitution,
 			store,
 			accepts: acceptEveryOffer
@@ -168,7 +168,7 @@ describe('confirmLeftUpstreamWith', () => {
 	// accepted, so one answer holds for every candidate the confirmation checks.
 	it('asks whether the connection is trusted only once, for any number of candidates', async () => {
 		const store = storeDouble();
-		const confirm = confirmLeftUpstreamWith({
+		const confirm = confirmUpstreamAvailabilityWith({
 			substitution: defaultSubstitution,
 			store,
 			accepts: acceptEveryOffer
@@ -194,7 +194,7 @@ describe('confirmLeftUpstreamWith', () => {
 	])('refuses a candidate when the daemon $name', async ({ trust }) => {
 		const store = storeDouble({ trust });
 
-		const verdict = await confirmLeftUpstreamWith({
+		const verdict = await confirmUpstreamAvailabilityWith({
 			substitution: defaultSubstitution,
 			store,
 			accepts: acceptEveryOffer
@@ -214,7 +214,7 @@ describe('confirmLeftUpstreamWith', () => {
 	it.each(closureRefusalCases)(
 		'refuses a candidate over $name',
 		async ({ closure, expected }) => {
-			const verdict = await confirmLeftUpstreamWith({
+			const verdict = await confirmUpstreamAvailabilityWith({
 				substitution: defaultSubstitution,
 				store: storeDouble({ closure }),
 				accepts: acceptEveryOffer
@@ -262,7 +262,7 @@ describe('confirmLeftUpstreamWith', () => {
 		}) => {
 			const store = storeDouble({ allowsSubstitutes });
 
-			const verdict = await confirmLeftUpstreamWith({
+			const verdict = await confirmUpstreamAvailabilityWith({
 				substitution,
 				store,
 				accepts: acceptEveryOffer
@@ -280,7 +280,7 @@ describe('confirmLeftUpstreamWith', () => {
 	);
 
 	it('refuses a candidate whose derivation cannot be read', async () => {
-		const verdict = await confirmLeftUpstreamWith({
+		const verdict = await confirmUpstreamAvailabilityWith({
 			substitution: defaultSubstitution,
 			store: storeDouble({ derivationFails: true }),
 			accepts: acceptEveryOffer
@@ -297,7 +297,7 @@ describe('confirmLeftUpstreamWith', () => {
 	it('reads no derivation for an installable naming a store path', async () => {
 		const store = storeDouble();
 
-		const verdict = await confirmLeftUpstreamWith({
+		const verdict = await confirmUpstreamAvailabilityWith({
 			substitution: defaultSubstitution,
 			store,
 			accepts: acceptEveryOffer

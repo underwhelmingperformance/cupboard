@@ -46,13 +46,13 @@ describe('db cost meter', () => {
 			const { db, dbCost } = instance.context;
 
 			insertUploads(db, 0, 3);
-			dbCost.settle();
+			dbCost.recordOutstanding();
 			const writesBeforeScan = dbCost.rowsWritten;
 			const smallScan = scanUploads(db, dbCost);
 			const writesWhileScanning = dbCost.rowsWritten - writesBeforeScan;
 
 			insertUploads(db, 3, 7);
-			dbCost.settle();
+			dbCost.recordOutstanding();
 			const largeScan = scanUploads(db, dbCost);
 
 			return { smallScan, largeScan, writesWhileScanning };
@@ -69,10 +69,10 @@ describe('db cost meter', () => {
 		const measured = await runInDurableObject(currentServer(), (instance) => {
 			const { db, dbCost } = instance.context;
 
-			dbCost.settle();
+			dbCost.recordOutstanding();
 			const before = dbCost.rowsWritten;
 			insertUploads(db, 0, 3);
-			dbCost.settle();
+			dbCost.recordOutstanding();
 
 			return dbCost.rowsWritten - before;
 		});
@@ -210,7 +210,7 @@ function scanUploads(
 ): number {
 	const before = databaseCost.rowsRead;
 	database.select().from(schema.pendingUploads).all();
-	databaseCost.settle();
+	databaseCost.recordOutstanding();
 
 	return databaseCost.rowsRead - before;
 }

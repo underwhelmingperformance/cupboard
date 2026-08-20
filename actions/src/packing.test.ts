@@ -126,16 +126,16 @@ describe('packCohorts', () => {
 	});
 
 	it('leaves a target packing cannot price untouched, in its own cohort', () => {
-		const unpriced = singleton('.#unpriced');
+		const withoutMeasurement = singleton('.#without-measurement');
 
 		const result = packCohorts({
 			enabled: true,
-			cohorts: [singleton('.#a'), unpriced],
+			cohorts: [singleton('.#a'), withoutMeasurement],
 			measurements: measurements([['.#a', 60]]),
 			capacity: 1000
 		});
 
-		expect(result?.cohorts).toContainEqual(unpriced);
+		expect(result?.cohorts).toContainEqual(withoutMeasurement);
 	});
 
 	it('never combines cohorts across different execution contexts', () => {
@@ -216,11 +216,16 @@ describe('packCohorts', () => {
 			targets: [target('.#group-a'), target('.#group-b')],
 			installables: ['.#group-a^out', '.#group-b^out']
 		});
-		const unpriced = singleton('.#unpriced');
+		const withoutMeasurement = singleton('.#without-measurement');
 
 		const result = packCohorts({
 			enabled: true,
-			cohorts: [singleton('.#a'), singleton('.#b'), explicit, unpriced],
+			cohorts: [
+				singleton('.#a'),
+				singleton('.#b'),
+				explicit,
+				withoutMeasurement
+			],
 			measurements: measurements([
 				['.#a', 60],
 				['.#b', 50],
@@ -247,7 +252,7 @@ describe('packCohorts', () => {
 		expect(Object.fromEntries(sizesByAttributes)).toStrictEqual({
 			'.#a,.#b': 110,
 			'.#group-a,.#group-b': 20,
-			'.#unpriced': undefined
+			'.#without-measurement': undefined
 		});
 	});
 });

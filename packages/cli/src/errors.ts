@@ -194,7 +194,9 @@ export class InvalidWorkerUrlError extends CliUsageError {
  */
 export class InvalidWorkerUrlBaseError extends CliUsageError {
 	constructor() {
-		super('Worker URL must carry nothing beyond origin and path');
+		super(
+			'Worker URL must not include credentials, a query string, or a fragment'
+		);
 		this.name = 'InvalidWorkerUrlBaseError';
 	}
 }
@@ -474,18 +476,13 @@ export class TokenProviderError extends CliError {
 	}
 }
 
-// The condition a capacity wait expired under, carried as the timeout's cause.
-// `ahead` is the number of sessions the server said were before this one when
-// it last answered `queued`, and is absent when it never did. It is a
-// diagnostic and nothing decides anything on it: the server's rotation moves as
-// soon as any entry settles, so it is neither a queue position nor an estimate
-// of how long the wait had left.
+// The state when a capacity timeout expires. `ahead` is the latest queued count,
+// or `undefined` if the server never sent a queued frame. It is diagnostic only
+// and does not represent the current queue position or an estimated wait.
 //
-// A session that spent the wait being refused an upgrade passes that refusal as
-// this error's own cause, so the status and body the server gave reach the
-// operator through the timeout's cause chain. A wait during which the cache
-// made no progress and refused no upgrade, which is a cache that accepts the
-// session and grants it nothing, has no such cause.
+// If the server refused an upgrade during this wait, the refusal is available
+// as the nested cause. A successful connection that grants no credit has no
+// nested cause.
 export class CommitCapacityQueuedError extends CliError {
 	constructor(
 		public readonly ahead?: number,
@@ -493,7 +490,7 @@ export class CommitCapacityQueuedError extends CliError {
 	) {
 		super(
 			ahead === undefined
-				? 'The server granted no capacity to commit under'
+				? 'The server did not grant commit capacity'
 				: `The server last reported ${String(ahead)} session(s) ahead`,
 			options
 		);
@@ -501,13 +498,10 @@ export class CommitCapacityQueuedError extends CliError {
 	}
 }
 
-// A publication gave up waiting for capacity to commit under. `waitedSeconds`
-// covers one unbroken stretch during which the cache gave the session no
-// progress. A grant, or an entry the cache answers, starts the measurement
-// again, so a cache that keeps granting credit, however slowly, never reaches
-// this error. `totalWaitedSeconds` sums every such stretch over the session and
-// is a diagnostic only. Only the paths still queued fail; paths already
-// committing are unaffected.
+// One uninterrupted period without commit progress. A grant or terminal update
+// resets the period, so a cache that keeps granting credit does not reach this
+// error. `totalWaitedSeconds` sums all such periods for diagnostics. Only queued
+// paths fail; paths already committing are unaffected.
 export class CommitCapacityTimeoutError extends CliError {
 	constructor(
 		public readonly timeoutSeconds: number,
@@ -1120,9 +1114,9 @@ export class BuildEventConnectionClosedError extends Error {
 
 /**
  * The daemon does not trust this client, so it would silently ignore the
- * invocation's `post-build-hook` override and the build would stream nothing.
- * Refused before the expensive build starts; `requiredSetting` is the daemon
- * setting that must list the user.
+ * invocation's `post-build-hook` override. The listener would therefore receive
+ * no completed-output events. Refuse the build before it starts;
+ * `requiredSetting` is the daemon setting that must list the user.
  */
 export class UntrustedDaemonError extends CliError {
 	public readonly requiredSetting = 'trusted-users';
@@ -1304,8 +1298,9 @@ export class BuildProvenanceIncompleteError extends Error {
 
 /**
  * The build succeeded but its publication or retention did not complete. The
- * exit code carries the classified sysexits category, so a cache failure is
- * never presented as a build failure; the receipt names each lost path.
+ * exit code uses the classified sysexits category so callers can distinguish a
+ * publication failure from a build failure. The receipt records each affected
+ * path.
  */
 export class BuildPublicationFailedError extends CliError {
 	constructor(

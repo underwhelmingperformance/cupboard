@@ -1441,16 +1441,15 @@ export class VerificationService {
 		return batch;
 	}
 
-	// Settles up to `limit` pending reuse rows on the DO. Their bytes are the
-	// already-verified canonical object, so the settle is decode-free: the
-	// promote is a head plus the `blob_state` upsert. The alarm backstop drives
-	// this so waiters on cheap rows are answered even with no consumer pass
-	// running; fresh rows stay for the queue consumer, which decodes off the DO
-	// thread. The reuse test and the bound run in the query, so a large
-	// fresh-row backlog costs nothing to walk past, and the snapshot leases its
-	// rows synchronously: a consumer pass's claims are respected, and a
-	// consumer crossing this settle stays off its rows in turn.
-	async settlePendingReuse(logger: Logger, limit: number): Promise<number> {
+	// Processes up to `limit` pending reuse rows on the Durable Object. Their
+	// bytes are already verified in the canonical object, so processing requires
+	// only a head request and a `blob_state` upsert. The alarm backstop processes
+	// these inexpensive rows even when no consumer pass is running; fresh rows
+	// remain for the queue consumer, which decodes them off the Durable Object's
+	// thread. The query applies both the reuse test and the limit, so a large
+	// backlog of fresh rows adds no scan cost. It also leases the selected rows
+	// synchronously, so a concurrent consumer does not claim them.
+	async processPendingReuse(logger: Logger, limit: number): Promise<number> {
 		const now = new Date();
 		const pendings = this.context.db
 			.select()

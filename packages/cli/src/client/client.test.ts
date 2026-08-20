@@ -587,7 +587,7 @@ describe('CupboardClient.commit', () => {
 		await expect(settled).resolves.toBeUndefined();
 	});
 
-	it('resolves the current token when the server expires an open commit socket', async () => {
+	it("uses the provider's current token after the server closes a commit socket whose token expired", async () => {
 		const { client, connections } = commitClient([
 			(socket) => {
 				socket.emit('open');

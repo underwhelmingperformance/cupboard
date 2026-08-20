@@ -11,7 +11,7 @@ import {
 } from './measurement.ts';
 
 /**
-A misuse of the gate: a baseline or tolerance it cannot work from.
+Invalid gate input: an unreadable baseline or tolerance.
 */
 export abstract class BudgetError extends UsageError {}
 
@@ -24,7 +24,9 @@ export class BaselineJsonError extends BudgetError {
 
 export class BaselineSchemaError extends BudgetError {
 	constructor(override readonly cause: z.ZodError) {
-		super('The baseline does not carry the measurements a gate compares');
+		super(
+			'The baseline does not contain the measurements required by the gate'
+		);
 		this.name = 'BaselineSchemaError';
 	}
 }
@@ -41,10 +43,10 @@ const budgetEntrySchema = z.object({
 });
 
 /**
- * The expected values a gate run measures against: a report an earlier run
- * wrote. Only the keys and measurements are read, so a baseline keeps working
- * when the report grows fields, and a hand-written baseline needs nothing but
- * the numbers it wants to hold the run to.
+ * Expected measurements for a gate, read from a previous report. Parsing
+ * ignores all fields except target and group keys and their measurements, so
+ * newer report fields do not invalidate existing baselines. A hand-written
+ * baseline needs only those values.
  */
 const keySchema = z.string().min(1);
 const targetBudgetSchema = budgetEntrySchema.extend({ attr: keySchema });
@@ -129,12 +131,10 @@ export interface BudgetOptions {
 }
 
 /**
- * Holds a report to the values a baseline recorded. A measurement passes
- * while it stays within its budget plus the tolerance; anything above that is
- * a breach naming the metric, the budget and the amount over. A measurement
- * the baseline has no entry for is reported as unbudgeted and never breaches,
- * so adding a target to the manifest asks for a new baseline rather than
- * failing the gate on its first run.
+ * Compares report measurements with baseline budgets plus the tolerance. Each
+ * breach records the metric, budget, measured value, and excess. Measurements
+ * absent from the baseline are reported as unbudgeted but do not fail the gate,
+ * which lets a new target establish a baseline on its first run.
  */
 export function checkBudgets(options: BudgetOptions): BudgetResult {
 	const tolerance = options.tolerance ?? defaultTolerance;
@@ -222,16 +222,14 @@ function collect(
 	}
 }
 
-// Counts and byte totals are whole numbers, so the allowance is one too:
-// rounding down keeps the gate from passing a measurement a fractional
-// allowance would have let through.
+// Counts and byte totals are integers. Round the tolerated limit down so a
+// fractional allowance cannot admit the next integer.
 function allowanceFor(expected: number, tolerance: number): number {
 	return Math.floor(expected * (1 + tolerance));
 }
 
-// A gate failure is the measurement disagreeing with the recorded budget, so
-// it gets its own code (65, the BSD sysexits EX_DATAERR) rather than the
-// catch-all a crash in the fixture itself would produce.
+// A budget breach exits with EX_DATAERR (65) so callers can distinguish
+// measured drift from an internal fixture failure.
 export const budgetExitCode = 65;
 
 /**

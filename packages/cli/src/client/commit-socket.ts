@@ -93,9 +93,9 @@ export type CommitSocketConnect = (
 ) => CommitSocket;
 
 /**
- * Supplies authentication for the first commit connection and each reconnect.
- * The session obtains a new attempt after an expiry close and refreshes the
- * current attempt once if an upgrade returns 401.
+ * Supplies authentication for the first commit connection and every reconnect.
+ * The session requests a new attempt after an expiry close. If an upgrade
+ * returns 401, it refreshes the current attempt once.
  */
 export interface CommitSocketCredentials {
 	readonly initial: BearerAttempt;

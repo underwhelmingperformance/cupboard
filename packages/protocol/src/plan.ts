@@ -66,11 +66,10 @@ export const unknownPathCauseSchema = z.discriminatedUnion('kind', [
 export type UnknownPathCause = z.output<typeof unknownPathCauseSchema>;
 
 /**
- * One store path whose availability the plan could not settle, with the cause
- * the plan inferred for it. `targets` holds the cohort targets that refer to
- * the path directly, by installable, expected output path or planned
- * derivation. A path reached only through a closure walk has no such target,
- * which is the common case for dependencies.
+ * A store path whose availability the plan could not determine, together with
+ * the inferred cause. `targets` contains cohort targets that refer to the path
+ * directly through an installable, expected output path, or planned derivation.
+ * Dependencies reached only through closure traversal have no target entry.
  */
 export const unknownPathDetailSchema = z.object({
 	path: storePathSchema,
@@ -80,9 +79,9 @@ export const unknownPathDetailSchema = z.object({
 export type UnknownPathDetail = z.output<typeof unknownPathDetailSchema>;
 
 /**
- * The number of unknown-availability paths a plan tolerates, and where that
- * limit came from: the configured ceiling, or the untrusted fallback with the
- * reason the configured ceiling could not be honoured.
+ * The maximum number of paths with unknown availability that a plan permits.
+ * `source` identifies either the configured limit or the fallback used when
+ * Cupboard could not trust the configured limit.
  */
 export const availabilityCeilingSchema = z.object({
 	value: z.number(),
@@ -231,9 +230,9 @@ function limitSentence(
 }
 
 /**
- * Renders the complete unknown-paths refusal for the operator: what the plan
- * could not settle, path by path, which substituters never answered, which
- * ceiling the count exceeded, and the remedy.
+ * Renders the complete refusal for the operator. The message lists each
+ * unavailable path and its cause, any substituters that could not be queried,
+ * the applicable limit, and the corrective action.
  */
 export function describeUnknownPathsRefusal(
 	refusal: UnknownPathsRefusalDescription

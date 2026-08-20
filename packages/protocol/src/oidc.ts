@@ -10,12 +10,10 @@ import {
 } from './grants.ts';
 import { isAllowedIssuerUrl, IssuerUrl } from './oidc-issuer.ts';
 
-// The issuer, subject and audience of an OIDC identity are used together
-// wherever trust is configured or matched. Each carries a distinct brand so the
-// compiler rejects a call that passes them in the wrong order. The brands add
-// no runtime check: these schemas brand a stored or reflected value as it
-// stands, and the ingress schemas that accept a client-supplied value do the
-// narrowing.
+// Issuer, subject, and audience values use separate brands so the compiler
+// rejects arguments in the wrong position. These schemas add brands without
+// validating the string. Ingress schemas perform validation before stored or
+// reflected values reach this layer.
 export const oidcIssuerSchema = z.string().brand('OidcIssuer');
 export type OidcIssuer = z.infer<typeof oidcIssuerSchema>;
 
@@ -70,11 +68,11 @@ export const subjectTokenTypeIdToken =
 	'urn:ietf:params:oauth:token-type:id_token';
 export const subjectTokenTypeJwt = 'urn:ietf:params:oauth:token-type:jwt';
 
-// The `authorization_details` a client requests: the RFC 9396 array as a
-// JSON-encoded form field, carried as an opaque string here. The token service
-// parses and validates it, so a malformed or unpermitted value answers
-// `invalid_authorization_details` from the token service. A claim-bound (CI)
-// rule must send it; an interactive owner may omit it and receive a wildcard.
+// A client sends the RFC 9396 `authorization_details` array as a JSON-encoded
+// form field. The token service parses and validates it and returns
+// `invalid_authorization_details` for malformed or unauthorised values. A
+// claim-bound rule must send the field. An interactive owner may omit it and
+// receive a wildcard grant.
 const requestedAuthorizationDetailsSchema = z.string().min(1);
 
 // The optional fields RFC 8693 permits (`audience`, `scope`, `resource`, …) are
@@ -118,16 +116,17 @@ export const tokenResponseSchema = z.strictObject({
 });
 export type ParsedTokenResponse = z.output<typeof tokenResponseSchema>;
 
-// A trust rule federates an external OIDC identity into a set of cupboard
-// grants. The owner's rule is seeded from deploy config with a wildcard grant;
-// other rules are managed through the admin API and permit the grants their
-// bindings render. `display` carries the human-facing provenance a preset pins.
+// A trust rule maps an external OIDC identity to Cupboard grants. Deployment
+// configuration creates the owner rule with a wildcard grant. Administrators
+// create other rules through the API, and their resource bindings determine the
+// grants that can be issued. `display` stores provenance for the preset that
+// created the rule.
 export const oidcTrustAddBodySchema = z.strictObject({
 	issuer: z
 		.url()
 		.refine(
 			isAllowedIssuerUrl,
-			'issuer must be an https URL (http only for loopback)'
+			'issuer must use HTTPS, except that a loopback issuer may use HTTP'
 		)
 		.transform((value) => IssuerUrl.parse(value)?.value ?? value)
 		.brand('OidcIssuer'),
@@ -136,7 +135,7 @@ export const oidcTrustAddBodySchema = z.strictObject({
 		.record(z.string().min(1), claimMatchSchema)
 		.refine(
 			(value) => Object.keys(value).length > 0,
-			'at least one claim is required to bind the rule'
+			'at least one claim is required'
 		),
 	permittedGrants: z.array(permittedGrantSchema).min(1),
 	display: oidcTrustDisplaySchema.optional()

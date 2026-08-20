@@ -34,9 +34,9 @@ filenames. They retain lookup support for the older
 
 An archive holds the `cupboard` executable and the `cupboard-hook-relay` hook
 helper beside it, which is where the CLI looks for the helper. The publish
-pipeline tier unpacks an archive and runs a consumer's publication from it when
-`CUPBOARD_RELEASE_ARCHIVE` names one, so a defect in the packaged asset fails CI
-rather than a consumer's job.
+workflow tests an archive by unpacking it and running a consumer publication
+with `CUPBOARD_RELEASE_ARCHIVE`. A defective packaged asset therefore fails CI
+before it reaches a consumer job.
 
 Each binary build tries the ESM format first: esbuild emits an ESM bundle, the
 SEA config sets `mainFormat: "module"`, postject injects the blob into a pinned

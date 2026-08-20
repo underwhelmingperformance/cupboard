@@ -16,10 +16,10 @@ export const defaultInTotoLeaves = {
 };
 
 /**
- * The in-toto Statement schema for the given leaf schemas. The Statement
- * invariants, the `_type` literal and at least one subject, are fixed here; the
- * subject digest and predicate type vary per consumer. The predicate is left
- * unvalidated for the caller to interpret.
+ * Creates an in-toto Statement schema from the supplied leaf schemas. This
+ * function requires the Statement `_type` and at least one subject. The caller
+ * supplies the schemas for subject digests and predicate types. The predicate
+ * remains unvalidated for the caller to interpret.
  */
 export function inTotoStatementSchema<
 	Sha256 extends z.ZodType<string>,
@@ -71,9 +71,9 @@ export class DsseDecodeError extends Error {
 const defaultStatementSchema = inTotoStatementSchema(defaultInTotoLeaves);
 
 /**
- * Decode and validate the in-toto Statement carried in a DSSE payload, returning
- * its predicate type, the sha256 digest of each subject, and the raw predicate.
- * Throws {@link InTotoStatementError} when the payload is not a valid statement.
+ * Decodes and validates an in-toto Statement from a DSSE payload. Returns the
+ * predicate type, each subject's SHA-256 digest, and the unvalidated predicate.
+ * Throws {@link InTotoStatementError} if the payload is not a valid Statement.
  */
 export function parseInTotoStatement(payload: Uint8Array): InTotoStatement {
 	let statement: z.infer<typeof defaultStatementSchema>;
@@ -96,11 +96,10 @@ export function parseInTotoStatement(payload: Uint8Array): InTotoStatement {
 }
 
 /**
- * Decode the in-toto Statement carried in a Sigstore DSSE bundle, validating its
- * payload with the given statement schema. Returns the parsed statement together
- * with the bundle so callers can go on to verify it. Throws
- * {@link DsseDecodeError} when the bytes are not a DSSE bundle carrying a valid
- * in-toto statement.
+ * Decodes a Sigstore DSSE bundle and validates its in-toto Statement with
+ * `statementSchema`. Returns both parsed values so the caller can verify the
+ * bundle. Throws {@link DsseDecodeError} if the bytes do not contain a valid
+ * DSSE bundle and Statement.
  */
 export function decodeDsseStatement<Statement>(
 	bytes: Uint8Array,

@@ -1,18 +1,16 @@
 import { StatusCodes } from 'http-status-codes';
 
-// A long push makes thousands of calls against one single-threaded Durable
-// Object and streams as many blobs, so an occasional gateway blip or dropped
-// connection is expected. A few backed-off retries keep one such blip from
-// failing the whole push.
+// A long push makes thousands of requests to one single-threaded Durable Object
+// and streams many blobs. Retry a small number of transient gateway and
+// connection failures so one failed request does not abort the entire push.
 export const maxTransientRetries = 4;
 const baseRetryDelayMs = 250;
 const maxRetryDelayMs = 5000;
 
-// The statuses that mean "make the same request again": a rate limit and the
-// gateway/overload conditions a server clears on its own. A deterministic
-// refusal is never in this set and reaches the caller on its first response: a
-// `500` from a broken invariant, an over-quota `507`, or any 4xx. A
-// `Retry-After` header only sets how long to wait, never whether to retry.
+// These statuses indicate a transient rate-limit, gateway, or overload
+// response. Deterministic failures, including invariant failures, quota
+// refusals, and other 4xx responses, return immediately. `Retry-After` controls
+// the delay only after a response has been classified as retryable.
 const retryableStatuses = new Set<number>([
 	StatusCodes.TOO_MANY_REQUESTS,
 	StatusCodes.BAD_GATEWAY,
@@ -28,16 +26,14 @@ export function isTransientResponse(response: Response): boolean {
 }
 
 /**
- * Wraps a fetcher so a transient failure retries with back-off: a network fault
- * (DNS, refused or reset connection) or a {@link isTransientResponse} status
- * backs off and repeats, up to {@link maxTransientRetries} times, so a single
- * gateway blip does not fail the call. A deterministic response is returned on
- * its first attempt for the caller to handle. The wait honours the server's
- * `Retry-After` when present (capped) and is abort-aware, so a Ctrl-C during it
- * is prompt.
+ * Wraps a fetcher so transient network failures and
+ * {@link isTransientResponse} statuses retry after a delay. The function makes
+ * at most {@link maxTransientRetries} additional attempts. Deterministic
+ * responses return immediately. A valid `Retry-After` header supplies the delay
+ * up to the configured maximum, and an abort signal ends the wait immediately.
  *
- * A `Request` input is cloned per attempt so its body survives a retry; callers
- * that retry a body must pass it as re-readable bytes, not a one-shot stream.
+ * The function clones a `Request` before each attempt. Callers that send a body
+ * must therefore supply reusable bytes rather than a one-shot stream.
  */
 export function retryingFetcher(fetcher: typeof fetch): typeof fetch {
 	return async (input, init) => {
@@ -74,9 +70,9 @@ export function retryingFetcher(fetcher: typeof fetch): typeof fetch {
 }
 
 /**
- * Discards a transient response body, then waits before retrying: the server's
- * `Retry-After` when it names one (capped at the backoff ceiling), otherwise
- * {@link backoffDelay}.
+ * Discards a transient response body, then waits for the next attempt. A valid
+ * `Retry-After` header supplies the delay, limited to the maximum backoff.
+ * Otherwise the function calls {@link backoffDelay}.
  */
 export async function transientResponseDelay(
 	response: Response,
@@ -99,10 +95,9 @@ export async function transientResponseDelay(
 }
 
 /**
- * Waits before the next retry: exponential back-off with full jitter, capped,
- * and abort-aware so a Ctrl-C during the wait is prompt. The jittered delay
- * never exceeds the cap, so a test can fire any pending wait by advancing a fake
- * clock past it.
+ * Waits for an exponentially increasing delay with full jitter. The delay does
+ * not exceed `maxRetryDelayMs`. An abort signal ends the wait immediately. Tests
+ * can complete any wait by advancing a fake clock past the maximum.
  */
 export async function backoffDelay(
 	attempt: number,

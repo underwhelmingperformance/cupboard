@@ -3,12 +3,12 @@ import { createHash } from 'node:crypto';
 import { type Cohort, isBestEffortCohort } from './publish-plan.ts';
 
 /**
- * The headroom shape `checkStoreCapacity` (packages/cli/src/plan/capacity.ts)
- * already prices a single build against. Packing prices a grouping the same
- * way, but `actions/` cannot import `packages/cli`, so the formula and its
- * provisional defaults are mirrored here rather than shared; keep the defaults
- * here and in `capacity.ts` numerically identical by hand until the formula
- * lives in a package both sides can import.
+ * `checkStoreCapacity` (packages/cli/src/plan/capacity.ts) applies this headroom
+ * calculation to one build. Packing applies the same calculation to a candidate
+ * group. `actions/` cannot import `packages/cli`, so the formula and its
+ * provisional defaults are mirrored here rather than shared. Keep the defaults
+ * here and in `capacity.ts` numerically identical until both can import the
+ * formula from one package.
  */
 export interface PackingHeadroom {
 	readonly absoluteMinimum: number;
@@ -18,10 +18,9 @@ export interface PackingHeadroom {
 export const defaultPackingHeadroomAbsoluteMinimum = 5 * 1024 ** 3;
 export const defaultPackingHeadroomFraction = 0.1;
 
-// Build scratch does not scale with store size: a fraction alone is generous
-// on a large store and negligible on a small one, so the effective headroom
-// is whichever of the two the store's own capacity makes larger. Identical to
-// capacity.ts's own effectiveHeadroom; see the module comment above.
+// Build scratch requirements do not scale with store size. The effective
+// headroom is therefore the greater of the absolute minimum and the configured
+// fraction. This matches `effectiveHeadroom` in capacity.ts.
 function effectivePackingHeadroom(
 	headroom: PackingHeadroom,
 	capacity: number
@@ -31,12 +30,14 @@ function effectivePackingHeadroom(
 
 export interface PackCohortsOptions {
 	/**
-	Off by default. When false, packing does not run and {@link packCohorts} returns `undefined`, so the caller keeps the manifest's own cohorts.
+	When false, packing does not run and {@link packCohorts} returns `undefined`.
+	The caller retains the cohorts from the manifest.
 	*/
 	readonly enabled: boolean;
 	readonly cohorts: readonly Cohort[];
 	/**
-	Each target's own measured substitutable NAR size, keyed by attr. A target with no entry here cannot be priced, so packing never repartitions it: it keeps its manifest-declared cohort untouched.
+	Measured substitutable NAR size for each target, keyed by attr. A target
+	without a measurement remains in its original cohort.
 	*/
 	readonly measurements: ReadonlyMap<string, number>;
 	readonly capacity: number;
@@ -45,7 +46,8 @@ export interface PackCohortsOptions {
 
 export interface PackingResult {
 	/**
-	The manifest's cohorts, with packable ones replaced by packed groupings; an explicit multi-target cohort is never split or merged, and always appears here exactly as declared.
+	The cohorts from the manifest after eligible single-target cohorts have been
+	combined. Explicit multi-target cohorts remain unchanged.
 	*/
 	readonly cohorts: readonly Cohort[];
 	/**
@@ -75,28 +77,21 @@ function executionContextKey(cohort: Cohort): string {
 }
 
 /**
- * Groups the manifest's own single-target cohorts into packed cohorts under a
- * disk budget (the given capacity less a configured headroom), first-fit
- * decreasing over each target's own measured substitutable NAR size: sort
- * candidates largest first, place each into the first packed group with
- * room, or open a new one. Deterministic from the measurements alone, never a
- * heuristic over derivation counts or manifest order; a tie in size breaks by
- * the manifest's own cohort order, never at random.
+ * Groups eligible single-target cohorts under a disk budget using first-fit
+ * decreasing. It sorts targets by measured substitutable NAR size, then places
+ * each target in the first group with enough capacity or starts a new group.
+ * Ties retain the cohort order from the manifest.
  *
- * Candidates are packed within one execution context only, and a cohort's
- * failure tolerance is part of that context: a best-effort target keeps the
- * `continue-on-error` its manifest asked for because it is never packed
- * alongside a required one.
+ * Packing combines targets only when they have the same execution context.
+ * Failure tolerance is part of that context, so a best-effort target is never
+ * packed alongside a required target.
  *
- * An explicit multi-target cohort (the manifest's own `cohort` label) is
- * never split or merged: it is not a candidate for packing at all, and
- * passes through untouched. A single-target cohort whose target has no
- * entry in `measurements` cannot be priced, and is left untouched the same
- * way: an unpriced repartition would be a heuristic, not a measurement.
+ * Packing does not split or merge an explicit multi-target cohort. A target
+ * without a measurement remains in its original cohort because measured
+ * packing has no basis for moving it.
  *
- * Returns `undefined` when disabled, so a caller can tell "packing found
- * nothing worth combining" (an empty set of packed groups, still a
- * `PackingResult`) apart from "packing did not run at all".
+ * Returns `undefined` only when disabled. An enabled run returns a
+ * `PackingResult` even when it combines no cohorts.
  */
 export function packCohorts(
 	options: PackCohortsOptions

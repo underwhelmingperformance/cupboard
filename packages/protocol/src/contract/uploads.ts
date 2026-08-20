@@ -16,17 +16,15 @@ import {
 
 import { baseProcedure } from './base.ts';
 
-// The upload conversation up to the commit: a credential scopes the push to its
-// staging prefix, negotiation decides per path whether to upload, reuse or skip,
-// and the missing NARs stream straight to R2 with the credential. The commit is
-// a WebSocket outside the contract.
+// Upload negotiation determines whether each path requires an upload, can reuse
+// an existing blob, or is already present. Missing NARs are uploaded directly to
+// R2 with temporary credentials. Commit uses a separate WebSocket protocol.
 export const uploadsContract = {
-	// Issues the temporary R2 credential a push uploads its blobs with. Called
-	// without a push id at push start, the server signs a fresh one and scopes the
-	// credential to that push's staging prefix. Called with an existing push id, it
-	// refreshes the credential for the same prefix off the caller's current token,
-	// so a long push can renew before the credential lapses without abandoning the
-	// bytes it has already staged. The credential never outlives the token.
+	// Issues temporary R2 credentials for a push. Without a `pushId`, the server
+	// creates and signs a new identifier. With an existing `pushId`, the server
+	// issues replacement credentials for the same staging prefix after authorising
+	// the current token. Replacement credentials let a long push continue using
+	// bytes already staged. Their expiry never exceeds the token expiry.
 	credential: baseProcedure
 		.meta({
 			requires: 'upload:negotiate',
@@ -56,15 +54,12 @@ export const uploadsContract = {
 		)
 		.output(uploadNegotiateResponseSchema),
 
-	// The read-only twin of negotiate: it classifies a closure exactly as
-	// negotiate would and reports the grace facts a report needs, but it plans no
-	// upload, heals no stale narinfo and extends no deadline. It takes no pushId,
-	// because a dry run creates no upload credential and so has no signed push id
-	// yet. Negotiate relies on that push id to stop a caller using it as an
-	// existence oracle; preview relies instead on the cache-scoped bearer grant
-	// and the classification's owned-edge check, which never reveals another
-	// tenant's blobs. It mutates nothing, so it carries no `maintenance` flag and
-	// never wakes the scheduler.
+	// Classifies a closure exactly as negotiation would, including the grace facts
+	// needed for a report. Preview creates no upload, repairs no stale narinfo, and
+	// extends no deadline. It has no `pushId` because it creates no credentials.
+	// The cache-scoped grant and ownership check prevent cross-tenant existence
+	// disclosure. Preview does not set `maintenance` and does not schedule
+	// background work.
 	preview: baseProcedure
 		.meta({
 			requires: 'upload:preview',
@@ -100,10 +95,10 @@ export const uploadsContract = {
 		)
 		.output(uploadConfirmResponseSchema),
 
-	// A deferred upload's status, polled by the uploadId the client holds; the
-	// id is unique across caches, so the cache is read from the pending row. A
-	// settled upload leaves no row and reads as `absent`, so a missing row does
-	// not deny the holder of the status operation.
+	// Returns the status of the upload identified by `uploadId`. Upload IDs are
+	// unique across caches, so the authoriser reads the cache from the pending row.
+	// After the server removes a completed row, status returns `absent`; the missing
+	// row does not deny an otherwise authorised request.
 	status: baseProcedure
 		.meta({
 			requires: 'upload:status',

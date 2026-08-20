@@ -808,9 +808,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// Arms the shared Durable Object alarm for the earliest socket deadline. Every
-	// authenticated session contributes its token expiry. A paced session also
-	// contributes an idle deadline so the wake can reclaim unused credit.
+	// Arms the shared Durable Object alarm for the earliest access-token or idle
+	// deadline. Every authenticated session has a token deadline. A paced session
+	// also has an idle deadline so the alarm can reclaim its unused credit.
 	private async armCommitSocketClose(): Promise<void> {
 		const sockets = this.ctx.getWebSockets();
 		const authenticationExpiry = this.commitCredit.nextAuthenticationExpiry();
@@ -1365,7 +1365,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// than reading the lifetime totals. The delta is exact only because nothing else
 		// issues statements on this object between the readings: the seed is synchronous
 		// and the one await here (`assertZstdAvailable`) touches no table.
-		this.context.dbCost.settle();
+		this.context.dbCost.recordOutstanding();
 		const rowsReadBefore = this.context.dbCost.rowsRead;
 		const rowsWrittenBefore = this.context.dbCost.rowsWritten;
 
@@ -1388,7 +1388,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		// Migration and seeding run before the first request opens its meter, so their
 		// rows land on no per-request line. Surface them once as the cold-start cost.
-		this.context.dbCost.settle();
+		this.context.dbCost.recordOutstanding();
 		logMethodFinished(rootLogger().with({ method: 'initialise' }), {
 			rowsRead: this.context.dbCost.rowsRead - rowsReadBefore,
 			rowsWritten: this.context.dbCost.rowsWritten - rowsWrittenBefore
@@ -1693,7 +1693,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		await this.metered('verify-backstop', (logger) =>
 			this.withMaintenanceEligibility(() =>
-				this.verification.settlePendingReuse(
+				this.verification.processPendingReuse(
 					logger,
 					verifyBackstopReuseSettleLimit
 				)
@@ -1747,19 +1747,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// Drives the bounded background loops the single DO alarm carries: closing
-	// expired or idle commit sockets, reconciling the committed paths a recent
-	// negotiate queued, resuming a cache teardown, the verify backstop, and finally
-	// resuming a capped garbage collection. Each re-arms the alarm while it has
-	// work left, so the backlogs converge across firings while the gate stays
-	// free between them. Garbage collection resumes last so a queued gc pass,
-	// which may wait behind an interactive or cron collection on the chain,
-	// cannot stall the other resume loops. The socket close runs first because it
-	// is cheap, and its wake is what a session waiting on credit depends on.
+	// The Durable Object uses one alarm for all bounded background work. Each task
+	// re-arms the alarm while work remains, so the gate stays free between passes.
+	// Close expired or idle commit sockets first because sessions waiting for
+	// credit depend on that pass. Then reconcile committed paths, resume cache
+	// teardown and the verification backstop, and finally resume garbage
+	// collection. Garbage collection runs last because it can wait behind an
+	// interactive or cron collection and must not delay the other tasks.
 	override async alarm(): Promise<void> {
 		await this.initialise();
-		// The alarm is a top-level entrypoint, so it seeds the logger the resume
-		// paths that log outside a metered block are threaded.
+		// Create a logger for resume paths that log outside a metered block.
 		const logger = rootLogger().with({ trigger: 'alarm' });
 		const now = Date.now();
 		this.commitCredit.closeExpiredSessions(now);
@@ -2338,7 +2335,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						ev: 'error',
 						uploadId: entry.uploadId,
 						status: StatusCodes.SERVICE_UNAVAILABLE,
-						message: 'the commit batch stopped before this entry was answered'
+						message:
+							'The server stopped processing the commit batch before it produced a result for this entry.'
 					});
 				}
 			} finally {

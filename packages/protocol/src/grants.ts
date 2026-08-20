@@ -8,11 +8,10 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
-// Capability model. A token carries a set of grants as RFC 9396
-// `authorization_details`; the authoriser asks one question, `isCoveredByToken`,
-// against the operation a route declares and the concrete resource it acts on.
-// A trust rule stores grants whose resources are bindings (templates, captures,
-// relations) that resolve to those concrete selectors at issue time.
+// Tokens encode grants in the RFC 9396 `authorization_details` claim.
+// `isCoveredByToken` checks the route's required operation against the concrete
+// request resource. Stored trust rules use templates and captures that resolve
+// to concrete selectors when the server issues a token.
 
 // Cache-scoped tenant operations. `gc:run` and `stats:read` also appear as
 // domain operations: the per-cache form carries a cache, the deployment-wide
@@ -208,18 +207,14 @@ function isRootWithin(requested: string, granted: string): boolean {
 		: requested === granted;
 }
 
-// An operation that is a strict attenuation of a broader one at issuance: doing
-// less than the broader operation, never more, so a rule trusted with the
-// broader operation may issue an explicit grant for the narrower one without
-// naming it separately. `upload:preview` only classifies a closure, and an
-// `upload:negotiate` grant already permits that.
+// At issuance, a rule that permits `upload:negotiate` may also issue
+// `upload:preview` because preview performs only the read-only classification
+// step.
 const impliedAtIssuance: Partial<Record<Operation, Operation>> = {
 	'upload:preview': 'upload:negotiate'
 };
 
-// An operation implied by a broader one a PRESENTED token already carries.
-// `upload:preview` is a strict read-only attenuation of `upload:negotiate` at
-// runtime as well as issuance.
+// Apply the same implication when checking authority from a presented token.
 const impliedByPresentedAuthority: Partial<Record<Operation, Operation>> = {
 	'upload:preview': 'upload:negotiate'
 };
@@ -239,11 +234,9 @@ function isOperationImplied(
 }
 
 /**
- * Whether a stored trust rule's permitted action set allows a requested
- * operation to be granted at token issuance: either the set names the
- * operation directly, or the operation is a strict attenuation of one the set
- * already names (see {@link impliedAtIssuance}). Used only against a rule's
- * permitted grants at exchange time, never against a presented token.
+ * Returns whether `actions` permits `operation` at token issuance. The set
+ * permits an operation either directly or through {@link impliedAtIssuance}.
+ * This check applies only to a stored rule during token exchange.
  */
 export function isOperationPermittedAtIssuance(
 	actions: readonly Operation[],
@@ -253,12 +246,10 @@ export function isOperationPermittedAtIssuance(
 }
 
 /**
- * Whether a set of actions a token actually carries authorises a requested
- * operation at runtime: either the set carries the operation directly, or the
- * operation is a strict read-only attenuation of one the set already carries
- * (see {@link impliedByPresentedAuthority}). This is the rule applied wherever
- * a PRESENTED token's authority is checked: in route authorisation, and in the
- * subset check used by attenuation and refresh narrowing.
+ * Returns whether the actions from a presented token authorise `operation`.
+ * Authority can be direct or follow
+ * {@link impliedByPresentedAuthority}. Route authorisation, attenuation, and
+ * refresh narrowing all use this check.
  */
 export function isOperationSatisfiedByPresentedActions(
 	actions: readonly Operation[],
@@ -333,10 +324,10 @@ function detailResource(detail: AuthorizationDetail): ResourceRequest {
 }
 
 /**
- * Whether the grant set covers every authority a requested detail carries: each
- * of its operations on its own resource. The subset test for attenuation and
- * refresh narrowing, so a narrowed token never reaches anything the presenter
- * could not. A requested wildcard is covered only by a presented wildcard.
+ * Returns whether `grants` authorises every operation in `detail` for its
+ * selected resource. Attenuation and refresh narrowing use this check to prevent
+ * a new token from exceeding the presenter's authority. Only a wildcard grant
+ * covers a requested wildcard.
  */
 export function isAuthorizationDetailCovered(
 	grants: readonly AuthorizationDetail[],
@@ -398,14 +389,14 @@ export const substitutionSchema = z
 		slug: z.literal(true).optional()
 	})
 	.refine((value) => value.capture === undefined || value.slug === undefined, {
-		message: 'a substitution uses at most one of capture or slug'
+		message: 'Set at most one of capture and slug'
 	});
 export type Substitution = z.infer<typeof substitutionSchema>;
 
 const substitutionMapSchema = z
 	.record(z.string().regex(templateVariablePattern), substitutionSchema)
 	.refine((map) => Object.keys(map).length <= maxSubstitutionsPerBinding, {
-		message: `at most ${String(maxSubstitutionsPerBinding)} substitutions`
+		message: `A binding may define at most ${String(maxSubstitutionsPerBinding)} substitutions`
 	});
 
 // The fields every binding shares: a template-or-exact source for a value
@@ -437,8 +428,7 @@ function refineBinding(
 	if (choices !== 1) {
 		ctx.addIssue({
 			code: 'custom',
-			message:
-				'a binding sets exactly one of equalsTemplate, exact, equalsResource'
+			message: 'Set exactly one of equalsTemplate, exact, and equalsResource'
 		});
 	}
 
@@ -452,7 +442,7 @@ function refineBinding(
 		if (!provided.has(variable)) {
 			ctx.addIssue({
 				code: 'custom',
-				message: `template variable ${variable} has no substitution`
+				message: `Define a substitution for template variable ${variable}`
 			});
 		}
 	}
@@ -512,11 +502,10 @@ const knownOperations: ReadonlySet<string> = new Set(operationSchema.options);
 
 const grantWithActionsSchema = z.looseObject({ actions: z.array(z.unknown()) });
 
-// A grant a rule persisted under an earlier build may name an operation since
-// retired (a removed scope). Drop those unknown actions rather than failing the
-// whole rule, so it still validates against the current operation set. A grant
-// left with no recognised action permits nothing and is dropped as well; a
-// wildcard grant has no actions and passes through untouched.
+// Stored rules can contain operations removed by a later release. Remove unknown
+// operations before strict validation. Remove a non-wildcard grant if no
+// recognised operation remains. Preserve wildcard grants because they have no
+// action list.
 function withoutRetiredActions(grants: unknown): unknown {
 	if (!Array.isArray(grants)) {
 		return grants;
@@ -547,10 +536,10 @@ function withoutRetiredActions(grants: unknown): unknown {
 }
 
 /**
- * Validates the grants a trust rule persisted, tolerating an older row that
- * still names a retired operation. Unknown actions are dropped and any grant
- * left empty is removed before the strict grant schema runs, so a routine
- * upgrade that narrows the operation set does not fail a stored rule.
+ * Validates stored trust-rule grants from both current and earlier releases.
+ * Before strict validation, the preprocessor removes retired operations and any
+ * non-wildcard grant with no recognised operation. An upgrade that narrows the
+ * operation set therefore does not invalidate the stored rule.
  */
 export const storedPermittedGrantsSchema = z.preprocess(
 	withoutRetiredActions,

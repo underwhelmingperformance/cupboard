@@ -163,7 +163,7 @@ describe('matchOidcTrust', () => {
 		});
 	});
 
-	it('matches when only the token iss carries a trailing slash', () => {
+	it('matches when only the token issuer ends with a trailing slash', () => {
 		expect(
 			matchOidcTrust(rules, {
 				iss: `${github}/`,

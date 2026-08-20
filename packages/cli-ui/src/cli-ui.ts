@@ -156,9 +156,9 @@ export interface ConfirmOptions {
 }
 
 /**
- * Thrown when a confirmation is needed but the run is non-interactive and
- * `--yes` was not given: there is no terminal to prompt on, so the command
- * fails loudly; blocking or silent proceeding are not acceptable fallbacks.
+ * Thrown when a non-interactive command requires confirmation and `--yes` was
+ * not given. The command cannot prompt, so it exits with a message that requires
+ * `--yes`.
  */
 export class ConfirmationRequiredError extends Error {
 	constructor(message: string) {
@@ -210,12 +210,9 @@ export function isInteractive(streams: {
 }
 
 /**
- * Everything a cupboard command prints or asks, in one clack-based visual
- * language: spinners mark phases, notes present structured facts, prompts ask
- * for decisions, and every prompt has a clean cancel path. The same interface
- * serves machine mode, where {@link CliUi.intro}, {@link CliUi.outro} and
- * {@link CliUi.note} print nothing and the structured output goes through
- * {@link CliUi.reporter}.
+ * UI abstraction for command narration, structured output, and prompts.
+ * Terminal mode uses Clack. Machine mode suppresses introductions, conclusions
+ * and notes, and writes structured events through {@link CliUi.reporter}.
  */
 export interface CliUi {
 	/**
@@ -655,12 +652,10 @@ interface UnitNotes {
 }
 
 /**
- * Collects the durable warnings a unit of work raises while it animates. clack
- * draws one region at a time and a {@link log.warn} written into a live spinner
- * or task log corrupts its redraw, so the warnings are emitted once the unit
- * ends, when nothing is animating. When the unit has a surface that can show a
- * warning in place (a task log), the caller passes a `live` sink, which prints
- * each warning as it arrives.
+ * Buffers warnings while a spinner or task animation is active. Clack renders
+ * one live region, so writing a warning immediately would corrupt the next
+ * redraw. The adapter flushes buffered warnings when the animation ends. An
+ * optional live sink lets a task log render each warning immediately.
  */
 function unitNotes(live?: (message: string) => void): UnitNotes {
 	const pending: string[] = [];
@@ -681,12 +676,10 @@ function unitNotes(live?: (message: string) => void): UnitNotes {
 }
 
 /**
- * Adapts the {@link Reporter} contract onto clack: a {@link Reporter.phase} is a
- * spinner whose title accumulates its facts, {@link Reporter.progress} a progress
- * bar, {@link Reporter.steps} a task log with grouped sub-steps, and a
- * {@link Reporter.result} a framed card. Narration outside a unit prints straight
- * away; a durable warning raised inside one is held by {@link unitNotes} and
- * emitted when the unit stops, so it survives a region that clears on success.
+ * Adapts {@link Reporter} to Clack. A phase uses a spinner, progress uses a
+ * progress bar, steps use a task log, and a result uses a framed card. Narration
+ * outside a unit renders immediately. {@link unitNotes} buffers warnings until
+ * the unit ends.
  */
 function clackReporter(
 	colours: Colours,

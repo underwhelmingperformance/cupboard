@@ -4,14 +4,14 @@ import type { ReporterMode } from '@cupboard/reporter';
 import { isGithubActions } from '@cupboard/shared/github-actions';
 
 /**
- * Resolve a CLI's reporter mode from its `--output-mode` flag and the
+ * Resolves a CLI's reporter mode from its `--output-mode` flag and the
  * environment. An explicit `--output-mode` wins; otherwise the precedence is
  * `FORCE_COLOR` > `PRE_COMMIT` > GitHub Actions > whether stderr is a TTY.
  * `FORCE_COLOR` forces the spinner even with no TTY (a CI that captures a
  * terminal); pre-commit hooks default to JSON because pre-commit captures hook
  * output even when stderr is a TTY; a GitHub Actions runner gets workflow-command
- * output. Colour saturation is a separate axis, chosen by `--colour`/`--no-colour`
- * and `NO_COLOR`; it does not select the mode here.
+ * output. The colour flags and `NO_COLOR` configure colour separately and do
+ * not select the reporter mode.
  */
 export function resolveReporterMode(mode?: ReporterMode): ReporterMode {
 	if (mode !== undefined) {

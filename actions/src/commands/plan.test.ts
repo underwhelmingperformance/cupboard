@@ -1686,7 +1686,7 @@ describe('cohort packing', () => {
 		]);
 	});
 
-	it('leaves the manifest cohorts untouched when packing is enabled but nothing is measured', async () => {
+	it('keeps the cohorts from the manifest when packing has no measurements', async () => {
 		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
 
 		const groups = await cohortAttributeGroups(planDirectory, {
@@ -1697,7 +1697,7 @@ describe('cohort packing', () => {
 		expect(groups).toStrictEqual([[target.attr], [targetB.attr]]);
 	});
 
-	it('never calls the measurer, and leaves cohorts untouched, when packing is disabled', async () => {
+	it('does not call the measurer and keeps the cohorts from the manifest when packing is disabled', async () => {
 		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
 		const measurer = vi.fn(() => Promise.resolve(new Map<string, number>()));
 
@@ -1730,7 +1730,7 @@ describe('cohort packing', () => {
 		]);
 	});
 
-	it('leaves the manifest cohorts untouched, and the plan green, when the measurement fails', async () => {
+	it('keeps the cohorts from the manifest and succeeds when measurement fails', async () => {
 		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
 
 		const groups = await cohortAttributeGroups(
@@ -1755,7 +1755,7 @@ function measureResultLine(
 // The production measurer answers over the same runner protocol as every
 // other cupboard invocation, so the planAction packing tests drive it without
 // an injected measurer: the recorded sizes reach packCohorts, and a failed
-// measurement leaves the manifest's own cohorts standing.
+// A failed production measurement keeps the cohorts from the manifest.
 function packingRunner(options: {
 	readonly measurements?: Readonly<
 		Record<string, { downloadSize: number; narSize: number }>

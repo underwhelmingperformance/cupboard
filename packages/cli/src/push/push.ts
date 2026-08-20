@@ -1473,8 +1473,8 @@ function unretainedUngracedWarning(
 	reporter.warn(
 		'unretained',
 		isZeroMatched
-			? 'a zero-grace retention policy matched these paths; nothing retains them and the next collection can remove them'
-			: 'no retention grace policy matched these paths; nothing retains them and the next collection can remove them'
+			? 'a zero-grace retention policy matched these paths; they have no retention root or grace deadline, so the next collection can remove them'
+			: 'no retention grace policy matched these paths; they have no retention root or grace deadline, so the next collection can remove them'
 	);
 }
 

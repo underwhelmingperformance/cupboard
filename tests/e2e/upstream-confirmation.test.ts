@@ -10,7 +10,7 @@ import { describe, expect, it, type TestContext } from 'vitest';
 
 import { isReachableElsewhere } from '../../packages/cli/src/plan/substituter-reach.ts';
 import {
-	confirmLeftUpstreamWith,
+	confirmUpstreamAvailabilityWith,
 	upstreamConfirmationOverrides
 } from '../../packages/cli/src/plan/upstream-confirmation.ts';
 import { Nix } from '../../packages/nix/src/nix.ts';
@@ -122,7 +122,7 @@ describe.skipIf(!existsSync(socketPath))('left-upstream confirmation', () => {
 			const isReachableOrFixture = (candidate: string): boolean =>
 				candidate === substituter.url || isReachableElsewhere(candidate);
 
-			const confirm = confirmLeftUpstreamWith({
+			const confirm = confirmUpstreamAvailabilityWith({
 				substitution,
 				// The store a plan opens for its confirmation: the daemon
 				// answers for what this machine holds, and the permitted

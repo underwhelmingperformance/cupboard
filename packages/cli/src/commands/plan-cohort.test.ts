@@ -177,7 +177,7 @@ function dependencies(
 		rootClient: rejectingRootClient(),
 		store: missingStore(emptyMissing()),
 		requeryUnknown: neverAsked,
-		confirmLeftUpstream: () => Promise.resolve({ kind: 'confirmed' }),
+		confirmUpstreamAvailability: () => Promise.resolve({ kind: 'confirmed' }),
 		destinationServed: () => Promise.resolve(new Set()),
 		viewServed: () => Promise.resolve(new Set()),
 		attestedServed: () =>
@@ -642,7 +642,7 @@ describe('runPlanCohort', () => {
 				queryValidPaths: () => Promise.resolve([appPath]),
 				unreachableSubstituters: () => Promise.resolve([])
 			},
-			confirmLeftUpstream: () =>
+			confirmUpstreamAvailability: () =>
 				Promise.resolve({ kind: 'closure-not-served', missing: otherPath })
 		});
 

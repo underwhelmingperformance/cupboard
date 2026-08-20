@@ -4188,16 +4188,16 @@ describe('buildCohortAction availability confirmation', () => {
 			reprobe: [{ kind: 'plan-reprobe', data: { withdrawn: 'all of them' } }]
 		},
 		{
-			// A cupboard old enough to leave a target upstream from the
-			// confirmation names an outcome this action places nowhere, and
-			// building the target publishes what a consumer could not fetch.
+			// An older cupboard can classify a target as `leftUpstream` during
+			// confirmation. This action cannot apply that outcome after planning,
+			// so it builds the target instead.
 			name: 'the confirmation withdraws a target to an outcome it cannot place',
 			reprobe: planReprobeSuccess([withdrawal('leftUpstream')], [])
 		}
 	] satisfies readonly {
 		readonly name: string;
 		readonly reprobe: readonly ReporterResultEvent[] | Error;
-	}[])('builds the whole build set when $name', async ({ reprobe }) => {
+	}[])('builds the complete build set when $name', async ({ reprobe }) => {
 		const run = await runConfirmedCohort(reprobe);
 
 		expect({
