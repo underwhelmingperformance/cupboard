@@ -350,7 +350,9 @@ async function installTrustedIdp(
 			);
 		}
 
-		return Promise.resolve(new Response('not found', { status: 404 }));
+		return Promise.resolve(
+			new Response('not found', { status: StatusCodes.NOT_FOUND })
+		);
 	});
 
 	return subjectToken;
@@ -461,6 +463,7 @@ describe('refresh grant', () => {
 		const outcomes = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
+				const okStatusCode: number = StatusCodes.OK;
 				const responses = await Promise.all([
 					instance.fetch(present()),
 					instance.fetch(present())
@@ -468,7 +471,7 @@ describe('refresh grant', () => {
 
 				return Promise.all(
 					responses.map(async (response) => {
-						if (response.status === 200) {
+						if (response.status === okStatusCode) {
 							const body = tokenResponseSchema.parse(await response.json());
 							const [refreshTokenId] = z
 								.tuple([z.uuid(), z.string()])
@@ -1098,9 +1101,11 @@ describe('auth discovery endpoints', () => {
 
 		expect({
 			status: response.status,
+			cacheControl: response.headers.get('cache-control'),
 			body: authorizationServerMetadataSchema.parse(await response.json())
 		}).toStrictEqual({
 			status: StatusCodes.OK,
+			cacheControl: 'no-store',
 			body: {
 				// The tenant's issuer is its own path-based URL, the same value
 				// provisioning stamps into the Durable Object's identity.
@@ -1175,7 +1180,9 @@ async function installGithubBranchRule(): Promise<{
 			);
 		}
 
-		return Promise.resolve(new Response('not found', { status: 404 }));
+		return Promise.resolve(
+			new Response('not found', { status: StatusCodes.NOT_FOUND })
+		);
 	});
 
 	const signWith =

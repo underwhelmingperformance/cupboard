@@ -2,7 +2,13 @@ import { type Logger } from '@cupboard/logger';
 import { ORPCError } from '@orpc/server';
 import { StatusCodes } from 'http-status-codes';
 
-import { CacheNotEmptyError, ServerHttpError } from '../errors.ts';
+import {
+	CacheNotEmptyError,
+	ServerHttpError,
+	SigningKeyBackfillIncompleteError,
+	SigningKeyRotationAbortNotAllowedError,
+	SigningKeyRotationInProgressError
+} from '../errors.ts';
 
 // The oRPC error codes for the statuses our ServerHttpError hierarchy uses.
 const codeByStatus: Record<number, string> = {
@@ -35,6 +41,30 @@ export function bridgedError(logger: Logger, error: unknown): unknown {
 			status: error.status,
 			message: error.message,
 			data: { cache: error.cache }
+		});
+	}
+
+	if (error instanceof SigningKeyRotationInProgressError) {
+		return new ORPCError('SIGNING_KEY_ROTATION_IN_PROGRESS', {
+			status: error.status,
+			message: error.message,
+			data: { id: error.id }
+		});
+	}
+
+	if (error instanceof SigningKeyBackfillIncompleteError) {
+		return new ORPCError('SIGNING_KEY_BACKFILL_INCOMPLETE', {
+			status: error.status,
+			message: error.message,
+			data: { id: error.id }
+		});
+	}
+
+	if (error instanceof SigningKeyRotationAbortNotAllowedError) {
+		return new ORPCError('SIGNING_KEY_ROTATION_ABORT_NOT_ALLOWED', {
+			status: error.status,
+			message: error.message,
+			data: { id: error.id }
 		});
 	}
 

@@ -331,7 +331,8 @@ export class AttestationsService {
 	private async serveTenantObject(
 		request: Request,
 		key: string,
-		contentType: string
+		contentType: string,
+		cacheControl = 'no-store'
 	): Promise<Response> {
 		const object = await this.context.env.BLOBS.get(key);
 
@@ -340,7 +341,7 @@ export class AttestationsService {
 		}
 
 		const headers = new Headers({
-			'cache-control': 'no-store',
+			'cache-control': cacheControl,
 			'content-type': contentType,
 			etag: object.httpEtag,
 			'last-modified': object.uploaded.toUTCString()
@@ -625,7 +626,8 @@ export class AttestationsService {
 		return this.serveTenantObject(
 			request,
 			casObjectKey(digest),
-			'application/vnd.dev.sigstore.bundle+json'
+			'application/vnd.dev.sigstore.bundle+json',
+			'public, max-age=31536000, immutable'
 		);
 	}
 

@@ -123,6 +123,37 @@ describe('buildProgram', () => {
 		).rejects.toBeInstanceOf(CommanderError);
 	});
 
+	it('rejects an invalid instance name as a concise usage error', async () => {
+		let result: unknown;
+
+		try {
+			await buildProgram().parseAsync([
+				'node',
+				'cupboard',
+				'init',
+				'--instance-name',
+				'Not Valid'
+			]);
+			result = { kind: 'parsed' as const };
+		} catch (error: unknown) {
+			result = error;
+		}
+
+		expectCommanderError(result);
+		expect({
+			code: result.code,
+			exitCode: cliExitCode(result, abortExitCode),
+			message: result.message
+		}).toStrictEqual({
+			code: 'commander.invalidArgument',
+			exitCode: usageExitCode,
+			message:
+				"error: option '--instance-name <name>' argument 'Not Valid' is invalid. " +
+				'Instance name must contain only lower-case letters, digits and internal ' +
+				'hyphens, and must be at most 63 characters long.'
+		});
+	});
+
 	it('accepts github as an output mode', async () => {
 		const program = buildProgram();
 		program.configureOutput({

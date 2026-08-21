@@ -1,7 +1,24 @@
-import type { Command } from 'commander';
+import {
+	type InstanceName,
+	instanceNameSchema
+} from '@cupboard/protocol/instance';
+import { type Command, InvalidArgumentError } from 'commander';
 
 import { colourFromGlobals, type ProgramOptions } from '../cli.ts';
 import type { DeployCliOptions } from '../deploy/command.ts';
+
+function parseInstanceName(value: string): InstanceName {
+	const parsed = instanceNameSchema.safeParse(value);
+
+	if (!parsed.success) {
+		throw new InvalidArgumentError(
+			'Instance name must contain only lower-case letters, digits and internal ' +
+				'hyphens, and must be at most 63 characters long.'
+		);
+	}
+
+	return parsed.data;
+}
 
 export function registerDeployCommand(
 	program: Command,
@@ -15,6 +32,11 @@ export function registerDeployCommand(
 				'account, ready for nix.conf.'
 		)
 		.option('--domain <host>', 'custom domain to serve the cache on')
+		.option(
+			'--instance-name <name>',
+			'name used in newly generated signing keys',
+			parseInstanceName
+		)
 		.option('--account <id>', 'Cloudflare account id (otherwise resolved)')
 		.option(
 			'--no-wrangler',

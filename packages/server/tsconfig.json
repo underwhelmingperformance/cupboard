@@ -2,7 +2,11 @@
 	"extends": "../../tsconfig.base.json",
 	"compilerOptions": {
 		"allowJs": true,
-		"types": ["./worker-configuration", "@cloudflare/vitest-pool-workers/types"]
+		"types": [
+			"@cloudflare/workers-types",
+			"./worker-configuration",
+			"@cloudflare/vitest-pool-workers/types"
+		]
 	},
 	"include": [
 		"drizzle.config.ts",

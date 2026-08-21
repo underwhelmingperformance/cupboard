@@ -34,6 +34,7 @@ import m0031 from './0031_retention_root_expiry_index.sql';
 import m0032 from './0032_careful_chameleon.sql';
 import m0033 from './0033_pending_upload_attach_root.sql';
 import m0034 from './0034_gc_scan_collect_phase.sql';
+import m0035 from './0035_chunky_unicorn.sql';
 
 export default {
 	journal,
@@ -72,6 +73,7 @@ export default {
 		m0031,
 		m0032,
 		m0033,
-		m0034
+		m0034,
+		m0035
 	}
 };

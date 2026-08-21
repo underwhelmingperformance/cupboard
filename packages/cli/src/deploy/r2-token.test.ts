@@ -26,7 +26,7 @@ type ApiCall =
 	| { readonly method: 'rollApiTokenSecret'; readonly tokenId: string };
 
 const absentString: string | undefined = undefined;
-const absentBindings: readonly unknown[] | undefined = undefined;
+const absentScriptConfiguration = undefined;
 
 function recordApiCall(apiCalls: ApiCall[], method: keyof CloudflareApi): void {
 	apiCalls.push({ method });
@@ -74,9 +74,9 @@ function baseApi(apiCalls: ApiCall[]): CloudflareApi {
 			recordApiCall(apiCalls, 'getScriptMigrationTag');
 			return Promise.resolve(absentString);
 		},
-		getScriptBindings: () => {
-			recordApiCall(apiCalls, 'getScriptBindings');
-			return Promise.resolve(absentBindings);
+		getScriptConfiguration: () => {
+			recordApiCall(apiCalls, 'getScriptConfiguration');
+			return Promise.resolve(absentScriptConfiguration);
 		},
 		uploadScript: () => {
 			recordApiCall(apiCalls, 'uploadScript');
@@ -135,8 +135,8 @@ function baseApi(apiCalls: ApiCall[]): CloudflareApi {
 			recordApiCall(apiCalls, 'getWorkersDevSubdomain');
 			return Promise.resolve(absentString);
 		},
-		enableWorkersDevRoute: () => {
-			recordApiCall(apiCalls, 'enableWorkersDevRoute');
+		setWorkersDevRoutes: () => {
+			recordApiCall(apiCalls, 'setWorkersDevRoutes');
 			return Promise.resolve();
 		},
 		queryWorkerLogs: () => Promise.resolve([])

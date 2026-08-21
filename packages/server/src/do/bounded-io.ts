@@ -76,30 +76,6 @@ export function boundedBlobs(bucket: R2Bucket): R2Bucket {
 	});
 }
 
-/**
-A {@link Cache} whose match/put/delete calls are bounded.
-*/
-export function boundedCache(cache: Cache): Cache {
-	return new Proxy(cache, {
-		get(target, property) {
-			switch (property) {
-				case 'match': {
-					return bounded(target.match.bind(target), 'cache.match');
-				}
-				case 'put': {
-					return bounded(target.put.bind(target), 'cache.put');
-				}
-				case 'delete': {
-					return bounded(target.delete.bind(target), 'cache.delete');
-				}
-				default: {
-					return passThrough(target, property);
-				}
-			}
-		}
-	});
-}
-
 // The real statement behind each bounded proxy, so `batch` hands D1 the native
 // statements the driver built rather than the proxies.
 const realStatement = new WeakMap<D1PreparedStatement, D1PreparedStatement>();

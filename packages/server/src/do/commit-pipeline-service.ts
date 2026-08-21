@@ -6,6 +6,7 @@ import {
 	narInfoGenerationSchema,
 	type NixSha256HashString,
 	type RootName,
+	signingKeyGenerationSchema,
 	type StoredCache,
 	type StorePathHash,
 	type StorePathString,
@@ -1827,6 +1828,9 @@ export class CommitPipelineService {
 			)
 		);
 		const sigs = signatures.map((signature) => signature.value);
+		const signatureGeneration = signingKeyGenerationSchema.parse(
+			Math.max(0, ...signingKeys.map((key) => key.generation))
+		);
 		const referencesJson = JSON.stringify(metadata.references);
 
 		// Source the generation inside the same transaction as the insert and the
@@ -1858,6 +1862,7 @@ export class CommitPipelineService {
 					ca: metadata.ca,
 					sigsJson: JSON.stringify(sigs),
 					generation,
+					signatureGeneration,
 					createdAt: now
 				} satisfies typeof schema.narInfos.$inferInsert)
 				.onConflictDoNothing()

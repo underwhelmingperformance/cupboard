@@ -13,8 +13,14 @@
 	// set with what this file lists.
 	"keep_vars": true,
 	"main": "src/tenant-worker.ts",
+	"workers_dev": false,
+	"preview_urls": false,
 	"compatibility_date": "2026-05-15",
 	"compatibility_flags": ["nodejs_compat"],
+	"cache": {
+		"enabled": true,
+		"cross_version_cache": true
+	},
 	"durable_objects": {
 		"bindings": [
 			{

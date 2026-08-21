@@ -33,7 +33,8 @@ These commands address the tenant, so their URL carries the tenant slug:
   and optionally pins them.
 - `cupboard cache`, `cupboard policy`, and `cupboard root` manage named caches
   and what is kept.
-- `cupboard key` and `cupboard auth-key` rotate the tenant's signing keys.
+- `cupboard key` rotates a tenant's narinfo signing keys and reports background
+  re-signing progress. `cupboard auth-key` rotates its access-token keys.
 - `cupboard oidc-trust` configures which CI workflows may push.
 - `cupboard stats` reports a cache's objects and the tenant's charged storage,
   `cupboard delete` removes a single store path, and `cupboard check` audits
@@ -65,7 +66,7 @@ Stand up a deployment, provision a tenant, then push to it:
 # Operator: deploy, then create a tenant. The --owner-* values are the OIDC
 # identity allowed to administer the tenant: the same identity its admin
 # presents to `cupboard login`.
-cupboard init
+cupboard init --instance-name cupboard
 cupboard tenant create https://cupboard.example.workers.dev acme \
   --owner-issuer <issuer> --owner-subject <subject> --owner-audience <audience>
 
@@ -81,6 +82,32 @@ cupboard config https://cupboard.example.workers.dev/t/acme \
 Most commands need a session first; `cupboard login <url>` caches an admin token
 for the tenant. Pushing from CI instead uses GitHub Actions OIDC with
 `cupboard push --github-oidc`, trusted through `cupboard oidc-trust`.
+
+The instance name is immutable after the first successful initialisation. Pass
+`--instance-name` to choose it. If the option is omitted, the CLI derives a
+stable `cupboard-<hash>` name from the deployment's public origin. The name
+forms the first component of each new Nix signing-key name:
+`<instance>-<tenant>-<generation>`. Hyphens inside the instance and tenant
+components are doubled so the complete name is unambiguous. A rotation keeps
+both keys signing while existing narinfos are re-signed in the background:
+
+```sh
+cupboard key rotate https://cupboard.example.workers.dev/t/acme
+cupboard key status https://cupboard.example.workers.dev/t/acme
+cupboard key retire https://cupboard.example.workers.dev/t/acme active
+```
+
+Add the incoming key to every client's `trusted-public-keys`, then wait for its
+backfill to complete before retiring the outgoing key. The first retirement
+demotes the outgoing key to published-only. Nix caches successful narinfo
+lookups, including their signatures, for `narinfo-cache-positive-ttl`; the
+default is 30 days. Keep the outgoing key in each client's `trusted-public-keys`
+until that client's cache window has elapsed since the last old-only response it
+could have fetched, or clear the client's narinfo cache. The server cannot infer
+a client's configured TTL. A second retirement removes the key from `/pubkey`,
+but `/pubkey` does not change any client's trust configuration. If the backfill
+cannot complete, `cupboard key abort <url> <incoming-id>` removes the incoming
+key and its unfinished work.
 
 ## Output modes
 

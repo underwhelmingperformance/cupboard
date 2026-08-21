@@ -62,6 +62,10 @@ describe('parseEmbeddedPayload', () => {
 					d1Databases: [{ binding: 'CUPBOARD_DB', databaseName: 'cupboard' }],
 					queueProducers: [],
 					queueConsumers: [],
+					services: [],
+					cacheEnabled: false,
+					workersDev: true,
+					previewUrls: true,
 					crons: [],
 					migrations: []
 				},
@@ -80,6 +84,10 @@ describe('parseEmbeddedPayload', () => {
 					d1Databases: [],
 					queueProducers: [],
 					queueConsumers: [],
+					services: [],
+					cacheEnabled: false,
+					workersDev: true,
+					previewUrls: true,
 					crons: [],
 					migrations: [{ tag: 'v1', newSqliteClasses: ['CupboardServer'] }]
 				}

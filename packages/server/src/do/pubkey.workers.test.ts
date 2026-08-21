@@ -53,7 +53,7 @@ describe('/pubkey serving', () => {
 			cacheControl: after.headers.get('cache-control')
 		}).toStrictEqual({
 			rotateStatus: StatusCodes.OK,
-			keys: [...beforeKeys, rotatedBody.rotated.publicKey],
+			keys: [...beforeKeys, rotatedBody.rotated.key.publicKey],
 			cacheControl: 'no-cache'
 		});
 	});

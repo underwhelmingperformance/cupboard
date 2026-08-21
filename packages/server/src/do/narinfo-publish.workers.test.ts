@@ -1,5 +1,6 @@
 import {
 	narInfoGenerationSchema,
+	signingKeyGenerationSchema,
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
@@ -21,6 +22,7 @@ import {
 } from '../test-support.ts';
 
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { storedSignaturesSchema } from './signing-keys.ts';
 
 const cache = '';
 
@@ -60,6 +62,66 @@ async function narInfoObjectText(
 	);
 
 	return object === null ? undefined : object.text();
+}
+
+function stallingPutBucket(
+	target: R2Bucket,
+	stalledKey: string
+): {
+	readonly bucket: R2Bucket;
+	readonly started: Promise<void>;
+	release(): void;
+} {
+	const started = Promise.withResolvers<undefined>();
+	const released = Promise.withResolvers<undefined>();
+	let hasStalled = false;
+
+	return {
+		bucket: new Proxy(target, {
+			get(bucketTarget, property) {
+				if (property === 'put') {
+					return async (
+						key: string,
+						value:
+							ReadableStream | ArrayBuffer | ArrayBufferView | string | null,
+						options?: R2PutOptions
+					) => {
+						if (!hasStalled && key === stalledKey) {
+							hasStalled = true;
+							started.resolve(undefined);
+							await released.promise;
+						}
+
+						return bucketTarget.put(key, value, options);
+					};
+				}
+
+				const value: unknown = Reflect.get(
+					bucketTarget,
+					property,
+					bucketTarget
+				);
+
+				if (typeof value !== 'function') {
+					return value;
+				}
+
+				return (...arguments_: unknown[]): unknown => {
+					const result: unknown = Reflect.apply(
+						value,
+						bucketTarget,
+						arguments_
+					);
+
+					return result;
+				};
+			}
+		}),
+		started: started.promise,
+		release: () => {
+			released.resolve(undefined);
+		}
+	};
 }
 
 // The narinfo object publishes outside the critical section, so a publish can
@@ -159,5 +221,86 @@ describe('narinfo object publish fence', () => {
 		});
 
 		expect(await narInfoObjectText(metadata.storePathHash)).toBeUndefined();
+	});
+
+	it('repairs a stale signature publish that lands during backfill', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('publish-signature-fence');
+		const metadata = uploadMetadata({
+			name: 'signature-fenced',
+			storePathHash: 'c'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+
+		await commitPath(token, metadata, nar);
+		const row = await committedRow(metadata.storePathHash);
+
+		await runInDurableObject(currentServer(), async (instance) => {
+			const service = new NarInfoObjectsService(instance.context);
+			const staleNarInfo = await service.narInfoFromRow(row);
+
+			expect(staleNarInfo).toBeDefined();
+
+			if (staleNarInfo === undefined) {
+				return;
+			}
+
+			const key = narInfoObjectKey(
+				fixtureTenant,
+				storePathHashSchema.parse(metadata.storePathHash),
+				cache
+			);
+			const stalled = stallingPutBucket(instance.context.env.BLOBS, key);
+			instance.context.env = {
+				...instance.context.env,
+				BLOBS: stalled.bucket
+			};
+			const publish = service.publishNarInfoObject(
+				cache,
+				row.storePathHash,
+				row.generation,
+				row.narHash,
+				staleNarInfo
+			);
+
+			await stalled.started;
+			const [signature] = storedSignaturesSchema.parse(
+				JSON.parse(row.sigsJson) as unknown
+			);
+
+			expect(signature).toBeDefined();
+
+			if (signature === undefined) {
+				return;
+			}
+
+			instance.context.db
+				.update(schema.narInfos)
+				.set({
+					sigsJson: JSON.stringify([signature, signature]),
+					pendingSignatureGeneration: signingKeyGenerationSchema.parse(2)
+				})
+				.where(narInfoRowFilter(metadata.storePathHash))
+				.run();
+			stalled.release();
+			await publish;
+		});
+
+		const object = await env.BLOBS.get(
+			narInfoObjectKey(
+				fixtureTenant,
+				storePathHashSchema.parse(metadata.storePathHash),
+				cache
+			)
+		);
+		const body = await object?.text();
+
+		expect({
+			signatures: body?.match(/^Sig:/gmu)?.length,
+			signatureGeneration: object?.customMetadata?.signatureGeneration
+		}).toStrictEqual({ signatures: 2, signatureGeneration: '2' });
 	});
 });

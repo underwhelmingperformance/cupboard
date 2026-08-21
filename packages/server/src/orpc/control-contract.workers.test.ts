@@ -5,6 +5,7 @@ import type { ContractRouterClient } from '@orpc/contract';
 import { ResponseValidationPlugin } from '@orpc/contract/plugins';
 import type { JsonifiedClient } from '@orpc/openapi-client';
 import { OpenAPILink } from '@orpc/openapi-client/fetch';
+import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -39,6 +40,28 @@ function controlClient(token?: string): ControlClient {
 
 describe('control contract round trip', () => {
 	beforeEach(resetTestServer);
+
+	it('initialises the immutable instance name idempotently', async () => {
+		await env.CUPBOARD_DB.prepare('DELETE FROM instance_config').run();
+		const client = controlClient(await issueControlAdminToken());
+		const unconfigured = await client.instance.get();
+
+		const first = await client.instance.initialise({ name: 'forge' });
+		const second = await client.instance.initialise({ name: 'forge' });
+		const read = await client.instance.get();
+		const [conflict] = await safe(
+			client.instance.initialise({ name: 'another' })
+		);
+
+		expect({ unconfigured, first, second, read }).toStrictEqual({
+			unconfigured: { state: 'unconfigured' },
+			first: { state: 'configured', name: 'forge' },
+			second: { state: 'configured', name: 'forge' },
+			read: { state: 'configured', name: 'forge' }
+		});
+		expect(conflict).toBeInstanceOf(ORPCError);
+		expect(conflict).toMatchObject({ status: StatusCodes.CONFLICT });
+	});
 
 	it('drives the control keys through the derived client', async () => {
 		const client = controlClient(await issueControlAdminToken());

@@ -4,6 +4,7 @@ import Cloudflare from 'cloudflare';
 import { NotFoundError } from 'cloudflare';
 import type { LifecycleUpdateParams } from 'cloudflare/resources/r2/buckets/lifecycle';
 import type { ScriptUpdateParams } from 'cloudflare/resources/workers/scripts/scripts';
+import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 import type { WorkerBundle } from './bundle.ts';
@@ -37,6 +38,17 @@ export interface QueueConsumerSettings {
 export interface WorkerSecret {
 	readonly name: string;
 	readonly text: string;
+}
+
+export interface ScriptConfiguration {
+	readonly bindings: readonly unknown[];
+	readonly cacheEnabled: boolean;
+	readonly crossVersionCache: boolean;
+}
+
+export interface WorkersDevelopmentRoutes {
+	readonly workersDev: boolean;
+	readonly previewUrls: boolean;
 }
 
 export interface TokenPermissionGroup {
@@ -105,11 +117,12 @@ export interface CloudflareApi {
 
 	getScriptMigrationTag(scriptName: ScriptName): Promise<string | undefined>;
 	/**
-	The script's live bindings, or undefined when it is not deployed.
+	The live bindings and cache settings needed for deployment convergence, or
+	undefined when the script is not deployed.
 	*/
-	getScriptBindings(
+	getScriptConfiguration(
 		scriptName: ScriptName
-	): Promise<readonly unknown[] | undefined>;
+	): Promise<ScriptConfiguration | undefined>;
 	uploadScript(
 		scriptName: ScriptName,
 		metadata: ScriptUpdateParams.Metadata,
@@ -154,7 +167,10 @@ export interface CloudflareApi {
 	The account's workers.dev subdomain, or undefined when unregistered.
 	*/
 	getWorkersDevSubdomain(): Promise<string | undefined>;
-	enableWorkersDevRoute(scriptName: ScriptName): Promise<void>;
+	setWorkersDevRoutes(
+		scriptName: ScriptName,
+		routes: WorkersDevelopmentRoutes
+	): Promise<void>;
 
 	/**
 	 * Recent Workers Observability log events matching a full-text needle in a
@@ -447,15 +463,32 @@ export function createCloudflareApi(
 			return script?.migration_tag ?? undefined;
 		},
 
-		async getScriptBindings(scriptName) {
+		async getScriptConfiguration(scriptName) {
 			try {
 				const settings =
 					await client.workers.scripts.scriptAndVersionSettings.get(
 						scriptName,
 						account
 					);
+				// Cloudflare returns cache_options here, but the pinned SDK's
+				// response type omits it.
+				const parsed = z
+					.object({
+						bindings: z.array(z.unknown()).default([]),
+						cache_options: z
+							.object({
+								enabled: z.boolean(),
+								cross_version_cache: z.boolean().optional()
+							})
+							.optional()
+					})
+					.parse(settings);
 
-				return settings.bindings ?? [];
+				return {
+					bindings: parsed.bindings,
+					cacheEnabled: parsed.cache_options?.enabled ?? false,
+					crossVersionCache: parsed.cache_options?.cross_version_cache ?? false
+				};
 			} catch (error) {
 				if (error instanceof NotFoundError) {
 					return;
@@ -593,7 +626,7 @@ export function createCloudflareApi(
 				if (
 					error instanceof Error &&
 					'status' in error &&
-					error.status === 404
+					error.status === StatusCodes.NOT_FOUND
 				) {
 					return [];
 				}
@@ -702,11 +735,18 @@ export function createCloudflareApi(
 			}
 		},
 
-		async enableWorkersDevRoute(scriptName) {
-			await client.workers.scripts.subdomain.create(scriptName, {
-				...account,
-				enabled: true
-			});
+		async setWorkersDevRoutes(scriptName, routes) {
+			try {
+				await client.workers.scripts.subdomain.create(scriptName, {
+					...account,
+					enabled: routes.workersDev,
+					previews_enabled: routes.previewUrls
+				});
+			} catch (error) {
+				if (!(error instanceof NotFoundError)) {
+					throw error;
+				}
+			}
 		},
 
 		async queryWorkerLogs(query) {

@@ -2,12 +2,9 @@ import {
 	nixSha256HashSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
-import {
-	createExecutionContext,
-	waitOnExecutionContext
-} from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
@@ -32,7 +29,6 @@ async function seedOwnedNar(): Promise<void> {
 
 // A private serve, so no edge cache sits in front of the ownership read.
 async function serveWithFaults(failures: number): Promise<Response> {
-	const ctx = createExecutionContext();
 	const faultyEnv = {
 		...env,
 		CUPBOARD_DB: flakyD1(env.CUPBOARD_DB, { failures })
@@ -40,17 +36,53 @@ async function serveWithFaults(failures: number): Promise<Response> {
 	const response = await serveNar(
 		new Request('https://cache.example/nar/probe'),
 		faultyEnv,
-		ctx,
 		tenant,
 		narHash,
 		true
 	);
-	await waitOnExecutionContext(ctx);
-
 	return response;
 }
 
 describe('NAR serve under shared-fact read faults', () => {
+	it('returns the GET representation when Hono dispatches HEAD', async () => {
+		await seedOwnedNar();
+
+		const response = await serveNar(
+			new Request('https://cache.example/nar/probe', { method: 'HEAD' }),
+			env,
+			tenant,
+			narHash,
+			false
+		);
+
+		expect({
+			status: response.status,
+			body: await response.text()
+		}).toStrictEqual({ status: StatusCodes.OK, body: narBytes });
+	});
+
+	it('returns metadata only for an uncached private HEAD', async () => {
+		await seedOwnedNar();
+
+		const response = await serveNar(
+			new Request('https://cache.example/nar/probe', { method: 'HEAD' }),
+			env,
+			tenant,
+			narHash,
+			true
+		);
+
+		expect({
+			status: response.status,
+			contentLength: response.headers.get('content-length'),
+			body: await response.text()
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			contentLength: String(narBytes.length),
+			body: ''
+		});
+	});
+
 	it('retries a transient fault on the ownership read', async () => {
 		await seedOwnedNar();
 
@@ -59,7 +91,7 @@ describe('NAR serve under shared-fact read faults', () => {
 		expect({
 			status: response.status,
 			body: await response.text()
-		}).toStrictEqual({ status: 200, body: narBytes });
+		}).toStrictEqual({ status: StatusCodes.OK, body: narBytes });
 	});
 
 	it('refuses retryably when the ownership read keeps faulting', async () => {
@@ -82,6 +114,9 @@ describe('NAR serve under shared-fact read faults', () => {
 		expect({
 			status: caught.status,
 			retryAfterSeconds: caught.retryAfterSeconds
-		}).toStrictEqual({ status: 503, retryAfterSeconds: 5 });
+		}).toStrictEqual({
+			status: StatusCodes.SERVICE_UNAVAILABLE,
+			retryAfterSeconds: 5
+		});
 	});
 });

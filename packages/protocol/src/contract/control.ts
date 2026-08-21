@@ -8,6 +8,11 @@ import {
 	controlKeyRotateResponseSchema
 } from '../control-keys.ts';
 import {
+	configuredInstanceSummarySchema,
+	instanceInitialiseBodySchema,
+	instanceSummarySchema
+} from '../instance.ts';
+import {
 	oidcTrustAddBodySchema,
 	oidcTrustListResponseSchema,
 	oidcTrustRemoveResponseSchema,
@@ -46,6 +51,19 @@ export const controlContract = {
 		.meta({ requires: 'control:check' })
 		.route({ method: 'GET', path: '/check' })
 		.output(controlCheckReportSchema),
+
+	instance: {
+		get: controlProcedure
+			.meta({ requires: 'instance:read' })
+			.route({ method: 'GET', path: '/instance' })
+			.output(instanceSummarySchema),
+
+		initialise: controlProcedure
+			.meta({ requires: 'instance:initialise' })
+			.route({ method: 'PUT', path: '/instance' })
+			.input(instanceInitialiseBodySchema)
+			.output(configuredInstanceSummarySchema)
+	},
 
 	keys: {
 		list: controlProcedure

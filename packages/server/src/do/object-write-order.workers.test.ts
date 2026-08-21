@@ -176,8 +176,12 @@ describe('path-keyed object write ordering', () => {
 				await service.putNarInfoObject(
 					cache,
 					storePathHash,
-					row.generation,
-					row.narHash,
+					{
+						generation: row.generation,
+						narHash: row.narHash,
+						signatureGeneration:
+							row.pendingSignatureGeneration ?? row.signatureGeneration
+					},
 					narInfo
 				);
 				didPutSettle = true;

@@ -1,6 +1,14 @@
+import { createHash } from 'node:crypto';
+
 import { tenantUrl } from '@cupboard/nix-store/cache-url';
 import { cacheNamePattern } from '@cupboard/nix-store/scalars';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import type {
+	InstanceName,
+	ParsedConfiguredInstanceSummary,
+	ParsedInstanceSummary
+} from '@cupboard/protocol/instance';
+import { instanceNameSchema } from '@cupboard/protocol/instance';
 import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
 import type {
 	ParsedControlCheckReport,
@@ -188,6 +196,11 @@ export interface OnboardClient extends Pick<
 	CupboardClient,
 	'version' | 'signup' | 'tokenExchange' | 'publicKey'
 > {
+	getInstance(token: string): Promise<ParsedInstanceSummary>;
+	initialiseInstance(
+		token: string,
+		name: InstanceName
+	): Promise<ParsedConfiguredInstanceSummary>;
 	listTenants(token: string): Promise<ParsedTenantListResponse>;
 	createTenant(
 		token: string,
@@ -195,6 +208,15 @@ export interface OnboardClient extends Pick<
 	): Promise<ParsedTenantSummary>;
 	rebuildMembership(token: string): Promise<ParsedMembershipRebuildResponse>;
 	controlCheck(token: string): Promise<ParsedControlCheckReport>;
+}
+
+function defaultInstanceName(publicUrl: string): InstanceName {
+	const identity = createHash('sha256')
+		.update(new URL(publicUrl).origin)
+		.digest('hex')
+		.slice(0, 16);
+
+	return instanceNameSchema.parse(`cupboard-${identity}`);
 }
 
 /**
@@ -233,6 +255,7 @@ export interface OnboardOptions {
 	*/
 	readonly tenantScriptName: ScriptName;
 	readonly domain: string | undefined;
+	readonly instanceName?: InstanceName;
 	readonly admin: OnboardAdmin;
 	/**
 	The version the uploaded Workers answer on `/_version`.
@@ -259,7 +282,7 @@ export interface OnboardOptions {
 
 const defaultAttempts = 30;
 const attemptDelayMs = 4000;
-const conflictStatusCode = 409;
+const conflictStatusCode: number = StatusCodes.CONFLICT;
 
 export type SlugProblem = 'empty' | 'invalid-format';
 
@@ -399,6 +422,21 @@ export async function onboardDeployment(
 			...(claim.ray !== undefined && { ray: claim.ray })
 		};
 	}
+
+	const currentInstance = await ui
+		.reporter()
+		.phase('Reading instance identity', () => client.getInstance(claim.token));
+	const instanceName =
+		options.instanceName ??
+		(currentInstance.state === 'configured'
+			? currentInstance.name
+			: defaultInstanceName(url));
+
+	await ui
+		.reporter()
+		.phase('Configuring instance identity', () =>
+			client.initialiseInstance(claim.token, instanceName)
+		);
 
 	// Read before creating: a re-run against an initialised deployment must
 	// skip the slug prompt, and several caches mean there is no "first".
@@ -540,11 +578,12 @@ async function resolveDeploymentUrl(
 
 	// With a custom domain the workers.dev route stays off: a private cache
 	// gains nothing from a second public hostname.
-	await options.ui
-		.reporter()
-		.phase('Enabling the workers.dev route', () =>
-			options.api.enableWorkersDevRoute(options.controlScriptName)
-		);
+	await options.ui.reporter().phase('Enabling the workers.dev route', () =>
+		options.api.setWorkersDevRoutes(options.controlScriptName, {
+			workersDev: true,
+			previewUrls: true
+		})
+	);
 
 	return url;
 }
@@ -563,6 +602,9 @@ function onboardClientFor(url: string, signal?: AbortSignal): OnboardClient {
 		signup: (request) => raw.signup(request),
 		tokenExchange: (subjectToken, subjectTokenType) =>
 			raw.tokenExchange(subjectToken, subjectTokenType),
+		initialiseInstance: (token, name) =>
+			control(token).instance.initialise({ name }),
+		getInstance: (token) => control(token).instance.get(),
 		listTenants: (token) => control(token).tenants.list(),
 		createTenant: (token, body) => control(token).tenants.create(body),
 		rebuildMembership: (token) => control(token).membership.rebuild(),

@@ -326,6 +326,25 @@ export class CupboardTestServer {
 		});
 
 		const adminToken = await this.exchangeControlAdminToken();
+		const instanceResponse = await fetch(
+			new URL('/control/instance', this.url),
+			{
+				method: 'PUT',
+				headers: {
+					'content-type': 'application/json',
+					authorization: `Bearer ${adminToken}`
+				},
+				body: JSON.stringify({ name: 'cupboard-e2e' })
+			}
+		);
+
+		if (!instanceResponse.ok) {
+			throw new InstanceInitialisationFailedError(
+				instanceResponse.status,
+				await instanceResponse.text()
+			);
+		}
+
 		const body = {
 			id: fixtureTenant,
 			readMode: spec.readMode,
@@ -484,6 +503,16 @@ export class TenantProvisionFailedError extends Error {
 	}
 }
 
+class InstanceInitialisationFailedError extends Error {
+	constructor(
+		public readonly status: number,
+		public readonly body: string
+	) {
+		super(`Instance initialisation failed with ${String(status)}: ${body}`);
+		this.name = 'InstanceInitialisationFailedError';
+	}
+}
+
 async function collectStreamBytes(
 	stream: ReadableStream<Uint8Array>
 ): Promise<Uint8Array> {
@@ -534,10 +563,10 @@ interface WorkerBundle {
 	readonly tenantEntrypoint: string;
 }
 
-// Bundles both Worker scripts into standalone modules: the control-plane Worker
-// (`worker.ts`) and the tenant Durable Object Worker (`tenant-worker.ts`). They are
-// deployed as two Workers, so the e2e harness runs them as two Miniflare workers
-// with a cross-script Durable Object binding, mirroring production.
+// Bundles both Worker scripts into standalone modules. The e2e tenant entrypoint
+// differs only in treating cache-tag purges as delivered because Miniflare does
+// not implement the Worker cache purge API. The two-worker layout and the
+// cross-script Durable Object binding otherwise match production.
 async function bundleWorker(directory: string): Promise<WorkerBundle> {
 	const outputDirectory = path.join(directory, 'worker-bundle');
 
@@ -549,7 +578,7 @@ async function bundleWorker(directory: string): Promise<WorkerBundle> {
 	);
 	await bundleEntry(
 		outputDirectory,
-		'packages/server/src/tenant-worker.ts',
+		'packages/server/src/test-worker.ts',
 		'tenant',
 		false
 	);

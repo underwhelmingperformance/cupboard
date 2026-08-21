@@ -1,11 +1,8 @@
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { narInfoCachePath } from '../http/http.ts';
-import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	bootstrap,
-	currentOrigin,
 	narBytes,
 	provisionFixtureTenant,
 	pushPath,
@@ -123,7 +120,7 @@ describe('private-read mode', () => {
 		});
 	});
 
-	it('keeps the edge cache empty in private mode but populates it publicly', async () => {
+	it('makes only public narinfos eligible for Workers Cache', async () => {
 		const init = await bootstrap();
 		const privatePath = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -138,26 +135,23 @@ describe('private-read mode', () => {
 		await pushPath(init.token, privatePath);
 		await pushPath(init.token, publicPath);
 
-		const privateUrl = new URL(
-			narInfoCachePath(fixtureTenant, privatePath.storePathHash),
-			currentOrigin()
-		);
-		const privateKey = privateUrl.href;
-		const publicUrl = new URL(
-			narInfoCachePath(fixtureTenant, publicPath.storePathHash),
-			currentOrigin()
-		);
-		const publicKey = publicUrl.href;
-
 		await makePrivate();
-		await readFetch(`/${privatePath.storePathHash}.narinfo`, authorised());
+		const privateResponse = await readFetch(
+			`/${privatePath.storePathHash}.narinfo`,
+			authorised()
+		);
 
 		await provisionFixtureTenant();
-		await readFetch(`/${publicPath.storePathHash}.narinfo`);
+		const publicResponse = await readFetch(
+			`/${publicPath.storePathHash}.narinfo`
+		);
 
 		expect({
-			privateCached: (await caches.default.match(privateKey)) !== undefined,
-			publicCached: (await caches.default.match(publicKey)) !== undefined
-		}).toStrictEqual({ privateCached: false, publicCached: true });
+			privateControl: privateResponse.headers.get('cache-control'),
+			publicControl: publicResponse.headers.get('cache-control')
+		}).toStrictEqual({
+			privateControl: 'no-store',
+			publicControl: 'public, max-age=3600, must-revalidate'
+		});
 	});
 });

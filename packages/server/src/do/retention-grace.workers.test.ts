@@ -130,7 +130,7 @@ function pipelineFor(context: ServerContext): CommitPipelineService {
 	return new CommitPipelineService(
 		context,
 		new CacheAdminService(context, deletionQueue),
-		new SigningKeysService(context),
+		new SigningKeysService(context, narInfoObjects),
 		new UploadStateService(context),
 		narInfoObjects,
 		new RetentionService(context)
@@ -2029,7 +2029,7 @@ function verificationFor(context: ServerContext): VerificationService {
 		new CommitPipelineService(
 			context,
 			new CacheAdminService(context, deletionQueue),
-			new SigningKeysService(context),
+			new SigningKeysService(context, narInfoObjects),
 			uploadState,
 			narInfoObjects,
 			retention
@@ -3214,7 +3214,11 @@ describe('confirming an unretained publication', () => {
 					]
 				}
 			},
-			metadata: { generation: '0', narHash: path.narHash }
+			metadata: {
+				generation: '0',
+				narHash: path.narHash,
+				signatureGeneration: '1'
+			}
 		});
 	});
 

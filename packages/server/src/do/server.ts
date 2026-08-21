@@ -98,6 +98,7 @@ import {
 } from './blob-reaper-service.ts';
 import { maxOutgoingConnections } from './bulk.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
+import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
 import {
 	CommitCreditService,
 	commitSocketIdleMs,
@@ -381,7 +382,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.narInfoObjects
 		);
 		this.reconcileQueue = new ReconcileQueueService(this.context);
-		this.signingKeys = new SigningKeysService(this.context);
+		this.signingKeys = new SigningKeysService(
+			this.context,
+			this.narInfoObjects
+		);
 		this.stats = new StatsService(this.context);
 		this.oidcTrust = new OidcTrustService(this.context, this.tenantIdentity);
 		this.retention = new RetentionService(this.context);
@@ -672,7 +676,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.get('/.well-known/oauth-authorization-server', (context) => {
 			const origin = requestOriginSchema.parse(new URL(context.req.url).origin);
 
-			return context.json(this.authKeys.authorizationServerMetadata(origin));
+			return context.json(
+				this.authKeys.authorizationServerMetadata(origin),
+				StatusCodes.OK,
+				{
+					'cache-control': 'public, max-age=3600'
+				}
+			);
 		});
 
 		// The commit endpoint is a WebSocket: the upgrade request carries the
@@ -1767,6 +1777,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.reconcileNegotiatedOnce();
 		await this.resumeCacheTeardown();
 		await this.resumeVerifyBackstop(logger);
+		await new CachePurgeQueueService(this.context).runOnce();
+		await this.signingKeys.runBackfillOnce();
 		await this.resumeGarbageCollection();
 	}
 

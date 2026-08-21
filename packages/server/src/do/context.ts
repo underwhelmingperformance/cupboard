@@ -54,9 +54,10 @@ import {
 import { parseStored } from '../http/parse.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 
-import { boundedBlobs, boundedCache, boundedD1 } from './bounded-io.ts';
+import { boundedBlobs, boundedD1 } from './bounded-io.ts';
 import { DatabaseCostMeter, meteredStorage } from './database-cost-meter.ts';
 import { criticalSectionBudgetMs, withDeadlineBudget } from './deadline.ts';
+import { boundedSubrequest } from './deadline.ts';
 import { NegotiateHintStore } from './negotiate-hints.ts';
 import { ObjectWriteOrder } from './object-write-order.ts';
 
@@ -166,8 +167,6 @@ export class ServerContext {
 	private credentialIssuer: PushCredentialIssuer | undefined;
 	readonly db: SchemaDatabase;
 	readonly d1: DrizzleD1Database<typeof d1Schema>;
-	// The Cache API, bounded so a stalled purge cannot hold the input gate.
-	readonly cache: Cache;
 	// The deadline a critical section imposes on its subrequests. A field, not the
 	// bare constant, so a test can shorten it to exercise the timeout path without
 	// waiting the full budget.
@@ -193,7 +192,7 @@ export class ServerContext {
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		this.ctx = ctx;
-		// Every R2, D1 and Cache call the services make is bounded, so a stalled
+		// Every R2 and D1 call the services make is bounded, so a stalled
 		// subrequest cannot hold this object's input gate to the ~30s
 		// `blockConcurrencyWhile` reset. R2 is reached through `env.BLOBS`, so the
 		// binding is replaced with a bounded one here rather than at every call site.
@@ -202,7 +201,6 @@ export class ServerContext {
 		// The global shared-blob facts live in D1, readable and writable by every
 		// tenant DO and the Worker.
 		this.d1 = drizzleD1(boundedD1(env.CUPBOARD_DB), { schema: d1Schema });
-		this.cache = boundedCache(caches.default);
 	}
 
 	// A request-path critical section: arriving events are gated out while `run`
@@ -248,6 +246,20 @@ export class ServerContext {
 		);
 
 		return this.credentialIssuer;
+	}
+
+	async purgeCacheTags(tags: readonly string[]): Promise<void> {
+		interface CachePurgeEntrypoint {
+			purgeTags(tags: string[]): Promise<void>;
+		}
+
+		const { CachedTenantReads: entrypoint } = this.ctx.exports as unknown as {
+			CachedTenantReads: CachePurgeEntrypoint;
+		};
+		await boundedSubrequest(
+			() => entrypoint.purgeTags([...tags]),
+			'cache.purge'
+		);
 	}
 
 	// This Durable Object's tenant slug, the sole source of the tenant scope in

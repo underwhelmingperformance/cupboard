@@ -37,6 +37,10 @@ function worker(overrides: Partial<WorkerConfig>): WorkerConfig {
 		d1Databases: [{ binding: 'CUPBOARD_DB', databaseName: 'cupboard' }],
 		queueProducers: [],
 		queueConsumers: [],
+		services: [],
+		cacheEnabled: false,
+		workersDev: true,
+		previewUrls: true,
 		crons: [],
 		migrations: [],
 		...overrides
@@ -47,6 +51,13 @@ const artifact: DeploymentArtifact = {
 	config: {
 		control: worker({
 			name: scriptName('cupboard'),
+			services: [
+				{
+					binding: 'CUPBOARD_TENANT',
+					service: scriptName('cupboard-tenant'),
+					entrypoint: 'CachedTenantReads'
+				}
+			],
 			kvNamespaces: [
 				{ binding: 'TENANT_CACHE', title: 'cupboard-tenant-cache' }
 			],
@@ -67,6 +78,9 @@ const artifact: DeploymentArtifact = {
 		}),
 		tenant: worker({
 			name: scriptName('cupboard-tenant'),
+			cacheEnabled: true,
+			workersDev: false,
+			previewUrls: false,
 			migrations: [{ tag: 'v1', newSqliteClasses: ['CupboardServer'] }]
 		})
 	},
@@ -107,10 +121,6 @@ function absentString(): string | undefined {
 	return undefined;
 }
 
-function absentRows(): readonly unknown[] | undefined {
-	return undefined;
-}
-
 function recordingApi(): { api: CloudflareApi; calls: string[] } {
 	const calls: string[] = [];
 
@@ -145,8 +155,10 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				recordFallbackApiCall(calls, 'getWorkersDevSubdomain');
 				return Promise.resolve(absentString());
 			},
-			enableWorkersDevRoute: () => {
-				recordFallbackApiCall(calls, 'enableWorkersDevRoute');
+			setWorkersDevRoutes(scriptName, routes) {
+				calls.push(
+					`workers-dev:${scriptName}:${String(routes.workersDev)}:${String(routes.previewUrls)}`
+				);
 				return Promise.resolve();
 			},
 			queryWorkerLogs: () => Promise.resolve([]),
@@ -179,9 +191,9 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				return Promise.resolve([]);
 			},
 			getScriptMigrationTag: () => Promise.resolve('v0'),
-			getScriptBindings: () => {
-				recordFallbackApiCall(calls, 'getScriptBindings');
-				return Promise.resolve(absentRows());
+			getScriptConfiguration: () => {
+				recordFallbackApiCall(calls, 'getScriptConfiguration');
+				return Promise.resolve(undefined);
 			},
 			uploadScript(scriptName) {
 				calls.push(`upload:${scriptName}`);
@@ -260,8 +272,10 @@ describe('runDeploy', () => {
 			'd1qr:SELECT name ',
 			'd1q:CREATE TABLE',
 			'd1q:INSERT INTO ',
+			'workers-dev:cupboard-tenant:false:false',
 			'upload:cupboard-tenant',
 			'upload:cupboard',
+			'workers-dev:cupboard-tenant:false:false',
 			'secret:cupboard:CONTROL_KEY_WRAP_SECRET',
 			'queue:cupboard-maintenance',
 			'consumer:qid-cupboard-maintenance->cupboard',
@@ -271,7 +285,93 @@ describe('runDeploy', () => {
 		]);
 	});
 
-	it('skips both uploads when the live build and configuration match', async () => {
+	it('uploads control first when the target removes the named entrypoint', async () => {
+		const { api, calls } = recordingApi();
+		const withoutNamedEntrypoint: DeploymentArtifact = {
+			...artifact,
+			config: {
+				...artifact.config,
+				control: {
+					...artifact.config.control,
+					services: [
+						...artifact.config.control.services.map((service) => ({
+							...service,
+							entrypoint: undefined
+						})),
+						{
+							binding: 'OTHER_SERVICE',
+							service: scriptName('cupboard-tenant'),
+							entrypoint: 'OtherEntrypoint'
+						}
+					]
+				}
+			}
+		};
+
+		await runDeploy({
+			artifact: withoutNamedEntrypoint,
+			api,
+			reporter: silentReporter,
+			options: {
+				domain: undefined,
+				dryRun: false,
+				secrets: { control: [], tenant: [] },
+				liveBuild: undefined
+			}
+		});
+
+		expect(calls.filter((call) => call.startsWith('upload:'))).toStrictEqual([
+			'upload:cupboard',
+			'upload:cupboard-tenant'
+		]);
+	});
+
+	it.each([
+		{ workersDev: true, previewUrls: true, calls: 1 },
+		{ workersDev: true, previewUrls: false, calls: 2 },
+		{ workersDev: false, previewUrls: true, calls: 2 },
+		{ workersDev: false, previewUrls: false, calls: 2 }
+	])(
+		'reconciles workers.dev=$workersDev and preview URLs=$previewUrls',
+		async ({ workersDev, previewUrls, calls: expectedCalls }) => {
+			const { api, calls } = recordingApi();
+			const configuredArtifact: DeploymentArtifact = {
+				...artifact,
+				config: {
+					...artifact.config,
+					tenant: {
+						...artifact.config.tenant,
+						workersDev,
+						previewUrls
+					}
+				}
+			};
+
+			await runDeploy({
+				artifact: configuredArtifact,
+				api,
+				reporter: silentReporter,
+				options: {
+					domain: undefined,
+					dryRun: false,
+					secrets: { control: [], tenant: [] },
+					liveBuild: undefined
+				}
+			});
+
+			expect(
+				calls.filter((call) => call.startsWith('workers-dev:'))
+			).toStrictEqual(
+				Array.from(
+					{ length: expectedCalls },
+					() =>
+						`workers-dev:cupboard-tenant:${String(workersDev)}:${String(previewUrls)}`
+				)
+			);
+		}
+	);
+
+	it('reconciles cache settings when the live build and bindings match', async () => {
 		const { api, calls } = recordingApi();
 		const skipped: string[] = [];
 		const succeeded: string[] = [];
@@ -282,7 +382,7 @@ describe('runDeploy', () => {
 		const convergedApi: CloudflareApi = {
 			...api,
 			getScriptMigrationTag: () => Promise.resolve('v1'),
-			getScriptBindings: (scriptName) => {
+			getScriptConfiguration: (scriptName) => {
 				const resources = {
 					d1: new Map([['cupboard', databaseId('db-id')]]),
 					kv: new Map([
@@ -295,10 +395,14 @@ describe('runDeploy', () => {
 						: artifact.config.control;
 				const { bindings } = buildScriptMetadata(config, resources);
 
-				return Promise.resolve([
-					{ type: 'secret_text', name: 'R2_SECRET_ACCESS_KEY' },
-					...(bindings ?? [])
-				]);
+				return Promise.resolve({
+					bindings: [
+						{ type: 'secret_text', name: 'R2_SECRET_ACCESS_KEY' },
+						...(bindings ?? [])
+					],
+					cacheEnabled: config.cacheEnabled,
+					crossVersionCache: config.cacheEnabled
+				});
 			}
 		};
 
@@ -334,6 +438,8 @@ describe('runDeploy', () => {
 				'd1qr:SELECT name ',
 				'd1q:CREATE TABLE',
 				'd1q:INSERT INTO ',
+				'workers-dev:cupboard-tenant:false:false',
+				'workers-dev:cupboard-tenant:false:false',
 				'queue:cupboard-maintenance',
 				'consumer:qid-cupboard-maintenance->cupboard',
 				'cron:cupboard:0 * * * *'
@@ -373,8 +479,10 @@ describe('runDeploy', () => {
 			'd1qr:SELECT name ',
 			'd1q:CREATE TABLE',
 			'd1q:INSERT INTO ',
+			'workers-dev:cupboard-tenant:false:false',
 			'upload:cupboard-tenant',
 			'upload:cupboard',
+			'workers-dev:cupboard-tenant:false:false',
 			'queue:cupboard-maintenance',
 			'consumer:qid-cupboard-maintenance->cupboard',
 			'cron:cupboard:0 * * * *'
@@ -450,8 +558,10 @@ describe('runDeploy', () => {
 				'd1qr:SELECT name ',
 				'd1q:CREATE TABLE',
 				'd1q:INSERT INTO ',
+				'workers-dev:cupboard-tenant:false:false',
 				'upload:cupboard-tenant',
 				'upload:cupboard',
+				'workers-dev:cupboard-tenant:false:false',
 				'queue:cupboard-maintenance',
 				'consumer:qid-cupboard-maintenance->cupboard',
 				'cron:cupboard:0 * * * *'
