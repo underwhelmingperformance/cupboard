@@ -1,4 +1,5 @@
 import Cloudflare from 'cloudflare';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import { createCloudflareApi } from './cloudflare-api.ts';
@@ -139,7 +140,7 @@ function fakeCloudflare(routes: Readonly<Record<string, unknown>>): {
 			return Promise.resolve(
 				Response.json(
 					{ success: false, errors: [{ code: 0, message: 'no route' }] },
-					{ status: 404 }
+					{ status: StatusCodes.NOT_FOUND }
 				)
 			);
 		}
@@ -464,5 +465,50 @@ describe('findCustomDomain', () => {
 		).findCustomDomain(scriptName('cupboard'));
 
 		expect(hostname).toBeUndefined();
+	});
+});
+
+describe('getScriptConfiguration', () => {
+	it('returns live bindings and cache settings', async () => {
+		const path = '/accounts/acc-1/workers/scripts/cupboard-tenant/settings';
+		const { client } = fakeCloudflare({
+			[`GET ${path}`]: {
+				bindings: [{ type: 'r2_bucket', name: 'BLOBS' }],
+				cache_options: { enabled: true, cross_version_cache: true }
+			}
+		});
+
+		const configuration = await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).getScriptConfiguration(scriptName('cupboard-tenant'));
+
+		expect(configuration).toStrictEqual({
+			bindings: [{ type: 'r2_bucket', name: 'BLOBS' }],
+			cacheEnabled: true,
+			crossVersionCache: true
+		});
+	});
+});
+
+describe('setWorkersDevRoutes', () => {
+	it('sets the workers.dev and preview URL states independently', async () => {
+		const path = '/accounts/acc-1/workers/scripts/cupboard-tenant/subdomain';
+		const { client, requests, bodies } = fakeCloudflare({
+			[`POST ${path}`]: { enabled: false, previews_enabled: false }
+		});
+
+		await createCloudflareApi(client, accountId('acc-1')).setWorkersDevRoutes(
+			scriptName('cupboard-tenant'),
+			{
+				workersDev: false,
+				previewUrls: true
+			}
+		);
+
+		expect({ requests, bodies }).toStrictEqual({
+			requests: [{ method: 'POST', path }],
+			bodies: [{ enabled: false, previews_enabled: true }]
+		});
 	});
 });

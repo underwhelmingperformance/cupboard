@@ -7,6 +7,13 @@ import type { DatabaseId, KvNamespaceId } from './identifiers.ts';
 type Metadata = ScriptUpdateParams.Metadata;
 type Binding = NonNullable<Metadata['bindings']>[number];
 
+export interface ScriptMetadata extends Metadata {
+	readonly cache_options: {
+		readonly enabled: boolean;
+		readonly cross_version_cache: boolean;
+	};
+}
+
 /**
  * Live resource identifiers resolved by name during reconciliation. R2 buckets
  * and queues are bound by name, so only D1 and KV need an id lookup.
@@ -86,6 +93,17 @@ function bindingsFor(
 		});
 	}
 
+	for (const service of worker.services) {
+		bindings.push({
+			type: 'service',
+			name: service.binding,
+			service: service.service,
+			...(service.entrypoint !== undefined && {
+				entrypoint: service.entrypoint
+			})
+		});
+	}
+
 	for (const [name, text] of Object.entries(worker.vars)) {
 		bindings.push({ type: 'plain_text', name, text });
 	}
@@ -105,7 +123,7 @@ export function buildScriptMetadata(
 	worker: WorkerConfig,
 	resources: ResolvedResources,
 	migration?: SingleStepMigrationParam
-): Metadata {
+): ScriptMetadata {
 	return {
 		main_module: worker.mainModule,
 		compatibility_date: worker.compatibilityDate,
@@ -116,6 +134,10 @@ export function buildScriptMetadata(
 		},
 		keep_bindings: ['secret_text', 'plain_text'],
 		bindings: bindingsFor(worker, resources),
+		cache_options: {
+			enabled: worker.cacheEnabled,
+			cross_version_cache: worker.cacheEnabled
+		},
 		...(worker.cpuMs !== undefined && { limits: { cpu_ms: worker.cpuMs } }),
 		...(migration !== undefined && { migrations: migration })
 	};

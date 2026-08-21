@@ -1,12 +1,17 @@
 import { InvalidNixPublicKeyError } from '@cupboard/nix-store/errors';
 import { NixPublicKey } from '@cupboard/nix-store/public-key';
+import {
+	signingKeyGenerationSchema,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
+import { instanceNameSchema } from '@cupboard/protocol/instance';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import { describe, expect, it } from 'vitest';
 import { ZodError } from 'zod';
 
 import * as schema from '../db/schema.ts';
 
-import { signingKeyFromRow } from './signing-keys.ts';
+import { signingKeyFromRow, signingKeyName } from './signing-keys.ts';
 
 const createdAt = isoTimestamp(new Date('2026-01-01T00:00:00.000Z'));
 
@@ -20,6 +25,7 @@ function storedRow(
 		publicKey,
 		signing: true,
 		published: true,
+		generation: signingKeyGenerationSchema.parse(1),
 		createdAt
 	};
 }
@@ -32,6 +38,7 @@ describe('signingKeyFromRow', () => {
 			publicKey: new NixPublicKey('cupboard-1:cHVi'),
 			signing: true,
 			published: true,
+			generation: signingKeyGenerationSchema.parse(1),
 			createdAt
 		});
 	});
@@ -56,5 +63,32 @@ describe('signingKeyFromRow', () => {
 		expect(() => signingKeyFromRow(storedRow('cupboard-1:cHVi', id))).toThrow(
 			ZodError
 		);
+	});
+});
+
+describe('signingKeyName', () => {
+	it('includes the instance, tenant and monotonic generation', () => {
+		expect(
+			signingKeyName(
+				instanceNameSchema.parse('forge'),
+				tenantIdSchema.parse('acme'),
+				signingKeyGenerationSchema.parse(17)
+			)
+		).toBe('forge-acme-17');
+	});
+
+	it('escapes component separators so different splits cannot collide', () => {
+		expect([
+			signingKeyName(
+				instanceNameSchema.parse('acme-prod'),
+				tenantIdSchema.parse('cache'),
+				signingKeyGenerationSchema.parse(1)
+			),
+			signingKeyName(
+				instanceNameSchema.parse('acme'),
+				tenantIdSchema.parse('prod-cache'),
+				signingKeyGenerationSchema.parse(1)
+			)
+		]).toStrictEqual(['acme--prod-cache-1', 'acme-prod--cache-1']);
 	});
 });

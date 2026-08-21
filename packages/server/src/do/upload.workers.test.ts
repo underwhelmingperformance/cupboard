@@ -25,7 +25,6 @@ import { z } from 'zod';
 import { buildVersion } from '../build-info.generated.ts';
 import * as schema from '../db/schema.ts';
 import {
-	narInfoCachePath,
 	narInfoObjectKey,
 	narObjectKey,
 	r2ObjectKeySchema,
@@ -139,17 +138,6 @@ function publicKeyShape(publicKey: string): {
 			atob(encoded),
 			(character) => character.codePointAt(0) ?? 0
 		).byteLength
-	};
-}
-
-async function cachedResponseShape(
-	cacheKey: string
-): Promise<{ readonly cached: boolean; readonly status: number | undefined }> {
-	const response = await caches.default.match(cacheKey);
-
-	return {
-		cached: response !== undefined,
-		status: response?.status
 	};
 }
 
@@ -308,7 +296,7 @@ describe('upload flow', () => {
 			publicKey: publicKeyShape(publicKey)
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			publicKey: { name: 'cupboard-1', rawBytes: 32 }
+			publicKey: { name: 'cupboard-v1-1', rawBytes: 32 }
 		});
 
 		await expectTextResponse(
@@ -356,7 +344,7 @@ describe('upload flow', () => {
 			stablePublicKey: first.publicKey,
 			first: {
 				url: currentOrigin(),
-				publicKey: { name: 'cupboard-1', rawBytes: 32 },
+				publicKey: { name: 'cupboard-v1-1', rawBytes: 32 },
 				stats: StatusCodes.OK
 			},
 			second: {
@@ -439,14 +427,40 @@ describe('upload flow', () => {
 			ca: undefined,
 			sigs: [signature]
 		});
+		const cachedNarInfo = await readFetch(`/${metadata.storePathHash}.narinfo`);
 		expect({
-			signatureVerified: await isNarInfoSignatureValid(narInfo, init.publicKey)
-		}).toStrictEqual({ signatureVerified: true });
+			signatureVerified: await isNarInfoSignatureValid(narInfo, init.publicKey),
+			cacheTag: cachedNarInfo.headers.get('cache-tag')
+		}).toStrictEqual({
+			signatureVerified: true,
+			cacheTag: `narinfo:v1:_default:${metadata.storePathHash}`
+		});
+		const objectKey = narInfoObjectKey(fixtureTenant, metadata.storePathHash);
+		const storedNarInfo = await env.BLOBS.get(objectKey);
+
+		if (storedNarInfo === null) {
+			throw new Error('Expected the committed narinfo object');
+		}
+
+		await env.BLOBS.put(objectKey, await storedNarInfo.arrayBuffer(), {
+			customMetadata: storedNarInfo.customMetadata,
+			httpMetadata: {
+				contentType: 'text/x-nix-narinfo; charset=utf-8',
+				cacheControl: 'public, max-age=3600'
+			}
+		});
+		const legacyMetadata = await readFetch(
+			`/${metadata.storePathHash}.narinfo`
+		);
+
+		expect(legacyMetadata.headers.get('cache-control')).toBe(
+			'public, max-age=3600, must-revalidate'
+		);
 		await expectTextResponse(
 			`/${metadata.storePathHash}.narinfo`,
 			{
 				body: narInfo.render(),
-				cacheControl: 'public, max-age=3600',
+				cacheControl: 'public, max-age=3600, must-revalidate',
 				contentType: 'text/x-nix-narinfo; charset=utf-8',
 				method: 'HEAD'
 			},
@@ -587,23 +601,12 @@ describe('upload flow', () => {
 		]);
 	});
 
-	it('serves a tenant its own cached NAR but never one it does not reference', async () => {
+	it('serves a NAR only through tenants that reference it', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await commitPath(token, metadata);
 		await provisionNamedTenant('acme');
 
-		// The owning tenant reads its NAR, populating its tenant-scoped edge cache.
-		const first = await readFetch(`/nar/${metadata.narHash}.nar.zst`);
-		expect([...new Uint8Array(await first.arrayBuffer())]).toStrictEqual([
-			...narBytes
-		]);
-
-		// With the R2 object gone, the owner is still served from its edge cache,
-		// but a tenant that never referenced the hash gets a 404, not the shared
-		// bytes: the NAR namespace is content-addressed but read access is per
-		// tenant.
-		await env.BLOBS.delete(narObjectKey(metadata.narHash));
 		const owner = await readFetch(`/nar/${metadata.narHash}.nar.zst`);
 		const intruder = await handlerFetch(
 			`/t/acme/nar/${metadata.narHash}.nar.zst`
@@ -2606,7 +2609,7 @@ describe('upload flow', () => {
 			fields: parsed.toFields()
 		}).toStrictEqual({
 			contentType: 'text/x-nix-narinfo; charset=utf-8',
-			cacheControl: 'public, max-age=3600',
+			cacheControl: 'public, max-age=3600, must-revalidate',
 			fields: {
 				storePath: metadata.storePath,
 				url: `nar/${metadata.narHash}.nar.zst`,
@@ -2732,30 +2735,22 @@ describe('upload flow', () => {
 		);
 	});
 
-	it('purges the cached narinfo when the reconcile removes a missing NAR blob', async () => {
+	it('removes the narinfo when reconcile finds its NAR missing', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await commitPath(token, metadata);
 
-		const cacheKeyUrl = new URL(
-			narInfoCachePath(fixtureTenant, metadata.storePathHash),
-			currentOrigin()
-		);
-		const cacheKey = cacheKeyUrl.href;
-		await readFetch(`/${metadata.storePathHash}.narinfo`);
-
-		await expect(cachedResponseShape(cacheKey)).resolves.toStrictEqual({
-			cached: true,
-			status: StatusCodes.OK
-		});
-
-		// Negotiate records the push origin with the queued path, so the reconcile
-		// purges the edge cache the request populated when it removes the narinfo.
 		await env.BLOBS.delete(narObjectKey(metadata.narHash));
 		await negotiateUploads(token, [metadata]);
 		await fireReconcile();
 
-		await expect(caches.default.match(cacheKey)).resolves.toBeUndefined();
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
+		).resolves.toBeNull();
+		const missingNarInfo = await readFetch(
+			`/${metadata.storePathHash}.narinfo`
+		);
+		expect(missingNarInfo.status).toBe(StatusCodes.NOT_FOUND);
 	});
 
 	it('reuses an existing blob for another store path', async () => {
@@ -2830,7 +2825,7 @@ describe('upload flow', () => {
 		expectSingleUploadDecision(await negotiateUploads(token, [third]), third);
 	});
 
-	it('purges a collected narinfo from the edge cache during GC', async () => {
+	it('removes a collected narinfo during GC', async () => {
 		const token = await initialise();
 		const kept = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -2843,18 +2838,6 @@ describe('upload flow', () => {
 
 		await commitPath(token, kept);
 		await setRoot(token, { name: 'main', targets: [kept.storePath] });
-
-		const cacheKeyUrl = new URL(
-			narInfoCachePath(fixtureTenant, collected.storePathHash),
-			currentOrigin()
-		);
-		const cacheKey = cacheKeyUrl.href;
-		await readFetch(`/${collected.storePathHash}.narinfo`);
-
-		await expect(cachedResponseShape(cacheKey)).resolves.toStrictEqual({
-			cached: true,
-			status: StatusCodes.OK
-		});
 
 		expect(await runGcResult()).toStrictEqual({
 			ok: true,
@@ -2866,10 +2849,12 @@ describe('upload flow', () => {
 			orphanStagingDeleted: 0
 		});
 
-		await expect(caches.default.match(cacheKey)).resolves.toBeUndefined();
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, collected.storePathHash))
+		).resolves.toBeNull();
 	});
 
-	it('does not purge the edge cache when GC runs from the internal cron origin', async () => {
+	it('removes a collected narinfo when GC runs from cron', async () => {
 		const token = await initialise();
 		const kept = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -2883,30 +2868,11 @@ describe('upload flow', () => {
 		await commitPath(token, kept);
 		await setRoot(token, { name: 'main', targets: [kept.storePath] });
 
-		const cacheKeyUrl = new URL(
-			narInfoCachePath(fixtureTenant, collected.storePathHash),
-			currentOrigin()
-		);
-		const cacheKey = cacheKeyUrl.href;
-		await readFetch(`/${collected.storePathHash}.narinfo`);
-
-		await expect(cachedResponseShape(cacheKey)).resolves.toStrictEqual({
-			cached: true,
-			status: StatusCodes.OK
-		});
-
 		await runGcFromInternalOrigin();
 
-		// The collection removed the narinfo object, but a cron-origin GC cannot
-		// purge the public edge cache, so the cached copy remains until its TTL
-		// lapses.
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, collected.storePathHash))
 		).resolves.toBeNull();
-		await expect(cachedResponseShape(cacheKey)).resolves.toStrictEqual({
-			cached: true,
-			status: StatusCodes.OK
-		});
 	});
 
 	it('spares an in-flight reserved narinfo row from collection', async () => {

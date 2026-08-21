@@ -26,17 +26,10 @@ const textHeaders = {
 export const r2ObjectKeySchema = z.string().brand('R2ObjectKey');
 export type R2ObjectKey = z.infer<typeof r2ObjectKeySchema>;
 
-// The URL a public read is cached under in the Cache API. It carries the tenant,
-// so two tenants sharing a host never collide, and a deletion purges the exact
-// key the read populated.
-export const edgeCacheKeySchema = z.string().brand('EdgeCacheKey');
-export type EdgeCacheKey = z.infer<typeof edgeCacheKeySchema>;
-
 // The public origin of an incoming request, threaded to where it derives an
-// absolute URL: the edge-cache key a narinfo is purged under, and the issuer and
-// endpoints of a tenant's authorisation-server metadata. It is minted once at
-// the request boundary and persisted to DO storage across a teardown or reconcile
-// drain, so it carries its own brand end to end.
+// absolute URL, including the issuer and endpoints in a tenant's authorisation
+// server metadata. It is minted once at the request boundary and persists across
+// a teardown or reconcile drain, so it carries its own brand end to end.
 export const requestOriginSchema = z.string().brand('RequestOrigin');
 export type RequestOrigin = z.infer<typeof requestOriginSchema>;
 
@@ -88,7 +81,7 @@ export const maxAttestationBundleBytes = 1024 * 1024;
 
 export const narInfoCacheTtlSeconds = 3600;
 
-export const narInfoCacheControl = `public, max-age=${String(narInfoCacheTtlSeconds)}`;
+export const narInfoCacheControl = `public, max-age=${String(narInfoCacheTtlSeconds)}, must-revalidate`;
 
 // A deleted narinfo can still be served from a warm edge for up to its TTL, so a
 // NAR it points at must outlive any such cached copy. The reaper arms an
@@ -168,24 +161,6 @@ export function attestationStagingObjectKey(
 	return r2ObjectKeySchema.parse(`staging/${pushId}/attestations/${uploadId}`);
 }
 
-// The request path a narinfo is served and edge-cached under: under the tenant
-// prefix, bare for the default cache and namespaced under `/cache/<cache>/` for a
-// named one. The read path's edge-cache key and the deletion purge both build on
-// this, so a narinfo's cached copy is keyed per tenant and two tenants sharing a
-// host never collide on the same store-path hash.
-export function narInfoCachePath(
-	tenant: TenantId,
-	storePathHash: StorePathHash,
-	cache: StoredCache = DEFAULT_CACHE
-): string {
-	const suffix =
-		cache === DEFAULT_CACHE
-			? `/${storePathHash}.narinfo`
-			: `/cache/${cache}/${storePathHash}.narinfo`;
-
-	return `/t/${tenant}${suffix}`;
-}
-
 // The sole narinfo-key constructors: never inline the prefix elsewhere. A narinfo's
 // materialised R2 object is tenant-namespaced, so distrusting tenants never share a
 // narinfo object even for the same store-path hash; the NAR bytes it points at stay
@@ -208,20 +183,6 @@ export function narInfoObjectKey(
 		cache === DEFAULT_CACHE ? storePathHash : `${cache}/${storePathHash}`;
 
 	return r2ObjectKeySchema.parse(`${narInfoObjectPrefix(tenant)}${suffix}`);
-}
-
-// The edge-cache key a narinfo is served and purged under: the request origin
-// joined to {@link narInfoCachePath}. The read path populates this key and a
-// deletion purges the same one, so both build it here and can never drift.
-export function narInfoCacheKey(
-	origin: RequestOrigin,
-	tenant: TenantId,
-	storePathHash: StorePathHash,
-	cache: StoredCache = DEFAULT_CACHE
-): EdgeCacheKey {
-	return edgeCacheKeySchema.parse(
-		new URL(narInfoCachePath(tenant, storePathHash, cache), origin).href
-	);
 }
 
 export function parseNarName(name: string): NixSha256HashString | undefined {

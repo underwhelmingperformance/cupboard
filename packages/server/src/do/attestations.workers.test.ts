@@ -123,8 +123,10 @@ describe('attestation attach and reads', () => {
 		expect({
 			attached,
 			listStatus: list.status,
+			listControl: list.headers.get('cache-control'),
 			listBody: attestationListSchema.parse(await list.json()),
 			bundleStatus: bundleRead.status,
+			bundleControl: bundleRead.headers.get('cache-control'),
 			bundleBytes: [...bundleBytes]
 		}).toStrictEqual({
 			attached: {
@@ -134,10 +136,12 @@ describe('attestation attach and reads', () => {
 				status: 'attached'
 			},
 			listStatus: StatusCodes.OK,
+			listControl: 'no-store',
 			listBody: {
 				attestations: [{ digest, predicateType, size: bundle.byteLength }]
 			},
 			bundleStatus: StatusCodes.OK,
+			bundleControl: 'no-store',
 			bundleBytes: [...bundle]
 		});
 	});

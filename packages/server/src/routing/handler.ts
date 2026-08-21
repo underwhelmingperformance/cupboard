@@ -1,6 +1,7 @@
 import {
 	cacheFromSelector,
 	cacheSelectorSchema,
+	DEFAULT_CACHE,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import {
@@ -43,10 +44,12 @@ import {
 } from '../read/read.ts';
 
 import { admitTenant, type TenantEntry } from './admission.ts';
+import { canonicalCacheRequest } from './cache-request.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
 import { computeNegotiateHints } from './negotiate-hints.ts';
 import { enqueueMaintenanceJobs, handleMaintenanceQueue } from './scheduled.ts';
+import { tenantReadFetch } from './tenant-read-handler.ts';
 import { parseTenantPath } from './tenant-routing.ts';
 
 const healthBody = new TextBody('ok\n');
@@ -145,26 +148,21 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		await next();
 	});
 
-	// OAuth discovery (RFC 8414) and the auth public keys both proxy to the
-	// tenant's Durable Object, so an admitted but unconfigured tenant returns 500
-	// here, advertising and serving no identity until one has been assigned.
-	// The object builds the metadata from its own request, so the
-	// issuer stays the tenant's path-based URL.
-	app.on(
-		'GET',
-		[
-			'/t/:tenant/.well-known/oauth-authorization-server',
-			'/t/:tenant/.well-known/jwks.json'
-		],
-		(context) =>
-			tenantServer(context.env, context.get('tenant')).fetch(
-				innerRequest(context)
-			)
+	// OAuth discovery and the auth public keys originate in the tenant's Durable
+	// Object. Neither response is cached because key rotation changes the JWKS and
+	// discovery contains absolute URLs derived from the public request origin.
+	app.get('/t/:tenant/.well-known/oauth-authorization-server', (context) =>
+		tenantUncachedRead(context, true)
+	);
+	app.get('/t/:tenant/.well-known/jwks.json', (context) =>
+		tenantServer(context.env, context.get('tenant')).fetch(
+			innerRequest(context)
+		)
 	);
 
-	// Attestation lists and bundles are served by the Durable Object; a name that
-	// does not parse falls through to the dispatch fallback, exactly as the
-	// object's own routes would see it.
+	// Attestation lists and bundle references change when paths or caches are
+	// removed, so both stay uncached. A name that does not parse falls through to
+	// the dispatch fallback, as the object's own routes would see it.
 	app.on(
 		'GET',
 		[
@@ -183,12 +181,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 				context.get('tenantEntry')
 			);
 
-			return (
-				denied ??
-				tenantServer(context.env, context.get('tenant')).fetch(
-					innerRequest(context)
-				)
-			);
+			return denied ?? tenantUncachedRead(context);
 		}
 	);
 	app.on(
@@ -209,12 +202,11 @@ function buildApp(): Hono<WorkerHonoEnv> {
 				context.get('tenantEntry')
 			);
 
-			return (
-				denied ??
-				tenantServer(context.env, context.get('tenant')).fetch(
-					innerRequest(context)
-				)
-			);
+			if (denied !== undefined) {
+				return denied;
+			}
+
+			return tenantUncachedRead(context, true);
 		}
 	);
 
@@ -277,17 +269,19 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			const entry = context.get('tenantEntry');
 			const denied = await guardRead(context.req.raw, entry);
 
-			return (
-				denied ??
-				serveNar(
-					context.req.raw,
-					context.env,
-					context.executionCtx,
-					context.get('tenant'),
-					narHash,
-					entry.readMode === 'private'
-				)
-			);
+			if (denied !== undefined) {
+				return denied;
+			}
+
+			return entry.readMode === 'private'
+				? serveNar(
+						context.req.raw,
+						context.env,
+						context.get('tenant'),
+						narHash,
+						true
+					)
+				: cachedTenantRead(context);
 		}
 	);
 
@@ -307,18 +301,20 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			const entry = context.get('tenantEntry');
 			const denied = await guardRead(context.req.raw, entry);
 
-			return (
-				denied ??
-				serveNarInfo(
-					context.req.raw,
-					context.env,
-					context.executionCtx,
-					context.get('tenant'),
-					context.get('cache'),
-					storePathHash,
-					entry.readMode === 'private'
-				)
-			);
+			if (denied !== undefined) {
+				return denied;
+			}
+
+			return entry.readMode === 'private'
+				? serveNarInfo(
+						context.req.raw,
+						context.env,
+						context.get('tenant'),
+						context.get('cache'),
+						storePathHash,
+						true
+					)
+				: cachedTenantRead(context);
 		}
 	);
 
@@ -329,16 +325,20 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			const entry = context.get('tenantEntry');
 			const denied = await guardRead(context.req.raw, entry);
 
-			return (
-				denied ??
-				cacheInfoResponse(
-					innerRequest(context),
-					context.env,
-					context.get('tenant'),
-					context.get('cache'),
-					entry.readMode === 'private'
-				)
-			);
+			if (denied !== undefined) {
+				return denied;
+			}
+
+			return entry.readMode === 'private' ||
+				context.get('cache') !== DEFAULT_CACHE
+				? cacheInfoResponse(
+						innerRequest(context),
+						context.env,
+						context.get('tenant'),
+						context.get('cache'),
+						true
+					)
+				: cachedTenantRead(context);
 		}
 	);
 
@@ -501,6 +501,46 @@ function innerRequest(context: Context<WorkerHonoEnv>): Request {
 	request.headers.delete(negotiateHintsHeader);
 
 	return request;
+}
+
+async function cachedTenantRead(
+	context: Context<WorkerHonoEnv>
+): Promise<Response> {
+	const { CUPBOARD_TENANT: service } = context.env as Partial<
+		Pick<Env, 'CUPBOARD_TENANT'>
+	>;
+
+	if (service !== undefined) {
+		return service.fetch(canonicalCacheRequest(context.req.raw));
+	}
+
+	return tenantReadFetch(
+		context.req.raw,
+		context.env as unknown as TenantEnv,
+		context.executionCtx
+	);
+}
+
+async function tenantUncachedRead(
+	context: Context<WorkerHonoEnv>,
+	shouldForceNoStore = false
+): Promise<Response> {
+	const response = await tenantServer(context.env, context.get('tenant')).fetch(
+		innerRequest(context)
+	);
+
+	if (!shouldForceNoStore) {
+		return response;
+	}
+
+	const headers = new Headers(response.headers);
+	headers.set('cache-control', 'no-store');
+
+	return new Response(response.body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers
+	});
 }
 
 // Dispatches a non-read tenant request to its Durable Object. A write (anything but

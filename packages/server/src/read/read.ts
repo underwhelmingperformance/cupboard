@@ -18,16 +18,14 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
 import { maxOutgoingConnections } from '../do/bulk.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
+import { narInfoCacheTag } from '../http/cache-tags.ts';
 import {
-	type EdgeCacheKey,
-	edgeCacheKeySchema,
 	isNotModified,
-	narInfoCacheKey,
+	narInfoCacheControl,
 	narInfoObjectKey,
 	narObjectKey,
 	notFoundResponse,
 	type R2ObjectKey,
-	requestOriginSchema,
 	TextBody,
 	textResponse
 } from '../http/http.ts';
@@ -37,11 +35,10 @@ import { isReadAuthorised, unauthorisedResponse } from './read-auth.ts';
 
 const cacheInfoBody = new TextBody(CacheInfo.default.render());
 
-/**
-The slice of the execution context the read path needs: deferred work.
-*/
-export interface ReadContext {
-	waitUntil(promise: Promise<unknown>): void;
+interface ReadEnv {
+	readonly BLOBS: R2Bucket;
+	readonly CUPBOARD_DB: D1Database;
+	readonly CUPBOARD_DO: DurableObjectNamespace;
 }
 
 // Splits an optional `/cache/<name>/` prefix off a tenant-relative path.
@@ -110,8 +107,7 @@ export async function guardRead(
 // same disclosure.
 export function serveNar(
 	request: Request,
-	env: Env,
-	ctx: ReadContext,
+	env: ReadEnv,
 	tenant: TenantId,
 	narHash: NixSha256HashString,
 	isPrivate: boolean
@@ -119,9 +115,7 @@ export function serveNar(
 	return serveR2(
 		request,
 		env,
-		ctx,
 		narObjectKey(narHash),
-		narCacheKey(tenant, narHash),
 		narHeaders,
 		!isPrivate,
 		() => hasTenantNarReference(env, tenant, narHash)
@@ -133,7 +127,7 @@ export function serveNar(
 // The read gets one bounded retry; a persistent fault refuses retryably, since
 // answering it as a miss would tell the client the path does not exist.
 async function hasTenantNarReference(
-	env: Env,
+	env: Pick<ReadEnv, 'CUPBOARD_DB'>,
 	tenant: TenantId,
 	narHash: NixSha256HashString
 ): Promise<boolean> {
@@ -164,22 +158,17 @@ async function hasTenantNarReference(
 // hash.
 export function serveNarInfo(
 	request: Request,
-	env: Env,
-	ctx: ReadContext,
+	env: ReadEnv,
 	tenant: TenantId,
 	cache: StoredCache,
 	storePathHash: StorePathHash,
 	isPrivate: boolean
 ): Promise<Response> {
-	const origin = requestOriginSchema.parse(new URL(request.url).origin);
-
 	return serveR2(
 		request,
 		env,
-		ctx,
 		narInfoObjectKey(tenant, storePathHash, cache),
-		narInfoCacheKey(origin, tenant, storePathHash, cache),
-		narInfoHeaders,
+		(object) => narInfoHeaders(object, tenant, cache, storePathHash),
 		!isPrivate
 	);
 }
@@ -211,7 +200,7 @@ export async function missingStorePathHashes(
 
 export async function cacheInfoResponse(
 	request: Request,
-	env: Env,
+	env: ReadEnv,
 	tenant: TenantId,
 	cache: StoredCache,
 	isPrivate: boolean
@@ -237,67 +226,43 @@ export async function cacheInfoResponse(
 	return new Response(response.body, { status: response.status, headers });
 }
 
-function narCacheKey(
-	tenant: TenantId,
-	narHash: NixSha256HashString
-): EdgeCacheKey {
-	const cacheKeyUrl = new URL(
-		`t/${tenant}/${narObjectKey(narHash)}`,
-		'https://cupboard-nar-cache.invalid/'
-	);
-	return edgeCacheKeySchema.parse(cacheKeyUrl.href);
-}
-
-// `isAuthorised`, when provided, gates access to a shared object. It runs before
-// any uncached read or existence probe, never on an edge-cache hit: a cached
-// entry is keyed per tenant, so a hit already proves this tenant was authorised
-// when it populated the cache. A false verdict reads as a 404.
+// `isAuthorised`, when provided, gates access to a shared object before its R2
+// read. The tenant Worker caches only public responses, after the control Worker
+// has admitted the tenant. Private reads call this function from the control
+// Worker and carry `no-store`.
 async function serveR2(
 	request: Request,
-	env: Env,
-	ctx: ReadContext,
+	env: ReadEnv,
 	key: R2ObjectKey,
-	cacheKey: EdgeCacheKey,
 	headersFor: (object: R2Object) => Headers,
 	isPublicCache: boolean,
 	isAuthorised?: () => Promise<boolean>
 ): Promise<Response> {
-	if (request.method === 'HEAD') {
-		if (isAuthorised !== undefined && !(await isAuthorised())) {
-			return notFoundResponse();
-		}
-
-		const object = await env.BLOBS.head(key);
-
-		if (object === null) {
-			return notFoundResponse();
-		}
-
-		const headers = privatise(headersFor(object), isPublicCache);
-
-		return isNotModified(request, headers)
-			? notModified(headers)
-			: new Response(undefined, { headers });
-	}
-
-	const cache = caches.default;
-
-	if (isPublicCache) {
-		const cached = await cache.match(cacheKey);
-
-		if (cached !== undefined) {
-			return isNotModified(request, cached.headers)
-				? notModified(cached.headers)
-				: cached;
-		}
-	}
-
 	if (isAuthorised !== undefined && !(await isAuthorised())) {
 		return notFoundResponse();
 	}
 
+	if (!isPublicCache && request.method === 'HEAD') {
+		return r2Response(
+			request,
+			await env.BLOBS.head(key),
+			headersFor,
+			isPublicCache
+		);
+	}
+
 	const object = await env.BLOBS.get(key);
 
+	return r2Response(request, object, headersFor, isPublicCache, object?.body);
+}
+
+function r2Response(
+	request: Request,
+	object: R2Object | null,
+	headersFor: (object: R2Object) => Headers,
+	isPublicCache: boolean,
+	body?: BodyInit
+): Response {
 	if (object === null) {
 		return notFoundResponse();
 	}
@@ -308,13 +273,7 @@ async function serveR2(
 		return notModified(headers);
 	}
 
-	const response = new Response(object.body, { headers });
-
-	if (isPublicCache) {
-		ctx.waitUntil(cache.put(cacheKey, response.clone()));
-	}
-
-	return response;
+	return new Response(body, { headers });
 }
 
 // In private mode the response body is served only after Basic auth, so it must
@@ -340,9 +299,19 @@ function narHeaders(object: R2Object): Headers {
 	return headers;
 }
 
-function narInfoHeaders(object: R2Object): Headers {
+function narInfoHeaders(
+	object: R2Object,
+	tenant: TenantId,
+	cache: StoredCache,
+	storePathHash: StorePathHash
+): Headers {
 	const headers = new Headers();
 	object.writeHttpMetadata(headers);
+	// Old R2 objects keep the response metadata from the version that wrote
+	// them. Apply the current policy at the read boundary so an upgrade changes
+	// the policy for existing narinfos too.
+	headers.set('cache-control', narInfoCacheControl);
+	headers.set('cache-tag', narInfoCacheTag(tenant, cache, storePathHash));
 	headers.set('etag', object.httpEtag);
 	headers.set('last-modified', object.uploaded.toUTCString());
 	headers.set('content-length', String(object.size));

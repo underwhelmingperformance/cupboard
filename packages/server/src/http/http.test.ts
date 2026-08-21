@@ -5,7 +5,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
-import { isNotModified, narInfoCachePath, narInfoObjectKey } from './http.ts';
+import { isNotModified, narInfoObjectKey } from './http.ts';
 
 const tenant = tenantIdSchema.parse('acme');
 const buildsCache = cacheNameSchema.parse('builds');
@@ -91,20 +91,6 @@ describe('narInfoObjectKey', () => {
 		}).toStrictEqual({
 			default: `t/acme/narinfo/${hash}`,
 			named: `t/acme/narinfo/builds/${hash}`
-		});
-	});
-});
-
-describe('narInfoCachePath', () => {
-	const hash = storePathHashSchema.parse('0123456789abcdfghijklmnpqrsvwxyz');
-
-	it('carries the tenant prefix, bare for the default cache and nested for a named one', () => {
-		expect({
-			default: narInfoCachePath(tenant, hash),
-			named: narInfoCachePath(tenant, hash, buildsCache)
-		}).toStrictEqual({
-			default: `/t/acme/${hash}.narinfo`,
-			named: `/t/acme/cache/builds/${hash}.narinfo`
 		});
 	});
 });

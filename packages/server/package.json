@@ -26,15 +26,15 @@
 		"drizzle-kit": "^0.31.10",
 		"typescript": "^6.0.3",
 		"vitest": "^4.1.8",
-		"wrangler": "^4.98.0"
+		"wrangler": "^4.107.0"
 	},
 	"license": "AGPL-3.0-or-later",
 	"main": "src/worker.ts",
 	"private": true,
 	"scripts": {
 		"build-info": "node ../../scripts/build-info.ts",
-		"cf:typegen": "pnpm build-info && wrangler types --env-file .typegen.vars --strict-vars false --env-interface Env && wrangler types -c wrangler.tenant.jsonc --env-file .typegen.tenant.vars --strict-vars false --env-interface TenantEnv --include-runtime false worker-configuration.tenant.d.ts",
-		"cf:typegen:check": "pnpm build-info && wrangler types --env-file .typegen.vars --strict-vars false --env-interface Env --check worker-configuration.d.ts && wrangler types -c wrangler.tenant.jsonc --env-file .typegen.tenant.vars --strict-vars false --env-interface TenantEnv --include-runtime false --check worker-configuration.tenant.d.ts",
+		"cf:typegen": "pnpm build-info && wrangler types --env-file .typegen.vars --strict-vars false --env-interface Env --include-runtime false worker-configuration.d.ts && wrangler types -c wrangler.tenant.jsonc --env-file .typegen.tenant.vars --strict-vars false --env-interface TenantEnv --include-runtime false worker-configuration.tenant.d.ts",
+		"cf:typegen:check": "pnpm build-info && wrangler types --env-file .typegen.vars --strict-vars false --env-interface Env --include-runtime false --check worker-configuration.d.ts && wrangler types -c wrangler.tenant.jsonc --env-file .typegen.tenant.vars --strict-vars false --env-interface TenantEnv --include-runtime false --check worker-configuration.tenant.d.ts",
 		"check:types": "pnpm cf:typegen:check && tsc --noEmit",
 		"deploy": "pnpm cf:typegen && pnpm deploy:migrations && wrangler deploy -c wrangler.tenant.jsonc && wrangler deploy",
 		"deploy:migrations": "wrangler d1 migrations apply CUPBOARD_DB --remote",

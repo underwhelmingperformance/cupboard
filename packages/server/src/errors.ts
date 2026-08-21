@@ -2,6 +2,7 @@ import {
 	type AuthKeyId,
 	type NixSha256HashString,
 	type RootName,
+	type SigningKeyId,
 	type StoredCache,
 	type StoreDirectory,
 	type StorePathHash,
@@ -122,9 +123,77 @@ export class CacheNotEmptyError extends ServerHttpError {
 export class LastSigningKeyError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
-	constructor(public readonly id: string) {
+	constructor(public readonly id: SigningKeyId) {
 		super('Cannot retire the last signing key');
 		this.name = 'LastSigningKeyError';
+	}
+}
+
+export class SigningKeyRotationInProgressError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly id: SigningKeyId) {
+		super('A signing key backfill is already in progress');
+		this.name = 'SigningKeyRotationInProgressError';
+	}
+}
+
+export class SigningKeyBackfillIncompleteError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly id: SigningKeyId) {
+		super('The signing key cannot be retired until backfill is complete');
+		this.name = 'SigningKeyBackfillIncompleteError';
+	}
+}
+
+export class SigningKeySequenceMissingError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor() {
+		super('Stored signing key sequence is missing');
+		this.name = 'SigningKeySequenceMissingError';
+	}
+}
+
+export class SigningKeyInstanceMissingError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor() {
+		super('Stored instance identity is missing');
+		this.name = 'SigningKeyInstanceMissingError';
+	}
+}
+
+export class SigningKeyVanishedError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly id: SigningKeyId) {
+		super('The signing key vanished immediately after it was stored');
+		this.name = 'SigningKeyVanishedError';
+	}
+}
+
+export class SigningKeyRotationAbortNotAllowedError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly id: SigningKeyId) {
+		super('Only an incomplete incoming signing key can be aborted');
+		this.name = 'SigningKeyRotationAbortNotAllowedError';
+	}
+}
+
+export class WorkersCacheUnavailableError extends Error {
+	constructor() {
+		super('Workers Cache is not available to the tenant Worker');
+		this.name = 'WorkersCacheUnavailableError';
+	}
+}
+
+export class WorkersCachePurgeError extends Error {
+	constructor(public readonly details: string) {
+		super(`Workers Cache purge failed: ${details}`);
+		this.name = 'WorkersCachePurgeError';
 	}
 }
 
@@ -190,6 +259,15 @@ export class GlobalAdminAlreadyClaimedError extends ServerHttpError {
 			'The deployment has already assigned the global administrator role to another principal.'
 		);
 		this.name = 'GlobalAdminAlreadyClaimedError';
+	}
+}
+
+export class InstanceAlreadyInitialisedError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor() {
+		super('The instance name has already been initialised');
+		this.name = 'InstanceAlreadyInitialisedError';
 	}
 }
 

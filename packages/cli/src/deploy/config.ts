@@ -44,6 +44,12 @@ export interface QueueProducerBinding {
 	readonly queue: string;
 }
 
+export interface ServiceBinding {
+	readonly binding: string;
+	readonly service: ScriptName;
+	readonly entrypoint: string | undefined;
+}
+
 export interface QueueConsumerConfig {
 	readonly queue: string;
 	readonly maxBatchSize: number | undefined;
@@ -73,6 +79,10 @@ export interface WorkerConfig {
 	readonly d1Databases: readonly D1Binding[];
 	readonly queueProducers: readonly QueueProducerBinding[];
 	readonly queueConsumers: readonly QueueConsumerConfig[];
+	readonly services: readonly ServiceBinding[];
+	readonly cacheEnabled: boolean;
+	readonly workersDev: boolean;
+	readonly previewUrls: boolean;
 	readonly crons: readonly string[];
 	readonly migrations: readonly DurableObjectMigration[];
 }
@@ -174,6 +184,12 @@ const d1DatabaseBinding = z.object({
 
 const queueProducer = z.object({ binding: z.string(), queue: queueName });
 
+const serviceBinding = z.object({
+	binding: z.string(),
+	service: workerName,
+	entrypoint: z.string().optional()
+});
+
 const queueConsumer = z.object({
 	queue: queueName,
 	max_batch_size: z.number().optional(),
@@ -214,6 +230,10 @@ const rawWranglerSchema = z.object({
 			consumers: z.array(queueConsumer).default([])
 		})
 		.optional(),
+	services: z.array(serviceBinding).default([]),
+	cache: z.object({ enabled: z.boolean() }).optional(),
+	workers_dev: z.boolean().default(true),
+	preview_urls: z.boolean().default(true),
 	triggers: z.object({ crons: z.array(cronExpression).default([]) }).optional(),
 	migrations: z.array(migration).default([])
 });
@@ -284,6 +304,14 @@ function toWorkerConfig(raw: RawWrangler, mainModule: string): WorkerConfig {
 			maxConcurrency: consumer.max_concurrency,
 			deadLetterQueue: consumer.dead_letter_queue
 		})),
+		services: raw.services.map((service) => ({
+			binding: service.binding,
+			service: scriptNameSchema.parse(service.service),
+			entrypoint: service.entrypoint
+		})),
+		cacheEnabled: raw.cache?.enabled ?? false,
+		workersDev: raw.workers_dev,
+		previewUrls: raw.preview_urls,
 		crons: raw.triggers?.crons ?? [],
 		migrations: raw.migrations.map((migration) => ({
 			tag: migration.tag,

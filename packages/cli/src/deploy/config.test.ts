@@ -13,6 +13,7 @@ const controlSource = `{
 			{ "name": "CUPBOARD_DO", "class_name": "CupboardServer", "script_name": "cupboard-tenant" }
 		]
 	},
+	"services": [{ "binding": "CUPBOARD_TENANT", "service": "cupboard-tenant", "entrypoint": "CachedTenantReads" }],
 	"r2_buckets": [{ "binding": "BLOBS", "bucket_name": "cupboard-blobs" }],
 	"kv_namespaces": [{ "binding": "TENANT_CACHE", "id": "0000" }],
 	"d1_databases": [{ "binding": "CUPBOARD_DB", "database_name": "cupboard" }],
@@ -30,8 +31,11 @@ const controlSource = `{
 
 const tenantSource = `{
 	"name": "cupboard-tenant",
+	"workers_dev": false,
+	"preview_urls": false,
 	"compatibility_date": "2026-05-15",
 	"compatibility_flags": ["nodejs_compat"],
+	"cache": { "enabled": true },
 	"durable_objects": { "bindings": [{ "name": "CUPBOARD_DO", "class_name": "CupboardServer" }] },
 	"r2_buckets": [{ "binding": "BLOBS", "bucket_name": "cupboard-blobs" }],
 	"d1_databases": [{ "binding": "CUPBOARD_DB", "database_name": "cupboard" }],
@@ -77,6 +81,16 @@ describe('parseDeploymentConfig', () => {
 						deadLetterQueue: 'cupboard-maintenance-dlq'
 					}
 				],
+				services: [
+					{
+						binding: 'CUPBOARD_TENANT',
+						service: 'cupboard-tenant',
+						entrypoint: 'CachedTenantReads'
+					}
+				],
+				cacheEnabled: false,
+				workersDev: true,
+				previewUrls: true,
 				crons: ['0 * * * *'],
 				migrations: []
 			},
@@ -101,6 +115,10 @@ describe('parseDeploymentConfig', () => {
 				d1Databases: [{ binding: 'CUPBOARD_DB', databaseName: 'cupboard' }],
 				queueProducers: [],
 				queueConsumers: [],
+				services: [],
+				cacheEnabled: true,
+				workersDev: false,
+				previewUrls: false,
 				crons: [],
 				migrations: [{ tag: 'v1', newSqliteClasses: ['CupboardServer'] }]
 			}

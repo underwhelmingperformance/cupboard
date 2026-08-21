@@ -1,5 +1,9 @@
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
+	type InstanceName,
+	instanceNameSchema
+} from '@cupboard/protocol/instance';
+import {
 	oidcAudienceSchema,
 	oidcIssuerSchema,
 	oidcSubjectSchema
@@ -13,6 +17,7 @@ import type {
 } from '@cupboard/protocol/tenants';
 import type { ProgressHandle, StepLog } from '@cupboard/reporter';
 import { ORPCError } from '@orpc/client';
+import { StatusCodes } from 'http-status-codes';
 import { afterEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -292,10 +297,15 @@ type ApiCall =
 			readonly scriptName: string;
 			readonly name: string;
 	  }
-	| { readonly method: 'enableWorkersDevRoute'; readonly scriptName: string };
+	| {
+			readonly method: 'setWorkersDevRoutes';
+			readonly scriptName: string;
+			readonly workersDev: boolean;
+			readonly previewUrls: boolean;
+	  };
 
 const absentString: string | undefined = undefined;
-const absentBindings: readonly unknown[] | undefined = undefined;
+const absentScriptConfiguration = undefined;
 
 function recordApiCall(apiCalls: ApiCall[], method: keyof CloudflareApi): void {
 	apiCalls.push({ method });
@@ -343,9 +353,9 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 			recordApiCall(apiCalls, 'getScriptMigrationTag');
 			return Promise.resolve(absentString);
 		},
-		getScriptBindings: () => {
-			recordApiCall(apiCalls, 'getScriptBindings');
-			return Promise.resolve(absentBindings);
+		getScriptConfiguration: () => {
+			recordApiCall(apiCalls, 'getScriptConfiguration');
+			return Promise.resolve(absentScriptConfiguration);
 		},
 		uploadScript: () => {
 			recordApiCall(apiCalls, 'uploadScript');
@@ -400,9 +410,8 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 			recordApiCall(apiCalls, 'getWorkersDevSubdomain');
 			return Promise.resolve(absentString);
 		},
-		enableWorkersDevRoute: (scriptName) => {
-			apiCalls.push({ method: 'enableWorkersDevRoute', scriptName });
-
+		setWorkersDevRoutes: (scriptName, routes) => {
+			apiCalls.push({ method: 'setWorkersDevRoutes', scriptName, ...routes });
 			return Promise.resolve();
 		},
 		queryWorkerLogs: () => Promise.resolve([])
@@ -489,6 +498,8 @@ interface ClientScript {
 	readonly rebuilds?: Scripted<ParsedMembershipRebuildResponse>[];
 	readonly controlChecks?: Scripted<ParsedR2CredentialCheck>[];
 	readonly publicKeys?: Scripted<string>[];
+	readonly instanceName?: InstanceName;
+	readonly instanceConfigured?: boolean;
 }
 
 interface ScriptedClient {
@@ -498,6 +509,7 @@ interface ScriptedClient {
 	readonly createdBodies: unknown[];
 	readonly membershipRebuildTokens: string[];
 	readonly controlCheckTokens: string[];
+	readonly initialisedInstanceNames: InstanceName[];
 	readonly cachedSessions: { session: CachedSession; target: URL }[];
 	readonly cacheSession: (session: CachedSession, target: URL) => Promise<void>;
 }
@@ -516,6 +528,9 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 	const membershipRebuildTokens: string[] = [];
 	const controlCheckTokens: string[] = [];
 	const cachedSessions: { session: CachedSession; target: URL }[] = [];
+	const initialisedInstanceNames: InstanceName[] = [];
+	const currentInstanceName =
+		script.instanceName ?? instanceNameSchema.parse('cupboard');
 
 	return {
 		urls,
@@ -523,6 +538,7 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 		createdBodies,
 		membershipRebuildTokens,
 		controlCheckTokens,
+		initialisedInstanceNames,
 		cachedSessions,
 		cacheSession: (session, target) => {
 			cachedSessions.push({ session, target });
@@ -533,6 +549,16 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 
 			return {
 				version: () => answer(versions, '/_version'),
+				getInstance: () =>
+					Promise.resolve(
+						script.instanceConfigured === false
+							? { state: 'unconfigured' }
+							: { state: 'configured', name: currentInstanceName }
+					),
+				initialiseInstance: (_token, name) => {
+					initialisedInstanceNames.push(name);
+					return Promise.resolve({ state: 'configured', name });
+				},
 				signup: (request) => {
 					signupBodies.push(request);
 					return answer(signups, '/signup');
@@ -587,6 +613,7 @@ function baseOptions(ui: DeployUi, client: ScriptedClient): OnboardOptions {
 		controlScriptName: scriptNameSchema.parse('cupboard'),
 		tenantScriptName: scriptNameSchema.parse('cupboard-tenant'),
 		domain: 'cache.example.com',
+		instanceName: instanceNameSchema.parse('cupboard'),
 		admin: claimable,
 		buildVersion: 'v-new',
 		claimSecret: { kind: 'none' },
@@ -704,11 +731,11 @@ describe('onboardDeployment', () => {
 	it('claims, creates the chosen tenant and initialises its cache', async () => {
 		const { ui, successes } = scriptedUi({ slugs: ['builds'] });
 		const client = scriptedClient({
-			versions: ['offline', 404, 'v-new'],
+			versions: ['offline', StatusCodes.NOT_FOUND, 'v-new'],
 			signup: [claimedSignup],
 			lists: [[]],
 			creates: [tenantSummary('builds')],
-			publicKeys: [503, 'pk-1']
+			publicKeys: [StatusCodes.SERVICE_UNAVAILABLE, 'pk-1']
 		});
 
 		const outcome = await onboardDeployment(baseOptions(ui, client));
@@ -822,7 +849,7 @@ describe('onboardDeployment', () => {
 			signup: [claimedSignup],
 			lists: [[]],
 			creates: [tenantSummary('builds')],
-			publicKeys: [500]
+			publicKeys: [StatusCodes.INTERNAL_SERVER_ERROR]
 		});
 
 		expect(await onboardDeployment(baseOptions(ui, client))).toStrictEqual({
@@ -999,8 +1026,8 @@ describe('onboardDeployment', () => {
 			// The kept pair fails; after the new pair is set, the Worker still
 			// answers with the old env once before the restart lands.
 			controlChecks: [
-				{ result: 'rejected', status: 403 },
-				{ result: 'rejected', status: 403 },
+				{ result: 'rejected', status: StatusCodes.FORBIDDEN },
+				{ result: 'rejected', status: StatusCodes.FORBIDDEN },
 				{ result: 'ok' }
 			],
 			publicKeys: ['pk-1']
@@ -1016,7 +1043,7 @@ describe('onboardDeployment', () => {
 				return Promise.resolve(
 					credentials.accessKeyId === goodKey
 						? { kind: 'valid' }
-						: { kind: 'rejected', status: 403 }
+						: { kind: 'rejected', status: StatusCodes.FORBIDDEN }
 				);
 			}
 		});
@@ -1064,7 +1091,7 @@ describe('onboardDeployment', () => {
 			signup: [claimedSignup],
 			lists: [[]],
 			creates: [tenantSummary('builds')],
-			controlChecks: [{ result: 'rejected', status: 403 }],
+			controlChecks: [{ result: 'rejected', status: StatusCodes.FORBIDDEN }],
 			publicKeys: ['pk-1']
 		});
 
@@ -1101,7 +1128,7 @@ describe('onboardDeployment', () => {
 			versions: ['v-new'],
 			signup: [{ ...claimedSignup, claimed: false }],
 			lists: [[]],
-			creates: [409, tenantSummary('builds-2')],
+			creates: [StatusCodes.CONFLICT, tenantSummary('builds-2')],
 			publicKeys: ['pk-2']
 		});
 
@@ -1151,6 +1178,43 @@ describe('onboardDeployment', () => {
 		});
 	});
 
+	it('keeps a custom instance name when a redeploy omits the option', async () => {
+		const { ui } = scriptedUi();
+		const forge = instanceNameSchema.parse('forge');
+		const client = scriptedClient({
+			instanceName: forge,
+			versions: ['v-new'],
+			signup: [{ ...claimedSignup, claimed: false }],
+			lists: [[tenantSummary('laney')]],
+			rebuilds: [{ tenants: 1 }],
+			publicKeys: ['pk-1']
+		});
+		const options = { ...baseOptions(ui, client), instanceName: undefined };
+
+		await onboardDeployment(options);
+
+		expect(client.initialisedInstanceNames).toStrictEqual([forge]);
+	});
+
+	it('derives a deployment-specific name for an unconfigured instance', async () => {
+		const { ui } = scriptedUi();
+		const client = scriptedClient({
+			instanceConfigured: false,
+			versions: ['v-new'],
+			signup: [{ ...claimedSignup, claimed: false }],
+			lists: [[tenantSummary('laney')]],
+			rebuilds: [{ tenants: 1 }],
+			publicKeys: ['pk-1']
+		});
+		const options = { ...baseOptions(ui, client), instanceName: undefined };
+
+		await onboardDeployment(options);
+
+		expect(client.initialisedInstanceNames).toStrictEqual([
+			'cupboard-052b3fa300f45d10'
+		]);
+	});
+
 	it('lists several existing caches and creates nothing', async () => {
 		const { ui } = scriptedUi();
 		const client = scriptedClient({
@@ -1193,7 +1257,7 @@ describe('onboardDeployment', () => {
 		const { ui } = scriptedUi();
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [403]
+			signup: [StatusCodes.FORBIDDEN]
 		});
 
 		const options = baseOptions(ui, client);
@@ -1202,7 +1266,7 @@ describe('onboardDeployment', () => {
 		expect(claimRefusedShape(outcome)).toStrictEqual({
 			kind: 'claim-refused',
 			url: 'https://cache.example.com',
-			status: 403,
+			status: StatusCodes.FORBIDDEN,
 			detail: 'GET /signup answered HTTP 403: computer says no'
 		});
 	});
@@ -1263,8 +1327,8 @@ describe('onboardDeployment', () => {
 				apiCalls.push({ method: 'getWorkersDevSubdomain' });
 				return subdomainOf('laney')();
 			},
-			enableWorkersDevRoute: (scriptName) => {
-				apiCalls.push({ method: 'enableWorkersDevRoute', scriptName });
+			setWorkersDevRoutes: (scriptName, routes) => {
+				apiCalls.push({ method: 'setWorkersDevRoutes', scriptName, ...routes });
 				return Promise.resolve();
 			}
 		};
@@ -1285,7 +1349,12 @@ describe('onboardDeployment', () => {
 			} satisfies OnboardOutcome,
 			apiCalls: [
 				{ method: 'getWorkersDevSubdomain' },
-				{ method: 'enableWorkersDevRoute', scriptName: 'cupboard' }
+				{
+					method: 'setWorkersDevRoutes',
+					scriptName: 'cupboard',
+					workersDev: true,
+					previewUrls: true
+				}
 			],
 			urls: ['https://cupboard.laney.workers.dev']
 		});
@@ -1318,7 +1387,9 @@ describe('onboardDeployment', () => {
 
 	it('gives up when the Worker never comes up', async () => {
 		const { ui } = scriptedUi();
-		const client = scriptedClient({ versions: ['offline', 'offline', 404] });
+		const client = scriptedClient({
+			versions: ['offline', 'offline', StatusCodes.NOT_FOUND]
+		});
 
 		const outcome = await onboardDeployment({
 			...baseOptions(ui, client),
@@ -1339,7 +1410,10 @@ describe('onboardDeployment', () => {
 			signup: [claimedSignup],
 			lists: [[]],
 			creates: [tenantSummary('builds')],
-			publicKeys: [503, 503]
+			publicKeys: [
+				StatusCodes.SERVICE_UNAVAILABLE,
+				StatusCodes.SERVICE_UNAVAILABLE
+			]
 		});
 
 		const outcome = await onboardDeployment({
@@ -1356,7 +1430,7 @@ describe('onboardDeployment', () => {
 
 	it('propagates a genuine failure on the version route', async () => {
 		const { ui } = scriptedUi();
-		const client = scriptedClient({ versions: [403] });
+		const client = scriptedClient({ versions: [StatusCodes.FORBIDDEN] });
 
 		const resolveOutcome = async (): Promise<
 			| { value: unknown }
@@ -1389,7 +1463,7 @@ describe('onboardDeployment', () => {
 			error: {
 				method: 'GET',
 				path: '/_version',
-				status: 403
+				status: StatusCodes.FORBIDDEN
 			}
 		});
 	});

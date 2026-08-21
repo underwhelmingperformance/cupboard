@@ -1,5 +1,10 @@
 import { type AuthKeyId, type TenantId } from '@cupboard/nix-store/scalars';
 import {
+	type ConfiguredInstanceSummary,
+	type InstanceName,
+	type InstanceSummary
+} from '@cupboard/protocol/instance';
+import {
 	issuedAccessTokenType,
 	type OidcAudience,
 	oidcAudienceSchema,
@@ -89,6 +94,10 @@ import {
 	removeControlTrust
 } from './control-trust.ts';
 import {
+	initialiseInstanceConfig,
+	readInstanceConfig
+} from './instance-config.ts';
+import {
 	invalidateTenantRow,
 	rebuildMembershipFilter,
 	refreshTenantMembership,
@@ -110,6 +119,25 @@ import {
 const discovery = new OidcDiscoveryStore();
 
 type Database = DrizzleD1Database<typeof d1Schema>;
+
+export async function controlInstance(env: Env): Promise<InstanceSummary> {
+	return (
+		(await readInstanceConfig(controlDatabase(env))) ?? {
+			state: 'unconfigured'
+		}
+	);
+}
+
+export function controlInstanceInitialise(
+	env: Env,
+	name: InstanceName
+): Promise<ConfiguredInstanceSummary> {
+	return initialiseInstanceConfig(
+		controlDatabase(env),
+		name,
+		isoTimestamp(new Date())
+	);
+}
 
 // RFC 8693 token exchange for the control plane: an external OIDC subject token is
 // matched to a control trust rule on its unverified claims, the signature is then

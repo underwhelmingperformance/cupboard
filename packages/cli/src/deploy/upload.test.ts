@@ -47,6 +47,16 @@ const controlConfig: WorkerConfig = {
 		{ binding: 'MAINTENANCE_QUEUE', queue: 'cupboard-maintenance' }
 	],
 	queueConsumers: [],
+	services: [
+		{
+			binding: 'CUPBOARD_TENANT',
+			service: scriptNameSchema.parse('cupboard-tenant'),
+			entrypoint: 'CachedTenantReads'
+		}
+	],
+	cacheEnabled: true,
+	workersDev: true,
+	previewUrls: true,
 	crons: ['0 * * * *'],
 	migrations: []
 };
@@ -69,6 +79,7 @@ describe('buildScriptMetadata', () => {
 			compatibility_flags: ['nodejs_compat'],
 			observability: { enabled: true, traces: { enabled: true } },
 			keep_bindings: ['secret_text', 'plain_text'],
+			cache_options: { enabled: true, cross_version_cache: true },
 			limits: { cpu_ms: 300_000 },
 			migrations: { new_tag: 'v1', new_sqlite_classes: ['CupboardServer'] },
 			bindings: [
@@ -85,6 +96,12 @@ describe('buildScriptMetadata', () => {
 					type: 'queue',
 					name: 'MAINTENANCE_QUEUE',
 					queue_name: 'cupboard-maintenance'
+				},
+				{
+					type: 'service',
+					name: 'CUPBOARD_TENANT',
+					service: 'cupboard-tenant',
+					entrypoint: 'CachedTenantReads'
 				},
 				{ type: 'plain_text', name: 'CUPBOARD_AUTH_ISSUER', text: 'cupboard' }
 			]

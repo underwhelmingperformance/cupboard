@@ -30,6 +30,7 @@ import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
+import { instanceNameSchema } from '@cupboard/protocol/instance';
 import {
 	oidcAudienceSchema,
 	type OidcIssuer,
@@ -242,6 +243,16 @@ export async function resetTestServer(): Promise<void> {
 
 	await configureFixtureTenant(harness.server);
 	await configureFixtureTenant(fixtureWorkerServer());
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	await database.delete(d1Schema.instanceConfig).run();
+	await database
+		.insert(d1Schema.instanceConfig)
+		.values({
+			id: 'singleton',
+			name: instanceNameSchema.parse('cupboard'),
+			createdAt: isoTimestamp(testBase)
+		})
+		.run();
 	await provisionFixtureTenant();
 }
 

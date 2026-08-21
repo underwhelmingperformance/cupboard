@@ -7,21 +7,17 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
 import { type DeletePathResponse } from '@cupboard/protocol/upload';
-import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, eq, exists, inArray, notExists, or, sql } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import {
-	type EdgeCacheKey,
-	narInfoCacheKey,
-	type RequestOrigin
-} from '../http/http.ts';
+import { type RequestOrigin } from '../http/http.ts';
 
 import { type AttestationCasService } from './attestation-cas-service.ts';
 import { type AttestationsService } from './attestations-service.ts';
-import { chunk, maxInClauseValues, maxOutgoingConnections } from './bulk.ts';
+import { chunk, maxInClauseValues } from './bulk.ts';
+import { CachePurgeQueueService } from './cache-purge-queue-service.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 
@@ -99,7 +95,10 @@ export class DeletionQueueService {
 		private readonly context: ServerContext,
 		private readonly attestationCas: AttestationCasService,
 		private readonly attestations: AttestationsService,
-		private readonly narInfoObjects: NarInfoObjectsService
+		private readonly narInfoObjects: NarInfoObjectsService,
+		private readonly cachePurges: CachePurgeQueueService = new CachePurgeQueueService(
+			context
+		)
 	) {}
 
 	// Retires the D1 reference edge for one captured narinfo version, then drops the
@@ -272,19 +271,6 @@ export class DeletionQueueService {
 		}
 	}
 
-	private async purgeCachedNarInfo(key: EdgeCacheKey): Promise<void> {
-		// Best-effort and colo-local: recovery correctness rests on the R2 delete
-		// and row cleanup, so a failed edge purge must not abort them. Other colos
-		// serve the stale narinfo until its TTL expires.
-		try {
-			await this.context.cache.delete(key);
-		} catch {
-			/*
-			edge purge is best-effort
-			*/
-		}
-	}
-
 	enqueueNarInfoDeletion(
 		handle: SchemaWriter,
 		cache: StoredCache,
@@ -369,7 +355,7 @@ export class DeletionQueueService {
 		cache: StoredCache,
 		storePathHash: StorePathHash,
 		generation: NarInfoGeneration,
-		origin?: RequestOrigin
+		_origin?: RequestOrigin
 	): Promise<{ objectDeleted: boolean; narScheduledForDeletion: boolean }> {
 		// Must run inside a DO critical section: the row check, object delete, NAR
 		// scheduling and queue clear span awaits and must not interleave with a
@@ -404,6 +390,7 @@ export class DeletionQueueService {
 			current !== undefined && current.generation !== queued.generation;
 
 		if (wasNewerCommitted) {
+			await this.cachePurges.enqueueNarInfos(cache, [storePathHash]);
 			await this.retireBlobRefEdge(
 				cache,
 				storePathHash,
@@ -423,15 +410,8 @@ export class DeletionQueueService {
 			};
 		}
 
-		const tenant = this.context.requireTenant();
-
 		await this.narInfoObjects.deleteNarInfoObject(cache, storePathHash);
-
-		if (origin !== undefined) {
-			await this.purgeCachedNarInfo(
-				narInfoCacheKey(origin, tenant, storePathHash, cache)
-			);
-		}
+		await this.cachePurges.enqueueNarInfos(cache, [storePathHash]);
 
 		await this.retireBlobRefEdge(
 			cache,
@@ -476,7 +456,7 @@ export class DeletionQueueService {
 	async retireTornDownNarInfos(
 		cache: StoredCache,
 		entries: readonly TornDownNarInfo[],
-		origin?: RequestOrigin
+		_origin?: RequestOrigin
 	): Promise<number> {
 		if (entries.length === 0) {
 			return 0;
@@ -514,20 +494,17 @@ export class DeletionQueueService {
 				return live === undefined || live === entry.generation;
 			});
 
-			// The served objects go in bulk, then their edge-cache entries
-			// (best-effort, bounded fan-out).
+			// Delete the served objects, then queue one global cache purge for this
+			// bounded chunk.
 			await this.narInfoObjects.deleteNarInfoObjects(
 				cache,
 				removable.map((entry) => entry.storePathHash)
 			);
 
-			if (origin !== undefined) {
-				await mapWithConcurrency(removable, maxOutgoingConnections, (entry) =>
-					this.purgeCachedNarInfo(
-						narInfoCacheKey(origin, tenant, entry.storePathHash, cache)
-					)
-				);
-			}
+			await this.cachePurges.enqueueNarInfos(
+				cache,
+				batch.map((entry) => entry.storePathHash)
+			);
 
 			// Retire the chunk's captured edges, crediting the narinfo count by how
 			// many actually existed, atomically so a replay cannot double-credit.

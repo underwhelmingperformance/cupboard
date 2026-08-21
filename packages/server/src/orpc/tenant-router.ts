@@ -82,6 +82,9 @@ export const tenantRouter = os.router({
 			),
 			retire: os.keys.signing.retire.handler(({ input, context }) =>
 				context.services.signingKeys.retireKey(input.id)
+			),
+			abort: os.keys.signing.abort.handler(({ input, context }) =>
+				context.services.signingKeys.abortKeyRotation(input.id)
 			)
 		},
 		auth: {

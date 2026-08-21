@@ -57,7 +57,7 @@ function pipelineFor(context: ServerContext): CommitPipelineService {
 	return new CommitPipelineService(
 		context,
 		new CacheAdminService(context, deletionQueue),
-		new SigningKeysService(context),
+		new SigningKeysService(context, narInfoObjects),
 		new UploadStateService(context),
 		narInfoObjects,
 		new RetentionService(context)

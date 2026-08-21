@@ -8,6 +8,7 @@ import {
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import type { InstanceName } from '@cupboard/protocol/instance';
 import type { TrustRuleId } from '@cupboard/protocol/oidc';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import type { ReadUser } from '@cupboard/shared/http';
@@ -25,6 +26,12 @@ import {
 	type ReadPasswordHash,
 	type ReadPasswordSalt
 } from '../read/read-auth.ts';
+
+export const instanceConfig = sqliteTable('instance_config', {
+	id: text('id').primaryKey(),
+	name: text('name').$type<InstanceName>().notNull(),
+	createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+});
 
 // The global, cross-tenant shared-blob facts, held in D1 and shared across all
 // tenant Durable Objects. A row exists exactly when a verified shared

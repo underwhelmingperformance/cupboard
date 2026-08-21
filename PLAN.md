@@ -74,6 +74,85 @@ contract: OAuth token and discovery/JWKS endpoints, the Nix binary-cache
 protocol and public key, the commit WebSocket, streamed object serves, and their
 HTTP authentication mechanisms.
 
+### Signing-key rotation and Workers Cache
+
+Signing-key rotation re-signs the tenant's existing narinfos. A deployment has
+an immutable instance name, set by `cupboard init --instance-name`. When the
+option is omitted, the CLI derives a stable `cupboard-<hash>` name from the
+deployment's public origin so independent deployments do not generate colliding
+key names. New signing keys use `<instance>-<tenant>-<generation>` as their Nix
+key name. Existing key names do not change when a deployment upgrades, and the
+generation counter never reuses a number. Hyphens inside the instance and tenant
+components are doubled so two different component pairs cannot produce the same
+key name.
+
+- [x] Keep the incoming and outgoing keys signing and published while the
+      rotation window is open. New narinfos carry both signatures.
+- [x] Re-sign existing narinfos in bounded alarm-driven batches. Each batch
+      writes the replacement R2 objects and queues at most 100 exact cache tags
+      for global purge.
+- [x] Commit a narinfo's new signature generation only after its cache-tag purge
+      succeeds. Keep retrying a failed purge so backfill cannot complete while
+      any cache location can still serve the old signatures.
+- [x] Report the backfill on the incoming signing key through `GET /keys` and
+      `cupboard key status`. A running or retrying status reports the start
+      time, last update, re-signed count, and remaining count. A complete status
+      reports the start and completion times and the final re-signed count.
+- [x] Refuse another rotation while a backfill is unfinished. Refuse to demote
+      or remove a key unless another signing key has complete coverage.
+- [x] Allow an operator to abort an unfinished incoming key and its durable
+      continuation while another signing key still has complete coverage.
+- [x] Keep cache purges in durable continuations. Mutation paths and backfill
+      batches retry failed purges from the tenant Durable Object's alarm.
+
+Backfill completion means every stored narinfo contains the incoming signature
+and Workers Cache has purged the old response. Nix also keeps successful narinfo
+lookups and their signatures in its local disk cache for
+`narinfo-cache-positive-ttl`, which defaults to 30 days. Operators must keep the
+outgoing key in each client's `trusted-public-keys` until that client's cache
+window has elapsed since its last possible old-only response, or clear the
+client's narinfo cache. The server cannot enforce this window because clients
+can configure different TTLs. Removing a key from `/pubkey` does not change
+client trust configuration.
+
+The control Worker remains the public gateway. It admits the tenant and checks
+private-read credentials before forwarding a public cacheable request through a
+Service binding to the tenant Worker's `CachedTenantReads` entrypoint. Workers
+Cache is enabled on the tenant Worker, but only that named entrypoint uses it.
+Cached responses are shared across Worker versions so deploying unchanged cache
+policy does not discard warm entries. Deployment convergence reads the live
+cache options and skips an upload when the build, bindings, migration and cache
+policy already match. The same entrypoint owns the response's cache tags and
+exposes the RPC method that calls `ctx.cache.purge()`. The tenant Worker's
+default entrypoint returns 404, and the script has neither a public
+`workers.dev` route nor preview URLs. This follows Cloudflare's recommended
+[gateway pattern][workers-cache-configuration]. The [service binding] keeps the
+cache-owning Worker private.
+
+| Response                                                                  | Workers Cache policy              |
+| ------------------------------------------------------------------------- | --------------------------------- |
+| Public NAR `GET` and `HEAD`                                               | One year, immutable               |
+| Public narinfo `GET` and `HEAD`                                           | One hour, exact narinfo cache tag |
+| Default `nix-cache-info` `GET` and `HEAD`                                 | One hour                          |
+| Named-cache `nix-cache-info` `GET` and `HEAD`                             | Not cached                        |
+| Attestation lists and bundles, OAuth discovery, pubkey, JWKS, reuse views | Not cached                        |
+| Private reads, admin APIs, misses, and errors                             | Not cached                        |
+| Health and version responses                                              | Not cached                        |
+
+Manual invalidation is reserved for responses whose objects change or disappear.
+Immutable NARs need no purge. Narinfos carry an exact `Cache-Tag`, and deletion,
+replacement, and signing backfill queue that tag for [programmatic
+purge][workers-cache-configuration]. Narinfos use `must-revalidate`, so
+Cloudflare cannot serve an expired response indefinitely while a purge
+continuation is retrying. The default cache's fixed metadata expires normally.
+Named-cache metadata, attestation responses, and OAuth discovery stay uncached
+because their contents can change.
+
+[workers-cache-configuration]:
+  https://developers.cloudflare.com/workers/cache/configuration/
+[service binding]:
+  https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/
+
 ## V1
 
 V1 is a single-cache personal binary cache. It should be enough to push a store
@@ -343,9 +422,9 @@ and GC routes.
 | Method    | Path                                      | Auth               | Notes                                           |
 | --------- | ----------------------------------------- | ------------------ | ----------------------------------------------- |
 | GET, HEAD | `/nix-cache-info`                         | public             | Worker; `text/x-nix-cache-info`.                |
-| GET, HEAD | `/<hash>.narinfo`                         | public             | Worker, from the R2 object + edge cache.        |
-| GET, HEAD | `/nar/<hash>.nar.zst`                     | public             | Worker, from R2 + edge cache.                   |
-| GET       | `/pubkey`                                 | public             | Worker, cached from the DO.                     |
+| GET, HEAD | `/<hash>.narinfo`                         | public             | Tenant Worker, from R2 + Workers Cache.         |
+| GET, HEAD | `/nar/<hash>.nar.zst`                     | public             | Tenant Worker, from R2 + Workers Cache.         |
+| GET       | `/pubkey`                                 | public             | DO, uncached for immediate rotation visibility. |
 | GET, HEAD | `/.well-known/jwks.json`                  | public             | Worker, from the DO. Auth public keys (`kid`).  |
 | GET       | `/.well-known/oauth-authorization-server` | public             | Worker. RFC 8414 metadata.                      |
 | GET       | `/_health`                                | public             | Worker. Liveness.                               |
@@ -355,6 +434,7 @@ and GC routes.
 | GET       | `/keys`                                   | admin JWT          | DO. Lists the narinfo signing key set.          |
 | POST      | `/keys/rotate`                            | admin JWT          | DO. Adds a signing+published key.               |
 | POST      | `/keys/retire/<id>`                       | admin JWT          | DO. Demotes a key, then drops it.               |
+| POST      | `/keys/abort/<id>`                        | admin JWT          | DO. Aborts an unfinished incoming key.          |
 | GET       | `/keys/auth`                              | admin JWT          | DO. Lists the auth signing-key set.             |
 | POST      | `/keys/auth/rotate`                       | admin JWT          | DO. Adds a new active auth key.                 |
 | POST      | `/keys/auth/retire/<kid>`                 | admin JWT          | DO. Retires an auth key by `kid`.               |
@@ -512,11 +592,11 @@ deployment, every narinfo and NAR fetch is serialised through that instance and
 pays the migration check on entry. R2 and the Cache API scale horizontally and
 serve from the edge, so the read path should not touch the DO at all.
 
-V2 moves all reads onto the Worker, backed by R2 and `caches.default`. The DO
-keeps the write path (negotiate, prepare, commit), admin, and GC. The narinfo
-row stays in DO SQLite because reference-graph GC needs to query it; it just
-stops being read on the hot path. A narinfo is rendered and signed once at
-commit time and written to R2, so reads never re-render or re-sign.
+V2 moves all reads onto the Worker, backed by R2 and Workers Cache. The DO keeps
+the write path (negotiate, prepare, commit), admin, and GC. The narinfo row
+stays in DO SQLite because reference-graph GC needs to query it; it just stops
+being read on the hot path. A narinfo is rendered and signed once at commit time
+and written to R2, so reads never re-render or re-sign.
 
 This relies on one invariant: a narinfo for a given store path hash is
 immutable. Nix derives the hash from the path's inputs and contents, so the same
@@ -539,17 +619,16 @@ up the narinfo object when a path's NAR has already vanished (stale recovery).
       `/pubkey`) from the Worker. `/pubkey` is forwarded to the DO uncached so a
       key rotation is visible immediately; the DO sets `no-cache` with a strong
       ETag so Nix still revalidates conditionally (see Signing, below).
-- [x] Only `GET` responses go into `caches.default`. `HEAD` is answered from R2
-      metadata (`BLOBS.head`) with no body and is never cached, since caching
-      HEAD responses invites body and header mismatches.
+- [x] Make both `GET` and `HEAD` eligible for Workers Cache. Hono dispatches
+      `HEAD` through the corresponding `GET` route and strips the body, so both
+      methods use the same R2 read and response metadata.
 
 ### NAR blobs from R2 and the edge
 
-- [x] Serve `GET` `/nar/<narHash>.nar.zst` in the Worker: check
-      `caches.default`, then `BLOBS.get`, building the existing `immutable`
-      response from the R2 object metadata (ETag, uploaded, size). On a miss,
-      populate the cache with `ctx.waitUntil(caches.default.put(...))`. `HEAD`
-      is answered from `BLOBS.head` without touching the cache.
+- [x] Serve `GET` and `HEAD` `/nar/<narHash>.nar.zst` from `BLOBS.get`, building
+      the immutable response from the R2 object metadata (ETag, uploaded, size).
+      Workers Cache checks and populates the response before and after the
+      tenant entrypoint runs.
 - [x] Keep conditional `If-None-Match` and `If-Modified-Since` 304 handling.
 - [x] NAR objects are content-addressed and immutable, so edge copies never need
       invalidation; deleting one only frees R2 storage. `/nar/<hash>` stays
@@ -596,9 +675,8 @@ up the narinfo object when a path's NAR has already vanished (stale recovery).
       can advertise an unservable path. An only-if-absent conditional put
       (`onlyIf`, semantics to confirm) is an optional guard, not a correctness
       requirement, since determinism makes any overwrite byte-identical.
-- [x] Serve `GET` `/<storePathHash>.narinfo` in the Worker from R2 via
-      `caches.default`, with ETag, last-modified, and 304 driven by the R2
-      object; `HEAD` from `BLOBS.head` without caching.
+- [x] Serve `GET` and `HEAD` `/<storePathHash>.narinfo` from R2 through Workers
+      Cache, with ETag, last-modified, and 304 driven by the R2 object.
 - [x] Stop reading the narinfo row on the read path; it remains only for GC and
       stats.
 - [x] Tests:
@@ -684,10 +762,10 @@ cache.
     `machine <host> login <user> password <pass>` to a `netrc-file`. The
     `config` command emits the netrc snippet alongside the substituter line when
     a credential is configured.
-  - Cached read responses key on the URL only, so in private mode `read.ts`
-    skips `caches.default` entirely rather than putting authenticated bodies
-    under a shared key. Keying cache entries by credential is deferred unless a
-    later measured need justifies it.
+  - Cached read responses key on the URL only, so private reads stay on the
+    uncached control entrypoint rather than forwarding authenticated bodies to
+    the cache-owning tenant entrypoint. Keying cache entries by credential is
+    deferred unless a later measured need justifies it.
   - Per-cache private mode is deferred; this is a global toggle first.
 
 - [x] Support one or more named cache paths for organisation:
@@ -748,10 +826,10 @@ cache.
     `private_jwk_json`, `public_key`, `signing`, `published`, `created_at`).
     Outside a rotation, exactly one key is both signing and published. During a
     window both the outgoing and incoming keys are signing and published.
-  - Old narinfos are never re-signed: they stay verifiable as long as clients
-    keep the old key in `trusted-public-keys`. `/pubkey` returns every published
-    key (newline-separated) during a window so clients can add the new key
-    before the old is retired.
+  - Existing narinfos are re-signed in the background with every signing key.
+    `/pubkey` returns every published key (newline-separated) during a window so
+    clients can add the new key before the old is retired. The outgoing key
+    cannot be demoted until the incoming key's backfill is complete.
   - `cupboard key rotate` (admin) adds the new key as signing+published and
     prints the migration steps; `key retire <id>` later drops the old key from
     signing and then from publication once clients have updated.
@@ -838,22 +916,21 @@ in three increments:
       `(cache, store_path_hash)` space in order, so named-cache objects are
       reconciled in the background alongside the default cache. Cloudflare
       Queues remain a fallback only if a scan cannot stay within cron/DO limits.
-- Edge-safe deletion mechanism for committed content. narinfo is edge-cached
-  with a max-age, and `caches.default.delete` only purges the current colo, so a
-  deleted narinfo can be served from a warm edge until its TTL expires. Deleting
+- Edge-safe deletion mechanism for committed content. A narinfo has a max-age
+  and an exact cache tag. Its owning tenant entrypoint can purge that tag
+  globally, while the NAR grace still protects against purge failures. Deleting
   committed content must not leave a cached narinfo pointing at a deleted NAR:
   - [x] One narinfo cache TTL constant; derive the GC grace from it
         (`grace = ttl + margin`) so the `Cache-Control` max-age and the grace
         cannot drift apart.
   - [x] On narinfo removal, delete the narinfo row in the transaction that
-        enqueues its object cleanup, then best-effort delete the
-        `narinfo/<storePathHash>` R2 object and `caches.default.delete` in the
-        current colo. Enqueue the NAR for deletion no earlier than
-        `now + grace`, only if no other narinfo references that NAR hash, and
-        only once the narinfo object has actually been removed, so the grace
-        clock starts from object removal. Removal is **row-first**: the narinfo
-        row is the source of truth, so a leftover R2 object can never bring the
-        path back to life.
+        enqueues its object cleanup, then delete the `narinfo/<storePathHash>`
+        R2 object and enqueue its cache tag for global purge. Enqueue the NAR
+        for deletion no earlier than `now + grace`, only if no other narinfo
+        references that NAR hash, and only once the narinfo object has actually
+        been removed, so the grace clock starts from object removal. Removal is
+        **row-first**: the narinfo row is the source of truth, so a leftover R2
+        object can never bring the path back to life.
   - [x] Extend `orphan_blob_deletion` with a `not_before` timestamp (Drizzle
         migration). The flush deletes a blob only when `now >= not_before` and
         the committed and live-pending checks still pass; abandoned pending
@@ -1077,15 +1154,13 @@ pure lexer handles text formats such as narinfo before a schema validates them.
 - [x] Remove the dead `resolveBearer` refresh branch from the CLI client.
 - [x] Guard reusable-blob row cleanup with a committed-reference check when R2
       reports the blob missing.
-- [x] Purge collected narinfos from the edge cache on interactive GC via the
-      caller's public origin; the cron pass arrives on the internal origin and
-      cannot know the public URL, so it relies on the narinfo TTL and the
-      orphan-blob grace window instead.
+- [x] Purge collected narinfos from Workers Cache by exact cache tag. The purge
+      does not depend on the request origin, so interactive and cron collection
+      use the same durable continuation.
 - [x] Build NAR file entries from one opened file handle so size, contents, and
       padding cannot diverge if a file changes mid-read.
-- [x] Keep `HEAD` as a direct R2 metadata check rather than consulting the edge
-      cache; the Cache API is GET-oriented, so reusing a cached GET for HEAD
-      would risk header divergence for no meaningful saving.
+- [x] Make NAR and narinfo `HEAD` eligible for the same Workers Cache entry as
+      `GET`; Hono invokes the `GET` handler and strips the body.
 - [x] Fix zstd write-side backpressure so completion waits for the write
       callback and for the transform to drain.
 - [x] Delete expired-root target rows and the root row in one transaction.

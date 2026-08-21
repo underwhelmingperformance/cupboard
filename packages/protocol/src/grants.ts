@@ -75,6 +75,8 @@ export const tenantOperations = [
 // Resource-free control operations.
 export const controlOperations = [
 	'control:check',
+	'instance:read',
+	'instance:initialise',
 	'control-key:list',
 	'control-key:rotate',
 	'control-key:retire',
@@ -124,6 +126,8 @@ export const operationSchema = z.enum([
 	'reuse-view:set',
 	'reuse-view:remove',
 	'control:check',
+	'instance:read',
+	'instance:initialise',
 	'control-key:list',
 	'control-key:rotate',
 	'control-key:retire',

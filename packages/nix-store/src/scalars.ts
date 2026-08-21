@@ -135,6 +135,14 @@ export const signingKeyIdSchema = z
 	.brand('SigningKeyId');
 export type SigningKeyId = z.infer<typeof signingKeyIdSchema>;
 
+export const signingKeyGenerationSchema = z
+	.number()
+	.int()
+	.nonnegative()
+	.max(Number.MAX_SAFE_INTEGER)
+	.brand('SigningKeyGeneration');
+export type SigningKeyGeneration = z.infer<typeof signingKeyGenerationSchema>;
+
 // A JWKS key id (`kid`) labelling a token-signing key: the auth plane's per-tenant
 // keys and the control plane's keys alike, since both are verified through the same
 // `AuthPublicKey`/`verifyAccessJwt` path. Rotated keys carry a random UUID; a

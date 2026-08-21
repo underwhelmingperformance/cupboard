@@ -3,6 +3,7 @@ import { isSea } from 'node:sea';
 
 import { NixConfig } from '@cupboard/nix-store/nix-config';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import type { InstanceName } from '@cupboard/protocol/instance';
 import type Cloudflare from 'cloudflare';
 import { APIError } from 'cloudflare';
 import { StatusCodes } from 'http-status-codes';
@@ -157,6 +158,7 @@ export class R2CredentialsRejectedError extends CliError {
 
 export interface DeployCliOptions {
 	readonly domain?: string;
+	readonly instanceName?: InstanceName;
 	readonly account?: string;
 	readonly dryRun?: boolean;
 	readonly fromTree?: boolean;
@@ -1489,6 +1491,7 @@ async function deployFlow(
 		controlScriptName: agreed.config.control.name,
 		tenantScriptName: agreed.config.tenant.name,
 		domain: agreed.domain,
+		instanceName: cliOptions.instanceName,
 		admin: onboardAdminFor(
 			agreed.owner,
 			subject !== undefined && idToken !== undefined

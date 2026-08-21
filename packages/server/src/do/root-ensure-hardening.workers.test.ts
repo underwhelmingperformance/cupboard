@@ -295,7 +295,8 @@ describe('root ensure hardening', () => {
 			body: currentBody,
 			customMetadata: {
 				generation: '0',
-				narHash: committed.narHash
+				narHash: committed.narHash,
+				signatureGeneration: '1'
 			}
 		});
 	});

@@ -72,7 +72,7 @@ describe('Nix substitution through a signing-key rotation', () => {
 
 					// Open the window. A path pushed now is signed by both keys.
 					const { rotated, keys } = await rpc.keys.signing.rotate();
-					const newKey = rotated.publicKey;
+					const newKey = rotated.key.publicKey;
 
 					const windowPath = await source.build(rotationDerivation('window'));
 					await push(windowPath);
@@ -83,6 +83,22 @@ describe('Nix substitution through a signing-key rotation', () => {
 					// new key alone, which is the rotation guarantee.
 					await targetOld.realise(windowPath, trusting([oldKey]));
 					await targetNew.realise(windowPath, trusting([newKey]));
+					await expect
+						.poll(
+							async () => {
+								const listed = await rpc.keys.signing.list();
+								const entry = listed.keys.find(
+									(candidate) => candidate.key.id === rotated.key.id
+								);
+
+								return entry?.state === 'signing'
+									? entry.backfill?.state
+									: undefined;
+							},
+							{ interval: 100, timeout: 30_000 }
+						)
+						.toBe('complete');
+					await targetNew.realise(before, trusting([newKey]));
 
 					// Retire the old key fully; a path pushed afterwards is signed by the
 					// new key only and still substitutes under it.
@@ -103,6 +119,10 @@ describe('Nix substitution through a signing-key rotation', () => {
 						publishedInWindow,
 						publishedAfterRetire,
 						before: await readFile(targetOld.physicalPath(before), 'utf8'),
+						beforeUnderNewKey: await readFile(
+							targetNew.physicalPath(before),
+							'utf8'
+						),
 						windowUnderOldKey: await readFile(
 							targetOld.physicalPath(windowPath),
 							'utf8'
@@ -123,6 +143,7 @@ describe('Nix substitution through a signing-key rotation', () => {
 						publishedInWindow: [oldKey, newKey].toSorted(byCodeUnit),
 						publishedAfterRetire: [newKey],
 						before: 'before',
+						beforeUnderNewKey: 'before',
 						windowUnderOldKey: 'window',
 						windowUnderNewKey: 'window',
 						postUnderNewKey: 'post'

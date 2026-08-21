@@ -105,7 +105,7 @@ describe('durable object state', () => {
 				{
 					cache: '',
 					storePathHash: metadata.storePathHash,
-					signatures: [{ keyName: 'cupboard-1', rawBytes: 64 }]
+					signatures: [{ keyName: 'cupboard-v1-1', rawBytes: 64 }]
 				}
 			],
 			blobState: [{ narHash: metadata.narHash }]

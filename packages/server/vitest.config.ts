@@ -37,7 +37,7 @@ export default defineConfig(async () => {
 							// its exported `fetch` directly (see `controlFetch`). The
 							// control-plane bindings are deliberately not bound here, so the
 							// Durable Object's env lacks them exactly as in production.
-							main: './src/tenant-worker.ts',
+							main: './src/test-worker.ts',
 							miniflare: {
 								bindings: {
 									R2_ACCESS_KEY_ID: 'test-access-key-id',
@@ -61,7 +61,7 @@ export default defineConfig(async () => {
 								queueProducers: {
 									MAINTENANCE_QUEUE: 'cupboard-maintenance'
 								},
-								compatibilityDate: '2026-04-28'
+								compatibilityDate: '2026-08-18'
 							},
 							wrangler: {
 								configPath: './wrangler.tenant.jsonc'

@@ -6,6 +6,8 @@ import { implement } from '@orpc/server';
 import {
 	controlAuthenticate,
 	controlCheck,
+	controlInstance,
+	controlInstanceInitialise,
 	controlKeyRetire,
 	controlKeyRotate,
 	controlKeys,
@@ -68,6 +70,12 @@ const os = implement(controlContract)
 
 export const controlRouter = os.router({
 	check: os.check.handler(({ context }) => controlCheck(context.env)),
+	instance: {
+		get: os.instance.get.handler(({ context }) => controlInstance(context.env)),
+		initialise: os.instance.initialise.handler(({ input, context }) =>
+			controlInstanceInitialise(context.env, input.name)
+		)
+	},
 	keys: {
 		list: os.keys.list.handler(({ context }) => controlKeys(context.env)),
 		rotate: os.keys.rotate.handler(({ context }) =>

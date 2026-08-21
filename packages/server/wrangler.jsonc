@@ -17,6 +17,13 @@
 	"main": "src/worker.ts",
 	"compatibility_date": "2026-05-15",
 	"compatibility_flags": ["nodejs_compat"],
+	"services": [
+		{
+			"binding": "CUPBOARD_TENANT",
+			"service": "cupboard-tenant",
+			"entrypoint": "CachedTenantReads"
+		}
+	],
 	"durable_objects": {
 		"bindings": [
 			{

@@ -4,6 +4,8 @@ import {
 	type NarInfoGeneration,
 	type NixSha256HashString,
 	referencesSchema,
+	type SigningKeyGeneration,
+	signingKeyGenerationSchema,
 	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
@@ -37,15 +39,20 @@ import { storedSignaturesSchema } from './signing-keys.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
 
-interface NarInfoObjectVersion {
+interface NarInfoReferenceVersion {
 	readonly generation: NarInfoGeneration;
 	readonly narHash: NixSha256HashString;
+}
+
+interface NarInfoObjectVersion extends NarInfoReferenceVersion {
+	readonly signatureGeneration: SigningKeyGeneration;
 }
 
 interface NarInfoObjectMetadata {
 	readonly [key: string]: string;
 	readonly generation: string;
 	readonly narHash: string;
+	readonly signatureGeneration: string;
 }
 
 function narInfoObjectMetadata(
@@ -53,7 +60,8 @@ function narInfoObjectMetadata(
 ): NarInfoObjectMetadata {
 	return {
 		generation: String(version.generation),
-		narHash: version.narHash
+		narHash: version.narHash,
+		signatureGeneration: String(version.signatureGeneration)
 	};
 }
 
@@ -62,12 +70,17 @@ function objectMetadata(
 ): NarInfoObjectMetadata | undefined {
 	const generation = object?.customMetadata?.generation;
 	const narHash = object?.customMetadata?.narHash;
+	const signatureGeneration = object?.customMetadata?.signatureGeneration;
 
-	if (generation === undefined || narHash === undefined) {
+	if (
+		generation === undefined ||
+		narHash === undefined ||
+		signatureGeneration === undefined
+	) {
 		return undefined;
 	}
 
-	return { generation, narHash };
+	return { generation, narHash, signatureGeneration };
 }
 
 function isObjectVersion(
@@ -78,8 +91,13 @@ function isObjectVersion(
 
 	return (
 		metadata?.generation === String(version.generation) &&
-		metadata.narHash === version.narHash
+		metadata.narHash === version.narHash &&
+		metadata.signatureGeneration === String(version.signatureGeneration)
 	);
+}
+
+function effectiveSignatureGeneration(row: NarInfoRow): SigningKeyGeneration {
+	return row.pendingSignatureGeneration ?? row.signatureGeneration;
 }
 
 // A committed reference edge as read from D1: the path, the generation the row
@@ -133,20 +151,44 @@ export class NarInfoObjectsService {
 			}
 		}
 
+		const row = this.context.db
+			.select()
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.storePathHash, storePathHash)
+				)
+			)
+			.get();
+		const isRowMatch =
+			row?.generation === generation && row.narHash === narHash;
+		const version: NarInfoObjectVersion = {
+			generation,
+			narHash,
+			signatureGeneration: isRowMatch
+				? effectiveSignatureGeneration(row)
+				: signingKeyGenerationSchema.parse(0)
+		};
+		const currentSignatures = isRowMatch
+			? storedSignaturesSchema.parse(JSON.parse(row.sigsJson) as unknown)
+			: undefined;
+		const suppliedSignatures = narInfo.toFields().sigs;
+		const shouldRenderCurrent =
+			isRowMatch &&
+			JSON.stringify(currentSignatures) !== JSON.stringify(suppliedSignatures);
+		const currentNarInfo = shouldRenderCurrent
+			? await this.narInfoFromRow(row)
+			: undefined;
+
 		await this.putNarInfoObject(
 			cache,
 			storePathHash,
-			generation,
-			narHash,
-			narInfo
+			version,
+			currentNarInfo ?? narInfo
 		);
 		await this.context.criticalSection(() =>
-			this.confirmPublishedObjectLocked(
-				cache,
-				storePathHash,
-				generation,
-				narHash
-			)
+			this.confirmPublishedObjectLocked(cache, storePathHash, version)
 		);
 	}
 
@@ -160,8 +202,7 @@ export class NarInfoObjectsService {
 	private async confirmPublishedObjectLocked(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
-		generation: NarInfoGeneration,
-		narHash: NixSha256HashString
+		version: NarInfoObjectVersion
 	): Promise<void> {
 		const row = this.context.db
 			.select()
@@ -174,7 +215,11 @@ export class NarInfoObjectsService {
 			)
 			.get();
 
-		if (row?.generation === generation && row.narHash === narHash) {
+		if (
+			row?.generation === version.generation &&
+			row.narHash === version.narHash &&
+			effectiveSignatureGeneration(row) === version.signatureGeneration
+		) {
 			return;
 		}
 
@@ -199,8 +244,11 @@ export class NarInfoObjectsService {
 		await this.putNarInfoObject(
 			cache,
 			storePathHash,
-			row.generation,
-			row.narHash,
+			{
+				generation: row.generation,
+				narHash: row.narHash,
+				signatureGeneration: effectiveSignatureGeneration(row)
+			},
 			narInfo
 		);
 	}
@@ -259,8 +307,11 @@ export class NarInfoObjectsService {
 		await this.putNarInfoObject(
 			cache,
 			storePathHash,
-			row.generation,
-			row.narHash,
+			{
+				generation: row.generation,
+				narHash: row.narHash,
+				signatureGeneration: effectiveSignatureGeneration(row)
+			},
 			narInfo
 		);
 	}
@@ -653,7 +704,7 @@ export class NarInfoObjectsService {
 	async servableNarInfoVersions(
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
-	): Promise<ReadonlyMap<StorePathHash, NarInfoObjectVersion>> {
+	): Promise<ReadonlyMap<StorePathHash, NarInfoReferenceVersion>> {
 		const hashes = [...new Set(storePathHashes)];
 		const present = await this.existingNarInfoObjects(cache, hashes);
 		const rows = this.narInfoRowsFor(cache, hashes);
@@ -666,7 +717,7 @@ export class NarInfoObjectsService {
 			this.context.env.BLOBS,
 			committedRows.map((row) => row.narHash)
 		);
-		const servable = new Map<StorePathHash, NarInfoObjectVersion>();
+		const servable = new Map<StorePathHash, NarInfoReferenceVersion>();
 		const hasCurrentObject = (row: NarInfoRow): boolean => {
 			const metadata = present.get(row.storePathHash);
 
@@ -788,8 +839,7 @@ export class NarInfoObjectsService {
 	async putNarInfoObject(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
-		generation: NarInfoGeneration,
-		narHash: NixSha256HashString,
+		version: NarInfoObjectVersion,
 		narInfo: NarInfo
 	): Promise<void> {
 		const key = narInfoObjectKey(
@@ -800,7 +850,7 @@ export class NarInfoObjectsService {
 
 		await this.context.objectWrites.write([key], () =>
 			this.context.env.BLOBS.put(key, narInfo.render(), {
-				customMetadata: narInfoObjectMetadata({ generation, narHash }),
+				customMetadata: narInfoObjectMetadata(version),
 				httpMetadata: {
 					contentType: 'text/x-nix-narinfo; charset=utf-8',
 					cacheControl: narInfoCacheControl

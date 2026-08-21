@@ -324,10 +324,8 @@ function canonicalJson(value: unknown): string {
 }
 
 /**
- * Provision, migrate, upload, and wire up a cupboard deployment. The tenant
- * Durable Object script is uploaded before the control plane that binds it
- * cross-script. With `--dry-run` it renders the plan and stops before any
- * mutation.
+ * Provision, migrate, upload, and wire up a cupboard deployment. With
+ * `--dry-run` it renders the plan and stops before any mutation.
  */
 export async function runDeploy(
 	dependencies: DeployDependencies
@@ -394,24 +392,35 @@ export async function runDeploy(
 			}
 
 			const [tenantLive, controlLive] = await Promise.all([
-				api.getScriptBindings(artifact.config.tenant.name),
-				api.getScriptBindings(artifact.config.control.name)
+				api.getScriptConfiguration(artifact.config.tenant.name),
+				api.getScriptConfiguration(artifact.config.control.name)
 			]);
 
 			return {
 				tenant:
+					tenantLive !== undefined &&
 					migration === undefined &&
-					hasMatchingBindings(tenantMetadata.bindings, tenantLive),
-				control: hasMatchingBindings(controlMetadata.bindings, controlLive)
+					hasMatchingBindings(tenantMetadata.bindings, tenantLive.bindings) &&
+					tenantLive.cacheEnabled === artifact.config.tenant.cacheEnabled &&
+					tenantLive.crossVersionCache === artifact.config.tenant.cacheEnabled,
+				control:
+					controlLive !== undefined &&
+					hasMatchingBindings(controlMetadata.bindings, controlLive.bindings) &&
+					controlLive.cacheEnabled === artifact.config.control.cacheEnabled &&
+					controlLive.crossVersionCache === artifact.config.control.cacheEnabled
 			};
 		}
 	);
 
-	if (unchanged.tenant) {
-		reporter.step(
-			`${artifact.config.tenant.name} already runs this build and configuration; upload skipped.`
-		);
-	} else {
+	const uploadTenant = async (): Promise<void> => {
+		if (unchanged.tenant) {
+			reporter.step(
+				`${artifact.config.tenant.name} already runs this build and configuration; upload skipped.`
+			);
+
+			return;
+		}
+
 		await reporter.phase('Uploading tenant worker', (context) =>
 			uploadScriptForPlan(
 				dependencies,
@@ -421,13 +430,16 @@ export async function runDeploy(
 				artifact.tenantBundle
 			)
 		);
-	}
+	};
+	const uploadControl = async (): Promise<void> => {
+		if (unchanged.control) {
+			reporter.step(
+				`${artifact.config.control.name} already runs this build and configuration; upload skipped.`
+			);
 
-	if (unchanged.control) {
-		reporter.step(
-			`${artifact.config.control.name} already runs this build and configuration; upload skipped.`
-		);
-	} else {
+			return;
+		}
+
 		await reporter.phase('Uploading control worker', (context) =>
 			uploadScriptForPlan(
 				dependencies,
@@ -437,7 +449,32 @@ export async function runDeploy(
 				artifact.controlBundle
 			)
 		);
+	};
+	const tenantRoutes = {
+		workersDev: artifact.config.tenant.workersDev,
+		previewUrls: artifact.config.tenant.previewUrls
+	};
+	const shouldRestrictTenantRoutes =
+		!tenantRoutes.workersDev || !tenantRoutes.previewUrls;
+
+	if (shouldRestrictTenantRoutes) {
+		await api.setWorkersDevRoutes(artifact.config.tenant.name, tenantRoutes);
 	}
+
+	const hasNamedTenantEntrypoint = artifact.config.control.services.some(
+		(service) =>
+			service.binding === 'CUPBOARD_TENANT' && service.entrypoint !== undefined
+	);
+
+	if (hasNamedTenantEntrypoint) {
+		await uploadTenant();
+		await uploadControl();
+	} else {
+		await uploadControl();
+		await uploadTenant();
+	}
+
+	await api.setWorkersDevRoutes(artifact.config.tenant.name, tenantRoutes);
 
 	const secretWork: { scriptName: ScriptName; secret: WorkerSecret }[] = [
 		...options.secrets.control.map((secret) => ({

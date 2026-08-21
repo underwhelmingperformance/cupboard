@@ -1,17 +1,29 @@
 import { rootLogger } from '@cupboard/logger';
 import { type Capture, startCapture } from '@cupboard/logger/testing';
-import { storedCacheSchema } from '@cupboard/nix-store/scalars';
+import {
+	signingKeyIdSchema,
+	storedCacheSchema
+} from '@cupboard/nix-store/scalars';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { ORPCError } from '@orpc/server';
 import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { CacheNotEmptyError, UploadNotFoundError } from '../errors.ts';
+import {
+	CacheNotEmptyError,
+	SigningKeyBackfillIncompleteError,
+	SigningKeyRotationAbortNotAllowedError,
+	SigningKeyRotationInProgressError,
+	UploadNotFoundError
+} from '../errors.ts';
 
 import { bridgedError } from './error-bridge.ts';
 
 describe('bridgedError', () => {
 	let capture: Capture;
+	const incomingKeyId = signingKeyIdSchema.parse(
+		'123e4567-e89b-12d3-a456-426614174000'
+	);
 
 	beforeEach(() => {
 		capture = startCapture();
@@ -48,6 +60,38 @@ describe('bridgedError', () => {
 			code: 'NOT_FOUND',
 			status: StatusCodes.NOT_FOUND,
 			message: 'Upload not found'
+		});
+		expect(capture.logs).toStrictEqual([]);
+	});
+
+	it.each([
+		{
+			name: 'an active rotation',
+			error: new SigningKeyRotationInProgressError(incomingKeyId),
+			code: 'SIGNING_KEY_ROTATION_IN_PROGRESS',
+			message: 'A signing key backfill is already in progress'
+		},
+		{
+			name: 'an incomplete backfill',
+			error: new SigningKeyBackfillIncompleteError(incomingKeyId),
+			code: 'SIGNING_KEY_BACKFILL_INCOMPLETE',
+			message: 'The signing key cannot be retired until backfill is complete'
+		},
+		{
+			name: 'a rotation which cannot be aborted',
+			error: new SigningKeyRotationAbortNotAllowedError(incomingKeyId),
+			code: 'SIGNING_KEY_ROTATION_ABORT_NOT_ALLOWED',
+			message: 'Only an incomplete incoming signing key can be aborted'
+		}
+	])('maps $name to its defined contract error', ({ error, code, message }) => {
+		const bridged = bridgedError(rootLogger(), error);
+
+		expect(bridged).toBeInstanceOf(ORPCError);
+		expect(bridged).toMatchObject({
+			code,
+			status: StatusCodes.CONFLICT,
+			message,
+			data: { id: incomingKeyId }
 		});
 		expect(capture.logs).toStrictEqual([]);
 	});

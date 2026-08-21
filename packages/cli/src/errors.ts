@@ -3,6 +3,7 @@ import {
 	genericExitCode,
 	usageExitCode
 } from '@cupboard/shared/errors';
+import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 // The CLI's own failure categories, layered on the shared generic (1) and usage
@@ -16,6 +17,12 @@ export const unavailableExitCode = 69;
 // generic 1 lets a caller that retries on the exit code tell a lost upload from
 // any other failure.
 export const publicationExitCode = 74;
+
+const unauthorisedStatusCode: number = StatusCodes.UNAUTHORIZED;
+const forbiddenStatusCode: number = StatusCodes.FORBIDDEN;
+const requestTimeoutStatusCode: number = StatusCodes.REQUEST_TIMEOUT;
+const tooManyRequestsStatusCode: number = StatusCodes.TOO_MANY_REQUESTS;
+const internalServerErrorStatusCode: number = StatusCodes.INTERNAL_SERVER_ERROR;
 
 export abstract class CliError extends CodedError {}
 
@@ -32,6 +39,13 @@ export class CliAbortError extends CliError {
 	constructor() {
 		super('Aborted');
 		this.name = 'CliAbortError';
+	}
+}
+
+export class SigningKeyNotFoundError extends CliError {
+	constructor(public readonly id: string) {
+		super(`Signing key '${id}' was not found.`);
+		this.name = 'SigningKeyNotFoundError';
 	}
 }
 
@@ -288,11 +302,18 @@ export class CupboardHttpError extends CliError {
 	}
 
 	override get exitCode(): number {
-		if (this.status === 401 || this.status === 403) {
+		if (
+			this.status === unauthorisedStatusCode ||
+			this.status === forbiddenStatusCode
+		) {
 			return authExitCode;
 		}
 
-		if (this.status === 408 || this.status === 429 || this.status >= 500) {
+		if (
+			this.status === requestTimeoutStatusCode ||
+			this.status === tooManyRequestsStatusCode ||
+			this.status >= internalServerErrorStatusCode
+		) {
 			return transientExitCode;
 		}
 

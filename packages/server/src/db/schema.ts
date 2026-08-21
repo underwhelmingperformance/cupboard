@@ -8,6 +8,8 @@ import {
 	type NixSha256HashString,
 	type RootName,
 	type Sha256HexDigest,
+	type SigningKeyGeneration,
+	signingKeyGenerationSchema,
 	type StoredCache,
 	type StorePathHash,
 	type StorePathString,
@@ -50,6 +52,13 @@ export const narInfos = sqliteTable(
 			.$type<NarInfoGeneration>()
 			.notNull()
 			.default(narInfoGenerationSchema.parse(0)),
+		signatureGeneration: integer('signature_generation')
+			.$type<SigningKeyGeneration>()
+			.notNull()
+			.default(signingKeyGenerationSchema.parse(0)),
+		pendingSignatureGeneration: integer(
+			'pending_signature_generation'
+		).$type<SigningKeyGeneration>(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 	},
 	(table) => [
@@ -61,7 +70,14 @@ export const narInfos = sqliteTable(
 		index('narinfo_store_path_hash_cache_idx').on(
 			table.storePathHash,
 			table.cache
-		)
+		),
+		index('narinfo_pending_signature_generation_idx').on(
+			table.pendingSignatureGeneration,
+			table.signatureGeneration,
+			table.cache,
+			table.storePathHash
+		),
+		index('narinfo_signature_generation_idx').on(table.signatureGeneration)
 	]
 );
 
@@ -248,8 +264,53 @@ export const signingKeys = sqliteTable('signing_key', {
 	publicKey: text('public_key').notNull(),
 	signing: integer('signing', { mode: 'boolean' }).notNull().default(true),
 	published: integer('published', { mode: 'boolean' }).notNull().default(true),
+	generation: integer('generation')
+		.$type<SigningKeyGeneration>()
+		.notNull()
+		.default(signingKeyGenerationSchema.parse(0)),
 	createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 });
+
+export const signingKeySequence = sqliteTable('signing_key_sequence', {
+	id: text('id').primaryKey(),
+	nextGeneration: integer('next_generation')
+		.$type<SigningKeyGeneration>()
+		.notNull()
+});
+
+export const signingKeyBackfills = sqliteTable('signing_key_backfill', {
+	keyId: text('key_id').primaryKey(),
+	generation: integer('generation').$type<SigningKeyGeneration>().notNull(),
+	state: text('state', {
+		enum: ['running', 'retrying', 'complete']
+	}).notNull(),
+	startedAt: text('started_at').$type<IsoTimestamp>().notNull(),
+	updatedAt: text('updated_at').$type<IsoTimestamp>().notNull(),
+	completedAt: text('completed_at').$type<IsoTimestamp>(),
+	resigned: integer('resigned').notNull().default(0),
+	failureOperation: text('failure_operation', {
+		enum: ['resigning', 'cache-purge']
+	}),
+	failedAt: text('failed_at').$type<IsoTimestamp>(),
+	failureMessage: text('failure_message')
+});
+
+export const cachePurgeContinuations = sqliteTable(
+	'cache_purge_continuation',
+	{
+		id: text('id').primaryKey(),
+		kind: text('kind', { enum: ['backfill', 'mutation'] }).notNull(),
+		signingKeyId: text('signing_key_id'),
+		entriesJson: text('entries_json').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
+		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull(),
+		lastAttemptAt: text('last_attempt_at').$type<IsoTimestamp>(),
+		lastError: text('last_error')
+	},
+	(table) => [
+		index('cache_purge_kind_created_at_idx').on(table.kind, table.createdAt)
+	]
+);
 
 export const retentionRoots = sqliteTable(
 	'retention_root',
