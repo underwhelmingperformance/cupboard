@@ -1,5 +1,13 @@
 import { randomBytes } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import {
+	chmod,
+	lstat,
+	mkdir,
+	readFile,
+	rename,
+	unlink,
+	writeFile
+} from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { env } from 'node:process';
@@ -49,29 +57,116 @@ export async function readSecretFile(
 	}
 }
 
+interface SecretFileOperations {
+	readonly move?: typeof rename;
+	readonly remove?: typeof unlink;
+	readonly write?: typeof writeFile;
+}
+
 /**
- * Persists a secret, readable only by the current user. It is written to a
- * fresh `0600` temporary file (exclusive create, so a pre-planted symlink is
- * not followed) and renamed over the target atomically; the directory is
- * created and its mode reasserted to `0700`. The file is therefore never
- * readable by anyone else, not even for the moment between its creation and
- * its mode being set.
+ * Persists a secret in a `0600` file inside a `0700` directory owned by the
+ * current user. It creates the temporary file exclusively with its final mode,
+ * so an existing path or symlink cannot redirect the write. It then renames the
+ * temporary file over the target atomically.
  */
 export async function writeSecretFile(
 	file: string,
-	contents: string
+	contents: string,
+	operations: SecretFileOperations = {}
 ): Promise<void> {
 	const directory = path.dirname(file);
 
+	await verifyNoSymlinkComponents(directory);
 	await mkdir(directory, { recursive: true, mode: 0o700 });
+	await verifySecretDirectory(directory);
 	await chmod(directory, 0o700);
 
 	const temporary = path.join(
 		directory,
 		`.secret.${randomBytes(8).toString('hex')}`
 	);
-	await writeFile(temporary, contents, { mode: 0o600, flag: 'wx' });
-	await rename(temporary, file);
+	const move = operations.move ?? rename;
+	const remove = operations.remove ?? unlink;
+	const write = operations.write ?? writeFile;
+
+	try {
+		await write(temporary, contents, { mode: 0o600, flag: 'wx' });
+		await verifySecretDirectory(directory);
+		await move(temporary, file);
+	} catch (error) {
+		try {
+			await remove(temporary);
+		} catch (cleanupError) {
+			if (!isNotFound(cleanupError)) {
+				throw new SecretFileCleanupError(temporary, error, cleanupError);
+			}
+		}
+
+		throw error;
+	}
+}
+
+class SecretFileCleanupError extends Error {
+	constructor(
+		public readonly residuePath: string,
+		public readonly operationError: unknown,
+		public readonly cleanupError: unknown
+	) {
+		super(
+			`${errorMessage(operationError)}. The temporary credential remains at '${residuePath}' because cleanup failed: ${errorMessage(cleanupError)}`,
+			{ cause: operationError }
+		);
+		this.name = 'SecretFileCleanupError';
+	}
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+async function verifySecretDirectory(directory: string): Promise<void> {
+	await verifyNoSymlinkComponents(directory);
+
+	const stats = await lstat(directory);
+
+	if (!stats.isDirectory()) {
+		throw new Error(`Secret directory '${directory}' is not a directory`);
+	}
+
+	const uid = process.getuid?.();
+	if (uid !== undefined && stats.uid !== uid) {
+		throw new Error(
+			`Secret directory '${directory}' is not owned by this user`
+		);
+	}
+}
+
+async function verifyNoSymlinkComponents(directory: string): Promise<void> {
+	const parsed = path.parse(path.resolve(directory));
+	const components = path
+		.resolve(directory)
+		.slice(parsed.root.length)
+		.split(path.sep);
+	let current = parsed.root;
+
+	for (const component of components) {
+		current = path.join(current, component);
+		let stats;
+		try {
+			stats = await lstat(current);
+		} catch (error) {
+			if (isNotFound(error)) {
+				return;
+			}
+
+			throw error;
+		}
+
+		if (stats.isSymbolicLink() && stats.uid !== 0) {
+			throw new Error(
+				`Secret directory component '${current}' is a symbolic link`
+			);
+		}
+	}
 }
 
 function isNotFound(error: unknown): boolean {
