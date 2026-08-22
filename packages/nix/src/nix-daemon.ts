@@ -10,6 +10,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import { positiveSafeInteger } from '@cupboard/shared/limits';
 
 import { narRegularFileContents } from './nar-file.ts';
 import {
@@ -376,9 +377,9 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		this.socketPath = options.socketPath ?? defaultDaemonSocketPath;
 		this.connect = options.connect ?? connectToNixDaemon;
 		this.preservesDaemonOptions = options.shouldPreserveDaemonOptions ?? false;
-		this.maxConnections = Math.max(
-			1,
-			options.maxConnections ?? defaultClosureConcurrency
+		this.maxConnections = positiveSafeInteger(
+			options.maxConnections ?? defaultClosureConcurrency,
+			'maxConnections'
 		);
 		this.maxConnectionAge = options.maxConnectionAge;
 		this.storeDirectory = options.storeDirectory ?? defaultStoreDirectory;

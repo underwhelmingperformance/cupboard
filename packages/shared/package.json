@@ -26,6 +26,7 @@
 		"./github-actions": "./src/github-actions.ts",
 		"./http": "./src/http.ts",
 		"./in-toto": "./src/in-toto.ts",
+		"./limits": "./src/limits.ts",
 		"./octokit": "./src/octokit.ts",
 		"./retry": "./src/retry.ts",
 		"./sigstore": "./src/sigstore.ts",

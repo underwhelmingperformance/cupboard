@@ -41,11 +41,16 @@ describe('mapWithConcurrency', () => {
 		expect(maxInFlight).toBe(2);
 	});
 
-	it('rejects a NaN concurrency', async () => {
-		await expect(
-			mapWithConcurrency([1, 2], NaN, (value) => Promise.resolve(value))
-		).rejects.toBeInstanceOf(RangeError);
-	});
+	it.each([0, -1, 1.5, NaN, Infinity])(
+		'refuses an invalid concurrency of %s',
+		async (concurrency) => {
+			await expect(
+				mapWithConcurrency([1, 2], concurrency, (value) =>
+					Promise.resolve(value)
+				)
+			).rejects.toBeInstanceOf(RangeError);
+		}
+	);
 
 	it('resolves to an empty array for no values', async () => {
 		await expect(

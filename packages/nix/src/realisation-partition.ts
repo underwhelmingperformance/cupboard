@@ -5,6 +5,10 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import {
+	type PositiveSafeInteger,
+	positiveSafeInteger
+} from '@cupboard/shared/limits';
 
 import {
 	type NixDerivedPathString,
@@ -152,7 +156,14 @@ class RealisationWalk {
 
 	private narSize = 0;
 
-	constructor(private readonly source: RealisationPartitionSource) {}
+	private readonly maxPaths: PositiveSafeInteger;
+
+	constructor(private readonly source: RealisationPartitionSource) {
+		this.maxPaths = positiveSafeInteger(
+			source.maxPaths ?? defaultRealisationWalkCap,
+			'maxPaths'
+		);
+	}
 
 	// Claim each derived path once so shared dependencies do not add their sizes
 	// twice. Check the cap before insertion so the first over-cap path is never
@@ -164,10 +175,8 @@ class RealisationWalk {
 			return false;
 		}
 
-		const maxPaths = this.source.maxPaths ?? defaultRealisationWalkCap;
-
-		if (this.visited.size >= maxPaths) {
-			throw new RealisationWalkOverCapError(maxPaths);
+		if (this.visited.size >= this.maxPaths) {
+			throw new RealisationWalkOverCapError(this.maxPaths);
 		}
 
 		this.visited.add(key);

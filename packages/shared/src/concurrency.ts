@@ -1,3 +1,5 @@
+import { positiveSafeInteger } from './limits.ts';
+
 /**
  * Calls `map` for each value with no more than `concurrency` calls in progress.
  * The returned results preserve input order.
@@ -12,11 +14,7 @@ export async function mapWithConcurrency<T, Result>(
 	concurrency: number,
 	map: (value: T, index: number) => Promise<Result>
 ): Promise<Result[]> {
-	// Reject `NaN`; otherwise the function would start no workers and return no
-	// results.
-	if (Number.isNaN(concurrency)) {
-		throw new RangeError('concurrency must be a number');
-	}
+	const limit = positiveSafeInteger(concurrency, 'concurrency');
 
 	const results: Result[] = [];
 	const iterator = values.entries();
@@ -45,7 +43,7 @@ export async function mapWithConcurrency<T, Result>(
 		}
 	};
 
-	const workerCount = Math.min(Math.max(concurrency, 1), values.length);
+	const workerCount = Math.min(limit, values.length);
 
 	await Promise.all(Array.from({ length: workerCount }, () => worker()));
 

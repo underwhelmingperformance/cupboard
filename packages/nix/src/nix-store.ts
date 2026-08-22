@@ -6,6 +6,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import { positiveSafeInteger } from '@cupboard/shared/limits';
 
 /**
  * Whether the daemon trusts this client, as the handshake reports it:
@@ -284,16 +285,13 @@ export async function resolveClosureBy(
 	queryPathInfo: (storePath: StorePathString) => Promise<NixValidPathInfo>,
 	concurrency = 1
 ): Promise<readonly NixValidPathInfo[]> {
+	const limit = positiveSafeInteger(concurrency, 'concurrency');
 	const closure = new Map<string, NixValidPathInfo>();
 	const claimed = new Set<string>();
 	let frontier = claimUnseen(roots, claimed);
 
 	while (frontier.length > 0) {
-		const infos = await mapWithConcurrency(
-			frontier,
-			concurrency,
-			queryPathInfo
-		);
+		const infos = await mapWithConcurrency(frontier, limit, queryPathInfo);
 		const references: StorePathString[] = [];
 
 		for (const info of infos) {

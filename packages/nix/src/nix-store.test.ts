@@ -81,6 +81,14 @@ function closureIn(storeDirectory: StoreDirectory): Closure {
 }
 
 describe('resolveClosureBy', () => {
+	it('rejects an invalid concurrency before an empty walk', async () => {
+		await expect(
+			resolveClosureBy([], () => Promise.reject(new Error('not called')), 0)
+		).rejects.toThrow('concurrency must be a positive safe integer');
+	});
+
+	// A store directory is discovered from the running configuration, so the walk
+	// is exercised under a store that is not the default `/nix/store` too.
 	it.each([
 		{ name: 'the default store', directory: '/nix/store' },
 		{

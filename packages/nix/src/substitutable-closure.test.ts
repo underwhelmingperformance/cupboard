@@ -314,6 +314,20 @@ describe('resolveSubstitutableClosure', () => {
 		});
 	});
 
+	it.each([0, -1, 1.5, NaN, Infinity])(
+		'refuses an invalid path cap of %s',
+		async (maxPaths) => {
+			const store = new FakeStore(
+				new Map([[appPath, held(appPath)]]),
+				new Map([[appPath, offer()]])
+			);
+
+			await expect(
+				resolveSubstitutableClosure(appPath, store.queries, { maxPaths })
+			).rejects.toBeInstanceOf(RangeError);
+		}
+	);
+
 	it('rejects with the signal reason before making any query', async () => {
 		const store = new FakeStore(
 			new Map([[appPath, held(appPath)]]),

@@ -1,4 +1,5 @@
 import type { StorePathString } from '@cupboard/nix-store/scalars';
+import { positiveSafeInteger } from '@cupboard/shared/limits';
 
 import {
 	claimUnseen,
@@ -104,7 +105,10 @@ export async function resolveSubstitutableClosure(
 	queries: SubstitutableClosureQueries,
 	options: SubstitutableClosureOptions = {}
 ): Promise<SubstitutableClosureVerdict> {
-	const maxPaths = options.maxPaths ?? defaultSubstitutableClosureCap;
+	const maxPaths = positiveSafeInteger(
+		options.maxPaths ?? defaultSubstitutableClosureCap,
+		'maxPaths'
+	);
 	const claimed = new Set<string>();
 	let frontier = claimUnseen([root], claimed);
 	let downloadSize = 0;

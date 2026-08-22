@@ -491,6 +491,17 @@ describe('queryMissingOver', () => {
 		expect(issued).toBe(1);
 	});
 
+	it.each([0, -1, 1.5, NaN, Infinity])(
+		'refuses an invalid path cap of %s',
+		async (maxPaths) => {
+			const invalid = { ...source(), maxPaths };
+
+			await expect(queryMissingOver([appPath], invalid)).rejects.toBeInstanceOf(
+				RangeError
+			);
+		}
+	);
+
 	it('rejects with the signal reason before starting the walk', async () => {
 		const reason = new Error('the caller gave up');
 		const abandoned = { ...source(), signal: AbortSignal.abort(reason) };
