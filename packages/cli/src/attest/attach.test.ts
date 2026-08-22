@@ -12,14 +12,16 @@ import type {
 	AttestationDecision,
 	AttestationNegotiateRequest
 } from '@cupboard/protocol/attestations';
+import { attestationNegotiateMaxBundles } from '@cupboard/protocol/attestations';
 import {
 	type Reporter,
 	type ResultPayload,
-	type ResultRow
+	type ResultRow,
+	type StepLog
 } from '@cupboard/reporter';
 import { readUserInputSchema } from '@cupboard/shared/http';
 import { ORPCError } from '@orpc/client';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
 	AttestationAttachResponseMismatchError,
@@ -35,8 +37,10 @@ import {
 	type AttestationAttachClient,
 	type AttestationPathInfo,
 	parseAttestationBundle,
+	type PreparedAttestationBundle,
 	readCommittedAttestationPathInfos,
 	requireAttestationAttachClient,
+	runAttestationAttachment,
 	runAttestAttach
 } from './attach.ts';
 
@@ -382,6 +386,54 @@ function recordedClient(
 }
 
 describe('runAttestAttach', () => {
+	it('negotiates a closure larger than the protocol cap in bounded batches', async () => {
+		const prepared: PreparedAttestationBundle[] = Array.from(
+			{ length: attestationNegotiateMaxBundles + 1 },
+			(_, index) => ({
+				storePathHash: StorePath.hash(appPath),
+				digest: index.toString(16).padStart(64, '0'),
+				bytes: new Uint8Array()
+			})
+		);
+		const batchSizes: number[] = [];
+		const group = {
+			error: vi.fn(),
+			message: vi.fn(),
+			success: vi.fn()
+		};
+		const log: StepLog = {
+			group: () => group,
+			message: vi.fn(),
+			warn: vi.fn()
+		};
+		const outcome = await runAttestationAttachment(prepared, log, {
+			client: {
+				negotiateAttestations(body) {
+					batchSizes.push(body.bundles.length);
+
+					return Promise.resolve({
+						bundles: body.bundles.map((bundle) => ({
+							action: 'skip',
+							...bundle
+						}))
+					});
+				},
+				uploadNar: () => Promise.resolve(),
+				attachAttestation
+			}
+		});
+
+		expect({
+			batchSizes,
+			attached: outcome.attached,
+			reused: outcome.reused
+		}).toStrictEqual({
+			batchSizes: [attestationNegotiateMaxBundles, 1],
+			attached: 0,
+			reused: attestationNegotiateMaxBundles + 1
+		});
+	});
+
 	it.each([
 		{
 			name: 'missing',

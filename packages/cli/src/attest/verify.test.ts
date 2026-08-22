@@ -14,10 +14,13 @@ import {
 	type VerifyTrust
 } from '@cupboard/shared/sigstore';
 import type { Signer } from '@sigstore/verify';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
+	RemoteAttestationBundleDigestMismatchError,
+	RemoteAttestationBundleSizeMismatchError,
 	RemoteNarInfoStorePathMismatchError,
 	verifyLocalAttestations,
 	verifyRemoteAttestations
@@ -29,7 +32,8 @@ const narDigest = [...NixSha256Hash.parse(narHash).digestBytes()]
 	.join('');
 
 const storePathHash = '0123456789abcdfghijklmnpqrsvwxyz';
-const bundleDigest = 'a'.repeat(64);
+const bundleDigest =
+	'4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a';
 const sbomBundleDigest = 'b'.repeat(64);
 const predicateType = 'https://slsa.dev/provenance/v1';
 const sbomPredicateType = 'https://spdx.dev/Document';
@@ -561,7 +565,7 @@ describe('remote attestation verification', () => {
 							{
 								digest: bundleDigest,
 								predicateType,
-								size: 123
+								size: 1
 							},
 							{
 								digest: sbomBundleDigest,
@@ -667,7 +671,7 @@ describe('remote attestation verification', () => {
 			) {
 				return Promise.resolve(
 					Response.json({
-						attestations: [{ digest: bundleDigest, predicateType, size: 123 }]
+						attestations: [{ digest: bundleDigest, predicateType, size: 1 }]
 					})
 				);
 			}
@@ -714,6 +718,79 @@ describe('remote attestation verification', () => {
 			}
 		]);
 	});
+
+	it.each([
+		{
+			name: 'size',
+			descriptor: { digest: bundleDigest, predicateType, size: 2 },
+			body: new Uint8Array([1]),
+			error: RemoteAttestationBundleSizeMismatchError
+		},
+		{
+			name: 'digest',
+			descriptor: { digest: bundleDigest, predicateType, size: 1 },
+			body: new Uint8Array([2]),
+			error: RemoteAttestationBundleDigestMismatchError
+		}
+	])(
+		'rejects a bundle whose $name differs from its descriptor',
+		async (fixture) => {
+			const signed = await signedNarInfo();
+			let verificationCalls = 0;
+			const fetcher: typeof fetch = (input) => {
+				const url = fetchInputUrl(input);
+
+				if (url === `https://cupboard.test/t/acme/${storePathHash}.narinfo`) {
+					return Promise.resolve(new Response(signed.source));
+				}
+
+				if (
+					url === `https://cupboard.test/t/acme/attestations/${storePathHash}`
+				) {
+					return Promise.resolve(
+						Response.json({ attestations: [fixture.descriptor] })
+					);
+				}
+
+				if (
+					url ===
+					`https://cupboard.test/t/acme/attestation-bundles/${bundleDigest}`
+				) {
+					return Promise.resolve(new Response(fixture.body));
+				}
+
+				return Promise.resolve(
+					new Response('not found', { status: StatusCodes.NOT_FOUND })
+				);
+			};
+
+			await expect(
+				verifyRemoteAttestations(
+					{
+						url: new URL('https://cupboard.test/t/acme'),
+						storePathHash,
+						predicateType,
+						trustedPublicKey: signed.publicKey,
+						certificateIdentity: policy.identity,
+						certificateOidcIssuer: policy.issuer
+					},
+					{
+						fetch: fetcher,
+						verify: () => {
+							verificationCalls += 1;
+							return Promise.resolve(
+								verifiedBundle(policy, {
+									predicateType,
+									subjectDigests: [narDigest]
+								})
+							);
+						}
+					}
+				)
+			).rejects.toBeInstanceOf(fixture.error);
+			expect(verificationCalls).toBe(0);
+		}
+	);
 
 	it('rejects a remote narinfo whose signed store path has a different hash', async () => {
 		const replayedHash = '11111111111111111111111111111111';

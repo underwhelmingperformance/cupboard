@@ -19,6 +19,7 @@ import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
+import { readResponseJson } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import { z } from 'zod';
 
@@ -43,6 +44,7 @@ import { isNixPositionalArgument } from './options.ts';
 import { cacheUrlFor } from './substituters.ts';
 
 const execFileAsync = promisify(execFile);
+const maximumAvailabilityResponseBytes = 16 * 1024 * 1024;
 
 export const maximumConcurrentAvailabilityQueries = 4;
 
@@ -775,7 +777,10 @@ async function queryMissingStorePathHashes(
 			let value: unknown;
 
 			try {
-				value = await response.json();
+				value = await readResponseJson(response, {
+					description: 'cache availability response',
+					maximumBytes: maximumAvailabilityResponseBytes
+				});
 			} catch (error) {
 				throw new CacheAvailabilityResponseMalformedError(
 					error instanceof SyntaxError ? error : new SyntaxError(String(error))

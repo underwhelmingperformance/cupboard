@@ -31,6 +31,10 @@ import {
 	withCleanup
 } from '@cupboard/shared/cleanup';
 import { createOctokitClient } from '@cupboard/shared/octokit';
+import {
+	readResponseBytes,
+	RemoteBodyTooLargeError
+} from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import {
 	AttestationSubjectMismatchError,
@@ -2179,69 +2183,22 @@ async function readBoundedAttestationBundle(
 	maximumBytes: number,
 	signal?: AbortSignal
 ): Promise<Uint8Array> {
-	const contentLength = response.headers.get('content-length');
-	const declaredBytes =
-		contentLength === null ? undefined : Number(contentLength);
-
-	if (
-		declaredBytes !== undefined &&
-		Number.isFinite(declaredBytes) &&
-		declaredBytes > maximumBytes
-	) {
-		await discardResponseBody(response);
-		throw new ReleaseAttestationBundleTooLargeError(
-			maximumBytes,
-			declaredBytes
-		);
-	}
-
-	const body = response.body;
-	if (body === null) {
-		return new Uint8Array();
-	}
-
-	const reader = body.getReader();
-	const chunks: Uint8Array[] = [];
-	let byteLength = 0;
-	const abort = (): void => {
-		void bestEffort(() => reader.cancel(signal?.reason));
-	};
-	signal?.addEventListener('abort', abort, { once: true });
-
 	try {
-		for (;;) {
-			signal?.throwIfAborted();
-			const chunk = await reader.read();
-			signal?.throwIfAborted();
-
-			if (chunk.done) {
-				break;
-			}
-
-			byteLength += chunk.value.byteLength;
-			if (byteLength > maximumBytes) {
-				await bestEffort(() => reader.cancel());
-				throw new ReleaseAttestationBundleTooLargeError(
-					maximumBytes,
-					byteLength
-				);
-			}
-
-			chunks.push(chunk.value);
+		return await readResponseBytes(response, {
+			description: 'release attestation bundle',
+			maximumBytes,
+			...(signal !== undefined && { signal })
+		});
+	} catch (error) {
+		if (error instanceof RemoteBodyTooLargeError) {
+			throw new ReleaseAttestationBundleTooLargeError(
+				error.maximumBytes,
+				error.observedBytes
+			);
 		}
-	} finally {
-		signal?.removeEventListener('abort', abort);
+
+		throw error;
 	}
-
-	const bytes = new Uint8Array(byteLength);
-	let offset = 0;
-
-	for (const chunk of chunks) {
-		bytes.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
-
-	return bytes;
 }
 
 async function listAttestations(
