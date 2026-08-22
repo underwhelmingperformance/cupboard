@@ -19,7 +19,8 @@ const sriSha256Hash = z.string().regex(/^sha256-[\d+/A-Za-z]{43}=$/);
 
 const dependenciesHashesSchema = z.object({
 	lockfile: sriSha256Hash,
-	store: sriSha256Hash
+	store: sriSha256Hash,
+	confirmation: z.literal('pending').optional()
 });
 
 export type DependenciesHashes = z.infer<typeof dependenciesHashesSchema>;
@@ -78,6 +79,16 @@ export class FakeHashRecordedError extends CodedError {
 				'interrupted update. Run `pnpm update:flake-deps` to refresh it.'
 		);
 		this.name = 'FakeHashRecordedError';
+	}
+}
+
+export class PendingStoreHashRecordedError extends CodedError {
+	constructor() {
+		super(
+			`${hashesFileName} records a store hash whose confirmation did not ` +
+				'finish. Run `pnpm update:flake-deps` to confirm it.'
+		);
+		this.name = 'PendingStoreHashRecordedError';
 	}
 }
 
@@ -142,6 +153,10 @@ export function checkFlakeDependencies(workspace: Workspace): void {
 	const digest = sriSha256(workspace.readLockfile());
 	const hashes = parseDependenciesHashes(workspace.readHashesFile());
 
+	if (hashes.confirmation === 'pending') {
+		throw new PendingStoreHashRecordedError();
+	}
+
 	if (hashes.store === fakeStoreHash) {
 		throw new FakeHashRecordedError();
 	}
@@ -171,7 +186,11 @@ export async function updateFlakeDependencies(
 	const originalText = workspace.readHashesFile();
 	const current = parseDependenciesHashes(originalText);
 
-	if (current.lockfile === digest && current.store !== fakeStoreHash) {
+	if (
+		current.lockfile === digest &&
+		current.store !== fakeStoreHash &&
+		current.confirmation !== 'pending'
+	) {
 		return { kind: 'already-current', store: current.store };
 	}
 
@@ -192,7 +211,10 @@ async function refetchStoreHash(
 	current: DependenciesHashes
 ): Promise<UpdateOutcome> {
 	workspace.writeHashesFile(
-		serialiseDependenciesHashes({ lockfile: digest, store: fakeStoreHash })
+		serialiseDependenciesHashes({
+			lockfile: digest,
+			store: fakeStoreHash
+		})
 	);
 
 	const resolved = await fetcher.resolveHash('resolve');
@@ -201,15 +223,19 @@ async function refetchStoreHash(
 		throw new FakeHashMatchedError();
 	}
 
+	const confirming = await fetcher.resolveHash('confirm');
+
+	if (confirming === undefined) {
+		throw new FakeHashMatchedError();
+	}
+
+	if (confirming !== resolved) {
+		throw new UnstableStoreHashError(resolved, confirming);
+	}
+
 	workspace.writeHashesFile(
 		serialiseDependenciesHashes({ lockfile: digest, store: resolved })
 	);
-
-	const confirming = await fetcher.resolveHash('confirm');
-
-	if (confirming !== undefined) {
-		throw new UnstableStoreHashError(resolved, confirming);
-	}
 
 	return {
 		kind: resolved === current.store ? 'store-unchanged' : 'store-updated',

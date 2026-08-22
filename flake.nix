@@ -36,7 +36,12 @@
       # resolved from: `pnpm update:flake-deps` refreshes the pair after a
       # `pnpm-lock.yaml` change, and `pnpm check:flake-deps` fails when they
       # drift apart.
-      pnpmDepsHash = (nixpkgs.lib.importJSON ./pnpm-deps-hash.json).store;
+      pnpmDepsHashes = nixpkgs.lib.importJSON ./pnpm-deps-hash.json;
+      pnpmDepsHash =
+        if (pnpmDepsHashes.confirmation or null) == "pending" then
+          throw "pnpm-deps-hash.json contains an unconfirmed store hash"
+        else
+          pnpmDepsHashes.store;
 
       # `pnpm build:binary` bundles the CLI and both Workers, then injects the
       # bundle into a copy of the Node binary as a single executable. It also
