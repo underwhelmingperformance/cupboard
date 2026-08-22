@@ -73,6 +73,26 @@ describe('workflowCommands', () => {
 		});
 	});
 
+	it('can require workflow syntax outside a runner', () => {
+		const out = captureStream();
+		const error = captureStream();
+		const commands = workflowCommands({
+			stdout: out.stream,
+			stderr: error.stream,
+			environment: {},
+			rendering: 'workflow'
+		});
+
+		commands.warning('forced');
+		commands.group('Details');
+		commands.endGroup();
+
+		expect({ out: out.lines, err: error.lines }).toStrictEqual({
+			out: ['::warning::forced\n', '::group::Details\n', '::endgroup::\n'],
+			err: []
+		});
+	});
+
 	it('opens and closes collapsible groups under GitHub Actions', () => {
 		const { commands, out } = commandsUnder({ GITHUB_ACTIONS: 'true' });
 

@@ -667,6 +667,65 @@ describe('createGithubReporter', () => {
 		});
 	});
 
+	it('marks a primitive failure as already reported', async () => {
+		const failure = 'build failed';
+		const rejected = Promise.withResolvers<never>();
+		rejected.reject(failure);
+
+		let error: unknown;
+		try {
+			await createGithubReporter().phase('Building', () => rejected.promise);
+		} catch (error_: unknown) {
+			error = error_;
+		}
+
+		expect({
+			alreadyReported: wasErrorReported(error),
+			message: error instanceof Error ? error.message : undefined,
+			output: written
+		}).toStrictEqual({
+			alreadyReported: true,
+			message: failure,
+			output: [
+				'::group::Building\n',
+				'::error::build failed\n',
+				'::endgroup::\n'
+			]
+		});
+	});
+
+	it('reports independent primitive failures with the same value', async () => {
+		const reporter = createGithubReporter();
+
+		for (const label of ['Building', 'Publishing']) {
+			const rejected = Promise.withResolvers<never>();
+			rejected.reject('same failure');
+
+			try {
+				await reporter.phase(label, () => rejected.promise);
+			} catch {
+				// Each phase reports its own failure before propagating it.
+			}
+		}
+
+		expect(written).toStrictEqual([
+			'::group::Building\n',
+			'::error::same failure\n',
+			'::endgroup::\n',
+			'::group::Publishing\n',
+			'::error::same failure\n',
+			'::endgroup::\n'
+		]);
+	});
+
+	it('emits workflow syntax when GitHub mode was explicitly selected', () => {
+		vi.stubEnv('GITHUB_ACTIONS', '');
+
+		createGithubReporter().warn('still annotated');
+
+		expect(written).toStrictEqual(['::warning::still annotated\n']);
+	});
+
 	it.each([
 		{
 			name: 'progress',
