@@ -68,6 +68,7 @@ import {
 	type ParsedUploadDecision,
 	type ParsedUploadPathMetadata,
 	pathDeletionResponseSchema,
+	type PushId,
 	type StatsResponse,
 	uploadActionDecisionSchema,
 	uploadCommitDecisionSchema,
@@ -99,7 +100,11 @@ import { z } from 'zod';
 import migrations from '../drizzle/migrations.js';
 
 import { issueAccessJwt } from './auth/auth.ts';
-import { issuePushId, pushIdSigningKeySchema } from './blob/push-id.ts';
+import {
+	issuePushId,
+	pushIdNonceSchema,
+	pushIdSigningKeySchema
+} from './blob/push-id.ts';
 import {
 	activeControlKey,
 	ensureControlKey
@@ -1645,10 +1650,16 @@ function cacheScopedPath(cache: string, suffix: string): string {
 const testPushIdSigningKey = pushIdSigningKeySchema.parse(
 	'test-push-id-signing-key'
 );
-export const testPushId = await issuePushId(
-	testPushIdSigningKey,
-	new Uint8Array(16)
-);
+export async function testPushIdFor(tenant: string): Promise<PushId> {
+	return issuePushId(
+		testPushIdSigningKey,
+		tenantIdSchema.parse(tenant),
+		0xff_ff_ff_ff,
+		pushIdNonceSchema.parse(new Uint8Array(16))
+	);
+}
+
+export const testPushId = await testPushIdFor('v1');
 
 export async function negotiateUploads(
 	token: string,
@@ -1759,6 +1770,7 @@ export async function pushPathToTenant(
 	nar?: VerifiableNar,
 	cache: string = WIRE_DEFAULT_CACHE
 ): Promise<void> {
+	const pushId = await testPushIdFor(tenant);
 	const negotiated = await tenantWorkerFetch(
 		tenant,
 		`/cache/${cache}/uploads`,
@@ -1767,7 +1779,7 @@ export async function pushPathToTenant(
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({
-				pushId: testPushId,
+				pushId,
 				paths: [uploadPathNegotiation(metadata)]
 			})
 		}
@@ -1806,6 +1818,7 @@ export async function attemptPushToTenant(
 	metadata: ParsedUploadPathMetadata,
 	nar?: VerifiableNar
 ): Promise<number> {
+	const pushId = await testPushIdFor(tenant);
 	const negotiated = await tenantWorkerFetch(
 		tenant,
 		`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
@@ -1814,7 +1827,7 @@ export async function attemptPushToTenant(
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({
-				pushId: testPushId,
+				pushId,
 				paths: [uploadPathNegotiation(metadata)]
 			})
 		}
@@ -1823,7 +1836,8 @@ export async function attemptPushToTenant(
 	expect(negotiated.status).toBe(StatusCodes.OK);
 	const decision = expectSingleUploadDecision(
 		uploadNegotiateResponseSchema.parse(await negotiated.json()),
-		metadata
+		metadata,
+		pushId
 	);
 
 	await putNarBytes(decision.r2Key, nar);
@@ -1864,6 +1878,7 @@ export async function stageDeferredForTenant(
 	metadata: ParsedUploadPathMetadata,
 	nar?: VerifiableNar
 ): Promise<UploadId> {
+	const pushId = await testPushIdFor(tenant);
 	const negotiated = await tenantWorkerFetch(
 		tenant,
 		`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
@@ -1872,7 +1887,7 @@ export async function stageDeferredForTenant(
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({
-				pushId: testPushId,
+				pushId,
 				paths: [uploadPathNegotiation(metadata)]
 			})
 		}
@@ -1881,7 +1896,8 @@ export async function stageDeferredForTenant(
 	expect(negotiated.status).toBe(StatusCodes.OK);
 	const decision = expectSingleUploadDecision(
 		uploadNegotiateResponseSchema.parse(await negotiated.json()),
-		metadata
+		metadata,
+		pushId
 	);
 
 	await putNarBytes(decision.r2Key, nar);
@@ -3146,7 +3162,8 @@ export function tenantId(name: string): TenantId {
 
 export function expectSingleUploadDecision(
 	response: UploadNegotiateResponse,
-	metadata: ParsedUploadPathMetadata
+	metadata: ParsedUploadPathMetadata,
+	pushId: PushId = testPushId
 ): ParsedUploadActionDecision {
 	const decision = uploadActionDecisionSchema.parse(singleDecision(response));
 	const expectedExpiresAt = uploadExpiryFromNow();
@@ -3157,7 +3174,7 @@ export function expectSingleUploadDecision(
 			storePathHash: metadata.storePathHash,
 			narHash: metadata.narHash,
 			uploadId: decision.uploadId,
-			r2Key: stagingObjectKey(testPushId, decision.uploadId),
+			r2Key: stagingObjectKey(pushId, decision.uploadId),
 			expiresAt: expectedExpiresAt
 		}
 	]);

@@ -7,6 +7,7 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { pushIdSchema } from '@cupboard/protocol/upload';
+import { parseAuthenticationHeader } from '@cupboard/shared/http';
 import { and, eq, inArray } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { z } from 'zod';
@@ -45,7 +46,12 @@ export async function computeNegotiateHints(
 	tenant: TenantId,
 	cache: StoredCache | undefined
 ): Promise<NegotiateHints | undefined> {
-	if (request.headers.get('authorization') === null) {
+	if (
+		parseAuthenticationHeader(
+			request.headers.get('authorization') ?? undefined,
+			'Bearer'
+		) === undefined
+	) {
 		return undefined;
 	}
 
@@ -64,7 +70,14 @@ export async function computeNegotiateHints(
 	}
 
 	try {
-		if (!(await isPushIdValid(pushIdSigningKey(env), parsed.data.pushId))) {
+		if (
+			!(await isPushIdValid(
+				pushIdSigningKey(env),
+				parsed.data.pushId,
+				tenant,
+				new Date()
+			))
+		) {
 			return undefined;
 		}
 	} catch {

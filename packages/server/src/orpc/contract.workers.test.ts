@@ -489,7 +489,7 @@ describe('tenant contract round trip', () => {
 			(new Date(issued.expiresAt).getTime() - Date.now()) / 1000;
 
 		expect({
-			pushIdShape: /^[0-9a-f]{96}$/.test(issued.pushId),
+			pushIdShape: /^[0-9a-f]{104}$/u.test(issued.pushId),
 			bucket: issued.bucket,
 			endpoint: issued.endpoint,
 			hasCredential:

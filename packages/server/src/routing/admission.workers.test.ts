@@ -475,7 +475,7 @@ describe('layered admission gate', () => {
 			.update(d1Schema.tenant)
 			.set({
 				readUser: readUserSchema.parse('reader'),
-				readPasswordHash: readPasswordHashSchema.parse('hash'),
+				readPasswordHash: readPasswordHashSchema.parse('0'.repeat(64)),
 				readPasswordSalt: readPasswordSaltSchema.parse('salt')
 			})
 			.where(eq(d1Schema.tenant.id, tenantIdSchema.parse('acme')))
@@ -489,7 +489,7 @@ describe('layered admission gate', () => {
 				readMode: 'private',
 				readVerifier: {
 					user: 'reader',
-					passwordHash: 'hash',
+					passwordHash: '0'.repeat(64),
 					passwordSalt: 'salt'
 				}
 			}

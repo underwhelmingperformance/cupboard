@@ -7,10 +7,24 @@ import { isConstantTimeEqual, sha256HexBytes } from '../crypto/crypto.ts';
 
 const textEncoder = new TextEncoder();
 const readPasswordHashDomain = 'cupboard-read-password-v1';
+const readPasswordKdfDomain = 'cupboard-read-password-v2';
+const readPasswordKdfIterations = 600_000;
+const readPasswordKdfPrefix = `pbkdf2-sha256$${String(
+	readPasswordKdfIterations
+)}$`;
 
 // Separate brands prevent callers from passing a password hash where a salt or
 // read user is required.
-export const readPasswordHashSchema = z.string().brand('ReadPasswordHash');
+export const readPasswordHashSchema = z
+	.string()
+	.refine(
+		(value) =>
+			/^[0-9a-f]{64}$/u.test(value) ||
+			(value.startsWith(readPasswordKdfPrefix) &&
+				/^[A-Za-z0-9_-]{43}$/u.test(value.slice(readPasswordKdfPrefix.length))),
+		'unsupported read-password verifier format'
+	)
+	.brand('ReadPasswordHash');
 export type ReadPasswordHash = z.infer<typeof readPasswordHashSchema>;
 
 export const readPasswordSaltSchema = z.string().brand('ReadPasswordSalt');
@@ -25,17 +39,58 @@ export interface ReadVerifier {
 }
 
 /**
- * Uses the stable, versioned encoding for stored read verifiers. Changing it
- * invalidates existing credentials.
+ * Creates the versioned PBKDF2 verifier stored for private-read credentials.
+ * Changing this format invalidates existing credentials.
  */
 export async function hashReadPassword(
 	password: string,
 	salt: ReadPasswordSalt
 ): Promise<ReadPasswordHash> {
+	const key = await crypto.subtle.importKey(
+		'raw',
+		textEncoder.encode(password),
+		'PBKDF2',
+		false,
+		['deriveBits']
+	);
+	const derived = await crypto.subtle.deriveBits(
+		{
+			name: 'PBKDF2',
+			hash: 'SHA-256',
+			iterations: readPasswordKdfIterations,
+			salt: textEncoder.encode(`${readPasswordKdfDomain}\0${salt}`)
+		},
+		key,
+		256
+	);
+
 	return readPasswordHashSchema.parse(
-		await sha256HexBytes(
-			textEncoder.encode(`${readPasswordHashDomain}\0${salt}\0${password}`)
-		)
+		`${readPasswordKdfPrefix}${bytesToBase64Url(new Uint8Array(derived))}`
+	);
+}
+
+async function legacyReadPasswordHash(
+	password: string,
+	salt: ReadPasswordSalt
+): Promise<string> {
+	return sha256HexBytes(
+		textEncoder.encode(`${readPasswordHashDomain}\0${salt}\0${password}`)
+	);
+}
+
+export async function isReadPasswordMatching(
+	password: string,
+	passwordHash: ReadPasswordHash,
+	salt: ReadPasswordSalt
+): Promise<boolean> {
+	const candidate = passwordHash.startsWith(readPasswordKdfPrefix)
+		? await hashReadPassword(password, salt)
+		: await legacyReadPasswordHash(password, salt);
+
+	return isConstantTimeEqual(
+		candidate,
+		passwordHash,
+		textEncoder.encode(passwordHash).byteLength
 	);
 }
 
@@ -47,9 +102,10 @@ export function generateReadPasswordSalt(): ReadPasswordSalt {
 }
 
 /**
- * After parsing a valid Basic credential, always hashes the password and
- * performs both comparisons before combining their results. A different user
- * does not skip the password comparison.
+ * Whether a request contains HTTP Basic credentials matching the tenant's read
+ * verifier. The password verifier uses fixed-length cryptographic comparison and
+ * is checked even when the user differs, so a user mismatch does not skip the
+ * password work.
  */
 export async function isReadAuthorised(
 	request: Request,
@@ -64,12 +120,11 @@ export async function isReadAuthorised(
 	}
 
 	const { user, password } = parsed.credential;
-	const passwordHash = await hashReadPassword(password, verifier.passwordSalt);
-
-	const isUserMatching = isConstantTimeEqual(user, verifier.user);
-	const isPasswordMatching = isConstantTimeEqual(
-		passwordHash,
-		verifier.passwordHash
+	const isUserMatching = user === verifier.user;
+	const isPasswordMatching = await isReadPasswordMatching(
+		password,
+		verifier.passwordHash,
+		verifier.passwordSalt
 	);
 
 	return isUserMatching && isPasswordMatching;

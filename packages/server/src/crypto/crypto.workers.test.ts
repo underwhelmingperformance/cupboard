@@ -4,7 +4,12 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
-import { generateSigningKey, sha256Hex, signNixFingerprint } from './crypto.ts';
+import {
+	generateSigningKey,
+	isConstantTimeEqual,
+	sha256Hex,
+	signNixFingerprint
+} from './crypto.ts';
 
 describe('crypto', () => {
 	const fingerprint = nixFingerprintSchema.parse(
@@ -16,6 +21,16 @@ describe('crypto', () => {
 		expect(await sha256Hex('cupboard-token')).toBe(
 			'e951cd4605d6f42c5bba9cf418756b172259552339512737d7abbb049935cb49'
 		);
+	});
+
+	it('compares only values satisfying the fixed-length format', async () => {
+		await expect(
+			Promise.all([
+				isConstantTimeEqual('abcd', 'abcd', 4),
+				isConstantTimeEqual('abcd', 'abce', 4),
+				isConstantTimeEqual('abcd', 'abcd', 3)
+			])
+		).resolves.toStrictEqual([true, false, false]);
 	});
 
 	it('produces the expected Ed25519 signature for a known Nix fingerprint and key', async () => {
