@@ -42,6 +42,20 @@ const budgetEntrySchema = z.object({
 const keySchema = z.string().min(1);
 const targetBudgetSchema = budgetEntrySchema.extend({ attr: keySchema });
 const groupBudgetSchema = budgetEntrySchema.extend({ key: keySchema });
+const targetBudgetsSchema = z
+	.array(targetBudgetSchema)
+	.refine(
+		(entries) =>
+			new Set(entries.map((entry) => entry.attr)).size === entries.length,
+		{ message: 'target attributes must be unique' }
+	);
+const groupBudgetsSchema = z
+	.array(groupBudgetSchema)
+	.refine(
+		(entries) =>
+			new Set(entries.map((entry) => entry.key)).size === entries.length,
+		{ message: 'group keys must be unique' }
+	);
 
 /**
  * Reads target and group keys and their measurements while ignoring other
@@ -49,8 +63,8 @@ const groupBudgetSchema = budgetEntrySchema.extend({ key: keySchema });
  * baseline, and a hand-written baseline needs only these values.
  */
 export const realisationBaselineSchema = z.object({
-	targets: z.array(targetBudgetSchema),
-	groups: z.array(groupBudgetSchema),
+	targets: targetBudgetsSchema,
+	groups: groupBudgetsSchema,
 	combined: budgetEntrySchema.optional()
 });
 export type RealisationBaseline = z.output<typeof realisationBaselineSchema>;

@@ -1,7 +1,5 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
@@ -44,10 +42,7 @@ describe.skipIf(!isNixPresent)('measure-realisation end to end', () => {
 		'measures each target apart and both together against an empty store',
 		{ timeout: 600_000 },
 		async () => {
-			const prefix = path.join(tmpdir(), 'cupboard-realisation-e2e-');
-			const directory = await createDivertedStoreDirectory(
-				await mkdtemp(prefix)
-			);
+			const divertedStore = await createDivertedStoreDirectory();
 
 			try {
 				const report = await measureRealisation({
@@ -57,7 +52,7 @@ describe.skipIf(!isNixPresent)('measure-realisation end to end', () => {
 					planner: createDivertedStorePlanner({
 						flake,
 						storeDirectory: discoverNixStoreConfig().storeDirectory,
-						directory,
+						directory: divertedStore.directory,
 						substituters: ['https://cache.nixos.org']
 					})
 				});
@@ -88,7 +83,7 @@ describe.skipIf(!isNixPresent)('measure-realisation end to end', () => {
 					groupedIsCheaper: true
 				});
 			} finally {
-				await removeDivertedStore(directory);
+				await removeDivertedStore(divertedStore);
 			}
 		}
 	);

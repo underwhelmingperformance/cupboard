@@ -43,6 +43,7 @@ function groupMeasurement(
 	const together = {
 		willBuild: measurement.willBuild,
 		willSubstitute: measurement.willSubstitute,
+		unknown: measurement.unknown,
 		downloadSize: measurement.downloadSize,
 		narSize: measurement.narSize
 	};
@@ -58,6 +59,7 @@ function groupMeasurement(
 			saved: {
 				willBuild: 0,
 				willSubstitute: 0,
+				unknown: 0,
 				downloadSize: 0,
 				narSize: 0
 			}
@@ -101,6 +103,33 @@ describe('parseBaseline', () => {
 		}
 	])('rejects $name', ({ source, expected }) => {
 		expect(() => parseBaseline(source)).toThrow(expected);
+	});
+
+	it.each([
+		{
+			name: 'duplicate target attributes',
+			value: {
+				targets: [
+					{ attr: 'app', measurement: budget },
+					{ attr: 'app', measurement: { ...budget, narSize: 1 } }
+				],
+				groups: []
+			}
+		},
+		{
+			name: 'duplicate group keys',
+			value: {
+				targets: [],
+				groups: [
+					{ key: 'linux', measurement: budget },
+					{ key: 'linux', measurement: { ...budget, narSize: 1 } }
+				]
+			}
+		}
+	])('refuses $name', ({ value }) => {
+		expect(() => parseBaseline(JSON.stringify(value))).toThrow(
+			BaselineSchemaError
+		);
 	});
 });
 

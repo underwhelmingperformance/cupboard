@@ -26,6 +26,10 @@ export function formatBytes(bytes: number): string {
 	return `${sign}${remaining.toFixed(digits)} ${binaryUnits[unit] ?? 'B'}`;
 }
 
+function formatCount(count: number, singular: string): string {
+	return `${String(count)} ${singular}${count === 1 ? '' : 's'}`;
+}
+
 export function renderSummary(report: RealisationReport): string {
 	const lines = [
 		`Realising ${report.flake} in the diverted store`,
@@ -37,9 +41,10 @@ export function renderSummary(report: RealisationReport): string {
 	for (const target of report.targets) {
 		lines.push(
 			`  ${target.attr}: ${String(target.measurement.willBuild)} to build, ` +
-				`${String(target.measurement.willSubstitute)} to fetch ` +
+				`${String(target.measurement.willSubstitute)} to fetch, ` +
+				`${formatCount(target.measurement.unknown, 'unknown path')} ` +
 				`(${formatBytes(target.measurement.downloadSize)} download, ` +
-				`${formatBytes(target.measurement.narSize)} NAR)`
+				`${formatBytes(target.measurement.narSize)} unpacked NAR bytes)`
 		);
 	}
 
@@ -60,15 +65,18 @@ function groupLines(key: string, group: GroupMeasurement): readonly string[] {
 	return [
 		`Group ${key} (${group.attrs.join(', ')}):`,
 		`  together: ${String(together.willBuild)} to build, ` +
-			`${String(together.willSubstitute)} to fetch ` +
+			`${String(together.willSubstitute)} to fetch, ` +
+			`${formatCount(together.unknown, 'unknown path')} ` +
 			`(${formatBytes(together.downloadSize)} download, ` +
-			`${formatBytes(together.narSize)} NAR)`,
+			`${formatBytes(together.narSize)} unpacked NAR bytes)`,
 		`  apart:    ${String(apart.willBuild)} to build, ` +
-			`${String(apart.willSubstitute)} to fetch ` +
+			`${String(apart.willSubstitute)} to fetch, ` +
+			`${formatCount(apart.unknown, 'unknown path')} ` +
 			`(${formatBytes(apart.downloadSize)} download, ` +
-			`${formatBytes(apart.narSize)} NAR)`,
-		`  grouping saves ${String(saved.willBuild)} derivation(s) and ` +
-			`${formatBytes(saved.narSize)} NAR bytes`
+			`${formatBytes(apart.narSize)} unpacked NAR bytes)`,
+		`  grouping saves ${formatCount(saved.willBuild, 'derivation')}, ` +
+			`${formatCount(saved.unknown, 'unknown path')}, and ` +
+			`${formatBytes(saved.narSize)} unpacked NAR bytes`
 	];
 }
 

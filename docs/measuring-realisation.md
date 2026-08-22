@@ -83,13 +83,21 @@ Other options:
 
 - `--substituter <url>`, repeatable, replaces the list every measurement is
   taken against. It defaults to `https://cache.nixos.org`.
-- `--work-dir <path>` uses the chosen directory instead of creating a temporary
-  directory. The command reuses existing contents and deletes the directory
-  after the run unless `--keep-store` is set. Reserve this path for the command.
-  Nix refuses a store reached through a symlink, so the command resolves the
-  path first; cleanup therefore deletes the resolved target.
-- `--keep-store` leaves the diverted store behind. Nix writes everything
-  read-only, so removing such a store by hand needs `chmod -R u+w` first.
+- `--work-dir <path>` creates a fresh parent for the diverted store instead of
+  using a temporary parent. The path must not exist and must not be a symlink.
+  The actual store is an unpredictable child of that parent. Cleanup verifies
+  the child's directory identity and ownership marker, then recursively removes
+  only the child. It removes the parent with `rmdir`, which refuses a non-empty
+  directory. A mismatched child remains in a holding directory whose path is
+  included in the error.
+- `--keep-store` leaves the parent and its diverted-store child behind. Nix
+  writes the child contents read-only, so removing the store by hand needs
+  `chmod -R u+w` first.
+
+Cleanup assumes that another process running as the same user does not change
+the private child while cleanup is traversing it. Node does not provide a
+portable handle-relative recursive removal API for Darwin and Linux. Do not run
+a measurement with another process that can write to its work directory.
 
 ## Using it as a gate
 

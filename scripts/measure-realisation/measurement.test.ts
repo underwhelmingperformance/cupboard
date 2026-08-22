@@ -203,18 +203,21 @@ describe('measureRealisation', () => {
 						apart: {
 							willBuild: 7,
 							willSubstitute: 22,
+							unknown: 0,
 							downloadSize: 2200,
 							narSize: 11_000
 						},
 						together: {
 							willBuild: 5,
 							willSubstitute: 15,
+							unknown: 0,
 							downloadSize: 1500,
 							narSize: 7000
 						},
 						saved: {
 							willBuild: 2,
 							willSubstitute: 7,
+							unknown: 0,
 							downloadSize: 700,
 							narSize: 4000
 						}
@@ -236,18 +239,21 @@ describe('measureRealisation', () => {
 					apart: {
 						willBuild: 7,
 						willSubstitute: 22,
+						unknown: 0,
 						downloadSize: 2200,
 						narSize: 11_000
 					},
 					together: {
 						willBuild: 5,
 						willSubstitute: 15,
+						unknown: 0,
 						downloadSize: 1500,
 						narSize: 7000
 					},
 					saved: {
 						willBuild: 2,
 						willSubstitute: 7,
+						unknown: 0,
 						downloadSize: 700,
 						narSize: 4000
 					}
@@ -332,7 +338,7 @@ describe('measureRealisation', () => {
 });
 
 describe('sumMeasurements', () => {
-	it('totals only the budgeted metrics', () => {
+	it('totals every metric used in a group comparison', () => {
 		expect(
 			sumMeasurements([
 				{
@@ -353,6 +359,7 @@ describe('sumMeasurements', () => {
 		).toStrictEqual({
 			willBuild: 11,
 			willSubstitute: 22,
+			unknown: 33,
 			downloadSize: 44,
 			narSize: 55
 		});
