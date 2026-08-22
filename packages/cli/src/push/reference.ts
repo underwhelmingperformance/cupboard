@@ -44,7 +44,7 @@ export async function fetchReferenceMetadata(
 	storePathHash: StorePathHash,
 	dependencies: ReferenceFetchDependencies = {}
 ): Promise<ReferenceMetadata> {
-	const fetcher = dependencies.fetch ?? resilientFetcher();
+	const fetcher = dependencies.fetch ?? resilientFetcher('replay-safe');
 	const target = new URL(
 		`${canonicalHref(source.url)}/${storePathHash}.narinfo`
 	);

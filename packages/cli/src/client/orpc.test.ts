@@ -1,3 +1,5 @@
+import { cacheSelectorSchema } from '@cupboard/nix-store/scalars';
+import { pushIdSchema } from '@cupboard/protocol/upload';
 import { ORPCError } from '@orpc/client';
 import { ValidationError } from '@orpc/contract';
 import { StatusCodes } from 'http-status-codes';
@@ -71,6 +73,29 @@ const badGateway = (): Response =>
 		status: StatusCodes.BAD_GATEWAY,
 		headers: { 'cf-ray': 'a113b23c78faf6c2' }
 	});
+
+const nonIdempotentNegotiations = [
+	{
+		name: 'upload negotiation',
+		url: 'https://cupboard.test/t/acme/cache/_default/uploads',
+		request: (rpc: ReturnType<typeof tenantRpc>) =>
+			rpc.uploads.negotiate({
+				cacheName: cacheSelectorSchema.parse('_default'),
+				pushId: pushIdSchema.parse('push'),
+				paths: []
+			})
+	},
+	{
+		name: 'attestation negotiation',
+		url: 'https://cupboard.test/t/acme/cache/_default/attestations',
+		request: (rpc: ReturnType<typeof tenantRpc>) =>
+			rpc.attestations.negotiate({
+				cacheName: cacheSelectorSchema.parse('_default'),
+				pushId: pushIdSchema.parse('push'),
+				bundles: []
+			})
+	}
+] as const;
 
 describe('tenantRpc', () => {
 	it('requests a tenant procedure under the existing path prefix with the configured credential', async () => {
@@ -205,6 +230,78 @@ describe('tenantRpc', () => {
 			vi.useRealTimers();
 		}
 	});
+
+	it('does not replay a signing-key rotation after a gateway failure', async () => {
+		const { fetcher, captured } = capturingFetcher([
+			badGateway,
+			() => {
+				throw new Error('rotation was replayed');
+			}
+		]);
+		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+			credential: 'admin-token',
+			fetcher
+		});
+
+		await expect(rpc.keys.signing.rotate()).rejects.toBeInstanceOf(
+			CupboardHttpError
+		);
+		expect(captured).toHaveLength(1);
+	});
+
+	it.each(nonIdempotentNegotiations)(
+		'does not replay $name after a gateway failure',
+		async ({ request }) => {
+			const { fetcher, captured } = capturingFetcher([
+				badGateway,
+				() => {
+					throw new Error('negotiation was replayed');
+				}
+			]);
+			const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+				credential: 'admin-token',
+				fetcher
+			});
+
+			await expect(request(rpc)).rejects.toBeInstanceOf(CupboardHttpError);
+			expect(captured).toHaveLength(1);
+		}
+	);
+
+	it.each(nonIdempotentNegotiations)(
+		'does not replay $name after a provider credential is refused',
+		async ({ request, url }) => {
+			const refresh = vi.fn(() => Promise.resolve('fresh-token'));
+			const provider: TokenProvider = {
+				get: () => Promise.resolve('stale-token'),
+				refresh
+			};
+			const { fetcher, captured } = capturingFetcher([
+				() =>
+					new Response('Unauthorised\n', {
+						status: StatusCodes.UNAUTHORIZED
+					}),
+				() => {
+					throw new Error('negotiation was replayed');
+				}
+			]);
+			const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
+				credential: provider,
+				fetcher
+			});
+
+			await expect(request(rpc)).rejects.toBeInstanceOf(ORPCError);
+			expect({ captured, refreshCalls: refresh.mock.calls }).toStrictEqual({
+				captured: [
+					{
+						url,
+						authorization: 'Bearer stale-token'
+					}
+				],
+				refreshCalls: []
+			});
+		}
+	);
 
 	it('includes the response body and ray id after the retry budget expires', async () => {
 		vi.useFakeTimers();

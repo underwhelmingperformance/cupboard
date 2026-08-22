@@ -441,7 +441,7 @@ export async function resolveSubstituters(
 	}
 
 	const viewUrl = reuseViewUrlFor(options.cacheUrl, options.reuseView);
-	const fetcher = retryingFetcher(dependencies.fetch ?? fetch);
+	const fetcher = retryingFetcher(dependencies.fetch ?? fetch, 'replay-safe');
 	const headers =
 		options.readUser === ''
 			? undefined
@@ -573,7 +573,7 @@ export async function fetchCachePublicKeyAt(
 	const url = canonicalHref(endpoint);
 
 	return fetchWithProbeDeadline(
-		retryingFetcher(fetcher),
+		retryingFetcher(fetcher, 'replay-safe'),
 		url,
 		{
 			headers: cachePublicKeyRequestHeaders(),

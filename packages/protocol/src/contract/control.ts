@@ -33,10 +33,12 @@ import {
 
 import { type AuthzMeta } from './base.ts';
 
-const controlProcedure = oc.$meta<AuthzMeta>({}).errors({
-	UNAUTHORIZED: {},
-	FORBIDDEN: {}
-});
+const controlProcedure = oc
+	.$meta<AuthzMeta>({ replaySafety: 'replay-unsafe' })
+	.errors({
+		UNAUTHORIZED: {},
+		FORBIDDEN: {}
+	});
 
 /**
  * The administrative API served under `/control` on the bare host. Paths in

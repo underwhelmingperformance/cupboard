@@ -60,7 +60,10 @@ describe('reachableFetcher', () => {
 
 	it('translates a rejected TypeError into a host-named unreachable error', async () => {
 		const cause = new TypeError('fetch failed', {
-			cause: new Error('getaddrinfo ENOTFOUND cupboard.example.workers.dev')
+			cause: Object.assign(
+				new Error('getaddrinfo ENOTFOUND cupboard.example.workers.dev'),
+				{ code: 'ENOTFOUND' }
+			)
 		});
 		const fetcher = reachableFetcher(() => Promise.reject(cause));
 

@@ -139,7 +139,7 @@ export async function cloudflareLogin(
 ): Promise<CloudflareGrant> {
 	throwIfAborted(options.signal);
 
-	const fetcher = options.fetcher ?? resilientFetcher();
+	const fetcher = options.fetcher ?? resilientFetcher('replay-unsafe');
 	const now = options.now ?? Date.now;
 
 	const obtained = await obtainAuthorizationCode({
@@ -178,7 +178,7 @@ export async function cloudflareLogin(
  */
 export async function refreshCloudflareGrant(
 	previous: CloudflareGrant,
-	fetcher: typeof fetch = resilientFetcher(),
+	fetcher: typeof fetch = resilientFetcher('replay-unsafe'),
 	now: () => number = Date.now,
 	signal?: AbortSignal
 ): Promise<CloudflareGrant | undefined> {

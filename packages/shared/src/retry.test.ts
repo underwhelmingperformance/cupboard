@@ -5,9 +5,21 @@ import {
 	backoffDelay,
 	isTransientResponse,
 	reachableFetcher,
-	retryingFetcher
+	retryingFetcher as makeRetryingFetcher
 } from './retry.ts';
 
+function retryingFetcher(fetcher: typeof fetch): typeof fetch {
+	return makeRetryingFetcher(fetcher, 'replay-safe');
+}
+
+function networkFailure(): TypeError {
+	return new TypeError('fetch failed', {
+		cause: { code: 'ECONNRESET' }
+	});
+}
+
+// Stands in for a caller's typed abort reason (the CLI aborts with its own
+// error class); the wrapper must surface it unchanged.
 class TestAbortError extends Error {
 	constructor() {
 		super('aborted');
@@ -74,6 +86,20 @@ describe('isTransientResponse', () => {
 });
 
 describe('backoffDelay', () => {
+	it('uses full jitter from zero to the exponential ceiling', async () => {
+		vi.useFakeTimers();
+		vi.spyOn(Math, 'random').mockReturnValue(0);
+
+		try {
+			const pending = backoffDelay(1);
+			await vi.advanceTimersByTimeAsync(0);
+
+			await expect(pending).resolves.toBeUndefined();
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('removes its abort listener after the delay completes', async () => {
 		vi.useFakeTimers();
 
@@ -178,7 +204,7 @@ describe('retryingFetcher', () => {
 
 		try {
 			const { fetcher, attempts } = scriptedFetcher([
-				() => Promise.reject(new TypeError('fetch failed')),
+				() => Promise.reject(networkFailure()),
 				ok
 			]);
 
@@ -193,6 +219,36 @@ describe('retryingFetcher', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+
+	it('does not retry an unrelated TypeError from a fetch wrapper', async () => {
+		const failure = new TypeError('wrapper failed');
+		const { fetcher, attempts } = scriptedFetcher([
+			() => Promise.reject(failure),
+			ok
+		]);
+
+		await expect(retryingFetcher(fetcher)('https://x.test')).rejects.toBe(
+			failure
+		);
+		expect(attempts()).toBe(1);
+	});
+
+	it('does not replay an operation declared unsafe', async () => {
+		const { fetcher, attempts } = scriptedFetcher([
+			status(StatusCodes.SERVICE_UNAVAILABLE),
+			ok
+		]);
+
+		const response = await makeRetryingFetcher(
+			fetcher,
+			'replay-unsafe'
+		)('https://x.test');
+
+		expect({ status: response.status, attempts: attempts() }).toStrictEqual({
+			status: StatusCodes.SERVICE_UNAVAILABLE,
+			attempts: 1
+		});
 	});
 
 	it('returns the last transient response once the retry budget is spent', async () => {
@@ -268,6 +324,59 @@ describe('retryingFetcher', () => {
 		}
 	});
 
+	it('honours an HTTP-date Retry-After before retrying', async () => {
+		vi.useFakeTimers();
+		const now = Date.UTC(2026, 7, 22, 22, 0, 0);
+		vi.setSystemTime(now);
+
+		try {
+			const { fetcher, attempts } = scriptedFetcher([
+				() =>
+					new Response('', {
+						status: StatusCodes.SERVICE_UNAVAILABLE,
+						headers: {
+							'retry-after': new Date(now + 2000).toUTCString()
+						}
+					}),
+				ok
+			]);
+			const pending = retryingFetcher(fetcher)('https://x.test');
+
+			await vi.advanceTimersByTimeAsync(1999);
+			expect(attempts()).toBe(1);
+
+			await vi.advanceTimersByTimeAsync(1);
+			await pending;
+			expect(attempts()).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('treats a decimal Retry-After as invalid', async () => {
+		vi.useFakeTimers();
+		vi.spyOn(Math, 'random').mockReturnValue(0.999);
+
+		try {
+			const { fetcher, attempts } = scriptedFetcher([
+				() =>
+					new Response('', {
+						status: StatusCodes.SERVICE_UNAVAILABLE,
+						headers: { 'retry-after': '1.5' }
+					}),
+				ok
+			]);
+			const pending = retryingFetcher(fetcher)('https://x.test');
+
+			await vi.advanceTimersByTimeAsync(250);
+			await pending;
+
+			expect(attempts()).toBe(2);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it('caps a Retry-After far larger than the ceiling', async () => {
 		vi.useFakeTimers();
 
@@ -328,8 +437,7 @@ class HostDownError extends Error {
 	}
 }
 
-const failing: typeof fetch = () =>
-	Promise.reject(new TypeError('fetch failed'));
+const failing: typeof fetch = () => Promise.reject(networkFailure());
 
 describe('reachableFetcher', () => {
 	it('translates a network fault through the supplied error factory', async () => {
@@ -359,5 +467,15 @@ describe('reachableFetcher', () => {
 		);
 
 		await expect(fetcher('https://cache.example.test/')).rejects.toBe(abort);
+	});
+
+	it('lets an unrelated TypeError propagate unchanged', async () => {
+		const failure = new TypeError('response decoder failed');
+		const fetcher = reachableFetcher(
+			() => Promise.reject(failure),
+			(host, cause) => new HostDownError(host, cause)
+		);
+
+		await expect(fetcher('https://cache.example.test/')).rejects.toBe(failure);
 	});
 });

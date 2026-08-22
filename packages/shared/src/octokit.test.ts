@@ -23,9 +23,15 @@ function countingFetch(status: number): {
 	};
 }
 
-async function fetchCountFor(status: number): Promise<number> {
+async function fetchCountFor(
+	status: number,
+	replaySafety: 'replay-safe' | 'replay-unsafe' = 'replay-unsafe'
+): Promise<number> {
 	const counter = countingFetch(status);
-	const octokit = createOctokitClient({ request: { fetch: counter.fetch } });
+	const octokit = createOctokitClient({
+		request: { fetch: counter.fetch },
+		replaySafety
+	});
 
 	try {
 		await octokit.request('GET /repos/{owner}/{repo}', {
@@ -74,10 +80,14 @@ describe('createOctokitClient', () => {
 		expect(headers?.get('x-github-api-version')).toBe('2026-03-10');
 	});
 
-	it('retries a transient server error', async () => {
+	it('does not replay an operation unless the client declares it safe', async () => {
+		expect(await fetchCountFor(500)).toBe(1);
+	});
+
+	it('retries a transient server error for a replay-safe client', async () => {
 		vi.useFakeTimers();
 
-		const pending = fetchCountFor(500);
+		const pending = fetchCountFor(500, 'replay-safe');
 		await vi.runAllTimersAsync();
 
 		expect(await pending).toBe(4);

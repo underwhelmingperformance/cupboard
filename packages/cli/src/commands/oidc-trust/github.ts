@@ -74,6 +74,7 @@ export function githubApi(
 	);
 
 	return createOctokitClient({
+		replaySafety: 'replay-safe',
 		...(token !== undefined && { auth: token }),
 		request: {
 			fetch: options.fetch ?? makeFetchHappen.defaults({ cachePath }),

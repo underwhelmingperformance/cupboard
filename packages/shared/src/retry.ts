@@ -1,6 +1,7 @@
 import { StatusCodes } from 'http-status-codes';
 
 import { discardResponseBody } from './cleanup.ts';
+import { parseHttpDate } from './http-fields.ts';
 
 // A long push makes thousands of requests to one single-threaded Durable Object
 // and streams many blobs. Retry a small number of transient gateway and
@@ -34,9 +35,21 @@ export function isTransientResponse(response: Response): boolean {
  * The function clones a `Request` before each attempt. Callers that send a body
  * must therefore supply reusable bytes rather than a one-shot stream.
  */
-export function retryingFetcher(fetcher: typeof fetch): typeof fetch {
+export type ReplaySafety = 'replay-safe' | 'replay-unsafe';
+
+export function retryingFetcher(
+	fetcher: typeof fetch,
+	replaySafety: ReplaySafety
+): typeof fetch {
 	return async (input, init) => {
 		const signal = init?.signal ?? undefined;
+
+		if (replaySafety === 'replay-unsafe') {
+			signal?.throwIfAborted();
+
+			return fetcher(input, init);
+		}
+
 		let retries = 0;
 
 		for (;;) {
@@ -48,7 +61,11 @@ export function retryingFetcher(fetcher: typeof fetch): typeof fetch {
 			try {
 				response = await fetcher(attempt, init);
 			} catch (error) {
-				if (signal?.aborted === true || retries >= maxTransientRetries) {
+				if (
+					signal?.aborted === true ||
+					!isFetchNetworkError(error) ||
+					retries >= maxTransientRetries
+				) {
 					throw error;
 				}
 
@@ -78,14 +95,11 @@ export async function transientResponseDelay(
 	attempt: number,
 	signal?: AbortSignal
 ): Promise<void> {
-	const retryAfterSeconds = Number(response.headers.get('retry-after'));
+	const retryAfter = retryAfterDelayMs(response.headers.get('retry-after'));
 	await discardResponseBody(response);
 
-	if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
-		await abortableSleep(
-			Math.min(retryAfterSeconds * 1000, maxRetryDelayMs),
-			signal
-		);
+	if (retryAfter !== undefined) {
+		await abortableSleep(Math.min(retryAfter, maxRetryDelayMs), signal);
 
 		return;
 	}
@@ -94,9 +108,9 @@ export async function transientResponseDelay(
 }
 
 /**
- * Waits for an exponentially increasing delay with equal jitter: half the
- * current ceiling plus a random value in the other half. The delay does not
- * exceed `maxRetryDelayMs`. An abort signal ends the wait immediately.
+ * Waits for an exponentially increasing delay with full jitter: a random value
+ * from zero to the current ceiling. The delay does not exceed
+ * `maxRetryDelayMs`. An abort signal ends the wait immediately.
  */
 export async function backoffDelay(
 	attempt: number,
@@ -107,7 +121,31 @@ export async function backoffDelay(
 		maxRetryDelayMs
 	);
 
-	await abortableSleep(ceiling / 2 + Math.random() * (ceiling / 2), signal);
+	await abortableSleep(Math.random() * ceiling, signal);
+}
+
+/**
+Parses a `Retry-After` delay in milliseconds from delay-seconds or an HTTP date.
+*/
+export function retryAfterDelayMs(
+	value: string | null | undefined,
+	nowMilliseconds: number = Date.now()
+): number | undefined {
+	if (value === null || value === undefined) {
+		return undefined;
+	}
+
+	if (/^\d+$/u.test(value)) {
+		const seconds = Number(value);
+
+		return Number.isSafeInteger(seconds) ? seconds * 1000 : undefined;
+	}
+
+	const retryAt = parseHttpDate(value);
+
+	return retryAt === undefined
+		? undefined
+		: Math.max(0, retryAt - nowMilliseconds);
 }
 
 async function abortableSleep(
@@ -133,10 +171,9 @@ async function abortableSleep(
 }
 
 /**
- * Replaces any `TypeError` rejected by the fetcher with the caller's typed error
- * for the requested host. Other rejected values propagate unchanged. Fetch
- * commonly uses `TypeError` for network failures, but an abort reason supplied
- * as a `TypeError` is translated too.
+ * Replaces a rejected `TypeError` when its cause chain contains a non-empty
+ * network error code. The caller supplies the typed error for the requested
+ * host. Other rejected values propagate unchanged, including abort reasons.
  */
 export function reachableFetcher(
 	fetcher: typeof fetch,
@@ -146,13 +183,37 @@ export function reachableFetcher(
 		try {
 			return await fetcher(input, init);
 		} catch (error) {
-			if (error instanceof TypeError) {
+			if (isFetchNetworkError(error)) {
 				throw makeError(hostOf(input), error);
 			}
 
 			throw error;
 		}
 	};
+}
+
+function isFetchNetworkError(error: unknown): error is TypeError {
+	if (!(error instanceof TypeError)) {
+		return false;
+	}
+
+	return hasNetworkCode(error.cause);
+}
+
+function hasNetworkCode(value: unknown): boolean {
+	if (typeof value !== 'object' || value === null) {
+		return false;
+	}
+
+	if ('code' in value && typeof value.code === 'string' && value.code !== '') {
+		return true;
+	}
+
+	if ('errors' in value && Array.isArray(value.errors)) {
+		return value.errors.some((error) => hasNetworkCode(error));
+	}
+
+	return 'cause' in value && hasNetworkCode(value.cause);
 }
 
 function hostOf(input: Parameters<typeof fetch>[0]): string {

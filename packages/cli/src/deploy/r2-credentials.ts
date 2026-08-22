@@ -124,7 +124,7 @@ export async function checkR2Credentials(
 		readonly bucketName: string;
 		readonly credentials: R2Credentials;
 	},
-	fetcher: typeof fetch = resilientFetcher()
+	fetcher: typeof fetch = resilientFetcher('replay-unsafe')
 ): Promise<R2CredentialCheck> {
 	const client = new AwsClient({
 		accessKeyId: options.credentials.accessKeyId,

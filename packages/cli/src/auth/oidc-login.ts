@@ -186,7 +186,7 @@ const endpointsSchema = z.object({
  */
 export async function discoverOidcLogin(
 	issuer: string,
-	fetcher: typeof fetch = resilientFetcher(),
+	fetcher: typeof fetch = resilientFetcher('replay-unsafe'),
 	signal?: AbortSignal
 ): Promise<OidcLoginEndpoints> {
 	throwIfAborted(signal);
@@ -298,7 +298,7 @@ export async function loopbackLogin(
 ): Promise<string> {
 	throwIfAborted(options.signal);
 
-	const fetcher = options.fetcher ?? resilientFetcher();
+	const fetcher = options.fetcher ?? resilientFetcher('replay-unsafe');
 	const obtained = await obtainAuthorizationCode({
 		authorizationEndpoint: options.endpoints.authorizationEndpoint,
 		clientId: options.clientId,
@@ -632,7 +632,7 @@ export async function deviceLogin(
 		});
 	}
 
-	const fetcher = options.fetcher ?? resilientFetcher();
+	const fetcher = options.fetcher ?? resilientFetcher('replay-unsafe');
 	const now = options.now ?? Date.now;
 
 	const authorization = await requestDeviceCode(

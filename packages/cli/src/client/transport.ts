@@ -2,6 +2,7 @@ import { InvalidCacheUrlBaseError } from '@cupboard/nix-store/errors';
 import { parseBaseUrl } from '@cupboard/nix-store/url';
 import {
 	reachableFetcher as sharedReachableFetcher,
+	type ReplaySafety,
 	retryingFetcher
 } from '@cupboard/shared/retry';
 
@@ -17,8 +18,11 @@ import {
  * {@link UnreachableHostError} for the requested host. Other errors pass through
  * unchanged.
  */
-export function resilientFetcher(fetcher: typeof fetch = fetch): typeof fetch {
-	return reachableFetcher(retryingFetcher(fetcher));
+export function resilientFetcher(
+	replaySafety: ReplaySafety,
+	fetcher: typeof fetch = fetch
+): typeof fetch {
+	return reachableFetcher(retryingFetcher(fetcher, replaySafety));
 }
 
 /**
@@ -48,10 +52,9 @@ export function parseWorkerUrl(value: string | URL): URL {
 }
 
 /**
- * Converts a rejected `TypeError` into an {@link UnreachableHostError} for the
- * requested host. Every other rejection passes through unchanged. The wrapper
- * cannot distinguish a network failure from another `TypeError` thrown by the
- * supplied fetcher.
+ * Converts a network failure identified by the shared fetch classifier into an
+ * {@link UnreachableHostError} for the requested host. Every other rejection
+ * passes through unchanged.
  */
 export function reachableFetcher(fetcher: typeof fetch): typeof fetch {
 	return sharedReachableFetcher(

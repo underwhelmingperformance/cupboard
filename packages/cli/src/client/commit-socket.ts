@@ -20,6 +20,7 @@ import {
 	type UploadId
 } from '@cupboard/protocol/upload';
 import { chunk } from '@cupboard/shared/collections';
+import { retryAfterDelayMs } from '@cupboard/shared/retry';
 import { z } from 'zod';
 
 import { abortReason } from '../abort.ts';
@@ -1710,15 +1711,16 @@ export function runCommitSession(
 				failSession(refusal);
 			};
 
-			// Bound an unfinished response body because no later connection event is
-			// guaranteed. The status is already available from the headers. If the
-			// body times out, reconnect back-off determines the next dial because the
-			// client does not parse `Retry-After` from an incomplete response.
+			// A peer can leave the body unfinished in the ways `refusalDrainMs`
+			// describes, none of which produce another event on this connection,
+			// so the read is bounded. The status arrived with the headers, so the
+			// refusal is answered on what was received. The headers are already
+			// complete, so a `Retry-After` still applies when the body is not.
 			//
 			// Keep this timer referenced because it is the only event guaranteed to
 			// resolve an unfinished refusal body.
 			refusalDrainTimer = setTimeout(() => {
-				refuse(undefined);
+				refuse(requestedRetryDelayMs(response));
 			}, refusalDrainMs);
 
 			response.on('data', (chunk) => {
@@ -1803,7 +1805,7 @@ function asError(value: unknown): Error {
 function reconnectDelay(attempt: number, base: number): number {
 	const ceiling = Math.min(base * 2 ** (attempt - 1), maxReconnectBackoffMs);
 
-	return ceiling / 2 + Math.random() * (ceiling / 2);
+	return Math.random() * ceiling;
 }
 
 /**
@@ -1820,19 +1822,15 @@ function isRetryableRefusal(status: number): boolean {
 }
 
 /**
- * Parses the delay-seconds form of `Retry-After` and caps the result at
- * {@link maxRetryAfterMs}. HTTP dates and non-positive or invalid values return
- * `undefined`, leaving exponential back-off to choose the delay.
+ * The wait a refused upgrade asked for in `Retry-After`, in milliseconds and
+ * capped at {@link maxRetryAfterMs}. Invalid values return `undefined` and the
+ * back-off decides the delay on its own.
  */
 function requestedRetryDelayMs(failure: UpgradeFailure): number | undefined {
 	const stated = failure.headers['retry-after'];
-	const seconds = Number(Array.isArray(stated) ? stated[0] : stated);
+	const delay = retryAfterDelayMs(Array.isArray(stated) ? stated[0] : stated);
 
-	if (!Number.isFinite(seconds) || seconds <= 0) {
-		return;
-	}
-
-	return Math.min(seconds * 1000, maxRetryAfterMs);
+	return delay === undefined ? undefined : Math.min(delay, maxRetryAfterMs);
 }
 
 function safeJsonParse(text: string): unknown {

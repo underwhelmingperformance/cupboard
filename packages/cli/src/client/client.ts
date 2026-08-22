@@ -58,11 +58,15 @@ export class CupboardClient {
 
 		return new CupboardClient(
 			new URL(value),
-			resilientFetcher(fetch),
+			fetch,
 			cachePrefixFor(resolved.cache ?? DEFAULT_CACHE),
 			resolved.signal
 		);
 	}
+
+	private readonly replaySafeFetcher: typeof fetch;
+
+	private readonly replayUnsafeFetcher: typeof fetch;
 
 	constructor(
 		public readonly baseUrl: URL,
@@ -72,12 +76,15 @@ export class CupboardClient {
 		public readonly cachePrefix = '',
 		public readonly signal?: AbortSignal,
 		private readonly connectSocket: CommitSocketConnect = connectCommitSocket
-	) {}
+	) {
+		this.replaySafeFetcher = resilientFetcher('replay-safe', fetcher);
+		this.replayUnsafeFetcher = resilientFetcher('replay-unsafe', fetcher);
+	}
 
 	private async fetchText(path: string): Promise<string> {
 		throwIfAborted(this.signal);
 
-		const response = await this.fetcher(this.resolve(path), {
+		const response = await this.replaySafeFetcher(this.resolve(path), {
 			signal: this.signal
 		});
 
@@ -154,8 +161,6 @@ export class CupboardClient {
 		return { initial: await authorise(), authorise };
 	}
 
-	// The shared fetcher has already exhausted retries for transient transport
-	// and gateway failures. Convert only the final non-success response here.
 	private async postTokenForm(
 		form: Readonly<Record<string, string>>
 	): Promise<Response> {
@@ -163,7 +168,7 @@ export class CupboardClient {
 
 		const url = this.resolve('/token');
 		const body = new URLSearchParams(form).toString();
-		const response = await this.fetcher(url, {
+		const response = await this.replayUnsafeFetcher(url, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body,
@@ -298,7 +303,7 @@ export class CupboardClient {
 				claim_secret: request.claim_secret
 			})
 		});
-		const response = await this.fetcher(url, {
+		const response = await this.replayUnsafeFetcher(url, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
 			body: body.toString(),

@@ -14,7 +14,6 @@ import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-	CliAbortError,
 	CupboardHttpError,
 	InvalidCacheNameError,
 	MalformedResponseError,
@@ -26,7 +25,6 @@ import {
 	FakeCommitSocket,
 	FakeUpgradeFailure
 } from './commit-socket.test-support.ts';
-import { resilientFetcher } from './transport.ts';
 
 interface CapturedRequest {
 	readonly url: string;
@@ -197,7 +195,7 @@ function scriptedClient(
 
 	const client = new CupboardClient(
 		new URL('https://cupboard.test'),
-		resilientFetcher(() => {
+		() => {
 			const next = attempts[attempted];
 			attempted += 1;
 
@@ -206,7 +204,7 @@ function scriptedClient(
 			}
 
 			return Promise.resolve(next());
-		}),
+		},
 		'',
 		signal
 	);
@@ -227,7 +225,7 @@ const marked = (status: number) => () =>
 	});
 const bare = (status: number) => () => new Response('', { status });
 
-describe('CupboardClient token retry', () => {
+describe('CupboardClient token replay', () => {
 	it.each([
 		{
 			label: 'a 503 carrying Retry-After',
@@ -237,47 +235,32 @@ describe('CupboardClient token retry', () => {
 		{ label: 'a 502', failure: bare(StatusCodes.BAD_GATEWAY) },
 		{ label: 'a 504', failure: bare(StatusCodes.GATEWAY_TIMEOUT) },
 		{ label: 'a 429', failure: bare(StatusCodes.TOO_MANY_REQUESTS) }
-	])('retries $label and returns the eventual token', async ({ failure }) => {
-		vi.useFakeTimers();
+	])('does not replay a token exchange after $label', async ({ failure }) => {
+		const { client, attempted } = scriptedClient([
+			failure,
+			() => Response.json(tokenResponse)
+		]);
 
-		try {
-			const { client, attempted } = scriptedClient([
-				failure,
-				failure,
-				() => Response.json(tokenResponse)
-			]);
+		const error = await rejectedBy(() => exchange(client));
 
-			const pending = exchange(client);
-			await vi.advanceTimersByTimeAsync(60_000);
-
-			expect({ result: await pending, attempts: attempted() }).toStrictEqual({
-				result: tokenResponse,
-				attempts: 3
-			});
-		} finally {
-			vi.useRealTimers();
-		}
+		expectCupboardHttpError(error);
+		expect({ attempts: attempted(), status: error.status }).toStrictEqual({
+			attempts: 1,
+			status: failure().status
+		});
 	});
 
-	it('retries a network fault and returns the eventual token', async () => {
-		vi.useFakeTimers();
+	it('does not replay a token exchange after a network fault', async () => {
+		const failure = new TypeError('fetch failed', {
+			cause: { code: 'ECONNRESET' }
+		});
+		const { client, attempted } = scriptedClient([
+			() => Promise.reject(failure),
+			() => Response.json(tokenResponse)
+		]);
 
-		try {
-			const { client, attempted } = scriptedClient([
-				() => Promise.reject(new TypeError('fetch failed')),
-				() => Response.json(tokenResponse)
-			]);
-
-			const pending = exchange(client);
-			await vi.advanceTimersByTimeAsync(60_000);
-
-			expect({ result: await pending, attempts: attempted() }).toStrictEqual({
-				result: tokenResponse,
-				attempts: 2
-			});
-		} finally {
-			vi.useRealTimers();
-		}
+		await expect(exchange(client)).rejects.toMatchObject({ cause: failure });
+		expect(attempted()).toBe(1);
 	});
 
 	it.each([
@@ -304,49 +287,6 @@ describe('CupboardClient token retry', () => {
 			status,
 			ray: 'ray-1'
 		});
-	});
-
-	it('surfaces the failure once the retry budget is spent', async () => {
-		vi.useFakeTimers();
-
-		try {
-			const { client, attempted } = scriptedClient(
-				Array.from({ length: 5 }, () => marked(StatusCodes.SERVICE_UNAVAILABLE))
-			);
-
-			const pending = rejectedBy(() => exchange(client));
-			await vi.advanceTimersByTimeAsync(60_000);
-			const error = await pending;
-
-			expectCupboardHttpError(error);
-			expect({ attempts: attempted(), status: error.status }).toStrictEqual({
-				attempts: 5,
-				status: StatusCodes.SERVICE_UNAVAILABLE
-			});
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	it('stops retrying when the signal aborts during the wait', async () => {
-		vi.useFakeTimers();
-
-		try {
-			const controller = new AbortController();
-			const { client, attempted } = scriptedClient(
-				[marked(StatusCodes.SERVICE_UNAVAILABLE)],
-				controller.signal
-			);
-
-			const pending = rejectedBy(() => exchange(client));
-			controller.abort(new CliAbortError());
-			await vi.advanceTimersByTimeAsync(60_000);
-
-			expect(await pending).toBeInstanceOf(CliAbortError);
-			expect(attempted()).toBe(1);
-		} finally {
-			vi.useRealTimers();
-		}
 	});
 });
 

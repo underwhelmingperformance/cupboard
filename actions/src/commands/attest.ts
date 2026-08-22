@@ -376,7 +376,7 @@ async function committedPathInfos(
 	inputs: AttestInputs,
 	dependencies: AttestDependencies
 ): Promise<readonly CommittedPathInfo[]> {
-	const fetcher = retryingFetcher(dependencies.fetch ?? fetch);
+	const fetcher = retryingFetcher(dependencies.fetch ?? fetch, 'replay-safe');
 	const base = canonicalHref(cacheUrlFor(inputs.url, inputs.cache));
 	const credential = readCredential(inputs);
 
