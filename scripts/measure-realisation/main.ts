@@ -4,6 +4,7 @@ import path from 'node:path';
 import { argv, exit, stdout } from 'node:process';
 import { pathToFileURL } from 'node:url';
 
+import { withCleanup } from '@cupboard/shared/cleanup';
 import { CodedError, genericExitCode } from '@cupboard/shared/errors';
 import { Command } from 'commander';
 
@@ -104,26 +105,29 @@ export async function main(
 		options.workDir ?? (await mkdtemp(workDirectoryPrefix))
 	);
 
-	try {
-		const report = await measureRealisation({
-			flake: options.flake,
-			substituters,
-			targets,
-			planner: createDivertedStorePlanner({
+	await withCleanup(
+		async () => {
+			const report = await measureRealisation({
 				flake: options.flake,
-				storeDirectory: discoverNixStoreConfig().storeDirectory,
-				directory,
-				substituters
-			})
-		});
+				substituters,
+				targets,
+				planner: createDivertedStorePlanner({
+					flake: options.flake,
+					storeDirectory: discoverNixStoreConfig().storeDirectory,
+					directory,
+					substituters
+				})
+			});
 
-		await emit(report, options.reportFile);
-		await gate(report, options);
-	} finally {
-		if (!options.keepStore) {
-			await removeDivertedStore(directory);
+			await emit(report, options.reportFile);
+			await gate(report, options);
+		},
+		async () => {
+			if (!options.keepStore) {
+				await removeDivertedStore(directory);
+			}
 		}
-	}
+	);
 }
 
 async function emit(

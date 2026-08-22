@@ -24,6 +24,7 @@ import {
 	type ParsedBuildOriginPredicate
 } from '@cupboard/protocol/build-origin';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
+import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
 	basicAuthHeader,
@@ -402,7 +403,7 @@ async function fetchCommittedPathInfo(
 		},
 		async (response) => {
 			if (!response.ok) {
-				await response.body?.cancel();
+				await discardResponseBody(response);
 				throw new CommittedSubjectUnavailableError(storePath, response.status);
 			}
 

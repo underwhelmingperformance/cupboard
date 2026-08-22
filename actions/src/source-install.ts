@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import { access, constants, mkdir, mkdtemp, rm, stat } from 'node:fs/promises';
 import path from 'node:path';
 
+import { bestEffort } from '@cupboard/shared/cleanup';
 import { CodedError } from '@cupboard/shared/errors';
 
 import {
@@ -291,7 +292,6 @@ export async function acquireSourceCupboard(
 	await assertCheckout(resolvedOptions, runCommand);
 
 	const rootDirectory = await createRoot(installDirectory);
-	let isAcquired = false;
 
 	try {
 		const buildResult = await runCommand(
@@ -343,12 +343,9 @@ export async function acquireSourceCupboard(
 			);
 		}
 
-		isAcquired = true;
-
 		return { binaryPath, cupboard: options.cupboard };
-	} finally {
-		if (!isAcquired) {
-			await removeRoot(rootDirectory);
-		}
+	} catch (error) {
+		await bestEffort(() => removeRoot(rootDirectory));
+		throw error;
 	}
 }

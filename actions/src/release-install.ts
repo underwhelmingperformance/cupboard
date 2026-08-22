@@ -25,6 +25,11 @@ import process, { arch, platform } from 'node:process';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import type { Reporter } from '@cupboard/reporter';
+import {
+	bestEffort,
+	discardResponseBody,
+	withCleanup
+} from '@cupboard/shared/cleanup';
 import { createOctokitClient } from '@cupboard/shared/octokit';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import {
@@ -473,86 +478,87 @@ export async function installCupboard(
 	const archivePath = path.join(downloadDirectory, assetName);
 	const checksumsPath = path.join(downloadDirectory, 'checksums.txt');
 
-	try {
-		const downloaded = await reporter.phase(
-			`Download ${assetName}`,
-			async () => {
-				const downloadDependencies = {
-					githubApiOrigin: githubApiOrigin(options.environment),
-					...(dependencies.fetch !== undefined && {
-						fetch: dependencies.fetch
-					}),
-					...(options.signal !== undefined && { signal: options.signal })
-				};
+	return withCleanup(
+		async () => {
+			const downloaded = await reporter.phase(
+				`Download ${assetName}`,
+				async () => {
+					const downloadDependencies = {
+						githubApiOrigin: githubApiOrigin(options.environment),
+						...(dependencies.fetch !== undefined && {
+							fetch: dependencies.fetch
+						}),
+						...(options.signal !== undefined && { signal: options.signal })
+					};
 
-				const archive = await downloadAsset(
-					asset,
-					archivePath,
-					options.githubToken,
-					downloadDependencies
-				);
-				await downloadAsset(
-					checksumAsset,
-					checksumsPath,
-					options.githubToken,
-					downloadDependencies
-				);
+					const archive = await downloadAsset(
+						asset,
+						archivePath,
+						options.githubToken,
+						downloadDependencies
+					);
+					await downloadAsset(
+						checksumAsset,
+						checksumsPath,
+						options.githubToken,
+						downloadDependencies
+					);
 
-				return archive;
-			}
-		);
-
-		await reporter.phase('Checking archive checksum', async () => {
-			const checksums = parseChecksums(await readFile(checksumsPath, 'utf8'));
-			const expectedChecksum = checksums.get(assetName);
-
-			if (expectedChecksum === undefined) {
-				throw new MissingChecksumError(assetName);
-			}
-
-			verifyChecksum(assetName, downloaded.sha256, expectedChecksum);
-		});
-
-		const sourceCommit = await reporter.phase(
-			'Checking release attestation',
-			async (phase) => {
-				const builtFrom = await verifyReleaseAttestation(
-					options,
-					archivePath,
-					release.tagName,
-					{ subjectDigest: downloaded.sha256 }
-				);
-				assertExpectedSourceCommit(
-					release.tagName,
-					builtFrom,
-					expectedSourceCommit
-				);
-				phase.fact('Built from', builtFrom);
-
-				return builtFrom;
-			}
-		);
-
-		await reporter.phase('Installing cupboard binary', () =>
-			publishReleaseArchive(
-				archivePath,
-				options.installDirectory,
-				release.tagName,
-				{
-					archiveSha256: downloaded.sha256,
-					...(options.signal !== undefined && { signal: options.signal })
+					return archive;
 				}
-			)
-		);
+			);
 
-		return {
-			binaryPath,
-			version: release.tagName,
-			sourceCommit
-		};
-	} finally {
-		await rm(downloadDirectory, { recursive: true, force: true });
-	}
+			await reporter.phase('Checking archive checksum', async () => {
+				const checksums = parseChecksums(await readFile(checksumsPath, 'utf8'));
+				const expectedChecksum = checksums.get(assetName);
+
+				if (expectedChecksum === undefined) {
+					throw new MissingChecksumError(assetName);
+				}
+
+				verifyChecksum(assetName, downloaded.sha256, expectedChecksum);
+			});
+
+			const sourceCommit = await reporter.phase(
+				'Checking release attestation',
+				async (phase) => {
+					const builtFrom = await verifyReleaseAttestation(
+						options,
+						archivePath,
+						release.tagName,
+						{ subjectDigest: downloaded.sha256 }
+					);
+					assertExpectedSourceCommit(
+						release.tagName,
+						builtFrom,
+						expectedSourceCommit
+					);
+					phase.fact('Built from', builtFrom);
+
+					return builtFrom;
+				}
+			);
+
+			await reporter.phase('Installing cupboard binary', () =>
+				publishReleaseArchive(
+					archivePath,
+					options.installDirectory,
+					release.tagName,
+					{
+						archiveSha256: downloaded.sha256,
+						...(options.signal !== undefined && { signal: options.signal })
+					}
+				)
+			);
+
+			return {
+				binaryPath,
+				version: release.tagName,
+				sourceCommit
+			};
+		},
+		() => rm(downloadDirectory, { recursive: true, force: true })
+	);
 }
 
 /**
@@ -590,78 +596,80 @@ export async function publishReleaseArchive(
 					dependencies.processPlatform ?? platform
 				))
 	);
-	try {
-		await releaseLock.assertOwned();
-		await cleanupOrphanReleaseReapers(paths);
-		await releaseLock.assertOwned();
-		await recoverReleaseInstallation(paths, move);
-		await releaseLock.assertOwned();
-		await cleanupIncompleteReleaseGenerations(paths);
-		await releaseLock.assertOwned();
-		await dependencies.publicationHook?.('locked');
+	return withCleanup(
+		async () => {
+			await releaseLock.assertOwned();
+			await cleanupOrphanReleaseReapers(paths);
+			await releaseLock.assertOwned();
+			await recoverReleaseInstallation(paths, move);
+			await releaseLock.assertOwned();
+			await cleanupIncompleteReleaseGenerations(paths);
+			await releaseLock.assertOwned();
+			await dependencies.publicationHook?.('locked');
 
-		const generationDirectory = path.join(
-			paths.generationsDirectory,
-			`sha256-${archiveSha256}`
-		);
-		const activeGeneration = await currentGenerationDirectory(paths);
-		const stagingDirectory = await prepareReleaseGenerationCandidate(
-			archivePath,
-			generationDirectory,
-			expectedVersion,
-			runCommand,
-			dependencies.signal
-		);
+			const generationDirectory = path.join(
+				paths.generationsDirectory,
+				`sha256-${archiveSha256}`
+			);
+			const activeGeneration = await currentGenerationDirectory(paths);
+			const stagingDirectory = await prepareReleaseGenerationCandidate(
+				archivePath,
+				generationDirectory,
+				expectedVersion,
+				runCommand,
+				dependencies.signal
+			);
 
-		try {
-			if (await isReleaseGenerationPresent(generationDirectory)) {
-				try {
-					await validateReleaseGenerationAgainstCandidate(
-						generationDirectory,
-						stagingDirectory,
-						dependencies.signal
-					);
-				} catch (error) {
-					if (
-						activeGeneration === path.resolve(generationDirectory) ||
-						(await wasReleaseGenerationActivated(generationDirectory))
-					) {
-						throw error;
+			await withCleanup(
+				async () => {
+					if (await isReleaseGenerationPresent(generationDirectory)) {
+						try {
+							await validateReleaseGenerationAgainstCandidate(
+								generationDirectory,
+								stagingDirectory,
+								dependencies.signal
+							);
+						} catch (error) {
+							if (
+								activeGeneration === path.resolve(generationDirectory) ||
+								(await wasReleaseGenerationActivated(generationDirectory))
+							) {
+								throw error;
+							}
+
+							await rm(generationDirectory, { recursive: true, force: true });
+						}
 					}
 
-					await rm(generationDirectory, { recursive: true, force: true });
-				}
-			}
+					if (!(await isReleaseGenerationPresent(generationDirectory))) {
+						dependencies.signal?.throwIfAborted();
+						await installReleaseGenerationCandidate(
+							stagingDirectory,
+							generationDirectory,
+							syncInstallationDirectory
+						);
+					}
 
-			if (!(await isReleaseGenerationPresent(generationDirectory))) {
-				dependencies.signal?.throwIfAborted();
-				await installReleaseGenerationCandidate(
-					stagingDirectory,
-					generationDirectory,
-					syncInstallationDirectory
-				);
-			}
+					if (activeGeneration === path.resolve(generationDirectory)) {
+						await ensureReleaseEntryLinks(paths, move);
+						await syncInstallationDirectory(paths.installDirectory);
+						return;
+					}
 
-			if (activeGeneration === path.resolve(generationDirectory)) {
-				await ensureReleaseEntryLinks(paths, move);
-				await syncInstallationDirectory(paths.installDirectory);
-				return;
-			}
-
-			await publishReleaseGeneration(
-				paths,
-				generationDirectory,
-				move,
-				dependencies,
-				syncInstallationDirectory,
-				releaseLock
+					await publishReleaseGeneration(
+						paths,
+						generationDirectory,
+						move,
+						dependencies,
+						syncInstallationDirectory,
+						releaseLock
+					);
+				},
+				() => rm(stagingDirectory, { recursive: true, force: true })
 			);
-		} finally {
-			await rm(stagingDirectory, { recursive: true, force: true });
-		}
-	} finally {
-		await releaseLock.release();
-	}
+		},
+		() => releaseLock.release()
+	);
 }
 
 const releaseStateDirectoryName = '.cupboard-releases';
@@ -829,7 +837,9 @@ async function prepareReleaseGenerationCandidate(
 
 		return stagingDirectory;
 	} catch (error) {
-		await rm(stagingDirectory, { recursive: true, force: true });
+		await bestEffort(() =>
+			rm(stagingDirectory, { recursive: true, force: true })
+		);
 		throw error;
 	}
 }
@@ -1786,7 +1796,7 @@ export async function downloadAsset(
 	});
 
 	if (!response.ok) {
-		await response.body?.cancel();
+		await discardResponseBody(response);
 		throw new GithubApiError(`failed to download ${asset.name}`, {
 			status: response.status
 		});
@@ -1801,7 +1811,7 @@ export async function downloadAsset(
 		Number.isFinite(declaredBytes) &&
 		declaredBytes > maximumBytes
 	) {
-		await response.body?.cancel();
+		await discardResponseBody(response);
 		throw new DownloadAssetTooLargeError(
 			asset.name,
 			maximumBytes,
@@ -1821,7 +1831,7 @@ export async function downloadAsset(
 	let bytes = 0;
 	let downloadError: unknown;
 	const abort = (): void => {
-		void reader.cancel(dependencies.signal?.reason);
+		void bestEffort(() => reader.cancel(dependencies.signal?.reason));
 	};
 	dependencies.signal?.addEventListener('abort', abort, { once: true });
 
@@ -1837,7 +1847,7 @@ export async function downloadAsset(
 
 			bytes += chunk.value.byteLength;
 			if (bytes > maximumBytes) {
-				await reader.cancel();
+				await bestEffort(() => reader.cancel());
 				throw new DownloadAssetTooLargeError(asset.name, maximumBytes, bytes);
 			}
 
@@ -2174,7 +2184,7 @@ async function readBoundedAttestationBundle(
 		Number.isFinite(declaredBytes) &&
 		declaredBytes > maximumBytes
 	) {
-		await response.body?.cancel();
+		await discardResponseBody(response);
 		throw new ReleaseAttestationBundleTooLargeError(
 			maximumBytes,
 			declaredBytes
@@ -2190,7 +2200,7 @@ async function readBoundedAttestationBundle(
 	const chunks: Uint8Array[] = [];
 	let byteLength = 0;
 	const abort = (): void => {
-		void reader.cancel(signal?.reason);
+		void bestEffort(() => reader.cancel(signal?.reason));
 	};
 	signal?.addEventListener('abort', abort, { once: true });
 
@@ -2206,7 +2216,7 @@ async function readBoundedAttestationBundle(
 
 			byteLength += chunk.value.byteLength;
 			if (byteLength > maximumBytes) {
-				await reader.cancel();
+				await bestEffort(() => reader.cancel());
 				throw new ReleaseAttestationBundleTooLargeError(
 					maximumBytes,
 					byteLength
@@ -2332,7 +2342,7 @@ async function fetchAttestationBundle(
 	});
 
 	if (!response.ok) {
-		await response.body?.cancel();
+		await discardResponseBody(response);
 		throw new GithubApiError('failed to fetch release attestation bundle', {
 			status: response.status
 		});

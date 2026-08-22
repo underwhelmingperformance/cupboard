@@ -4,6 +4,7 @@ import {
 	uploadCapabilitiesHeader,
 	uploadGraceFactsCapability
 } from '@cupboard/protocol/upload';
+import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { StatusCodes } from 'http-status-codes';
 
 import {
@@ -131,7 +132,7 @@ export function pushClientFor(
 			const response = await (options.fetcher ?? fetch)(target, {
 				signal: options.signal
 			});
-			await response.body?.cancel();
+			await discardResponseBody(response);
 
 			return response.status !== notFoundStatus;
 		},

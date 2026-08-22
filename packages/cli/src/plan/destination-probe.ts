@@ -12,6 +12,7 @@ import {
 	cacheAvailabilityResponseSchema,
 	reuseViewAvailabilityMaxPaths
 } from '@cupboard/protocol/cache-availability';
+import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
@@ -220,13 +221,13 @@ async function hasAttestation(
 	const response = await fetcher(target, { headers });
 
 	if (response.status === notFoundStatus) {
-		await response.body?.cancel();
+		await discardResponseBody(response);
 
 		return false;
 	}
 
 	if (!response.ok) {
-		await response.body?.cancel();
+		await discardResponseBody(response);
 		throw new DestinationProbeResponseError(target, response.status);
 	}
 
@@ -271,7 +272,7 @@ async function queryMissingStorePathHashes(
 	});
 
 	if (!response.ok) {
-		await response.body?.cancel();
+		await discardResponseBody(response);
 		throw new DestinationProbeResponseError(target, response.status);
 	}
 

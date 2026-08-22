@@ -18,6 +18,8 @@
 		"vitest": "^4.1.8"
 	},
 	"exports": {
+		"./child-process": "./src/child-process.ts",
+		"./cleanup": "./src/cleanup.ts",
 		"./collections": "./src/collections.ts",
 		"./concurrency": "./src/concurrency.ts",
 		"./errors": "./src/errors.ts",
