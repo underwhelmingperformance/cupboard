@@ -21,4 +21,11 @@ describe('chunk', () => {
 	it('returns no chunks for an empty input', () => {
 		expect(chunk([], 3)).toStrictEqual([]);
 	});
+
+	it.each([0, -1, 1.5, NaN, Infinity])(
+		'refuses an invalid size of %s',
+		(size) => {
+			expect(() => chunk(['a'], size)).toThrow(RangeError);
+		}
+	);
 });

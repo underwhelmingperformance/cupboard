@@ -830,6 +830,15 @@ describe('NixDaemonStoreClient copy observation', () => {
 });
 
 describe('NixDaemonStoreClient', () => {
+	it.each([0, -1, 1.5, NaN, Infinity])(
+		'refuses an invalid connection limit of %s',
+		(maxConnections) => {
+			expect(() => new NixDaemonStoreClient({ maxConnections })).toThrow(
+				RangeError
+			);
+		}
+	);
+
 	it('closes an in-flight connection and rejects with the abort reason', async () => {
 		const controller = new AbortController();
 		const reason = new Error('stop querying the daemon');
