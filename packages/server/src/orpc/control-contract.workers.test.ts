@@ -118,6 +118,29 @@ describe('control contract round trip', () => {
 		});
 	});
 
+	it('replaces a legacy-normalised control issuer through exact add and remove operations', async () => {
+		const client = controlClient(await issueControlAdminToken());
+		const body = {
+			issuer: 'https://idp.example.test',
+			audience: 'cupboard-control',
+			claims: { sub: 'automation' },
+			permittedGrants: [{ type: 'cupboard_wildcard' as const }]
+		};
+		const legacy = await client.oidcTrust.add(body);
+		const exact = await client.oidcTrust.add({
+			...body,
+			issuer: `${body.issuer}/`
+		});
+		const removed = await client.oidcTrust.remove({ id: legacy.id });
+		const repeated = await client.oidcTrust.remove({ id: legacy.id });
+
+		expect({ exactIssuer: exact.issuer, removed, repeated }).toStrictEqual({
+			exactIssuer: `${body.issuer}/`,
+			removed: { id: legacy.id, removed: true },
+			repeated: { id: legacy.id, removed: false }
+		});
+	});
+
 	it('rejects a control trust write from a token without its scope', async () => {
 		const scoped = await issueControlAdminToken('writer', cacheWriteGrants());
 		const client = controlClient(scoped);

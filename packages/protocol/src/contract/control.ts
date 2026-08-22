@@ -13,7 +13,7 @@ import {
 	instanceSummarySchema
 } from '../instance.ts';
 import {
-	oidcTrustAddBodySchema,
+	controlOidcTrustAddBodySchema,
 	oidcTrustListResponseSchema,
 	oidcTrustRemoveResponseSchema,
 	oidcTrustSummarySchema,
@@ -185,7 +185,7 @@ export const controlContract = {
 		add: controlProcedure
 			.meta({ requires: 'control-oidc-trust:add' })
 			.route({ method: 'POST', path: '/oidc-trust' })
-			.input(oidcTrustAddBodySchema)
+			.input(controlOidcTrustAddBodySchema)
 			.output(oidcTrustSummarySchema),
 
 		remove: controlProcedure

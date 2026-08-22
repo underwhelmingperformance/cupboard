@@ -111,7 +111,7 @@ describe('discoverOidcLogin', () => {
 		const discovered = await discoverOidcLogin('https://idp.example.com/', () =>
 			Promise.resolve(
 				Response.json({
-					issuer: 'https://idp.example.com',
+					issuer: 'https://idp.example.com/',
 					authorization_endpoint: endpoints.authorizationEndpoint,
 					token_endpoint: endpoints.tokenEndpoint,
 					device_authorization_endpoint: endpoints.deviceAuthorizationEndpoint
@@ -133,7 +133,7 @@ describe('discoverOidcLogin', () => {
 
 				return Promise.resolve(
 					Response.json({
-						issuer: 'https://idp.example.com',
+						issuer: 'https://idp.example.com/',
 						authorization_endpoint: endpoints.authorizationEndpoint,
 						token_endpoint: endpoints.tokenEndpoint
 					})

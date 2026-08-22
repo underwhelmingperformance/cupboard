@@ -211,6 +211,34 @@ describe('oidc-trust admin API', () => {
 		});
 	});
 
+	it('replaces a legacy-normalised ordinary issuer through exact add and remove operations', async () => {
+		const token = await adminToken();
+		const legacyResponse = await addRule(token, additionBody);
+		const legacy = oidcTrustSummarySchema.parse(await legacyResponse.json());
+		const exactBody: OidcTrustAddBody = {
+			...additionBody,
+			issuer: `${additionBody.issuer}/`
+		};
+		const exactResponse = await addRule(token, exactBody);
+		const exact = oidcTrustSummarySchema.parse(await exactResponse.json());
+		const removed = await authorisedFetch(`/oidc-trust/${legacy.id}`, token, {
+			method: 'DELETE'
+		});
+		const repeated = await authorisedFetch(`/oidc-trust/${legacy.id}`, token, {
+			method: 'DELETE'
+		});
+
+		expect({
+			exactIssuer: exact.issuer,
+			removed: oidcTrustRemoveResponseSchema.parse(await removed.json()),
+			repeated: oidcTrustRemoveResponseSchema.parse(await repeated.json())
+		}).toStrictEqual({
+			exactIssuer: exactBody.issuer,
+			removed: { id: legacy.id, removed: true },
+			repeated: { id: legacy.id, removed: false }
+		});
+	});
+
 	it('reports an unknown rule as not removed', async () => {
 		const token = await adminToken();
 

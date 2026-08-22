@@ -331,7 +331,10 @@ async function installTrustedIdp(
 			return Promise.resolve(
 				Response.json({
 					issuer: 'https://idp.test',
-					jwks_uri: 'https://idp.test/jwks'
+					jwks_uri: 'https://idp.test/jwks',
+					response_types_supported: ['id_token'],
+					subject_types_supported: ['public'],
+					id_token_signing_alg_values_supported: ['RS256']
 				})
 			);
 		}
@@ -1146,7 +1149,10 @@ async function installGithubBranchRule(): Promise<{
 			return Promise.resolve(
 				Response.json({
 					issuer: githubIssuer,
-					jwks_uri: `${githubIssuer}/jwks`
+					jwks_uri: `${githubIssuer}/jwks`,
+					response_types_supported: ['id_token'],
+					subject_types_supported: ['public'],
+					id_token_signing_alg_values_supported: ['RS256']
 				})
 			);
 		}

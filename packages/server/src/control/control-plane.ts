@@ -221,12 +221,23 @@ export async function controlTokenExchange(
 		throw new ControlSubjectTokenUntrustedError();
 	}
 
-	const verified = await verifyControlInbound(rule, body.subject_token);
-	const subject = oidcSubjectSchema.parse(
+	const verified = await verifyControlInbound(
+		rule,
+		body.subject_token,
+		body.subject_token_type === subjectTokenTypeIdToken
+	);
+	const requiresIdTokenClaims =
+		body.subject_token_type === subjectTokenTypeIdToken;
+	const verifiedSubject =
 		typeof verified.sub === 'string' && verified.sub !== ''
 			? verified.sub
-			: rule.id
-	);
+			: undefined;
+
+	if (requiresIdTokenClaims && verifiedSubject === undefined) {
+		throw new SubjectTokenVerificationFailedError();
+	}
+
+	const subject = oidcSubjectSchema.parse(verifiedSubject ?? rule.id);
 
 	await ensureControlKey(database, wrappingSecret, isoTimestamp(now));
 	const active = await activeControlKey(database, wrappingSecret);
@@ -285,7 +296,8 @@ async function verifyControlSelfIssued(
 
 async function verifyControlInbound(
 	rule: OidcTrustRule,
-	token: string
+	token: string,
+	requiresIdTokenClaims: boolean
 ): Promise<JWTPayload> {
 	// Reaching the issuer is an upstream condition, not a bad token, so a discovery
 	// or JWKS-fetch failure is a retryable 503.
@@ -303,7 +315,8 @@ async function verifyControlInbound(
 			{
 				issuer: rule.issuer,
 				audience: rule.audience,
-				algorithms: issuer.algorithms
+				algorithms: issuer.algorithms,
+				requireIdTokenClaims: requiresIdTokenClaims
 			},
 			new Date()
 		);

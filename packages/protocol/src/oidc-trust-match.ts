@@ -33,9 +33,8 @@ export interface OidcClaims {
 	readonly [claim: string]: unknown;
 }
 
-// The rule's issuer is normalised at ingress; the token's `iss` is normalised
-// the same way before comparison, so a trailing slash on either side does not
-// stop a genuine match. A non-URL `iss` normalises to nothing and never matches.
+// Issuer identifiers use the exact, case-sensitive value configured at ingress.
+// A malformed `iss` fails validation and never matches.
 function hasMatchingIssuer(rule: OidcTrustRule, claims: OidcClaims): boolean {
 	return (
 		typeof claims.iss === 'string' &&
@@ -82,18 +81,20 @@ function interactiveRank(rule: OidcTrustRule): number {
 }
 
 /**
- * Selects a candidate trust rule from decoded OIDC claims. The caller must then
- * verify the token's signature, issuer, audience and expiry against that rule
- * before using it. A matching rule that permits a wildcard grant takes
- * precedence over claim-bound rules. The remaining order is the number of
- * configured claims followed by the rule id, so selection does not depend on
- * the order of the input rows.
+ * The trust rule whose issuer, audience and configured claims all match the
+ * verified token, or `undefined` when none does. Selection prefers the
+ * interactive owner rule (so the owner is never downgraded), then the most
+ * specific rule. Selection rejects two matches with the same rank and
+ * specificity because a generated rule ID cannot decide which authority the
+ * token receives. Matching never substitutes for verification: the caller must
+ * already have checked the token's signature, issuer, audience and expiry with
+ * `jose`.
  */
 export function matchOidcTrust(
 	rules: readonly OidcTrustRule[],
 	claims: OidcClaims
 ): OidcTrustRule | undefined {
-	return rules
+	const matches = rules
 		.filter(
 			(rule) =>
 				hasMatchingIssuer(rule, claims) &&
@@ -103,10 +104,21 @@ export function matchOidcTrust(
 		.toSorted(
 			(left, right) =>
 				interactiveRank(right) - interactiveRank(left) ||
-				specificity(right) - specificity(left) ||
-				left.id.localeCompare(right.id)
-		)
-		.at(0);
+				specificity(right) - specificity(left)
+		);
+	const selected = matches[0];
+	const competing = matches[1];
+
+	if (
+		selected !== undefined &&
+		competing !== undefined &&
+		interactiveRank(selected) === interactiveRank(competing) &&
+		specificity(selected) === specificity(competing)
+	) {
+		return undefined;
+	}
+
+	return selected;
 }
 
 export interface ClaimMismatch {

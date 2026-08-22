@@ -143,7 +143,12 @@ async function verifySignupToken(
 		return await verifyInboundOidcToken(
 			resolved.resolver,
 			token,
-			{ issuer, audience, algorithms: resolved.algorithms },
+			{
+				issuer,
+				audience,
+				algorithms: resolved.algorithms,
+				requireIdTokenClaims: true
+			},
 			new Date()
 		);
 	} catch (error) {
