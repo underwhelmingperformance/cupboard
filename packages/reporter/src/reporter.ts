@@ -7,6 +7,14 @@ import { z } from 'zod';
 
 const reportedErrors = new WeakSet<object>();
 
+class ThrownValueError extends Error {}
+
+function reportableError(error: unknown): Error {
+	return error instanceof Error
+		? error
+		: new ThrownValueError(formatErrorWithCauses(error));
+}
+
 /**
  * Records an error object's identity globally so another reporter can suppress
  * a duplicate diagnostic. Primitive thrown values cannot be tracked.
@@ -528,7 +536,11 @@ function buildGithubReporter(
 	now: () => number,
 	recordResult: (payload: ResultPayload) => void
 ): Reporter {
-	const commands = workflowCommands({ stdout: out, stderr: out });
+	const commands = workflowCommands({
+		stdout: out,
+		stderr: out,
+		rendering: 'workflow'
+	});
 	const line = (text: string): void => {
 		out.write(`${text}\n`);
 	};
@@ -558,15 +570,19 @@ function buildGithubReporter(
 			}
 		};
 	};
-	const emitError = (error: unknown): void => {
-		if (wasErrorReported(error)) {
-			return;
+	const emitError = (error: unknown): Error => {
+		const reportedError = reportableError(error);
+
+		if (wasErrorReported(reportedError)) {
+			return reportedError;
 		}
 
-		// With `GITHUB_ACTIONS=true`, the command emitter escapes newlines so the
-		// complete cause chain remains in one annotation.
-		commands.error(formatErrorWithCauses(error));
-		markErrorReported(error);
+		// commands.error escapes newlines, so the multi-line text stays one
+		// annotation.
+		commands.error(formatErrorWithCauses(reportedError));
+		markErrorReported(reportedError);
+
+		return reportedError;
 	};
 
 	return {
@@ -589,10 +605,10 @@ function buildGithubReporter(
 				return value;
 			} catch (error) {
 				emitFacts(facts);
-				emitError(error);
+				const reportedError = emitError(error);
 				commands.endGroup();
 
-				throw error;
+				throw reportedError;
 			}
 		},
 
@@ -636,10 +652,10 @@ function buildGithubReporter(
 				return value;
 			} catch (error) {
 				emitFacts(facts);
-				emitError(error);
+				const reportedError = emitError(error);
 				commands.endGroup();
 
-				throw error;
+				throw reportedError;
 			}
 		},
 
@@ -659,10 +675,10 @@ function buildGithubReporter(
 
 				return value;
 			} catch (error) {
-				emitError(error);
+				const reportedError = emitError(error);
 				commands.endGroup();
 
-				throw error;
+				throw reportedError;
 			}
 		},
 

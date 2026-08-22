@@ -19,6 +19,7 @@ export interface WorkflowCommandStreams {
 	readonly stdout?: CommandStream;
 	readonly stderr?: CommandStream;
 	readonly environment?: Readonly<Record<string, string | undefined>>;
+	readonly rendering?: 'auto' | 'workflow' | 'plain';
 }
 
 export interface WorkflowCommands {
@@ -45,9 +46,10 @@ function escapeData(message: string): string {
 }
 
 /**
- * Writes GitHub workflow-command syntax to `stdout` when the process runs under
- * GitHub Actions. Elsewhere it writes plain messages, using `stderr` for
- * errors.
+ * Builds the workflow-command emitters over the given streams. `workflow` and
+ * `plain` select their respective rendering explicitly. `auto` uses workflow
+ * syntax under GitHub Actions and plain messages elsewhere. Plain errors go to
+ * stderr; all other output goes to stdout.
  */
 export function workflowCommands(
 	streams: WorkflowCommandStreams = {}
@@ -55,9 +57,12 @@ export function workflowCommands(
 	const out = streams.stdout ?? process.stdout;
 	const errorOut = streams.stderr ?? process.stderr;
 	const environment = streams.environment;
+	const isWorkflowSyntax =
+		streams.rendering === 'workflow' ||
+		(streams.rendering !== 'plain' && isGithubActions(environment));
 
 	const annotate = (level: AnnotationLevel, message: string): void => {
-		if (isGithubActions(environment)) {
+		if (isWorkflowSyntax) {
 			out.write(`::${level}::${escapeData(message)}\n`);
 			return;
 		}
@@ -80,7 +85,7 @@ export function workflowCommands(
 			annotate('error', message);
 		},
 		group: (title) => {
-			if (isGithubActions(environment)) {
+			if (isWorkflowSyntax) {
 				out.write(`::group::${escapeData(title)}\n`);
 				return;
 			}
@@ -88,7 +93,7 @@ export function workflowCommands(
 			out.write(`${title}\n`);
 		},
 		endGroup: () => {
-			if (isGithubActions(environment)) {
+			if (isWorkflowSyntax) {
 				out.write('::endgroup::\n');
 			}
 		}
