@@ -5,7 +5,8 @@ import { z } from 'zod';
 import {
 	oidcAudienceSchema,
 	oidcIssuerSchema,
-	oidcSubjectSchema
+	oidcSubjectSchema,
+	oidcTrustIssuerInputSchema
 } from './oidc.ts';
 import { isoTimestampSchema } from './scalars.ts';
 
@@ -50,7 +51,7 @@ export type ParsedTenantReadCredential = z.output<
 export const tenantCreateBodySchema = z.strictObject({
 	id: tenantIdSchema,
 	readMode: tenantReadModeSchema,
-	ownerIssuer: z.string().min(1).brand('OidcIssuer'),
+	ownerIssuer: oidcTrustIssuerInputSchema,
 	ownerSubject: z.string().min(1).brand('OidcSubject'),
 	ownerAudience: z.string().min(1).brand('OidcAudience'),
 	read: tenantReadCredentialSchema.optional(),

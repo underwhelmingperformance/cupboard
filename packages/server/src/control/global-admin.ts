@@ -1,5 +1,7 @@
+import { trustRuleIdSchema } from '@cupboard/protocol/oidc';
+import { legacyNormalisedIssuer } from '@cupboard/protocol/oidc-issuer';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, exists, inArray, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
@@ -13,7 +15,7 @@ const singletonId = 'singleton';
 
 // The fixed id of the control trust rule the bootstrap seeds, so a re-claim by the
 // same principal does not insert a duplicate.
-const bootstrapTrustId = 'signup';
+const bootstrapTrustId = trustRuleIdSchema.parse('signup');
 
 export interface ClaimPrincipal {
 	readonly issuer: string;
@@ -23,6 +25,42 @@ export interface ClaimPrincipal {
 
 export interface ClaimOutcome {
 	readonly claimed: boolean;
+}
+
+async function repairMissingAudience(
+	database: Database,
+	principal: ClaimPrincipal,
+	claimsJson: string,
+	legacyIssuer: string | undefined
+): Promise<void> {
+	const issuers =
+		legacyIssuer === undefined
+			? [principal.issuer]
+			: [principal.issuer, legacyIssuer];
+	const bootstrapRuleFilter = and(
+		eq(d1Schema.controlTrust.id, bootstrapTrustId),
+		eq(d1Schema.controlTrust.issuer, d1Schema.globalAdmin.issuer),
+		eq(d1Schema.controlTrust.audience, principal.audience),
+		eq(d1Schema.controlTrust.claimsJson, claimsJson)
+	);
+	const bootstrapRule = database
+		.select({ one: sql`1` })
+		.from(d1Schema.controlTrust)
+		.where(bootstrapRuleFilter);
+	const matchingBootstrapRule = exists(bootstrapRule);
+
+	await database
+		.update(d1Schema.globalAdmin)
+		.set({ audience: principal.audience })
+		.where(
+			and(
+				eq(d1Schema.globalAdmin.id, singletonId),
+				eq(d1Schema.globalAdmin.subject, principal.subject),
+				inArray(d1Schema.globalAdmin.issuer, issuers),
+				eq(d1Schema.globalAdmin.audience, ''),
+				matchingBootstrapRule
+			)
+		);
 }
 
 // Claim the administrator and seed its control trust rule in one D1 batch. A
@@ -59,13 +97,45 @@ export async function claimGlobalAdmin(
 	const bootstrapTrustWhere = and(
 		eq(d1Schema.globalAdmin.id, singletonId),
 		eq(d1Schema.globalAdmin.issuer, principal.issuer),
-		eq(d1Schema.globalAdmin.subject, principal.subject)
+		eq(d1Schema.globalAdmin.subject, principal.subject),
+		eq(d1Schema.globalAdmin.audience, principal.audience)
 	);
 
 	const bootstrapTrustSelect = database
 		.select(bootstrapTrustColumns)
 		.from(d1Schema.globalAdmin)
 		.where(bootstrapTrustWhere);
+	const legacyIssuer = legacyNormalisedIssuer(principal.issuer);
+
+	await repairMissingAudience(database, principal, claimsJson, legacyIssuer);
+
+	if (legacyIssuer !== undefined) {
+		// A successful claim proves the exact issuer, subject and audience. Repair
+		// only the value that the older trailing-slash normalisation produced. Token
+		// verification never treats the two issuer values as equivalent.
+		const adminRepairWhere = and(
+			eq(d1Schema.globalAdmin.id, singletonId),
+			eq(d1Schema.globalAdmin.issuer, legacyIssuer),
+			eq(d1Schema.globalAdmin.subject, principal.subject),
+			eq(d1Schema.globalAdmin.audience, principal.audience)
+		);
+		const trustRepairWhere = and(
+			eq(d1Schema.controlTrust.id, bootstrapTrustId),
+			eq(d1Schema.controlTrust.issuer, legacyIssuer),
+			eq(d1Schema.controlTrust.audience, principal.audience),
+			eq(d1Schema.controlTrust.claimsJson, claimsJson)
+		);
+		const repairAdmin = database
+			.update(d1Schema.globalAdmin)
+			.set({ issuer: principal.issuer })
+			.where(adminRepairWhere);
+		const repairTrust = database
+			.update(d1Schema.controlTrust)
+			.set({ issuer: principal.issuer })
+			.where(trustRepairWhere);
+
+		await database.batch([repairAdmin, repairTrust]);
+	}
 
 	await database.batch([
 		database
@@ -74,6 +144,7 @@ export async function claimGlobalAdmin(
 				id: singletonId,
 				issuer: principal.issuer,
 				subject: principal.subject,
+				audience: principal.audience,
 				claimedAt: now
 			})
 			.onConflictDoNothing(),
@@ -95,7 +166,8 @@ export async function claimGlobalAdmin(
 
 	if (
 		admin.issuer !== principal.issuer ||
-		admin.subject !== principal.subject
+		admin.subject !== principal.subject ||
+		admin.audience !== principal.audience
 	) {
 		throw new GlobalAdminAlreadyClaimedError();
 	}

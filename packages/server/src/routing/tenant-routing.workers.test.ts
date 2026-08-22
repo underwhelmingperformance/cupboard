@@ -141,7 +141,7 @@ describe('tenant routing', () => {
 		});
 	});
 
-	it('stops reads once the tenant manifest records suspension', async () => {
+	it('stops reads as soon as the authoritative tenant row is suspended', async () => {
 		const active = await handlerFetch(
 			`/t/${fixtureTenant}/.well-known/jwks.json`
 		);

@@ -1912,9 +1912,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.initialise();
 
 		await this.metered('configure', async () => {
-			if (this.tenantIdentity.configure(identity)) {
-				this.oidcTrust.seedOwnerRule();
-			}
+			this.context.db.transaction((transaction) => {
+				if (this.tenantIdentity.configure(identity, transaction)) {
+					this.oidcTrust.seedOwnerRule(transaction);
+				}
+			});
 
 			await this.reconcileMaintenanceEligibility();
 		});

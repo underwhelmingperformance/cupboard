@@ -262,10 +262,10 @@ export async function resetTestServer(): Promise<void> {
 }
 
 /**
- * Writes the fixture tenant's registry, usage, membership, and filter state so
- * Worker-routed requests can reach it. `readMode` controls whether reads are
- * public; `read` supplies the verifier for a private tenant. Repeated calls can
- * change the fixture's read mode without resetting its usage counters.
+ * Writes the fixture tenant's authoritative D1 row and refreshes the negative
+ * membership hints. `readMode` selects public or private reads; `read` supplies
+ * the verifier for a private tenant. Repeated calls can change the mode without
+ * resetting usage counters.
  */
 export async function provisionFixtureTenant(
 	options: {
@@ -408,9 +408,9 @@ export async function provisionNamedTenant(
 }
 
 /**
- * Marks a provisioned tenant suspended, the way the control plane does: it updates
- * the authoritative D1 status (which the write gate reads) and invalidates the
- * cached row, so a read reflects the new status without waiting on the row TTL.
+ * Marks a provisioned tenant suspended, as the control plane does. Every
+ * admission reads the updated D1 status. The invalidation call remains as a
+ * deployment-compatibility boundary and is a no-op in current code.
  */
 export async function suspendTenant(id: string): Promise<void> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -424,9 +424,10 @@ export async function suspendTenant(id: string): Promise<void> {
 }
 
 /**
- * Begins offboarding a provisioned tenant the way the control plane does: it updates
- * the authoritative D1 status, invalidates the cached row, and tells the Durable
- * Object to stop re-materialising its objects, so the cron's offboard drain can run.
+ * Begins offboarding a provisioned tenant, as the control plane does. It updates
+ * the authoritative D1 status and tells the Durable Object to stop
+ * re-materialising its objects, so the cron can drain them. The invalidation
+ * call is a no-op retained for deployments with the old row cache.
  */
 export async function offboardTenant(id: string): Promise<void> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });

@@ -1,6 +1,33 @@
 import { describe, expect, it } from 'vitest';
 
-import { tenantReadCredentialSchema } from './tenants.ts';
+import {
+	tenantCreateBodySchema,
+	tenantReadCredentialSchema
+} from './tenants.ts';
+
+describe('tenantCreateBodySchema', () => {
+	it.each([
+		'not-an-issuer',
+		'https://alice@idp.example.test',
+		'https://alice:secret@idp.example.test',
+		'https://idp.example.test?tenant=acme',
+		'https://idp.example.test#issuer',
+		'https://idp.example.test?',
+		'https://idp.example.test#',
+		'https://@idp.example.test',
+		'https://:@idp.example.test'
+	])('rejects an invalid owner issuer: %s', (ownerIssuer) => {
+		const body = {
+			id: 'acme',
+			readMode: 'public',
+			ownerIssuer,
+			ownerSubject: 'owner',
+			ownerAudience: 'cupboard'
+		};
+
+		expect(tenantCreateBodySchema.safeParse(body).success).toBe(false);
+	});
+});
 
 describe('tenantReadCredentialSchema', () => {
 	it('accepts a netrc-safe opaque password', () => {

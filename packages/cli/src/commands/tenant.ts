@@ -252,7 +252,7 @@ export function registerTenantCommands(
 
 	tenant
 		.command('suspend')
-		.description('Suspend a tenant: new writes stop, reads stop after the TTL.')
+		.description('Suspend a tenant: new reads and writes stop immediately.')
 		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
 		.option('-y, --yes', 'suspend without the confirmation prompt')
@@ -437,7 +437,7 @@ export async function runTenantSuspend(
 ): Promise<void> {
 	const outcome = await ui.confirm({
 		message: `Suspend tenant ${id}?`,
-		detail: 'New writes stop at once; reads stop after the read TTL.'
+		detail: 'New reads and writes stop as soon as the suspension is recorded.'
 	});
 
 	if (outcome !== 'yes') {

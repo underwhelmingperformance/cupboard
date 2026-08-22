@@ -370,6 +370,20 @@ describe('runTenantSuspend / runTenantRemove', () => {
 		}
 	];
 
+	it('states that suspension takes effect on reads and writes immediately', async () => {
+		const { ui, captured } = fakeCliUi({ confirm: 'no' });
+
+		await runTenantSuspend(acmeTenant, ui, tenantClient({}));
+
+		expect(captured.confirms).toStrictEqual([
+			{
+				message: 'Suspend tenant acme?',
+				detail:
+					'New reads and writes stop as soon as the suspension is recorded.'
+			}
+		]);
+	});
+
 	it.each(cases)(
 		'$name reports the resulting status once confirmed',
 		async ({ run, method, status }) => {

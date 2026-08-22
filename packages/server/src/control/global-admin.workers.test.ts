@@ -1,3 +1,4 @@
+import { trustRuleIdSchema } from '@cupboard/protocol/oidc';
 import { isoTimestampSchema } from '@cupboard/protocol/scalars';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -21,13 +22,16 @@ function controlDatabase(): ReturnType<typeof drizzleD1<typeof d1Schema>> {
 async function adminAndTrust(
 	database: ReturnType<typeof controlDatabase>
 ): Promise<{
-	admin: undefined | { issuer: string; subject: string; claimedAt: string };
+	admin:
+		| undefined
+		| { issuer: string; subject: string; audience: string; claimedAt: string };
 	trust: { id: string; issuer: string; audience: string; claimsJson: string }[];
 }> {
 	const admin = await database
 		.select({
 			issuer: d1Schema.globalAdmin.issuer,
 			subject: d1Schema.globalAdmin.subject,
+			audience: d1Schema.globalAdmin.audience,
 			claimedAt: d1Schema.globalAdmin.claimedAt
 		})
 		.from(d1Schema.globalAdmin)
@@ -58,7 +62,7 @@ describe('claimGlobalAdmin', () => {
 
 		expect({ outcome, ...state }).toStrictEqual({
 			outcome: { claimed: true },
-			admin: { issuer, subject: 'owner', claimedAt: t0 },
+			admin: { issuer, subject: 'owner', audience, claimedAt: t0 },
 			trust: [
 				{
 					id: 'signup',
@@ -87,7 +91,102 @@ describe('claimGlobalAdmin', () => {
 
 		expect({ outcome, ...state }).toStrictEqual({
 			outcome: { claimed: false },
-			admin: { issuer, subject: 'owner', claimedAt: t0 },
+			admin: { issuer, subject: 'owner', audience, claimedAt: t0 },
+			trust: [
+				{
+					id: 'signup',
+					issuer,
+					audience,
+					claimsJson: JSON.stringify({ sub: 'owner' })
+				}
+			]
+		});
+	});
+
+	it('repairs an issuer whose trailing slash an older release removed', async () => {
+		const database = controlDatabase();
+		await database.batch([
+			database.insert(d1Schema.globalAdmin).values({
+				id: 'singleton',
+				issuer,
+				subject: 'owner',
+				audience,
+				claimedAt: t0
+			}),
+			database.insert(d1Schema.controlTrust).values({
+				id: trustRuleIdSchema.parse('signup'),
+				issuer,
+				audience,
+				claimsJson: JSON.stringify({ sub: 'owner' }),
+				permittedGrantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
+				createdAt: t0
+			})
+		]);
+		const exactIssuer = `${issuer}/`;
+
+		const repaired = await claimGlobalAdmin(
+			database,
+			{ issuer: exactIssuer, subject: 'owner', audience },
+			t1
+		);
+		const repeated = await claimGlobalAdmin(
+			database,
+			{ issuer: exactIssuer, subject: 'owner', audience },
+			t1
+		);
+
+		expect({
+			repaired,
+			repeated,
+			...(await adminAndTrust(database))
+		}).toStrictEqual({
+			repaired: { claimed: false },
+			repeated: { claimed: false },
+			admin: {
+				issuer: exactIssuer,
+				subject: 'owner',
+				audience,
+				claimedAt: t0
+			},
+			trust: [
+				{
+					id: 'signup',
+					issuer: exactIssuer,
+					audience,
+					claimsJson: JSON.stringify({ sub: 'owner' })
+				}
+			]
+		});
+	});
+
+	it('repairs an empty audience written by the preceding Worker', async () => {
+		const database = controlDatabase();
+		await database.batch([
+			database.insert(d1Schema.globalAdmin).values({
+				id: 'singleton',
+				issuer,
+				subject: 'owner',
+				claimedAt: t0
+			}),
+			database.insert(d1Schema.controlTrust).values({
+				id: trustRuleIdSchema.parse('signup'),
+				issuer,
+				audience,
+				claimsJson: JSON.stringify({ sub: 'owner' }),
+				permittedGrantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
+				createdAt: t0
+			})
+		]);
+
+		const outcome = await claimGlobalAdmin(
+			database,
+			{ issuer, subject: 'owner', audience },
+			t1
+		);
+
+		expect({ outcome, ...(await adminAndTrust(database)) }).toStrictEqual({
+			outcome: { claimed: false },
+			admin: { issuer, subject: 'owner', audience, claimedAt: t0 },
 			trust: [
 				{
 					id: 'signup',
@@ -136,7 +235,7 @@ describe('claimGlobalAdmin', () => {
 				status: StatusCodes.CONFLICT
 			},
 			state: {
-				admin: { issuer, subject: 'owner', claimedAt: t0 },
+				admin: { issuer, subject: 'owner', audience, claimedAt: t0 },
 				trust: [
 					{
 						id: 'signup',
@@ -147,5 +246,22 @@ describe('claimGlobalAdmin', () => {
 				]
 			}
 		});
+	});
+
+	it('refuses a changed signup audience for the same issuer and subject', async () => {
+		const database = controlDatabase();
+		await claimGlobalAdmin(
+			database,
+			{ issuer, subject: 'owner', audience },
+			t0
+		);
+
+		await expect(
+			claimGlobalAdmin(
+				database,
+				{ issuer, subject: 'owner', audience: 'another-client' },
+				t1
+			)
+		).rejects.toBeInstanceOf(GlobalAdminAlreadyClaimedError);
 	});
 });

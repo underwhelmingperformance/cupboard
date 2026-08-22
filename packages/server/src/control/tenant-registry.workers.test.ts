@@ -182,6 +182,77 @@ describe('tenant registry', () => {
 		expect(again.id).toBe(acme);
 	});
 
+	it('repairs a legacy-normalised owner issuer and makes the repair idempotent', async () => {
+		await ensureTenant(database(), createBody(acme), now);
+		const exactBody = tenantCreateBodySchema.parse({
+			...createBody(acme),
+			ownerIssuer: 'https://idp.test/'
+		});
+
+		const repaired = await ensureTenant(database(), exactBody, now);
+		const repeated = await ensureTenant(database(), exactBody, now);
+		const oldIdentity = await rejectedBy(() =>
+			ensureTenant(database(), createBody(acme), now)
+		);
+
+		expect({ repaired, repeated }).toStrictEqual({
+			repaired: {
+				id: acme,
+				status: 'active',
+				readMode: 'private',
+				ownerIssuer: 'https://idp.test/',
+				ownerSubject: 'owner',
+				ownerAudience: 'aud',
+				configVersion: 2,
+				createdAt: now
+			},
+			repeated: {
+				id: acme,
+				status: 'active',
+				readMode: 'private',
+				ownerIssuer: 'https://idp.test/',
+				ownerSubject: 'owner',
+				ownerAudience: 'aud',
+				configVersion: 2,
+				createdAt: now
+			}
+		});
+		expect(errorFields(oldIdentity)).toStrictEqual({
+			name: 'TenantAlreadyExistsError',
+			status: StatusCodes.CONFLICT,
+			id: acme
+		});
+	});
+
+	it('does not repair the owner issuer when another setting conflicts', async () => {
+		await ensureTenant(database(), quotaBody(acme, 1000), now);
+		const conflicting = tenantCreateBodySchema.parse({
+			...quotaBody(acme, 2000),
+			ownerIssuer: 'https://idp.test/'
+		});
+
+		const rejected = await rejectedBy(() =>
+			ensureTenant(database(), conflicting, now)
+		);
+		const stored = await database()
+			.select({
+				ownerIssuer: d1Schema.tenant.ownerIssuer,
+				configVersion: d1Schema.tenant.configVersion
+			})
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, acme))
+			.get();
+
+		expect({ error: errorFields(rejected), stored }).toStrictEqual({
+			error: {
+				name: 'TenantAlreadyExistsError',
+				status: StatusCodes.CONFLICT,
+				id: acme
+			},
+			stored: { ownerIssuer: 'https://idp.test', configVersion: 1 }
+		});
+	});
+
 	it('refuses a conflicting re-create of the same slug', async () => {
 		await ensureTenant(database(), createBody(acme, 'private'), now);
 

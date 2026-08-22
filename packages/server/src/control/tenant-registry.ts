@@ -4,6 +4,7 @@ import {
 	oidcIssuerSchema,
 	oidcSubjectSchema
 } from '@cupboard/protocol/oidc';
+import { legacyNormalisedIssuer } from '@cupboard/protocol/oidc-issuer';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import type {
 	ParsedTenantCreateBody,
@@ -73,7 +74,7 @@ function toSummary(row: TenantRow): ParsedTenantSummary {
 	};
 }
 
-async function hasSameConfig(
+async function hasSameConfigExceptIssuer(
 	row: TenantRow,
 	body: ParsedTenantCreateBody
 ): Promise<boolean> {
@@ -81,11 +82,43 @@ async function hasSameConfig(
 
 	return (
 		row.readMode === body.readMode &&
-		row.ownerIssuer === body.ownerIssuer &&
 		row.ownerSubject === body.ownerSubject &&
 		row.ownerAudience === body.ownerAudience &&
 		isReadMatching
 	);
+}
+
+async function repairLegacyOwnerIssuer(
+	database: Database,
+	row: TenantRow,
+	body: ParsedTenantCreateBody
+): Promise<TenantRow | undefined> {
+	const legacyIssuer = legacyNormalisedIssuer(body.ownerIssuer);
+
+	if (
+		legacyIssuer === undefined ||
+		row.ownerIssuer !== legacyIssuer ||
+		!(await hasSameConfigExceptIssuer(row, body))
+	) {
+		return undefined;
+	}
+
+	const repaired = await database
+		.update(d1Schema.tenant)
+		.set({
+			ownerIssuer: body.ownerIssuer,
+			configVersion: sql`${d1Schema.tenant.configVersion} + 1`
+		})
+		.where(
+			and(
+				eq(d1Schema.tenant.id, row.id),
+				eq(d1Schema.tenant.ownerIssuer, legacyIssuer),
+				eq(d1Schema.tenant.configVersion, row.configVersion)
+			)
+		)
+		.returning();
+
+	return repaired[0];
 }
 
 async function hasSameReadVerifier(
@@ -115,10 +148,10 @@ async function hasSameReadVerifier(
 	);
 }
 
-// This is the first provisioning step. The caller configures the Durable Object
-// before publishing its membership marker and filter, so requests cannot reach
-// an unconfigured object. A matching retry returns the existing row and can
-// safely repeat the later steps; a different configuration is a conflict.
+// Write the authoritative tenant row before configuring the Durable Object and
+// publishing membership hints. Requests therefore cannot reach an unconfigured
+// object. A matching retry can repeat the remaining provisioning steps; another
+// configuration for the same slug is a conflict.
 export async function ensureTenant(
 	database: Database,
 	body: ParsedTenantCreateBody,
@@ -161,7 +194,20 @@ export async function ensureTenant(
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
-	if (existing === undefined || !(await hasSameConfig(existing, body))) {
+	if (existing === undefined) {
+		throw new TenantAlreadyExistsError(body.id);
+	}
+
+	if (!(await hasSameConfigExceptIssuer(existing, body))) {
+		throw new TenantAlreadyExistsError(body.id);
+	}
+
+	const requiresIssuerRepair = existing.ownerIssuer !== body.ownerIssuer;
+
+	if (
+		requiresIssuerRepair &&
+		existing.ownerIssuer !== legacyNormalisedIssuer(body.ownerIssuer)
+	) {
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
@@ -174,7 +220,28 @@ export async function ensureTenant(
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
-	return toSummary(existing);
+	if (!requiresIssuerRepair) {
+		return toSummary(existing);
+	}
+
+	const repaired = await repairLegacyOwnerIssuer(database, existing, body);
+
+	if (repaired !== undefined) {
+		return toSummary(repaired);
+	}
+
+	// A concurrent retry may have completed the compare-and-set first. Treat its
+	// exact result as the same successful repair.
+	const concurrent = await loadTenant(database, body.id);
+
+	if (
+		concurrent?.ownerIssuer !== body.ownerIssuer ||
+		!(await hasSameConfigExceptIssuer(concurrent, body))
+	) {
+		throw new TenantAlreadyExistsError(body.id);
+	}
+
+	return toSummary(concurrent);
 }
 
 // The usage row must exist before the tenant accepts writes. Conflict handling
@@ -234,18 +301,17 @@ export async function listTenants(
 	return rows.map((row) => toSummary(row));
 }
 
-// The caller invalidates the admission cache after this update. Writes read D1
-// before dispatch, so suspension stops them immediately; reads observe the new
-// status after their short cache TTL. Offboarding keeps the tenant reachable only
-// for its bounded drain.
+// Sets a tenant's status and returns its summary. Every request reads this D1 row
+// before admission, so suspension stops reads and writes as soon as the update
+// commits. Offboarding refuses new work while the bounded drain runs.
 export async function setTenantStatus(
 	database: Database,
 	id: TenantId,
 	status: 'suspended' | 'offboarding'
 ): Promise<ParsedTenantSummary> {
-	// `offboarded` is terminal. The conditional update prevents a repeated delete
-	// from moving the slug back to offboarding. A follow-up read distinguishes a
-	// missing tenant from a retired one when the update matches no row.
+	// The conditional update cannot move an offboarded tenant back to offboarding.
+	// If it matches no row, the following read distinguishes a missing tenant from
+	// an offboarded one.
 	const updated = await database
 		.update(d1Schema.tenant)
 		.set({ status })
