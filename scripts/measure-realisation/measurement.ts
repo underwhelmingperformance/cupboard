@@ -38,7 +38,13 @@ export const budgetedMetrics = [
 ] as const;
 export type BudgetedMetric = (typeof budgetedMetrics)[number];
 
-export type MeasurementDelta = Readonly<Record<BudgetedMetric, number>>;
+const comparedMetrics = [...budgetedMetrics, 'unknown'] as const;
+type ComparedMetric = (typeof comparedMetrics)[number];
+
+/**
+The difference between two measurements, metric by metric.
+*/
+export type MeasurementDelta = Readonly<Record<ComparedMetric, number>>;
 
 export interface ResolvedDerivation {
 	readonly drvPath: StorePathString;
@@ -258,6 +264,7 @@ export function deltaOf(measurement: RealisationMeasurement): MeasurementDelta {
 	return {
 		willBuild: measurement.willBuild,
 		willSubstitute: measurement.willSubstitute,
+		unknown: measurement.unknown,
 		downloadSize: measurement.downloadSize,
 		narSize: measurement.narSize
 	};
@@ -269,12 +276,13 @@ export function sumMeasurements(
 	const total = {
 		willBuild: 0,
 		willSubstitute: 0,
+		unknown: 0,
 		downloadSize: 0,
 		narSize: 0
 	};
 
 	for (const measurement of measurements) {
-		for (const metric of budgetedMetrics) {
+		for (const metric of comparedMetrics) {
 			total[metric] += measurement[metric];
 		}
 	}
@@ -289,6 +297,7 @@ function subtract(
 	return {
 		willBuild: left.willBuild - right.willBuild,
 		willSubstitute: left.willSubstitute - right.willSubstitute,
+		unknown: left.unknown - right.unknown,
 		downloadSize: left.downloadSize - right.downloadSize,
 		narSize: left.narSize - right.narSize
 	};

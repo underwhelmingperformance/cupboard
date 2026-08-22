@@ -27,7 +27,7 @@ const report: RealisationReport = {
 			measurement: {
 				willBuild: 3,
 				willSubstitute: 10,
-				unknown: 0,
+				unknown: 2,
 				downloadSize: 1024,
 				narSize: 2048
 			},
@@ -41,7 +41,7 @@ const report: RealisationReport = {
 		measurement: {
 			willBuild: 5,
 			willSubstitute: 15,
-			unknown: 0,
+			unknown: 3,
 			downloadSize: 3072,
 			narSize: 4096
 		},
@@ -50,18 +50,21 @@ const report: RealisationReport = {
 			apart: {
 				willBuild: 7,
 				willSubstitute: 22,
+				unknown: 5,
 				downloadSize: 5120,
 				narSize: 8192
 			},
 			together: {
 				willBuild: 5,
 				willSubstitute: 15,
+				unknown: 3,
 				downloadSize: 3072,
 				narSize: 4096
 			},
 			saved: {
 				willBuild: 2,
 				willSubstitute: 7,
+				unknown: 2,
 				downloadSize: 2048,
 				narSize: 4096
 			}
@@ -76,13 +79,38 @@ describe('renderSummary', () => {
 			'Substituters: https://cache.nixos.org',
 			'',
 			'Per target:',
-			'  app: 3 to build, 10 to fetch (1.0 KiB download, 2.0 KiB NAR)',
+			'  app: 3 to build, 10 to fetch, 2 unknown paths (1.0 KiB download, 2.0 KiB unpacked NAR bytes)',
 			'',
 			'Group all-targets (app, tool):',
-			'  together: 5 to build, 15 to fetch (3.0 KiB download, 4.0 KiB NAR)',
-			'  apart:    7 to build, 22 to fetch (5.0 KiB download, 8.0 KiB NAR)',
-			'  grouping saves 2 derivation(s) and 4.0 KiB NAR bytes'
+			'  together: 5 to build, 15 to fetch, 3 unknown paths (3.0 KiB download, 4.0 KiB unpacked NAR bytes)',
+			'  apart:    7 to build, 22 to fetch, 5 unknown paths (5.0 KiB download, 8.0 KiB unpacked NAR bytes)',
+			'  grouping saves 2 derivations, 2 unknown paths, and 4.0 KiB unpacked NAR bytes'
 		]);
+	});
+
+	it('uses singular nouns for one saved derivation and unknown path', () => {
+		if (report.combined === undefined) {
+			throw new Error('the fixture must include a combined measurement');
+		}
+
+		const summary = renderSummary({
+			...report,
+			combined: {
+				...report.combined,
+				comparison: {
+					...report.combined.comparison,
+					saved: {
+						...report.combined.comparison.saved,
+						willBuild: 1,
+						unknown: 1
+					}
+				}
+			}
+		});
+
+		expect(summary.split('\n').at(-1)).toBe(
+			'  grouping saves 1 derivation, 1 unknown path, and 4.0 KiB unpacked NAR bytes'
+		);
 	});
 
 	it('renders an empty substituter list as (none)', () => {

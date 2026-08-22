@@ -1,5 +1,19 @@
 import { execFile } from 'node:child_process';
-import { chmod, mkdir, readdir, realpath, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import {
+	chmod,
+	lstat,
+	mkdir,
+	mkdtemp,
+	readdir,
+	readFile,
+	realpath,
+	rename,
+	rm,
+	rmdir,
+	writeFile
+} from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 
@@ -8,6 +22,7 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import { bestEffort } from '@cupboard/shared/cleanup';
 import { CodedError } from '@cupboard/shared/errors';
 import { z } from 'zod';
 
@@ -153,24 +168,180 @@ export interface DivertedStoreOptions {
 	readonly now?: () => number;
 }
 
-/**
- * Nix rejects a store below a symlink. Return the resolved directory so the
- * store URI does not use one, including the `/var` symlink used by temporary
- * directories on macOS.
- */
-export async function createDivertedStoreDirectory(
-	directory: string
-): Promise<string> {
-	const resolved = await realpath(await mkdirIfNeeded(directory));
-
-	await mkdir(path.join(resolved, 'store'), { recursive: true });
-	await mkdir(path.join(resolved, 'state'), { recursive: true });
-
-	return resolved;
+export interface DivertedStoreDirectory {
+	readonly directory: string;
+	readonly workDirectory: string;
+	readonly directoryIdentity: string;
+	readonly ownershipToken: string;
 }
 
-async function mkdirIfNeeded(directory: string): Promise<string> {
-	await mkdir(directory, { recursive: true });
+type DivertedStoreDirectoryInitialiser = (
+	owned: DivertedStoreDirectory
+) => Promise<void>;
+type DivertedStoreDirectoryResolver = (directory: string) => Promise<string>;
+type DivertedStoreDirectoryHook = (directory: string) => Promise<void>;
+
+const noDivertedStoreDirectoryHook: DivertedStoreDirectoryHook = () =>
+	Promise.resolve();
+
+const ownershipFile = '.cupboard-diverted-store';
+
+/**
+ * Creates a fresh work directory and puts the diverted store in an
+ * unpredictable child. Cleanup recursively removes only that private child.
+ * It removes the work directory with `rmdir` after the child is gone. Another
+ * process running as the same user must not change the private child while
+ * cleanup traverses it.
+ *
+ * Resolve the path because Nix rejects a store below a symlink. On macOS, the
+ * normal temporary directory is reached through `/var`, which is a symlink.
+ */
+export async function createDivertedStoreDirectory(
+	directory?: string,
+	initialise: DivertedStoreDirectoryInitialiser = initialiseDivertedStoreDirectory,
+	resolve: DivertedStoreDirectoryResolver = realpath,
+	beforeOwnershipMarker: DivertedStoreDirectoryHook = noDivertedStoreDirectoryHook,
+	afterWorkDirectoryCreation: DivertedStoreDirectoryHook = noDivertedStoreDirectoryHook
+): Promise<DivertedStoreDirectory> {
+	const workDirectory =
+		directory === undefined
+			? await mkdtemp(path.join(tmpdir(), 'cupboard-realisation-'))
+			: await createExplicitDirectory(directory);
+	let privateDirectory: string | undefined;
+	let directoryIdentity: string | undefined;
+	let owned: DivertedStoreDirectory | undefined;
+
+	try {
+		await afterWorkDirectoryCreation(workDirectory);
+		privateDirectory = await mkdtemp(
+			path.join(workDirectory, '.cupboard-store-')
+		);
+		directoryIdentity = await readDirectoryIdentity(privateDirectory);
+		const resolvedDirectory = await resolve(privateDirectory);
+		await verifyDirectoryIdentity(resolvedDirectory, directoryIdentity);
+		await beforeOwnershipMarker(resolvedDirectory);
+		await verifyDirectoryIdentity(resolvedDirectory, directoryIdentity);
+		const ownershipToken = randomUUID();
+		await writeOwnershipMarker(resolvedDirectory, ownershipToken);
+		await verifyDirectoryIdentity(resolvedDirectory, directoryIdentity);
+		await verifyOwnershipMarker(resolvedDirectory, ownershipToken);
+		owned = {
+			directory: resolvedDirectory,
+			workDirectory,
+			directoryIdentity,
+			ownershipToken
+		};
+		await initialise(owned);
+		await verifyDirectoryIdentity(resolvedDirectory, directoryIdentity);
+		await verifyOwnershipMarker(resolvedDirectory, ownershipToken);
+
+		return owned;
+	} catch (error) {
+		if (privateDirectory !== undefined && directoryIdentity !== undefined) {
+			await removeFailedDivertedStoreDirectory(
+				privateDirectory,
+				directoryIdentity,
+				owned
+			);
+		}
+		await bestEffort(() => rmdir(workDirectory));
+
+		throw error;
+	}
+}
+
+async function readDirectoryIdentity(directory: string): Promise<string> {
+	const metadata = await lstat(directory, { bigint: true });
+
+	if (!metadata.isDirectory()) {
+		throw new Error('Refusing a replaced diverted-store directory');
+	}
+
+	return `${String(metadata.dev)}:${String(metadata.ino)}`;
+}
+
+async function verifyDirectoryIdentity(
+	directory: string,
+	expectedIdentity: string
+): Promise<void> {
+	let actualIdentity: string;
+
+	try {
+		actualIdentity = await readDirectoryIdentity(directory);
+	} catch (error) {
+		throw new Error('Refusing a replaced diverted-store directory', {
+			cause: error
+		});
+	}
+
+	if (actualIdentity !== expectedIdentity) {
+		throw new Error('Refusing a replaced diverted-store directory');
+	}
+}
+
+async function writeOwnershipMarker(
+	directory: string,
+	ownershipToken: string
+): Promise<void> {
+	await writeFile(path.join(directory, ownershipFile), ownershipToken, {
+		encoding: 'utf8',
+		flag: 'wx',
+		mode: 0o600
+	});
+}
+
+async function verifyOwnershipMarker(
+	directory: string,
+	ownershipToken: string
+): Promise<void> {
+	let recordedToken: string;
+
+	try {
+		recordedToken = await readFile(path.join(directory, ownershipFile), 'utf8');
+	} catch (error) {
+		throw new Error('Refusing a replaced diverted-store directory', {
+			cause: error
+		});
+	}
+
+	if (recordedToken !== ownershipToken) {
+		throw new Error('Refusing a replaced diverted-store directory');
+	}
+}
+
+async function initialiseDivertedStoreDirectory(
+	owned: DivertedStoreDirectory
+): Promise<void> {
+	await mkdir(path.join(owned.directory, 'store'), { recursive: true });
+	await mkdir(path.join(owned.directory, 'state'), { recursive: true });
+}
+
+async function removeFailedDivertedStoreDirectory(
+	created: string,
+	directoryIdentity: string,
+	owned: DivertedStoreDirectory | undefined
+): Promise<void> {
+	if (owned !== undefined) {
+		await bestEffort(() => removeDivertedStore(owned));
+		return;
+	}
+
+	await bestEffort(async () => {
+		const claimed = await claimDivertedStoreDirectory(
+			created,
+			directoryIdentity
+		);
+
+		try {
+			await rm(claimed.directory, { recursive: true, force: true });
+		} finally {
+			await bestEffort(() => rmdir(claimed.holdingDirectory));
+		}
+	});
+}
+
+async function createExplicitDirectory(directory: string): Promise<string> {
+	await mkdir(directory);
 
 	return directory;
 }
@@ -180,9 +351,98 @@ async function mkdirIfNeeded(directory: string): Promise<string> {
  * read-only directory cannot have its entries unlinked, so every entry is
  * made writable on the way out.
  */
-export async function removeDivertedStore(directory: string): Promise<void> {
-	await makeWritable(directory);
-	await rm(directory, { recursive: true, force: true });
+export async function removeDivertedStore(
+	owned: DivertedStoreDirectory,
+	beforeRemoval: DivertedStoreDirectoryHook = noDivertedStoreDirectoryHook,
+	afterRemovalClaim: DivertedStoreDirectoryHook = noDivertedStoreDirectoryHook,
+	afterCleanupVerification: DivertedStoreDirectoryHook = noDivertedStoreDirectoryHook
+): Promise<void> {
+	await beforeRemoval(owned.directory);
+	const claimed = await claimDivertedStoreDirectory(
+		owned.directory,
+		owned.directoryIdentity,
+		owned.ownershipToken,
+		afterRemovalClaim
+	);
+
+	try {
+		await afterCleanupVerification(claimed.directory);
+		await makeWritable(claimed.directory);
+		await rm(claimed.directory, { recursive: true, force: true });
+	} catch (error) {
+		throw directoryRecoveryError(claimed.directory, error);
+	} finally {
+		await bestEffort(() => rmdir(claimed.holdingDirectory));
+	}
+
+	await rmdir(owned.workDirectory);
+}
+
+interface ClaimedDivertedStoreDirectory {
+	readonly directory: string;
+	readonly holdingDirectory: string;
+}
+
+async function claimDivertedStoreDirectory(
+	directory: string,
+	expectedIdentity: string,
+	ownershipToken?: string,
+	afterClaim: DivertedStoreDirectoryHook = noDivertedStoreDirectoryHook
+): Promise<ClaimedDivertedStoreDirectory> {
+	const holdingDirectory = await mkdtemp(
+		path.join(path.dirname(directory), '.cupboard-cleanup-')
+	);
+	const claimedDirectory = path.join(holdingDirectory, 'store');
+	let isMoved = false;
+
+	try {
+		await rename(directory, claimedDirectory);
+		isMoved = true;
+		await afterClaim(directory);
+		await verifyDirectoryIdentity(claimedDirectory, expectedIdentity);
+
+		if (ownershipToken !== undefined) {
+			try {
+				await verifyOwnershipMarker(claimedDirectory, ownershipToken);
+			} catch (error) {
+				throw new Error(`Refusing to remove unowned directory: ${directory}`, {
+					cause: error
+				});
+			}
+		}
+
+		return {
+			directory: claimedDirectory,
+			holdingDirectory
+		};
+	} catch (error) {
+		if (!isMoved) {
+			await bestEffort(() => rmdir(holdingDirectory));
+			throw error;
+		}
+
+		throw directoryRecoveryError(claimedDirectory, error);
+	}
+}
+
+function directoryRecoveryError(
+	recoveryPath: string,
+	primaryError: unknown
+): Error {
+	const primaryMessage = reportedError(primaryError);
+	const sentence = primaryMessage.endsWith('.')
+		? primaryMessage
+		: `${primaryMessage}.`;
+
+	return new Error(
+		`${sentence} The claimed entry remains at ` +
+			`${recoveryPath}; inspect it before moving or removing it.`,
+		{ cause: primaryError }
+	);
+}
+
+function reportedError(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 async function makeWritable(directory: string): Promise<void> {

@@ -1,6 +1,4 @@
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
+import { readFile, writeFile } from 'node:fs/promises';
 import { argv, exit, stdout } from 'node:process';
 import { pathToFileURL } from 'node:url';
 
@@ -80,11 +78,11 @@ export function createProgram(): Command {
 		)
 		.option(
 			'--work-dir <path>',
-			'directory to reuse for the diverted store; deleted unless --keep-store is set'
+			'new parent directory for the diverted store; deleted unless --keep-store is set'
 		)
 		.option(
 			'--keep-store',
-			'leave the diverted store behind for inspection',
+			'leave the work directory and diverted store behind for inspection',
 			false
 		);
 }
@@ -100,10 +98,7 @@ export async function main(
 		options.substituter.length > 0
 			? options.substituter
 			: [...defaultSubstituters];
-	const workDirectoryPrefix = path.join(tmpdir(), 'cupboard-realisation-');
-	const directory = await createDivertedStoreDirectory(
-		options.workDir ?? (await mkdtemp(workDirectoryPrefix))
-	);
+	const divertedStore = await createDivertedStoreDirectory(options.workDir);
 
 	await withCleanup(
 		async () => {
@@ -114,7 +109,7 @@ export async function main(
 				planner: createDivertedStorePlanner({
 					flake: options.flake,
 					storeDirectory: discoverNixStoreConfig().storeDirectory,
-					directory,
+					directory: divertedStore.directory,
 					substituters
 				})
 			});
@@ -124,7 +119,7 @@ export async function main(
 		},
 		async () => {
 			if (!options.keepStore) {
-				await removeDivertedStore(directory);
+				await removeDivertedStore(divertedStore);
 			}
 		}
 	);
