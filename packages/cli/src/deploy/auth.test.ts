@@ -5,6 +5,7 @@ import type { CredentialChain } from './auth.ts';
 import {
 	defaultCredentialChain,
 	freshIdToken,
+	resolveCloudflare,
 	resolveCredential
 } from './auth.ts';
 import type { CloudflareGrant } from './cloudflare-oauth.ts';
@@ -407,7 +408,7 @@ describe('freshIdToken', () => {
 		expect(await freshIdToken(chain)).toBe(reissued);
 	});
 
-	it('falls back to the stale token when the refresh declines', async () => {
+	it('returns no token when refresh declines an already stale token', async () => {
 		const stale = tokenExpiringAt(nowSeconds - 60);
 		const { chain, calls } = chainWith({
 			storedGrant: { ...freshGrant, idToken: stale }
@@ -416,7 +417,21 @@ describe('freshIdToken', () => {
 		expect({
 			token: await freshIdToken(chain),
 			written: calls.written
-		}).toStrictEqual({ token: stale, written: [] });
+		}).toStrictEqual({ token: undefined, written: [] });
+	});
+
+	it('rejects an id_token that is still stale after a successful refresh', async () => {
+		const stale = tokenExpiringAt(nowSeconds - 60);
+		const renewed: CloudflareGrant = { ...freshGrant, idToken: stale };
+		const { chain, calls } = chainWith({
+			storedGrant: { ...freshGrant, idToken: stale },
+			renewedGrant: renewed
+		});
+
+		expect({
+			token: await freshIdToken(chain),
+			written: calls.written
+		}).toStrictEqual({ token: undefined, written: [renewed] });
 	});
 
 	it('returns undefined without a cached grant', async () => {
@@ -449,5 +464,20 @@ describe('defaultCredentialChain', () => {
 			upgradeLogin: true,
 			browserUrls: []
 		});
+	});
+});
+
+describe('resolveCloudflare', () => {
+	it('disables the SDK retry loop for Cloudflare mutations', async () => {
+		const { chain } = chainWith({
+			env: { CLOUDFLARE_API_TOKEN: 'env-token' }
+		});
+		const resolved = await resolveCloudflare(
+			'acc-1',
+			() => Promise.reject(new Error('account choice was not expected')),
+			chain
+		);
+
+		expect(resolved.client.maxRetries).toBe(0);
 	});
 });

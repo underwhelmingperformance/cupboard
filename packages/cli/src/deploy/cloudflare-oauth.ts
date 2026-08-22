@@ -1,7 +1,13 @@
+import { readResponseJson } from '@cupboard/shared/response-body';
 import { z } from 'zod';
 
 import { throwIfAborted } from '../abort.ts';
 import { decodeJwtPayload } from '../auth/jwt.ts';
+import {
+	hasOAuthErrorCode,
+	type OAuthErrorResponse,
+	parseOAuthErrorResponse
+} from '../auth/oauth-error.ts';
 import { obtainAuthorizationCode, postForm } from '../auth/oidc-login.ts';
 import { resilientFetcher } from '../client/transport.ts';
 import { CliError } from '../errors.ts';
@@ -9,9 +15,19 @@ import { CliError } from '../errors.ts';
 export abstract class CloudflareLoginError extends CliError {}
 
 export class CloudflareTokenRequestError extends CloudflareLoginError {
-	constructor(public readonly status: number) {
-		super(`Cloudflare token request failed with HTTP ${String(status)}`);
+	readonly providerError: string | undefined;
+
+	constructor(
+		public readonly status: number,
+		public readonly oauthError: OAuthErrorResponse | undefined
+	) {
+		const detail = oauthError === undefined ? '' : `: ${oauthError.error}`;
+
+		super(
+			`Cloudflare token request failed with HTTP ${String(status)}${detail}`
+		);
 		this.name = 'CloudflareTokenRequestError';
+		this.providerError = oauthError?.error;
 	}
 }
 
@@ -172,9 +188,10 @@ export async function cloudflareLogin(
 }
 
 /**
- * Attempts to renew a grant while preserving its subject. Returns `undefined`
- * when there is no refresh token or any part of the exchange fails, including
- * cancellation. Callers then fall back to interactive login.
+ * Renews a grant from its refresh token and preserves the subject. Returns
+ * `undefined` if the grant has no refresh token or Cloudflare rejects it with
+ * `invalid_grant`, which lets the caller start an interactive login. Transport,
+ * server, and malformed-response failures propagate to the caller.
  */
 export async function refreshCloudflareGrant(
 	previous: CloudflareGrant,
@@ -200,8 +217,29 @@ export async function refreshCloudflareGrant(
 			previous,
 			signal
 		);
-	} catch {
-		return undefined;
+	} catch (error) {
+		if (hasOAuthErrorCode(error, 'invalid_grant')) {
+			return undefined;
+		}
+
+		throw error;
+	}
+}
+
+const maximumTokenResponseBytes = 64 * 1024;
+
+async function tokenResponsePayload(response: Response): Promise<unknown> {
+	try {
+		return await readResponseJson(response, {
+			description: 'Cloudflare token response',
+			maximumBytes: maximumTokenResponseBytes
+		});
+	} catch (error) {
+		if (error instanceof SyntaxError) {
+			throw new CloudflareTokenResponseNotJsonError({ cause: error });
+		}
+
+		throw error;
 	}
 }
 
@@ -213,17 +251,13 @@ async function exchangeForGrant(
 	signal?: AbortSignal
 ): Promise<CloudflareGrant> {
 	const response = await fetcher(tokenEndpoint, postForm(form, signal));
+	const payload = await tokenResponsePayload(response);
 
 	if (!response.ok) {
-		throw new CloudflareTokenRequestError(response.status);
-	}
-
-	let payload: unknown;
-
-	try {
-		payload = await response.json();
-	} catch (error) {
-		throw new CloudflareTokenResponseNotJsonError({ cause: error });
+		throw new CloudflareTokenRequestError(
+			response.status,
+			parseOAuthErrorResponse(payload)
+		);
 	}
 
 	const parsed = tokenResponseSchema.safeParse(payload);
@@ -240,12 +274,11 @@ async function exchangeForGrant(
 
 	return {
 		accessToken: parsed.data.access_token,
-		// The server may rotate the refresh token on use, and a refresh response
-		// may omit the id_token. Keep the previous values when the response omits
-		// their replacements.
+		// The server may rotate the refresh token on use. A response without an
+		// id_token does not renew the old token, which may already be expired.
 		refreshToken: parsed.data.refresh_token ?? previous?.refreshToken,
 		expiresAt: now() + expiresIn * 1000,
 		subject: subject ?? previous?.subject,
-		idToken: parsed.data.id_token ?? previous?.idToken
+		idToken: parsed.data.id_token
 	};
 }

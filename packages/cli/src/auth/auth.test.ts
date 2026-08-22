@@ -378,7 +378,12 @@ describe('cachedOwnerProvider', () => {
 			client: {
 				tokenRefresh: () =>
 					Promise.reject(
-						new CupboardHttpError('POST', '/token', 400, 'invalid_grant')
+						new CupboardHttpError(
+							'POST',
+							'/token',
+							400,
+							JSON.stringify({ error: 'invalid_grant' })
+						)
 					),
 				tokenExchange: (subjectToken) => {
 					exchangedWith.push(subjectToken);
@@ -404,6 +409,28 @@ describe('cachedOwnerProvider', () => {
 				}
 			]
 		});
+	});
+
+	it('surfaces an invalid refresh request instead of replacing the session', async () => {
+		const failure = new CupboardHttpError(
+			'POST',
+			'/token',
+			400,
+			JSON.stringify({ error: 'invalid_request' })
+		);
+		const { harness } = sessionHarness({
+			accessToken: accessToken('stale', past - 60),
+			refreshToken: 'refresh-1'
+		});
+		const provider = cachedOwnerProvider(target, {
+			...harness,
+			client: {
+				...harness.client,
+				tokenRefresh: () => Promise.reject(failure)
+			}
+		});
+
+		await expect(provider.get()).rejects.toBe(failure);
 	});
 
 	it('prompts a login when no silent path can issue a token', async () => {
@@ -452,7 +479,12 @@ describe('cachedOwnerProvider', () => {
 				...harness.client,
 				tokenExchange: () =>
 					Promise.reject(
-						new CupboardHttpError('POST', '/token', 400, 'invalid_grant')
+						new CupboardHttpError(
+							'POST',
+							'/token',
+							400,
+							JSON.stringify({ error: 'invalid_grant' })
+						)
 					)
 			},
 			grantChain: {
@@ -480,6 +512,30 @@ describe('cachedOwnerProvider', () => {
 		expect(outcome).toStrictEqual({
 			error: { name: 'OwnerLoginRequiredError' }
 		});
+	});
+
+	it('surfaces an invalid exchange request instead of requesting a login', async () => {
+		const failure = new CupboardHttpError(
+			'POST',
+			'/token',
+			400,
+			JSON.stringify({ error: 'invalid_request' })
+		);
+		const { harness } = sessionHarness();
+		const provider = cachedOwnerProvider(target, {
+			...harness,
+			client: {
+				...harness.client,
+				tokenExchange: () => Promise.reject(failure)
+			},
+			grantChain: {
+				...harness.grantChain,
+				readGrant: () =>
+					Promise.resolve(cloudflareGrant(jwt({ exp: farFuture })))
+			}
+		});
+
+		await expect(provider.refresh()).rejects.toBe(failure);
 	});
 
 	it('propagates a server failure rather than prompting a login', async () => {
