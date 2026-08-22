@@ -305,8 +305,11 @@ export class UploadsService {
 			throw new InvalidPushIdError();
 		}
 
-		// Bind the run root before planning any upload. Each pending row then records
-		// the root that its eventual commit must attach to.
+		requireServedStorePaths(body.paths.map((path) => path.storePath));
+
+		// Reject paths from another store directory before creating or extending the
+		// run root. Each pending upload then records the root its commit must attach
+		// to.
 		if (body.attachRoot !== undefined) {
 			this.roots.bindRunRoot(
 				cache,
@@ -318,8 +321,6 @@ export class UploadsService {
 		if (body.paths.length === 0) {
 			return { uploads: [] };
 		}
-
-		requireServedStorePaths(body.paths.map((path) => path.storePath));
 
 		const {
 			facts,

@@ -1,4 +1,7 @@
-import { WIRE_DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
+import {
+	storePathSchema,
+	WIRE_DEFAULT_CACHE
+} from '@cupboard/nix-store/scalars';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
@@ -303,6 +306,35 @@ describe('negotiate binds the run root', () => {
 		}).toStrictEqual({
 			roots: [],
 			planned: uploadIds.map((id) => ({ id, attachRootName: undefined }))
+		});
+	});
+
+	it('validates every store path before binding the run root', async () => {
+		const token = await issueServerSignedToken(pushGrants(runRootName));
+		const original = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			fileSize: 1
+		});
+		const metadata = {
+			...original,
+			storePath: storePathSchema.parse(
+				'/other/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-first'
+			)
+		};
+
+		const response = await negotiate(token, [metadata], {
+			name: runRootName,
+			ttlSeconds: 3600
+		});
+
+		expect({
+			status: response.status,
+			roots: await retentionRootRows(),
+			planned: await plannedUploadRows()
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			roots: [],
+			planned: []
 		});
 	});
 });
