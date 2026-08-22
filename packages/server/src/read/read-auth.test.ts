@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest';
 import {
 	hashReadPassword,
 	isReadAuthorised,
+	isReadPasswordMatching,
+	readPasswordHashSchema,
 	readPasswordSaltSchema,
 	type ReadVerifier
 } from './read-auth.ts';
@@ -30,6 +32,26 @@ async function verifierFor(password: string): Promise<ReadVerifier> {
 }
 
 describe('isReadAuthorised', () => {
+	it('creates a versioned PBKDF2 verifier and accepts legacy SHA-256 rows', async () => {
+		const salt = readPasswordSaltSchema.parse('test-salt');
+		const current = await hashReadPassword('password', salt);
+		const legacy = await crypto.subtle.digest(
+			'SHA-256',
+			new TextEncoder().encode('cupboard-read-password-v1\0test-salt\0password')
+		);
+		const legacyHex = Array.from(new Uint8Array(legacy), (byte) =>
+			byte.toString(16).padStart(2, '0')
+		).join('');
+
+		expect({
+			versioned: current.startsWith('pbkdf2-sha256$600000$'),
+			legacy: await isReadPasswordMatching(
+				'password',
+				readPasswordHashSchema.parse(legacyHex),
+				salt
+			)
+		}).toStrictEqual({ versioned: true, legacy: true });
+	});
 	it.each([
 		{
 			name: 'matching credentials, password split on the first colon',

@@ -270,7 +270,7 @@ export class TokenExchangeService {
 
 		if (
 			row === undefined ||
-			!isConstantTimeEqual(row.secretHash, presentedHash)
+			!(await isConstantTimeEqual(row.secretHash, presentedHash, 64))
 		) {
 			throw new StaleRefreshTokenError();
 		}

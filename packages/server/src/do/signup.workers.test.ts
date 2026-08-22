@@ -78,13 +78,13 @@ const gateForbidden: SignupGateOutcome = {
 	}
 };
 
-function gateOutcome(
+async function gateOutcome(
 	gateEnv: Parameters<typeof enforceGate>[0],
 	claimSecret: string | undefined,
 	subject: string
-): SignupGateOutcome {
+): Promise<SignupGateOutcome> {
 	try {
-		enforceGate(gateEnv, claimSecret, subject);
+		await enforceGate(gateEnv, claimSecret, subject);
 
 		return gateAllowed;
 	} catch (error) {
@@ -205,14 +205,14 @@ describe('signup gate', () => {
 		}
 	])(
 		'$name',
-		({ secret, pinned, localDev, claimSecret, subject, expected }) => {
+		async ({ secret, pinned, localDev, claimSecret, subject, expected }) => {
 			const gateEnv = {
 				CUPBOARD_SIGNUP_SECRET: secret,
 				CUPBOARD_SIGNUP_SUBJECT: pinned,
 				CUPBOARD_LOCAL_DEV: localDev
 			};
 
-			expect(gateOutcome(gateEnv, claimSecret, subject)).toStrictEqual(
+			expect(await gateOutcome(gateEnv, claimSecret, subject)).toStrictEqual(
 				expected
 			);
 		}

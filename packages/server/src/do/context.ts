@@ -5,6 +5,7 @@ import {
 	type NixSha256HashString,
 	type RootName,
 	type TenantId,
+	tenantIdSchema,
 	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import { type ResolvedRootTarget } from '@cupboard/nix-store/store-path';
@@ -196,9 +197,19 @@ export class ServerContext {
 	}
 
 	pushCredentials(): PushCredentialIssuer {
+		const identity = this.db
+			.select({ tenant: schema.tenantIdentity.tenant })
+			.from(schema.tenantIdentity)
+			.get();
+
+		if (identity === undefined) {
+			throw new TenantNotConfiguredError();
+		}
+
 		this.credentialIssuer ??= new PushCredentialIssuer(
 			() => r2PresignConfiguration(this.env),
-			pushIdSigningKey(this.env)
+			pushIdSigningKey(this.env),
+			tenantIdSchema.parse(identity.tenant)
 		);
 
 		return this.credentialIssuer;

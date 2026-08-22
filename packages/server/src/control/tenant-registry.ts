@@ -25,6 +25,7 @@ import {
 import {
 	generateReadPasswordSalt,
 	hashReadPassword,
+	isReadPasswordMatching,
 	type ReadPasswordHash,
 	type ReadPasswordSalt
 } from '../read/read-auth.ts';
@@ -107,9 +108,10 @@ async function hasSameReadVerifier(
 		return false;
 	}
 
-	return (
-		(await hashReadPassword(read.password, row.readPasswordSalt)) ===
-		row.readPasswordHash
+	return isReadPasswordMatching(
+		read.password,
+		row.readPasswordHash,
+		row.readPasswordSalt
 	);
 }
 

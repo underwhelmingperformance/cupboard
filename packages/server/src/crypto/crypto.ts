@@ -19,17 +19,38 @@ export async function sha256HexBytes(bytes: Uint8Array): Promise<string> {
 	return bytesToHex(new Uint8Array(digest));
 }
 
-export function isConstantTimeEqual(left: string, right: string): boolean {
+const comparisonKey = crypto.subtle.importKey(
+	'raw',
+	textEncoder.encode('cupboard/constant-time-comparison/v1'),
+	{ name: 'HMAC', hash: 'SHA-256' },
+	false,
+	['sign', 'verify']
+);
+
+/**
+ * Compares two strings of the required UTF-8 byte length through Web Crypto's
+ * HMAC verifier. Returns false before invoking Web Crypto if either input has a
+ * different length.
+ */
+export async function isConstantTimeEqual(
+	left: string,
+	right: string,
+	expectedByteLength: number
+): Promise<boolean> {
 	const leftBytes = textEncoder.encode(left);
 	const rightBytes = textEncoder.encode(right);
-	const size = Math.max(leftBytes.byteLength, rightBytes.byteLength);
-	let difference = leftBytes.byteLength ^ rightBytes.byteLength;
 
-	for (let index = 0; index < size; index += 1) {
-		difference |= (leftBytes[index] ?? 0) ^ (rightBytes[index] ?? 0);
+	if (
+		leftBytes.byteLength !== expectedByteLength ||
+		rightBytes.byteLength !== expectedByteLength
+	) {
+		return false;
 	}
 
-	return difference === 0;
+	const key = await comparisonKey;
+	const signature = await crypto.subtle.sign('HMAC', key, leftBytes);
+
+	return crypto.subtle.verify('HMAC', key, signature, rightBytes);
 }
 
 // The Workers type also covers algorithms that return one key, but Ed25519

@@ -56,6 +56,7 @@ import {
 	tenantCasBlobRows,
 	tenantUsageRow,
 	testPushId,
+	testPushIdFor,
 	testServerFor,
 	uploadMetadata,
 	uploadPathNegotiation,
@@ -678,13 +679,14 @@ async function negotiateTenant(
 	pathHash: string,
 	digest: Sha256HexDigest
 ): Promise<ParsedAttestationDecision> {
+	const pushId = await testPushIdFor(tenant);
 	const response = await tenantFetch(
 		tenant,
 		'/cache/_default/attestations',
 		token,
 		{
 			body: JSON.stringify({
-				pushId: testPushId,
+				pushId,
 				bundles: [{ storePathHash: pathHash, digest }]
 			}),
 			headers: { 'content-type': 'application/json' },
@@ -725,13 +727,14 @@ async function pushPathThroughTenant(
 	metadata: ReturnType<typeof uploadMetadata>,
 	nar: Awaited<ReturnType<typeof verifiableNar>>
 ): Promise<void> {
+	const pushId = await testPushIdFor(tenant);
 	const negotiated = await tenantFetch(
 		tenant,
 		'/cache/_default/uploads',
 		token,
 		{
 			body: JSON.stringify({
-				pushId: testPushId,
+				pushId,
 				paths: [uploadPathNegotiation(metadata)]
 			}),
 			headers: { 'content-type': 'application/json' },

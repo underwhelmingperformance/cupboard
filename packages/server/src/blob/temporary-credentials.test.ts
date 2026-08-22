@@ -1,8 +1,10 @@
-import { ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import type { R2PresignerConfiguration } from './presign.ts';
-import { createR2TemporaryCredentials } from './temporary-credentials.ts';
+import {
+	createR2TemporaryCredentials,
+	r2CredentialTtlSecondsSchema
+} from './temporary-credentials.ts';
 
 const configuration: R2PresignerConfiguration = {
 	accountId: 'acct-123',
@@ -12,7 +14,7 @@ const configuration: R2PresignerConfiguration = {
 };
 
 const now = new Date('2026-06-29T12:00:00.000Z');
-const ttlSeconds = ttlSecondsSchema.parse(900);
+const ttlSeconds = r2CredentialTtlSecondsSchema.parse(900);
 const issuedAt = Math.floor(now.getTime() / 1000);
 
 const textEncoder = new TextEncoder();
@@ -67,6 +69,13 @@ function jwtFrom(sessionToken: string): {
 
 describe('createR2TemporaryCredentials', () => {
 	const prefixPaths = ['staging/push-1/'];
+
+	it("caps the branded lifetime at R2's seven-day maximum", () => {
+		expect({
+			maximum: r2CredentialTtlSecondsSchema.safeParse(604_800).success,
+			eightDays: r2CredentialTtlSecondsSchema.safeParse(691_200).success
+		}).toStrictEqual({ maximum: true, eightDays: false });
+	});
 
 	it('reuses the parent access key ID and returns the endpoint, bucket, expiry and derived secret', async () => {
 		const credentials = await createR2TemporaryCredentials(

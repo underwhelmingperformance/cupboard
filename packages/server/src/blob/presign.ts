@@ -1,4 +1,3 @@
-import { ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import { AwsClient } from 'aws4fetch';
 
 import {
@@ -8,7 +7,8 @@ import {
 
 import {
 	createR2TemporaryCredentials,
-	pushUploadActions
+	pushUploadActions,
+	r2CredentialTtlSecondsSchema
 } from './temporary-credentials.ts';
 
 const credentialProbeKey = 'staging/.cupboard-credential-probe/probe';
@@ -40,7 +40,7 @@ export class R2Presigner {
 			{
 				actions: pushUploadActions,
 				prefixPaths: [credentialProbePrefix],
-				ttlSeconds: ttlSecondsSchema.parse(60)
+				ttlSeconds: r2CredentialTtlSecondsSchema.parse(60)
 			},
 			now
 		);

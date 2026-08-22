@@ -396,7 +396,7 @@ describe('tenant registry', () => {
 			.update(d1Schema.tenant)
 			.set({
 				readUser: readUserSchema.parse('reader'),
-				readPasswordHash: readPasswordHashSchema.parse('hash')
+				readPasswordHash: readPasswordHashSchema.parse('0'.repeat(64))
 			})
 			.where(eq(d1Schema.tenant.id, acme))
 			.run();

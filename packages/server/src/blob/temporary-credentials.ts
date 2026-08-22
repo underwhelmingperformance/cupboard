@@ -1,6 +1,7 @@
-import type { TtlSeconds } from '@cupboard/nix-store/scalars';
+import { positiveIntSchema } from '@cupboard/nix-store/scalars';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
 import type { R2Credential } from '@cupboard/protocol/upload';
+import { z } from 'zod';
 
 import type { R2PresignerConfiguration } from './presign.ts';
 
@@ -19,11 +20,19 @@ export type R2CredentialGrant =
 export type R2TemporaryCredentialOptions = R2CredentialGrant & {
 	readonly prefixPaths?: readonly string[];
 	readonly objectPaths?: readonly string[];
-	readonly ttlSeconds: TtlSeconds;
+	readonly ttlSeconds: R2CredentialTtlSeconds;
 };
 
-// Include PutObject and the multipart lifecycle, but no read or list operation.
-// The resulting credential can stage bytes without reading another upload.
+export const r2CredentialTtlSecondsSchema = positiveIntSchema
+	.max(7 * 24 * 60 * 60)
+	.brand('R2CredentialTtlSeconds');
+export type R2CredentialTtlSeconds = z.infer<
+	typeof r2CredentialTtlSecondsSchema
+>;
+
+// These actions let a credential upload staged bytes through a single
+// PutObject or a multipart upload. The credential cannot read staged bytes or
+// list objects.
 export const pushUploadActions = [
 	'PutObject',
 	'CreateMultipartUpload',

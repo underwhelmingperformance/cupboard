@@ -13,6 +13,7 @@ import {
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import type { JWTPayload } from 'jose';
 
+import { isConstantTimeEqual, sha256Hex } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	ControlNotConfiguredError,
@@ -64,7 +65,7 @@ export async function handleSignup(
 	);
 	const subject = verifiedSubject(verified);
 
-	enforceGate(env, body.claim_secret, subject);
+	await enforceGate(env, body.claim_secret, subject);
 
 	const now = new Date();
 	const { claimed: isClaimed } = await claimGlobalAdmin(
@@ -89,21 +90,27 @@ export interface SignupGate {
 	readonly CUPBOARD_LOCAL_DEV: string | undefined;
 }
 
-// A configured claim secret must match; otherwise a configured subject must
-// match the verified token. With neither binding, only local development may
-// claim the first administrator.
-export function enforceGate(
+// A configured single-use claim secret must match. Without a secret, a
+// configured subject must match the verified token. With neither binding, only
+// local development may claim the first administrator.
+export async function enforceGate(
 	env: SignupGate,
 	claimSecret: string | undefined,
 	subject: string
-): void {
+): Promise<void> {
 	const secret = env.CUPBOARD_SIGNUP_SECRET ?? '';
 
 	if (secret !== '') {
-		if (
-			claimSecret === undefined ||
-			!isConstantTimeEqual(claimSecret, secret)
-		) {
+		if (claimSecret === undefined) {
+			throw new SignupForbiddenError();
+		}
+
+		const [presentedHash, expectedHash] = await Promise.all([
+			sha256Hex(claimSecret),
+			sha256Hex(secret)
+		]);
+
+		if (!(await isConstantTimeEqual(presentedHash, expectedHash, 64))) {
 			throw new SignupForbiddenError();
 		}
 
@@ -166,24 +173,6 @@ function verifiedSubject(verified: JWTPayload): string {
 	}
 
 	return verified.sub;
-}
-
-function isConstantTimeEqual(a: string, b: string): boolean {
-	const encoder = new TextEncoder();
-	const aBytes = encoder.encode(a);
-	const bBytes = encoder.encode(b);
-
-	if (aBytes.length !== bBytes.length) {
-		return false;
-	}
-
-	let difference = 0;
-
-	for (const [index, byte] of aBytes.entries()) {
-		difference |= byte ^ (bBytes[index] ?? 0);
-	}
-
-	return difference === 0;
 }
 
 function isLocalDevelopment(env: SignupGate): boolean {
