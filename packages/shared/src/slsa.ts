@@ -1,16 +1,15 @@
 import { z } from 'zod';
 
 const githubUrlPrefix = 'https://github.com/';
-
-const slsaProvenancePrefix = 'https://slsa.dev/provenance/';
+export const slsaProvenanceType = 'https://slsa.dev/provenance/v1';
+export const githubWorkflowBuildType =
+	'https://actions.github.io/buildtypes/workflow/v1';
 
 /**
- * Returns whether the value begins with the SLSA provenance predicate prefix.
- * This classifies the predicate for display; it does not validate a version or
- * the predicate body.
+ * Whether a predicate type is the SLSA provenance version this package parses.
  */
 export function isSlsaProvenanceType(predicateType: string): boolean {
-	return predicateType.startsWith(slsaProvenancePrefix);
+	return predicateType === slsaProvenanceType;
 }
 
 const slsaDependencySchema = z.object({
@@ -39,6 +38,7 @@ const internalParametersSchema = z.object({
 });
 
 const buildDefinitionSchema = z.object({
+	buildType: z.literal(githubWorkflowBuildType),
 	externalParameters: externalParametersSchema.nullish(),
 	internalParameters: internalParametersSchema.nullish(),
 	resolvedDependencies: z.array(slsaDependencySchema).nullish()

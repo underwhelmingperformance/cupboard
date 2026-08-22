@@ -1,9 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
-import { slsaProvenanceSummary, slsaSourceCommit } from './slsa.ts';
+import {
+	githubWorkflowBuildType,
+	isSlsaProvenanceType,
+	slsaProvenanceSummary,
+	slsaSourceCommit
+} from './slsa.ts';
 
 function provenance(dependencies: readonly unknown[]): Record<string, unknown> {
-	return { buildDefinition: { resolvedDependencies: dependencies } };
+	return {
+		buildDefinition: {
+			buildType: githubWorkflowBuildType,
+			resolvedDependencies: dependencies
+		}
+	};
 }
 
 function fromJson(text: string): unknown {
@@ -101,9 +111,20 @@ describe('slsaSourceCommit', () => {
 	});
 });
 
+describe('isSlsaProvenanceType', () => {
+	it.each([
+		['the v1 type', 'https://slsa.dev/provenance/v1', true],
+		['an arbitrary suffix', 'https://slsa.dev/provenance/made-up', false],
+		['a lookalike prefix', 'https://slsa.dev/provenance/v1/extra', false]
+	])('classifies %s', (_name, predicateType, expected) => {
+		expect(isSlsaProvenanceType(predicateType)).toBe(expected);
+	});
+});
+
 describe('slsaProvenanceSummary', () => {
 	const fullPredicate = {
 		buildDefinition: {
+			buildType: githubWorkflowBuildType,
 			externalParameters: {
 				workflow: {
 					ref: 'refs/heads/main',
@@ -143,12 +164,25 @@ describe('slsaProvenanceSummary', () => {
 		expect(
 			slsaProvenanceSummary({
 				buildDefinition: {
+					buildType: githubWorkflowBuildType,
 					externalParameters: {
 						workflow: { repository: 'https://github.com/owner/repo' }
 					}
 				}
 			})
 		).toStrictEqual({ sourceRepository: 'https://github.com/owner/repo' });
+	});
+
+	it('does not project GitHub fields from another build type', () => {
+		expect(
+			slsaProvenanceSummary({
+				...fullPredicate,
+				buildDefinition: {
+					...fullPredicate.buildDefinition,
+					buildType: 'https://example.test/build/v1'
+				}
+			})
+		).toBeUndefined();
 	});
 
 	it.each([

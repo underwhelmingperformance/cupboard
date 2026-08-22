@@ -257,7 +257,7 @@ async function main(): Promise<void> {
 			'--no-colour',
 			'config',
 			'https://cache.example.invalid',
-			'cupboard-1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa='
+			'cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8='
 		]);
 	}
 

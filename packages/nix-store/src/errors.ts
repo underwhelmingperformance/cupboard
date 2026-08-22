@@ -74,6 +74,13 @@ export class InvalidNixPublicKeyError extends ProtocolError {
 	}
 }
 
+export class InvalidNixPublicKeySetError extends ProtocolError {
+	constructor(public readonly detail: string) {
+		super(`Invalid Nix public key set: ${detail}`);
+		this.name = 'InvalidNixPublicKeySetError';
+	}
+}
+
 // A narinfo signature that is not `<name>:<base64>`. Both halves are required:
 // the name selects the key the signature is checked against, and the material
 // is the detached signature itself.

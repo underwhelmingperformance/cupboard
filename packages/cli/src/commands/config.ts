@@ -2,6 +2,7 @@ import { env } from 'node:process';
 
 import { cacheUrl } from '@cupboard/nix-store/cache-url';
 import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
+import { parsePublishedNixPublicKeys } from '@cupboard/nix-store/public-key';
 import { type Reporter } from '@cupboard/reporter';
 import type { ReadUser } from '@cupboard/shared/http';
 import type { Command } from 'commander';
@@ -40,7 +41,10 @@ export function runConfig(
 	// The nix.conf snippet is the command's payload, so it goes to stdout and
 	// `cupboard config <url> <pubkey> >> nix.conf` works. The netrc lines belong in
 	// a different file, so they stay on stderr as guidance.
-	const nixConfig = new NixConfig(url, publicKey);
+	const publishedKeys = parsePublishedNixPublicKeys(publicKey)
+		.map((key) => key.value)
+		.join('\n');
+	const nixConfig = new NixConfig(url, publishedKeys);
 	reporter.data(nixConfig.render().trimEnd());
 
 	if (credential === undefined) {

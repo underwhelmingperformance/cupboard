@@ -8,6 +8,8 @@ import { InvalidCacheNameError } from '../errors.ts';
 import { cacheSubstituterUrl, runConfig } from './config.ts';
 
 const alice = readUserInputSchema.parse('alice');
+const publishedPublicKey =
+	'cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=';
 
 interface CapturedOutput {
 	readonly data: string[];
@@ -101,7 +103,7 @@ function capturingReporter(captured: CapturedOutput): Reporter {
 
 const nixConfig = [
 	'extra-substituters = https://cupboard.example.workers.dev',
-	'extra-trusted-public-keys = cupboard-1:abc123'
+	`extra-trusted-public-keys = ${publishedPublicKey}`
 ].join('\n');
 
 describe('runConfig', () => {
@@ -110,7 +112,7 @@ describe('runConfig', () => {
 
 		runConfig(
 			new URL('https://cupboard.example.workers.dev'),
-			'cupboard-1:abc123',
+			publishedPublicKey,
 			capturingReporter(captured)
 		);
 
@@ -122,7 +124,7 @@ describe('runConfig', () => {
 
 		runConfig(
 			new URL('https://cupboard.example.workers.dev'),
-			'cupboard-1:abc123',
+			publishedPublicKey,
 			capturingReporter(captured),
 			{ user: alice, password: 'correct-horse-battery-staple' }
 		);
@@ -144,7 +146,7 @@ describe('runConfig', () => {
 
 		runConfig(
 			new URL('http://localhost:1234'),
-			'cupboard-1:abc123',
+			publishedPublicKey,
 			capturingReporter(captured),
 			{ user: alice, password: 'correct-horse-battery-staple' }
 		);
@@ -153,7 +155,7 @@ describe('runConfig', () => {
 			data: [
 				[
 					'extra-substituters = http://localhost:1234',
-					'extra-trusted-public-keys = cupboard-1:abc123'
+					`extra-trusted-public-keys = ${publishedPublicKey}`
 				].join('\n')
 			],
 			infos: [

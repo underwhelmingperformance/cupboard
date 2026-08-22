@@ -4,7 +4,10 @@ import { readFile as nodeReadFile } from 'node:fs/promises';
 import { cacheUrl, publicKeyUrl } from '@cupboard/nix-store/cache-url';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
-import { NixPublicKey } from '@cupboard/nix-store/public-key';
+import {
+	NixPublicKey,
+	parsePublishedNixPublicKeys
+} from '@cupboard/nix-store/public-key';
 import { type StoredCache } from '@cupboard/nix-store/scalars';
 import { NixSignature } from '@cupboard/nix-store/signature';
 import { canonicalHref } from '@cupboard/nix-store/url';
@@ -318,13 +321,7 @@ async function remoteTrustKeys(
 }
 
 function trustedPublicKeys(source: string): readonly string[] {
-	const keys = source.split(/\s+/).filter(Boolean);
-
-	if (keys.length === 0) {
-		throw new Error('Narinfo trust source did not contain any public keys');
-	}
-
-	return keys;
+	return parsePublishedNixPublicKeys(source).map((key) => key.value);
 }
 
 function readAuthHeaders(options: RemoteAttestationVerifyOptions): Headers {

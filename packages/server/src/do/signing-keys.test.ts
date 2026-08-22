@@ -14,6 +14,7 @@ import * as schema from '../db/schema.ts';
 import { signingKeyFromRow, signingKeyName } from './signing-keys.ts';
 
 const createdAt = isoTimestamp(new Date('2026-01-01T00:00:00.000Z'));
+const publicKey = 'cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=';
 
 function storedRow(
 	publicKey: string,
@@ -32,10 +33,10 @@ function storedRow(
 
 describe('signingKeyFromRow', () => {
 	it('reads the key name from the stored public key', () => {
-		expect(signingKeyFromRow(storedRow('cupboard-1:cHVi'))).toStrictEqual({
+		expect(signingKeyFromRow(storedRow(publicKey))).toStrictEqual({
 			id: 'active',
 			privateJwk: { kty: 'OKP' },
-			publicKey: new NixPublicKey('cupboard-1:cHVi'),
+			publicKey: new NixPublicKey(publicKey),
 			signing: true,
 			published: true,
 			generation: signingKeyGenerationSchema.parse(1),
@@ -45,7 +46,10 @@ describe('signingKeyFromRow', () => {
 
 	it.each([
 		{ name: 'no separator', publicKey: 'cupboard-1' },
-		{ name: 'an empty name', publicKey: ':cHVi' },
+		{
+			name: 'an empty name',
+			publicKey: ':AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8='
+		},
 		{ name: 'empty material', publicKey: 'cupboard-1:' }
 	])('rejects a stored public key with $name', ({ publicKey }) => {
 		expect(() => signingKeyFromRow(storedRow(publicKey))).toThrow(
@@ -57,9 +61,7 @@ describe('signingKeyFromRow', () => {
 		{ name: 'an unknown fixed id', id: 'primary' },
 		{ name: 'a truncated uuid', id: '123e4567-e89b-12d3-a456' }
 	])('rejects a stored key identifier with $name', ({ id }) => {
-		expect(() => signingKeyFromRow(storedRow('cupboard-1:cHVi', id))).toThrow(
-			ZodError
-		);
+		expect(() => signingKeyFromRow(storedRow(publicKey, id))).toThrow(ZodError);
 	});
 });
 

@@ -139,12 +139,16 @@ describe('fetchCachePublicKey', () => {
 		const fetchLike = (url: string) => {
 			requests.push(url);
 
-			return Promise.resolve(new Response('cupboard-1:abc123=\n'));
+			return Promise.resolve(
+				new Response(
+					'cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n'
+				)
+			);
 		};
 
 		const key = await fetchCachePublicKey(base, fetchLike);
 
-		expect(key).toBe('cupboard-1:abc123=');
+		expect(key).toBe('cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=');
 		expect(requests).toStrictEqual(['https://cupboard.example/t/acme/pubkey']);
 	});
 

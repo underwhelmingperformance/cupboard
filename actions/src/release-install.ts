@@ -30,7 +30,10 @@ import {
 	discardResponseBody,
 	withCleanup
 } from '@cupboard/shared/cleanup';
-import { createOctokitClient } from '@cupboard/shared/octokit';
+import {
+	createOctokitClient,
+	findGithubRelease
+} from '@cupboard/shared/octokit';
 import {
 	readResponseBytes,
 	RemoteBodyTooLargeError
@@ -1725,22 +1728,15 @@ async function fetchNewestRelease(
 	owner: string,
 	repo: string
 ): Promise<Release> {
-	const { data } = await octokit.rest.repos.listReleases({
-		owner,
-		repo,
-		per_page: 20
-	});
+	const item = await findGithubRelease(
+		octokit,
+		{ owner, repo },
+		(candidate) =>
+			!candidate.draft && releaseResponseSchema.safeParse(candidate).success
+	);
 
-	for (const item of data) {
-		if (item.draft) {
-			continue;
-		}
-
-		const parsed = releaseResponseSchema.safeParse(item);
-
-		if (parsed.success) {
-			return releaseFromResponse(parsed.data);
-		}
+	if (item !== undefined) {
+		return releaseFromResponse(releaseResponseSchema.parse(item));
 	}
 
 	throw new NoReleaseFoundError(`${owner}/${repo}`);

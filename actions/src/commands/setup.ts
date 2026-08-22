@@ -6,6 +6,7 @@ import { env } from 'node:process';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import { publicKeyUrl } from '@cupboard/nix-store/cache-url';
 import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
+import { parsePublishedNixPublicKeys } from '@cupboard/nix-store/public-key';
 import {
 	type CachePriority,
 	type StoredCache
@@ -605,7 +606,9 @@ export async function fetchCachePublicKeyAt(
 				throw new CachePublicKeyEmptyResponseError(url);
 			}
 
-			return publicKey;
+			return parsePublishedNixPublicKeys(publicKey)
+				.map((key) => key.value)
+				.join('\n');
 		}
 	);
 }

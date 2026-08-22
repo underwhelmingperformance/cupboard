@@ -1,3 +1,4 @@
+import { parseNamedMaterial } from './named-material.ts';
 import { NixPublicKey } from './public-key.ts';
 import { type NixFingerprint, type NixKeyName } from './scalars.ts';
 import { NixSignature } from './signature.ts';
@@ -65,7 +66,7 @@ export class NixTrustedKeys {
  * `undefined` for any other format.
  */
 export function publicKeyOfSecret(contents: string): NixPublicKey | undefined {
-	const parsed = parseKey(contents.trim());
+	const parsed = parseNamedMaterial(contents.trim());
 
 	if (parsed?.bytes.byteLength !== secretKeyByteLength) {
 		return undefined;

@@ -13,6 +13,7 @@ import {
 	type VerifiedIdentityPolicy,
 	type VerifyTrust
 } from '@cupboard/shared/sigstore';
+import { githubWorkflowBuildType } from '@cupboard/shared/slsa';
 import type { Signer } from '@sigstore/verify';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
@@ -180,11 +181,11 @@ function verifiedSigner(policy: VerifiedIdentityPolicy): Signer {
 
 const integratedTime = '2024-06-30T14:22:07.000Z';
 const tlogEntries = [{ logIndex: '148905233', integratedTime }];
-const signedTimestampCount = 1;
+const verifiedTimestampCount = 1;
 const trust: VerifyTrust = {
 	tlogEntries,
-	timestampCount: signedTimestampCount,
-	signedAt: integratedTime
+	timestampCount: verifiedTimestampCount,
+	integratedAt: integratedTime
 };
 
 function verifiedBundle(
@@ -200,7 +201,7 @@ function verifiedBundle(
 		subjectDigests: fields.subjectDigests,
 		signer: verifiedSigner(policy),
 		...(fields.predicate !== undefined && { predicate: fields.predicate }),
-		signedTimestampCount,
+		verifiedTimestampCount,
 		tlogEntries
 	};
 }
@@ -219,10 +220,13 @@ async function generateSigningKeyPair(): Promise<Ed25519KeyPair> {
 	return { privateKey, publicKey };
 }
 
-async function namedPublicKey(keyPair: Ed25519KeyPair): Promise<string> {
+async function namedPublicKey(
+	keyPair: Ed25519KeyPair,
+	name = 'cache'
+): Promise<string> {
 	const publicKey = await crypto.subtle.exportKey('raw', keyPair.publicKey);
 
-	return `cache:${Buffer.from(publicKey).toString('base64')}`;
+	return `${name}:${Buffer.from(publicKey).toString('base64')}`;
 }
 
 async function signedNarInfo(hash: string = storePathHash): Promise<{
@@ -307,6 +311,7 @@ describe('local attestation verification', () => {
 	it('surfaces the SLSA provenance summary from the predicate', async () => {
 		const predicate = {
 			buildDefinition: {
+				buildType: githubWorkflowBuildType,
 				externalParameters: {
 					workflow: {
 						ref: 'refs/heads/main',
@@ -528,7 +533,10 @@ describe('remote attestation verification', () => {
 
 	it('verifies remote bundles through the cache read surface', async () => {
 		const narInfo = await signedNarInfo();
-		const stalePublicKey = await namedPublicKey(await generateSigningKeyPair());
+		const stalePublicKey = await namedPublicKey(
+			await generateSigningKeyPair(),
+			'stale-cache'
+		);
 		const recordedCalls: {
 			readonly url: string;
 			readonly authorisation?: string;
