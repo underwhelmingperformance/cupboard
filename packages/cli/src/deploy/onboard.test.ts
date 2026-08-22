@@ -341,8 +341,8 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 			recordApiCall(apiCalls, 'ensureQueue');
 			return Promise.resolve(queueIdSchema.parse('queue-id'));
 		},
-		d1Query: () => {
-			recordApiCall(apiCalls, 'd1Query');
+		d1QueryBatch: () => {
+			recordApiCall(apiCalls, 'd1QueryBatch');
 			return Promise.resolve();
 		},
 		d1QueryRows: () => {
@@ -386,8 +386,8 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 			recordApiCall(apiCalls, 'findCustomDomain');
 			return Promise.resolve(absentString);
 		},
-		ensureCustomDomain: () => {
-			recordApiCall(apiCalls, 'ensureCustomDomain');
+		setCustomDomain: () => {
+			recordApiCall(apiCalls, 'setCustomDomain');
 			return Promise.resolve();
 		},
 		listTokenPermissionGroups: () => {
@@ -474,11 +474,16 @@ function httpRejection(status: number, member: string): Error {
 	return new CupboardHttpError('GET', member, status, 'computer says no\n');
 }
 
+const notFoundStatus: number = StatusCodes.NOT_FOUND;
+
 function orpcRejection(status: number): Error {
-	return new ORPCError('INTERNAL_SERVER_ERROR', {
-		status,
-		message: 'computer says no'
-	});
+	return new ORPCError(
+		status === notFoundStatus ? 'NOT_FOUND' : 'INTERNAL_SERVER_ERROR',
+		{
+			status,
+			message: 'computer says no'
+		}
+	);
 }
 
 interface ClientScript {
@@ -984,6 +989,43 @@ describe('onboardDeployment', () => {
 				}
 			],
 			controlCheckTokens: ['admin-jwt']
+		});
+	});
+
+	it('continues when an older deployment has no R2 check procedure', async () => {
+		const { ui, warnings } = scriptedUi({ slugs: ['builds'] });
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [claimedSignup],
+			lists: [[]],
+			creates: [tenantSummary('builds')],
+			controlChecks: [StatusCodes.NOT_FOUND],
+			publicKeys: ['pk-1']
+		});
+
+		await onboardDeployment({ ...baseOptions(ui, client), r2: keptR2 });
+
+		expect(warnings).toStrictEqual([
+			'Could not check the R2 credentials (the deployment returned HTTP 404).'
+		]);
+	});
+
+	it('surfaces a server failure from the R2 check procedure', async () => {
+		const { ui } = scriptedUi({ slugs: ['builds'] });
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [claimedSignup],
+			lists: [[]],
+			creates: [tenantSummary('builds')],
+			controlChecks: [StatusCodes.SERVICE_UNAVAILABLE],
+			publicKeys: ['pk-1']
+		});
+
+		await expect(
+			onboardDeployment({ ...baseOptions(ui, client), r2: keptR2 })
+		).rejects.toMatchObject({
+			code: 'INTERNAL_SERVER_ERROR',
+			status: StatusCodes.SERVICE_UNAVAILABLE
 		});
 	});
 

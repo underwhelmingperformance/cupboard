@@ -7,6 +7,8 @@ import type { ScriptUpdateParams } from 'cloudflare/resources/workers/scripts/sc
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
+import { CliError } from '../errors.ts';
+
 import type { WorkerBundle } from './bundle.ts';
 import {
 	type CloudflareAccountId,
@@ -35,12 +37,28 @@ export interface QueueConsumerSettings {
 	readonly deadLetterQueue: string | undefined;
 }
 
+/**
+Cloudflare returned a queue consumer that needs an update but has no update id.
+*/
+export class QueueConsumerIdMissingError extends CliError {
+	constructor(
+		public readonly queueId: QueueId,
+		public readonly scriptName: ScriptName
+	) {
+		super(
+			`Cloudflare returned a drifted queue consumer for ${scriptName} without a consumer id; the consumer on queue ${queueId} cannot be updated.`
+		);
+		this.name = 'QueueConsumerIdMissingError';
+	}
+}
+
 export interface WorkerSecret {
 	readonly name: string;
 	readonly text: string;
 }
 
 export interface ScriptConfiguration {
+	readonly buildVersion?: string;
 	readonly bindings: readonly unknown[];
 	readonly cacheEnabled: boolean;
 	readonly crossVersionCache: boolean;
@@ -49,6 +67,11 @@ export interface ScriptConfiguration {
 export interface WorkersDevelopmentRoutes {
 	readonly workersDev: boolean;
 	readonly previewUrls: boolean;
+}
+
+export interface CustomDomain {
+	readonly hostname: string;
+	readonly zoneId: ZoneId;
 }
 
 export interface TokenPermissionGroup {
@@ -102,7 +125,10 @@ export interface CloudflareApi {
 	ensureKvNamespace(title: string): Promise<KvNamespaceId>;
 	ensureQueue(name: string): Promise<QueueId>;
 
-	d1Query(databaseId: DatabaseId, sql: string): Promise<void>;
+	d1QueryBatch(
+		databaseId: DatabaseId,
+		statements: readonly string[]
+	): Promise<void>;
 	d1QueryRows(databaseId: DatabaseId, sql: string): Promise<string[]>;
 
 	getScriptMigrationTag(scriptName: ScriptName): Promise<string | undefined>;
@@ -133,10 +159,9 @@ export interface CloudflareApi {
 
 	findZoneId(name: string): Promise<ZoneId | undefined>;
 	findCustomDomain(scriptName: ScriptName): Promise<string | undefined>;
-	ensureCustomDomain(
+	setCustomDomain(
 		scriptName: ScriptName,
-		hostname: string,
-		zoneId: ZoneId
+		domain: CustomDomain | undefined
 	): Promise<void>;
 
 	listTokenPermissionGroups(): Promise<TokenPermissionGroup[]>;
@@ -193,15 +218,17 @@ const liveConsumerSchema = z.object({
 			batch_size: z.number().optional(),
 			max_wait_time_ms: z.number().optional(),
 			max_retries: z.number().optional(),
-			max_concurrency: z.number().optional()
+			max_concurrency: z.number().nullable().optional()
 		})
 		.optional()
 });
+const defaultQueueBatchSize = 10;
+const defaultQueueBatchWaitMilliseconds = 5000;
+const defaultQueueRetries = 3;
 
 /**
- * Whether a live queue consumer already has every setting the deploy
- * would write. Settings the config leaves undefined are the platform's to
- * default, so they do not count against a match.
+ * Whether a live queue consumer uses the configured values, or Cloudflare's
+ * documented defaults for settings the deployment omits.
  */
 function isConsumerSettled(
 	existing: {
@@ -209,29 +236,28 @@ function isConsumerSettled(
 			readonly batch_size?: number;
 			readonly max_wait_time_ms?: number;
 			readonly max_retries?: number;
-			readonly max_concurrency?: number;
+			readonly max_concurrency?: number | null;
 		};
 		readonly dead_letter_queue?: string;
 	},
 	desired: QueueConsumerSettings
 ): boolean {
-	const isSettled = (
-		want: number | undefined,
-		live: number | undefined
-	): boolean => want === undefined || want === live;
+	const liveMaxConcurrency = existing.settings?.max_concurrency;
+	const effectiveMaxConcurrency =
+		typeof liveMaxConcurrency === 'number' ? liveMaxConcurrency : undefined;
 
 	return (
-		isSettled(desired.maxBatchSize, existing.settings?.batch_size) &&
-		isSettled(
-			desired.maxBatchTimeout === undefined
-				? undefined
-				: desired.maxBatchTimeout * 1000,
-			existing.settings?.max_wait_time_ms
-		) &&
-		isSettled(desired.maxRetries, existing.settings?.max_retries) &&
-		isSettled(desired.maxConcurrency, existing.settings?.max_concurrency) &&
-		(desired.deadLetterQueue === undefined ||
-			desired.deadLetterQueue === existing.dead_letter_queue)
+		(existing.settings?.batch_size ?? defaultQueueBatchSize) ===
+			(desired.maxBatchSize ?? defaultQueueBatchSize) &&
+		(existing.settings?.max_wait_time_ms ??
+			defaultQueueBatchWaitMilliseconds) ===
+			(desired.maxBatchTimeout === undefined
+				? defaultQueueBatchWaitMilliseconds
+				: desired.maxBatchTimeout * 1000) &&
+		(existing.settings?.max_retries ?? defaultQueueRetries) ===
+			(desired.maxRetries ?? defaultQueueRetries) &&
+		effectiveMaxConcurrency === desired.maxConcurrency &&
+		(existing.dead_letter_queue ?? '') === (desired.deadLetterQueue ?? '')
 	);
 }
 
@@ -409,8 +435,11 @@ export function createCloudflareApi(
 			return queueIdSchema.parse(created.queue_id ?? '');
 		},
 
-		async d1Query(databaseId, sql) {
-			await client.d1.database.query(databaseId, { ...account, sql });
+		async d1QueryBatch(databaseId, statements) {
+			await client.d1.database.query(databaseId, {
+				...account,
+				batch: statements.map((sql) => ({ sql }))
+			});
 		},
 
 		async d1QueryRows(databaseId, sql) {
@@ -455,6 +484,9 @@ export function createCloudflareApi(
 				// response type omits it.
 				const parsed = z
 					.object({
+						annotations: z
+							.object({ 'workers/tag': z.string().optional() })
+							.optional(),
 						bindings: z.array(z.unknown()).default([]),
 						cache_options: z
 							.object({
@@ -466,6 +498,9 @@ export function createCloudflareApi(
 					.parse(settings);
 
 				return {
+					...(parsed.annotations?.['workers/tag'] !== undefined && {
+						buildVersion: parsed.annotations['workers/tag']
+					}),
 					bindings: parsed.bindings,
 					cacheEnabled: parsed.cache_options?.enabled ?? false,
 					crossVersionCache: parsed.cache_options?.cross_version_cache ?? false
@@ -551,12 +586,12 @@ export function createCloudflareApi(
 				return;
 			}
 
-			if (existing.consumer_id === undefined) {
-				// A matched consumer that cannot be addressed cannot be updated;
-				// leaving it unchanged is the only thing this deploy can do.
-				return;
+			if (existing.consumer_id === undefined || existing.consumer_id === '') {
+				throw new QueueConsumerIdMissingError(queueId, scriptName);
 			}
 
+			// This endpoint is PUT, so omitted settings return to their platform
+			// defaults when a deployment removes them.
 			await client.queues.consumers.update(existing.consumer_id, {
 				...body,
 				queue_id: queueId
@@ -636,23 +671,32 @@ export function createCloudflareApi(
 			return existing?.hostname;
 		},
 
-		async ensureCustomDomain(scriptName, hostname, zoneId) {
-			const existing = await firstMatch(
-				client.workers.domains.list(account),
-				(domain) => domain.hostname === hostname
+		async setCustomDomain(scriptName, desired) {
+			const domains = await Array.fromAsync(
+				client.workers.domains.list(account)
 			);
+			const current = domains.filter((domain) => domain.service === scriptName);
 
-			if (existing?.service === scriptName) {
-				return;
+			if (
+				desired !== undefined &&
+				current.every((domain) => domain.hostname !== desired.hostname)
+			) {
+				await client.workers.domains.update({
+					...account,
+					hostname: desired.hostname,
+					zone_id: desired.zoneId,
+					service: scriptName,
+					environment: 'production'
+				});
 			}
 
-			await client.workers.domains.update({
-				...account,
-				hostname,
-				zone_id: zoneId,
-				service: scriptName,
-				environment: 'production'
-			});
+			for (const domain of current) {
+				if (domain.hostname === desired?.hostname) {
+					continue;
+				}
+
+				await client.workers.domains.delete(domain.id, account);
+			}
 		},
 
 		async listTokenPermissionGroups() {
@@ -717,17 +761,11 @@ export function createCloudflareApi(
 		},
 
 		async setWorkersDevRoutes(scriptName, routes) {
-			try {
-				await client.workers.scripts.subdomain.create(scriptName, {
-					...account,
-					enabled: routes.workersDev,
-					previews_enabled: routes.previewUrls
-				});
-			} catch (error) {
-				if (!(error instanceof NotFoundError)) {
-					throw error;
-				}
-			}
+			await client.workers.scripts.subdomain.create(scriptName, {
+				...account,
+				enabled: routes.workersDev,
+				previews_enabled: routes.previewUrls
+			});
 		},
 
 		async queryWorkerLogs(query) {

@@ -1,12 +1,17 @@
-import Cloudflare from 'cloudflare';
+import Cloudflare, { NotFoundError } from 'cloudflare';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
-import { createCloudflareApi } from './cloudflare-api.ts';
+import {
+	createCloudflareApi,
+	QueueConsumerIdMissingError
+} from './cloudflare-api.ts';
 import {
 	cloudflareAccountIdSchema,
+	databaseIdSchema,
 	queueIdSchema,
-	scriptNameSchema
+	scriptNameSchema,
+	zoneIdSchema
 } from './identifiers.ts';
 
 const accountId = (value: string) => cloudflareAccountIdSchema.parse(value);
@@ -227,6 +232,32 @@ describe('uploadScript', () => {
 	});
 });
 
+describe('d1QueryBatch', () => {
+	it('sends one transactional batch to the D1 query endpoint', async () => {
+		const path = '/accounts/acc-1/d1/database/db-1/query';
+		const { client, requests, bodies } = fakeCloudflare({
+			[`POST ${path}`]: []
+		});
+
+		await createCloudflareApi(client, accountId('acc-1')).d1QueryBatch(
+			databaseIdSchema.parse('db-1'),
+			['CREATE TABLE example (id INTEGER);', 'INSERT INTO example VALUES (1);']
+		);
+
+		expect({ requests, bodies }).toStrictEqual({
+			requests: [{ method: 'POST', path }],
+			bodies: [
+				{
+					batch: [
+						{ sql: 'CREATE TABLE example (id INTEGER);' },
+						{ sql: 'INSERT INTO example VALUES (1);' }
+					]
+				}
+			]
+		});
+	});
+});
+
 describe('ensureQueueConsumer', () => {
 	it('does not write when the live consumer already matches', async () => {
 		const { client, requests } = fakeCloudflare({
@@ -281,6 +312,64 @@ describe('ensureQueueConsumer', () => {
 			{ method: 'GET', path: consumersPath },
 			{ method: 'PUT', path: `${consumersPath}/consumer-1` }
 		]);
+	});
+
+	it('clears live settings that were removed from the deployment', async () => {
+		const { client, requests, bodies } = fakeCloudflare({
+			[`GET ${consumersPath}`]: [liveWorkerConsumer],
+			[`PUT ${consumersPath}/consumer-1`]: {}
+		});
+
+		await createCloudflareApi(client, accountId('acc-1')).ensureQueueConsumer(
+			queueId('queue-1'),
+			scriptName('cupboard'),
+			{
+				maxBatchSize: undefined,
+				maxBatchTimeout: undefined,
+				maxRetries: undefined,
+				maxConcurrency: undefined,
+				deadLetterQueue: undefined
+			}
+		);
+
+		expect({ requests, update: bodies[1] }).toStrictEqual({
+			requests: [
+				{ method: 'GET', path: consumersPath },
+				{ method: 'PUT', path: `${consumersPath}/consumer-1` }
+			],
+			update: {
+				type: 'worker',
+				script_name: 'cupboard',
+				settings: {}
+			}
+		});
+	});
+
+	it('rejects drift when the live consumer has no addressable id', async () => {
+		const { consumer_id: _consumerId, ...withoutId } = liveWorkerConsumer;
+		const { client, requests } = fakeCloudflare({
+			[`GET ${consumersPath}`]: [
+				{
+					...withoutId,
+					settings: { ...withoutId.settings, batch_size: 1 }
+				}
+			]
+		});
+		const api = createCloudflareApi(client, accountId('acc-1'));
+
+		await expect(
+			api.ensureQueueConsumer(
+				queueId('queue-1'),
+				scriptName('cupboard'),
+				desiredSettings
+			)
+		).rejects.toStrictEqual(
+			new QueueConsumerIdMissingError(
+				queueId('queue-1'),
+				scriptName('cupboard')
+			)
+		);
+		expect(requests).toStrictEqual([{ method: 'GET', path: consumersPath }]);
 	});
 
 	it('matches a consumer answering with script_name as the schema claims', async () => {
@@ -468,11 +557,67 @@ describe('findCustomDomain', () => {
 	});
 });
 
+describe('setCustomDomain', () => {
+	const domainsPath = '/accounts/acc-1/workers/domains';
+
+	it('detaches every domain routed to the script when none is configured', async () => {
+		const { client, requests } = fakeCloudflare({
+			[`GET ${domainsPath}`]: [
+				{ id: 'keep', hostname: 'other.example.com', service: 'other-worker' },
+				{ id: 'old-a', hostname: 'old-a.example.com', service: 'cupboard' },
+				{ id: 'old-b', hostname: 'old-b.example.com', service: 'cupboard' }
+			],
+			[`DELETE ${domainsPath}/old-a`]: { success: true },
+			[`DELETE ${domainsPath}/old-b`]: { success: true }
+		});
+
+		await createCloudflareApi(client, accountId('acc-1')).setCustomDomain(
+			scriptName('cupboard'),
+			undefined
+		);
+
+		expect(requests).toStrictEqual([
+			{ method: 'GET', path: domainsPath },
+			{ method: 'DELETE', path: `${domainsPath}/old-a` },
+			{ method: 'DELETE', path: `${domainsPath}/old-b` }
+		]);
+	});
+
+	it('attaches the configured domain before detaching an old domain', async () => {
+		const { client, requests } = fakeCloudflare({
+			[`GET ${domainsPath}`]: [
+				{ id: 'old', hostname: 'old.example.com', service: 'cupboard' }
+			],
+			[`PUT ${domainsPath}`]: {
+				id: 'new',
+				hostname: 'new.example.com',
+				service: 'cupboard'
+			},
+			[`DELETE ${domainsPath}/old`]: { success: true }
+		});
+
+		await createCloudflareApi(client, accountId('acc-1')).setCustomDomain(
+			scriptName('cupboard'),
+			{
+				hostname: 'new.example.com',
+				zoneId: zoneIdSchema.parse('zone-1')
+			}
+		);
+
+		expect(requests).toStrictEqual([
+			{ method: 'GET', path: domainsPath },
+			{ method: 'PUT', path: domainsPath },
+			{ method: 'DELETE', path: `${domainsPath}/old` }
+		]);
+	});
+});
+
 describe('getScriptConfiguration', () => {
 	it('returns live bindings and cache settings', async () => {
 		const path = '/accounts/acc-1/workers/scripts/cupboard-tenant/settings';
 		const { client } = fakeCloudflare({
 			[`GET ${path}`]: {
+				annotations: { 'workers/tag': 'abc123' },
 				bindings: [{ type: 'r2_bucket', name: 'BLOBS' }],
 				cache_options: { enabled: true, cross_version_cache: true }
 			}
@@ -484,6 +629,7 @@ describe('getScriptConfiguration', () => {
 		).getScriptConfiguration(scriptName('cupboard-tenant'));
 
 		expect(configuration).toStrictEqual({
+			buildVersion: 'abc123',
 			bindings: [{ type: 'r2_bucket', name: 'BLOBS' }],
 			cacheEnabled: true,
 			crossVersionCache: true
@@ -510,5 +656,16 @@ describe('setWorkersDevRoutes', () => {
 			requests: [{ method: 'POST', path }],
 			bodies: [{ enabled: false, previews_enabled: true }]
 		});
+	});
+
+	it('reports a missing script to the caller', async () => {
+		const { client } = fakeCloudflare({});
+
+		await expect(
+			createCloudflareApi(client, accountId('acc-1')).setWorkersDevRoutes(
+				scriptName('cupboard-tenant'),
+				{ workersDev: false, previewUrls: false }
+			)
+		).rejects.toBeInstanceOf(NotFoundError);
 	});
 });

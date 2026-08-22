@@ -1,3 +1,5 @@
+import { getDomain } from 'tldts';
+
 import { CliError } from '../errors.ts';
 
 export type DomainProblem =
@@ -79,4 +81,29 @@ export function checkDomainOption(value: string): string {
 	}
 
 	return value;
+}
+
+/**
+ * Candidate Cloudflare zones for a hostname, from the most specific delegated
+ * zone down to its registrable domain. The Public Suffix List supplies the
+ * lower bound, so a lookup never asks Cloudflare for a suffix such as `co.uk`.
+ */
+export function cloudflareZoneCandidates(hostname: string): string[] {
+	const normalised = hostname.toLowerCase();
+	const registrable = getDomain(normalised, {
+		allowPrivateDomains: true,
+		extractHostname: false
+	});
+
+	if (registrable === null) {
+		return [];
+	}
+
+	const hostnameLabels = normalised.split('.');
+	const registrableLabels = registrable.split('.');
+	const candidateCount = hostnameLabels.length - registrableLabels.length + 1;
+
+	return Array.from({ length: candidateCount }, (_unused, index) =>
+		hostnameLabels.slice(index).join('.')
+	);
 }

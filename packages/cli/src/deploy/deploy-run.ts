@@ -1,5 +1,5 @@
 import type { PhaseContext, Reporter, ResultRow } from '@cupboard/reporter';
-import { APIError } from 'cloudflare';
+import { APIError, NotFoundError } from 'cloudflare';
 import type { ScriptUpdateParams } from 'cloudflare/resources/workers/scripts/scripts';
 import { z } from 'zod';
 
@@ -7,6 +7,7 @@ import type { DeploymentArtifact } from './artifact.ts';
 import type { WorkerBundle } from './bundle.ts';
 import type { CloudflareApi, WorkerSecret } from './cloudflare-api.ts';
 import type { DeploymentConfig } from './config.ts';
+import { cloudflareZoneCandidates } from './domain.ts';
 import type { DatabaseId, KvNamespaceId, ScriptName } from './identifiers.ts';
 import {
 	applyD1Migrations,
@@ -14,7 +15,11 @@ import {
 } from './migrations.ts';
 import { type OwnerChoice, ownerHint } from './owner.ts';
 import type { DeploySecrets } from './secrets.ts';
-import { buildScriptMetadata, type ResolvedResources } from './upload.ts';
+import {
+	buildScriptMetadata,
+	type ResolvedResources,
+	type ScriptMetadata
+} from './upload.ts';
 
 // Cloudflare's error code for `limits` on a plan that does not allow them.
 const cpuLimitsUnsupportedCode = 100_328;
@@ -57,9 +62,7 @@ async function uploadScriptForPlan(
 
 export interface DeployOptions {
 	readonly domain: string | undefined;
-	readonly dryRun: boolean;
 	readonly secrets: DeploySecrets;
-	readonly liveBuild: string | undefined;
 }
 
 export interface DeployDependencies {
@@ -215,8 +218,7 @@ async function reconcileResources(
 }
 
 async function configureTriggers(
-	dependencies: DeployDependencies,
-	resources: ResolvedResources
+	dependencies: DeployDependencies
 ): Promise<void> {
 	const { api, reporter, options, artifact } = dependencies;
 	const control = artifact.config.control;
@@ -234,29 +236,45 @@ async function configureTriggers(
 			});
 		}
 
-		if (control.crons.length > 0) {
-			await api.ensureSchedules(control.name, control.crons);
+		await api.ensureSchedules(control.name, control.crons);
+
+		if (options.domain === undefined) {
+			await api.setCustomDomain(control.name, undefined);
+
+			return;
 		}
 
-		if (options.domain !== undefined) {
-			const zoneId = await api.findZoneId(zoneOf(options.domain));
+		const zoneId = await findZoneId(api, options.domain);
 
-			if (zoneId === undefined) {
-				context.warn(
-					'No Cloudflare zone for',
-					`${options.domain}; add the domain to this account, then re-run.`
-				);
-			} else {
-				await api.ensureCustomDomain(control.name, options.domain, zoneId);
-			}
+		if (zoneId === undefined) {
+			context.warn(
+				'No Cloudflare zone for',
+				`${options.domain}; add the domain to this account, then re-run.`
+			);
+
+			return;
 		}
 
-		return resources;
+		await api.setCustomDomain(control.name, {
+			hostname: options.domain,
+			zoneId
+		});
 	});
 }
 
-function zoneOf(hostname: string): string {
-	return hostname.split('.').slice(-2).join('.');
+async function findZoneId(
+	api: CloudflareApi,
+	hostname: string
+): Promise<Awaited<ReturnType<CloudflareApi['findZoneId']>>> {
+	for (const candidate of cloudflareZoneCandidates(hostname)) {
+		const zoneId = await api.findZoneId(candidate);
+
+		if (zoneId !== undefined) {
+			return zoneId;
+		}
+	}
+
+	return undefined;
 }
 
 /**
@@ -319,9 +337,9 @@ function canonicalJson(value: unknown): string {
 }
 
 /**
- * Provisions, migrates, uploads, and configures a Cupboard deployment.
- * `--dry-run` renders the plan without mutating Cloudflare. A live deployment
- * uploads the tenant Durable Object before the control Worker that binds it.
+ * Provisions, migrates, uploads, and configures a Cupboard deployment after the
+ * caller has accepted the plan. The command handles `--dry-run` before it calls
+ * this mutating operation.
  */
 export async function runDeploy(
 	dependencies: DeployDependencies
@@ -340,7 +358,8 @@ export async function runDeploy(
 	if (databaseId !== undefined) {
 		const applied = await applyD1Migrations(
 			{
-				query: (database, sql) => api.d1Query(database, sql),
+				queryBatch: (database, statements) =>
+					api.d1QueryBatch(database, statements),
 				queryRows: (database, sql) => api.d1QueryRows(database, sql)
 			},
 			databaseId,
@@ -361,14 +380,18 @@ export async function runDeploy(
 		tag,
 		artifact.config.tenant.migrations
 	);
-	const tenantMetadata = buildScriptMetadata(
-		artifact.config.tenant,
-		resources,
-		migration
+	const withBuildVersion = (metadata: ScriptMetadata): ScriptMetadata => ({
+		...metadata,
+		annotations: {
+			...metadata.annotations,
+			'workers/tag': artifact.buildVersion
+		}
+	});
+	const tenantMetadata = withBuildVersion(
+		buildScriptMetadata(artifact.config.tenant, resources, migration)
 	);
-	const controlMetadata = buildScriptMetadata(
-		artifact.config.control,
-		resources
+	const controlMetadata = withBuildVersion(
+		buildScriptMetadata(artifact.config.control, resources)
 	);
 
 	const unchanged = await reporter.phase(
@@ -376,14 +399,8 @@ export async function runDeploy(
 		async (context) => {
 			context.fact('build', artifact.buildVersion);
 
-			// A dirty build's version cannot distinguish two different working
-			// trees, so only a clean build that is already live can converge.
-			if (
-				options.liveBuild !== artifact.buildVersion ||
-				artifact.buildVersion.endsWith('+dirty')
-			) {
-				context.fact('live', options.liveBuild ?? 'unreachable');
-
+			// A dirty build's version cannot distinguish two different working trees.
+			if (artifact.buildVersion.endsWith('+dirty')) {
 				return { tenant: false, control: false };
 			}
 
@@ -394,13 +411,13 @@ export async function runDeploy(
 
 			return {
 				tenant:
-					tenantLive !== undefined &&
+					tenantLive?.buildVersion === artifact.buildVersion &&
 					migration === undefined &&
 					hasMatchingBindings(tenantMetadata.bindings, tenantLive.bindings) &&
 					tenantLive.cacheEnabled === artifact.config.tenant.cacheEnabled &&
 					tenantLive.crossVersionCache === artifact.config.tenant.cacheEnabled,
 				control:
-					controlLive !== undefined &&
+					controlLive?.buildVersion === artifact.buildVersion &&
 					hasMatchingBindings(controlMetadata.bindings, controlLive.bindings) &&
 					controlLive.cacheEnabled === artifact.config.control.cacheEnabled &&
 					controlLive.crossVersionCache === artifact.config.control.cacheEnabled
@@ -454,7 +471,15 @@ export async function runDeploy(
 		!tenantRoutes.workersDev || !tenantRoutes.previewUrls;
 
 	if (shouldRestrictTenantRoutes) {
-		await api.setWorkersDevRoutes(artifact.config.tenant.name, tenantRoutes);
+		try {
+			await api.setWorkersDevRoutes(artifact.config.tenant.name, tenantRoutes);
+		} catch (error) {
+			// The settings route does not exist before the first script upload. The
+			// required call after upload must still confirm the restricted routes.
+			if (!isMissingWorkerScriptError(error)) {
+				throw error;
+			}
+		}
 	}
 
 	const hasNamedTenantEntrypoint = artifact.config.control.services.some(
@@ -495,7 +520,7 @@ export async function runDeploy(
 		reporter.step('Setting secrets · no secrets to set');
 	}
 
-	await configureTriggers(dependencies, resources);
+	await configureTriggers(dependencies);
 
 	const d1Name = artifact.config.tenant.d1Databases[0]?.databaseName;
 	const d1Database =
@@ -532,4 +557,11 @@ export async function runDeploy(
 	});
 
 	return rows;
+}
+
+function isMissingWorkerScriptError(error: unknown): boolean {
+	return (
+		error instanceof NotFoundError &&
+		error.errors.some((item) => item.code === 10_007)
+	);
 }

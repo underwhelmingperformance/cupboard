@@ -7,7 +7,17 @@ import {
 	SessionRejectedError
 } from '../errors.ts';
 
-import { translateRpcError } from './rpc-errors.ts';
+import { isRpcNotFoundError, translateRpcError } from './rpc-errors.ts';
+
+describe('isRpcNotFoundError', () => {
+	it.each([
+		['NOT_FOUND', 404, true],
+		['INTERNAL_SERVER_ERROR', 404, false],
+		['NOT_FOUND', 503, false]
+	])('classifies $code at HTTP $status', (code, status, expected) => {
+		expect(isRpcNotFoundError(new ORPCError(code, { status }))).toBe(expected);
+	});
+});
 
 describe('translateRpcError', () => {
 	it.each([

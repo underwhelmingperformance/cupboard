@@ -31,6 +31,7 @@ import {
 } from '../auth/token-store.ts';
 import { CupboardClient } from '../client/client.ts';
 import { controlRpc } from '../client/orpc.ts';
+import { isRpcNotFoundError } from '../client/rpc-errors.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { CupboardHttpError } from '../errors.ts';
 
@@ -581,10 +582,11 @@ function describeR2Check(check: ParsedR2CredentialCheck): string {
 }
 
 /**
- * The stored R2 secrets cannot be read back, so the Worker probes them. A
- * failed probe prompts for a replacement pair, tests it directly against R2,
- * stores it, and repeats the Worker probe. Credential failures warn but do not
- * fail onboarding because they prevent pushes, not reads.
+ * Verifies the R2 credentials stored as Worker secrets, which cannot be read
+ * back. A failed check prompts for a replacement, verifies it directly against
+ * R2, stores it, and repeats the Worker check. Only a missing check procedure
+ * identifies an older deployment; authentication and server failures propagate.
+ * Bad credentials remain warnings because the cache can still serve reads.
  */
 async function ensureWorkerR2(dependencies: {
 	readonly ui: DeployUi;
@@ -613,9 +615,11 @@ async function ensureWorkerR2(dependencies: {
 				return answered.r2;
 			});
 	} catch (error) {
-		if (error instanceof ORPCError) {
+		// An older deployment has no check route; the credentials stay
+		// unproven.
+		if (isRpcNotFoundError(error)) {
 			ui.warn(
-				`Could not check the R2 credentials (the deployment answered ` +
+				`Could not check the R2 credentials (the deployment returned ` +
 					`HTTP ${String(error.status)}).`
 			);
 
@@ -669,7 +673,17 @@ async function ensureWorkerR2(dependencies: {
 		}
 
 		if (probe.kind === 'unreachable') {
-			ui.warn('Could not reach R2 to check the pair; nothing was changed.');
+			ui.warn(
+				'Could not reach R2 to check the pair. The Worker credentials were not changed.'
+			);
+
+			return;
+		}
+
+		if (probe.kind === 'invalid-response') {
+			ui.warn(
+				`${probe.cause.message} The Worker credentials were not changed.`
+			);
 
 			return;
 		}
