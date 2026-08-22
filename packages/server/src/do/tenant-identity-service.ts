@@ -11,7 +11,7 @@ import { eq } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
 
-import type { ServerContext } from './context.ts';
+import type { SchemaWriter, ServerContext } from './context.ts';
 
 const identityId = 'singleton';
 
@@ -28,8 +28,10 @@ export interface TenantIdentity {
 export class TenantIdentityService {
 	constructor(private readonly context: ServerContext) {}
 
-	current(): TenantIdentity | undefined {
-		const row = this.context.db
+	current(
+		database: SchemaWriter = this.context.db
+	): TenantIdentity | undefined {
+		const row = database
 			.select()
 			.from(schema.tenantIdentity)
 			.where(eq(schema.tenantIdentity.id, identityId))
@@ -50,11 +52,14 @@ export class TenantIdentityService {
 		};
 	}
 
-	// An equal or older `configVersion` changes nothing, so a replay cannot restore
-	// stale identity fields or owner access. A true result tells the caller to
-	// reseed the reserved owner rule from the new identity.
-	configure(identity: TenantIdentity): boolean {
-		const existing = this.current();
+	// Apply only a newer configuration version. An equal or older dispatch cannot
+	// restore stale identity fields or owner access. The result tells the caller
+	// whether to reseed the reserved owner rule.
+	configure(
+		identity: TenantIdentity,
+		database: SchemaWriter = this.context.db
+	): boolean {
+		const existing = this.current(database);
 
 		if (
 			existing !== undefined &&
@@ -63,7 +68,7 @@ export class TenantIdentityService {
 			return false;
 		}
 
-		this.context.db
+		database
 			.insert(schema.tenantIdentity)
 			.values({ id: identityId, ...identity })
 			.onConflictDoUpdate({

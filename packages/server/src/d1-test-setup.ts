@@ -53,9 +53,9 @@ beforeEach(async () => {
 	await database.delete(tenant).run();
 	await database.delete(manifestState).run();
 
-	// KV is shared across tests like D1; clear the admission manifest and the cron's
-	// operational state (the reaper's demote-scan position) so neither a stale
-	// manifest nor a stale cursor leaks into the next test.
+	// KV is shared across tests like D1. Clear the negative membership hints and
+	// the cron's operational state so neither membership state nor the reaper's
+	// demote-scan cursor leaks into the next test.
 	for (const kv of [env.TENANT_CACHE, env.CRON_STATE]) {
 		const { keys } = await kv.list();
 		await Promise.all(keys.map((key) => kv.delete(key.name)));

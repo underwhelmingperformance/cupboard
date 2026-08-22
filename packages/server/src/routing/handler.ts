@@ -123,13 +123,11 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		}
 	);
 
-	// Admission resolves every tenant slug against the manifest in KV. Reject an
-	// absent slug before creating a Durable Object so arbitrary slugs cannot create
-	// unprovisioned objects. `parseTenantPath` reads the raw pathname and rejects an
-	// encoded slug.
-	//
-	// Writes stop immediately after the authoritative D1 status changes. Reads stop
-	// after the updated manifest reaches KV and the cached entry expires.
+	// The membership filter and KV marker reject unknown tenant slugs before a
+	// request can create a Durable Object. Every remaining request reads the
+	// authoritative D1 row, so a status change applies to reads and writes without
+	// waiting for the negative caches to refresh. `parseTenantPath` reads the raw
+	// pathname and rejects an encoded slug.
 	app.use('/t/:tenant/*', async (context, next) => {
 		const requestUrl = new URL(context.req.url);
 		const route = parseTenantPath(requestUrl.pathname);
@@ -571,8 +569,9 @@ async function dispatchTenant(
 	inner: Request,
 	env: Env,
 	tenant: TenantId,
-	// Reuse status only when admission read D1 for this request. Cached admission
-	// must recheck D1 before a write.
+	// Current admission supplies status from this request's D1 read. If an
+	// admission source cannot prove its status is authoritative, dispatch reads D1
+	// before a write.
 	admittedStatus?: TenantEntry['status']
 ): Promise<Response> {
 	if (!isTenantWrite(inner)) {
@@ -588,6 +587,8 @@ async function dispatchTenant(
 	return tenantServer(env, tenant).fetch(inner);
 }
 
+// Returns the admitted status only when it came from this request's D1 read.
+// An unproven status therefore cannot bypass the authoritative write check.
 function admittedWriteStatus(
 	context: Context<WorkerHonoEnv>
 ): TenantEntry['status'] | undefined {
@@ -596,9 +597,9 @@ function admittedWriteStatus(
 		: undefined;
 }
 
-// Token exchange and the two read-only POST endpoints bypass the write gate. A
-// WebSocket upgrade uses GET on the wire, but the only socket route commits
-// uploads and must be gated as a write.
+// The two read-only POST endpoints bypass the write gate. A WebSocket upgrade
+// uses GET on the wire, but the only socket route commits uploads and must be
+// gated as a write.
 function isTenantWrite(inner: Request): boolean {
 	if (inner.headers.get('upgrade')?.toLowerCase() === 'websocket') {
 		return true;
@@ -609,10 +610,6 @@ function isTenantWrite(inner: Request): boolean {
 	}
 
 	const innerUrl = new URL(inner.url);
-
-	if (innerUrl.pathname === '/token') {
-		return false;
-	}
 
 	return !(
 		isUploadPreviewRequest(inner.method, innerUrl.pathname) ||

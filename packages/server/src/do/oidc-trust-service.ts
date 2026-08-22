@@ -39,6 +39,7 @@ import {
 	oidcTrustSummaryFromRow,
 	type OwnerConfig,
 	ownerRuleId,
+	type SchemaWriter,
 	type ServerContext
 } from './context.ts';
 import { type TenantIdentityService } from './tenant-identity-service.ts';
@@ -51,8 +52,12 @@ export class OidcTrustService {
 		private readonly tenantIdentity: TenantIdentityService
 	) {}
 
-	private ownerConfig(): OwnerConfig | undefined {
-		const identity = this.tenantIdentity.current();
+	private ownerConfig(
+		database: SchemaWriter = this.context.db
+	): OwnerConfig | undefined {
+		// Tenant identity is the only source for the owner rule. An unconfigured
+		// Durable Object therefore has no owner rule to seed.
+		const identity = this.tenantIdentity.current(database);
 
 		if (identity === undefined) {
 			return undefined;
@@ -247,13 +252,13 @@ export class OidcTrustService {
 			.map((row) => oidcTrustRuleFromRow(row));
 	}
 
-	seedOwnerRule(): void {
-		const owner = this.ownerConfig();
+	seedOwnerRule(database: SchemaWriter = this.context.db): void {
+		const owner = this.ownerConfig(database);
 
 		if (owner === undefined) {
 			// A deployment that clears its owner config revokes the owner's admin
 			// rule, so no standing owner identity outlives the config that named it.
-			this.context.db
+			database
 				.delete(schema.oidcTrust)
 				.where(eq(schema.oidcTrust.id, ownerRuleId))
 				.run();
@@ -270,7 +275,7 @@ export class OidcTrustService {
 		};
 		const createdAt = isoTimestamp(new Date());
 
-		this.context.db
+		database
 			.insert(schema.oidcTrust)
 			.values({
 				id: ownerRuleId,

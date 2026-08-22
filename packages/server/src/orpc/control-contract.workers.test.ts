@@ -183,6 +183,46 @@ describe('control contract round trip', () => {
 		});
 	});
 
+	it.each([
+		'https://idp.test?',
+		'https://idp.test#',
+		'https://@idp.test',
+		'https://:@idp.test'
+	])(
+		'rejects owner issuer %s without reserving the tenant slug',
+		async (ownerIssuer) => {
+			const token = await issueControlAdminToken();
+			const invalid = await controlWorkerFetch(
+				new Request(`${currentOrigin()}/control/tenants`, {
+					method: 'POST',
+					headers: {
+						authorization: `Bearer ${token}`,
+						'content-type': 'application/json'
+					},
+					body: JSON.stringify({
+						id: 'acme',
+						readMode: 'private',
+						ownerIssuer,
+						ownerSubject: 'owner',
+						ownerAudience: 'aud'
+					})
+				})
+			);
+			const created = await controlClient(token).tenants.create({
+				id: 'acme',
+				readMode: 'private',
+				ownerIssuer: 'https://idp.test',
+				ownerSubject: 'owner',
+				ownerAudience: 'aud'
+			});
+
+			expect({ invalid: invalid.status, created: created.id }).toStrictEqual({
+				invalid: StatusCodes.BAD_REQUEST,
+				created: 'acme'
+			});
+		}
+	);
+
 	it('rebuilds tenant membership through the derived client', async () => {
 		const client = controlClient(await issueControlAdminToken());
 

@@ -193,9 +193,9 @@ interface SignupVerificationConfig {
 }
 
 function signupIssuer(env: SignupVerificationConfig): OidcIssuer {
-	// Discovery is cached per issuer identifier, so the configured value is
-	// normalised here, where it enters the server, and a value that is not a
-	// usable issuer URL is a deploy fault the caller cannot clear by retrying.
+	// Parse the configured value at ingress so discovery and token verification
+	// use the same exact issuer identifier. An unusable value is a deployment
+	// fault which the caller cannot clear by retrying.
 	const configured = IssuerUrl.parse(env.CUPBOARD_SIGNUP_ISSUER ?? '');
 
 	if (configured === undefined) {

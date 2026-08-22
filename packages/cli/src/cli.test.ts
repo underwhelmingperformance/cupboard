@@ -404,6 +404,12 @@ describe('command help', () => {
 		expect(help).toContain('remove-grace');
 	});
 
+	it('describes immediate read and write suspension', () => {
+		expect(helpFor(['tenant', 'suspend'])).toContain(
+			'Suspend a tenant: new reads and writes stop immediately.'
+		);
+	});
+
 	it('shows the cache-prefix and grace options for policy add-grace', () => {
 		const help = helpFor(['policy', 'add-grace']);
 

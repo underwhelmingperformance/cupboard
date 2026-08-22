@@ -83,4 +83,27 @@ describe('configure RPC', () => {
 
 		expect(version).toBe(3);
 	});
+
+	it('rolls identity back when owner-rule seeding fails', async () => {
+		await fetchPath('/.well-known/jwks.json');
+
+		const version = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				await expect(
+					instance.configure({
+						...identity(2),
+						ownerIssuer: oidcIssuerSchema.parse('not-an-issuer')
+					})
+				).rejects.toThrow();
+
+				return drizzle(state.storage, { schema: { tenantIdentity } })
+					.select()
+					.from(tenantIdentity)
+					.get()?.configVersion;
+			}
+		);
+
+		expect(version).toBe(1);
+	});
 });

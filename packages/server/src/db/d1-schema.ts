@@ -121,14 +121,12 @@ export const controlTrust = sqliteTable('control_trust', {
 	disabledAt: text('disabled_at').$type<IsoTimestamp>()
 });
 
-// The tenant registry has one row per provisioned tenant and is written only by
-// the Worker.
-// `status` gates admission: `active` serves and accepts writes, `suspended` stops
-// writes at once and reads after the manifest TTL, `offboarding` drains, and
-// `offboarded` is the terminal scrubbed tombstone, which keeps the slug from
-// being reused. The owner identity and `config_version` configure the tenant
-// Durable Object. The version orders deliveries so an older configuration
-// cannot replace a newer one.
+// Each provisioned cache has one authoritative tenant row. `status` gates every
+// request: `active` serves reads and accepts writes, `suspended` refuses both,
+// `offboarding` drains, and `offboarded` is the terminal scrubbed tombstone. The
+// tombstone prevents reuse of the slug and is excluded from maintenance and
+// membership hints. `config_version` orders identity updates sent to the tenant
+// Durable Object.
 export const tenant = sqliteTable(
 	'tenant',
 	{
@@ -142,9 +140,10 @@ export const tenant = sqliteTable(
 		ownerAudience: text('owner_audience').notNull(),
 		configVersion: integer('config_version').notNull(),
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
-		// Private reads use this Basic-auth user and password verifier. The plaintext
-		// password is never stored. A private tenant with no complete verifier fails
-		// closed; public tenants keep all three columns null.
+		// Private caches store the Basic-auth user, salt, and password verifier.
+		// Public caches keep all three columns null. A private cache with an
+		// incomplete verifier rejects every read; the plaintext password is never
+		// stored.
 		readUser: text('read_user').$type<ReadUser>(),
 		readPasswordHash: text('read_password_hash').$type<ReadPasswordHash>(),
 		readPasswordSalt: text('read_password_salt').$type<ReadPasswordSalt>(),
@@ -197,19 +196,21 @@ export const tenantMaintenanceEligibility = sqliteTable(
 	]
 );
 
+// Existing databases retain this table for migration compatibility. Admission
+// now reads tenant rows from D1 and uses KV only for negative membership hints.
 export const manifestState = sqliteTable('manifest_state', {
 	id: text('id').primaryKey(),
 	version: integer('version').notNull()
 });
 
-// The first successful signup assigns the global administrator. The fixed
-// `id = 'singleton'` makes that assignment irreversible: a later principal hits
-// the primary-key conflict and is refused. `issuer` and `subject` identify the
-// administrator.
+// The first successful signup inserts the singleton global-administrator row.
+// Its primary key prevents later claims from replacing the administrator.
+// `issuer`, `subject`, and `audience` identify that principal.
 export const globalAdmin = sqliteTable('global_admin', {
 	id: text('id').primaryKey(),
 	issuer: text('issuer').notNull(),
 	subject: text('subject').notNull(),
+	audience: text('audience').notNull().default(''),
 	claimedAt: text('claimed_at').$type<IsoTimestamp>().notNull()
 });
 

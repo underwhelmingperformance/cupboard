@@ -314,7 +314,7 @@ describe('layered admission gate', () => {
 		expect(response.headers.get('retry-after')).toBeNull();
 	});
 
-	it('maps a persistent write gate fault to a retryable refusal', async () => {
+	it('uses the fresh admission row instead of a second write-gate read', async () => {
 		await ensureTenant(database(), createBody(gateSlug, 'public'), now);
 		await refreshTenantMembership(env);
 		await primeRowCache(gateSlug);
@@ -324,10 +324,7 @@ describe('layered admission gate', () => {
 			gateSlug
 		);
 
-		expect({
-			status: response.status,
-			retryAfter: response.headers.get('retry-after')
-		}).toStrictEqual({ status: 503, retryAfter: '5' });
+		expect(response.headers.get('retry-after')).toBeNull();
 	});
 
 	it('trusts a fresh admission status, sparing the write gate read', async () => {
@@ -405,7 +402,7 @@ describe('layered admission gate', () => {
 			previewPut: previewPut.status,
 			previewChild: previewChild.status
 		}).toStrictEqual({
-			preview: StatusCodes.UNAUTHORIZED,
+			preview: StatusCodes.NOT_FOUND,
 			negotiate: StatusCodes.FORBIDDEN,
 			previewPut: StatusCodes.FORBIDDEN,
 			previewChild: StatusCodes.FORBIDDEN

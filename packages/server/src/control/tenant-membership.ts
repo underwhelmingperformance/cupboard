@@ -1,24 +1,19 @@
 import { type TenantId } from '@cupboard/nix-store/scalars';
 import {
 	type TenantReadMode,
-	tenantReadModeSchema,
-	type TenantStatus,
-	tenantStatusSchema
+	type TenantStatus
 } from '@cupboard/protocol/tenants';
-import { type ReadUser, readUserSchema } from '@cupboard/shared/http';
+import { type ReadUser } from '@cupboard/shared/http';
 import { eq, ne } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
-import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import { readWithOneRetry } from '../db/transient.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
 import {
 	type ReadPasswordHash,
-	readPasswordHashSchema,
-	type ReadPasswordSalt,
-	readPasswordSaltSchema
+	type ReadPasswordSalt
 } from '../read/read-auth.ts';
 
 import { BinaryFuse8 } from './binary-fuse-filter/index.ts';
@@ -33,23 +28,22 @@ type Database = DrizzleD1Database<typeof d1Schema>;
 const memberKeyPrefix = 'tenant-member:';
 const filterKey = 'tenant-filter';
 
-// How long a colo trusts its cached filter and a cached public row before
-// refetching. Both are ceilings: an early eviction only costs an extra read,
-// never correctness, and a mutation purges the local entry to take effect sooner.
+// How long a colo trusts its cached filter before refetching. The filter only
+// rejects unknown tenants; it never supplies security-sensitive tenant state.
 const filterCacheTtlSeconds = 10;
-const rowCacheTtlSeconds = 10;
 // KV reads of the per-tenant marker are edge-cached for at least this long, so a
 // repeated probe for the same slug is self-limiting. Tier 1 already absorbs
 // distinct-slug spray, so this only blunts repeated probes.
 const memberKeyCacheTtlSeconds = 60;
 
-const tenantReadVerifierSchema = z.object({
-	user: readUserSchema,
-	passwordHash: readPasswordHashSchema,
-	passwordSalt: readPasswordSaltSchema
-});
-
-export type TenantReadVerifier = z.infer<typeof tenantReadVerifierSchema>;
+/**
+ * The private-read verifier loaded from the tenant's authoritative D1 row.
+ */
+export interface TenantReadVerifier {
+	readonly user: ReadUser;
+	readonly passwordHash: ReadPasswordHash;
+	readonly passwordSalt: ReadPasswordSalt;
+}
 
 export interface TenantEntry {
 	readonly status: TenantStatus;
@@ -57,8 +51,8 @@ export interface TenantEntry {
 	readonly readVerifier?: TenantReadVerifier;
 }
 
-// A write can trust a fresh D1 status. A cached entry may lag a suspension, so
-// the write path must confirm its status against D1 before dispatch.
+// Current admission reads D1 and returns `fresh: true`. The flag remains in the
+// dispatch boundary while deployments with the old tenant-row cache drain.
 export interface TenantAdmission {
 	readonly entry: TenantEntry;
 	readonly fresh: boolean;
@@ -67,12 +61,6 @@ export interface TenantAdmission {
 interface DeferredContext {
 	waitUntil(promise: Promise<unknown>): void;
 }
-
-const tenantEntrySchema = z.object({
-	status: tenantStatusSchema,
-	readMode: tenantReadModeSchema,
-	readVerifier: tenantReadVerifierSchema.optional()
-});
 
 export function tenantMemberKey(slug: TenantId): string {
 	return `${memberKeyPrefix}${slug}`;
@@ -169,14 +157,8 @@ async function loadMembershipFilter(
 	return deserialiseFilter(new Uint8Array(bytes));
 }
 
-function rowCacheKey(slug: TenantId): Request {
-	return new Request(
-		`https://tenant-row.cupboard.invalid/${encodeURIComponent(slug)}`
-	);
-}
-
-// Every content request depends on this row. After the bounded retry, report a
-// persistent D1 fault as a retryable refusal rather than an internal error.
+// Every push and fetch depends on this authoritative row. Retry one transient
+// D1 failure, then return a retryable refusal for a persistent failure.
 async function readTenantRow(
 	database: Database,
 	slug: TenantId
@@ -228,25 +210,13 @@ function entryFromRow(row: TenantAdmissionRow): TenantEntry {
 	return { status: row.status, readMode: row.readMode };
 }
 
-// Tier 3 reads one authoritative row. Public entries have a short edge-cache
-// TTL. Private entries are never cached, so credential rotation and revocation
-// take effect immediately.
+// Tier 3 reads the authoritative D1 row. Neither public nor private entries use
+// the colo-local Cache API, so suspension and credential changes take effect as
+// soon as the control API commits them.
 async function readTenantEntry(
 	env: Env,
-	ctx: DeferredContext,
 	slug: TenantId
 ): Promise<TenantAdmission | undefined> {
-	const cacheKey = rowCacheKey(slug);
-	const cached = await caches.default.match(cacheKey);
-
-	if (cached !== undefined) {
-		const parsed = tenantEntrySchema.safeParse(await cached.json());
-
-		if (parsed.success) {
-			return { entry: parsed.data, fresh: false };
-		}
-	}
-
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const row = await readTenantRow(database, slug);
 
@@ -254,22 +224,11 @@ async function readTenantEntry(
 		return undefined;
 	}
 
-	const entry = entryFromRow(row);
-
-	if (entry.readMode === 'public') {
-		const cacheControl = `max-age=${String(rowCacheTtlSeconds)}`;
-		const cachedResponse = Response.json(entry, {
-			headers: { 'cache-control': cacheControl }
-		});
-		ctx.waitUntil(caches.default.put(cacheKey, cachedResponse));
-	}
-
-	return { entry, fresh: true };
+	return { entry: entryFromRow(row), fresh: true };
 }
 
-// Returns the tenant's admission entry, or undefined when the layered gate can
-// prove that the slug is absent. A cache fault falls through to the authoritative
-// D1 row instead of rejecting the tenant.
+// The filter or marker can reject an unknown slug. Every admitted slug comes
+// from the authoritative D1 row, and a cache fault falls through to that read.
 export async function admitTenant(
 	env: Env,
 	ctx: DeferredContext,
@@ -287,7 +246,7 @@ export async function admitTenant(
 		return undefined;
 	}
 
-	return readTenantEntry(env, ctx, slug);
+	return readTenantEntry(env, slug);
 }
 
 // Scheduled maintenance rebuilds the filter from one registry snapshot and
@@ -305,9 +264,10 @@ export async function refreshTenantMembership(env: Env): Promise<number> {
 	return live.length;
 }
 
-// After creation, publish the live registry immediately so the new tenant need
-// not wait for scheduled maintenance. This is the sole writer of the filter key;
-// a negative result remains definitive until a later rebuild includes the tenant.
+// Rebuild the filter after creation so the new tenant becomes admissible within
+// the filter cache TTL instead of waiting for scheduled maintenance. This is
+// the only writer of the filter key, so a negative result remains definitive
+// until a later rebuild includes the tenant.
 export async function rebuildMembershipFilter(env: Env): Promise<void> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
@@ -334,15 +294,8 @@ async function liveTenantSlugs(database: Database): Promise<TenantId[]> {
 	return rows.map((row) => row.id);
 }
 
-// Invalidates a tenant's cached row in this colo, so a status, readMode, or
-// credential change made here takes effect without waiting on the row TTL. The
-// control plane calls this when it mutates a tenant. Best-effort and per-colo:
-// other colos refresh on their own TTL.
-export async function invalidateTenantRow(slug: TenantId): Promise<void> {
-	try {
-		await caches.default.delete(rowCacheKey(slug));
-	} catch {
-		// A failed purge only leaves the row cached until its TTL, so a mutation
-		// must not fail on it; the row TTL is the backstop.
-	}
+// Kept as the mutation-call boundary while deployments with the old row-cache
+// code drain. Current admission always reads D1 and needs no local invalidation.
+export function invalidateTenantRow(_slug: TenantId): Promise<void> {
+	return Promise.resolve();
 }

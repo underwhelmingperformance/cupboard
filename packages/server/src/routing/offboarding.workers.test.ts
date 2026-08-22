@@ -50,13 +50,13 @@ import {
 
 import { runBlobReaper, runCronTick, runOffboardBatch } from './scheduled.ts';
 
-// Offboarding is a quiesce-then-drain state machine: the control plane marks the
-// tenant `offboarding` (stopping new writes and, after the manifest TTL, reads), then
-// the cron drains a bounded batch of its reference and presence rows through the
-// tenant's own Durable Object and a bounded batch of its R2 objects through the
-// Worker. A fully drained tenant is finalised into a terminal scrubbed `offboarded`
-// tombstone admission no longer admits, and the shared blobs it released are
-// collected by the global reaper.
+// Offboarding is a quiesce-then-drain state machine. The control plane marks the
+// tenant `offboarding`, which stops new reads and writes as soon as the D1 update
+// commits. The cron then asks the tenant's Durable Object to drain a bounded
+// batch of reference and presence rows. The Worker drains a bounded batch of R2
+// objects. A fully drained tenant becomes a terminal scrubbed `offboarded`
+// tombstone which admission refuses. The global reaper collects the shared blobs
+// which the tenant released.
 
 const tenantCounter = { next: 0 };
 const defaultCache: StoredCache = DEFAULT_CACHE;
