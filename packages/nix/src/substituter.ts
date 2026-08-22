@@ -14,6 +14,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
+import { bestEffort, discardResponseBody } from '@cupboard/shared/cleanup';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
 	basicAuthHeader,
@@ -871,7 +872,7 @@ function sleep(
  * Cancels an unread response body so its connection can be reused promptly.
  */
 async function discard(response: Response): Promise<void> {
-	await response.body?.cancel();
+	await discardResponseBody(response);
 }
 
 class OversizedSubstituterDocumentError extends NixStoreError {
@@ -964,7 +965,7 @@ async function boundedText(
 			text += decoder.decode(value, { stream: true });
 		}
 	} finally {
-		await reader.cancel();
+		await bestEffort(() => reader.cancel());
 	}
 }
 

@@ -15,6 +15,7 @@ import {
 	cacheAvailabilityMaxPaths,
 	cacheAvailabilityResponseSchema
 } from '@cupboard/protocol/cache-availability';
+import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
@@ -767,7 +768,7 @@ async function queryMissingStorePathHashes(
 		},
 		async (response) => {
 			if (!response.ok) {
-				await response.body?.cancel();
+				await discardResponseBody(response);
 				throw new CacheAvailabilityQueryError(response.status);
 			}
 

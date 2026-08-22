@@ -1,5 +1,7 @@
 import { StatusCodes } from 'http-status-codes';
 
+import { discardResponseBody } from './cleanup.ts';
+
 // A long push makes thousands of requests to one single-threaded Durable Object
 // and streams many blobs. Retry a small number of transient gateway and
 // connection failures so one failed request does not abort the entire push.
@@ -77,7 +79,7 @@ export async function transientResponseDelay(
 	signal?: AbortSignal
 ): Promise<void> {
 	const retryAfterSeconds = Number(response.headers.get('retry-after'));
-	await response.body?.cancel();
+	await discardResponseBody(response);
 
 	if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
 		await abortableSleep(

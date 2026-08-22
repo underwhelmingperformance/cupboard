@@ -11,6 +11,7 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import { withCleanup } from '@cupboard/shared/cleanup';
 
 import { maxNarFileByteLength } from './nar-file.ts';
 import {
@@ -51,17 +52,18 @@ export type ReadStoreFile = (filePath: string) => Promise<string>;
 const defaultReadStoreFile: ReadStoreFile = async (filePath) => {
 	const file = await open(filePath, 'r');
 
-	try {
-		const { size } = await file.stat();
+	return withCleanup(
+		async () => {
+			const { size } = await file.stat();
 
-		if (size > maxNarFileByteLength) {
-			throw new StoreFileTooLargeError(filePath, size, maxNarFileByteLength);
-		}
+			if (size > maxNarFileByteLength) {
+				throw new StoreFileTooLargeError(filePath, size, maxNarFileByteLength);
+			}
 
-		return await file.readFile('utf8');
-	} finally {
-		await file.close();
-	}
+			return file.readFile('utf8');
+		},
+		() => file.close()
+	);
 };
 
 export class StoreFileTooLargeError extends NixStoreError {

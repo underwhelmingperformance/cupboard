@@ -1,3 +1,5 @@
+import { withCleanup } from '@cupboard/shared/cleanup';
+
 import { NixStoreError } from './nix-store.ts';
 
 /**
@@ -41,30 +43,31 @@ export async function narRegularFileContents(
 	// Parsing stops after the closing regular-file marker, before the producer
 	// necessarily reports the end of the stream. Release the iterator so a
 	// producer such as `narFromPath` can close its dedicated daemon connection.
-	try {
-		await reader.expectWord('nix-archive-1');
-		await reader.expectWord('(');
-		await reader.expectWord('type');
-		await reader.expectWord('regular');
+	return withCleanup(
+		async () => {
+			await reader.expectWord('nix-archive-1');
+			await reader.expectWord('(');
+			await reader.expectWord('type');
+			await reader.expectWord('regular');
 
-		const marker = await reader.readWord();
+			const marker = await reader.readWord();
 
-		if (marker === 'executable') {
-			await reader.expectWord('');
-			await reader.expectWord('contents');
-		} else if (marker !== 'contents') {
-			throw new UnexpectedNarShapeError(
-				`expected 'contents' or 'executable', found '${marker}'`
-			);
-		}
+			if (marker === 'executable') {
+				await reader.expectWord('');
+				await reader.expectWord('contents');
+			} else if (marker !== 'contents') {
+				throw new UnexpectedNarShapeError(
+					`expected 'contents' or 'executable', found '${marker}'`
+				);
+			}
 
-		const contents = await reader.readBlob(maxByteLength);
-		await reader.expectWord(')');
+			const contents = await reader.readBlob(maxByteLength);
+			await reader.expectWord(')');
 
-		return contents;
-	} finally {
-		await reader.release();
-	}
+			return contents;
+		},
+		() => reader.release()
+	);
 }
 
 // Structural words in this NAR subset are no longer than `nix-archive-1`.
