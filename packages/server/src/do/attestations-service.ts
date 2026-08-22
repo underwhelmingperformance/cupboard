@@ -50,7 +50,8 @@ import {
 	attestationStagingObjectKey,
 	casObjectKey,
 	isNotModified,
-	parseAttestationDigestName
+	parseAttestationDigestName,
+	uncachedNotFoundResponse
 } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
 
@@ -337,7 +338,7 @@ export class AttestationsService {
 		const object = await this.context.env.BLOBS.get(key);
 
 		if (object === null) {
-			return notFound();
+			return uncachedNotFoundResponse();
 		}
 
 		const headers = new Headers({
@@ -611,11 +612,11 @@ export class AttestationsService {
 		);
 
 		if (!(await this.hasOwnBundleReferenceInCache(cache, digest))) {
-			return notFound();
+			return uncachedNotFoundResponse();
 		}
 
 		if (!(await this.hasAvailableBundle(digest))) {
-			return notFound();
+			return uncachedNotFoundResponse();
 		}
 
 		return this.serveTenantObject(
@@ -760,8 +761,4 @@ function attestationReferenceKey(
 	digest: Sha256HexDigest
 ): string {
 	return `${storePathHash} ${String(generation)} ${digest}`;
-}
-
-function notFound(): Response {
-	return new Response('Not found\n', { status: StatusCodes.NOT_FOUND });
 }

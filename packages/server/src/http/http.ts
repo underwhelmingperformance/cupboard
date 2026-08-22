@@ -229,6 +229,16 @@ export function notFoundResponse(): Response {
 	});
 }
 
+/**
+ * Returns a 404 that authenticated and mutable reads cannot retain.
+ */
+export function uncachedNotFoundResponse(): Response {
+	const response = notFoundResponse();
+	response.headers.set('cache-control', 'no-store');
+
+	return response;
+}
+
 export async function textResponse(
 	request: Request,
 	body: string | TextBody,
