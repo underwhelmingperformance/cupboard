@@ -114,7 +114,7 @@ export class RetentionService {
 	addPolicy(body: ParsedRetentionPolicyAddBody): RetentionPolicySummary {
 		const id = crypto.randomUUID();
 
-		this.context.db
+		const row = this.context.db
 			.insert(schema.retentionPolicies)
 			.values({
 				id,
@@ -123,14 +123,17 @@ export class RetentionService {
 				defaultTtlSeconds: body.ttlSeconds,
 				createdAt: isoTimestamp(new Date())
 			})
-			.run();
+			.onConflictDoUpdate({
+				target: [
+					schema.retentionPolicies.scope,
+					schema.retentionPolicies.pattern
+				],
+				set: { defaultTtlSeconds: body.ttlSeconds }
+			})
+			.returning()
+			.get();
 
-		return {
-			id,
-			scope: body.scope,
-			pattern: body.pattern,
-			ttlSeconds: body.ttlSeconds
-		};
+		return policySummaryFromRow(row);
 	}
 
 	removePolicy(id: string): RetentionPolicyRemoveResponse {

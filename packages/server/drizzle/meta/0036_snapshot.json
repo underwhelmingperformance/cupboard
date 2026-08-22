@@ -1,8 +1,8 @@
 {
 	"version": "6",
 	"dialect": "sqlite",
-	"id": "901e0bb5-a7f8-433a-ae4f-ba22fe6261f9",
-	"prevId": "52a8f38f-c8ef-43e3-b456-785dd82e6481",
+	"id": "05113441-85c4-4e0b-968b-f347515e890a",
+	"prevId": "901e0bb5-a7f8-433a-ae4f-ba22fe6261f9",
 	"tables": {
 		"auth_key": {
 			"name": "auth_key",
@@ -995,7 +995,13 @@
 					"autoincrement": false
 				}
 			},
-			"indexes": {},
+			"indexes": {
+				"retention_policy_scope_pattern_unique": {
+					"name": "retention_policy_scope_pattern_unique",
+					"columns": ["scope", "pattern"],
+					"isUnique": true
+				}
+			},
 			"foreignKeys": {},
 			"compositePrimaryKeys": {},
 			"uniqueConstraints": {},

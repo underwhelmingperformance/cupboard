@@ -304,6 +304,11 @@ describe('tenant contract round trip', () => {
 			pattern: 'pr-',
 			ttlSeconds: 604_800
 		});
+		const updatedPolicy = await client.policies.add({
+			scope: 'root-name-prefix',
+			pattern: 'pr-',
+			ttlSeconds: 1_209_600
+		});
 		const policies = await client.policies.list();
 		const policyRemoved = await client.policies.remove({ id: policy.id });
 
@@ -322,12 +327,33 @@ describe('tenant contract round trip', () => {
 		const ruleRemoved = await client.oidcTrust.remove({ id: rule.id });
 
 		expect({
-			policyListed: policies.policies.map((entry) => entry.id),
+			policy,
+			updatedPolicy,
+			policyListed: policies.policies,
 			policyRemoved,
 			ruleGrants: rule.permittedGrants.length,
 			ruleRemoved
 		}).toStrictEqual({
-			policyListed: [policy.id],
+			policy: {
+				id: policy.id,
+				scope: 'root-name-prefix',
+				pattern: 'pr-',
+				ttlSeconds: 604_800
+			},
+			updatedPolicy: {
+				id: policy.id,
+				scope: 'root-name-prefix',
+				pattern: 'pr-',
+				ttlSeconds: 1_209_600
+			},
+			policyListed: [
+				{
+					id: policy.id,
+					scope: 'root-name-prefix',
+					pattern: 'pr-',
+					ttlSeconds: 1_209_600
+				}
+			],
 			policyRemoved: { id: policy.id, removed: true },
 			ruleGrants: 1,
 			ruleRemoved: { id: rule.id, removed: true }
