@@ -297,7 +297,7 @@ describe('resolveCupboard', () => {
 		const fetcher: typeof fetch = (input) => {
 			const url = requestUrl(input);
 
-			if (url.endsWith('/repos/owner/cupboard/releases?per_page=20')) {
+			if (url.endsWith('/repos/owner/cupboard/releases?page=1&per_page=100')) {
 				return Promise.resolve(
 					Response.json([
 						{ draft: true, tag_name: 'draft', assets: [] },

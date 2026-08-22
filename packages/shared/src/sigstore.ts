@@ -16,6 +16,10 @@ import {
 	inTotoStatementSchema
 } from './in-toto.ts';
 import {
+	isoFromUnixSeconds,
+	verifiedTimestampCount
+} from './sigstore-evidence.ts';
+import {
 	isSlsaProvenanceType,
 	type SlsaProvenanceSummary,
 	slsaProvenanceSummary
@@ -42,13 +46,12 @@ export interface VerifyTlogEntry {
 }
 
 /**
- * Evidence extracted from the bundle after Sigstore verifies it. `signedAt` is
- * the earliest Rekor integration time, not the time when the signature was
- * created. `timestampCount` is the number of signed timestamp records in the
- * bundle.
+ * Evidence extracted after Sigstore verifies a bundle. `integratedAt` is the
+ * earliest Rekor integration time, not the time when the signature was
+ * created. `timestampCount` counts verified signed timestamps.
  */
 export interface VerifyTrust {
-	readonly signedAt?: string;
+	readonly integratedAt?: string;
 	readonly tlogEntries: readonly VerifyTlogEntry[];
 	readonly timestampCount: number;
 }
@@ -82,7 +85,7 @@ export interface VerifiedBundle {
 	readonly predicateType: string;
 	readonly subjectDigests: readonly string[];
 	readonly predicate?: unknown;
-	readonly signedTimestampCount: number;
+	readonly verifiedTimestampCount: number;
 	readonly tlogEntries: readonly VerifyTlogEntry[];
 }
 
@@ -235,7 +238,7 @@ export async function verifyBundle(
 		predicateType: parsed.predicateType,
 		subjectDigests: parsed.subjectDigests,
 		predicate: parsed.predicate,
-		signedTimestampCount: signedEntity.timestamps.length,
+		verifiedTimestampCount: verifiedTimestampCount(signedEntity.timestamps),
 		tlogEntries: signedEntity.tlogEntries.map((entry) => {
 			const integratedTime = isoFromUnixSeconds(entry.integratedTime);
 
@@ -288,33 +291,23 @@ export function resultFor(
 }
 
 function trustFor(verified: VerifiedBundle): VerifyTrust {
-	let signedAt: string | undefined;
+	let integratedAt: string | undefined;
 
 	for (const entry of verified.tlogEntries) {
 		if (entry.integratedTime === undefined) {
 			continue;
 		}
 
-		if (signedAt === undefined || entry.integratedTime < signedAt) {
-			signedAt = entry.integratedTime;
+		if (integratedAt === undefined || entry.integratedTime < integratedAt) {
+			integratedAt = entry.integratedTime;
 		}
 	}
 
 	return {
 		tlogEntries: verified.tlogEntries,
-		timestampCount: verified.signedTimestampCount,
-		...(signedAt !== undefined && { signedAt })
+		timestampCount: verified.verifiedTimestampCount,
+		...(integratedAt !== undefined && { integratedAt })
 	};
-}
-
-function isoFromUnixSeconds(seconds: string): string | undefined {
-	const value = Number(seconds);
-
-	if (!Number.isFinite(value) || value <= 0) {
-		return undefined;
-	}
-
-	return new Date(value * 1000).toISOString();
 }
 
 export function bundleVerifyOptions(

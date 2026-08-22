@@ -1,3 +1,4 @@
+import { parsePublishedNixPublicKeys } from '@cupboard/nix-store/public-key';
 import {
 	cacheNameSchema,
 	DEFAULT_CACHE,
@@ -214,8 +215,14 @@ export class CupboardClient {
 		return result.data;
 	}
 
-	publicKey(): Promise<string> {
-		return this.fetchText('/pubkey');
+	// The route renders the key set with a trailing newline. Individual keys do
+	// not contain newlines, so trim it before returning the key set.
+	async publicKey(): Promise<string> {
+		const source = await this.fetchText('/pubkey');
+
+		return parsePublishedNixPublicKeys(source)
+			.map((key) => key.value)
+			.join('\n');
 	}
 
 	version(): Promise<string> {

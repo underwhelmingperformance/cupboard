@@ -5,6 +5,7 @@ import { env } from 'node:process';
 import { pathToFileURL } from 'node:url';
 
 import { cacheUrl, publicKeyUrl } from '@cupboard/nix-store/cache-url';
+import { parsePublishedNixPublicKeys } from '@cupboard/nix-store/public-key';
 import { cacheNameSchema } from '@cupboard/nix-store/scalars';
 import { canonicalHref, parseBaseUrl } from '@cupboard/nix-store/url';
 import { discardResponseBody } from '@cupboard/shared/cleanup';
@@ -15,7 +16,7 @@ import {
 } from '@cupboard/shared/errors';
 import {
 	createOctokitClient,
-	githubReplaySafeRequest
+	filterGithubReleases
 } from '@cupboard/shared/octokit';
 import { readResponseText } from '@cupboard/shared/response-body';
 
@@ -220,7 +221,9 @@ export async function fetchCachePublicKey(
 		maximumBytes: maximumPublishedKeyBytes
 	});
 
-	return key.trim();
+	return parsePublishedNixPublicKeys(key)
+		.map((publicKey) => publicKey.value)
+		.join('\n');
 }
 
 export function substituterSection(options: {
@@ -320,7 +323,7 @@ export async function publishAction(
 	);
 
 	const selection = selectDraftRelease(
-		await listReleases(octokit, inputs.repository),
+		await listReleases(octokit, inputs.repository, inputs.version),
 		inputs.version
 	);
 
@@ -357,15 +360,16 @@ export async function publishAction(
 
 async function listReleases(
 	octokit: Octokit,
-	repository: Repository
+	repository: Repository,
+	version: string
 ): Promise<ReleaseSummary[]> {
-	const { data } = await octokit.rest.repos.listReleases({
-		...repository,
-		per_page: 100,
-		request: githubReplaySafeRequest
-	});
+	const releases = await filterGithubReleases(
+		octokit,
+		repository,
+		(release) => release.tag_name === version
+	);
 
-	return data.map((release) => toReleaseSummary(release));
+	return releases.map((release) => toReleaseSummary(release));
 }
 
 async function upsertDraft(

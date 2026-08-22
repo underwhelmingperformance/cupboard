@@ -624,11 +624,16 @@ describe('fetchCachePublicKeyAt', () => {
 				headers: Object.fromEntries(new Headers(init?.headers))
 			};
 
-			return Promise.resolve(new Response(' cache.example.test:key\n'));
+			return Promise.resolve(
+				new Response(
+					' cache.example.test:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\n'
+				)
+			);
 		});
 
 		expect({ publicKey, request }).toStrictEqual({
-			publicKey: 'cache.example.test:key',
+			publicKey:
+				'cache.example.test:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=',
 			request: {
 				url: url.href,
 				headers: {

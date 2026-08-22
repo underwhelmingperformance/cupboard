@@ -25,6 +25,7 @@ import {
 	AttestationSubjectMismatchError,
 	type VerifiedBundle
 } from '@cupboard/shared/sigstore';
+import { githubWorkflowBuildType } from '@cupboard/shared/slsa';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -2176,6 +2177,7 @@ function verifiedAs(digest: string, commit: string): VerifiedBundle {
 		subjectDigests: [digest],
 		predicate: {
 			buildDefinition: {
+				buildType: githubWorkflowBuildType,
 				resolvedDependencies: [
 					{
 						uri: 'git+https://github.com/owner/repo@refs/heads/main',
@@ -2184,7 +2186,7 @@ function verifiedAs(digest: string, commit: string): VerifiedBundle {
 				]
 			}
 		},
-		signedTimestampCount: 0,
+		verifiedTimestampCount: 0,
 		tlogEntries: []
 	};
 }

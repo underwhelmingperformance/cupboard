@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { createOctokitClient } from './octokit.ts';
+import { ProgressiveCollectionLimitError } from './collections.ts';
+import {
+	createOctokitClient,
+	filterGithubReleases,
+	findGithubRelease,
+	maximumGithubReleaseCandidates,
+	maximumGithubReleasePages
+} from './octokit.ts';
 
 function countingFetch(status: number): {
 	readonly fetch: typeof fetch;
@@ -44,6 +51,110 @@ async function fetchCountFor(
 
 	return counter.calls();
 }
+
+function paginatedOctokit(
+	itemsForPage: (page: number) => readonly { id: number; draft?: boolean }[],
+	hasNextPage: (page: number) => boolean
+): {
+	readonly octokit: ReturnType<typeof createOctokitClient>;
+	readonly pages: number[];
+} {
+	const pages: number[] = [];
+	const octokit = createOctokitClient({
+		request: {
+			fetch: (input: string | URL | Request) => {
+				const url = new URL(
+					typeof input === 'string'
+						? input
+						: input instanceof URL
+							? input.href
+							: input.url
+				);
+				const page = Number(url.searchParams.get('page') ?? '1');
+				pages.push(page);
+				const headers = new Headers({ 'content-type': 'application/json' });
+
+				if (hasNextPage(page)) {
+					headers.set(
+						'link',
+						`<https://api.github.com/repos/o/r/releases?per_page=100&page=${String(page + 1)}>; rel="next"`
+					);
+				}
+
+				return Promise.resolve(Response.json(itemsForPage(page), { headers }));
+			}
+		}
+	});
+
+	return { octokit, pages };
+}
+
+describe('GitHub release lookup', () => {
+	it('stops after the first matching release', async () => {
+		const { octokit, pages } = paginatedOctokit(
+			(page) => [{ id: page, draft: page === 2 }],
+			(page) => page < 3
+		);
+		const release = await findGithubRelease(
+			octokit,
+			{
+				owner: 'o',
+				repo: 'r'
+			},
+			(item) => item.draft
+		);
+
+		expect({ pages, id: release?.id }).toStrictEqual({
+			pages: [1, 2],
+			id: 2
+		});
+	});
+
+	it('collects only matching releases across pages', async () => {
+		const { octokit, pages } = paginatedOctokit(
+			(page) => [
+				{ id: page * 10, draft: false },
+				{ id: page * 10 + 1, draft: true }
+			],
+			(page) => page < 2
+		);
+		const releases = await filterGithubReleases(
+			octokit,
+			{
+				owner: 'o',
+				repo: 'r'
+			},
+			(item) => item.draft
+		);
+
+		expect({ pages, ids: releases.map((release) => release.id) }).toStrictEqual(
+			{
+				pages: [1, 2],
+				ids: [11, 21]
+			}
+		);
+	});
+
+	it('rejects a continuation without fetching beyond the page limit', async () => {
+		const { octokit, pages } = paginatedOctokit(
+			(page) => [{ id: page }],
+			() => true
+		);
+
+		await expect(
+			filterGithubReleases(octokit, { owner: 'o', repo: 'r' }, () => true)
+		).rejects.toStrictEqual(
+			new ProgressiveCollectionLimitError(
+				'GitHub release search for o/r',
+				maximumGithubReleaseCandidates,
+				maximumGithubReleasePages,
+				maximumGithubReleasePages,
+				maximumGithubReleasePages
+			)
+		);
+		expect(pages).toHaveLength(maximumGithubReleasePages);
+	});
+});
 
 describe('createOctokitClient', () => {
 	afterEach(() => {

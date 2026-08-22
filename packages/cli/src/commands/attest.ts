@@ -416,7 +416,7 @@ function trustRows(trust: VerifyTrust, options: VerifyOptions): ResultRow[] {
 	const indexes = trust.tlogEntries.map((entry) => entry.logIndex).join(', ');
 
 	return [
-		...optionalRow('Signed at', trust.signedAt),
+		...optionalRow('Rekor integration', trust.integratedAt),
 		...optionalRow(
 			'Rekor log',
 			indexes === '' ? undefined : `index ${indexes}`
@@ -434,8 +434,8 @@ function trustRows(trust: VerifyTrust, options: VerifyOptions): ResultRow[] {
 			label: 'Timestamps',
 			value: describeCount(
 				trust.timestampCount,
-				'signed',
-				'signed',
+				'verified timestamp',
+				'verified timestamps',
 				options.timestampThreshold
 			)
 		}

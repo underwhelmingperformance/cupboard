@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { chunk } from './collections.ts';
+import {
+	chunk,
+	filterProgressively,
+	findProgressively,
+	ProgressiveCollectionLimitError,
+	type ProgressivePage
+} from './collections.ts';
 
 describe('chunk', () => {
 	it.each([
@@ -28,4 +34,70 @@ describe('chunk', () => {
 			expect(() => chunk(['a'], size)).toThrow(RangeError);
 		}
 	);
+});
+
+function page<T>(
+	items: readonly T[],
+	next?: () => Promise<ProgressivePage<T>>
+): ProgressivePage<T> {
+	return { items, ...(next !== undefined && { next }) };
+}
+
+const limits = {
+	description: 'test search',
+	maximumItems: 3,
+	maximumPages: 2
+};
+
+describe('progressive collections', () => {
+	it('stops after the first match without requesting the continuation', async () => {
+		let continuationRequests = 0;
+		const first = page([1, 2], () => {
+			continuationRequests += 1;
+
+			return Promise.resolve(page([3]));
+		});
+
+		await expect(
+			findProgressively(first, (item) => item === 2, limits)
+		).resolves.toBe(2);
+		expect(continuationRequests).toBe(0);
+	});
+
+	it('filters pages while keeping only matching items', async () => {
+		const first = page([1, 2], () => Promise.resolve(page([3])));
+
+		await expect(
+			filterProgressively(first, (item) => item % 2 === 1, limits)
+		).resolves.toStrictEqual([1, 3]);
+	});
+
+	it('rejects a remaining page before requesting it', async () => {
+		let continuationRequests = 0;
+		const second = page([2], () => {
+			continuationRequests += 1;
+
+			return Promise.resolve(page([3]));
+		});
+		const first = page([1], () => {
+			continuationRequests += 1;
+
+			return Promise.resolve(second);
+		});
+
+		await expect(
+			filterProgressively(first, () => true, limits)
+		).rejects.toStrictEqual(
+			new ProgressiveCollectionLimitError('test search', 3, 2, 2, 2)
+		);
+		expect(continuationRequests).toBe(1);
+	});
+
+	it('rejects an item beyond the candidate limit', async () => {
+		await expect(
+			filterProgressively(page([1, 2, 3, 4]), () => true, limits)
+		).rejects.toStrictEqual(
+			new ProgressiveCollectionLimitError('test search', 3, 2, 4, 1)
+		);
+	});
 });

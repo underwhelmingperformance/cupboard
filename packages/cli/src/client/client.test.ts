@@ -26,6 +26,9 @@ import {
 	FakeUpgradeFailure
 } from './commit-socket.test-support.ts';
 
+const publishedPublicKey =
+	'cupboard-1:AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=';
+
 interface CapturedRequest {
 	readonly url: string;
 	readonly method: string | undefined;
@@ -586,7 +589,7 @@ describe('CupboardClient cache prefix', () => {
 			(input) => {
 				requested = requestUrl(input);
 
-				return Promise.resolve(new Response('cupboard-1:key\n'));
+				return Promise.resolve(new Response(`${publishedPublicKey}\n`));
 			}
 		);
 
@@ -596,14 +599,20 @@ describe('CupboardClient cache prefix', () => {
 	});
 
 	it('does not prefix a deployment-wide route', async () => {
-		const { client, captured } = capturingClient(
-			'cupboard-1:k\n',
+		let requested: string | undefined;
+		const client = new CupboardClient(
+			new URL('https://cupboard.test'),
+			(input) => {
+				requested = requestUrl(input);
+
+				return Promise.resolve(new Response(`${publishedPublicKey}\n`));
+			},
 			'/cache/builds'
 		);
 
 		await client.publicKey();
 
-		expect(captured()?.url).toBe('https://cupboard.test/pubkey');
+		expect(requested).toBe('https://cupboard.test/pubkey');
 	});
 
 	it('rejects an invalid cache name when building a scoped client', () => {
