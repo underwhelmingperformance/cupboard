@@ -14,6 +14,7 @@ import {
 	oidcSubjectSchema
 } from '@cupboard/protocol/oidc';
 import { type IsoTimestamp, isoTimestamp } from '@cupboard/protocol/scalars';
+import { parseAuthenticationHeader } from '@cupboard/shared/http';
 import { importJWK, jwtVerify, SignJWT } from 'jose';
 
 import { generateEd25519KeyPair } from '../crypto/crypto.ts';
@@ -45,13 +46,10 @@ export interface AuthPublicKey {
 }
 
 export function bearerToken(request: Request): string | undefined {
-	const header = request.headers.get('authorization');
-
-	if (header?.startsWith('Bearer ') !== true) {
-		return undefined;
-	}
-
-	return header.slice('Bearer '.length);
+	return parseAuthenticationHeader(
+		request.headers.get('authorization') ?? undefined,
+		'Bearer'
+	);
 }
 
 export interface IssueAccessJwtOptions {

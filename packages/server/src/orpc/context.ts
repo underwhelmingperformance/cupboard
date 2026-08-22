@@ -70,4 +70,5 @@ export interface TenantOrpcContext {
 	readonly request: Request;
 	readonly services: TenantRpcServices;
 	readonly logger: Logger;
+	readonly resHeaders?: Headers;
 }

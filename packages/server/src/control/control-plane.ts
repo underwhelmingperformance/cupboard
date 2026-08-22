@@ -67,6 +67,7 @@ import {
 	UnsupportedGrantTypeError,
 	UnsupportedSubjectTokenTypeError
 } from '../errors.ts';
+import { oauthJsonResponse } from '../http/oauth-response.ts';
 import { parseFormBody } from '../http/parse.ts';
 import {
 	decodeInboundClaims,
@@ -188,16 +189,13 @@ export async function controlTokenExchange(
 			now
 		);
 
-		return Response.json(
-			{
-				access_token: accessToken,
-				token_type: 'Bearer',
-				expires_in: writeJwtTtlSeconds,
-				issued_token_type: issuedAccessTokenType,
-				authorization_details: granted
-			} satisfies TokenResponse,
-			{ headers: { 'cache-control': 'no-store' } }
-		);
+		return oauthJsonResponse({
+			access_token: accessToken,
+			token_type: 'Bearer',
+			expires_in: writeJwtTtlSeconds,
+			issued_token_type: issuedAccessTokenType,
+			authorization_details: granted
+		} satisfies TokenResponse);
 	}
 
 	if (
@@ -259,16 +257,13 @@ export async function controlTokenExchange(
 		now
 	);
 
-	return Response.json(
-		{
-			access_token: accessToken,
-			token_type: 'Bearer',
-			expires_in: adminJwtTtlSeconds,
-			issued_token_type: issuedAccessTokenType,
-			authorization_details: grants
-		} satisfies TokenResponse,
-		{ headers: { 'cache-control': 'no-store' } }
-	);
+	return oauthJsonResponse({
+		access_token: accessToken,
+		token_type: 'Bearer',
+		expires_in: adminJwtTtlSeconds,
+		issued_token_type: issuedAccessTokenType,
+		authorization_details: grants
+	} satisfies TokenResponse);
 }
 
 // Verifies a subject token against the control plane's own keys. A token that

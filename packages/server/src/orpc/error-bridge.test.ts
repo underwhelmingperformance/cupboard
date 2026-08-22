@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
 	CacheNotEmptyError,
+	CommitSessionLimitError,
 	SigningKeyBackfillIncompleteError,
 	SigningKeyRotationAbortNotAllowedError,
 	SigningKeyRotationInProgressError,
@@ -63,6 +64,17 @@ describe('bridgedError', () => {
 			message: 'Upload not found'
 		});
 		expect(capture.logs).toStrictEqual([]);
+	});
+
+	it('preserves retry metadata in the oRPC response headers', () => {
+		const headers = new Headers();
+
+		bridgedError(rootLogger(), new CommitSessionLimitError(10), headers);
+
+		expect(Object.fromEntries(headers)).toStrictEqual({
+			'cache-control': 'no-store',
+			'retry-after': '5'
+		});
 	});
 
 	it.each([

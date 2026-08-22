@@ -32,20 +32,57 @@ export async function parseRequestBody<S extends z.ZodType>(
 }
 
 /**
- * Parses a request body as `application/x-www-form-urlencoded` data and
- * validates it against `schema`. Schema mismatches become OAuth
- * `invalid_request` errors in the RFC 6749 section 5.2 envelope.
+ * Validates an `application/x-www-form-urlencoded` request body against a
+ * schema, returning the parsed (branded) value. Repeated keys become arrays, so
+ * a schema for a singleton OAuth parameter rejects duplicates. A body the schema
+ * rejects becomes an OAuth `invalid_request` carrying the schema's diagnostics,
+ * so the `/token` endpoint reports it in the RFC 6749 §5.2 envelope.
  */
 export async function parseFormBody<S extends z.ZodType>(
 	schema: S,
 	request: Request
 ): Promise<z.output<S>> {
-	// Read the bytes directly because the runtime warns when `Request.text()` reads
-	// an `application/x-www-form-urlencoded` body.
-	const decoder = new TextDecoder();
-	const body = decoder.decode(await request.arrayBuffer());
+	const mediaType = request.headers
+		.get('content-type')
+		?.split(';', 1)[0]
+		?.trim();
+
+	if (mediaType?.toLowerCase() !== 'application/x-www-form-urlencoded') {
+		throw invalidForm('Content-Type must be application/x-www-form-urlencoded');
+	}
+
+	// Decode the raw bytes directly: the runtime warns when
+	// `.text()` is called on a body whose type is not `text/*`, and a urlencoded
+	// body parses identically from its UTF-8 bytes.
+	const decoder = new TextDecoder('utf-8', {
+		fatal: true,
+		ignoreBOM: false
+	});
+	let body: string;
+
+	try {
+		body = decoder.decode(await request.arrayBuffer());
+	} catch {
+		throw invalidForm('Form body is not valid UTF-8');
+	}
+
 	const parameters = new URLSearchParams(body);
-	const result = schema.safeParse(Object.fromEntries(parameters));
+	const values: Record<string, string | string[]> = {};
+
+	for (const [name, value] of parameters) {
+		const current = values[name];
+
+		if (current === undefined) {
+			values[name] = value;
+			continue;
+		}
+
+		values[name] = Array.isArray(current)
+			? [...current, value]
+			: [current, value];
+	}
+
+	const result = schema.safeParse(values);
 
 	if (!result.success) {
 		throw new TokenRequestBodyInvalidError(result.error);
@@ -54,6 +91,15 @@ export async function parseFormBody<S extends z.ZodType>(
 	return result.data;
 }
 
+function invalidForm(message: string): TokenRequestBodyInvalidError {
+	return new TokenRequestBodyInvalidError(
+		new z.ZodError([{ code: 'custom', path: [], message }])
+	);
+}
+
+/**
+Validates a value taken from the request path or query string.
+*/
 export function parseRequestValue<S extends z.ZodType>(
 	schema: S,
 	value: unknown

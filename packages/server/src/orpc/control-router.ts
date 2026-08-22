@@ -38,6 +38,7 @@ export interface ControlOrpcContext {
 	readonly request: Request;
 	readonly env: Env;
 	readonly logger: Logger;
+	readonly resHeaders?: Headers;
 }
 
 // Verify every control token and check the procedure's declared operation
@@ -48,7 +49,7 @@ const os = implement(controlContract)
 		try {
 			return await next();
 		} catch (error) {
-			throw bridgedError(context.logger, error);
+			throw bridgedError(context.logger, error, context.resHeaders);
 		}
 	})
 	.use(async ({ context, procedure, next }, input) => {

@@ -2,7 +2,8 @@ import {
 	cacheFromSelector,
 	cacheSelectorSchema,
 	DEFAULT_CACHE,
-	type TenantId
+	type TenantId,
+	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import {
 	cacheAvailabilityRequestSchema,
@@ -84,8 +85,48 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		})
 	);
 
-	// Reject unknown and encoded slugs before resolving a Durable Object so an
-	// arbitrary URL cannot create unprovisioned tenant storage.
+	// RFC 8414 inserts the well-known component before a path-based issuer.
+	// Keep the older appended spelling below for existing clients, but publish
+	// and serve the standard tenant metadata URL here.
+	app.get(
+		'/.well-known/oauth-authorization-server/t/:tenant',
+		async (context) => {
+			const tenant = tenantIdSchema.safeParse(context.req.param('tenant'));
+
+			if (!tenant.success) {
+				return notFoundResponse();
+			}
+
+			const admission = await admitTenant(
+				context.env,
+				context.executionCtx,
+				tenant.data
+			);
+
+			if (admission?.entry.status !== 'active') {
+				return notFoundResponse();
+			}
+
+			const inner = new URL(context.req.url);
+			inner.pathname = '/.well-known/oauth-authorization-server';
+			const response = await tenantServer(context.env, tenant.data).fetch(
+				new Request(inner, context.req.raw)
+			);
+			const headers = new Headers(response.headers);
+			headers.set('cache-control', 'no-store');
+
+			return new Response(response.body, {
+				status: response.status,
+				statusText: response.statusText,
+				headers
+			});
+		}
+	);
+
+	// Admission resolves every tenant slug against the manifest in KV. Reject an
+	// absent slug before creating a Durable Object so arbitrary slugs cannot create
+	// unprovisioned objects. `parseTenantPath` reads the raw pathname and rejects an
+	// encoded slug.
 	//
 	// Writes stop immediately after the authoritative D1 status changes. Reads stop
 	// after the updated manifest reaches KV and the cached entry expires.

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
-const basicScheme = 'Basic ';
+const basicScheme = 'Basic';
+const token68Pattern = /^[A-Za-z0-9._~+/-]+=*$/u;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
@@ -16,7 +17,7 @@ export type ReadUser = z.infer<typeof readUserSchema>;
 export const readUserInputSchema = z
 	.string()
 	.min(1)
-	.refine((value) => !value.includes(':'))
+	.refine((value) => !value.includes(':') && !hasControlCharacter(value))
 	.brand('ReadUser');
 
 export interface BasicCredential {
@@ -40,7 +41,39 @@ export function basicAuthHeader(credential: BasicCredential): {
 } {
 	const encoded = toBase64(`${credential.user}:${credential.password}`);
 
-	return { authorization: `${basicScheme}${encoded}` };
+	return { authorization: `${basicScheme} ${encoded}` };
+}
+
+/**
+ * Reads token68 credentials from a case-insensitive HTTP authentication
+ * scheme. Basic uses token68 directly, and Bearer uses the same character and
+ * padding grammar for its b64token. Both schemes require one or more spaces
+ * before the credentials.
+ */
+export function parseAuthenticationHeader(
+	header: string | undefined,
+	scheme: string
+): string | undefined {
+	if (header === undefined) {
+		return;
+	}
+
+	if (hasControlCharacter(header)) {
+		return;
+	}
+
+	const separator = header.indexOf(' ');
+
+	if (
+		separator === -1 ||
+		header.slice(0, separator).toLowerCase() !== scheme.toLowerCase()
+	) {
+		return;
+	}
+
+	const credentials = header.slice(separator).replace(/^ +/u, '');
+
+	return token68Pattern.test(credentials) ? credentials : undefined;
 }
 
 /**
@@ -51,11 +84,13 @@ export function basicAuthHeader(credential: BasicCredential): {
 export function parseBasicAuthHeader(
 	header: string | undefined
 ): BasicCredentialResult {
-	if (!header?.startsWith(basicScheme)) {
+	const encoded = parseAuthenticationHeader(header, basicScheme);
+
+	if (encoded === undefined) {
 		return { ok: false, reason: 'not-basic' };
 	}
 
-	const decoded = fromBase64(header.slice(basicScheme.length));
+	const decoded = fromBase64(encoded);
 
 	if (decoded === undefined) {
 		return { ok: false, reason: 'undecodable' };
@@ -68,15 +103,28 @@ export function parseBasicAuthHeader(
 	}
 
 	const user = readUserInputSchema.safeParse(decoded.slice(0, separator));
+	const password = decoded.slice(separator + 1);
 
-	if (!user.success) {
+	if (!user.success || hasControlCharacter(password)) {
 		return { ok: false, reason: 'malformed' };
 	}
 
 	return {
 		ok: true,
-		credential: { user: user.data, password: decoded.slice(separator + 1) }
+		credential: { user: user.data, password }
 	};
+}
+
+function hasControlCharacter(value: string): boolean {
+	for (let index = 0; index < value.length; index += 1) {
+		const codePoint = value.codePointAt(index);
+
+		if (codePoint === 0x7f || (codePoint !== undefined && codePoint <= 0x1f)) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 // The header's payload is base64 over the credential's UTF-8 bytes, so both

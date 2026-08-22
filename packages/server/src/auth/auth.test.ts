@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	AccessTokenVerificationError,
 	type AuthPublicKey,
+	bearerToken,
 	generateAuthKeyPair,
 	InvalidGrantsError,
 	issueAccessJwt,
@@ -32,6 +33,40 @@ const ttlSeconds = ttlSecondsSchema.parse(600);
 const kid = authKeyIdSchema.parse('k-test');
 
 const wildcardGrants: AuthorizationDetails = [{ type: 'cupboard_wildcard' }];
+
+describe('bearerToken', () => {
+	it.each(['Bearer token', 'Bearer token=', 'bearer token', 'BeArEr   token'])(
+		'parses %s with shared HTTP authentication grammar',
+		(header) => {
+			const credentials = header.slice(header.lastIndexOf(' ') + 1);
+
+			expect(
+				bearerToken(
+					new Request('https://example.test', {
+						headers: { authorization: header }
+					})
+				)
+			).toBe(credentials);
+		}
+	);
+
+	it.each([
+		'Basic token',
+		'Bearer',
+		'Bearer   ',
+		'Bearer to\tken',
+		'Bearer token,other',
+		'Bearer token=other'
+	])('rejects %s', (header) => {
+		expect(
+			bearerToken(
+				new Request('https://example.test', {
+					headers: { authorization: header }
+				})
+			)
+		).toBeUndefined();
+	});
+});
 
 function keySet(publicJwk: JsonWebKey): AuthPublicKey[] {
 	return [{ kid, publicJwk }];

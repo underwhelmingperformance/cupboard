@@ -463,6 +463,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			);
 
 			if (isMatched) {
+				response.headers.set('cache-control', 'no-store');
 				const pathname = new URL(context.req.url).pathname;
 				const isUploadGraceEndpoint =
 					context.req.method === 'POST' &&

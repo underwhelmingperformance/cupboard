@@ -29,7 +29,7 @@ const os = implement(tenantContract)
 		try {
 			return await next();
 		} catch (error) {
-			throw bridgedError(context.logger, error);
+			throw bridgedError(context.logger, error, context.resHeaders);
 		}
 	})
 	.use(async ({ context, procedure, next }, input) => {

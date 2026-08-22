@@ -87,6 +87,37 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
+	it('hardens every matched tenant response and Bearer challenge', async () => {
+		await useTestServer('contract-response-headers');
+		const init = await bootstrap();
+		const cachesUrl = new URL('/caches', currentOrigin());
+		const authorised = await currentServer().fetch(
+			new Request(cachesUrl, {
+				headers: { authorization: `Bearer ${init.token}` }
+			})
+		);
+		const unauthorised = await currentServer().fetch(new Request(cachesUrl));
+
+		expect({
+			authorised: {
+				status: authorised.status,
+				cacheControl: authorised.headers.get('cache-control')
+			},
+			unauthorised: {
+				status: unauthorised.status,
+				cacheControl: unauthorised.headers.get('cache-control'),
+				challenge: unauthorised.headers.get('www-authenticate')
+			}
+		}).toStrictEqual({
+			authorised: { status: StatusCodes.OK, cacheControl: 'no-store' },
+			unauthorised: {
+				status: StatusCodes.UNAUTHORIZED,
+				cacheControl: 'no-store',
+				challenge: 'Bearer'
+			}
+		});
+	});
+
 	it('returns CACHE_NOT_EMPTY when cache removal requires force', async () => {
 		await useTestServer('contract-cache-not-empty');
 		const init = await bootstrap();

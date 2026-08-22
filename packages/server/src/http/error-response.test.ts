@@ -34,10 +34,12 @@ describe('serverErrorHandler', () => {
 
 		expect({
 			status: response.status,
+			challenge: response.headers.get('www-authenticate'),
 			body: await response.text(),
 			logged: capture.logs
 		}).toStrictEqual({
 			status: 401,
+			challenge: 'Bearer',
 			body: 'Unauthorised\n',
 			logged: []
 		});
