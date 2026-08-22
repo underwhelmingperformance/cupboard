@@ -25,6 +25,7 @@
 		"./errors": "./src/errors.ts",
 		"./github-actions": "./src/github-actions.ts",
 		"./http": "./src/http.ts",
+		"./http-fields": "./src/http-fields.ts",
 		"./in-toto": "./src/in-toto.ts",
 		"./limits": "./src/limits.ts",
 		"./octokit": "./src/octokit.ts",
