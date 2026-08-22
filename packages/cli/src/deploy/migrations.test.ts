@@ -32,16 +32,16 @@ describe('parseD1Migrations', () => {
 
 function fakeApi(alreadyApplied: readonly string[]): {
 	api: D1MigrationApi;
-	queries: string[];
+	batches: string[][];
 } {
-	const queries: string[] = [];
+	const batches: string[][] = [];
 	const applied = new Set(alreadyApplied);
 
 	return {
-		queries,
+		batches,
 		api: {
-			query(_databaseId, sql) {
-				queries.push(sql);
+			queryBatch(_databaseId, statements) {
+				batches.push([...statements]);
 				return Promise.resolve();
 			},
 			queryRows: () => Promise.resolve([...applied])
@@ -59,7 +59,7 @@ describe('applyD1Migrations', () => {
 	];
 
 	it('runs only pending migrations and records them', async () => {
-		const { api, queries } = fakeApi(['0000_a.sql']);
+		const { api, batches } = fakeApi(['0000_a.sql']);
 
 		const result = await applyD1Migrations(
 			api,
@@ -68,16 +68,20 @@ describe('applyD1Migrations', () => {
 		);
 
 		expect(result).toStrictEqual(['0001_b.sql']);
-		expect(queries).toStrictEqual([
-			'CREATE TABLE IF NOT EXISTS d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);',
-			'CREATE TABLE b (id);',
-			'CREATE TABLE c (id);',
-			"INSERT INTO d1_migrations (name) VALUES ('0001_b.sql');"
+		expect(batches).toStrictEqual([
+			[
+				'CREATE TABLE IF NOT EXISTS d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);'
+			],
+			[
+				'CREATE TABLE b (id);',
+				'CREATE TABLE c (id);',
+				"INSERT INTO d1_migrations (name) VALUES ('0001_b.sql');"
+			]
 		]);
 	});
 
 	it('is a no-op when everything is applied', async () => {
-		const { api, queries } = fakeApi(['0000_a.sql', '0001_b.sql']);
+		const { api, batches } = fakeApi(['0000_a.sql', '0001_b.sql']);
 
 		const result = await applyD1Migrations(
 			api,
@@ -86,8 +90,55 @@ describe('applyD1Migrations', () => {
 		);
 
 		expect(result).toStrictEqual([]);
-		expect(queries).toStrictEqual([
-			'CREATE TABLE IF NOT EXISTS d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);'
+		expect(batches).toStrictEqual([
+			[
+				'CREATE TABLE IF NOT EXISTS d1_migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);'
+			]
+		]);
+	});
+
+	it('retries a migration as one batch after a failed attempt', async () => {
+		const migration = migrations[1];
+
+		if (migration === undefined) {
+			throw new Error('The retry fixture migration is missing.');
+		}
+
+		const batches: string[][] = [];
+		let attempt = 0;
+		const api: D1MigrationApi = {
+			queryBatch(_databaseId, statements) {
+				batches.push([...statements]);
+				attempt += 1;
+
+				return attempt === 2
+					? Promise.reject(new Error('D1 batch failed'))
+					: Promise.resolve();
+			},
+			queryRows: () => Promise.resolve([])
+		};
+		const databaseId = databaseIdSchema.parse('db-1');
+
+		await expect(
+			applyD1Migrations(api, databaseId, [migration])
+		).rejects.toThrow('D1 batch failed');
+		await expect(
+			applyD1Migrations(api, databaseId, [migration])
+		).resolves.toStrictEqual(['0001_b.sql']);
+
+		expect(batches).toStrictEqual([
+			[expect.stringContaining('CREATE TABLE IF NOT EXISTS d1_migrations')],
+			[
+				'CREATE TABLE b (id);',
+				'CREATE TABLE c (id);',
+				"INSERT INTO d1_migrations (name) VALUES ('0001_b.sql');"
+			],
+			[expect.stringContaining('CREATE TABLE IF NOT EXISTS d1_migrations')],
+			[
+				'CREATE TABLE b (id);',
+				'CREATE TABLE c (id);',
+				"INSERT INTO d1_migrations (name) VALUES ('0001_b.sql');"
+			]
 		]);
 	});
 });

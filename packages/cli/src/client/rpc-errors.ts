@@ -11,16 +11,31 @@ import {
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
 /**
- * Returns true when prepare or commit reports `NOT_FOUND` because negotiated
- * state disappeared. The pending row may have expired, staged bytes may have
- * vanished, or a shared blob selected for reuse may have been collected. The
- * caller recovers by negotiating again; a missing reuse blob is then planned as
- * an upload. Handles the `ORPCError` from prepare and the
- * {@link CupboardHttpError} from WebSocket commit.
+Whether an oRPC procedure reports that its route or requested resource is absent.
+*/
+export function isRpcNotFoundError(
+	error: unknown
+): error is ORPCError<'NOT_FOUND', unknown> {
+	return (
+		error instanceof ORPCError &&
+		error.code === 'NOT_FOUND' &&
+		error.status === notFoundStatus
+	);
+}
+
+/**
+ * Whether a prepare or commit failed because what it negotiated is no longer
+ * there, so the server returns `NOT_FOUND`: the pending row expired and was
+ * reaped, the staged bytes vanished before the commit ran, or the shared blob
+ * a reuse commit was negotiated against was collected. The caller
+ * re-negotiates the path, since every one of those recovers by planning afresh
+ * (a lost reuse re-plans as an upload).
+ * Prepare speaks oRPC and commit speaks the WebSocket, so the same condition
+ * arrives as either an `ORPCError` or a {@link CupboardHttpError}.
  */
 export function isStaleUploadError(error: unknown): boolean {
 	if (error instanceof ORPCError) {
-		return error.code === 'NOT_FOUND';
+		return isRpcNotFoundError(error);
 	}
 
 	return error instanceof CupboardHttpError && error.status === notFoundStatus;

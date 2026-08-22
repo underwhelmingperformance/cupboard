@@ -1,7 +1,9 @@
+import { readResponseText } from '@cupboard/shared/response-body';
 import { AwsClient } from 'aws4fetch';
 import { z } from 'zod';
 
 import { resilientFetcher } from '../client/transport.ts';
+import { CliError } from '../errors.ts';
 
 import type { CloudflareAccountId } from './identifiers.ts';
 import { type DeployUi, terminalLink } from './ui.ts';
@@ -56,7 +58,20 @@ export async function promptR2CredentialPair(
 export type R2CredentialCheck =
 	| { readonly kind: 'valid' }
 	| { readonly kind: 'rejected'; readonly status: number }
+	| { readonly kind: 'invalid-response'; readonly cause: Error }
 	| { readonly kind: 'unreachable'; readonly cause: unknown };
+
+/**
+R2 accepted the request but did not identify exactly one multipart upload.
+*/
+class R2CredentialResponseError extends CliError {
+	constructor() {
+		super(
+			'R2 returned a successful multipart-upload response without exactly one non-empty UploadId.'
+		);
+		this.name = 'R2CredentialResponseError';
+	}
+}
 
 export type R2AccessKeyIdProblem = 'invalid-hex32';
 
@@ -150,32 +165,61 @@ export async function checkR2Credentials(
 		return { kind: 'rejected', status: begun.status };
 	}
 
-	const uploadId = parseUploadId(await begun.text());
+	let body: string;
 
-	if (uploadId !== undefined) {
-		const signed = await client.sign(
-			`${objectUrl}?uploadId=${encodeURIComponent(uploadId)}`,
-			{ method: 'DELETE' }
-		);
+	try {
+		body = await readResponseText(begun, {
+			description: 'R2 multipart-upload response',
+			maximumBytes: 64 * 1024
+		});
+	} catch (error) {
+		return {
+			kind: 'invalid-response',
+			cause: error instanceof Error ? error : new R2CredentialResponseError()
+		};
+	}
 
-		try {
-			await fetcher(signed);
-		} catch {
-			// Credential validity is already established; cleanup is best effort.
-		}
+	const uploadId = parseUploadId(body);
+
+	if (uploadId === undefined) {
+		return { kind: 'invalid-response', cause: new R2CredentialResponseError() };
+	}
+
+	const signed = await client.sign(
+		`${objectUrl}?uploadId=${encodeURIComponent(uploadId)}`,
+		{ method: 'DELETE' }
+	);
+
+	try {
+		await fetcher(signed);
+	} catch {
+		// A begun upload holds no object, so a failed abort leaves only an empty
+		// in-progress upload that R2 drops on its own; the verdict is already set.
 	}
 
 	return { kind: 'valid' };
 }
 
-function parseUploadId(body: string): string | undefined {
-	const open = '<UploadId>';
-	const start = body.indexOf(open);
-	const end = body.indexOf('</UploadId>');
+const initiateResultPattern =
+	/^\s*(?:<\?xml[^>]*\?>\s*)?<InitiateMultipartUploadResult(?:\s[^>]*)?>([\s\S]*)<\/InitiateMultipartUploadResult>\s*$/u;
+const uploadIdPattern = /<UploadId>([^<]+)<\/UploadId>/gu;
 
-	if (start === -1 || end === -1) {
+function parseUploadId(body: string): string | undefined {
+	const result = initiateResultPattern.exec(body);
+
+	if (result === null) {
 		return undefined;
 	}
 
-	return body.slice(start + open.length, end);
+	const content = result[1];
+
+	if (content === undefined) {
+		return undefined;
+	}
+
+	const uploadIds = content.matchAll(uploadIdPattern).toArray();
+	const uploadId =
+		uploadIds.length === 1 ? (uploadIds[0]?.[1]?.trim() ?? '') : '';
+
+	return uploadId === '' ? undefined : uploadId;
 }

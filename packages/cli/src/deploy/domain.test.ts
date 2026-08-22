@@ -3,9 +3,29 @@ import { z } from 'zod';
 
 import {
 	checkDomainOption,
+	cloudflareZoneCandidates,
 	domainProblem,
 	InvalidDomainError
 } from './domain.ts';
+
+describe('cloudflareZoneCandidates', () => {
+	it.each([
+		{
+			hostname: 'api.cache.example.co.uk',
+			zones: ['api.cache.example.co.uk', 'cache.example.co.uk', 'example.co.uk']
+		},
+		{
+			hostname: 'user.github.io',
+			zones: ['user.github.io']
+		},
+		{
+			hostname: 'CACHE.Example.COM',
+			zones: ['cache.example.com', 'example.com']
+		}
+	])('lists candidate zones for $hostname', ({ hostname, zones }) => {
+		expect(cloudflareZoneCandidates(hostname)).toStrictEqual(zones);
+	});
+});
 
 function thrownBy(run: () => unknown): unknown {
 	let thrown: unknown;

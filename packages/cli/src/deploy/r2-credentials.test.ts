@@ -49,6 +49,38 @@ describe('checkR2Credentials', () => {
 		});
 	});
 
+	it.each([
+		[
+			'an absent upload id',
+			'<InitiateMultipartUploadResult></InitiateMultipartUploadResult>'
+		],
+		[
+			'duplicate upload ids',
+			'<InitiateMultipartUploadResult><UploadId>UP-1</UploadId><UploadId>UP-2</UploadId></InitiateMultipartUploadResult>'
+		],
+		[
+			'a truncated result',
+			'<InitiateMultipartUploadResult><UploadId>UP-1</UploadId>'
+		]
+	])('rejects %s in a successful response', async (_name, body) => {
+		const { fetcher, requests } = respondingWith(200, body);
+
+		const result = await checkR2Credentials(options, fetcher);
+
+		expect({
+			kind: result.kind,
+			causeName:
+				result.kind === 'invalid-response' && result.cause instanceof Error
+					? result.cause.name
+					: undefined,
+			requests: requests.map((request) => request.method)
+		}).toStrictEqual({
+			kind: 'invalid-response',
+			causeName: 'R2CredentialResponseError',
+			requests: ['POST']
+		});
+	});
+
 	it.each([[401], [403], [404]])('reports a %i as rejected', async (status) => {
 		const { fetcher } = respondingWith(status);
 

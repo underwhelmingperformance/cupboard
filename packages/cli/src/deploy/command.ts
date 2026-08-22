@@ -9,8 +9,6 @@ import { APIError } from 'cloudflare';
 import { StatusCodes } from 'http-status-codes';
 
 import { delayMs, isAbortError, throwIfAborted } from '../abort.ts';
-import { CupboardClient } from '../client/client.ts';
-import { parseWorkerUrl } from '../client/transport.ts';
 import { CliError } from '../errors.ts';
 
 import { buildArtifactFromTree, type DeploymentArtifact } from './artifact.ts';
@@ -50,7 +48,6 @@ import { readCachedGrant, writeCachedGrant } from './grant-store.ts';
 import type { CloudflareAccountId } from './identifiers.ts';
 import {
 	type ClaimSecret,
-	deploymentUrl,
 	onboardAdminFor,
 	onboardDeployment
 } from './onboard.ts';
@@ -859,6 +856,10 @@ export async function verifyR2Credentials(options: {
 						throw new R2UnreachableError({ cause: result.cause });
 					}
 
+					if (result.kind === 'invalid-response') {
+						throw result.cause;
+					}
+
 					if (attempt >= attempts) {
 						throw new R2CredentialsRejectedError(result.status);
 					}
@@ -891,7 +892,7 @@ export async function verifyR2Credentials(options: {
 				{
 					value: 'continue',
 					label: 'Deploy anyway',
-					hint: 'set this pair even though R2 rejected the write probe'
+					hint: 'set this pair without a successful R2 write probe'
 				},
 				{ value: 'cancel', label: 'Cancel' }
 			]);
@@ -1228,9 +1229,7 @@ async function deployFlow(
 		return {
 			options: {
 				domain: state.domain,
-				dryRun: false,
-				secrets: { control: controlSecrets, tenant: tenantSecrets },
-				liveBuild: undefined
+				secrets: { control: controlSecrets, tenant: tenantSecrets }
 			},
 			missing,
 			annotated
@@ -1366,38 +1365,11 @@ async function deployFlow(
 		agreed.owner.kind === 'owner' ? agreed.owner.owner : undefined
 	);
 
-	const liveBuild = await ui
-		.reporter()
-		.phase('Checking the deployed build', async (context) => {
-			const url = await deploymentUrl(
-				apiFor(agreed.accountId),
-				agreed.config.control.name,
-				agreed.domain
-			);
-
-			if (url === undefined) {
-				return;
-			}
-
-			try {
-				const live = await CupboardClient.fromUrl(parseWorkerUrl(url), {
-					signal: runtimeOptions.signal
-				}).version();
-				context.fact('live', live);
-
-				return live;
-			} catch {
-				context.fact('live', 'unreachable');
-
-				return;
-			}
-		});
-
 	await runDeploy({
 		artifact: { ...artifact, config: deployedConfig },
 		api: apiFor(agreed.accountId),
 		reporter: ui.reporter(),
-		options: { ...options, liveBuild }
+		options
 	});
 
 	// A newly supplied signup secret is available for the claim. An existing

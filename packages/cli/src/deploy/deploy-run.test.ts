@@ -1,9 +1,9 @@
 import type { Reporter } from '@cupboard/reporter';
-import { APIError } from 'cloudflare';
+import { APIError, NotFoundError } from 'cloudflare';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { DeploymentArtifact } from './artifact.ts';
-import type { CloudflareApi } from './cloudflare-api.ts';
+import type { CloudflareApi, ScriptConfiguration } from './cloudflare-api.ts';
 import type { WorkerConfig } from './config.ts';
 import { collectResources, runDeploy } from './deploy-run.ts';
 import {
@@ -182,8 +182,8 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				calls.push(`queue:${name}`);
 				return Promise.resolve(queueId(`qid-${name}`));
 			},
-			d1Query(_databaseId, sql) {
-				calls.push(`d1q:${sql.slice(0, 12)}`);
+			d1QueryBatch(_databaseId, statements) {
+				calls.push(`d1q:${statements[0]?.slice(0, 12) ?? ''}`);
 				return Promise.resolve();
 			},
 			d1QueryRows(_databaseId, sql) {
@@ -223,11 +223,40 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				recordFallbackApiCall(calls, 'findCustomDomain');
 				return Promise.resolve(absentString());
 			},
-			ensureCustomDomain(scriptName, hostname) {
-				calls.push(`domain:${hostname}->${scriptName}`);
+			setCustomDomain(scriptName, domain) {
+				calls.push(`domain:${domain?.hostname ?? '(none)'}->${scriptName}`);
 				return Promise.resolve();
 			}
 		}
+	};
+}
+
+const noBuildVersion = Symbol('no-build-version');
+
+function deployedConfiguration(
+	script: string,
+	buildVersion: string | typeof noBuildVersion = artifact.buildVersion
+): ScriptConfiguration {
+	const resources = {
+		d1: new Map([['cupboard', databaseId('db-id')]]),
+		kv: new Map([
+			['cupboard-tenant-cache', kvNamespaceId('kv-cupboard-tenant-cache')]
+		])
+	};
+	const config =
+		script === 'cupboard-tenant'
+			? artifact.config.tenant
+			: artifact.config.control;
+	const { bindings } = buildScriptMetadata(config, resources);
+
+	return {
+		...(buildVersion !== noBuildVersion && { buildVersion }),
+		bindings: [
+			{ type: 'secret_text', name: 'R2_SECRET_ACCESS_KEY' },
+			...(bindings ?? [])
+		],
+		cacheEnabled: config.cacheEnabled,
+		crossVersionCache: config.cacheEnabled
 	};
 }
 
@@ -252,12 +281,10 @@ describe('runDeploy', () => {
 			reporter: silentReporter,
 			options: {
 				domain: 'cupboard.store',
-				dryRun: false,
 				secrets: {
 					control: [{ name: 'CONTROL_KEY_WRAP_SECRET', text: 'k' }],
 					tenant: []
-				},
-				liveBuild: undefined
+				}
 			}
 		});
 
@@ -271,7 +298,8 @@ describe('runDeploy', () => {
 			'd1q:CREATE TABLE',
 			'd1qr:SELECT name ',
 			'd1q:CREATE TABLE',
-			'd1q:INSERT INTO ',
+			'unexpected:getScriptConfiguration',
+			'unexpected:getScriptConfiguration',
 			'workers-dev:cupboard-tenant:false:false',
 			'upload:cupboard-tenant',
 			'upload:cupboard',
@@ -283,6 +311,33 @@ describe('runDeploy', () => {
 			'zone:cupboard.store',
 			'domain:cupboard.store->cupboard'
 		]);
+	});
+
+	it('removes schedules and custom domains that are no longer configured', async () => {
+		const { api, calls } = recordingApi();
+		const withoutCrons: DeploymentArtifact = {
+			...artifact,
+			config: {
+				...artifact.config,
+				control: { ...artifact.config.control, crons: [] }
+			}
+		};
+
+		await runDeploy({
+			artifact: withoutCrons,
+			api,
+			reporter: silentReporter,
+			options: {
+				domain: undefined,
+				secrets: { control: [], tenant: [] }
+			}
+		});
+
+		expect(
+			calls.filter(
+				(call) => call.startsWith('cron:') || call.startsWith('domain:')
+			)
+		).toStrictEqual(['cron:cupboard:', 'domain:(none)->cupboard']);
 	});
 
 	it('uploads control first when the target removes the named entrypoint', async () => {
@@ -314,9 +369,7 @@ describe('runDeploy', () => {
 			reporter: silentReporter,
 			options: {
 				domain: undefined,
-				dryRun: false,
-				secrets: { control: [], tenant: [] },
-				liveBuild: undefined
+				secrets: { control: [], tenant: [] }
 			}
 		});
 
@@ -353,9 +406,7 @@ describe('runDeploy', () => {
 				reporter: silentReporter,
 				options: {
 					domain: undefined,
-					dryRun: false,
-					secrets: { control: [], tenant: [] },
-					liveBuild: undefined
+					secrets: { control: [], tenant: [] }
 				}
 			});
 
@@ -371,6 +422,146 @@ describe('runDeploy', () => {
 		}
 	);
 
+	it('tolerates a missing script only while restricting routes before upload', async () => {
+		const { api, calls } = recordingApi();
+		const missing = APIError.generate(
+			404,
+			{ errors: [{ code: 10_007, message: 'script not found' }] },
+			'not found',
+			new Headers()
+		);
+		expect(missing).toBeInstanceOf(NotFoundError);
+		let routeAttempts = 0;
+		const missingBeforeUpload: CloudflareApi = {
+			...api,
+			setWorkersDevRoutes: (scriptName, routes) => {
+				routeAttempts += 1;
+				calls.push(
+					`workers-dev:${scriptName}:${String(routes.workersDev)}:${String(routes.previewUrls)}`
+				);
+
+				return routeAttempts === 1
+					? Promise.reject(missing)
+					: Promise.resolve();
+			}
+		};
+
+		await runDeploy({
+			artifact,
+			api: missingBeforeUpload,
+			reporter: silentReporter,
+			options: {
+				domain: undefined,
+				secrets: { control: [], tenant: [] }
+			}
+		});
+
+		expect(routeAttempts).toBe(2);
+	});
+
+	it('surfaces other Cloudflare not-found failures before upload', async () => {
+		const { api } = recordingApi();
+		const missing = APIError.generate(
+			404,
+			{ errors: [{ code: 1000, message: 'unrelated resource not found' }] },
+			'not found',
+			new Headers()
+		);
+		let routeAttempts = 0;
+		const failingApi: CloudflareApi = {
+			...api,
+			setWorkersDevRoutes: () => {
+				routeAttempts += 1;
+
+				return routeAttempts === 1
+					? Promise.reject(missing)
+					: Promise.resolve();
+			}
+		};
+
+		await expect(
+			runDeploy({
+				artifact,
+				api: failingApi,
+				reporter: silentReporter,
+				options: {
+					domain: undefined,
+					secrets: { control: [], tenant: [] }
+				}
+			})
+		).rejects.toBe(missing);
+		expect(routeAttempts).toBe(1);
+	});
+
+	it('fails when route restriction cannot be confirmed after upload', async () => {
+		const { api } = recordingApi();
+		const missing = APIError.generate(
+			404,
+			{ errors: [{ code: 0, message: 'missing' }] },
+			'not found',
+			new Headers()
+		);
+		let routeAttempts = 0;
+		const missingAfterUpload: CloudflareApi = {
+			...api,
+			setWorkersDevRoutes: () => {
+				routeAttempts += 1;
+
+				return routeAttempts === 2
+					? Promise.reject(missing)
+					: Promise.resolve();
+			}
+		};
+
+		await expect(
+			runDeploy({
+				artifact,
+				api: missingAfterUpload,
+				reporter: silentReporter,
+				options: {
+					domain: undefined,
+					secrets: { control: [], tenant: [] }
+				}
+			})
+		).rejects.toBe(missing);
+	});
+
+	it('finds a delegated zone without querying the public suffix', async () => {
+		const { api, calls } = recordingApi();
+		const delegatedApi: CloudflareApi = {
+			...api,
+			findZoneId: (name) => {
+				calls.push(`zone:${name}`);
+
+				return Promise.resolve(
+					name === 'cache.example.co.uk'
+						? zoneIdSchema.parse('delegated-zone')
+						: undefined
+				);
+			}
+		};
+
+		await runDeploy({
+			artifact,
+			api: delegatedApi,
+			reporter: silentReporter,
+			options: {
+				domain: 'api.cache.example.co.uk',
+				secrets: { control: [], tenant: [] }
+			}
+		});
+
+		expect(
+			calls.filter(
+				(call) => call.startsWith('zone:') || call.startsWith('domain:')
+			)
+		).toStrictEqual([
+			'zone:api.cache.example.co.uk',
+			'zone:cache.example.co.uk',
+			'domain:api.cache.example.co.uk->cupboard'
+		]);
+	});
+
 	it('reconciles cache settings when the live build and bindings match', async () => {
 		const { api, calls } = recordingApi();
 		const skipped: string[] = [];
@@ -382,28 +573,8 @@ describe('runDeploy', () => {
 		const convergedApi: CloudflareApi = {
 			...api,
 			getScriptMigrationTag: () => Promise.resolve('v1'),
-			getScriptConfiguration: (scriptName) => {
-				const resources = {
-					d1: new Map([['cupboard', databaseId('db-id')]]),
-					kv: new Map([
-						['cupboard-tenant-cache', kvNamespaceId('kv-cupboard-tenant-cache')]
-					])
-				};
-				const config =
-					scriptName === 'cupboard-tenant'
-						? artifact.config.tenant
-						: artifact.config.control;
-				const { bindings } = buildScriptMetadata(config, resources);
-
-				return Promise.resolve({
-					bindings: [
-						{ type: 'secret_text', name: 'R2_SECRET_ACCESS_KEY' },
-						...(bindings ?? [])
-					],
-					cacheEnabled: config.cacheEnabled,
-					crossVersionCache: config.cacheEnabled
-				});
-			}
+			getScriptConfiguration: (script) =>
+				Promise.resolve(deployedConfiguration(script))
 		};
 
 		await runDeploy({
@@ -420,9 +591,7 @@ describe('runDeploy', () => {
 			},
 			options: {
 				domain: undefined,
-				dryRun: false,
-				secrets: { control: [], tenant: [] },
-				liveBuild: 'abc123def456'
+				secrets: { control: [], tenant: [] }
 			}
 		});
 
@@ -437,12 +606,12 @@ describe('runDeploy', () => {
 				'd1q:CREATE TABLE',
 				'd1qr:SELECT name ',
 				'd1q:CREATE TABLE',
-				'd1q:INSERT INTO ',
 				'workers-dev:cupboard-tenant:false:false',
 				'workers-dev:cupboard-tenant:false:false',
 				'queue:cupboard-maintenance',
 				'consumer:qid-cupboard-maintenance->cupboard',
-				'cron:cupboard:0 * * * *'
+				'cron:cupboard:0 * * * *',
+				'domain:(none)->cupboard'
 			],
 			succeeded: ['Applying D1 migrations · applied 1'],
 			skipped: [
@@ -451,6 +620,57 @@ describe('runDeploy', () => {
 				'Setting secrets · no secrets to set'
 			]
 		});
+	});
+
+	it('uploads only the Worker whose deployed build does not match', async () => {
+		const { api, calls } = recordingApi();
+		const partialApi: CloudflareApi = {
+			...api,
+			getScriptConfiguration: (script) =>
+				Promise.resolve(
+					deployedConfiguration(
+						script,
+						script === 'cupboard' ? artifact.buildVersion : 'previous-build'
+					)
+				)
+		};
+
+		await runDeploy({
+			artifact,
+			api: partialApi,
+			reporter: silentReporter,
+			options: { domain: undefined, secrets: { control: [], tenant: [] } }
+		});
+
+		expect(calls.filter((call) => call.startsWith('upload:'))).toStrictEqual([
+			'upload:cupboard-tenant'
+		]);
+	});
+
+	it('uploads a Worker when a settings update removed its build tag', async () => {
+		const { api, calls } = recordingApi();
+		const driftedApi: CloudflareApi = {
+			...api,
+			getScriptConfiguration: (script) =>
+				Promise.resolve(
+					deployedConfiguration(
+						script,
+						script === 'cupboard' ? noBuildVersion : artifact.buildVersion
+					)
+				)
+		};
+
+		await runDeploy({
+			artifact,
+			api: driftedApi,
+			reporter: silentReporter,
+			options: { domain: undefined, secrets: { control: [], tenant: [] } }
+		});
+
+		expect(calls.filter((call) => call.startsWith('upload:'))).toStrictEqual([
+			'upload:cupboard-tenant',
+			'upload:cupboard'
+		]);
 	});
 
 	it('never skips a dirty build, whose version cannot be trusted', async () => {
@@ -462,9 +682,7 @@ describe('runDeploy', () => {
 			reporter: silentReporter,
 			options: {
 				domain: undefined,
-				dryRun: false,
-				secrets: { control: [], tenant: [] },
-				liveBuild: 'abc123def456+dirty'
+				secrets: { control: [], tenant: [] }
 			}
 		});
 
@@ -478,14 +696,14 @@ describe('runDeploy', () => {
 			'd1q:CREATE TABLE',
 			'd1qr:SELECT name ',
 			'd1q:CREATE TABLE',
-			'd1q:INSERT INTO ',
 			'workers-dev:cupboard-tenant:false:false',
 			'upload:cupboard-tenant',
 			'upload:cupboard',
 			'workers-dev:cupboard-tenant:false:false',
 			'queue:cupboard-maintenance',
 			'consumer:qid-cupboard-maintenance->cupboard',
-			'cron:cupboard:0 * * * *'
+			'cron:cupboard:0 * * * *',
+			'domain:(none)->cupboard'
 		]);
 	});
 
@@ -540,9 +758,7 @@ describe('runDeploy', () => {
 			},
 			options: {
 				domain: undefined,
-				dryRun: false,
-				secrets: { control: [], tenant: [] },
-				liveBuild: undefined
+				secrets: { control: [], tenant: [] }
 			}
 		});
 
@@ -557,14 +773,16 @@ describe('runDeploy', () => {
 				'd1q:CREATE TABLE',
 				'd1qr:SELECT name ',
 				'd1q:CREATE TABLE',
-				'd1q:INSERT INTO ',
+				'unexpected:getScriptConfiguration',
+				'unexpected:getScriptConfiguration',
 				'workers-dev:cupboard-tenant:false:false',
 				'upload:cupboard-tenant',
 				'upload:cupboard',
 				'workers-dev:cupboard-tenant:false:false',
 				'queue:cupboard-maintenance',
 				'consumer:qid-cupboard-maintenance->cupboard',
-				'cron:cupboard:0 * * * *'
+				'cron:cupboard:0 * * * *',
+				'domain:(none)->cupboard'
 			],
 			warnings: [
 				"CPU limit not applied: cupboard: this plan does not support CPU limits, so the Worker runs within the plan's CPU budget"

@@ -22,7 +22,7 @@ const statementBreakpoint = '--> statement-breakpoint';
 /**
  * Parse Drizzle's `.sql` migration files into ordered, statement-split
  * migrations. Drizzle separates statements with a `--> statement-breakpoint`
- * marker; the D1 query API takes one statement at a time.
+ * marker; the D1 query API accepts the statements as a transactional batch.
  */
 export function parseD1Migrations(
 	files: readonly RawMigrationFile[]
@@ -39,7 +39,10 @@ export function parseD1Migrations(
 }
 
 export interface D1MigrationApi {
-	query(databaseId: DatabaseId, sql: string): Promise<void>;
+	queryBatch(
+		databaseId: DatabaseId,
+		statements: readonly string[]
+	): Promise<void>;
 	queryRows(databaseId: DatabaseId, sql: string): Promise<readonly string[]>;
 }
 
@@ -61,7 +64,7 @@ export async function applyD1Migrations(
 	databaseId: DatabaseId,
 	migrations: readonly D1Migration[]
 ): Promise<string[]> {
-	await api.query(databaseId, ensureTrackingTable);
+	await api.queryBatch(databaseId, [ensureTrackingTable]);
 
 	const applied = new Set(
 		await api.queryRows(databaseId, 'SELECT name FROM d1_migrations;')
@@ -73,14 +76,10 @@ export async function applyD1Migrations(
 	const newlyApplied: string[] = [];
 
 	for (const migration of pending) {
-		for (const statement of migration.statements) {
-			await api.query(databaseId, statement);
-		}
-
-		await api.query(
-			databaseId,
+		await api.queryBatch(databaseId, [
+			...migration.statements,
 			`INSERT INTO d1_migrations (name) VALUES (${quote(migration.name)});`
-		);
+		]);
 
 		newlyApplied.push(migration.name);
 	}

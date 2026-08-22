@@ -62,8 +62,8 @@ function baseApi(apiCalls: ApiCall[]): CloudflareApi {
 			recordApiCall(apiCalls, 'ensureQueue');
 			return Promise.resolve(queueIdSchema.parse('queue-id'));
 		},
-		d1Query: () => {
-			recordApiCall(apiCalls, 'd1Query');
+		d1QueryBatch: () => {
+			recordApiCall(apiCalls, 'd1QueryBatch');
 			return Promise.resolve();
 		},
 		d1QueryRows: () => {
@@ -106,8 +106,8 @@ function baseApi(apiCalls: ApiCall[]): CloudflareApi {
 			recordApiCall(apiCalls, 'findCustomDomain');
 			return Promise.resolve(absentString);
 		},
-		ensureCustomDomain: () => {
-			recordApiCall(apiCalls, 'ensureCustomDomain');
+		setCustomDomain: () => {
+			recordApiCall(apiCalls, 'setCustomDomain');
 			return Promise.resolve();
 		},
 		listTokenPermissionGroups: () => {
