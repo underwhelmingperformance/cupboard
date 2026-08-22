@@ -9,6 +9,7 @@ import {
 	SigningKeyRotationAbortNotAllowedError,
 	SigningKeyRotationInProgressError
 } from '../errors.ts';
+import { serverHttpErrorHeaders } from '../http/error-response.ts';
 
 const codeByStatus: Record<number, string> = {
 	[StatusCodes.BAD_REQUEST]: 'BAD_REQUEST',
@@ -33,7 +34,17 @@ const codeByStatus: Record<number, string> = {
  * the request logger and returned unchanged so oRPC can mask them with its own
  * 500 response.
  */
-export function bridgedError(logger: Logger, error: unknown): unknown {
+export function bridgedError(
+	logger: Logger,
+	error: unknown,
+	responseHeaders?: Headers
+): unknown {
+	if (responseHeaders !== undefined && error instanceof ServerHttpError) {
+		for (const [name, value] of serverHttpErrorHeaders(error)) {
+			responseHeaders.set(name, value);
+		}
+	}
+
 	if (error instanceof CacheNotEmptyError) {
 		return new ORPCError('CACHE_NOT_EMPTY', {
 			status: error.status,

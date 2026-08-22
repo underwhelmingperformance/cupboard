@@ -8,20 +8,26 @@ import {
 	DatabaseOverloadedError,
 	OAuthError,
 	ServerHttpError,
-	TenantDispatchInterruptedError
+	TenantDispatchInterruptedError,
+	UnauthenticatedError
 } from '../errors.ts';
 import { rootLogger } from '../observability/logging.ts';
 
+import { oauthJsonResponse } from './oauth-response.ts';
+
+// Maps a thrown error to an HTTP response: an OAuth error to its RFC 6749 JSON
+// body, any other `ServerHttpError` to its status and message. Anything else
+// is not ours to map and returns undefined.
 function errorResponse(error: unknown): Response | undefined {
 	if (error instanceof OAuthError) {
-		return Response.json(
+		return oauthJsonResponse(
 			{
 				error: error.error,
 				error_description: error.message,
 				...(error.problem !== undefined && { problem: error.problem }),
 				...(error.detail !== undefined && { detail: error.detail })
 			},
-			{ status: error.status, headers: { 'Cache-Control': 'no-store' } }
+			{ status: error.status }
 		);
 	}
 
@@ -33,16 +39,10 @@ function errorResponse(error: unknown): Response | undefined {
 }
 
 function serverHttpErrorResponse(error: ServerHttpError): Response {
-	// A cache could retain a transient refusal after the origin has recovered.
-	// Mark every retryable Hono response no-store so the next attempt reaches the
-	// origin.
-	const headers =
-		error.retryAfterSeconds === undefined
-			? undefined
-			: {
-					'retry-after': String(error.retryAfterSeconds),
-					'cache-control': 'no-store'
-				};
+	// A retryable refusal must never be cached, on any route: a reader that
+	// stored this response would keep retrying against a cache instead of the
+	// origin, well past whatever made it transient.
+	const headers = serverHttpErrorHeaders(error);
 
 	return new Response(`${error.message}\n`, {
 		status: error.status,
@@ -50,8 +50,27 @@ function serverHttpErrorResponse(error: ServerHttpError): Response {
 	});
 }
 
-// D1 overloads and faults that Cloudflare marks as retryable become transient
-// refusals. Other unmodelled errors use the redacted 500 response below.
+/**
+HTTP metadata shared by ordinary and oRPC error renderers.
+*/
+export function serverHttpErrorHeaders(error: ServerHttpError): Headers {
+	const headers = new Headers();
+
+	if (error.retryAfterSeconds !== undefined) {
+		headers.set('retry-after', String(error.retryAfterSeconds));
+		headers.set('cache-control', 'no-store');
+	}
+
+	if (error instanceof UnauthenticatedError) {
+		headers.set('www-authenticate', 'Bearer');
+	}
+
+	return headers;
+}
+
+// The Hono error handler applies the same mapping. A D1 overload or a fault the
+// runtime marks retryable is a transient refusal, not a server fault; anything
+// else we do not model uses {@link unmappedErrorResponse}.
 export const serverErrorHandler: ErrorHandler = (error, context) => {
 	const mapped = errorResponse(error);
 

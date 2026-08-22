@@ -49,6 +49,7 @@ import {
 	UnsupportedGrantTypeError,
 	UnsupportedSubjectTokenTypeError
 } from '../errors.ts';
+import { oauthJsonResponse } from '../http/oauth-response.ts';
 import { parseFormBody } from '../http/parse.ts';
 
 import { type AuthKeysService } from './auth-keys-service.ts';
@@ -235,16 +236,13 @@ export class TokenExchangeService {
 			new Date()
 		);
 
-		return Response.json(
-			{
-				access_token: accessToken,
-				token_type: 'Bearer',
-				expires_in: writeJwtTtlSeconds,
-				issued_token_type: issuedAccessTokenType,
-				authorization_details: granted
-			} satisfies TokenResponse,
-			{ headers: { 'cache-control': 'no-store' } }
-		);
+		return oauthJsonResponse({
+			access_token: accessToken,
+			token_type: 'Bearer',
+			expires_in: writeJwtTtlSeconds,
+			issued_token_type: issuedAccessTokenType,
+			authorization_details: granted
+		} satisfies TokenResponse);
 	}
 
 	private async refresh(body: ParsedTokenRequest): Promise<Response> {

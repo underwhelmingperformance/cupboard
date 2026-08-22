@@ -93,16 +93,48 @@ describe('parseFormBody', () => {
 		});
 	});
 
-	it('collapses a repeated key to its last value', async () => {
-		const parsed = await parseFormBody(
-			grant,
-			formRequest('grant_type=first&grant_type=second&subject_token=abc')
-		);
+	it('rejects a repeated singleton parameter', async () => {
+		await expect(
+			parseFormBody(
+				grant,
+				formRequest('grant_type=first&grant_type=second&subject_token=abc')
+			)
+		).rejects.toThrow(TokenRequestBodyInvalidError);
+	});
 
-		expect(parsed).toStrictEqual({
-			grant_type: 'second',
-			subject_token: 'abc'
+	it('preserves a repeated parameter when the schema permits it', async () => {
+		const repeated = z.strictObject({ resource: z.array(z.string()) });
+
+		await expect(
+			parseFormBody(repeated, formRequest('resource=one&resource=two'))
+		).resolves.toStrictEqual({ resource: ['one', 'two'] });
+	});
+
+	it('rejects a non-form media type', async () => {
+		await expect(
+			parseFormBody(
+				grant,
+				new Request('https://cupboard.test', {
+					method: 'POST',
+					headers: { 'Content-Type': 'text/plain' },
+					body: 'grant_type=t&subject_token=a'
+				})
+			)
+		).rejects.toThrow(TokenRequestBodyInvalidError);
+	});
+
+	it('rejects a form body which is not valid UTF-8', async () => {
+		const malformed = new Request('https://cupboard.test', {
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/x-www-form-urlencoded'
+			},
+			body: new Uint8Array([0xff])
 		});
+
+		await expect(parseFormBody(grant, malformed)).rejects.toThrow(
+			TokenRequestBodyInvalidError
+		);
 	});
 
 	it.each([

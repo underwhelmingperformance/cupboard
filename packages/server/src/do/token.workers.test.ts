@@ -148,11 +148,13 @@ describe('POST /token', () => {
 		expect({
 			status: response.status,
 			cacheControl: response.headers.get('cache-control'),
+			pragma: response.headers.get('pragma'),
 			error: body.error,
 			problem: body.problem
 		}).toStrictEqual({
 			status: StatusCodes.BAD_REQUEST,
 			cacheControl: 'no-store',
+			pragma: 'no-cache',
 			error: 'invalid_request',
 			problem: 'unsupported-subject-token-type'
 		});

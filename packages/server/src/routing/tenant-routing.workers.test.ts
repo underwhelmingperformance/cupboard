@@ -82,6 +82,23 @@ describe('tenant routing', () => {
 		});
 	});
 
+	it('serves tenant metadata at the RFC 8414 path-derived URL', async () => {
+		await provisionNamedTenant('acme');
+
+		const response = await handlerFetch(
+			'/.well-known/oauth-authorization-server/t/acme'
+		);
+
+		expect({
+			status: response.status,
+			issuer: authorizationServerMetadataSchema.parse(await response.json())
+				.issuer
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			issuer: `${currentOrigin()}/t/acme`
+		});
+	});
+
 	it('issues under its own issuer, and that token verifies at that tenant only', async () => {
 		const acmeIssuer = await provisionNamedTenant('acme');
 		await provisionNamedTenant('beta');
