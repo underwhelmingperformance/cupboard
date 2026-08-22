@@ -658,16 +658,24 @@ export class DeletionQueueService {
 		origin?: RequestOrigin
 	): Promise<void> {
 		const now = isoTimestamp(new Date());
-
-		this.context.db.transaction((tx) => {
-			tx.delete(schema.narInfos)
+		const wasRemoved = this.context.db.transaction((tx) => {
+			const deleted = tx
+				.delete(schema.narInfos)
 				.where(
 					and(
 						eq(schema.narInfos.cache, row.cache),
-						eq(schema.narInfos.storePathHash, row.storePathHash)
+						eq(schema.narInfos.storePathHash, row.storePathHash),
+						eq(schema.narInfos.generation, row.generation),
+						eq(schema.narInfos.narHash, row.narHash)
 					)
 				)
-				.run();
+				.returning({ storePathHash: schema.narInfos.storePathHash })
+				.get();
+
+			if (deleted === undefined) {
+				return false;
+			}
+
 			tx.delete(schema.retentionGrace)
 				.where(
 					and(
@@ -684,7 +692,13 @@ export class DeletionQueueService {
 				row.generation,
 				now
 			);
+
+			return true;
 		});
+
+		if (!wasRemoved) {
+			return;
+		}
 
 		try {
 			await this.deleteQueuedNarInfo(
