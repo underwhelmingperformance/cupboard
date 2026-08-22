@@ -16,7 +16,7 @@ const forceQuerySchema = z
 
 export const cachesContract = {
 	list: baseProcedure
-		.meta({ requires: 'cache:list' })
+		.meta({ requires: 'cache:list', replaySafety: 'replay-safe' })
 		.route({ method: 'GET', path: '/caches' })
 		.output(cacheListResponseSchema),
 

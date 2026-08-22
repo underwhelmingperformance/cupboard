@@ -90,7 +90,7 @@ export async function verifyRemoteAttestations(
 	dependencies: AttestationVerifyDependencies = {}
 ): Promise<readonly VerifyResult[]> {
 	const policy = identityPolicy(options);
-	const fetcher = dependencies.fetch ?? resilientFetcher();
+	const fetcher = dependencies.fetch ?? resilientFetcher('replay-safe');
 	const base = canonicalHref(cacheUrl(options.url, options.cache));
 	const readHeaders = readAuthHeaders(options);
 	const narInfo = await fetchNarInfo(

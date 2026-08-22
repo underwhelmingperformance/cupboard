@@ -14,7 +14,6 @@ import {
 } from '../client/client.ts';
 import { type AccessCredential } from '../client/credentials.ts';
 import { tenantRpc } from '../client/orpc.ts';
-import { resilientFetcher } from '../client/transport.ts';
 
 import { credentialSession } from './credential-session.ts';
 import { type PushClient } from './push.ts';
@@ -69,7 +68,7 @@ export function pushClientFor(
 	});
 	const raw = new CupboardClient(
 		new URL(url),
-		resilientFetcher(options.fetcher ?? fetch),
+		options.fetcher ?? fetch,
 		cachePrefixFor(cache),
 		options.signal
 	);

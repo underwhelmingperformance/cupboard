@@ -714,7 +714,7 @@ async function availablePathsAt(
 	}
 
 	const batches = chunk(pathsByHash.keys().toArray(), maximumBatchSize);
-	const fetcher = retryingFetcher(options.fetcher ?? fetch);
+	const fetcher = retryingFetcher(options.fetcher ?? fetch, 'replay-safe');
 	const headers = {
 		'content-type': 'application/json',
 		...(options.credentials !== undefined &&

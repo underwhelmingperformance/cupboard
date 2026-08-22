@@ -3237,9 +3237,10 @@ describe('credit-paced commits', () => {
 	// budget consumption. Free reconnects during a capacity wait must still reach
 	// the cap so a repeatedly dropping server is not dialled continuously.
 	//
-	// Pin jitter to its lower bound: 500, 1000, 2000, 4000, then the 5000 cap.
+	// The jitter is pinned to the midpoint of each step's ceiling: 500, 1000,
+	// 2000, 4000, then the 5000 cap.
 	it('backs off further on each free reconnect', async () => {
-		vi.spyOn(Math, 'random').mockReturnValue(0);
+		vi.spyOn(Math, 'random').mockReturnValue(0.5);
 
 		const dropped = Array.from({ length: 5 }, () => new FakeCommitSocket());
 		const last = new FakeCommitSocket();
@@ -3269,7 +3270,7 @@ describe('credit-paced commits', () => {
 
 	// An entry frame resets the reconnect counter as well as restoring budget.
 	it('resets reconnect backoff after an entry receives a frame', async () => {
-		vi.spyOn(Math, 'random').mockReturnValue(0);
+		vi.spyOn(Math, 'random').mockReturnValue(0.5);
 
 		const unanswered = [new FakeCommitSocket(), new FakeCommitSocket()];
 		const answering = new FakeCommitSocket();
@@ -3316,16 +3317,31 @@ describe('credit-paced commits', () => {
 	// Honour a valid `Retry-After` when it exceeds the reconnect backoff, up to
 	// one minute. A missing or unreadable value leaves the backoff unchanged.
 	//
-	// Pin jitter so the first reconnect backoff is 250 ms.
+	// The jitter is pinned to its midpoint, so the back-off the first reconnect
+	// would otherwise wait is 250 ms.
 	it.each([
-		{ what: 'a delay longer than the back-off', asked: '12', delayMs: 12_000 },
-		{ what: 'a delay beyond the cap', asked: '3600', delayMs: 60_000 },
+		{
+			what: 'a delay longer than the back-off',
+			asked: () => '12',
+			delayMs: 12_000
+		},
+		{
+			what: 'an HTTP date',
+			asked: () => new Date(Date.now() + 12_000).toUTCString(),
+			delayMs: 12_000
+		},
+		{ what: 'a delay beyond the cap', asked: () => '3600', delayMs: 60_000 },
 		{ what: 'no delay', asked: undefined, delayMs: 250 },
-		{ what: 'a delay it cannot read', asked: 'in a while', delayMs: 250 }
+		{
+			what: 'a decimal delay it cannot read',
+			asked: () => '1.5',
+			delayMs: 250
+		}
 	])(
 		'waits $delayMs ms after an upgrade refusal naming $what',
 		async ({ asked, delayMs }) => {
-			vi.spyOn(Math, 'random').mockReturnValue(0);
+			vi.setSystemTime(Date.UTC(2026, 7, 22, 22, 0, 0));
+			vi.spyOn(Math, 'random').mockReturnValue(0.5);
 
 			const refused = new FakeCommitSocket();
 			const last = new FakeCommitSocket();
@@ -3342,7 +3358,7 @@ describe('credit-paced commits', () => {
 
 			const refusal = new FakeUpgradeFailure(
 				503,
-				asked === undefined ? {} : { 'retry-after': asked }
+				asked === undefined ? {} : { 'retry-after': asked() }
 			);
 			refused.emit('unexpected-response', {}, refusal);
 			refusal.emit('data', Buffer.from('Commit sessions are busy'));
@@ -3498,14 +3514,16 @@ describe('credit-paced commits', () => {
 		});
 	});
 
-	// A peer can leave an upgrade-response body unfinished without another
-	// socket event. Bound the read; if it times out, discard any incomplete
-	// `Retry-After` value and use reconnect backoff.
+	// A peer can leave the refusal body unfinished: truncated and then
+	// half-closed, or headers with a length it never sends the rest of. Neither
+	// shape produces another event, so the session bounds the read and treats
+	// the timeout as the refusal itself. Headers are complete before the body,
+	// so the next dial still honours their `Retry-After`.
 	it.each([
 		{ what: 'a truncated body', body: 'Commit sess' },
 		{ what: 'no body at all', body: undefined }
 	])('drops a refusal that never ends, given $what', async ({ body }) => {
-		vi.spyOn(Math, 'random').mockReturnValue(0);
+		vi.spyOn(Math, 'random').mockReturnValue(0.5);
 
 		const refused = new FakeCommitSocket();
 		const last = new FakeCommitSocket();
@@ -3526,7 +3544,7 @@ describe('credit-paced commits', () => {
 		}
 
 		const refusedAt = Date.now();
-		await vi.advanceTimersByTimeAsync(drainTimeoutMs + maxBackoffMs);
+		await vi.advanceTimersByTimeAsync(drainTimeoutMs + 12_000);
 
 		advertiseCredit(last, 1, 1);
 		last.emit('open');
@@ -3538,7 +3556,7 @@ describe('credit-paced commits', () => {
 			ack: await ackOf(commit)
 		}).toStrictEqual({
 			destroyed: true,
-			dialedAfterMs: drainTimeoutMs + 250,
+			dialedAfterMs: drainTimeoutMs + 12_000,
 			ack: { storePathHash, narHash, status: 'committed' }
 		});
 	});

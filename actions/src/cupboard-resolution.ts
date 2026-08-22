@@ -237,6 +237,7 @@ export async function resolveCupboard(
 	const [owner, name] = splitRepository(options.releaseRepository);
 	const providedVersion = nonBlank(options.cupboardVersion);
 	const client = createOctokitClient({
+		replaySafety: 'replay-safe',
 		...(options.githubToken !== '' && { auth: options.githubToken }),
 		baseUrl: endpoints.rest,
 		...(dependencies.fetch !== undefined && {

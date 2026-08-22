@@ -298,6 +298,7 @@ function buildOctokit(
 	};
 
 	return createOctokitClient({
+		replaySafety: 'replay-safe',
 		...(options.githubToken !== '' && { auth: options.githubToken }),
 		apiVersion: '2026-03-10',
 		...(options.environment.GITHUB_API_URL !== undefined && {
@@ -1788,7 +1789,10 @@ export async function downloadAsset(
 	const maximumBytes = dependencies.maximumBytes ?? maximumReleaseAssetBytes;
 	const expectedOrigin = dependencies.githubApiOrigin ?? githubApiOrigin({});
 	const url = authenticatedReleaseAssetUrl(asset, expectedOrigin);
-	const response = await retryingFetcher(dependencies.fetch ?? fetch)(url, {
+	const response = await retryingFetcher(
+		dependencies.fetch ?? fetch,
+		'replay-safe'
+	)(url, {
 		headers: requestHeaders(url.origin === expectedOrigin ? githubToken : '', {
 			accept: 'application/octet-stream'
 		}),
@@ -2336,7 +2340,7 @@ async function fetchAttestationBundle(
 		headers.authorization = `token ${githubToken}`;
 	}
 
-	const response = await retryingFetcher(fetcher)(url, {
+	const response = await retryingFetcher(fetcher, 'replay-safe')(url, {
 		headers,
 		...(signal !== undefined && { signal })
 	});

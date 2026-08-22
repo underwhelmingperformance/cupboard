@@ -140,7 +140,7 @@ export function cacheInfoFetcher(
 					user: options.readUser,
 					password: options.readPassword
 				});
-	const fetcher = resilientFetcher(dependencies.fetch);
+	const fetcher = resilientFetcher('replay-safe', dependencies.fetch);
 	const timeoutMs = dependencies.timeoutMs ?? cacheInfoTimeoutMs;
 
 	return async (url: URL) => {

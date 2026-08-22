@@ -1,3 +1,4 @@
+import { type ReplaySafety } from '@cupboard/shared/retry';
 import { oc } from '@orpc/contract';
 
 import { type Operation } from '../grants.ts';
@@ -31,9 +32,16 @@ export interface AuthzMeta {
 	readonly requires?: Operation;
 	readonly resource?: ResourceSpec;
 	readonly maintenance?: boolean;
+	readonly replaySafety?: ReplaySafety;
 }
 
-export const baseProcedure = oc.$meta<AuthzMeta>({}).errors({
-	UNAUTHORIZED: {},
-	FORBIDDEN: {}
-});
+/**
+ * The base contract for authenticated procedures. It declares the shared
+ * authorisation errors, and each procedure adds its required operation.
+ */
+export const baseProcedure = oc
+	.$meta<AuthzMeta>({ replaySafety: 'replay-unsafe' })
+	.errors({
+		UNAUTHORIZED: {},
+		FORBIDDEN: {}
+	});

@@ -1,16 +1,16 @@
 import { controlContract, tenantContract } from '@cupboard/protocol/contract';
-import {
-	backoffDelay,
-	isTransientResponse,
-	maxTransientRetries,
-	transientResponseDelay
-} from '@cupboard/shared/retry';
+import { type AuthzMeta } from '@cupboard/protocol/contract';
+import { type ReplaySafety, retryingFetcher } from '@cupboard/shared/retry';
 import {
 	createORPCClient,
 	createORPCErrorFromJson,
 	isORPCErrorJson
 } from '@orpc/client';
-import type { AnyContractRouter, ContractRouterClient } from '@orpc/contract';
+import {
+	type AnyContractRouter,
+	type ContractRouterClient,
+	isContractProcedure
+} from '@orpc/contract';
 import { ResponseValidationPlugin } from '@orpc/contract/plugins';
 import type { JsonifiedClient } from '@orpc/openapi-client';
 import { OpenAPILink } from '@orpc/openapi-client/fetch';
@@ -72,8 +72,6 @@ function derivedClient<C extends AnyContractRouter>(
 	options: TenantRpcOptions
 ): JsonifiedClient<ContractRouterClient<C>> {
 	const { credential, signal, fetcher = fetch } = options;
-	const reachable = reachableFetcher(fetcher);
-
 	const link = new OpenAPILink(contract, {
 		url,
 		headers: () => {
@@ -83,32 +81,23 @@ function derivedClient<C extends AnyContractRouter>(
 
 			return {};
 		},
-		// Each attempt clones the buffered JSON request. A 401 refreshes the bearer
-		// once. A rejected fetch or a 429, 502, 503 or 504 response uses the shared
-		// transient retry budget.
-		fetch: async (request, init) => {
+		fetch: async (request, init, _options, path) => {
 			const requestHeaders = Object.fromEntries(request.headers.entries());
 			let attempt = await bearerAttempt(credential, requestHeaders);
 			let current = new Request(request, { headers: attempt.headers });
-			let retries = 0;
+			const replaySafety = replaySafetyFor(contract, path);
+			const transport = reachableFetcher(
+				retryingFetcher(fetcher, replaySafety)
+			);
 
 			for (;;) {
 				throwIfAborted(signal);
+				const response = await transport(current.clone(), { ...init, signal });
 
-				let response: Response;
-				try {
-					response = await reachable(current.clone(), { ...init, signal });
-				} catch (error) {
-					if (signal?.aborted === true || retries >= maxTransientRetries) {
-						throw error;
-					}
-
-					retries += 1;
-					await backoffDelay(retries, signal);
-					continue;
-				}
-
-				if (response.status === unauthorizedStatusCode) {
+				if (
+					replaySafety === 'replay-safe' &&
+					response.status === unauthorizedStatusCode
+				) {
 					const refreshed = await attempt.refreshAfterAuthenticationFailure();
 
 					if (refreshed !== undefined) {
@@ -118,12 +107,6 @@ function derivedClient<C extends AnyContractRouter>(
 					}
 				}
 
-				if (isTransientResponse(response) && retries < maxTransientRetries) {
-					retries += 1;
-					await transientResponseDelay(response, retries, signal);
-					continue;
-				}
-
 				return await settleServerError(current, response);
 			}
 		},
@@ -131,6 +114,29 @@ function derivedClient<C extends AnyContractRouter>(
 	});
 
 	return createORPCClient(link);
+}
+
+function replaySafetyFor(
+	contract: AnyContractRouter,
+	path: readonly string[]
+): ReplaySafety {
+	let procedure: unknown = contract;
+
+	for (const segment of path) {
+		if (typeof procedure !== 'object' || procedure === null) {
+			return 'replay-unsafe';
+		}
+
+		procedure = (procedure as Readonly<Record<string, unknown>>)[segment];
+	}
+
+	if (!isContractProcedure(procedure)) {
+		return 'replay-unsafe';
+	}
+
+	const metadata = procedure['~orpc'].meta as AuthzMeta;
+
+	return metadata.replaySafety ?? 'replay-unsafe';
 }
 
 const serverErrorThreshold: number = StatusCodes.INTERNAL_SERVER_ERROR;

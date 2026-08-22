@@ -12,7 +12,10 @@ import {
 	genericExitCode,
 	UsageError
 } from '@cupboard/shared/errors';
-import { createOctokitClient } from '@cupboard/shared/octokit';
+import {
+	createOctokitClient,
+	githubReplaySafeRequest
+} from '@cupboard/shared/octokit';
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -352,7 +355,8 @@ async function listReleases(
 ): Promise<ReleaseSummary[]> {
 	const { data } = await octokit.rest.repos.listReleases({
 		...repository,
-		per_page: 100
+		per_page: 100,
+		request: githubReplaySafeRequest
 	});
 
 	return data.map((release) => toReleaseSummary(release));

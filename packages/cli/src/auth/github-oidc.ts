@@ -83,7 +83,7 @@ export async function fetchGithubOidcToken(options: {
 	const url = new URL(requestUrl);
 	url.searchParams.set('audience', options.audience);
 
-	const fetcher = options.fetcher ?? resilientFetcher();
+	const fetcher = options.fetcher ?? resilientFetcher('replay-safe');
 	const response = await fetcher(url, {
 		headers: { authorization: `Bearer ${requestToken}` },
 		signal: options.signal

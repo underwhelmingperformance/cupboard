@@ -3,6 +3,8 @@ import { throttling } from '@octokit/plugin-throttling';
 import { Octokit } from '@octokit/rest';
 import { StatusCodes } from 'http-status-codes';
 
+import { type ReplaySafety } from './retry.ts';
+
 // The single retry policy for the project: the throttling plugin handles the
 // documented rate-limit responses and the retry plugin handles transient
 // failures.
@@ -23,6 +25,8 @@ const doNotRetryStatuses = [
 	StatusCodes.UNAVAILABLE_FOR_LEGAL_REASONS
 ];
 
+export const githubReplaySafeRequest = { retries: 3 } as const;
+
 type OctokitClientConstructorOptions = NonNullable<
 	ConstructorParameters<typeof OctokitClient>[0]
 >;
@@ -32,6 +36,7 @@ export interface OctokitClientOptions {
 	readonly apiVersion?: string;
 	readonly baseUrl?: string;
 	readonly request?: OctokitClientConstructorOptions['request'];
+	readonly replaySafety?: ReplaySafety;
 }
 
 /**
@@ -52,7 +57,13 @@ export function createOctokitClient(
 			onRateLimit: () => false,
 			onSecondaryRateLimit: () => false
 		},
-		retry: { doNotRetry: doNotRetryStatuses }
+		retry: {
+			doNotRetry: doNotRetryStatuses,
+			retries:
+				options.replaySafety === 'replay-safe'
+					? githubReplaySafeRequest.retries
+					: 0
+		}
 	});
 
 	if (options.apiVersion !== undefined) {

@@ -60,7 +60,8 @@ export const uploadsContract = {
 	preview: baseProcedure
 		.meta({
 			requires: 'upload:preview',
-			resource: { cache: { field: 'cacheName' } }
+			resource: { cache: { field: 'cacheName' } },
+			replaySafety: 'replay-safe'
 		})
 		.route({ method: 'POST', path: '/cache/{cacheName}/uploads/preview' })
 		.input(
@@ -99,7 +100,8 @@ export const uploadsContract = {
 	status: baseProcedure
 		.meta({
 			requires: 'upload:status',
-			resource: { cache: { pending: true, missingDenies: false } }
+			resource: { cache: { pending: true, missingDenies: false } },
+			replaySafety: 'replay-safe'
 		})
 		.route({ method: 'GET', path: '/uploads/{id}/status' })
 		.input(z.strictObject({ id: uploadIdSchema }))
