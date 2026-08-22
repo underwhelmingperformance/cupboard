@@ -1,15 +1,23 @@
 import { spawn } from 'node:child_process';
 import { platform } from 'node:process';
 
+import {
+	observeChildProcess,
+	waitForChildProcess
+} from '@cupboard/shared/child-process';
+
+/**
+Where {@link openBrowser} writes its messages; any reporter satisfies it.
+*/
 export interface BrowserMessages {
 	info(message: string): void;
 	warn(message: string): void;
 }
 
 /**
- * Prints the URL, then starts the platform opener without waiting for it. A
- * warning reports only a failure to spawn the child process; the opener's later
- * exit status is not observed.
+ * Prints the URL and starts the platform opener. The function returns without
+ * waiting, then reports a warning if the process cannot start or exits
+ * unsuccessfully.
  */
 export function openBrowser(target: string, messages: BrowserMessages): void {
 	messages.info(`Opening your browser to:\n${target}`);
@@ -19,7 +27,12 @@ export function openBrowser(target: string, messages: BrowserMessages): void {
 		stdio: 'ignore',
 		detached: true
 	});
-	child.on('error', () => {
+	const completion = waitForChildProcess(observeChildProcess(child));
+	void completion.then(({ error, signal, status }) => {
+		if (error === undefined && signal === undefined && status === 0) {
+			return;
+		}
+
 		messages.warn(
 			'Could not open a browser automatically; open the URL above yourself.'
 		);
