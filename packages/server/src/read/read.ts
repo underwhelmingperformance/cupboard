@@ -27,7 +27,8 @@ import {
 	notFoundResponse,
 	type R2ObjectKey,
 	TextBody,
-	textResponse
+	textResponse,
+	uncachedNotFoundResponse
 } from '../http/http.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 
@@ -228,7 +229,7 @@ async function serveR2(
 	isAuthorised?: () => Promise<boolean>
 ): Promise<Response> {
 	if (isAuthorised !== undefined && !(await isAuthorised())) {
-		return notFoundResponse();
+		return uncachedNotFoundResponse();
 	}
 
 	if (!isPublicCache && request.method === 'HEAD') {
@@ -253,7 +254,7 @@ function r2Response(
 	body?: BodyInit
 ): Response {
 	if (object === null) {
-		return notFoundResponse();
+		return isPublicCache ? notFoundResponse() : uncachedNotFoundResponse();
 	}
 
 	const headers = privatise(headersFor(object), isPublicCache);

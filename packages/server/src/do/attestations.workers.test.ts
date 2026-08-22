@@ -113,6 +113,21 @@ describe('attestation attach and reads', () => {
 		await clearBlobStorage();
 	});
 
+	it('marks an absent attestation list as uncacheable', async () => {
+		await initialiseViaWorker();
+		const storePathHash = uniqueStorePathHash();
+
+		const response = await readFetch(`/attestations/${storePathHash}`);
+
+		expect({
+			status: response.status,
+			cacheControl: response.headers.get('cache-control')
+		}).toStrictEqual({
+			status: StatusCodes.NOT_FOUND,
+			cacheControl: 'no-store'
+		});
+	});
+
 	it('attaches a DSSE bundle and serves descriptors from the filed edge', async () => {
 		const { token, metadata, bundle, digest } = await committedPathBundle();
 
