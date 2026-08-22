@@ -138,6 +138,32 @@ describe('migrations', () => {
 		expect(rows).toStrictEqual([policy]);
 	});
 
+	it('keeps the newest retention policy for each selector', async () => {
+		const rows = await runInDurableObject(
+			testServerFor('migration-retention-policy-identity'),
+			async (_instance, state) => {
+				await migrateThrough(state, 35);
+
+				state.storage.sql.exec(
+					"INSERT INTO retention_policy (id, scope, pattern, default_ttl_seconds, created_at) VALUES ('old', 'root-name-prefix', 'pr-', 10, '2026-01-01T00:00:00.000Z')"
+				);
+				state.storage.sql.exec(
+					"INSERT INTO retention_policy (id, scope, pattern, default_ttl_seconds, created_at) VALUES ('new', 'root-name-prefix', 'pr-', 20, '2026-01-02T00:00:00.000Z')"
+				);
+
+				await migrateThrough(state, latestMigrationIndex);
+
+				return state.storage.sql
+					.exec(
+						'SELECT id, default_ttl_seconds AS defaultTtlSeconds FROM retention_policy'
+					)
+					.toArray();
+			}
+		);
+
+		expect(rows).toStrictEqual([{ id: 'new', defaultTtlSeconds: 20 }]);
+	});
+
 	it('migrates and round-trips the verification cursor', async () => {
 		const cursor = {
 			id: 'active',

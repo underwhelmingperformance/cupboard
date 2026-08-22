@@ -414,13 +414,22 @@ export const caches = sqliteTable('cache', {
 	createdAt: text('created_at').$type<IsoTimestamp>().notNull()
 });
 
-export const retentionPolicies = sqliteTable('retention_policy', {
-	id: text('id').primaryKey(),
-	scope: text('scope', { enum: ['cache', 'root-name-prefix'] }).notNull(),
-	pattern: text('pattern').notNull(),
-	defaultTtlSeconds: integer('default_ttl_seconds').notNull(),
-	createdAt: text('created_at').$type<IsoTimestamp>().notNull()
-});
+export const retentionPolicies = sqliteTable(
+	'retention_policy',
+	{
+		id: text('id').primaryKey(),
+		scope: text('scope', { enum: ['cache', 'root-name-prefix'] }).notNull(),
+		pattern: text('pattern').notNull(),
+		defaultTtlSeconds: integer('default_ttl_seconds').notNull(),
+		createdAt: text('created_at').$type<IsoTimestamp>().notNull()
+	},
+	(table) => [
+		unique('retention_policy_scope_pattern_unique').on(
+			table.scope,
+			table.pattern
+		)
+	]
+);
 
 // A policy applies to each path published to a cache whose name starts with
 // `cache_prefix`; the empty prefix is the tenant-wide default. Prefixes are
