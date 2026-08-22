@@ -163,17 +163,17 @@ describe('matchOidcTrust', () => {
 		});
 	});
 
-	it('matches when only the token issuer ends with a trailing slash', () => {
+	it('rejects when only the token issuer ends with a trailing slash', () => {
 		expect(
 			matchOidcTrust(rules, {
 				iss: `${github}/`,
 				aud: audience,
 				repository_owner_id: '5678'
 			})?.id
-		).toBe('repo');
+		).toBeUndefined();
 	});
 
-	it('breaks an equal-specificity tie by id, regardless of row order', () => {
+	it('fails closed on an equal-rank and equal-specificity tie', () => {
 		const ownerClaimRule: OidcTrustRule = {
 			id: trustRuleIdSchema.parse('rule-b'),
 			issuer: github,
@@ -198,7 +198,7 @@ describe('matchOidcTrust', () => {
 		expect({
 			forward: matchOidcTrust([ownerClaimRule, actorClaimRule], claims)?.id,
 			reversed: matchOidcTrust([actorClaimRule, ownerClaimRule], claims)?.id
-		}).toStrictEqual({ forward: 'rule-a', reversed: 'rule-a' });
+		}).toStrictEqual({ forward: undefined, reversed: undefined });
 	});
 
 	it('prefers a wildcard rule over a claim-bound rule with the same specificity', () => {

@@ -43,6 +43,7 @@ import {
 	StaleRefreshTokenError,
 	SubjectTokenRequiredError,
 	type SubjectTokenUntrustedError,
+	SubjectTokenVerificationFailedError,
 	TenantSubjectTokenClaimMismatchError,
 	TenantSubjectTokenUntrustedError,
 	UnsupportedGrantTypeError,
@@ -94,18 +95,30 @@ export class TokenExchangeService {
 		const rule = matchOidcTrust(this.oidcTrust.enabledOidcTrustRules(), claims);
 
 		if (rule === undefined) {
-			throw await this.untrustedRefusal(claims, body.subject_token);
+			throw await this.untrustedRefusal(
+				claims,
+				body.subject_token,
+				body.subject_token_type === subjectTokenTypeIdToken
+			);
 		}
 
+		const requiresIdTokenClaims =
+			body.subject_token_type === subjectTokenTypeIdToken;
 		const verified = await this.oidcTrust.verifyInbound(
 			rule,
-			body.subject_token
+			body.subject_token,
+			requiresIdTokenClaims
 		);
-		const subject = oidcSubjectSchema.parse(
+		const verifiedSubject =
 			typeof verified.sub === 'string' && verified.sub !== ''
 				? verified.sub
-				: rule.id
-		);
+				: undefined;
+
+		if (requiresIdTokenClaims && verifiedSubject === undefined) {
+			throw new SubjectTokenVerificationFailedError();
+		}
+
+		const subject = oidcSubjectSchema.parse(verifiedSubject ?? rule.id);
 
 		return this.issuedResponse(
 			rule,
@@ -124,7 +137,8 @@ export class TokenExchangeService {
 	// about the rule.
 	private async untrustedRefusal(
 		claims: OidcClaims,
-		subjectToken: string
+		subjectToken: string,
+		requiresIdTokenClaims: boolean
 	): Promise<SubjectTokenUntrustedError> {
 		const candidate = this.repositoryPinnedCandidate(claims);
 
@@ -134,7 +148,11 @@ export class TokenExchangeService {
 
 		let verified: OidcClaims;
 		try {
-			verified = await this.oidcTrust.verifyInbound(candidate, subjectToken);
+			verified = await this.oidcTrust.verifyInbound(
+				candidate,
+				subjectToken,
+				requiresIdTokenClaims
+			);
 		} catch {
 			// Collapse signature failures and issuer outages to the same generic
 			// refusal. Neither failure can expose a claim value. Candidate verification

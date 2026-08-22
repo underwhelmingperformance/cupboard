@@ -8,7 +8,7 @@ import {
 	oidcTrustDisplaySchema,
 	permittedGrantSchema
 } from './grants.ts';
-import { isAllowedIssuerUrl, IssuerUrl } from './oidc-issuer.ts';
+import { IssuerUrl } from './oidc-issuer.ts';
 
 // Issuer, subject, and audience values use separate brands so the compiler
 // rejects arguments in the wrong position. These schemas add brands without
@@ -74,11 +74,10 @@ export const subjectTokenTypeJwt = 'urn:ietf:params:oauth:token-type:jwt';
 // may omit it and receive that grant.
 const requestedAuthorizationDetailsSchema = z.string().min(1);
 
-// The optional fields RFC 8693 permits (`audience`, `scope`, `resource`, …) are
-// accepted and ignored: the matched trust rule alone fixes the issued audience,
-// so a non-strict object strips them. `authorization_details` is the one
-// optional field cupboard reads.
-export const tokenExchangeRequestSchema = z.object({
+// The matched trust rule fixes the issued audience and grants. Optional RFC
+// 8693 target and token-type fields are therefore refused until Cupboard can
+// implement their semantics rather than silently returning a different token.
+export const tokenExchangeRequestSchema = z.strictObject({
 	grant_type: z.string().min(1),
 	subject_token: z.string().min(1),
 	subject_token_type: z.string().min(1),
@@ -91,7 +90,7 @@ export type ParsedTokenExchangeRequest = z.output<
 // The tenant token endpoint's request, before grant dispatch: only the grant
 // type is required here, and each grant validates its own fields afterwards,
 // so an unknown grant type answers `unsupported_grant_type`.
-export const tokenRequestSchema = z.object({
+export const tokenRequestSchema = z.strictObject({
 	grant_type: z.string().min(1),
 	subject_token: z.string().min(1).optional(),
 	subject_token_type: z.string().min(1).optional(),
@@ -115,19 +114,31 @@ export const tokenResponseSchema = z.strictObject({
 });
 export type ParsedTokenResponse = z.output<typeof tokenResponseSchema>;
 
-// Deployment configuration seeds an owner rule with a wildcard grant. The API
-// can create additional rules, including other wildcard rules. For a claim-bound
-// rule, resource bindings determine which concrete grants the server can issue.
-// `display` records which preset created the rule.
+// A trust rule maps an external OIDC identity to Cupboard grants. Deployment
+// configuration creates the owner rule with a wildcard grant. Administrators
+// create other rules through the API, and their resource bindings determine the
+// grants that can be issued. `display` stores provenance for the preset that
+// created the rule.
+export const oidcTrustIssuerInputSchema = z
+	.url()
+	.transform((value, context) => {
+		const issuer = IssuerUrl.parse(value);
+
+		if (issuer === undefined) {
+			context.addIssue({
+				code: 'custom',
+				message:
+					'issuer must be an HTTPS URL without userinfo, a query or a fragment; loopback issuers may use HTTP'
+			});
+			return z.NEVER;
+		}
+
+		return issuer.value;
+	})
+	.brand('OidcIssuer');
+
 export const oidcTrustAddBodySchema = z.strictObject({
-	issuer: z
-		.url()
-		.refine(
-			isAllowedIssuerUrl,
-			'issuer must use HTTPS, except that a loopback issuer may use HTTP'
-		)
-		.transform((value) => IssuerUrl.parse(value)?.value ?? value)
-		.brand('OidcIssuer'),
+	issuer: oidcTrustIssuerInputSchema,
 	audience: z.string().min(1).brand('OidcAudience'),
 	claims: z
 		.record(z.string().min(1), claimMatchSchema)
@@ -139,6 +150,16 @@ export const oidcTrustAddBodySchema = z.strictObject({
 	display: oidcTrustDisplaySchema.optional()
 });
 export type ParsedOidcTrustAddBody = z.output<typeof oidcTrustAddBodySchema>;
+
+// Control-plane identities have one stable subject. Patterned subjects cannot
+// be represented by the control trust store and would make every row read fail.
+export const controlOidcTrustAddBodySchema = oidcTrustAddBodySchema.refine(
+	(body) => typeof body.claims.sub === 'string' && body.claims.sub.length > 0,
+	{
+		message: 'claims.sub must be an exact non-empty string for control trust',
+		path: ['claims', 'sub']
+	}
+);
 
 export const oidcTrustSummarySchema = z.strictObject({
 	id: trustRuleIdSchema,

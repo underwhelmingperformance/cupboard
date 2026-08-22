@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	controlOidcTrustAddBodySchema,
 	oidcTrustAddBodySchema,
 	oidcTrustListResponseSchema,
 	oidcTrustRemoveResponseSchema,
@@ -33,15 +34,17 @@ describe('tokenExchangeRequestSchema', () => {
 		expect(tokenExchangeRequestSchema.safeParse(value).success).toBe(false);
 	});
 
-	it('ignores the optional fields RFC 8693 permits', () => {
-		const parsed = tokenExchangeRequestSchema.parse({
-			...request,
-			audience: 'https://cache.example.workers.dev',
-			scope: 'write'
-		});
-
-		expect(parsed).toStrictEqual(request);
-	});
+	it.each(['audience', 'resource', 'scope', 'requested_token_type'])(
+		'rejects the unsupported %s field',
+		(field) => {
+			expect(
+				tokenExchangeRequestSchema.safeParse({
+					...request,
+					[field]: 'unsupported'
+				}).success
+			).toBe(false);
+		}
+	);
 
 	it('leaves authorization_details encoded for the token service', () => {
 		// The body validator keeps it raw; the token service parses it, so a
@@ -197,6 +200,41 @@ describe('oidc trust schemas', () => {
 			}
 		},
 		{
+			name: 'an issuer with a username',
+			value: { ...additionBody, issuer: 'https://alice@idp.example.test' }
+		},
+		{
+			name: 'an issuer with a password',
+			value: {
+				...additionBody,
+				issuer: 'https://alice:secret@idp.example.test'
+			}
+		},
+		{
+			name: 'an issuer with a query',
+			value: { ...additionBody, issuer: 'https://idp.example.test?tenant=acme' }
+		},
+		{
+			name: 'an issuer with a fragment',
+			value: { ...additionBody, issuer: 'https://idp.example.test#issuer' }
+		},
+		{
+			name: 'an issuer with a bare query',
+			value: { ...additionBody, issuer: 'https://idp.example.test?' }
+		},
+		{
+			name: 'an issuer with a bare fragment',
+			value: { ...additionBody, issuer: 'https://idp.example.test#' }
+		},
+		{
+			name: 'an issuer with bare userinfo',
+			value: { ...additionBody, issuer: 'https://@idp.example.test' }
+		},
+		{
+			name: 'an issuer with bare userinfo separators',
+			value: { ...additionBody, issuer: 'https://:@idp.example.test' }
+		},
+		{
 			name: 'an empty audience',
 			value: { ...additionBody, audience: '' }
 		},
@@ -215,13 +253,27 @@ describe('oidc trust schemas', () => {
 		expect(oidcTrustAddBodySchema.safeParse(value).success).toBe(false);
 	});
 
-	it('normalises a trailing slash off the issuer', () => {
+	it('preserves a trailing slash in the issuer', () => {
 		const parsed = oidcTrustAddBodySchema.parse({
 			...additionBody,
 			issuer: 'https://token.actions.githubusercontent.com/'
 		});
 
-		expect(parsed.issuer).toBe('https://token.actions.githubusercontent.com');
+		expect(parsed.issuer).toBe('https://token.actions.githubusercontent.com/');
+	});
+
+	it('requires an exact subject for control trust', () => {
+		const exact = { ...additionBody, claims: { sub: 'operator' } };
+		const patterned = {
+			...additionBody,
+			claims: { sub: { pattern: '^operator.*$' } }
+		};
+
+		expect({
+			exact: controlOidcTrustAddBodySchema.safeParse(exact).success,
+			patterned: controlOidcTrustAddBodySchema.safeParse(patterned).success,
+			missing: controlOidcTrustAddBodySchema.safeParse(additionBody).success
+		}).toStrictEqual({ exact: true, patterned: false, missing: false });
 	});
 
 	it('accepts the summary, list and remove responses', () => {

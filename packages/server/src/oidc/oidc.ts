@@ -1,11 +1,13 @@
 import type { OidcAudience, OidcIssuer } from '@cupboard/protocol/oidc';
 import { isAllowedIssuerUrl, IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 import type { OidcClaims } from '@cupboard/protocol/oidc-trust-match';
+import { readResponseBytes } from '@cupboard/shared/response-body';
 import {
 	createRemoteJWKSet,
 	customFetch,
 	decodeJwt,
 	errors as joseErrors,
+	type FetchImplementation,
 	type JWTPayload,
 	jwtVerify,
 	type JWTVerifyGetKey
@@ -22,6 +24,14 @@ const jwksCacheMaxAgeMs = 10 * 60 * 1000;
 const jwksCooldownMs = 30 * 1000;
 const jwksTimeoutMs = 5 * 1000;
 
+// Both endpoints return JSON metadata rather than bulk content. Discovery gets
+// a compact ceiling, while JWKS allows more space for overlapping keys during
+// rotation.
+const discoveryMaximumBytes = 128 * 1024;
+const jwksMaximumBytes = 1024 * 1024;
+
+// `customFetch` is jose's `unique symbol`; widen it to `symbol` so it can be
+// used as a computed property key without tripping the unsafe-key lint.
 const customFetchKey: symbol = customFetch;
 
 export class OidcTokenDecodeError extends Error {
@@ -80,6 +90,7 @@ export interface InboundVerifyOptions {
 	readonly issuer: OidcIssuer;
 	readonly audience: OidcAudience;
 	readonly algorithms: readonly string[];
+	readonly requireIdTokenClaims?: boolean;
 }
 
 /**
@@ -97,6 +108,7 @@ const tokenVerificationErrors = [
 	joseErrors.JWTInvalid,
 	joseErrors.JWSInvalid,
 	joseErrors.JOSEAlgNotAllowed,
+	joseErrors.JOSENotSupported,
 	joseErrors.JWKSNoMatchingKey,
 	joseErrors.JWKSMultipleMatchingKeys
 ];
@@ -115,19 +127,62 @@ export async function verifyInboundOidcToken(
 ): Promise<JWTPayload> {
 	try {
 		const verified = await jwtVerify(token, resolveKey, {
-			// Cupboard deliberately treats issuer identifiers with and without one
-			// trailing slash as equivalent for provider compatibility. Require `exp`
-			// so every accepted token has a finite validity period.
-			issuer: [options.issuer, `${options.issuer}/`],
+			issuer: options.issuer,
 			audience: options.audience,
 			algorithms: [...options.algorithms],
-			requiredClaims: ['exp'],
+			requiredClaims: options.requireIdTokenClaims
+				? ['exp', 'sub', 'iat']
+				: ['exp'],
 			clockTolerance: inboundClockToleranceSeconds,
 			currentDate: now
 		});
 
+		if (options.requireIdTokenClaims) {
+			if (
+				typeof verified.payload.sub !== 'string' ||
+				verified.payload.sub.length === 0
+			) {
+				throw new OidcTokenVerificationError({
+					cause: new Error('ID token subject must be a non-empty string')
+				});
+			}
+
+			if (
+				typeof verified.payload.iat !== 'number' ||
+				!Number.isFinite(verified.payload.iat)
+			) {
+				throw new OidcTokenVerificationError({
+					cause: new Error('ID token issued-at time must be a finite number')
+				});
+			}
+		}
+
+		const tokenAudience = verified.payload.aud;
+
+		if (Array.isArray(tokenAudience)) {
+			const distinctAudiences = new Set(tokenAudience);
+			const hasAdditionalAudience =
+				distinctAudiences.size > 1 &&
+				[...distinctAudiences].some(
+					(audience) => audience !== options.audience
+				);
+
+			if (
+				distinctAudiences.size > 1 &&
+				(hasAdditionalAudience || verified.payload.azp !== options.audience)
+			) {
+				throw new OidcTokenVerificationError({
+					cause: new Error('Multi-audience token is not exclusively authorised')
+				});
+			}
+		}
+
 		return verified.payload;
 	} catch (error) {
+		if (error instanceof OidcTokenVerificationError) {
+			throw error;
+		}
+
 		if (isTokenVerificationFailure(error)) {
 			throw new OidcTokenVerificationError({ cause: error });
 		}
@@ -138,16 +193,49 @@ export async function verifyInboundOidcToken(
 
 export interface OidcDiscovery {
 	readonly jwksUri: string;
-	readonly signingAlgValues?: readonly string[];
+	readonly signingAlgValues: readonly string[];
 }
 
 const oidcDiscoverySchema = z.object({
 	issuer: z.url(),
 	jwks_uri: z.url().refine(isAllowedIssuerUrl),
-	id_token_signing_alg_values_supported: z.array(z.string()).optional()
+	response_types_supported: z.array(z.string()).min(1),
+	subject_types_supported: z.array(z.string()).min(1),
+	id_token_signing_alg_values_supported: z.array(z.string()).min(1)
 });
 
 const discoveryTimeoutMs = 15_000;
+
+interface BoundedFetchOptions {
+	readonly description: string;
+	readonly maximumBytes: number;
+}
+
+/**
+ * Fetches and buffers one response within a byte limit. The returned response
+ * contains only the bounded bytes, so a downstream parser cannot bypass the
+ * limit by calling `text()` or `json()` itself.
+ */
+async function fetchBoundedResponse(
+	fetcher: typeof fetch,
+	input: string | URL | Request,
+	init: RequestInit,
+	options: BoundedFetchOptions
+): Promise<Response> {
+	const response = await fetcher(input, init);
+	const bytes = await readResponseBytes(response, {
+		...options,
+		signal: init.signal ?? undefined
+	});
+	const headers = new Headers(response.headers);
+	headers.set('content-length', String(bytes.byteLength));
+
+	return new Response(bytes.byteLength === 0 ? undefined : bytes, {
+		headers,
+		status: response.status,
+		statusText: response.statusText
+	});
+}
 
 /**
  * Fetches the issuer's metadata and returns the JWKS URL and advertised ID-token
@@ -171,15 +259,24 @@ export async function fetchOidcDiscovery(
 	let payload: unknown;
 
 	try {
-		// Keep discovery on the issuer-derived URL. The jose resolver applies the
-		// same redirect policy when it fetches the JWKS.
-		const response = await fetcher(issuerUrl.discoveryUrl, {
-			redirect: 'manual',
-			signal: AbortSignal.timeout(discoveryTimeoutMs)
-		});
+		// Do not follow redirects: a redirect from the issuer's metadata endpoint
+		// to another host would let a compromised or hijacked endpoint serve a
+		// substitute document. A 3xx fails the `ok` check below. (The JWKS fetch,
+		// run by jose, is likewise pinned to `redirect: 'manual'`.)
+		const response = await fetchBoundedResponse(
+			fetcher,
+			issuerUrl.discoveryUrl,
+			{
+				redirect: 'manual',
+				signal: AbortSignal.timeout(discoveryTimeoutMs)
+			},
+			{
+				description: 'OIDC discovery response',
+				maximumBytes: discoveryMaximumBytes
+			}
+		);
 
 		if (!response.ok) {
-			await response.text();
 			throw new Error(
 				`discovery responded with HTTP ${String(response.status)}`
 			);
@@ -210,20 +307,16 @@ export async function fetchOidcDiscovery(
 	};
 }
 
-// OIDC discovery requires the signing-algorithm field and requires it to include
-// RS256. Use RS256 as a compatibility fallback when a provider omits the field.
-const defaultInboundAlgorithm = 'RS256';
-
+/**
+ * The accepted algorithms for an issuer: the issuer's advertised set narrowed to
+ * Cupboard's asymmetric allowlist. An issuer that advertises only algorithms
+ * outside the allowlist produces an empty set, so verification rejects every
+ * token from that issuer.
+ */
 export function intersectAlgorithms(
-	advertised: readonly string[] | undefined,
+	advertised: readonly string[],
 	allowlist: readonly string[]
 ): string[] {
-	if (advertised === undefined) {
-		return allowlist.filter(
-			(algorithm) => algorithm === defaultInboundAlgorithm
-		);
-	}
-
 	return allowlist.filter((algorithm) => advertised.includes(algorithm));
 }
 
@@ -276,12 +369,17 @@ export class OidcDiscoveryStore {
 
 	private async discover(issuer: OidcIssuer): Promise<ResolvedIssuer> {
 		const discovery = await fetchOidcDiscovery(issuer, this.fetcher);
+		const jwksFetcher: FetchImplementation = (url, options) =>
+			fetchBoundedResponse(this.fetcher, url, options, {
+				description: 'OIDC JWKS response',
+				maximumBytes: jwksMaximumBytes
+			});
 
 		return {
 			resolver: createRemoteJWKSet(new URL(discovery.jwksUri), {
 				cacheMaxAge: jwksCacheMaxAgeMs,
 				cooldownDuration: jwksCooldownMs,
-				[customFetchKey]: this.fetcher,
+				[customFetchKey]: jwksFetcher,
 				timeoutDuration: jwksTimeoutMs
 			}),
 			algorithms: intersectAlgorithms(
@@ -291,8 +389,9 @@ export class OidcDiscoveryStore {
 		};
 	}
 
-	// Trust-rule ingress removes one trailing slash, so those two configured
-	// spellings must share a cache entry.
+	// The exact issuer identifier is the cache key. Values that differ by a
+	// trailing slash remain separate trust domains even when their discovery URL
+	// happens to be the same.
 	resolve(issuer: OidcIssuer): Promise<ResolvedIssuer> {
 		const nowMs = this.now();
 		const cached = this.issuers.get(issuer);

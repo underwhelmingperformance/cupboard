@@ -4,6 +4,8 @@ import {
 	oidcIssuerSchema,
 	oidcTrustAddBodySchema
 } from '@cupboard/protocol/oidc';
+import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
+import { StatusCodes } from 'http-status-codes';
 import {
 	createLocalJWKSet,
 	errors as joseErrors,
@@ -14,6 +16,7 @@ import {
 	SignJWT
 } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import {
 	decodeInboundClaims,
@@ -35,6 +38,32 @@ const metadataUrl =
 const audience = oidcAudienceSchema.parse('client-id.apps.example.com');
 const now = new Date('2026-01-01T00:00:00.000Z');
 const kid = 'idp-key-1';
+const oversizedDocumentPaddingBytes = 2 * 1024 * 1024;
+
+function streamedJsonResponse(
+	value: unknown,
+	status: number
+): { readonly response: Response; readonly cancel: ReturnType<typeof vi.fn> } {
+	const bytes = new TextEncoder().encode(JSON.stringify(value));
+	const split = Math.floor(bytes.byteLength / 2);
+	const cancel = vi.fn();
+	const body = new ReadableStream<Uint8Array>({
+		cancel,
+		start(controller) {
+			controller.enqueue(bytes.subarray(0, split));
+			controller.enqueue(bytes.subarray(split));
+			controller.close();
+		}
+	});
+
+	return {
+		response: new Response(body, {
+			status,
+			headers: { 'content-type': 'application/json' }
+		}),
+		cancel
+	};
+}
 
 function configuredRuleIssuer(configured: string): OidcIssuer {
 	return oidcTrustAddBodySchema.parse({
@@ -91,6 +120,21 @@ function errorShape(error: Error): {
 	};
 }
 
+function boundedBodyFailureShape(error: unknown): {
+	readonly name: string;
+	readonly causeIsTooLarge: boolean;
+} {
+	return {
+		name: error instanceof Error ? error.name : 'NonErrorFailure',
+		causeIsTooLarge:
+			error instanceof Error && error.cause instanceof RemoteBodyTooLargeError
+	};
+}
+
+function jsonClaims(json: string): Record<string, unknown> {
+	return z.record(z.string(), z.unknown()).parse(JSON.parse(json));
+}
+
 function unavailableOidcMetadata(): Promise<Response> {
 	return Promise.reject(new Error('issuer is unavailable'));
 }
@@ -100,6 +144,8 @@ function successfulOidcMetadata(): Promise<Response> {
 		Response.json({
 			issuer,
 			jwks_uri: 'https://accounts.example.com/jwks',
+			response_types_supported: ['id_token'],
+			subject_types_supported: ['public'],
 			id_token_signing_alg_values_supported: ['RS256']
 		})
 	);
@@ -109,12 +155,19 @@ interface SignOptions {
 	readonly at?: Date;
 	readonly tokenIssuer?: string;
 	readonly withExpiry?: boolean;
+	readonly withIssuedAt?: boolean;
+	readonly tokenAudience?: string | string[];
 }
 
 interface InboundIssuer {
 	readonly jwks: JSONWebKeySet;
 	sign(claims: Record<string, unknown>, at?: Date): Promise<string>;
 	signWithoutExpiry(claims: Record<string, unknown>): Promise<string>;
+	signWithoutIssuedAt(claims: Record<string, unknown>): Promise<string>;
+	signWithAudience(
+		tokenAudience: string | string[],
+		claims: Record<string, unknown>
+	): Promise<string>;
 	signWithIssuer(
 		tokenIssuer: string,
 		claims: Record<string, unknown>
@@ -134,15 +187,24 @@ async function inboundIssuer(algorithm = 'RS256'): Promise<InboundIssuer> {
 
 	const build = (
 		claims: Record<string, unknown>,
-		{ at = now, tokenIssuer = issuer, withExpiry = true }: SignOptions = {}
+		{
+			at = now,
+			tokenIssuer = issuer,
+			withExpiry = true,
+			withIssuedAt = true,
+			tokenAudience = audience
+		}: SignOptions = {}
 	): Promise<string> => {
 		const issuedAt = Math.floor(at.getTime() / 1000);
 		const signJwt = new SignJWT(claims);
 		const jwt = signJwt
 			.setProtectedHeader({ alg: algorithm, kid })
 			.setIssuer(tokenIssuer)
-			.setAudience(audience)
-			.setIssuedAt(issuedAt);
+			.setAudience(tokenAudience);
+
+		if (withIssuedAt) {
+			jwt.setIssuedAt(issuedAt);
+		}
 
 		if (withExpiry) {
 			jwt.setExpirationTime(issuedAt + 600);
@@ -155,6 +217,9 @@ async function inboundIssuer(algorithm = 'RS256'): Promise<InboundIssuer> {
 		jwks: { keys: [publicJwk] },
 		sign: (claims, at = now) => build(claims, { at }),
 		signWithoutExpiry: (claims) => build(claims, { withExpiry: false }),
+		signWithoutIssuedAt: (claims) => build(claims, { withIssuedAt: false }),
+		signWithAudience: (tokenAudience, claims) =>
+			build(claims, { tokenAudience }),
 		signWithIssuer: (tokenIssuer, claims) => build(claims, { tokenIssuer })
 	};
 }
@@ -166,6 +231,7 @@ function verifyOptions(
 		issuer,
 		audience,
 		algorithms: inboundAlgorithmAllowlist,
+		requireIdTokenClaims: true,
 		...overrides
 	};
 }
@@ -340,18 +406,156 @@ describe('verifyInboundOidcToken', () => {
 		});
 	});
 
-	it('treats issuer identifiers with and without one trailing slash as equivalent', async () => {
+	it.each([
+		{
+			name: 'subject',
+			issue: (idp: InboundIssuer) => idp.sign({})
+		},
+		{
+			name: 'issued-at time',
+			issue: (idp: InboundIssuer) => idp.signWithoutIssuedAt({ sub: 'owner' })
+		}
+	])('rejects an ID token with no $name', async ({ issue }) => {
+		const idp = await inboundIssuer();
+		const token = await issue(idp);
+
+		await expect(
+			verifyInboundOidcToken(
+				createLocalJWKSet(idp.jwks),
+				token,
+				verifyOptions(),
+				now
+			)
+		).rejects.toBeInstanceOf(OidcTokenVerificationError);
+	});
+
+	it.each([
+		{ name: 'a null subject', claims: jsonClaims('{"sub":null}') },
+		{ name: 'an object subject', claims: { sub: { id: 'owner' } } },
+		{ name: 'an empty subject', claims: { sub: '' } }
+	])('rejects an ID token with $name', async ({ claims }) => {
+		const idp = await inboundIssuer();
+		const token = await idp.sign(claims);
+
+		await expect(
+			verifyInboundOidcToken(
+				createLocalJWKSet(idp.jwks),
+				token,
+				verifyOptions(),
+				now
+			)
+		).rejects.toBeInstanceOf(OidcTokenVerificationError);
+	});
+
+	it.each([
+		{ name: 'a string issued-at time', iat: 'now' },
+		{ name: 'a null issued-at time', iat: jsonClaims('{"iat":null}').iat }
+	])('rejects an ID token with $name', async ({ iat }) => {
+		const idp = await inboundIssuer();
+		const token = await idp.signWithoutIssuedAt({ sub: 'owner', iat });
+
+		await expect(
+			verifyInboundOidcToken(
+				createLocalJWKSet(idp.jwks),
+				token,
+				verifyOptions(),
+				now
+			)
+		).rejects.toBeInstanceOf(OidcTokenVerificationError);
+	});
+
+	it.each([
+		{ tokenAudience: [audience] },
+		{ tokenAudience: [audience, audience] }
+	])(
+		'accepts one distinct audience without an authorised party: $tokenAudience',
+		async ({ tokenAudience }) => {
+			const idp = await inboundIssuer();
+			const token = await idp.signWithAudience(tokenAudience, { sub: 'owner' });
+
+			const payload = await verifyInboundOidcToken(
+				createLocalJWKSet(idp.jwks),
+				token,
+				verifyOptions(),
+				now
+			);
+
+			expect(payload.aud).toStrictEqual(tokenAudience);
+		}
+	);
+
+	it('rejects an untrusted additional audience', async () => {
+		const idp = await inboundIssuer();
+		const token = await idp.signWithAudience([audience, 'untrusted-client'], {
+			sub: 'owner',
+			azp: audience
+		});
+
+		await expect(
+			verifyInboundOidcToken(
+				createLocalJWKSet(idp.jwks),
+				token,
+				verifyOptions(),
+				now
+			)
+		).rejects.toBeInstanceOf(OidcTokenVerificationError);
+	});
+
+	it('rejects multiple distinct audiences without an authorised party', async () => {
+		const idp = await inboundIssuer();
+		const token = await idp.signWithAudience([audience, 'untrusted-client'], {
+			sub: 'owner'
+		});
+
+		await expect(
+			verifyInboundOidcToken(
+				createLocalJWKSet(idp.jwks),
+				token,
+				verifyOptions(),
+				now
+			)
+		).rejects.toBeInstanceOf(OidcTokenVerificationError);
+	});
+
+	it('classifies an unsupported critical header as a bad token', async () => {
+		const idp = await inboundIssuer();
+		const token = await idp.sign({ sub: 'owner' });
+		const [, payload, signature] = token.split('.', 3);
+
+		if (payload === undefined || signature === undefined) {
+			throw new Error('The test issuer returned a malformed token');
+		}
+
+		const header = btoa(
+			JSON.stringify({ alg: 'RS256', kid, crit: ['unknown'], unknown: true })
+		)
+			.replaceAll('+', '-')
+			.replaceAll('/', '_')
+			.replaceAll('=', '');
+		const unsupported = `${header}.${payload}.${signature}`;
+
+		await expect(
+			verifyInboundOidcToken(
+				createLocalJWKSet(idp.jwks),
+				unsupported,
+				verifyOptions(),
+				now
+			)
+		).rejects.toBeInstanceOf(OidcTokenVerificationError);
+	});
+
+	it('rejects a token whose issuer differs by a trailing slash', async () => {
 		const idp = await inboundIssuer();
 		const token = await idp.signWithIssuer(`${issuer}/`, { sub: 'owner' });
 
-		const payload = await verifyInboundOidcToken(
-			createLocalJWKSet(idp.jwks),
-			token,
-			verifyOptions(),
-			now
-		);
-
-		expect(payload.iss).toBe(`${issuer}/`);
+		await expect(
+			verifyInboundOidcToken(
+				createLocalJWKSet(idp.jwks),
+				token,
+				verifyOptions(),
+				now
+			)
+		).rejects.toBeInstanceOf(OidcTokenVerificationError);
 	});
 
 	it('rejects every token when the accepted algorithm set is empty', async () => {
@@ -406,12 +610,7 @@ describe('verifyInboundOidcToken', () => {
 describe('intersectAlgorithms', () => {
 	it.each([
 		{
-			name: 'uses RS256 when metadata omits the signing algorithms',
-			advertised: undefined,
-			expected: ['RS256']
-		},
-		{
-			name: 'returns algorithms present in both the metadata and the allowlist',
+			name: 'narrows to the advertised asymmetric algorithms',
 			advertised: ['RS256'],
 			expected: ['RS256']
 		},
@@ -433,7 +632,7 @@ describe('intersectAlgorithms', () => {
 });
 
 describe('fetchOidcDiscovery', () => {
-	it('removes one trailing slash before fetching issuer metadata', async () => {
+	it('reads the jwks_uri and signing algorithms', async () => {
 		const requested: string[] = [];
 		const fetcher: typeof fetch = (input) => {
 			requested.push(requestUrl(input));
@@ -442,16 +641,15 @@ describe('fetchOidcDiscovery', () => {
 				Response.json({
 					issuer,
 					jwks_uri: 'https://accounts.example.com/jwks',
+					response_types_supported: ['id_token'],
+					subject_types_supported: ['public'],
 					id_token_signing_alg_values_supported: ['RS256', 'ES256'],
 					authorization_endpoint: 'https://accounts.example.com/authorize'
 				})
 			);
 		};
 
-		const discovery = await fetchOidcDiscovery(
-			oidcIssuerSchema.parse(`${issuer}/`),
-			fetcher
-		);
+		const discovery = await fetchOidcDiscovery(issuer, fetcher);
 
 		expect({ requested, discovery }).toStrictEqual({
 			requested: [metadataUrl],
@@ -462,20 +660,139 @@ describe('fetchOidcDiscovery', () => {
 		});
 	});
 
-	it('returns no algorithm list when metadata omits the field', async () => {
-		const discovery = await fetchOidcDiscovery(issuer, () =>
-			Promise.resolve(
-				Response.json({
-					issuer,
-					jwks_uri: 'https://accounts.example.com/jwks'
-				})
+	it('rejects metadata without required signing algorithms', async () => {
+		await expect(
+			fetchOidcDiscovery(issuer, () =>
+				Promise.resolve(
+					Response.json({
+						issuer,
+						jwks_uri: 'https://accounts.example.com/jwks',
+						response_types_supported: ['id_token'],
+						subject_types_supported: ['public']
+					})
+				)
 			)
+		).rejects.toBeInstanceOf(OidcDiscoveryError);
+	});
+
+	it('rejects and cancels an oversized successful discovery body', async () => {
+		const oversized = streamedJsonResponse(
+			{
+				issuer,
+				jwks_uri: 'https://accounts.example.com/jwks',
+				authorization_endpoint: 'https://accounts.example.com/authorize',
+				response_types_supported: ['id_token'],
+				subject_types_supported: ['public'],
+				id_token_signing_alg_values_supported: ['RS256'],
+				extension: 'x'.repeat(oversizedDocumentPaddingBytes)
+			},
+			StatusCodes.OK
 		);
 
-		expect(discovery).toStrictEqual({
-			jwksUri: 'https://accounts.example.com/jwks',
-			signingAlgValues: undefined
+		const error = await rejectedBy(() =>
+			fetchOidcDiscovery(issuer, () => Promise.resolve(oversized.response))
+		);
+
+		expect({
+			...boundedBodyFailureShape(error),
+			cancellationCount: oversized.cancel.mock.calls.length
+		}).toStrictEqual({
+			name: 'OidcDiscoveryError',
+			causeIsTooLarge: true,
+			cancellationCount: 1
 		});
+	});
+
+	it('rejects and cancels an oversized unsuccessful discovery body', async () => {
+		const oversized = streamedJsonResponse(
+			{ error: 'x'.repeat(oversizedDocumentPaddingBytes) },
+			StatusCodes.NOT_FOUND
+		);
+
+		const error = await rejectedBy(() =>
+			fetchOidcDiscovery(issuer, () => Promise.resolve(oversized.response))
+		);
+
+		expect({
+			...boundedBodyFailureShape(error),
+			cancellationCount: oversized.cancel.mock.calls.length
+		}).toStrictEqual({
+			name: 'OidcDiscoveryError',
+			causeIsTooLarge: true,
+			cancellationCount: 1
+		});
+	});
+
+	it('cancels the discovery body when the fetch signal aborts', async () => {
+		const abort = new AbortController();
+		const timeout = vi
+			.spyOn(AbortSignal, 'timeout')
+			.mockReturnValue(abort.signal);
+		const { promise: readStarted, resolve: markReadStarted } =
+			Promise.withResolvers<true>();
+		const cancel = vi.fn();
+		let isCancelled = false;
+		const bytes = new TextEncoder().encode(
+			JSON.stringify({
+				issuer,
+				jwks_uri: 'https://accounts.example.com/jwks',
+				response_types_supported: ['id_token'],
+				subject_types_supported: ['public'],
+				id_token_signing_alg_values_supported: ['RS256']
+			})
+		);
+		const body = new ReadableStream<Uint8Array>(
+			{
+				cancel(reason) {
+					isCancelled = true;
+					cancel(reason);
+				},
+				pull(controller) {
+					markReadStarted(true);
+
+					return new Promise<void>((resolve) => {
+						abort.signal.addEventListener(
+							'abort',
+							() => {
+								queueMicrotask(() => {
+									if (!isCancelled) {
+										controller.enqueue(bytes);
+										controller.close();
+									}
+									resolve();
+								});
+							},
+							{ once: true }
+						);
+					});
+				}
+			},
+			{ highWaterMark: 0 }
+		);
+
+		try {
+			const pending = fetchOidcDiscovery(issuer, () =>
+				Promise.resolve(new Response(body))
+			);
+			await readStarted;
+			abort.abort(new DOMException('discovery timed out', 'TimeoutError'));
+			const error = await rejectedBy(() => pending);
+
+			expect({
+				name: error instanceof Error ? error.name : 'NonErrorFailure',
+				causeIsAbort:
+					error instanceof Error && error.cause === abort.signal.reason,
+				cancellationCount: cancel.mock.calls.length,
+				timeoutCalls: timeout.mock.calls
+			}).toStrictEqual({
+				name: 'OidcDiscoveryError',
+				causeIsAbort: true,
+				cancellationCount: 1,
+				timeoutCalls: [[15_000]]
+			});
+		} finally {
+			timeout.mockRestore();
+		}
 	});
 
 	it.each([
@@ -571,6 +888,42 @@ describe('fetchOidcDiscovery', () => {
 });
 
 describe('OidcDiscoveryStore', () => {
+	it('rejects and cancels an oversized JWKS body', async () => {
+		const idp = await inboundIssuer();
+		const oversized = streamedJsonResponse(
+			{
+				...idp.jwks,
+				extension: 'x'.repeat(oversizedDocumentPaddingBytes)
+			},
+			StatusCodes.OK
+		);
+		const fetcher: typeof fetch = (input) =>
+			requestUrl(input) === metadataUrl
+				? successfulOidcMetadata()
+				: Promise.resolve(oversized.response);
+		const store = new OidcDiscoveryStore({ now: () => 0, fetcher });
+		const resolved = await store.resolve(issuer);
+		const token = await idp.sign({ sub: 'owner' });
+
+		const error = await rejectedBy(() =>
+			verifyInboundOidcToken(
+				resolved.resolver,
+				token,
+				{ issuer, audience, algorithms: resolved.algorithms },
+				now
+			)
+		);
+
+		expect({
+			...boundedBodyFailureShape(error),
+			cancellationCount: oversized.cancel.mock.calls.length
+		}).toStrictEqual({
+			name: 'OidcKeysUnreachableError',
+			causeIsTooLarge: true,
+			cancellationCount: 1
+		});
+	});
+
 	it('re-runs discovery once a cached entry is older than the cache age', async () => {
 		const requested: string[] = [];
 		const fetcher: typeof fetch = (input) => {
@@ -580,6 +933,8 @@ describe('OidcDiscoveryStore', () => {
 				Response.json({
 					issuer,
 					jwks_uri: 'https://accounts.example.com/jwks',
+					response_types_supported: ['id_token'],
+					subject_types_supported: ['public'],
 					id_token_signing_alg_values_supported: ['RS256']
 				})
 			);
@@ -599,15 +954,18 @@ describe('OidcDiscoveryStore', () => {
 		]);
 	});
 
-	it('shares one fetch for configured issuer values that differ only by a trailing slash', async () => {
+	it('keeps exact issuer spellings in separate cache entries', async () => {
 		const requested: string[] = [];
+		const discoveredIssuers = [issuer, `${issuer}/`];
 		const fetcher: typeof fetch = (input) => {
 			requested.push(requestUrl(input));
 
 			return Promise.resolve(
 				Response.json({
-					issuer,
+					issuer: discoveredIssuers[requested.length - 1],
 					jwks_uri: 'https://accounts.example.com/jwks',
+					response_types_supported: ['id_token'],
+					subject_types_supported: ['public'],
 					id_token_signing_alg_values_supported: ['RS256']
 				})
 			);
@@ -618,7 +976,9 @@ describe('OidcDiscoveryStore', () => {
 			await store.resolve(configuredRuleIssuer(configured));
 		}
 
-		expect({ requested }).toStrictEqual({ requested: [metadataUrl] });
+		expect({ requested }).toStrictEqual({
+			requested: [metadataUrl, metadataUrl]
+		});
 	});
 
 	it('uses one discovery fetch for concurrent first resolutions', async () => {
@@ -630,6 +990,8 @@ describe('OidcDiscoveryStore', () => {
 				Response.json({
 					issuer,
 					jwks_uri: 'https://accounts.example.com/jwks',
+					response_types_supported: ['id_token'],
+					subject_types_supported: ['public'],
 					id_token_signing_alg_values_supported: ['RS256']
 				})
 			);

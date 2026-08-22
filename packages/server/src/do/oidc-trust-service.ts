@@ -93,7 +93,8 @@ export class OidcTrustService {
 
 	private async verifyInboundOnce(
 		rule: OidcTrustRule,
-		token: string
+		token: string,
+		requiresIdTokenClaims: boolean
 	): Promise<JWTPayload> {
 		// Discovery and JWKS fetch failures are retryable issuer outages.
 		// Signature and claim failures remain non-retryable token errors.
@@ -113,7 +114,8 @@ export class OidcTrustService {
 				{
 					issuer: rule.issuer,
 					audience: rule.audience,
-					algorithms: issuer.algorithms
+					algorithms: issuer.algorithms,
+					requireIdTokenClaims: requiresIdTokenClaims
 				},
 				new Date()
 			);
@@ -214,9 +216,13 @@ export class OidcTrustService {
 		}
 	}
 
-	async verifyInbound(rule: OidcTrustRule, token: string): Promise<JWTPayload> {
+	async verifyInbound(
+		rule: OidcTrustRule,
+		token: string,
+		requiresIdTokenClaims: boolean
+	): Promise<JWTPayload> {
 		try {
-			return await this.verifyInboundOnce(rule, token);
+			return await this.verifyInboundOnce(rule, token, requiresIdTokenClaims);
 		} catch (error) {
 			// Only the transient upstream refusal is retried; a token that failed
 			// verification is refused at once. One short in-place retry absorbs an
@@ -227,7 +233,7 @@ export class OidcTrustService {
 
 			await new Promise((resolve) => setTimeout(resolve, issuerRetryDelayMs));
 
-			return this.verifyInboundOnce(rule, token);
+			return this.verifyInboundOnce(rule, token, requiresIdTokenClaims);
 		}
 	}
 

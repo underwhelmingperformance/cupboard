@@ -22,20 +22,19 @@ export function isAllowedIssuerUrl(value: string): boolean {
 }
 
 /**
- * An issuer must pass {@link isAllowedIssuerUrl} and contain no query, fragment
- * or user information. Cupboard removes one trailing slash before comparing
- * issuer strings or building the discovery URL. This tolerance is local;
- * OpenID Connect specifies exact issuer-string comparisons.
+ * A validated OpenID Connect issuer identifier. Construction enforces the
+ * transport rule while preserving the exact identifier because discovery
+ * metadata and token issuer comparisons are case-sensitive string comparisons.
  */
 export class IssuerUrl {
 	static parse(raw: string): IssuerUrl | undefined {
-		if (!isAllowedIssuerUrl(raw)) {
+		if (!isAllowedIssuerUrl(raw) || hasForbiddenRawIssuerComponent(raw)) {
 			return undefined;
 		}
 
-		// An OIDC issuer identifier carries no query, fragment or userinfo. The
-		// discovery URL is built by appending a path, so anything here would yield a
-		// malformed `<issuer>?x=1/.well-known/...`; reject it instead.
+		// URL parsing erases empty query, fragment and userinfo components. Keep the
+		// parsed checks as well so non-empty components cannot enter by another URL
+		// spelling.
 		const url = new URL(raw);
 
 		if (
@@ -47,16 +46,15 @@ export class IssuerUrl {
 			return undefined;
 		}
 
-		// Preserve the supplied identifier apart from one trailing slash.
-		// Reconstructing it from `url` could normalise characters even though
-		// Cupboard's issuer comparisons are string-based.
-		return new IssuerUrl(raw.endsWith('/') ? raw.slice(0, -1) : raw);
+		return new IssuerUrl(raw);
 	}
 
 	private constructor(readonly value: string) {}
 
 	get discoveryUrl(): string {
-		return `${this.value}/.well-known/openid-configuration`;
+		const separator = this.value.endsWith('/') ? '' : '/';
+
+		return `${this.value}${separator}.well-known/openid-configuration`;
 	}
 
 	matches(other: string): boolean {
@@ -64,5 +62,37 @@ export class IssuerUrl {
 	}
 }
 
+function hasForbiddenRawIssuerComponent(raw: string): boolean {
+	if (raw.includes('?') || raw.includes('#')) {
+		return true;
+	}
+
+	const authority = /^https?:\/\/([^/?#]*)/iu.exec(raw)?.[1];
+
+	return authority === undefined || authority.includes('@');
+}
+
+/**
+ * The stored issuer value to replace during an explicit trailing-slash
+ * compatibility repair, or `undefined` when no repair applies.
+ */
+export function legacyNormalisedIssuer(
+	exactIssuer: string
+): string | undefined {
+	const exact = IssuerUrl.parse(exactIssuer);
+
+	if (!exact?.value.endsWith('/')) {
+		return undefined;
+	}
+
+	const legacy = exact.value.slice(0, -1);
+
+	return IssuerUrl.parse(legacy)?.value;
+}
+
+// The issuer and audience Cupboard puts in its own access tokens, and pins when
+// verifying them, when a deployment leaves CUPBOARD_AUTH_ISSUER and _AUDIENCE
+// unset. One default keeps the issued token, its verification and the published
+// OAuth metadata reporting the same identity.
 export const defaultAuthIssuer = 'cupboard';
 export const defaultAuthAudience = 'cupboard';
