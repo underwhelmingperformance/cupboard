@@ -290,22 +290,36 @@ export async function freshIdToken(
 		return undefined;
 	}
 
-	const expiry =
-		cached.idToken === undefined ? undefined : jwtExpiryMs(cached.idToken);
+	const cachedToken = freshTokenFromGrant(cached, chain.now());
 
-	if (expiry !== undefined && expiry > chain.now() + idTokenFreshnessMarginMs) {
-		return cached.idToken;
+	if (cachedToken !== undefined) {
+		return cachedToken;
 	}
 
 	const renewed = await chain.refreshGrant(cached);
 
 	if (renewed === undefined) {
-		return cached.idToken;
+		return undefined;
 	}
 
 	await chain.writeGrant(renewed);
 
-	return renewed.idToken;
+	return freshTokenFromGrant(renewed, chain.now());
+}
+
+function freshTokenFromGrant(
+	grant: CloudflareGrant,
+	now: number
+): string | undefined {
+	if (grant.idToken === undefined) {
+		return undefined;
+	}
+
+	const expiry = jwtExpiryMs(grant.idToken);
+
+	return expiry !== undefined && expiry > now + idTokenFreshnessMarginMs
+		? grant.idToken
+		: undefined;
 }
 
 export interface ResolvedAccount {
@@ -336,7 +350,10 @@ export async function resolveCloudflare(
 	chain: CredentialChain
 ): Promise<ResolvedAccount> {
 	const credential = await resolveCredential(chain);
-	const client = new Cloudflare({ apiToken: credential.token });
+	const client = new Cloudflare({
+		apiToken: credential.token,
+		maxRetries: 0
+	});
 
 	const fromEnv = accountOption ?? chain.env.CLOUDFLARE_ACCOUNT_ID;
 

@@ -192,7 +192,10 @@ export function reachableFetcher(
 	};
 }
 
-function isFetchNetworkError(error: unknown): error is TypeError {
+/**
+Whether Node's fetch implementation identified the failure as a network error.
+*/
+export function isFetchNetworkError(error: unknown): error is TypeError {
 	if (!(error instanceof TypeError)) {
 		return false;
 	}

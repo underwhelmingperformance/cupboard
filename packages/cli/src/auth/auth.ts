@@ -18,6 +18,7 @@ import {
 	fetchGithubOidcToken,
 	type GithubOidcEnvironment
 } from './github-oidc.ts';
+import { hasOAuthErrorCode } from './oauth-error.ts';
 import {
 	type CachedSession,
 	readCachedSession,
@@ -163,7 +164,7 @@ async function establishSession(
 function isGrantRefusal(error: unknown): boolean {
 	return (
 		error instanceof CupboardHttpError &&
-		(error.status === 400 || error.status === 401)
+		hasOAuthErrorCode(error, 'invalid_grant')
 	);
 }
 

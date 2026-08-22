@@ -6,6 +6,11 @@ import {
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
+import {
+	type OAuthErrorResponse,
+	parseOAuthErrorBody
+} from './auth/oauth-error.ts';
+
 // The CLI's own failure categories, layered on the shared generic (1) and usage
 // (2) codes. The values follow the BSD sysexits convention (77 EX_NOPERM, 75
 // EX_TEMPFAIL, 69 EX_UNAVAILABLE, 74 EX_IOERR).
@@ -286,6 +291,8 @@ export class QuotaExceededError extends CliError {
 }
 
 export class CupboardHttpError extends CliError {
+	readonly oauthError: OAuthErrorResponse | undefined;
+
 	constructor(
 		public readonly method: string,
 		public readonly path: string,
@@ -299,6 +306,7 @@ export class CupboardHttpError extends CliError {
 
 		super(`${method} ${path} failed with ${String(status)}: ${body}${rayNote}`);
 		this.name = 'CupboardHttpError';
+		this.oauthError = parseOAuthErrorBody(body);
 	}
 
 	override get exitCode(): number {

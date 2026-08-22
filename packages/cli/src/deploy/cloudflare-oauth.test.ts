@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { AuthorizationAccessDeniedError } from '../auth/oidc-login.ts';
+import { UnreachableHostError } from '../errors.ts';
 
 import {
 	type CloudflareGrant,
@@ -297,7 +298,7 @@ describe('refreshCloudflareGrant', () => {
 				refreshToken: 'refresh-old',
 				expiresAt: 5000 + 1800 * 1000,
 				subject: 'cf-user-1',
-				idToken: 'id-token-old'
+				idToken: undefined
 			},
 			tokenRequests: [
 				{
@@ -352,5 +353,81 @@ describe('refreshCloudflareGrant', () => {
 		});
 
 		expect(await refreshCloudflareGrant(previous, fetcher)).toBeUndefined();
+	});
+
+	it('surfaces a transport failure instead of starting a new login', async () => {
+		const cause = new TypeError('fetch failed', {
+			cause: { code: 'ECONNREFUSED' }
+		});
+		const failure = new UnreachableHostError('dash.cloudflare.com', cause);
+
+		await expect(
+			refreshCloudflareGrant(previous, () => Promise.reject(failure))
+		).rejects.toBe(failure);
+	});
+
+	it.each([
+		['invalid_request', 400],
+		['invalid_client', 401]
+	])(
+		'surfaces the %s response instead of starting a new login',
+		async (code, status) => {
+			const { fetcher } = fakeCloudflare({
+				tokenBody: { error: code },
+				tokenStatus: status
+			});
+
+			const error = await rejectedBy(
+				refreshCloudflareGrant(previous, fetcher),
+				CloudflareTokenRequestError
+			);
+
+			expect({
+				status: error.status,
+				providerError: error.providerError
+			}).toStrictEqual({
+				status,
+				providerError: code
+			});
+		}
+	);
+
+	it('surfaces a malformed success response instead of starting a new login', async () => {
+		const { fetcher } = fakeCloudflare({ tokenBody: {} });
+
+		await expect(
+			refreshCloudflareGrant(previous, fetcher)
+		).rejects.toMatchObject({
+			name: 'CloudflareTokenResponseMalformedError'
+		});
+	});
+
+	it('surfaces a network failure instead of starting a new login', async () => {
+		const failure = new TypeError('fetch failed', {
+			cause: { code: 'ECONNREFUSED' }
+		});
+		const fetcher: typeof fetch = () => Promise.reject(failure);
+
+		await expect(refreshCloudflareGrant(previous, fetcher)).rejects.toBe(
+			failure
+		);
+	});
+
+	it('surfaces an unrelated fetcher error instead of starting a new login', async () => {
+		const failure = new TypeError('response decoder failed');
+		const fetcher: typeof fetch = () => Promise.reject(failure);
+
+		await expect(refreshCloudflareGrant(previous, fetcher)).rejects.toBe(
+			failure
+		);
+	});
+
+	it('surfaces an abort instead of starting a new login', async () => {
+		const controller = new AbortController();
+		controller.abort(new Error('cancelled by test'));
+
+		await expect(
+			refreshCloudflareGrant(previous, fetch, Date.now, controller.signal)
+		).rejects.toThrow('cancelled by test');
 	});
 });
