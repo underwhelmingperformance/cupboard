@@ -7,6 +7,7 @@ import { pathToFileURL } from 'node:url';
 import { cacheUrl, publicKeyUrl } from '@cupboard/nix-store/cache-url';
 import { cacheNameSchema } from '@cupboard/nix-store/scalars';
 import { canonicalHref, parseBaseUrl } from '@cupboard/nix-store/url';
+import { discardResponseBody } from '@cupboard/shared/cleanup';
 import {
 	CodedError,
 	genericExitCode,
@@ -16,6 +17,7 @@ import {
 	createOctokitClient,
 	githubReplaySafeRequest
 } from '@cupboard/shared/octokit';
+import { readResponseText } from '@cupboard/shared/response-body';
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -197,9 +199,9 @@ export function createDraftBody(options: CreateDraftOptions): CreateDraftBody {
 	};
 }
 
-type FetchLike = (
-	url: string
-) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
+type FetchLike = (url: string) => Promise<Response>;
+
+const maximumPublishedKeyBytes = 64 * 1024;
 
 export async function fetchCachePublicKey(
 	baseUrl: URL,
@@ -209,10 +211,14 @@ export async function fetchCachePublicKey(
 	const response = await fetchLike(url);
 
 	if (!response.ok) {
+		await discardResponseBody(response);
 		throw new PublicKeyFetchError(url, response.status);
 	}
 
-	const key = await response.text();
+	const key = await readResponseText(response, {
+		description: 'cache public key',
+		maximumBytes: maximumPublishedKeyBytes
+	});
 
 	return key.trim();
 }

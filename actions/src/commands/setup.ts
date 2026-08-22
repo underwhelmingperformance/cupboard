@@ -17,6 +17,7 @@ import {
 } from '@cupboard/protocol/reuse-views';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
+import { readResponseText } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
 
@@ -380,6 +381,9 @@ interface CacheInfoFetchDependencies {
 	readonly signal?: AbortSignal;
 }
 
+const maximumCacheInfoBytes = 1024 * 1024;
+const maximumPublishedKeyBytes = 64 * 1024;
+
 async function fetchCacheInfoPriority(
 	fetcher: typeof fetch,
 	substituter: URL,
@@ -405,7 +409,13 @@ async function fetchCacheInfoPriority(
 			}
 
 			try {
-				return CacheInfo.parse(await response.text()).priority;
+				return CacheInfo.parse(
+					await readResponseText(response, {
+						description: `${side} cache information`,
+						maximumBytes: maximumCacheInfoBytes,
+						...(signal !== undefined && { signal })
+					})
+				).priority;
 			} catch (error) {
 				throw new CacheInfoInvalidError(side, url, { cause: error });
 			}
@@ -584,7 +594,11 @@ export async function fetchCachePublicKeyAt(
 				throw new CachePublicKeyRequestFailedError(url, response.status);
 			}
 
-			const responseBody = await response.text();
+			const responseBody = await readResponseText(response, {
+				description: 'cache public key',
+				maximumBytes: maximumPublishedKeyBytes,
+				...(signal !== undefined && { signal })
+			});
 			const publicKey = responseBody.trim();
 
 			if (publicKey === '') {

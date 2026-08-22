@@ -1,4 +1,5 @@
 import { parseBaseUrl } from '@cupboard/nix-store/url';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -122,11 +123,9 @@ describe('createDraftBody', () => {
 });
 
 const unavailable = () =>
-	Promise.resolve({
-		ok: false,
-		status: 503,
-		text: () => Promise.resolve('')
-	});
+	Promise.resolve(
+		new Response('', { status: StatusCodes.SERVICE_UNAVAILABLE })
+	);
 
 const baseUrl = parseBaseUrl(new URL('https://cupboard.example/t/acme'));
 const slashedBaseUrl = parseBaseUrl(
@@ -140,11 +139,7 @@ describe('fetchCachePublicKey', () => {
 		const fetchLike = (url: string) => {
 			requests.push(url);
 
-			return Promise.resolve({
-				ok: true,
-				status: 200,
-				text: () => Promise.resolve('cupboard-1:abc123=\n')
-			});
+			return Promise.resolve(new Response('cupboard-1:abc123=\n'));
 		};
 
 		const key = await fetchCachePublicKey(base, fetchLike);

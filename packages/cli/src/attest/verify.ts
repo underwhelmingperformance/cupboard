@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFile as nodeReadFile } from 'node:fs/promises';
 
 import { cacheUrl, publicKeyUrl } from '@cupboard/nix-store/cache-url';
@@ -8,7 +9,14 @@ import { type StoredCache } from '@cupboard/nix-store/scalars';
 import { NixSignature } from '@cupboard/nix-store/signature';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import { attestationListSchema } from '@cupboard/protocol/attestations';
+import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
+import {
+	readResponseBytes,
+	readResponseJson,
+	readResponseText,
+	RemoteBodyTooLargeError
+} from '@cupboard/shared/response-body';
 import {
 	type AttestationPolicyOptions,
 	type BundleVerifyOptions,
@@ -60,6 +68,32 @@ export class RemoteNarInfoStorePathMismatchError extends Error {
 		this.name = 'RemoteNarInfoStorePathMismatchError';
 	}
 }
+
+export class RemoteAttestationBundleSizeMismatchError extends Error {
+	constructor(
+		public readonly digest: string,
+		public readonly expectedBytes: number,
+		public readonly actualBytes: number
+	) {
+		super('Remote attestation bundle size does not match its descriptor');
+		this.name = 'RemoteAttestationBundleSizeMismatchError';
+	}
+}
+
+export class RemoteAttestationBundleDigestMismatchError extends Error {
+	constructor(
+		public readonly expectedDigest: string,
+		public readonly actualDigest: string
+	) {
+		super('Remote attestation bundle digest does not match its descriptor');
+		this.name = 'RemoteAttestationBundleDigestMismatchError';
+	}
+}
+
+const maximumRemoteNarInfoBytes = 1024 * 1024;
+const maximumRemoteAttestationListBytes = 16 * 1024 * 1024;
+const maximumRemoteAttestationBundleBytes = 1024 * 1024;
+const maximumRemotePublicKeyBytes = 64 * 1024;
 
 export async function verifyLocalAttestations(
 	options: LocalAttestationVerifyOptions,
@@ -144,6 +178,14 @@ export async function verifyRemoteAttestations(
 
 	return Promise.all(
 		selected.map(async (descriptor) => {
+			if (descriptor.size > maximumRemoteAttestationBundleBytes) {
+				throw new RemoteBodyTooLargeError(
+					`attestation bundle ${descriptor.digest}`,
+					maximumRemoteAttestationBundleBytes,
+					descriptor.size
+				);
+			}
+
 			const bundleUrl = `${base}/attestation-bundles/${descriptor.digest}`;
 			const response = await fetcher(bundleUrl, {
 				headers: readHeaders,
@@ -151,13 +193,36 @@ export async function verifyRemoteAttestations(
 			});
 
 			if (!response.ok) {
+				await discardResponseBody(response);
 				throw new Error(
 					`Could not fetch attestation bundle ${descriptor.digest}`
 				);
 			}
+			const bundle = await readResponseBytes(response, {
+				description: `attestation bundle ${descriptor.digest}`,
+				maximumBytes: maximumRemoteAttestationBundleBytes,
+				...(options.signal !== undefined && { signal: options.signal })
+			});
+
+			if (bundle.byteLength !== descriptor.size) {
+				throw new RemoteAttestationBundleSizeMismatchError(
+					descriptor.digest,
+					descriptor.size,
+					bundle.byteLength
+				);
+			}
+
+			const actualDigest = createHash('sha256').update(bundle).digest('hex');
+
+			if (actualDigest !== descriptor.digest) {
+				throw new RemoteAttestationBundleDigestMismatchError(
+					descriptor.digest,
+					actualDigest
+				);
+			}
 
 			const verified = await verify(
-				new Uint8Array(await response.arrayBuffer()),
+				bundle,
 				policy,
 				bundleVerifyOptions(options)
 			);
@@ -181,10 +246,17 @@ async function fetchNarInfo(
 	const response = await fetcher(url, { headers, signal });
 
 	if (!response.ok) {
+		await discardResponseBody(response);
 		throw new Error('Could not fetch remote narinfo');
 	}
 
-	return NarInfo.parse(await response.text());
+	return NarInfo.parse(
+		await readResponseText(response, {
+			description: 'remote narinfo',
+			maximumBytes: maximumRemoteNarInfoBytes,
+			...(signal !== undefined && { signal })
+		})
+	);
 }
 
 async function fetchAttestationList(
@@ -196,10 +268,17 @@ async function fetchAttestationList(
 	const response = await fetcher(url, { headers, signal });
 
 	if (!response.ok) {
+		await discardResponseBody(response);
 		throw new Error('Could not fetch remote attestation list');
 	}
 
-	return attestationListSchema.parse(await response.json()).attestations;
+	return attestationListSchema.parse(
+		await readResponseJson(response, {
+			description: 'remote attestation list',
+			maximumBytes: maximumRemoteAttestationListBytes,
+			...(signal !== undefined && { signal })
+		})
+	).attestations;
 }
 
 async function remoteTrustKeys(
@@ -225,10 +304,17 @@ async function remoteTrustKeys(
 	});
 
 	if (!response.ok) {
+		await discardResponseBody(response);
 		throw new Error('Could not fetch cache public key');
 	}
 
-	return trustedPublicKeys(await response.text());
+	return trustedPublicKeys(
+		await readResponseText(response, {
+			description: 'cache public key',
+			maximumBytes: maximumRemotePublicKeyBytes,
+			...(options.signal !== undefined && { signal: options.signal })
+		})
+	);
 }
 
 function trustedPublicKeys(source: string): readonly string[] {

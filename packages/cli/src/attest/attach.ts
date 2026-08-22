@@ -17,6 +17,7 @@ import type {
 	AttestationNegotiateRequest,
 	AttestationNegotiateResponse
 } from '@cupboard/protocol/attestations';
+import { attestationNegotiateMaxBundles } from '@cupboard/protocol/attestations';
 import {
 	type AttestationAttachPath,
 	attestationAttachSummaryResultKind,
@@ -29,6 +30,7 @@ import {
 	type ResultRow,
 	type StepLog
 } from '@cupboard/reporter';
+import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import type { ReadUser } from '@cupboard/shared/http';
 import { ORPCError } from '@orpc/client';
@@ -383,13 +385,21 @@ export async function runAttestationAttachment(
 	options: AttestationAttachmentOptions
 ): Promise<AttestationAttachOutcome> {
 	const negotiateStep = log.group('negotiate');
-	const negotiation = await options.client.negotiateAttestations({
-		bundles: prepared.map((bundle) => ({
-			storePathHash: bundle.storePathHash,
-			digest: bundle.digest
-		}))
-	});
-	const decisions = exactAttestationDecisions(prepared, negotiation.bundles);
+	const decisions: AttestationDecision[] = [];
+
+	for (const batch of chunk(prepared, attestationNegotiateMaxBundles)) {
+		const negotiation = await options.client.negotiateAttestations({
+			bundles: batch.map((bundle) => ({
+				storePathHash: bundle.storePathHash,
+				digest: bundle.digest
+			}))
+		});
+		decisions.push(...exactAttestationDecisions(batch, negotiation.bundles));
+	}
+
+	const preparedByIdentity = new Map(
+		prepared.map((bundle) => [attestationBundleIdentityKey(bundle), bundle])
+	);
 	const toUpload = decisions.filter((decision) =>
 		isAttestationUpload(decision)
 	);
@@ -404,7 +414,10 @@ export async function runAttestationAttachment(
 	let uploadedBytes = 0;
 
 	await mapWithConcurrency(toUpload, bundleConcurrency, async (decision) => {
-		const bundle = findAttestationBundle(prepared, decision);
+		const bundle = requirePreparedAttestationBundle(
+			preparedByIdentity,
+			decision
+		);
 
 		// Attestation bytes use the same staging uploader and push credential as
 		// NARs. The negotiated `r2Key` selects the attestation staging object.
@@ -421,10 +434,8 @@ export async function runAttestationAttachment(
 	const bundles: AttestationBundleOutcome[] = decisions
 		.filter((decision) => isAttestationSkip(decision))
 		.flatMap((decision) => {
-			const match = prepared.find(
-				(item) =>
-					item.storePathHash === decision.storePathHash &&
-					item.digest === decision.digest
+			const match = preparedByIdentity.get(
+				attestationBundleIdentityKey(decision)
 			);
 
 			return match === undefined
@@ -439,7 +450,10 @@ export async function runAttestationAttachment(
 		});
 
 	await mapWithConcurrency(toUpload, bundleConcurrency, async (decision) => {
-		const bundle = findAttestationBundle(prepared, decision);
+		const bundle = requirePreparedAttestationBundle(
+			preparedByIdentity,
+			decision
+		);
 
 		try {
 			const response = requireMatchingAttachResponse(
@@ -486,6 +500,22 @@ export async function runAttestationAttachment(
 		unservableStorePathHashes,
 		bundles
 	};
+}
+
+function requirePreparedAttestationBundle(
+	preparedByIdentity: ReadonlyMap<string, PreparedAttestationBundle>,
+	decision: Extract<AttestationDecision, { action: 'upload' }>
+): PreparedAttestationBundle {
+	const bundle = preparedByIdentity.get(attestationBundleIdentityKey(decision));
+
+	if (bundle !== undefined) {
+		return bundle;
+	}
+
+	throw new UnexpectedAttestationDecisionError(
+		decision.storePathHash,
+		decision.digest
+	);
 }
 
 export interface AttestAttachDependencies {

@@ -1,6 +1,7 @@
 import type {
 	CommitSocket,
 	CommitSocketData,
+	UpgradeBodyChunk,
 	UpgradeFailure,
 	UpgradeResponse
 } from './commit-socket.ts';
@@ -15,7 +16,7 @@ interface CommitSocketEvents {
 }
 
 interface UpgradeFailureEvents {
-	data: [chunk: CommitSocketData];
+	data: [chunk: UpgradeBodyChunk];
 	end: [];
 }
 

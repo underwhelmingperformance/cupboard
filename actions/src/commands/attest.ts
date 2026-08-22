@@ -31,6 +31,7 @@ import {
 	type BasicCredential,
 	type ReadUser
 } from '@cupboard/shared/http';
+import { readResponseText } from '@cupboard/shared/response-body';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
 
@@ -370,6 +371,7 @@ async function resolveAttestation(
 }
 
 const committedPathConcurrency = 6;
+const maximumNarInfoBytes = 1024 * 1024;
 
 async function committedPathInfos(
 	paths: readonly StorePathString[],
@@ -407,7 +409,10 @@ async function fetchCommittedPathInfo(
 				throw new CommittedSubjectUnavailableError(storePath, response.status);
 			}
 
-			return response.text();
+			return readResponseText(response, {
+				description: `narinfo for ${storePath}`,
+				maximumBytes: maximumNarInfoBytes
+			});
 		}
 	);
 	let narInfo: NarInfo;

@@ -14,13 +14,17 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
-import { bestEffort, discardResponseBody } from '@cupboard/shared/cleanup';
+import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
 	basicAuthHeader,
 	type BasicCredential,
 	readUserSchema
 } from '@cupboard/shared/http';
+import {
+	readResponseText,
+	RemoteBodyTooLargeError
+} from '@cupboard/shared/response-body';
 import { fetch as undiciFetch, type Response } from 'undici';
 
 import {
@@ -937,35 +941,17 @@ async function boundedText(
 	response: Response,
 	maxByteLength: number
 ): Promise<string> {
-	const body = response.body;
-
-	if (body === null) {
-		return '';
-	}
-
-	const reader: ReadableStreamDefaultReader<Uint8Array> = body.getReader();
-	const decoder = new TextDecoder();
-	let text = '';
-	let byteLength = 0;
-
 	try {
-		for (;;) {
-			const { done, value } = await reader.read();
-
-			if (done) {
-				return text + decoder.decode();
-			}
-
-			byteLength += value.byteLength;
-
-			if (byteLength > maxByteLength) {
-				throw new OversizedSubstituterDocumentError(maxByteLength);
-			}
-
-			text += decoder.decode(value, { stream: true });
+		return await readResponseText(response, {
+			description: 'substituter document',
+			maximumBytes: maxByteLength
+		});
+	} catch (error) {
+		if (error instanceof RemoteBodyTooLargeError) {
+			throw new OversizedSubstituterDocumentError(maxByteLength);
 		}
-	} finally {
-		await bestEffort(() => reader.cancel());
+
+		throw error;
 	}
 }
 

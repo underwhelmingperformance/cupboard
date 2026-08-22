@@ -20,6 +20,7 @@ import {
 	type UploadId
 } from '@cupboard/protocol/upload';
 import { chunk } from '@cupboard/shared/collections';
+import { BoundedBodyCollector } from '@cupboard/shared/response-body';
 import { retryAfterDelayMs } from '@cupboard/shared/retry';
 import { z } from 'zod';
 
@@ -36,18 +37,29 @@ import {
 
 import type { BearerAttempt } from './credentials.ts';
 
+/**
+A received WebSocket frame; `ws` hands it over as a `Buffer`.
+*/
 export interface CommitSocketData {
 	toString(): string;
 }
 
 /**
- * The `ws` response for a refused upgrade. Ownership of the connection passes
- * to the listener, so the session must destroy the response after reading it.
+A refused upgrade body chunk; Node hands it over as a `Buffer`.
+*/
+export interface UpgradeBodyChunk extends Uint8Array {
+	toString(): string;
+}
+
+/**
+ * The HTTP response returned when the server refuses an upgrade (a `ws`
+ * `IncomingMessage`). `ws` hands a refused connection to the listener but does
+ * not consume the response, so the session calls `destroy` after reading it.
  */
 export interface UpgradeFailure {
 	readonly statusCode?: number;
 	readonly headers: Readonly<Record<string, string | string[] | undefined>>;
-	on(event: 'data', listener: (chunk: CommitSocketData) => void): unknown;
+	on(event: 'data', listener: (chunk: UpgradeBodyChunk) => void): unknown;
 	on(event: 'end', listener: () => void): unknown;
 	destroy(): void;
 }
@@ -221,6 +233,8 @@ const maxRetryAfterMs = 60_000;
 // declares a length it never sends. Without this timer, either case could leave
 // the session waiting indefinitely.
 const refusalDrainMs = 5000;
+const maximumRefusalBodyBytes = 64 * 1024;
+// How many times one entry is re-sent before its error is treated as terminal.
 const maxEntryRetries = 3;
 const entryRetryBaseMs = 500;
 
@@ -1662,7 +1676,10 @@ export function runCommitSession(
 				return;
 			}
 
-			const chunks: string[] = [];
+			const body = new BoundedBodyCollector(
+				maximumRefusalBodyBytes,
+				'truncate'
+			);
 
 			// `ws` transfers ownership of the refused handshake to this listener.
 			// Destroy the response to release an unfinished body and close the socket
@@ -1689,7 +1706,7 @@ export function runCommitSession(
 					'GET',
 					options.path,
 					status,
-					chunks.join('')
+					body.text()
 				);
 
 				if (isRetryableRefusal(status)) {
@@ -1712,10 +1729,10 @@ export function runCommitSession(
 			};
 
 			// A peer can leave the body unfinished in the ways `refusalDrainMs`
-			// describes, none of which produce another event on this connection,
-			// so the read is bounded. The status arrived with the headers, so the
-			// refusal is answered on what was received. The headers are already
-			// complete, so a `Retry-After` still applies when the body is not.
+			// describes without producing another event on this connection. Bound
+			// the read and report the refusal from the bytes received before the
+			// deadline. The complete headers retain `Retry-After` even when the body
+			// is incomplete.
 			//
 			// Keep this timer referenced because it is the only event guaranteed to
 			// resolve an unfinished refusal body.
@@ -1724,7 +1741,9 @@ export function runCommitSession(
 			}, refusalDrainMs);
 
 			response.on('data', (chunk) => {
-				chunks.push(chunk.toString());
+				if (!body.append(chunk)) {
+					refuse(requestedRetryDelayMs(response));
+				}
 			});
 			response.on('end', () => {
 				refuse(requestedRetryDelayMs(response));

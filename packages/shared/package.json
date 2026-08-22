@@ -30,6 +30,7 @@
 		"./limits": "./src/limits.ts",
 		"./octokit": "./src/octokit.ts",
 		"./retry": "./src/retry.ts",
+		"./response-body": "./src/response-body.ts",
 		"./sigstore": "./src/sigstore.ts",
 		"./slsa": "./src/slsa.ts",
 		"./timeout": "./src/timeout.ts"
