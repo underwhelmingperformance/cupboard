@@ -16,6 +16,7 @@ import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { chunk } from '@cupboard/shared/collections';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader, type BasicCredential } from '@cupboard/shared/http';
+import { readResponseJson } from '@cupboard/shared/response-body';
 import { isSlsaProvenanceType } from '@cupboard/shared/slsa';
 import { StatusCodes } from 'http-status-codes';
 
@@ -23,6 +24,7 @@ import type { DestinationProbes } from './availability-partition.ts';
 import { DestinationProbeResponseError } from './destination-probe-errors.ts';
 
 const maximumConcurrentProbes = 4;
+const maximumProbeResponseBytes = 16 * 1024 * 1024;
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
 export interface DestinationProbeOptions {
@@ -234,7 +236,10 @@ async function hasAttestation(
 	let value: unknown;
 
 	try {
-		value = await response.json();
+		value = await readResponseJson(response, {
+			description: `Destination attestation response from ${target}`,
+			maximumBytes: maximumProbeResponseBytes
+		});
 	} catch (error) {
 		throw new DestinationProbeResponseError(
 			target,
@@ -279,7 +284,10 @@ async function queryMissingStorePathHashes(
 	let value: unknown;
 
 	try {
-		value = await response.json();
+		value = await readResponseJson(response, {
+			description: `Destination availability response from ${target}`,
+			maximumBytes: maximumProbeResponseBytes
+		});
 	} catch (error) {
 		throw new DestinationProbeResponseError(
 			target,

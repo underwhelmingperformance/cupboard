@@ -2,11 +2,15 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 
 import { isAllowedIssuerUrl, IssuerUrl } from '@cupboard/protocol/oidc-issuer';
+import { discardResponseBody } from '@cupboard/shared/cleanup';
+import { readResponseJson } from '@cupboard/shared/response-body';
 import { z } from 'zod';
 
 import { abortable, delayMs, throwIfAborted } from '../abort.ts';
 import { resilientFetcher } from '../client/transport.ts';
 import { CliError } from '../errors.ts';
+
+const maximumOidcResponseBytes = 1024 * 1024;
 
 export interface OidcLoginErrorOptions {
 	readonly cause?: unknown;
@@ -218,6 +222,7 @@ export async function discoverOidcLogin(
 	}
 
 	if (!response.ok) {
+		await discardResponseBody(response);
 		throw new OidcLoginError(`Could not read OIDC metadata for ${issuer}`, {
 			kind: 'discovery-http',
 			issuer,
@@ -228,8 +233,16 @@ export async function discoverOidcLogin(
 	let payload: unknown;
 
 	try {
-		payload = await response.json();
+		payload = await readResponseJson(response, {
+			description: `OIDC metadata for ${issuer}`,
+			maximumBytes: maximumOidcResponseBytes,
+			signal
+		});
 	} catch (error) {
+		if (!(error instanceof SyntaxError)) {
+			throw error;
+		}
+
 		throw new OidcLoginError(`Could not read OIDC metadata for ${issuer}`, {
 			kind: 'discovery-non-json',
 			issuer,
@@ -706,11 +719,12 @@ async function requestDeviceCode(
 	const response = await fetcher(endpoint, postForm(form, signal));
 
 	if (!response.ok) {
+		await discardResponseBody(response);
 		throw new DeviceAuthorizationRequestError(response.status);
 	}
 
 	const parsed = deviceAuthorizationSchema.safeParse(
-		await readJson(response, 'device-authorization-non-json')
+		await readJson(response, 'device-authorization-non-json', signal)
 	);
 
 	if (!parsed.success) {
@@ -739,7 +753,7 @@ async function pollDeviceToken(
 		endpoints.tokenEndpoint,
 		postForm(form, signal)
 	);
-	const payload = await readJson(response, 'device-token-non-json');
+	const payload = await readJson(response, 'device-token-non-json', signal);
 
 	if (response.ok) {
 		const parsed = idTokenSchema.safeParse(payload);
@@ -774,11 +788,20 @@ async function pollDeviceToken(
 
 async function readJson(
 	response: Response,
-	kind: OidcLoginErrorKind
+	kind: OidcLoginErrorKind,
+	signal?: AbortSignal
 ): Promise<unknown> {
 	try {
-		return await response.json();
+		return await readResponseJson(response, {
+			description: 'OIDC endpoint response',
+			maximumBytes: maximumOidcResponseBytes,
+			signal
+		});
 	} catch (error) {
+		if (!(error instanceof SyntaxError)) {
+			throw error;
+		}
+
 		throw new OidcLoginError('OIDC endpoint returned a non-JSON response', {
 			kind,
 			cause: error
@@ -798,6 +821,7 @@ async function exchangeCode(
 	);
 
 	if (!response.ok) {
+		await discardResponseBody(response);
 		throw new OidcLoginError(
 			`Token exchange failed with HTTP ${String(response.status)}`,
 			{ kind: 'token-http', status: response.status }
@@ -805,7 +829,7 @@ async function exchangeCode(
 	}
 
 	const parsed = idTokenSchema.safeParse(
-		await readJson(response, 'token-non-json')
+		await readJson(response, 'token-non-json', signal)
 	);
 
 	if (!parsed.success) {

@@ -64,6 +64,85 @@ export interface LookupRepositoryOptions {
 	readonly signal?: AbortSignal;
 }
 
+function isAsyncByteIterable(
+	value: unknown
+): value is AsyncIterable<Uint8Array> {
+	if (typeof value !== 'object' || value === null) {
+		return false;
+	}
+
+	return typeof Reflect.get(value, Symbol.asyncIterator) === 'function';
+}
+
+function webStream(
+	body: AsyncIterable<Uint8Array>
+): ReadableStream<Uint8Array> {
+	const iterator = body[Symbol.asyncIterator]();
+
+	return new ReadableStream<Uint8Array>({
+		async pull(controller) {
+			const result = await iterator.next();
+
+			if (result.done) {
+				controller.close();
+				return;
+			}
+
+			controller.enqueue(result.value);
+		},
+		async cancel() {
+			await iterator.return?.();
+		}
+	});
+}
+
+function cachedGithubFetch(cachePath: string): typeof fetch {
+	const fetcher = makeFetchHappen.defaults({ cachePath });
+
+	return async (input, init) => {
+		const request = new Request(input, init);
+
+		if (request.method !== 'GET' && request.method !== 'HEAD') {
+			throw new TypeError(
+				'The cached GitHub transport accepts only GET and HEAD requests.'
+			);
+		}
+
+		const requestOptions = {
+			headers: Object.fromEntries(request.headers.entries()),
+			method: request.method,
+			signal: request.signal
+		};
+		const response = await fetcher(request.url, requestOptions);
+		const responseHeaders = new Headers();
+		response.headers.forEach((value, name) => {
+			responseHeaders.append(name, value);
+		});
+		const hasNoBody = [
+			StatusCodes.NO_CONTENT,
+			StatusCodes.RESET_CONTENT,
+			StatusCodes.NOT_MODIFIED
+		].includes(response.status);
+		const responseBody: unknown = response.body;
+
+		let body: ReadableStream<Uint8Array> | undefined;
+
+		if (!hasNoBody) {
+			if (!isAsyncByteIterable(responseBody)) {
+				throw new TypeError('The cached GitHub response body is not readable.');
+			}
+
+			body = webStream(responseBody);
+		}
+
+		return new Response(body, {
+			headers: responseHeaders,
+			status: response.status,
+			statusText: response.statusText
+		});
+	};
+}
+
 export function githubApi(
 	options: LookupRepositoryOptions = {}
 ): ReturnType<typeof createOctokitClient> {
@@ -72,12 +151,13 @@ export function githubApi(
 	const token = [process.env.GH_TOKEN, process.env.GITHUB_TOKEN].find(
 		(candidate) => candidate !== undefined && candidate !== ''
 	);
+	const fetcher = options.fetch ?? cachedGithubFetch(cachePath);
 
 	return createOctokitClient({
 		replaySafety: 'replay-safe',
 		...(token !== undefined && { auth: token }),
 		request: {
-			fetch: options.fetch ?? makeFetchHappen.defaults({ cachePath }),
+			fetch: fetcher,
 			...(signal !== undefined && { signal })
 		}
 	});

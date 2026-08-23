@@ -1,5 +1,6 @@
 import { storePathHashSchema } from '@cupboard/nix-store/scalars';
 import { readUserSchema } from '@cupboard/shared/http';
+import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -63,6 +64,24 @@ function respondingFetcher(
 }
 
 describe('fetchReferenceMetadata', () => {
+	it('rejects an oversized narinfo before parsing it', async () => {
+		await expect(
+			fetchReferenceMetadata(
+				{ url: new URL('https://cache.example.workers.dev/') },
+				storePathHash,
+				{
+					fetch: respondingFetcher(
+						[],
+						() =>
+							new Response(narInfoText(), {
+								headers: { 'content-length': String(1024 * 1024 + 1) }
+							})
+					)
+				}
+			)
+		).rejects.toBeInstanceOf(RemoteBodyTooLargeError);
+	});
+
 	it('maps a served narinfo to upload metadata and retains its signatures', async () => {
 		const requests: RecordedRequest[] = [];
 		const metadata = await fetchReferenceMetadata(

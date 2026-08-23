@@ -10,6 +10,7 @@ import {
 	type CommitSessionFrame,
 	uploadIdSchema
 } from '@cupboard/protocol/upload';
+import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -350,6 +351,20 @@ describe('CupboardClient.signup', () => {
 			path: '/signup',
 			status: 409
 		});
+	});
+
+	it('rejects an oversized signup response before parsing it', async () => {
+		const client = new CupboardClient(new URL('https://cupboard.test'), () =>
+			Promise.resolve(
+				Response.json(response, {
+					headers: { 'content-length': String(16 * 1024 * 1024 + 1) }
+				})
+			)
+		);
+
+		await expect(
+			client.signup({ subject_token: 'subject.jwt' })
+		).rejects.toBeInstanceOf(RemoteBodyTooLargeError);
 	});
 });
 

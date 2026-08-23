@@ -26,6 +26,10 @@ import {
 	commitCreditCapability,
 	type UploadId
 } from '@cupboard/protocol/upload';
+import {
+	readResponseJson,
+	readResponseText
+} from '@cupboard/shared/response-body';
 import { WebSocket } from 'ws';
 import { z } from 'zod';
 
@@ -49,6 +53,9 @@ import { type AccessCredential, bearerAttempt } from './credentials.ts';
 import { resilientFetcher } from './transport.ts';
 
 export { type AccessCredential, type TokenProvider } from './credentials.ts';
+
+const maximumErrorResponseBytes = 64 * 1024;
+const maximumClientResponseBytes = 16 * 1024 * 1024;
 
 export class CupboardClient {
 	static fromUrl(
@@ -94,12 +101,20 @@ export class CupboardClient {
 				'GET',
 				path,
 				response.status,
-				await response.text(),
+				await readResponseText(response, {
+					description: `Cupboard ${path} error response`,
+					maximumBytes: maximumErrorResponseBytes,
+					signal: this.signal
+				}),
 				rayOf(response)
 			);
 		}
 
-		const body = await response.text();
+		const body = await readResponseText(response, {
+			description: `Cupboard ${path} response`,
+			maximumBytes: maximumClientResponseBytes,
+			signal: this.signal
+		});
 
 		return body.trimEnd();
 	}
@@ -181,7 +196,11 @@ export class CupboardClient {
 				'POST',
 				'/token',
 				response.status,
-				await response.text(),
+				await readResponseText(response, {
+					description: 'Cupboard token error response',
+					maximumBytes: maximumErrorResponseBytes,
+					signal: this.signal
+				}),
 				rayOf(response)
 			);
 		}
@@ -197,7 +216,11 @@ export class CupboardClient {
 		let payload: unknown;
 
 		try {
-			payload = await response.json();
+			payload = await readResponseJson(response, {
+				description: `Cupboard ${path} response`,
+				maximumBytes: maximumClientResponseBytes,
+				signal: this.signal
+			});
 		} catch (error) {
 			if (error instanceof SyntaxError) {
 				throw new MalformedResponseError(path, error);
@@ -322,7 +345,11 @@ export class CupboardClient {
 				'POST',
 				'/signup',
 				response.status,
-				await response.text(),
+				await readResponseText(response, {
+					description: 'Cupboard signup error response',
+					maximumBytes: maximumErrorResponseBytes,
+					signal: this.signal
+				}),
 				rayOf(response)
 			);
 		}

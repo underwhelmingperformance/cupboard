@@ -3,7 +3,9 @@ import { type StorePathHash } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { canonicalHref } from '@cupboard/nix-store/url';
 import { type UploadPathMetadataFields } from '@cupboard/protocol/upload';
+import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
+import { readResponseText } from '@cupboard/shared/response-body';
 
 import { resilientFetcher } from '../client/transport.ts';
 import {
@@ -22,6 +24,8 @@ export interface ReferenceFetchDependencies {
 	readonly fetch?: typeof fetch;
 	readonly signal?: AbortSignal;
 }
+
+const maximumNarInfoBytes = 1024 * 1024;
 
 /**
  * The destination signs the narinfo it serves, so upload metadata excludes the
@@ -54,10 +58,15 @@ export async function fetchReferenceMetadata(
 	});
 
 	if (!response.ok) {
+		await discardResponseBody(response);
 		throw new NarInfoUnavailableError(target, response.status);
 	}
 
-	const body = await response.text();
+	const body = await readResponseText(response, {
+		description: `Narinfo response from ${target.href}`,
+		maximumBytes: maximumNarInfoBytes,
+		signal: dependencies.signal
+	});
 
 	try {
 		const narInfo = NarInfo.parse(body);

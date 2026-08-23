@@ -20,6 +20,7 @@ import {
 } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import { basicAuthHeader, type ReadUser } from '@cupboard/shared/http';
+import { readResponseText } from '@cupboard/shared/response-body';
 import type { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 
@@ -28,6 +29,8 @@ import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { resilientFetcher } from '../client/transport.ts';
+
+const maximumCacheInfoBytes = 1024 * 1024;
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseGrace } from '../duration.ts';
 import {
@@ -159,7 +162,11 @@ export function cacheInfoFetcher(
 				...(headers !== undefined && { headers }),
 				signal
 			});
-			body = await response.text();
+			body = await readResponseText(response, {
+				description: `Cache information from ${target.href}`,
+				maximumBytes: maximumCacheInfoBytes,
+				signal
+			});
 		} catch (error) {
 			if (options.signal?.aborted === true) {
 				throw abortReason(options.signal);

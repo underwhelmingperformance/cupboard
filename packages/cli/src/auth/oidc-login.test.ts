@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 
+import { RemoteBodyTooLargeError } from '@cupboard/shared/response-body';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -92,6 +93,20 @@ describe('createPkce', () => {
 });
 
 describe('discoverOidcLogin', () => {
+	it('rejects oversized discovery metadata through the bounded reader', async () => {
+		const caught = await rejectedBy(() =>
+			discoverOidcLogin('https://idp.example.com', () =>
+				Promise.resolve(
+					new Response('{}', {
+						headers: { 'content-length': String(1024 * 1024 + 1) }
+					})
+				)
+			)
+		);
+
+		expect(caught).toBeInstanceOf(RemoteBodyTooLargeError);
+	});
+
 	it('reads the authorization, token and device endpoints', async () => {
 		const discovered = await discoverOidcLogin('https://idp.example.com/', () =>
 			Promise.resolve(

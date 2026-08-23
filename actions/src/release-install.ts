@@ -377,8 +377,8 @@ export interface DownloadedAsset {
 export const maximumReleaseAssetBytes = 256 * 1024 * 1024;
 const maximumAttestationBundleBytes = 16 * 1024 * 1024;
 
-// The small page size bounds each response that Octokit buffers. The candidate
-// and page limits bound both retained bundles and traversal of sparse pages.
+// The candidate and page limits bound both retained bundles and traversal of
+// sparse pages. The shared Octokit transport bounds each response body.
 export const maximumReleaseAttestationCandidates = 100;
 export const maximumReleaseAttestationPages = 10;
 const releaseAttestationsPerPage = 10;

@@ -1,3 +1,4 @@
+import { StatusCodes } from 'http-status-codes';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ProgressiveCollectionLimitError } from './collections.ts';
@@ -5,9 +6,12 @@ import {
 	createOctokitClient,
 	filterGithubReleases,
 	findGithubRelease,
+	maximumGithubErrorResponseBytes,
 	maximumGithubReleaseCandidates,
-	maximumGithubReleasePages
+	maximumGithubReleasePages,
+	maximumGithubSuccessResponseBytes
 } from './octokit.ts';
+import { RemoteBodyTooLargeError } from './response-body.ts';
 
 function countingFetch(status: number): {
 	readonly fetch: typeof fetch;
@@ -193,6 +197,102 @@ describe('createOctokitClient', () => {
 
 	it('does not replay an operation unless the client declares it safe', async () => {
 		expect(await fetchCountFor(500)).toBe(1);
+	});
+
+	it.each([
+		{
+			name: 'successful',
+			status: StatusCodes.OK,
+			maximumBytes: maximumGithubSuccessResponseBytes
+		},
+		{
+			name: 'error',
+			status: StatusCodes.INTERNAL_SERVER_ERROR,
+			maximumBytes: maximumGithubErrorResponseBytes
+		}
+	])(
+		'bounds and cancels an oversized $name response',
+		async ({ status, maximumBytes }) => {
+			vi.useRealTimers();
+			let wasCancelled = false;
+			const octokit = createOctokitClient({
+				request: {
+					fetch: () =>
+						Promise.resolve(
+							new Response(
+								new ReadableStream<Uint8Array>({
+									cancel() {
+										wasCancelled = true;
+									}
+								}),
+								{
+									status,
+									headers: {
+										'content-length': String(maximumBytes + 1),
+										'content-type': 'application/json'
+									}
+								}
+							)
+						)
+				}
+			});
+
+			await expect(
+				octokit.request('GET /repos/{owner}/{repo}', {
+					owner: 'o',
+					repo: 'r'
+				})
+			).rejects.toMatchObject({
+				cause: new RemoteBodyTooLargeError(
+					'GitHub API response',
+					maximumBytes,
+					maximumBytes + 1,
+					'declared'
+				)
+			});
+			expect(wasCancelled).toBe(true);
+		}
+	);
+
+	it('does not override a cancellable client retry policy during release lookup', async () => {
+		const controller = new AbortController();
+		const reason = new Error('stop release lookup');
+		let calls = 0;
+		const { promise: started, resolve: requestStarted } =
+			Promise.withResolvers<undefined>();
+		const octokit = createOctokitClient({
+			replaySafety: 'replay-safe',
+			request: {
+				retries: 0,
+				signal: controller.signal,
+				fetch: async () => {
+					calls += 1;
+					requestStarted(undefined);
+					await new Promise<void>((_resolve, reject) => {
+						controller.signal.addEventListener(
+							'abort',
+							() => {
+								reject(reason);
+							},
+							{ once: true }
+						);
+					});
+
+					throw new Error('unreachable');
+				}
+			}
+		});
+		const lookup = findGithubRelease(
+			octokit,
+			{ owner: 'o', repo: 'r' },
+			() => true
+		);
+
+		await started;
+		controller.abort(reason);
+
+		await expect(lookup).rejects.toThrow(reason.message);
+		expect(calls).toBe(1);
 	});
 
 	it('retries a transient server error for a replay-safe client', async () => {
