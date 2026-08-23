@@ -984,11 +984,13 @@ subject token matches. Verification is uniform; `jose` does the cryptography.
       a cupboard access JWT. Owner login yields `admin`; CI yields `write`.
       Success and error bodies follow RFC 6749 §5.1/§5.2;
       `Cache-Control:     no-store`.
-- [x] Sign cupboard access JWTs with a deployment-owned key (`auth_key`) in the
-      RFC 9068 shape: `typ: at+jwt`, a `scope` claim, and the signing key's
-      `kid` in the header. Write tokens carry a `cb_roots` claim; admin tokens
-      are unconstrained. Tokens are short-lived and stateless, with no
-      issued-token table; expiry and key rotation cover revocation.
+- [x] Sign cupboard access JWTs with a deployment-owned key (`auth_key`). The
+      protected header uses the private `typ` value `cupboard-access+jwt` and
+      carries the signing key's `kid`. The payload represents authority through
+      an RFC 9396 `authorization_details` claim. These tokens do not claim the
+      RFC 9068 profile because Cupboard does not implement that profile's full
+      claim and algorithm contract. Tokens are short-lived and stateless, with
+      no issued-token table; expiry and key rotation cover revocation.
 - [x] Verify inbound tokens with issuer and audience pinned and an asymmetric
       algorithm allowlist (RS256/PS256/ES256/EdDSA), never the token's own
       header and never `alg: none` or a symmetric algorithm. Verification has
