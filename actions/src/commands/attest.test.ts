@@ -36,7 +36,7 @@ import {
 } from './attest.ts';
 
 describe('renderChecksums', () => {
-	it('renders sha256sum lines that parseChecksums round-trips', () => {
+	it('renders sha256sum lines and parseChecksums recovers their entries', () => {
 		const rendered = renderChecksums([
 			{
 				storePath: '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
@@ -114,7 +114,7 @@ describe('attestationSubjects', () => {
 		'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib'
 	);
 
-	it('emits only paths named by the current build receipt', () => {
+	it('returns only paths listed in the current build receipt', () => {
 		const partitioned = attestationSubjects(
 			[attestPathInfo(builtPath, 0xaa), attestPathInfo(substitutedPath, 0xbb)],
 			{
@@ -158,8 +158,6 @@ describe('attestationSubjects', () => {
 	});
 });
 
-// Creates a version 3 subject whose repeated digest byte is easy to recognise
-// in rendered checksums.
 function provenancedSubject(
 	storePath: StorePathString,
 	digestByte: string,
@@ -175,7 +173,6 @@ function provenancedSubject(
 	};
 }
 
-// A version 3 subject for a path the run published but did not build.
 function copiedSubject(storePath: StorePathString, digestByte: string) {
 	return {
 		origin: 'copied' as const,
@@ -186,12 +183,10 @@ function copiedSubject(storePath: StorePathString, digestByte: string) {
 	};
 }
 
-// One entry of the checksums file the signing step receives.
 function acceptedDigest(storePath: StorePathString, sha256: string) {
 	return { storePath, sha256 };
 }
 
-// Represents a coordinator that does not hold any receipt subjects locally.
 const heldNowhere: SelectedPathInfos = new Map();
 
 describe('provenancedSubjects', () => {
@@ -213,13 +208,12 @@ describe('provenancedSubjects', () => {
 		}
 	];
 
-	// A local store entry matching the receipt's NAR hash and deriver.
 	const holdsBuiltPath: SelectedPathInfos = new Map([
 		[builtPath, attestPathInfo(builtPath, 0xaa)]
 	]);
 
 	it.each(realisedHere)(
-		'attests $name whose path this machine still holds',
+		'attests $name whose metadata is committed at the destination',
 		({ verification }) => {
 			expect(
 				provenancedSubjects(
@@ -239,7 +233,7 @@ describe('provenancedSubjects', () => {
 	);
 
 	it.each(realisedHere)(
-		'refuses $name whose path this machine no longer holds',
+		'refuses $name absent from the committed destination',
 		({ verification }) => {
 			let failure: unknown;
 
@@ -267,8 +261,6 @@ describe('provenancedSubjects', () => {
 		}
 	);
 
-	// A subject this machine holds is one the run can check for itself, and
-	// the checksum it renders is signed under this repository's identity.
 	it.each([
 		{
 			name: 'a NAR hash that moved since the receipt was written',
@@ -283,7 +275,7 @@ describe('provenancedSubjects', () => {
 			expected: SubjectDeriverMovedError
 		}
 	])(
-		'refuses to attest a held subject with $name',
+		'refuses attestation when destination metadata contains $name',
 		({ digestByte, deriver, expected }) => {
 			const held: SelectedPathInfos = new Map([
 				[
@@ -326,7 +318,7 @@ describe('provenancedSubjects', () => {
 		).toThrow(SubjectNotHeldError);
 	});
 
-	it('attests a build-store subject verified live in the selected store', () => {
+	it('accepts a build-store subject present in the selected destination cache', () => {
 		const heldRemotely: SelectedPathInfos = new Map([
 			[remotePath, attestPathInfo(remotePath, 0xbb)]
 		]);
@@ -347,7 +339,7 @@ describe('provenancedSubjects', () => {
 		});
 	});
 
-	it('attests a subject with a recorded builder', () => {
+	it('accepts a subject whose receipt records a remote builder', () => {
 		const holdsRemotePath: SelectedPathInfos = new Map([
 			[remotePath, attestPathInfo(remotePath, 0xbb)]
 		]);
@@ -461,7 +453,7 @@ describe('buildOriginPredicateFor', () => {
 		});
 	});
 
-	it('carries the builder the receipt recorded', () => {
+	it('preserves the recorded builder in the build-origin predicate', () => {
 		const receipt = buildReceiptSchema.parse({
 			version: 3,
 			paths: [remotePath],
@@ -688,7 +680,7 @@ describe('attestAction committed cache verification', () => {
 		return receiptFile;
 	}
 
-	it('attests from the committed destination after the remote build store has gone', async () => {
+	it('attests from the committed destination without access to the remote build store', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
 		const receiptFile = await receiptFileIn(directory);
 		const checksumsFile = path.join(directory, 'subjects.txt');
@@ -800,8 +792,6 @@ describe('attestAction committed cache verification', () => {
 		}
 	});
 
-	// A version 2 receipt records no origin, so the action reports an empty
-	// predicate file and the workflow skips the second signing step.
 	it('reports no predicate file for a receipt that records no origin', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
 		const receiptFile = path.join(directory, 'receipt.json');

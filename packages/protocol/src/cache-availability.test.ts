@@ -11,7 +11,7 @@ import {
 const storePathHash = '1'.repeat(32);
 
 describe('cache availability protocol', () => {
-	it('accepts a bounded request and response', () => {
+	it('accepts 900 requested and missing hashes', () => {
 		const request = {
 			storePathHashes: Array.from(
 				{ length: cacheAvailabilityMaxPaths },
@@ -31,7 +31,7 @@ describe('cache availability protocol', () => {
 		}).toStrictEqual({ request: true, response: true });
 	});
 
-	it('rejects a request above the Worker subrequest bound', () => {
+	it('rejects more than 900 requested hashes', () => {
 		const request = {
 			storePathHashes: Array.from(
 				{ length: cacheAvailabilityMaxPaths + 1 },
@@ -44,7 +44,7 @@ describe('cache availability protocol', () => {
 		);
 	});
 
-	it('uses a lower bound for reuse-view requests', () => {
+	it('accepts 50 reuse-view hashes and rejects 51', () => {
 		const bounded = {
 			storePathHashes: Array.from(
 				{ length: reuseViewAvailabilityMaxPaths },

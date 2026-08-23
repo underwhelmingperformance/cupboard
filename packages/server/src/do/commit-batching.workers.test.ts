@@ -38,7 +38,6 @@ import { RetentionService } from './retention-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
 
-// The pipeline over a live instance's context, as the server itself builds it.
 function pipelineFor(context: ServerContext): CommitPipelineService {
 	const narInfoObjects = new NarInfoObjectsService(context);
 	const attestationCas = new AttestationCasService(context);
@@ -64,10 +63,10 @@ function pipelineFor(context: ServerContext): CommitPipelineService {
 	);
 }
 
-// Concurrent settles share the materialise flush: a burst that has enqueued by
-// the time a flush's gate turn comes lands in one batch, so a loaded push
-// settles many paths per gate and per combined charge batch.
-describe('batched commit settles', () => {
+// `materialiseBatched` shares a flush among the requests already enqueued when
+// its gate callback begins. A burst can therefore settle several paths in one
+// critical section and one combined charge batch.
+describe('commit batching', () => {
 	beforeEach(resetTestServer);
 
 	it('settles a synchronous burst in one combined charge batch', async () => {
@@ -84,9 +83,6 @@ describe('batched commit settles', () => {
 			})
 		);
 
-		// The first path uploads the blob; the rest negotiate to reuse commits of
-		// the now-canonical bytes and settle through the ordinary flow, so every
-		// path ends committed with its own narinfo row.
 		const [uploadPath, ...reusePaths] = paths;
 
 		if (uploadPath === undefined) {
@@ -103,9 +99,9 @@ describe('batched commit settles', () => {
 			await commitUpload(token, decision.uploadId);
 		}
 
-		// Re-materialising a committed row at its own version is idempotent (the
-		// conditional charge statements replay as no-ops), so the burst below is
-		// the settle path with a known, already-reserved generation per path.
+		// Replaying a committed row at its current generation is idempotent because
+		// the conditional charge statements become no-ops. The test can therefore
+		// exercise the shared flush with a known generation for every path.
 		const batches = vi.spyOn(env.CUPBOARD_DB, 'batch');
 
 		try {
@@ -113,8 +109,6 @@ describe('batched commit settles', () => {
 				currentServer(),
 				async (instance) => {
 					const pipeline = pipelineFor(instance.context);
-					// One probe covers the burst: every path reuses the same canonical
-					// blob, so the shared facts are identical.
 					const [head, ...rest] = paths;
 
 					if (head === undefined) {
@@ -122,8 +116,8 @@ describe('batched commit settles', () => {
 					}
 
 					const probe = await pipeline.probeMaterialisation(head);
-					// The probe reads its shared facts in one batch of its own; discount
-					// it so the count measures only the charge the flush settles.
+					// The probe performs its own D1 batch. Clear that call so the assertion
+					// counts only the charge batch from the shared flush.
 					batches.mockClear();
 					const rows = instance.context.db
 						.select({
@@ -136,8 +130,8 @@ describe('batched commit settles', () => {
 						rows.map((row) => [row.storePathHash, row.generation])
 					);
 
-					// Every request enqueues in the same tick, so the first flush's
-					// gate callback takes them all.
+					// Enqueue every request in the same turn so the first gate callback can
+					// take the whole burst.
 					return Promise.all(
 						[head, ...rest].map((metadata) => {
 							const generation = generations.get(metadata.storePathHash);
@@ -210,8 +204,6 @@ describe('batched commit settles', () => {
 						await pipeline.prefetchMaterialisationFacts(narHashes);
 					const prefetchBatches = batches.mock.calls.length;
 
-					// A probe handed the prefetched facts pays only its R2 head, no D1
-					// batch of its own.
 					batches.mockClear();
 					await pipeline.probeMaterialisation(
 						head,
@@ -236,7 +228,7 @@ describe('batched commit settles', () => {
 		});
 	});
 
-	it('a commit-batch of reuse entries pays two prefetch D1 batches plus one charge flush, not one probe per entry', async () => {
+	it('makes three D1 batch calls for two reuse entries', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('socket-prefetch');
 		const paths = ['a', 'b', 'c'].map((letter, index) =>
@@ -255,8 +247,6 @@ describe('batched commit settles', () => {
 			throw new Error('the batch needs at least one path');
 		}
 
-		// Commit the first path so its canonical blob is in the CAS; the rest
-		// negotiate as reuse commits sharing that blob.
 		await commitPath(token, first, nar);
 
 		const reuseEntries: {
@@ -272,11 +262,9 @@ describe('batched commit settles', () => {
 			reuseEntries.push({ uploadId: decision.uploadId, metadata });
 		}
 
-		// Spy on D1 batch calls. The commit-batch handler prefetches facts for the
-		// whole message (2 D1 batches), each entry's probe reads from memory (0
-		// per-entry D1 batches), and the shared materialise flush settles all entries
-		// in one charge batch (1 D1 batch). Total: 3 batch calls regardless of the
-		// number of entries.
+		// The handler performs two prefetch batches for the whole message and one
+		// charge batch for the shared flush. Each entry must use the prefetched facts
+		// instead of adding its own D1 probe.
 		const batches = vi.spyOn(env.CUPBOARD_DB, 'batch');
 
 		try {
@@ -302,15 +290,9 @@ describe('batched commit settles', () => {
 		}
 	});
 
-	it('both entries of a batch sharing one narHash settle when quota fits exactly one blob charge', async () => {
+	it('settles both entries sharing one NAR when the quota allows one blob charge', async () => {
 		const nar = await verifiableNar('shared-hash-quota');
 
-		// Commit the first path so the tenant owns the blob with bytes = fileSize.
-		// Quota is then set to exactly fileSize, leaving no headroom for a second
-		// charge. Paths B and C negotiate as reuse commits (the tenantBlob row
-		// already exists), so the batch's prefetch reads isOwned=true for both and
-		// the materialise flush skips the byte credit, so both settle with no
-		// over-quota event.
 		await provisionFixtureTenant({ quotaBytes: nar.narBytes.byteLength });
 		const token = await initialise();
 
@@ -341,8 +323,6 @@ describe('batched commit settles', () => {
 
 		await commitPath(token, pathA, nar);
 
-		// B and C negotiate as reuse commits: the tenant already owns the blob, so
-		// findReusableBlobs returns it for both.
 		const decisionB = expectSingleCommitDecision(
 			await negotiateUploads(token, [pathB]),
 			pathB
@@ -397,8 +377,6 @@ describe('batched commit settles', () => {
 			throw new Error('the batch needs a seed path');
 		}
 
-		// The seed commits the blob outside the run root, so every rooted path
-		// negotiates a reuse commit and its attach settles through the flush.
 		await commitPath(token, seed, nar);
 
 		const negotiated = await authorisedFetch(
@@ -419,7 +397,6 @@ describe('batched commit settles', () => {
 			.parse(await negotiated.json())
 			.uploads.map((decision) => uploadCommitDecisionSchema.parse(decision));
 
-		// Two batch messages over one session, so the attaches span two flushes.
 		const session = await openCommitSession(token);
 		const frames: string[] = [];
 

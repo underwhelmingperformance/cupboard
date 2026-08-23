@@ -1,27 +1,24 @@
 import { NixNetrcSyntaxError } from './nix-store.ts';
 
-/**
-HTTP Basic credentials selected from a netrc entry.
-*/
 export interface NetrcCredential {
 	readonly login: string;
 	readonly password: string;
 }
 
 /**
- * Selects credentials for a host from a netrc, or returns `undefined` when no
- * entry matches.
+ * Selects HTTP Basic credentials for a host using libcurl-compatible netrc
+ * parsing. Returns `undefined` when no usable entry matches.
  *
  * Nix hands the file to libcurl rather than reading it itself, so what a netrc
- * means is what libcurl makes of it: whitespace-separated tokens, a line whose
- * first non-blank character is `#` dropped whole, and `machine`, `default`,
- * `login`, `password` and `macdef` recognised whatever their case. Tokens run
- * on across lines, so an entry is a run of tokens rather than a run of lines.
+ * means is what libcurl makes of it: tokens separated by spaces, tabs and line
+ * breaks; a line whose first non-blank character is `#` dropped whole; and
+ * `machine`, `default`, `login`, `password` and `macdef` recognised whatever
+ * their case. Entries can continue across lines.
  *
- * The first matching `machine` or `default` entry wins, so an early `default`
- * shadows later machine entries. An entry with a login but no password uses an
- * empty password, and one with a password but no login uses that
- * password under an empty login.
+ * A complete early `default` entry shadows later machine entries. When another
+ * machine begins, a matching entry with only a login is skipped. At the end of
+ * the file, either credential field is accepted and the missing field becomes
+ * an empty string.
  */
 export function netrcCredentialFor(
 	source: string,
@@ -41,8 +38,8 @@ export function netrcCredentialFor(
 		}
 
 		if (state === 'macdef') {
-			// Every token of a macro's body is passed over, up to the blank line
-			// that ends the definition.
+			// A macdef body ends at the next blank line. Tokens inside it do not
+			// define machines or credentials.
 			state = token.endsLine && token.isBlank ? 'nothing' : 'macdef';
 			continue;
 		}
@@ -82,8 +79,9 @@ export function netrcCredentialFor(
 		} else if (isKeyword(text, 'password')) {
 			keyword = 'password';
 		} else if (isKeyword(text, 'machine')) {
-			// A password completes the matching entry. Otherwise continue scanning
-			// for a later entry with credentials.
+			// When another machine begins, return the current matching entry only if
+			// it has a password. A login-only entry is discarded so scanning can
+			// continue.
 			if (entry.password !== undefined) {
 				return finish(entry);
 			}
@@ -102,15 +100,11 @@ export function netrcCredentialFor(
 	}
 }
 
-/**
-Credentials parsed from the current entry before defaults are applied.
-*/
 interface PartialCredential {
 	readonly login?: string;
 	readonly password?: string;
 }
 
-// A matched entry is usable when it specifies either credential field.
 function finish(entry: PartialCredential): NetrcCredential | undefined {
 	if (entry.login === undefined && entry.password === undefined) {
 		return;
@@ -119,33 +113,25 @@ function finish(entry: PartialCredential): NetrcCredential | undefined {
 	return { login: entry.login ?? '', password: entry.password ?? '' };
 }
 
-/**
-Where the reader is between the `machine` line and the credentials.
-*/
 type LookupState = 'nothing' | 'host-found' | 'host-valid' | 'macdef';
 
-/**
-Which half of a credential the next token supplies.
-*/
 type Keyword = 'none' | 'login' | 'password';
 
-// The keywords are matched whatever their case, as libcurl compares them.
 function isKeyword(token: string, keyword: string): boolean {
 	return token.toLowerCase() === keyword;
 }
 
 /**
- * The host format used by netrc. URLs enclose IPv6 addresses in brackets;
- * netrc entries do not.
+ * Removes the brackets that URLs place around IPv6 hosts before matching a
+ * netrc machine, where IPv6 addresses are unbracketed.
  */
 function withoutBrackets(host: string): string {
 	return host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
 }
 
 /**
- * The file with its comments gone. A line is a comment when its first non-blank
- * character is `#`, which is the whole of the comment syntax: a `#` anywhere
- * else is an ordinary character of the token it sits in.
+ * A `#` starts a comment only when it is the first non-blank character on a
+ * line. Anywhere else, it is an ordinary character in a token.
  */
 function withoutCommentLines(source: string): string {
 	return source
@@ -154,20 +140,14 @@ function withoutCommentLines(source: string): string {
 		.join('\n');
 }
 
-/**
-One token, or the end of a line with no token on it.
-*/
 type NetrcToken =
 	| { readonly endsLine: true; readonly isBlank: boolean }
 	| { readonly endsLine: false; readonly text: string };
 
-// The characters that separate one token from the next. libcurl skips only
-// these two between tokens.
+// Use only spaces and tabs as separators. libcurl rejects other control
+// characters instead of treating them as whitespace.
 const blanks = new Set([' ', '\t']);
 
-/**
-Reads a netrc's tokens in order, raising over a line it cannot read.
-*/
 class NetrcReader {
 	private at = 0;
 	private lineHasToken = false;
@@ -181,10 +161,9 @@ class NetrcReader {
 	}
 
 	/**
-	 * A token that runs to the next character a token cannot contain: every
-	 * character above a space belongs to the token. A carriage return is not
-	 * above a space, so it ends the token. The next read then finds a character
-	 * that cannot start a token and raises {@link NixNetrcSyntaxError}.
+	 * libcurl accepts every character above ASCII space in an unquoted token.
+	 * Other control characters are syntax errors rather than separators. A
+	 * carriage return therefore ends the token and makes the next read fail.
 	 */
 	private plainToken(): string {
 		const start = this.at;
@@ -209,7 +188,6 @@ class NetrcReader {
 	 * literally.
 	 */
 	private quotedToken(): string {
-		// The opening quote is not part of the value.
 		this.at += 1;
 
 		let text = '';
@@ -243,9 +221,6 @@ class NetrcReader {
 		}
 	}
 
-	/**
-	The next token, or `undefined` at the end of the file.
-	*/
 	next(): NetrcToken | undefined {
 		this.passBlanks();
 

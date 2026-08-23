@@ -45,7 +45,7 @@ const insertUnsignedNarInfo =
 	"INSERT INTO narinfo (store_path_hash, store_path, nar_hash, nar_size, file_hash, file_size, compression, references_json, created_at) VALUES (?, ?, 'sha256:nar', 10, 'sha256:file', 20, 'zstd', '[]', '2026-01-01T00:00:00.000Z')";
 
 describe('migrations', () => {
-	it('carries a pre-0007 narinfo through the 0007 and 0008 recreates', async () => {
+	it('preserves a pre-0007 narinfo through the 0007 and 0008 table recreations', async () => {
 		const server = testServerFor('migration-recreates');
 		const signedHash = 'a'.repeat(32);
 		const unsignedHash = 'b'.repeat(32);
@@ -234,7 +234,7 @@ describe('migrations', () => {
 		});
 	});
 
-	it('carries a pre-decision pending upload through the grace-decision column', async () => {
+	it('adds a null grace decision to a pending upload created before 0029', async () => {
 		const decision = await runInDurableObject(
 			testServerFor('migration-grace-decision'),
 			async (_instance, state) => {
@@ -262,7 +262,7 @@ describe('migrations', () => {
 		expect(decision).toStrictEqual([{ id: 'u1', hasDecision: false }]);
 	});
 
-	it('carries a pre-0033 pending upload through the attach-root column add', async () => {
+	it('adds a null attach root to a pending upload created before 0033', async () => {
 		const insertPreAttachPendingUpload =
 			"INSERT INTO pending_upload (id, cache, nar_hash, r2_key, metadata_json, created_at, expires_at) VALUES ('u1', '', 'sha256:nar', 'staging/p/u1', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:15:00.000Z')";
 		const selectAttachRootNames =
@@ -292,7 +292,7 @@ describe('migrations', () => {
 		expect(migrated).toStrictEqual([{ id: 'u1', hasAttachRoot: false }]);
 	});
 
-	it('carries a pre-0034 scan through the collect phase rename', async () => {
+	it('migrates a pre-0034 sweep scan to the collect phase', async () => {
 		const insertCollectingScan =
 			"INSERT INTO garbage_collection_scan (cache, revision, phase, cursor, reference_cursor, allow_empty_sweep) VALUES ('builds', 7, 'sweep', 'aa', -1, 1)";
 		const selectScans =

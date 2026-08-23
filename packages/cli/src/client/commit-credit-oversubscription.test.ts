@@ -21,8 +21,6 @@ const storePathHash = storePathHashSchema.parse(
 const narHash = nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`);
 const path = '/cache/_default/commit';
 
-// A socket that hands what the client sends to the server standing behind it,
-// rather than only recording it.
 class ServerDrivenSocket extends FakeCommitSocket {
 	constructor(private readonly deliver: (text: string) => void) {
 		super();
@@ -41,11 +39,10 @@ interface FakeServerSession {
 }
 
 /**
- * A commit server that enforces credit the way the real one does: a tenant-wide
- * budget, an opening grant of whatever is free, a debit per entry admitted, and
- * a release per entry answered that is handed straight to the next session
- * waiting in the rotation. It settles every entry it admits, so the only thing
- * a publication can be held up by here is capacity.
+ * Models the tenant-wide credit invariant. Admission consumes credit, the first
+ * response returns it, and waiting sessions receive returned credit in
+ * rotation. Every admitted entry settles, which isolates capacity as the only
+ * possible source of delay.
  */
 class CreditServerFake {
 	private available: number;
@@ -62,8 +59,9 @@ class CreditServerFake {
 			credit: 0,
 			demand: 0
 		};
-		// Half of what is free, as the real server grants it: the opening grant is
-		// speculative, so it may not take a pool the session has not asked for.
+		// Grant half the free capacity, matching the server. The upgrade precedes a
+		// demand declaration, so the speculative grant must leave capacity for other
+		// sessions.
 		const grant = Math.floor(this.available / 2);
 		this.available -= grant;
 		session.credit = grant;
@@ -140,8 +138,6 @@ class CreditServerFake {
 		}
 	}
 
-	// Hands free credit to the waiting sessions a quantum at a time, in rotation
-	// order. Returns whether `observed` was among those granted.
 	private grantWaiting(observed?: FakeServerSession): boolean {
 		let isGrantedObserved = false;
 
@@ -185,10 +181,9 @@ function targetsFor(
 	}));
 }
 
-// Every publication runs the real client against a server whose budget cannot
-// cover even one of them, let alone all of them at once. None of them may fail:
-// capacity is the server's business to pace, and a client that is paced simply
-// takes longer.
+// Each publication requests six credits from a server with a four-credit
+// tenant budget. Successful completion proves that clients wait for server
+// pacing instead of treating insufficient opening credit as a failure.
 describe('publications that oversubscribe the server budget', () => {
 	it('settles every path of every publication over one upgrade each', async () => {
 		const publications = 5;
@@ -231,10 +226,7 @@ describe('publications that oversubscribe the server budget', () => {
 			publications: settled.length,
 			statuses: [...new Set(settled.flat())],
 			settledPaths: settled.flat().length,
-			// One upgrade per publication: waiting happened on open sockets, and no
-			// client re-dialled because it was told to wait.
 			upgrades: server.upgrades,
-			// The budget really was exhausted, so the run proves what it claims to.
 			wasSaturated: server.queuedFrames > 0
 		}).toStrictEqual({
 			publications,

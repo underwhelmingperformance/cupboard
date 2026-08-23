@@ -75,9 +75,6 @@ export class AttestationCasService {
 		digest: Sha256HexDigest,
 		size: number
 	): Promise<boolean> {
-		// Read the usage counters and this digest's presence together; the presence
-		// read has no side effect, so it is safe to take eagerly even when the
-		// usage row settles the answer first.
 		const usageFilter = eq(d1Schema.tenantUsage.tenant, tenant);
 		const [usageRows, ownedRows] = await this.context.d1.batch([
 			this.context.d1
@@ -239,9 +236,6 @@ export class AttestationCasService {
 		return 'referenced';
 	}
 
-	// The pure quota decision for charging `size` new bytes: a caller that has read
-	// the tenant's usage counters and this digest's presence (a present digest is
-	// already charged, so it never re-charges) evaluates it without a further read.
 	overQuotaForCharge(
 		usage:
 			| {
@@ -281,13 +275,10 @@ export class AttestationCasService {
 		const tenant = this.context.requireTenant();
 		const now = isoTimestamp(new Date());
 
-		// On the reaper demote path, fence every destructive step on the shared object
-		// generation the reaper observed gone. A re-promote bumps cas_object.storedAt,
-		// so a row carrying a different one means the object is live again and its
-		// reference, presence and quota must all stand together; a row gone (or still
-		// carrying the observed value) lets the demote proceed. A direct removal passes
-		// no fence. Fencing the edge delete keeps it consistent with the credit: a
-		// re-promoted reference is neither stripped nor its charge credited away.
+		// The reaper observed a particular object generation before it found the
+		// object missing. If another request promotes the object again, every delete
+		// and quota credit below must fail its storedAt fence so the new generation
+		// keeps its reference and charge. Direct removal does not use this fence.
 		const repromotedFilter =
 			fenceStoredAt === undefined
 				? undefined
@@ -315,10 +306,9 @@ export class AttestationCasService {
 		);
 		const presenceFilter = this.presenceFilter(tenant, reference.digest);
 
-		// Delete the edge, then read whether the digest is still referenced and its
-		// presence size, in one batch: its statements run sequentially in a
-		// transaction, so the reads see the post-delete state, and the eager presence
-		// read is discarded when the digest is still referenced.
+		// D1 executes a batch sequentially in one transaction. These reads must see
+		// the state after the edge deletion so only the last reference releases the
+		// tenant's charge.
 		const [, stillReferencedRows, presenceRows] = await this.context.d1.batch([
 			this.context.d1
 				.delete(d1Schema.attestationReference)

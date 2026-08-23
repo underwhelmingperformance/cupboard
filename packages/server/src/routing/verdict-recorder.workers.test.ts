@@ -25,8 +25,8 @@ describe('VerdictRecorder', () => {
 			});
 		});
 
-		// The first add starts a flush with just itself; the two landing while
-		// that RPC is in flight coalesce into one successor.
+		// The first verdict starts a flush. The next two arrive while its RPC is in
+		// flight and must share one subsequent flush.
 		recorder.add(verdict('a'));
 		recorder.add(verdict('b'));
 		recorder.add(verdict('c'));
@@ -70,8 +70,8 @@ describe('VerdictRecorder', () => {
 
 		const applied = await recorder.finishRecording();
 
-		// The failed attempt retries in place with the same batch, so the pass's
-		// decode is not wasted on a transient blip.
+		// Retry the same batch so a transient recording failure does not require
+		// decoding those uploads again.
 		expect({ applied, batches }).toStrictEqual({
 			applied: 1,
 			batches: [[verdict('a')], [verdict('a')]]
@@ -98,7 +98,7 @@ describe('VerdictRecorder', () => {
 		]);
 	});
 
-	it('settles to zero with nothing recorded', async () => {
+	it('returns zero when no verdict was recorded', async () => {
 		const recorder = new VerdictRecorder(rootLogger(), () =>
 			Promise.resolve(0)
 		);

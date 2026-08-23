@@ -104,7 +104,7 @@ describe('computeDurableObjectMigration', () => {
 			expected: { new_tag: 'v1', new_sqlite_classes: ['CupboardServer'] }
 		},
 		{
-			name: 'redeploy at the latest tag sends nothing',
+			name: 'redeploy at the latest tag omits the migration payload',
 			deployedTag: 'v1',
 			expected: undefined
 		}

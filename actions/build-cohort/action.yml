@@ -9,7 +9,7 @@ inputs:
     description: This job's entry from the plan cohort-matrix.
     required: true
   url:
-    description: cupboard Worker URL.
+    description: Cupboard Worker URL.
     required: true
   cupboard-path:
     description: Path to the cupboard binary installed by actions/setup.
@@ -91,7 +91,8 @@ inputs:
     required: false
   reference-paths-file:
     description: >-
-      Where to write paths the tenant already holds, publishable by reference.
+      Where to write paths the destination already serves and can publish by
+      reference.
     required: false
   left-upstream-file:
     description: >-

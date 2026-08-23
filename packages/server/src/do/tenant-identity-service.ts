@@ -15,9 +15,6 @@ import type { ServerContext } from './context.ts';
 
 const identityId = 'singleton';
 
-// The identity the control plane assigns a tenant Durable Object: the slug it
-// serves, the issuer and audience it pins into issued tokens, the owner OIDC triple
-// its admin rule is seeded from, and the monotonic config version that fences it.
 export interface TenantIdentity {
 	readonly tenant: TenantId;
 	readonly issuer: OidcIssuer;
@@ -28,9 +25,6 @@ export interface TenantIdentity {
 	readonly configVersion: number;
 }
 
-// Owns the Durable Object's single `tenant_identity` row. A configured tenant reads
-// its identity from here; the `configure` RPC writes it under the config-version
-// fence.
 export class TenantIdentityService {
 	constructor(private readonly context: ServerContext) {}
 
@@ -56,9 +50,9 @@ export class TenantIdentityService {
 		};
 	}
 
-	// Applies an identity when its config version is newer than the applied one,
-	// returning whether it was applied. A version no greater is ignored, so a stale
-	// or replayed dispatch never downgrades identity (the monotonic fence).
+	// An equal or older `configVersion` changes nothing, so a replay cannot restore
+	// stale identity fields or owner access. A true result tells the caller to
+	// reseed the reserved owner rule from the new identity.
 	configure(identity: TenantIdentity): boolean {
 		const existing = this.current();
 

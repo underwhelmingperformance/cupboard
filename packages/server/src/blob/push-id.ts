@@ -1,15 +1,11 @@
-// A push id is a random nonce followed by the HMAC of that nonce, both hex. The
-// server issues it when it hands out a push's upload credential and verifies it
-// again on negotiate, so a client cannot present a push id the server never
-// signed, and the server keeps no per-push state to check it against. The domain
-// prefix versions the construction so a future scheme can be told apart.
+// A push ID is a 16-byte random nonce followed by a full HMAC-SHA256 tag, both
+// encoded as hexadecimal. The server can verify the ID during negotiation
+// without storing per-push state. The domain string prevents the same key from
+// authenticating another protocol; changing it invalidates existing push IDs.
 
 import { type PushId, pushIdSchema } from '@cupboard/protocol/upload';
 import { z } from 'zod';
 
-// The HMAC secret the server signs and checks push ids with, read from the
-// PUSH_ID_SIGNING_KEY binding. Branded so a bare string can never stand in for
-// the signing key at a call that expects it.
 export const pushIdSigningKeySchema = z.string().brand('PushIdSigningKey');
 export type PushIdSigningKey = z.infer<typeof pushIdSigningKeySchema>;
 
@@ -61,8 +57,8 @@ function isConstantTimeEqual(a: string, b: string): boolean {
 }
 
 /**
- * Signs a push id from a caller-supplied nonce. The nonce is a parameter so the
- * issuing service can supply fresh randomness while tests stay deterministic.
+ * Signs a caller-supplied 16-byte nonce. Callers must provide exactly 16 bytes
+ * because verification rejects every other push ID length.
  */
 export async function issuePushId(
 	secret: PushIdSigningKey,
@@ -75,9 +71,6 @@ export async function issuePushId(
 	);
 }
 
-/**
-Signs a push id over a fresh random nonce.
-*/
 export async function createPushId(secret: PushIdSigningKey): Promise<PushId> {
 	return issuePushId(
 		secret,
@@ -85,9 +78,6 @@ export async function createPushId(secret: PushIdSigningKey): Promise<PushId> {
 	);
 }
 
-/**
-Whether the push id carries a tag this secret would have produced.
-*/
 export async function isPushIdValid(
 	secret: PushIdSigningKey,
 	pushId: string

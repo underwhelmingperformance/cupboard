@@ -50,20 +50,12 @@ import {
 	type ReferenceFetchDependencies
 } from '../push/reference.ts';
 
-/**
-A local Sigstore DSSE bundle file whose subjects name store paths.
-*/
 export interface AttestationBundleSource {
 	readonly path: string;
 }
 
 export type ReadAttestationBundle = (path: string) => Promise<Uint8Array>;
 
-/**
- * The client surface an attestation attachment consumes: the contract-backed
- * negotiate and attach conversations, plus the staging upload the bundle
- * bytes stream through under the push credential.
- */
 export interface AttestationAttachClient {
 	negotiateAttestations(
 		body: Omit<AttestationNegotiateRequest, 'pushId'>
@@ -72,9 +64,6 @@ export interface AttestationAttachClient {
 	attachAttestation(uploadId: string): Promise<AttestationAttachResponse>;
 }
 
-// The push client's attestation conversation is optional, for a minimal client
-// that never attaches. A client that does attach needs all three operations, so
-// a missing one is refused with a typed error.
 export function requireAttestationAttachClient(client: {
 	negotiateAttestations?: AttestationAttachClient['negotiateAttestations'];
 	attachAttestation?: AttestationAttachClient['attachAttestation'];
@@ -98,10 +87,9 @@ export function requireAttestationAttachClient(client: {
 }
 
 /**
- * A skip decision whose committed NAR differs from the local path's: the two
- * sides realised the same store path with different bytes, so the build is
- * not reproducible. The cache keeps its copy, and an attestation over the
- * local bytes can never attach to it.
+ * A skip decision can reveal that the local path and the committed path have
+ * different NAR hashes. An attestation for the local bytes cannot be attached
+ * to the cache's copy of that store path.
  */
 export interface DivergentSkip {
 	readonly storePath: StorePathString;
@@ -121,9 +109,6 @@ export interface PrepareAttestationBundlesOptions {
 	readonly divergent: ReadonlyMap<StorePathHash, DivergentSkip>;
 }
 
-/**
-The committed path identity needed to match a bundle subject.
-*/
 export interface AttestationPathInfo {
 	readonly storePath: StorePathString;
 	readonly narHash: NixSha256Hash;
@@ -134,7 +119,6 @@ interface AttestationSubject {
 	readonly sha256: Sha256HexDigest;
 }
 
-// Cache reads and bundle uploads share the same bounded fan-out.
 const bundleConcurrency = 6;
 
 export interface CommittedAttestationSource {
@@ -145,8 +129,11 @@ export interface CommittedAttestationSource {
 }
 
 /**
-Read the bundle-matching identities from the destination's live narinfos.
-*/
+ * Reads the path identities from the destination's live narinfos. A path that
+ * is absent during this initial read fails the command. The standalone attach
+ * command reports an unservable outcome only for a later `NOT_FOUND` response
+ * from the attachment request.
+ */
 export async function readCommittedAttestationPathInfos(
 	paths: readonly StorePathString[],
 	source: CommittedAttestationSource,
@@ -182,10 +169,10 @@ export async function readCommittedAttestationPathInfos(
 }
 
 /**
- * Reads and parses the bundle sources, matching each bundle's in-toto subject
- * names and digests against the given store paths and NAR hashes. A bundle
- * whose subjects match no path refuses, as does one describing a path whose
- * cached NAR diverges from the local bytes; duplicate (path, bundle) pairs
+ * Matches every in-toto subject in each bundle against the selected store
+ * paths and NAR hashes. If any subject is outside that set, the whole bundle is
+ * rejected before upload. A bundle is also rejected when the destination has
+ * different bytes for one of its subjects. Duplicate path and bundle pairs
  * collapse to one entry.
  */
 export async function prepareAttestationBundles(
@@ -280,18 +267,14 @@ function recordPreparedBundle(
 export interface AttestationAttachmentOptions {
 	readonly client: AttestationAttachClient;
 	/**
-	 * Tolerate a per-path attach refusal: the server answers `NOT_FOUND` when
-	 * no committed narinfo row backs the path, so with this set such a path
-	 * becomes an `unservable` outcome and the rest of the bundles attach. A
-	 * push leaves it unset: it just committed every path it attests, so the
-	 * refusal there is a fault worth failing on.
+	 * Treats `NOT_FOUND` during attachment as an `unservable` outcome and
+	 * continues with the other bundles. The server uses this response when the
+	 * committed path disappears or the pending attachment is missing or expired.
+	 * A push leaves this unset because it has just committed every path it attests.
 	 */
 	readonly skipUnservable?: boolean;
 }
 
-/**
-One bundle's terminal state in the attachment conversation.
-*/
 export interface AttestationBundleOutcome {
 	readonly storePathHash: StorePathHash;
 	readonly digest: string;
@@ -299,18 +282,9 @@ export interface AttestationBundleOutcome {
 }
 
 export interface AttestationAttachOutcome {
-	/**
-	Bundles uploaded and attached.
-	*/
 	readonly attached: number;
-	/**
-	Bundles the cache already held for their paths.
-	*/
 	readonly reused: number;
 	readonly uploadedBytes: number;
-	/**
-	Paths whose attach the server refused for want of a committed copy.
-	*/
 	readonly unservableStorePathHashes: ReadonlySet<StorePathHash>;
 	readonly bundles: readonly AttestationBundleOutcome[];
 }
@@ -326,8 +300,8 @@ function attestationBundleIdentityKey(
 	return `${identity.storePathHash}\0${identity.digest}`;
 }
 
-// The response is a protocol answer, not a best-effort list: every requested
-// bundle must have one decision, and no decision may name anything else.
+// Negotiation must return exactly one decision for every requested bundle.
+// Missing, duplicate, and unexpected identities are protocol failures.
 function exactAttestationDecisions(
 	requested: readonly AttestationBundleIdentity[],
 	decisions: readonly AttestationDecision[]
@@ -397,19 +371,12 @@ function requireMatchingAttachResponse(
 	);
 }
 
-// Whether an attach was refused because nothing committed backs it: the
-// pending row's path has no committed narinfo, or the row itself lapsed
-// before the attach ran. Both answer `NOT_FOUND`.
+// The server returns `NOT_FOUND` when the committed path disappears or the
+// pending attachment is missing or expired before this request.
 function isUnservablePathAttachError(error: unknown): boolean {
 	return error instanceof ORPCError && error.code === 'NOT_FOUND';
 }
 
-/**
- * Drives prepared bundles through the attestation conversation: negotiate
- * decides per bundle whether to upload or skip, the bundle bytes stream to
- * their staging keys, and attach verifies and references each staged bundle,
- * reporting each stage through the given step log.
- */
 export async function runAttestationAttachment(
 	prepared: readonly PreparedAttestationBundle[],
 	log: StepLog,
@@ -439,9 +406,8 @@ export async function runAttestationAttachment(
 	await mapWithConcurrency(toUpload, bundleConcurrency, async (decision) => {
 		const bundle = findAttestationBundle(prepared, decision);
 
-		// The bundle streams to its staging key under the push prefix with
-		// the same credential the NARs use, so there is no separate upload
-		// path.
+		// Attestation bytes use the same staging uploader and push credential as
+		// NARs. The negotiated `r2Key` selects the attestation staging object.
 		await options.client.uploadNar(decision.r2Key, byteStream([bundle.bytes]));
 
 		uploadedBytes += bundle.bytes.byteLength;
@@ -452,9 +418,6 @@ export async function runAttestationAttachment(
 	const attachStep = log.group('attach');
 	let attached = 0;
 	const unservableStorePathHashes = new Set<StorePathHash>();
-	// A decision identifies its bundle with plain strings from the wire, while
-	// the prepared bundle holds the branded pair, so each outcome is recorded
-	// from the matched prepared bundle.
 	const bundles: AttestationBundleOutcome[] = decisions
 		.filter((decision) => isAttestationSkip(decision))
 		.flatMap((decision) => {
@@ -527,21 +490,16 @@ export async function runAttestationAttachment(
 
 export interface AttestAttachDependencies {
 	readonly client: AttestationAttachClient;
-	/**
-	Live committed path identities read from the destination cache.
-	*/
 	readonly pathInfos: readonly AttestationPathInfo[];
 	readonly attestations: readonly AttestationBundleSource[];
 	readonly readAttestationBundle?: ReadAttestationBundle;
 }
 
 /**
- * Attaches attestation bundles to already-published store paths: the named
- * paths' NAR hashes come from the destination's committed narinfos, each
- * bundle's subjects match against them, and the bundles drive through the
- * conversation. A path the cache does not serve is a typed `unservable`
- * outcome in the summary, never a run failure: the rest of the bundles still
- * attach.
+ * Attaches bundles after their subjects have been matched against live
+ * destination narinfos. If the server returns `NOT_FOUND` during attachment,
+ * the summary reports the path as unservable and continues with the other
+ * bundles.
  */
 export async function runAttestAttach(
 	paths: readonly string[],
@@ -570,7 +528,9 @@ export async function runAttestAttach(
 				readBundle,
 				divergent: new Map()
 			});
-			readStep.success(`${formatCount(bundles.length)} bundle(s)`);
+			readStep.success(
+				`${formatCount(bundles.length)} ${bundles.length === 1 ? 'bundle' : 'bundles'}`
+			);
 
 			return {
 				prepared: bundles,
@@ -594,7 +554,7 @@ export async function runAttestAttach(
 
 		reporter.warn(
 			'unservable',
-			`${path.storePath === undefined ? path.storePathHash : StorePath.basename(path.storePath)}: the cache serves no committed copy of this path; attachment not recorded`
+			`${path.storePath === undefined ? path.storePathHash : StorePath.basename(path.storePath)}: the committed path disappeared or the pending attachment was no longer available; attachment not recorded`
 		);
 	}
 
@@ -605,9 +565,8 @@ export async function runAttestAttach(
 		uploadedBytes: outcome.uploadedBytes,
 		paths: summaryPaths
 	};
-	// The summary is locally assembled, but a non-conforming server can
-	// contribute a value the schema refuses; the report must still render, so
-	// a validation failure downgrades to the unvalidated shape.
+	// A result-schema failure must not hide the attachment outcome from the
+	// reporter, so reporting falls back to the unvalidated summary.
 	const validated = attestationAttachSummarySchema.safeParse(summary);
 
 	reporter.result({
@@ -644,16 +603,14 @@ function attachPathRow(outcome: AttestationAttachPath['outcome']): string {
 		}
 
 		case 'unservable': {
-			return 'not served by the cache; attachment not recorded';
+			return 'attachment no longer available; not recorded';
 		}
 	}
 }
 
-// Folds the bundle-level outcomes into one outcome per covered path, in the
-// order the bundles were prepared. An unservable refusal is path-level, so it
-// wins over any bundle result; a path with at least one freshly attached
-// bundle reads as attached, and one whose every bundle was already held reads
-// as reused.
+// Fold the bundle outcomes into one result per path, preserving preparation
+// order. Use the highest-severity outcome for each path: unservable, attached,
+// then reused.
 function attachSummaryPaths(
 	prepared: readonly PreparedAttestationBundle[],
 	outcome: AttestationAttachOutcome,
@@ -771,7 +728,7 @@ export function parseAttestationBundle(
 	if (!bundle.success) {
 		throw new AttestationBundleInvalidError(
 			path,
-			'bundle does not carry a DSSE envelope'
+			'bundle has no DSSE envelope'
 		);
 	}
 
@@ -784,7 +741,7 @@ export function parseAttestationBundle(
 	} catch {
 		throw new AttestationBundleInvalidError(
 			path,
-			'bundle DSSE payload is not JSON'
+			'DSSE envelope payload is not JSON'
 		);
 	}
 
@@ -793,7 +750,7 @@ export function parseAttestationBundle(
 	if (!statement.success) {
 		throw new AttestationBundleInvalidError(
 			path,
-			'bundle DSSE payload is not a supported in-toto statement'
+			'DSSE envelope payload is not a supported in-toto statement'
 		);
 	}
 

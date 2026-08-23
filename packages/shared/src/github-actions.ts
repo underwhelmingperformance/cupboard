@@ -11,24 +11,16 @@ export function isGithubActions(
 	return environment.GITHUB_ACTIONS === 'true';
 }
 
-/** The slice of a writable stream the emitters need; `process.stdout`,
- * `node:stream` Writables and test fakes all satisfy it. */
 export interface CommandStream {
 	write(chunk: string): unknown;
 }
 
-/** Where the workflow commands write, injectable for tests; both streams
- * default to the process's own. */
 export interface WorkflowCommandStreams {
 	readonly stdout?: CommandStream;
 	readonly stderr?: CommandStream;
 	readonly environment?: Readonly<Record<string, string | undefined>>;
 }
 
-/**
- * The emitters for one destination: annotations, plain lines and collapsible
- * groups, bound to the streams they write to.
- */
 export interface WorkflowCommands {
 	debug(message: string): void;
 	notice(message: string): void;
@@ -53,9 +45,9 @@ function escapeData(message: string): string {
 }
 
 /**
- * Builds the workflow-command emitters over the given streams. Under GitHub
- * Actions every command goes to `out` as `::level::` syntax; elsewhere the
- * plain message prints, with `error` on `err` so failures reach stderr.
+ * Writes GitHub workflow-command syntax to `stdout` when the process runs under
+ * GitHub Actions. Elsewhere it writes plain messages, using `stderr` for
+ * errors.
  */
 export function workflowCommands(
 	streams: WorkflowCommandStreams = {}

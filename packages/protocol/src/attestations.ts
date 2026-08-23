@@ -28,8 +28,6 @@ const attestationBundleRequestSchema = z.strictObject({
 	digest: sha256HexDigestSchema
 });
 
-// One negotiate carries the attestations for a store-path closure, bounded like
-// the upload negotiate it accompanies; the cap rejects only an abusive body.
 export const attestationNegotiateMaxBundles = 100_000;
 
 export const attestationNegotiateRequestSchema = z.strictObject({

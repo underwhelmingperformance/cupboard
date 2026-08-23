@@ -88,18 +88,15 @@ function toMatcherRule(summary: ParsedOidcTrustSummary): OidcTrustRule {
 	};
 }
 
-// The claims that identify which trigger a rule is for. A candidate that
-// mismatches on one of these is a rule for a different event, not the rule
-// this shape was meant to match, so it ranks behind a candidate whose
-// mismatches are all configuration.
+// Prefer a rule for the modelled trigger over a sibling rule for another
+// event. Otherwise an event mismatch can hide the configuration mismatch that
+// the operator needs to fix.
 const triggerClaims = new Set(['event_name', 'ref', 'ref_type']);
 
-// Explains why no rule matched `claims`: the repository-pinned candidates are
-// diagnosed claim by claim, mirroring the server's refusal diagnostics, and a
-// candidate whose configured claims all match must differ on its audience.
-// With several candidates (a PR rule and a branch rule, say), the rule this
-// shape was meant to match is the one whose trigger claims agree; its first
-// failing claim is the useful diagnosis, not the sibling's event mismatch.
+// Diagnose only rules that already match the repository id. Among those rules,
+// prefer the modelled trigger and then the fewest total mismatches. This follows
+// the server's disclosure boundary while avoiding a sibling rule's event
+// mismatch when a more relevant rule has configuration drift.
 function unmatchedDetail(
 	rules: readonly OidcTrustRule[],
 	claims: OidcClaims
@@ -138,13 +135,13 @@ function unmatchedDetail(
 	const mismatch = firstClaimMismatch(candidate, claims);
 
 	if (mismatch === undefined) {
-		return `rule ${candidate.id} expects audience ${candidate.audience}, a run presents ${String(claims.aud)}`;
+		return `rule ${candidate.id} expects audience ${candidate.audience}; the modelled run uses ${String(claims.aud)}`;
 	}
 
 	const presented =
 		mismatch.presented === undefined
-			? 'the run presents no such claim'
-			: `a run presents ${mismatch.presented}`;
+			? 'the modelled run has no value for this claim'
+			: `the modelled run uses ${mismatch.presented}`;
 
 	return `rule ${candidate.id} expects ${mismatch.claim} to match ${mismatch.expected}; ${presented}`;
 }
@@ -159,10 +156,9 @@ function describeAuthorizationDetail(detail: AuthorizationDetail): string {
 	return `${detail.actions.join(', ')} on cache ${detail.cache}${root}`;
 }
 
-// A rule whose claims match can still refuse a run: the exchange enforces the
-// rule's stored grants, so the grants must cover everything the run requests.
-// Each request below is built by the same helpers the CLI's commands use, so
-// this check and a real run ask for the same authority.
+// Matching claims do not grant authority by themselves. Model the quickstart's
+// requests with the same authorization helpers as the commands, then check each
+// request against the stored grants. This does not inspect a caller's flags.
 function checkTrustRule(
 	check: string,
 	rules: readonly OidcTrustRule[],
@@ -179,7 +175,7 @@ function checkTrustRule(
 		return {
 			check,
 			status: 'failed',
-			detail: `interactive rule ${matched.id} matches this workflow; workflows must use a scoped CI rule`
+			detail: `interactive rule ${matched.id} matches the modelled claims; workflows must use a scoped CI rule`
 		};
 	}
 
@@ -193,7 +189,7 @@ function checkTrustRule(
 			return {
 				check,
 				status: 'failed',
-				detail: `rule ${matched.id} matches but its grants do not permit ${describeAuthorizationDetail(refused)}; remove it and re-run setup`
+				detail: `rule ${matched.id} matches the modelled claims but does not permit ${describeAuthorizationDetail(refused)}; remove it and re-run setup`
 			};
 		}
 	}
@@ -201,9 +197,8 @@ function checkTrustRule(
 	return { check, status: 'ok' };
 }
 
-// The grace in force for one cache, mirroring the server's resolution: the
-// longest matching cache-name prefix wins, and the empty prefix matches every
-// cache as the tenant default.
+// Mirror the server's policy selection. The longest cache-name prefix wins,
+// and the empty prefix supplies the tenant default.
 function effectiveGraceSeconds(
 	policies: readonly { cachePrefix: string; graceSeconds: number }[],
 	cache: string
@@ -270,7 +265,7 @@ async function checkGracePolicy(
 			return {
 				check,
 				status: 'failed',
-				detail: `no grace policy covers the ${cacheLabel} cache: a require-grace push publishes paths nothing retains`
+				detail: `no grace policy covers the ${cacheLabel} cache; a push with require-grace would fail because no policy would retain its paths`
 			};
 		}
 
@@ -278,7 +273,7 @@ async function checkGracePolicy(
 			return {
 				check,
 				status: 'failed',
-				detail: `the ${String(graceSeconds)}s grace in force for the ${cacheLabel} cache is under ${String(minimumGraceSeconds)}s and risks expiring mid-run`
+				detail: `the ${cacheLabel} cache has ${String(graceSeconds)}s of grace; GitHub publication requires at least ${String(minimumGraceSeconds)}s`
 			};
 		}
 	}
@@ -334,17 +329,17 @@ async function checkReuseView(
 		return {
 			check,
 			status: 'failed',
-			detail: `the ${pullRequestViewName} view does not answer nix-cache-info`
+			detail: `could not read nix-cache-info from the ${pullRequestViewName} view`
 		};
 	}
 
-	// A substituter can only serve paths from the store it advertises, so a view
-	// on a different store directory answers nothing the destination could use.
+	// Nix only uses a substituter for paths in its advertised store directory. A
+	// view for another store therefore cannot provide paths for this destination.
 	if (view.storeDirectory !== destination.storeDirectory) {
 		return {
 			check,
 			status: 'failed',
-			detail: `view serves store ${view.storeDirectory}, not the destination's ${destination.storeDirectory}`
+			detail: `view advertises store directory ${view.storeDirectory}; the destination advertises ${destination.storeDirectory}`
 		};
 	}
 
@@ -359,8 +354,8 @@ async function checkReuseView(
 	return { check, status: 'ok' };
 }
 
-// The branch rule's root grant is a prefix; the caller's root-prefix must sit
-// beneath it or every root write of a run is refused.
+// The branch rule grants a root prefix. Every root that the caller writes must
+// remain below that prefix.
 function checkRootPrefix(
 	options: GithubCheckOptions,
 	identity: RepositoryIdentity
@@ -371,7 +366,8 @@ function checkRootPrefix(
 		return {
 			check,
 			status: 'unverified',
-			detail: 'no --root-prefix given; pass the caller workflow’s value'
+			detail:
+				"no --root-prefix given; pass the value from the caller's workflow"
 		};
 	}
 
@@ -402,12 +398,13 @@ export async function runGithubCheck(
 		dependencies.signal === undefined ? {} : { signal: dependencies.signal };
 	const workflowReference = parseExactWorkflowReference(options.workflowRef);
 
-	await reporter.phase('Verifying workflow reference', () =>
+	await reporter.phase('Checking workflow reference on GitHub', () =>
 		verifyReference(workflowReference, lookupOptions)
 	);
 
-	const identity = await reporter.phase('Resolving repository', () =>
-		resolveRepository(options.repo, lookupOptions)
+	const identity = await reporter.phase(
+		'Reading repository identity from GitHub',
+		() => resolveRepository(options.repo, lookupOptions)
 	);
 	const rules = await reporter.phase('Reading trust rules', async () => {
 		const listed = await client.oidcTrust.list();
@@ -417,9 +414,9 @@ export async function runGithubCheck(
 			.map((rule) => toMatcherRule(rule));
 	});
 
-	// The authority each run genuinely requests, against the placeholder
-	// claims above: the PR run publishes to its pr-1 cache and roots under it,
-	// the branch run to the default cache under the caller's root prefix.
+	// These representative requests use the quickstart defaults. They cover a PR
+	// publication to `pr-1` and a branch publication to the default cache, but
+	// they are not evidence of the arguments that a real workflow will use.
 	const pullRequestRootPrefix = `github:${identity.fullName}/pr-1`;
 	const branchRootPrefix =
 		options.rootPrefix ?? `github:${identity.fullName}/${options.branch}`;
@@ -465,30 +462,33 @@ export async function runGithubCheck(
 		confirmAuthorizationDetails({ cacheSelector: defaultSelector })
 	];
 
-	const findings = await reporter.phase('Checking invariants', async () => [
-		checkTrustRule(
-			'pull-request trust rule',
-			rules,
-			githubPullRequestClaims(url, identity, {
-				pullRequestNumber: 1,
-				workflowReference: workflowReference.reference
-			}),
-			pullRequestRequests
-		),
-		checkTrustRule(
-			`${options.branch} trust rule`,
-			rules,
-			githubBranchClaims(url, identity, {
-				branch: options.branch,
-				eventName: 'push',
-				workflowReference: workflowReference.reference
-			}),
-			branchRequests
-		),
-		await checkGracePolicy(client),
-		await checkReuseView(url, client, dependencies.fetchCacheInfo),
-		checkRootPrefix(options, identity)
-	]);
+	const findings = await reporter.phase(
+		'Checking tenant configuration',
+		async () => [
+			checkTrustRule(
+				'pull-request trust rule',
+				rules,
+				githubPullRequestClaims(url, identity, {
+					pullRequestNumber: 1,
+					workflowReference: workflowReference.reference
+				}),
+				pullRequestRequests
+			),
+			checkTrustRule(
+				`${options.branch} trust rule`,
+				rules,
+				githubBranchClaims(url, identity, {
+					branch: options.branch,
+					eventName: 'push',
+					workflowReference: workflowReference.reference
+				}),
+				branchRequests
+			),
+			await checkGracePolicy(client),
+			await checkReuseView(url, client, dependencies.fetchCacheInfo),
+			checkRootPrefix(options, identity)
+		]
+	);
 
 	const rows: ResultRow[] = findings.map((finding) => ({
 		label: finding.check,

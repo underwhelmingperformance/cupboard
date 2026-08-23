@@ -19,8 +19,8 @@ import { NonLoopbackConnectionError } from './network-guard-error.ts';
 // The refused destinations cannot reach a real host even when the guard misses
 // them: 192.0.2.0/24 is TEST-NET-1, which is reserved for documentation and is
 // not routed, and the `.invalid` top-level domain never resolves. A missed
-// attempt still fails its assertion, because the connection then throws nothing
-// at all, or throws one of Node's own errors in place of the guard's refusal.
+// attempt still fails its assertion because the connection either returns a
+// socket or throws one of Node's own errors instead of the guard's refusal.
 const testNetAddress = '192.0.2.1';
 const unresolvableName = 'cupboard.invalid';
 
@@ -29,10 +29,6 @@ const unresolvableName = 'cupboard.invalid';
 // `any`, and naming it here keeps that out of the assertion.
 const anyRendering: unknown = expect.any(String);
 
-/**
- * The facts a refusal carries, or the value itself when it is not a refusal, so
- * that a failing assertion reports what did happen.
- */
 function guardFacts(failure: unknown): unknown {
 	if (!(failure instanceof NonLoopbackConnectionError)) {
 		return failure;
@@ -45,9 +41,6 @@ function guardFacts(failure: unknown): unknown {
 	};
 }
 
-/**
-Makes a fetch request and returns what it rejected with.
-*/
 async function fetchFailure(url: string): Promise<unknown> {
 	try {
 		await fetch(url);
@@ -58,11 +51,8 @@ async function fetchFailure(url: string): Promise<unknown> {
 	return undefined;
 }
 
-/**
- * Attempts a connection and returns what `connect` threw. A socket that the
- * guard lets through is destroyed at once, so a regressed guard leaves nothing
- * connecting in the background.
- */
+// Destroy any socket that bypasses the guard so a failed test does not leave a
+// connection open in the background.
 function connectionFailure(connect: () => net.Socket): unknown {
 	let socket: net.Socket | undefined;
 

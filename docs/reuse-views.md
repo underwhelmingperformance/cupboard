@@ -66,10 +66,9 @@ path by itself.
 
 ## Adopting pull-request builds into a branch
 
-A common shape adopts a pull request's build into `main`'s own publication. An
-administrator defines the view once, covering the per-PR caches the
-`add-github-pr` rule already routes builds to (see
-[docs/trust-rules.md](./trust-rules.md)):
+A post-merge `main` workflow can reuse outputs that CI published for the pull
+request. An administrator defines the view once so it selects the per-PR caches
+used by the `add-github-pr` rule (see [docs/trust-rules.md](./trust-rules.md)):
 
 ```bash
 cupboard reuse-view set https://cupboard.example.workers.dev/t/acme pull-requests \

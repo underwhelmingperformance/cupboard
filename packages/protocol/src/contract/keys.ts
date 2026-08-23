@@ -18,7 +18,7 @@ import {
 import { baseProcedure } from './base.ts';
 
 export const keysContract = {
-	// The narinfo signing keys Nix verifies against.
+	// Nix verifies narinfo signatures with these keys.
 	signing: {
 		list: baseProcedure
 			.meta({ requires: 'signing-key:list' })
@@ -61,7 +61,7 @@ export const keysContract = {
 			.output(keyAbortResponseSchema)
 	},
 
-	// The auth-token signing keys, rotated independently of the narinfo keys.
+	// Auth-token keys rotate independently of the narinfo keys.
 	auth: {
 		list: baseProcedure
 			.meta({ requires: 'auth-key:list' })

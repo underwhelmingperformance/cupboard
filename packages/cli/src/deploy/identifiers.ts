@@ -1,9 +1,9 @@
 import { z } from 'zod';
 
-// The Cloudflare identifiers the deploy pipeline threads between the CLI flags,
-// the wrangler config and the Cloudflare API. Each carries its own brand so an
-// account id, a script name, a database id, a KV namespace id, a zone id and a
-// queue id cannot stand in for one another at a call site. They are
+// The deploy pipeline passes Cloudflare identifiers between CLI flags, the
+// Wrangler config and the Cloudflare API. A separate brand prevents an account
+// id, script name, database id, KV namespace id, zone id or queue id from being
+// passed in place of another. These are
 // CLI-internal identifiers, so they brand their string without narrowing it
 // further.
 

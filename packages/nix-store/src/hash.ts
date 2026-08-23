@@ -18,14 +18,8 @@ import {
 const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 const sha256DigestBytes = 32;
 
-/**
-A hash algorithm supported by Nix.
-*/
 export type NixHashAlgorithm = 'md5' | 'sha1' | 'sha256' | 'sha512';
 
-/**
-A hash parsed from a Nix value.
-*/
 export interface NixHash {
 	readonly algorithm: NixHashAlgorithm;
 	readonly bytes: Uint8Array;

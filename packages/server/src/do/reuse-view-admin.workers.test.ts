@@ -254,8 +254,6 @@ describe('reuse views', () => {
 			selectors: [...definition.selectors],
 			priority: definition.priority
 		});
-		// The same definition with the selectors in a different order is the
-		// same content.
 		const reapplied = await setView(token, 'reuse', {
 			selectors: definition.selectors.toReversed(),
 			priority: definition.priority

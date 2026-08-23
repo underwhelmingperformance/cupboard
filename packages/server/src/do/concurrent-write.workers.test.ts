@@ -34,12 +34,10 @@ describe('concurrent writes', () => {
 		await putNarBytes(first.r2Key);
 		await putNarBytes(second.r2Key);
 
-		// Both commits race to the single materialisation. The loser answers by
-		// what it finds: 'committed' when it parked on the shared verdict, or
-		// 'already-present' when the winner settled before its frame was
-		// processed, exactly as a re-push of a cached path answers. Both are
-		// converged successes; the accounting below pins that only one path was
-		// materialised and charged.
+		// Only one commit materialises the path. The other can report `committed` if
+		// it waits for the shared verdict, or `already-present` if the first commit
+		// settles before the second frame is processed. Both statuses are successful;
+		// the final accounting must still contain one path and one blob charge.
 		const settled = await Promise.all([
 			commitUpload(token, first.uploadId),
 			commitUpload(token, second.uploadId)

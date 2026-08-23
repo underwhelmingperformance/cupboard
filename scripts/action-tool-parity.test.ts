@@ -221,7 +221,7 @@ describe('documentation action pins', () => {
 });
 
 describe('canonical acquisition composition', () => {
-	it('keeps the legacy setup version output beside the canonical coordinate', () => {
+	it('documents reusable acquisition JSON beside the legacy version output', () => {
 		const setupAction = readFileSync(
 			path.join(actionsDirectory, 'setup', 'action.yml'),
 			'utf8'
@@ -229,7 +229,7 @@ describe('canonical acquisition composition', () => {
 
 		expect({
 			canonical: setupAction.includes(
-				'cupboard:\n    description: Canonical release or source acquisition as validated JSON.\n    value: ${{ steps.setup.outputs.cupboard }}'
+				'cupboard:\n    description:\n      Pass this JSON to another setup invocation to acquire the same release or\n      source commit.\n    value: ${{ steps.setup.outputs.cupboard }}'
 			),
 			legacyVersion: setupAction.includes(
 				'cupboard-version:\n    description: Resolved cupboard release tag; empty for source acquisition.\n    value: ${{ steps.setup.outputs.cupboard-version }}'
@@ -244,7 +244,7 @@ describe('canonical acquisition composition', () => {
 		);
 
 		expect(pushAction).toContain(
-			'cupboard-version:\n    description: Inspected cupboard version.\n    value: ${{ steps.push.outputs.cupboard-version }}'
+			'cupboard-version:\n    description: Version reported by the cupboard executable.\n    value: ${{ steps.push.outputs.cupboard-version }}'
 		);
 	});
 

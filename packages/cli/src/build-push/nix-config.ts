@@ -1,6 +1,3 @@
-/**
-The environment shape the child composition reads and returns.
-*/
 export type ChildEnvironment = Readonly<Record<string, string | undefined>>;
 
 /**

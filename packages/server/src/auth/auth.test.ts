@@ -87,29 +87,32 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 				}
 			])
 		}
-	])('round-trips $name, preserving grants and subject', async ({ grants }) => {
-		const keyPair = await generateAuthKeyPair();
-		const token = await issueAccessJwt(
-			keyPair.privateJwk,
-			{ issuer, audience, subject, grants, kid, ttlSeconds },
-			now
-		);
+	])(
+		'verifies $name with its subject, grants, and expiry intact',
+		async ({ grants }) => {
+			const keyPair = await generateAuthKeyPair();
+			const token = await issueAccessJwt(
+				keyPair.privateJwk,
+				{ issuer, audience, subject, grants, kid, ttlSeconds },
+				now
+			);
 
-		const claims = await verifyAccessJwt(
-			keySet(keyPair.publicJwk),
-			token,
-			{ issuer, audience },
-			now
-		);
+			const claims = await verifyAccessJwt(
+				keySet(keyPair.publicJwk),
+				token,
+				{ issuer, audience },
+				now
+			);
 
-		expect(claims).toStrictEqual({
-			subject,
-			grants,
-			expiresAt: new Date(now.getTime() + ttlSeconds * 1000)
-		});
-	});
+			expect(claims).toStrictEqual({
+				subject,
+				grants,
+				expiresAt: new Date(now.getTime() + ttlSeconds * 1000)
+			});
+		}
+	);
 
-	it('preserves audit claims alongside the grants', async () => {
+	it('accepts additional audit claims without changing the returned access claims', async () => {
 		const keyPair = await generateAuthKeyPair();
 		const token = await issueAccessJwt(
 			keyPair.privateJwk,
@@ -139,7 +142,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		});
 	});
 
-	it('selects the verification key by kid from a rotated set', async () => {
+	it('verifies a token when its signing key is one of several live keys', async () => {
 		const retired = await generateAuthKeyPair();
 		const active = await generateAuthKeyPair();
 		const token = await issueAccessJwt(

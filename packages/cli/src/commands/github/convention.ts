@@ -12,29 +12,22 @@ import {
 	WorkflowReferenceUnpinnedError
 } from '../../errors.ts';
 
-// The reuse-view name and per-PR cache prefix the quickstart uses. Setup
-// writes them and check verifies them, so the one spelling lives here.
 export const pullRequestViewName = 'pull-requests';
 export const pullRequestPrefix = 'pr-';
 
-// The grace below which the plan-to-target span of a busy run is at real
-// risk of outliving its intermediates' deadlines. Setup refuses to store
-// less and check fails a stored policy under it, so the two cannot drift.
+// Grace-managed paths can expire between planning and the final root update.
+// Keep this floor long enough for that interval.
 export const minimumGraceSeconds = 3600;
 
-// A mutable ref (a branch, a pull-request merge ref, an abbreviation)
-// follows whatever it later names, so a trust rule pinning one would trust
-// future edits to the workflow file. Setup refuses to store such a pin and
-// check refuses to verify against one. The generic oidc-trust commands keep
-// the bare-path pattern shape, which a reusable workflow's deliberately
-// ref-agnostic rule needs.
+// Branches, pull-request merge refs and abbreviated commit ids can resolve to
+// different workflow contents later. The GitHub commands therefore accept
+// only full commit ids and tag refs. Tags require a separate GitHub lookup to
+// check whether their release is reported as immutable.
 const immutableReferencePattern = /^(?:refs\/tags\/.+|[0-9a-f]{40})$/;
 const workflowPathPattern = /^\.github\/workflows\/[^/]+\.ya?ml$/;
 
 const tagReferencePrefix = 'refs/tags/';
 
-// Tag patterns admit literal tag characters with `*` wildcards that stay
-// within one path segment.
 const tagGlobCharacters = /^[A-Za-z0-9._/+*-]+$/;
 
 export type ExactWorkflowReferencePin =
@@ -153,10 +146,9 @@ function workflowReferencePin(
 }
 
 /**
- * The `job_workflow_ref` claim a parsed reference pins: the exact reference
- * for a commit or tag pin, or for a tag pattern an anchored RE2 in which the
- * owner, repository and path stay literal and only the tag part admits the
- * pattern's namespace.
+ * Returns an exact `job_workflow_ref` value for a commit or tag. A tag pattern
+ * becomes an anchored RE2 pattern. The owner, repository and workflow path
+ * remain literal, and only the tag can contain wildcards.
  */
 export function workflowReferenceClaim(parsed: WorkflowReference): ClaimMatch {
 	if (parsed.pin.kind !== 'tag-pattern') {
@@ -171,9 +163,9 @@ export function workflowReferenceClaim(parsed: WorkflowReference): ClaimMatch {
 }
 
 /**
- * Whether two workflow-reference claims can admit the same exact reference.
- * Returns `undefined` when both claims are patterns and either is not in the
- * canonical form produced by {@link workflowReferenceClaim}.
+ * Tests whether two workflow-reference matchers can accept the same exact
+ * reference. Returns `undefined` when both are patterns and either one differs
+ * from the canonical form produced by {@link workflowReferenceClaim}.
  */
 export function workflowReferenceClaimsOverlap(
 	left: ClaimMatch,
@@ -209,8 +201,8 @@ export function workflowReferenceClaimsOverlap(
 	return canTagGlobsOverlap(leftReference.pin.glob, rightReference.pin.glob);
 }
 
-// Each `*` matches within one path segment; everything else is quoted
-// literally.
+// Keep wildcards within one tag path segment. Git tag names can contain `/`,
+// but a single `*` in the command syntax must not cross it.
 function tagGlobRe2(glob: string): string {
 	return glob
 		.split('*')

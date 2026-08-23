@@ -128,8 +128,6 @@ const unavailable = () =>
 		text: () => Promise.resolve('')
 	});
 
-// A `CACHE_URL` reaches the script through `parseBaseUrl`, so the bases here
-// are built the same way, spelled both with and without a trailing slash.
 const baseUrl = parseBaseUrl(new URL('https://cupboard.example/t/acme'));
 const slashedBaseUrl = parseBaseUrl(
 	new URL('https://cupboard.example/t/acme/')
@@ -137,7 +135,7 @@ const slashedBaseUrl = parseBaseUrl(
 const baseUrls = [baseUrl, slashedBaseUrl];
 
 describe('fetchCachePublicKey', () => {
-	it.each(baseUrls)('addresses /pubkey under %s', async (base) => {
+	it.each(baseUrls)('requests /pubkey from %s', async (base) => {
 		const requests: string[] = [];
 		const fetchLike = (url: string) => {
 			requests.push(url);
@@ -163,7 +161,7 @@ describe('fetchCachePublicKey', () => {
 });
 
 describe('substituterSection', () => {
-	it.each(baseUrls)('renders the cache URL and key under %s', (base) => {
+	it.each(baseUrls)('renders the cache URL and key for %s', (base) => {
 		expect(
 			substituterSection({
 				baseUrl: base,
@@ -208,7 +206,7 @@ describe('assetContentType', () => {
 });
 
 describe('checksumTargets', () => {
-	it('keeps only archives, sorted', () => {
+	it('filters archive assets and sorts them by name', () => {
 		expect(
 			checksumTargets([
 				'checksums.txt',

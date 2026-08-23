@@ -1,23 +1,17 @@
 import { EnvHttpProxyAgent, fetch as undiciFetch } from 'undici';
 
-/**
- * Proxy values from the environment, using libcurl's variable names and
- * precedence. A field is absent when no variable configures that proxy.
- */
 export interface ProxySettings {
 	readonly httpProxy?: string;
 	readonly httpsProxy?: string;
 	readonly noProxy?: string;
 }
 
-/**
-An environment as this module reads one: variable names to their values.
-*/
 export type ProxyEnvironment = Readonly<Record<string, string | undefined>>;
 
 /**
- * The proxies the environment configures. libcurl reads `<scheme>_proxy` first
- * and falls back to `all_proxy`, taking the first non-empty value.
+ * Reads proxy settings with libcurl's variable names and precedence. For each
+ * scheme, it uses the first non-empty scheme-specific variable, then falls back
+ * to `all_proxy`.
  *
  * `http_proxy` is read in lower case alone. A CGI script runs with the request
  * headers in its environment as `HTTP_*` variables, so a request carrying a
@@ -45,8 +39,8 @@ export function proxySettingsFrom(env: ProxyEnvironment): ProxySettings {
 	};
 }
 
-// An empty value disables the proxy, which is how a variable is unset for one
-// command without being unset for the shell that ran it.
+// Treat an empty variable as unset. This leaves later fallback variables
+// available, matching libcurl.
 function firstNonEmpty(
 	env: ProxyEnvironment,
 	names: readonly string[]
@@ -69,6 +63,9 @@ function firstNonEmpty(
  * The hosts listed in `no_proxy` go direct. That list is read by the agent,
  * which accepts a leading dot, a bare domain matched on its label boundaries,
  * an optional port, and `*` for every host.
+ *
+ * The returned fetcher forwards every request option, including abort and
+ * timeout signals, and adds only the proxy dispatcher.
  */
 export function proxiedFetch(
 	env: ProxyEnvironment
@@ -79,11 +76,9 @@ export function proxiedFetch(
 		return;
 	}
 
-	// Reuse one agent and its proxy connections across requests.
-	// The agent otherwise falls back to `process.env` for every absent option.
-	// Pass an empty string for each proxy that is not configured, so an
-	// upper-case HTTP_PROXY, which is deliberately not read above, cannot come
-	// back when the agent builds its routes.
+	// EnvHttpProxyAgent reads process.env for omitted options. Pass an empty string
+	// for every unconfigured option so ignored ambient values, including
+	// HTTP_PROXY, cannot re-enter the routing decision.
 	const dispatcher = new EnvHttpProxyAgent({
 		httpProxy: proxies.httpProxy ?? '',
 		httpsProxy: proxies.httpsProxy ?? '',

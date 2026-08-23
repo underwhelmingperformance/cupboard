@@ -35,9 +35,6 @@ export type PermittedSubstituterStore = Pick<
 >;
 
 export interface UpstreamConfirmationOptions {
-	/**
-	The effective settings deciding whether Nix would substitute at all.
-	*/
 	readonly substitution: NixSubstitutionSettings;
 	readonly store: PermittedSubstituterStore;
 	/**
@@ -60,8 +57,8 @@ export function confirmUpstreamAvailabilityWith(
 ): (
 	candidate: UpstreamAvailabilityCandidate
 ) => Promise<UpstreamAvailabilityVerdict> {
-	// The trust answer is the same for every candidate this confirmation
-	// checks, so the store is asked once and the answer reused.
+	// The daemon grants trust to the connection, not to individual paths. Query
+	// it once and apply the result to every candidate checked through this store.
 	let honoured: Promise<SubstituterSettingsOutcome> | undefined;
 
 	return async (candidate) => {
@@ -118,22 +115,13 @@ export function confirmUpstreamAvailabilityWith(
 }
 
 export interface UpstreamConfirmationOverrideOptions {
-	/**
-	 * Which of the configured substituters a consumer elsewhere could also
-	 * reach. {@link isReachableElsewhere} decides for a plan; a test injects
-	 * its own so a fixture it controls can stand in for a public cache.
-	 */
 	readonly isReachable?: SubstituterReach;
 }
 
 /**
- * The overrides a confirmation's store is opened with.
- *
- * The substituter list is assigned outright, so the substituters the
- * confirmation queries are exactly the permitted ones: configured caches that
- * another consumer could reach, excluding this tenant's own cache. Positive
- * narinfo cache entries expire at once, so the daemon returns current results
- * from those substituters.
+ * The override replaces the substituter list with externally usable configured
+ * caches, excluding this tenant's endpoints. A zero positive narinfo TTL makes
+ * each confirmation request current metadata from those caches.
  *
  * A daemon honours these for a trusted client only, so
  * {@link confirmUpstreamAvailabilityWith} checks the connection's trust before
@@ -156,9 +144,8 @@ export function upstreamConfirmationOverrides(
 	};
 }
 
-// Every cupboard endpoint a runner is configured with hangs off the tenant
-// Worker URL: the destination cache nests under it by name, and so does each
-// reuse view. A substituter at or under that URL is one of cupboard's own.
+// The destination cache and every reuse view use paths beneath the tenant
+// Worker URL. Exclude the tenant URL itself and every descendant path.
 function isTenantEndpoint(substituter: string, tenantUrl: URL): boolean {
 	const parsed = URL.parse(substituter);
 
@@ -175,9 +162,8 @@ function isTenantEndpoint(substituter: string, tenantUrl: URL): boolean {
 	);
 }
 
-// `always-allow-substitutes` overrides a derivation's own setting, so no
-// derivation read is required. Plain store-path installables also have no
-// derivation option to inspect.
+// `always-allow-substitutes` overrides the derivation policy, so no derivation
+// read is required. A plain store-path installable has no derivation policy.
 async function derivationRefusal(
 	candidate: UpstreamAvailabilityCandidate,
 	options: UpstreamConfirmationOptions

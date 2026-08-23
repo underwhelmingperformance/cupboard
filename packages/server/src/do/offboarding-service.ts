@@ -45,10 +45,6 @@ export function attestationReferenceMatch(
 	);
 }
 
-/**
- * Builds the DELETE removing one chunk of presence rows by narHash.
- * Exported for the D1 parameter guard test.
- */
 export function buildTenantBlobDeleteStatement(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
@@ -64,10 +60,6 @@ export function buildTenantBlobDeleteStatement(
 		);
 }
 
-/**
- * Builds the DELETE removing one chunk of CAS presence rows by digest.
- * Exported for the D1 parameter guard test.
- */
 export function buildTenantCasBlobDeleteStatement(
 	database: DrizzleD1Database<typeof d1Schema>,
 	tenant: TenantId,
@@ -83,12 +75,9 @@ export function buildTenantCasBlobDeleteStatement(
 		);
 }
 
-// Drains a tenant being offboarded. The Durable Object is the single writer of its
-// tenant's `blob_ref`/`tenant_blob` rows, so the Worker removes them only through
-// this RPC: deleting an edge here lets the global reaper collect the now-unreferenced
-// shared blob, and the per-tenant single-writer rule is never broken by a Worker that
-// deletes edge rows directly. Each pass is bounded so a tenant with a large store
-// drains over successive cron ticks.
+// The Durable Object remains the only writer of its tenant's reference and
+// presence rows during offboarding. Each bounded pass removes rows through this
+// service, allowing the global reaper to collect unreferenced shared objects.
 export class OffboardingService {
 	constructor(private readonly context: ServerContext) {}
 
@@ -265,17 +254,13 @@ export class OffboardingService {
 		);
 	}
 
-	// Marks this tenant offboarding so the verify-restore path stops re-materialising
-	// its objects. Called when offboarding begins and again on every drain pass.
+	// Prevent verification recovery from restoring objects while offboarding.
 	begin(): void {
 		this.context.offboarding = true;
 	}
 
-	// Deletes a bounded batch of this tenant's reference edges and presence rows,
-	// reporting whether any remain so the Worker can drive the drain to completion. A
-	// Durable Object whose identity is already gone has been purged by an interrupted
-	// finalisation; it is reported drained so the Worker re-runs finalisation and the
-	// stuck tenant converges.
+	// A missing identity means an earlier finalisation already purged local state.
+	// Report it as drained so the Worker can repeat the remaining D1 finalisation.
 	async drain(limit: number): Promise<{ drained: boolean }> {
 		this.begin();
 

@@ -19,9 +19,6 @@ import { isolatedEnvironment } from '../support/nix.ts';
 import { type OfferFields, oracleOffer } from './narinfo.ts';
 import type { Oracle } from './oracle.ts';
 
-/**
-The host store directory containing the fixture paths.
-*/
 const hostStoreDirectory: StoreDirectory =
 	storeDirectorySchema.parse('/nix/store');
 
@@ -36,9 +33,6 @@ const hostStoreDirectory: StoreDirectory =
 export interface AvailabilityFixture {
 	readonly root: string;
 	readonly environment: NodeJS.ProcessEnv;
-	/**
-	The cache offering the closure, as a substituter URI.
-	*/
 	readonly cacheUri: string;
 	/**
 	 * A local store containing the same closure, referenced by path. For this
@@ -46,26 +40,11 @@ export interface AvailabilityFixture {
 	 * than from narinfo documents.
 	 */
 	readonly storeSubstituter: string;
-	/**
-	An input-addressed path, referencing {@link dependencyPath}.
-	*/
 	readonly builtPath: StorePathString;
 	readonly dependencyPath: StorePathString;
-	/**
-	A derivation in the host store whose output has no substituter offer.
-	*/
 	readonly derivationPath: StorePathString;
-	/**
-	A path absent from every store and substituter.
-	*/
 	readonly absentPath: StorePathString;
-	/**
-	The key the cache's narinfos are signed with.
-	*/
 	readonly trustedPublicKey: string;
-	/**
-	A key that did not sign any path in the cache.
-	*/
 	readonly untrustedPublicKey: string;
 }
 
@@ -140,9 +119,6 @@ async function run(
 	return result.stdout.trim();
 }
 
-/**
-Builds the closure and signs a cache containing it.
-*/
 export async function createAvailabilityFixture(
 	oracle: Oracle
 ): Promise<AvailabilityFixture> {
@@ -311,12 +287,10 @@ async function readPublicKey(filePath: string): Promise<string> {
 	return published.trim();
 }
 
-// Isolate the fixture store from configuration files on the host machine.
 function noConfigFile(): string | undefined {
 	return;
 }
 
-// A key unused by the cache, for the untrusted-signature case.
 async function generateUntrustedPublicKey(
 	oracle: Oracle,
 	root: string,
@@ -366,19 +340,10 @@ export async function createTargetStore(
 }
 
 export interface TargetStore {
-	/**
-	The store URI passed to the oracle.
-	*/
 	readonly uri: string;
-	/**
-	The state directory passed to our client.
-	*/
 	readonly stateDirectory: string;
 }
 
-/**
-The signing policy configured for both clients.
-*/
 export interface SigningPolicy {
 	readonly requireSignatures: boolean;
 	readonly trustedPublicKeys: readonly string[];
@@ -450,9 +415,6 @@ export async function offeredThroughStore(
 	};
 }
 
-/**
-Opens our client over a store with the specified substituter.
-*/
 function openClient(
 	fixture: AvailabilityFixture,
 	stateDirectory: string,
@@ -551,9 +513,6 @@ export async function offeredPaths(
 	return { oracle: sorted(offered), client: sorted(client) };
 }
 
-/**
-The work required to realise a set of targets.
-*/
 export interface RealisationPlan {
 	readonly willBuild: readonly string[];
 	readonly willFetch: readonly string[];
@@ -619,9 +578,6 @@ export function parseRealisationPlan(stderr: string): RealisationPlan {
 	};
 }
 
-/**
-The realisation plan reported by each client.
-*/
 export async function realisationPlans(
 	oracle: Oracle,
 	fixture: AvailabilityFixture,
@@ -695,9 +651,6 @@ export async function closureOutcome(
 	return { realised: realise.status === 0, verdict };
 }
 
-/**
-Copies the fixture closure into a store for the client to traverse.
-*/
 export async function fillFromCache(
 	oracle: Oracle,
 	fixture: AvailabilityFixture,

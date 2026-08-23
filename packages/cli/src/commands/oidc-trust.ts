@@ -41,7 +41,6 @@ interface GithubPrOptions {
 	readonly cacheTemplate?: string;
 	readonly rootTemplate?: string;
 	readonly jobWorkflowRef?: string;
-	// Commander's `--no-attest` leaves this `true` unless the flag is passed.
 	readonly attest?: boolean;
 }
 
@@ -51,7 +50,6 @@ interface GithubTagOptions {
 	readonly cacheTemplate?: string;
 	readonly rootTemplate?: string;
 	readonly jobWorkflowRef?: string;
-	// Commander's `--no-attest` leaves this `true` unless the flag is passed.
 	readonly attest?: boolean;
 }
 
@@ -63,9 +61,8 @@ interface GithubBranchOptions {
 	readonly attest?: boolean;
 }
 
-// Attestation is a dedicated toggle on the GitHub presets, not a grant value,
-// and it is granted by default; `--no-attest` is authoritative,
-// so it wins even if `attest` was named some other way.
+// GitHub presets grant attestation by default. The dedicated `--no-attest`
+// option overrides any `attest` entry in the general action list.
 function withAttest(
 	allow: readonly string[],
 	attest: boolean | undefined
@@ -75,9 +72,8 @@ function withAttest(
 	return attest === false ? base : [...base, 'attest'];
 }
 
-// Assemble the rule body from flags, or read it whole from a JSON file. The file
-// form is the escape hatch for grants the flags do not spell, such as admin,
-// domain, or control grants.
+// JSON input accepts the complete rule schema, including admin, domain, and
+// control grants that have no dedicated flags.
 async function addBodyFor(
 	options: OidcTrustAddOptions
 ): Promise<OidcTrustAddBody> {
@@ -145,9 +141,7 @@ interface OidcTrustAddOptions {
 }
 
 /**
- * The slice of the derived client the trust commands consume, in the
- * contract's input and output shapes; the real `tenantRpc(...).oidcTrust`
- * satisfies it by construction.
+ * The OIDC trust operations required by the command implementations.
  */
 export interface OidcTrustClient {
 	list(): Promise<ParsedOidcTrustListResponse>;
@@ -222,9 +216,8 @@ function summaryRows(summary: OidcTrustSummary): ResultRow[] {
 	];
 }
 
-// Merge the `--claim` pairs with the `--job-workflow-ref` shorthand, refusing to
-// set `job_workflow_ref` twice so a rule never depends on which flag was read
-// last.
+// Reject duplicate sources for `job_workflow_ref` instead of making command-line
+// option order determine the rule.
 export function claimsForAdd(
 	claimPairs: readonly string[],
 	jobWorkflowReference: string | undefined
@@ -263,15 +256,12 @@ function parseClaims(pairs: readonly string[]): Record<string, string> {
 	return claims;
 }
 
-// The tenant and control trust commands differ only in which client they bind
-// and which URL they take; the rule body, output shapes, and run-helpers are
-// shared, so both planes are registered from one builder.
 interface OidcTrustPlane {
 	readonly name: string;
 	readonly description: string;
 	readonly urlArgument: string;
-	// The GitHub PR preset reads provider-specific claims, so it is offered only
-	// on the tenant plane.
+	// The GitHub PR preset grants tenant cache authority and is not available on
+	// the control plane.
 	readonly githubPr: boolean;
 	readonly clientFor: (
 		url: URL,
@@ -305,11 +295,9 @@ const controlPlane: OidcTrustPlane = {
 		}).oidcTrust
 };
 
-// Assemble the per-PR rule for a GitHub repository, pinning its immutable
-// numeric ids so a rename never silently changes who is trusted. A build of pull
-// request <n> pushes to its own `pr-<n>` cache and writes the matching retention
-// root `github:<owner>/<repo>/pr-<n>/`, both keyed on the pull-request number
-// captured from the `ref` claim, so one PR cannot reach another's paths.
+// Pin immutable repository IDs and the pull-request event. The captured PR
+// number selects both `pr-<n>` and its retention root, so one PR cannot write
+// another PR's cache.
 export function githubPrAddBody(
 	url: URL,
 	identity: RepositoryIdentity,
@@ -317,20 +305,15 @@ export function githubPrAddBody(
 ): OidcTrustAddBody {
 	const cacheTemplate = options.cacheTemplate ?? 'pr-{pr}';
 
-	// Pin the pull-request event so this rule matches only PR tokens. A tenant
-	// often trusts the same repository for several events, a tagged release or a
-	// branch push, with a rule for each. Selection routes a token to a single
-	// rule by its claims, so a PR rule that pinned only the repository ids would
-	// also match a release or push token and could be chosen ahead of the rule
-	// meant for that event.
+	// Rule selection occurs before token verification and chooses one matching
+	// rule. Pin the event so a token from the same repository cannot select this
+	// rule for a branch or tag build.
 	const claims: Record<string, ClaimMatch> = {
 		repository_id: String(identity.repositoryId),
 		repository_owner_id: String(identity.repositoryOwnerId),
 		event_name: 'pull_request'
 	};
 
-	// Pinning the workflow is an optional extra restriction on top of the event
-	// and the `{pr}` capture on the bindings below.
 	if (options.jobWorkflowRef !== undefined) {
 		claims.job_workflow_ref = jobWorkflowReferenceClaim(options.jobWorkflowRef);
 	}
@@ -342,8 +325,6 @@ export function githubPrAddBody(
 		permittedGrants: [
 			buildCacheGrant({
 				cacheTemplate,
-				// The PR's root nests its cache name under the repository, so the
-				// captured `{pr}` resolves in both bindings.
 				rootTemplate:
 					options.rootTemplate ??
 					`github:${identity.fullName}/${cacheTemplate}/`,
@@ -358,12 +339,8 @@ export function githubPrAddBody(
 	});
 }
 
-// Assemble the per-tag rule for a GitHub repository, pinning its immutable
-// numeric ids and the `tag` ref type so only a tag build matches, whether the
-// tag was pushed or a release published it. A build of tag <name> pushes to its
-// own `<name>` cache and writes the matching retention root
-// `github:<owner>/<repo>/<name>/`, both keyed on the tag captured from the
-// `ref` claim.
+// Pin immutable repository IDs and the tag ref type. The captured tag selects
+// both the cache and its retention root.
 export function githubTagAddBody(
 	url: URL,
 	identity: RepositoryIdentity,
@@ -371,17 +348,14 @@ export function githubTagAddBody(
 ): OidcTrustAddBody {
 	const cacheTemplate = options.cacheTemplate ?? '{tag}';
 
-	// Pin the tag ref type so this rule matches only tag tokens and never a
-	// branch or pull-request token, which would otherwise let it be selected
-	// ahead of the rule meant for those events.
+	// Pin the ref type so a branch or pull-request token from the same repository
+	// cannot select this rule.
 	const claims: Record<string, ClaimMatch> = {
 		repository_id: String(identity.repositoryId),
 		repository_owner_id: String(identity.repositoryOwnerId),
 		ref_type: 'tag'
 	};
 
-	// Pinning the workflow is an optional extra restriction on top of the ref
-	// type and the `{tag}` capture on the bindings below.
 	if (options.jobWorkflowRef !== undefined) {
 		claims.job_workflow_ref = jobWorkflowReferenceClaim(options.jobWorkflowRef);
 	}
@@ -393,8 +367,6 @@ export function githubTagAddBody(
 		permittedGrants: [
 			buildCacheGrant({
 				cacheTemplate,
-				// The tag's root nests its cache name under the repository, so the
-				// captured `{tag}` resolves in both bindings.
 				rootTemplate:
 					options.rootTemplate ??
 					`github:${identity.fullName}/${cacheTemplate}/`,
@@ -409,12 +381,8 @@ export function githubTagAddBody(
 	});
 }
 
-// Assemble the branch rule for a GitHub repository: pushes to `branch` publish
-// to the tenant's default cache, scoped to the retention root the push action
-// writes by default, `github:<owner>/<repo>/<branch>/`. The trigger branch is
-// pinned through the `ref` claim, so a sibling branch sharing a reusable
-// workflow cannot match. Pinning the workflow file with `--workflow` is an
-// optional extra restriction on top of that.
+// Pin immutable repository IDs and the branch ref. The rule grants the default
+// cache and the retention root used by the push action for that branch.
 export function githubBranchAddBody(
 	url: URL,
 	identity: RepositoryIdentity,

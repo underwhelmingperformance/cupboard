@@ -43,8 +43,6 @@ import {
 } from './context.ts';
 import { type TenantIdentityService } from './tenant-identity-service.ts';
 
-// How long an inbound verify waits before its one retry of an issuer that
-// could not be reached.
 const issuerRetryDelayMs = 100;
 
 export class OidcTrustService {
@@ -54,8 +52,6 @@ export class OidcTrustService {
 	) {}
 
 	private ownerConfig(): OwnerConfig | undefined {
-		// The assigned identity is the sole owner source: an unconfigured Durable
-		// Object has no owner rule to seed (and 500s before it serves anyway).
 		const identity = this.tenantIdentity.current();
 
 		if (identity === undefined) {
@@ -99,9 +95,8 @@ export class OidcTrustService {
 		rule: OidcTrustRule,
 		token: string
 	): Promise<JWTPayload> {
-		// Discovery resolves the issuer's JWKS and its accepted algorithms. Failing
-		// to reach the issuer is an upstream condition, not a bad token, so it yields
-		// a retryable 503.
+		// Discovery and JWKS fetch failures are retryable issuer outages.
+		// Signature and claim failures remain non-retryable token errors.
 		let issuer;
 		try {
 			issuer = await this.context.discovery.resolve(rule.issuer);
@@ -123,7 +118,6 @@ export class OidcTrustService {
 				new Date()
 			);
 		} catch (error) {
-			// A JWKS fetch failure is the same transient upstream condition as a discovery failure.
 			if (error instanceof OidcKeysUnreachableError) {
 				throw new IssuerUnavailableError(rule.issuer, { cause: error });
 			}
@@ -260,16 +254,12 @@ export class OidcTrustService {
 			return;
 		}
 
-		// Redeploying with new owner config updates the rule in place, so the owner
-		// identity always tracks deploy config. Clearing `disabledAt` on conflict
-		// re-enables it, so the owner is restored even if the rule was ever
-		// disabled out of band. `ownerConfig` has already normalised the issuer.
+		// Update the fixed rule in place and clear `disabledAt` so current deploy
+		// configuration remains authoritative after an earlier disablement.
 		const fields = {
 			issuer: owner.issuer,
 			audience: owner.audience,
 			claimsJson: JSON.stringify({ sub: owner.subject }),
-			// The owner is the interactive trust class: a single wildcard grant
-			// covers every operation in its domain.
 			permittedGrantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }])
 		};
 		const createdAt = isoTimestamp(new Date());

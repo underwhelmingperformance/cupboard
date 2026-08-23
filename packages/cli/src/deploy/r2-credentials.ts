@@ -19,9 +19,6 @@ export interface R2Credentials {
 	readonly secretAccessKey: R2SecretAccessKey;
 }
 
-/**
-Prompt for an existing pair; undefined when cancelled.
-*/
 export async function promptR2CredentialPair(
 	ui: DeployUi,
 	accountId: CloudflareAccountId
@@ -56,9 +53,6 @@ export async function promptR2CredentialPair(
 	};
 }
 
-/**
-The verdict of probing R2 with a credential pair.
-*/
 export type R2CredentialCheck =
 	| { readonly kind: 'valid' }
 	| { readonly kind: 'rejected'; readonly status: number }
@@ -66,9 +60,6 @@ export type R2CredentialCheck =
 
 export type R2AccessKeyIdProblem = 'invalid-hex32';
 
-/**
-The access key id is the Cloudflare API token id: 32 hex characters.
-*/
 export function accessKeyIdProblem(
 	value: string
 ): R2AccessKeyIdProblem | undefined {
@@ -93,9 +84,6 @@ function accessKeyIdProblemText(value: string): string | undefined {
 
 export type R2SecretAccessKeyProblem = 'invalid-hex64';
 
-/**
-The secret is the hex SHA-256 of the token value: 64 hex characters.
-*/
 export function secretAccessKeyProblem(
 	value: string
 ): R2SecretAccessKeyProblem | undefined {
@@ -124,13 +112,11 @@ function secretAccessKeyProblemText(value: string): string | undefined {
 const credentialProbeKey = '.cupboard-credential-probe';
 
 /**
- * Whether the credential pair can write to the bucket the way a push does,
- * leaving nothing behind: begin a multipart upload, then abort it. Beginning one
- * proves write access (a push stages every NAR as a multipart upload) and
- * creates no object, since only completing one would; the abort clears the
- * in-progress upload. Probing a write (not a read) lets a write-only token
- * pass, since a push uploads with a write-only credential.
- * 401/403 means R2 rejected the pair.
+ * Begins a multipart upload to test the same write access that a push needs.
+ * R2 creates no object until an upload completes. If the response contains an
+ * upload id, the probe attempts to abort it. A successful begin is accepted
+ * even if that cleanup request fails. This permits write-only credentials;
+ * 401 or 403 rejects them.
  */
 export async function checkR2Credentials(
 	options: {
@@ -175,8 +161,7 @@ export async function checkR2Credentials(
 		try {
 			await fetcher(signed);
 		} catch {
-			// A begun upload holds no object, so a failed abort leaves only an empty
-			// in-progress upload that R2 drops on its own; the verdict is already set.
+			// Credential validity is already established; cleanup is best effort.
 		}
 	}
 

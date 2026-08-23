@@ -31,9 +31,6 @@ function syntheticHash(index: number): string {
 	return `${'0'.repeat(30)}${suffix}`;
 }
 
-// Seeds target rows straight into the root's target set, the state a run
-// root's attaches accrete; the listing and paging under test read exactly
-// these rows.
 async function seedTargets(
 	name: string,
 	indexes: readonly number[]
@@ -60,8 +57,6 @@ async function seedTargets(
 	});
 }
 
-// A listed root as the fixtures produce it: every root here is set with a
-// one-hour TTL on the pinned test clock.
 function listedRoot(name: string, targetCount: number) {
 	return {
 		name,

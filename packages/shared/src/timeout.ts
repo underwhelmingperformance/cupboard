@@ -1,10 +1,8 @@
-// Returns a promise that resolves when `pending` finishes, whether it fulfils or
-// rejects.
 async function completionSignal(pending: Promise<unknown>): Promise<void> {
 	try {
 		await pending;
 	} catch {
-		// Only completion matters here; the caller does not need the result.
+		// The caller needs only the completion signal, not the rejection.
 	}
 }
 

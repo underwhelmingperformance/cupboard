@@ -42,9 +42,8 @@ async function deferredUpload(): Promise<{
 	await putNarBytes(upload.r2Key);
 	await markUploadPendingVerification(upload.uploadId);
 
-	// The canonical object exists, as it does when a promote ran before the row
-	// settled terminally (an over-quota rejection follows a successful promote),
-	// so a straggler's own promote finds it and would carry on to materialise.
+	// Keep the canonical object present so the straggler reaches the terminal-row
+	// fence. An over-quota rejection can settle after promotion has succeeded.
 	await putNarBytes(narObjectKey(metadata.narHash));
 
 	return {
@@ -64,10 +63,9 @@ async function isNarInfoObjectPresent(
 	return object !== null;
 }
 
-// A terminal verdict is retained through its observation window, and verify
-// passes may overlap, so a straggling verdict can land on a row another pass
-// already settled. The terminal verdict is the authority: nothing may be
-// reopened, reserved or served on the straggler's account.
+// A terminal verdict remains authoritative throughout its observation window.
+// Verify passes can overlap, so a later verdict must not reopen or serve a row
+// that another pass has settled.
 describe('terminal verdicts against straggling verifications', () => {
 	beforeEach(resetTestServer);
 
@@ -92,8 +90,6 @@ describe('terminal verdicts against straggling verifications', () => {
 			fileSize: narBytes.byteLength
 		});
 
-		// The row survives byte-for-byte (a straggler must not even re-extend the
-		// observation window), no narinfo row was reserved, nothing is served.
 		expect({
 			row: await pendingUploadSnapshot(upload.uploadId),
 			generation: await narInfoGeneration(upload.storePathHash),
@@ -105,15 +101,13 @@ describe('terminal verdicts against straggling verifications', () => {
 		});
 	});
 
-	it('stops a verification whose row turned terminal mid-apply', async () => {
+	it('does not serve an upload that becomes terminal during verification', async () => {
 		const upload = await deferredUpload();
 
-		// Hold the straggler at its promote (the canonical head is its first R2
-		// read, one-shot so the resumed apply proceeds) while a competing pass
-		// settles the row terminally: the straggler passes the entry check on the
-		// still-pending row, so only the gate's re-read can stop it. The whole
-		// interleave runs inside the Durable Object so no promise crosses request
-		// contexts.
+		// Hold the straggler at its first canonical head after it reads the pending
+		// row. A competing pass then settles the row. Only the re-read inside the gate
+		// can stop the straggler. Run the whole interleave inside the Durable Object
+		// so no promise crosses request contexts.
 		const canonicalKey = narObjectKey(upload.narHash);
 		const settled = await runInDurableObject(
 			currentServer(),

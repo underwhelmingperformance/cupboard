@@ -6,9 +6,8 @@ const inTotoStatementType = 'https://in-toto.io/Statement/v1';
 const sha256HexPattern = /^[0-9a-f]{64}$/;
 
 /**
- * The plain leaf schemas: a lowercase-hex sha256 subject digest and a string
- * predicate type. Consumers that brand these values pass their own schemas in
- * instead.
+ * Default leaf schemas accept a lowercase hexadecimal SHA-256 digest and any
+ * predicate type. Consumers can supply branded or narrower schemas instead.
  */
 export const defaultInTotoLeaves = {
 	sha256: z.string().regex(sha256HexPattern),
@@ -45,9 +44,6 @@ interface InTotoStatement {
 
 type SigstoreBundle = ReturnType<typeof bundleFromJSON>;
 
-/**
-An in-toto Statement payload that is malformed or fails its schema.
-*/
 export class InTotoStatementError extends Error {
 	constructor(public readonly detail: string) {
 		super(`in-toto statement ${detail}`);
@@ -55,9 +51,6 @@ export class InTotoStatementError extends Error {
 	}
 }
 
-/**
-A Sigstore bundle whose in-toto Statement could not be decoded.
-*/
 export class DsseDecodeError extends Error {
 	constructor(
 		public readonly detail: string,

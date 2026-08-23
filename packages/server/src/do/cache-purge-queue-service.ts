@@ -16,13 +16,13 @@ const cachePurgeRetryMs = 30_000;
 const tagsSchema = z.array(z.string()).min(1).max(cachePurgeBatchSize);
 
 /**
-Persists and runs global Workers Cache purges for updated narinfos.
+Persists narinfo cache-tag purges so failed requests can be retried.
 */
 export class CachePurgeQueueService {
 	constructor(private readonly context: ServerContext) {}
 
 	/**
-	Queues exact narinfo invalidations and schedules their continuation.
+	Queues exact narinfo invalidations and schedules the first attempt.
 	*/
 	async enqueueNarInfos(
 		cache: StoredCache,
@@ -60,8 +60,9 @@ export class CachePurgeQueueService {
 	}
 
 	/**
-	Runs one queued invalidation, retrying until purge succeeds or its TTL ends.
-	*/
+	 * Runs one queued invalidation. A failed purge remains queued until its TTL
+	 * expires.
+	 */
 	async runOnce(): Promise<void> {
 		const continuation = this.context.db
 			.select()

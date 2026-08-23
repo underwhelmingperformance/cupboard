@@ -67,7 +67,7 @@ describe('verifyWorkflowReference', () => {
 		expect(requested).toStrictEqual([{ pathname: contentPath, ref: commit }]);
 	});
 
-	it('accepts a tag backed by an immutable release and a workflow file', async () => {
+	it('accepts a tag when GitHub reports an immutable release and returns the workflow file', async () => {
 		const requested: string[] = [];
 		const fetch: typeof globalThis.fetch = (input) => {
 			const url = requestUrl(input);
@@ -91,7 +91,7 @@ describe('verifyWorkflowReference', () => {
 		]);
 	});
 
-	it('refuses an ordinary mutable tag', async () => {
+	it('refuses a tag whose release GitHub reports as mutable', async () => {
 		await expect(
 			verifyWorkflowReference(
 				parseExactWorkflowReference(`${workflowPath}@refs/tags/v1.2.3`),
@@ -110,7 +110,7 @@ describe('verifyWorkflowReference', () => {
 		).rejects.toBeInstanceOf(WorkflowReferenceNotFoundError);
 	});
 
-	it('maps an exhausted rate limit to a typed error', async () => {
+	it('throws GithubRateLimitError when the rate limit is exhausted', async () => {
 		const parsed = parseExactWorkflowReference(
 			`${workflowPath}@${'c'.repeat(40)}`
 		);
@@ -120,7 +120,7 @@ describe('verifyWorkflowReference', () => {
 		).rejects.toBeInstanceOf(GithubRateLimitError);
 	});
 
-	it('maps a non-exhausted forbidden response to a permission error', async () => {
+	it('throws GithubPermissionError for a forbidden response outside a rate limit', async () => {
 		const reference = `${workflowPath}@${'d'.repeat(40)}`;
 
 		await expect(

@@ -360,8 +360,6 @@ export class AttestationsService {
 		});
 	}
 
-	// The `(storePathHash, generation, digest)` keys of this tenant's attestation
-	// edges for `digests`, read set-wise in a handful of chunked queries.
 	private async filedReferenceKeys(
 		cache: StoredCache,
 		digests: readonly Sha256HexDigest[]
@@ -405,9 +403,6 @@ export class AttestationsService {
 		);
 	}
 
-	// The subset of `digests` whose shared CAS object is both recorded and present:
-	// one chunked `cas_object` read followed by a bounded fan-out of `head` reads,
-	// the set-wise form of {@link hasAvailableBundle}.
 	private async availableDigests(
 		digests: readonly Sha256HexDigest[]
 	): Promise<Set<Sha256HexDigest>> {
@@ -563,8 +558,8 @@ export class AttestationsService {
 
 		const parsed = parseAttestationBundle(measured.bytes);
 
-		// A rejection inside blockConcurrencyWhile would break the input gate, so
-		// the outcome is carried out as a value and rethrown afterwards.
+		// Do not reject inside blockConcurrencyWhile; Cloudflare would break the
+		// Durable Object's input gate. Rethrow after leaving the callback.
 		const finalised = await this.context.criticalSection(async () => {
 			try {
 				const value = await this.finaliseAttach(
@@ -631,9 +626,6 @@ export class AttestationsService {
 		);
 	}
 
-	// Renders this path's descriptor list from its filed edges. A caller that has
-	// already resolved the committed generation under the gate passes it in, sparing
-	// the committed-row read; callers without one leave it undefined and it is read.
 	async materialiseList(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
@@ -762,8 +754,6 @@ function narHashDigestHex(narHash: NixSha256HashString): Sha256HexDigest {
 	return NixSha256Hash.parse(narHash).digestHex();
 }
 
-// Identifies an attestation edge by the three columns negotiate matches a bundle
-// against: the path, its committed generation, and the bundle digest it points at.
 function attestationReferenceKey(
 	storePathHash: StorePathHash,
 	generation: NarInfoGeneration,

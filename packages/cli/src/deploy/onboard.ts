@@ -43,22 +43,17 @@ import {
 } from './r2-credentials.ts';
 import type { DeployUi } from './ui.ts';
 
-/**
-What a single probe of the deployment concluded.
-*/
 type Probe<T> =
 	| { readonly kind: 'ready'; readonly value: T }
 	| {
 			readonly kind: 'retry';
 			readonly detail: string;
-			/**
-			The HTTP status the host answered, when it answered at all.
-			*/
 			readonly status?: number;
 			readonly ray?: string;
 	  }
-	/** A terminal answer: the host responded with an error it will not recover
-	 * from, so polling stops at once. */
+	/**
+	A non-retryable response; polling stops immediately.
+	*/
 	| {
 			readonly kind: 'stop';
 			readonly detail: string;
@@ -66,23 +61,14 @@ type Probe<T> =
 			readonly ray?: string;
 	  };
 
-/**
-How the agreed admin binding relates to the person deploying.
-*/
 export type OnboardAdmin =
 	| {
 			readonly kind: 'claimable';
 			readonly owner: OwnerBinding;
-			/**
-			The deployer's id_token, the proof the server checks.
-			*/
 			readonly idToken: string;
 	  }
 	| { readonly kind: 'other'; readonly owner: OwnerBinding }
 	| {
-			/**
-			The session's credential carries no identity to prove a match.
-			*/
 			readonly kind: 'unproven';
 			readonly owner: OwnerBinding;
 	  }
@@ -90,9 +76,9 @@ export type OnboardAdmin =
 
 /**
  * The admin binding as the onboarding sees it: claimable right now when the
- * agreed binding is the deployer's own identity and the login carried an
+ * agreed binding is the deployer's own identity and the login included an
  * id_token to prove it; someone else's when the binding is a different
- * identity; unproven when the session's credential carries no identity at
+ * identity; unproven when the session's credential includes no identity at
  * all; or nobody's.
  */
 export function onboardAdminFor(
@@ -121,14 +107,8 @@ export function onboardAdminFor(
 export type OnboardOutcome =
 	| {
 			readonly kind: 'ready';
-			/**
-			The deployment's base URL (the control plane).
-			*/
 			readonly url: string;
 			readonly slug: string;
-			/**
-			The cache URL Nix talks to: `<url>/t/<slug>`.
-			*/
 			readonly cacheUrl: URL;
 			readonly publicKey: string;
 	  }
@@ -147,13 +127,7 @@ export type OnboardOutcome =
 			readonly kind: 'claim-refused';
 			readonly url: string;
 			readonly status: number;
-			/**
-			The failing call and the server's own words.
-			*/
 			readonly detail: string;
-			/**
-			Cloudflare's ray id for the failed request, when present.
-			*/
 			readonly ray?: string;
 	  }
 	| { readonly kind: 'claim-cancelled'; readonly url: string }
@@ -169,18 +143,12 @@ export type OnboardOutcome =
 	| {
 			readonly kind: 'unreachable';
 			readonly url: string;
-			/**
-			What the final probe saw, e.g. `HTTP 404` or `unreachable`.
-			*/
 			readonly lastProbe: string;
 			/**
-			The status the host answered, when it answered at all (vs DNS).
+			Present for an HTTP response and absent for a network failure.
 			*/
 			readonly lastStatus?: number;
 			readonly lastRay?: string;
-			/**
-			The Worker script behind `url`, for pointing at its logs.
-			*/
 			readonly worker: string;
 	  }
 	| { readonly kind: 'no-subdomain' };
@@ -189,8 +157,8 @@ export type OnboardOutcome =
  * What the onboarding drives: the raw endpoints {@link CupboardClient}
  * serves, plus the control procedures in the contract's shapes. The tokens
  * arrive per call because they are issued mid-flow, after the client is
- * built; the default factory answers each control call with a derived client
- * bound to that token.
+ * built; the default factory creates a derived client for each control call
+ * and binds that call's token.
  */
 export interface OnboardClient extends Pick<
 	CupboardClient,
@@ -222,8 +190,7 @@ function defaultInstanceName(publicUrl: string): InstanceName {
 /**
  * How this deploy settled the Worker's R2 pair: freshly set after a
  * client-side probe, or kept in place. A kept pair's values cannot be read
- * back, so the deployment is asked to prove it once a cache exists to ask
- * through.
+ * back, so the Worker proves it after a cache exists.
  */
 export type OnboardR2 =
 	| {
@@ -234,9 +201,10 @@ export type OnboardR2 =
 	| { readonly kind: 'fresh' };
 
 /**
- * What the deploy knows about the `CUPBOARD_SIGNUP_SECRET` Worker secret,
- * which takes precedence over the admin binding when set: the value itself
- * when this deploy supplied it, only that one exists, or nothing.
+ * What the deploy knows about `CUPBOARD_SIGNUP_SECRET`, which takes precedence
+ * over the admin binding. `known` includes the value supplied by this deploy;
+ * `configured` means the Worker has an unreadable existing value; `none` means
+ * the secret is absent.
  */
 export type ClaimSecret =
 	| { readonly kind: 'known'; readonly value: string }
@@ -246,28 +214,19 @@ export type ClaimSecret =
 export interface OnboardOptions {
 	readonly api: CloudflareApi;
 	readonly ui: DeployUi;
-	/**
-	The control Worker's script name, which serves the control plane.
-	*/
 	readonly controlScriptName: ScriptName;
-	/**
-	The tenant script's name, which holds the R2 credential secrets.
-	*/
 	readonly tenantScriptName: ScriptName;
 	readonly domain: string | undefined;
 	readonly instanceName?: InstanceName;
 	readonly admin: OnboardAdmin;
-	/**
-	The version the uploaded Workers answer on `/_version`.
-	*/
 	readonly buildVersion: string;
 	readonly claimSecret: ClaimSecret;
 	readonly r2: OnboardR2;
 	readonly signal?: AbortSignal;
 	/**
-	 * Fetches an id_token fit to present right now. The login's snapshot can
-	 * expire while the deploy runs, so the claim asks at the moment of use and
-	 * falls back to the snapshot when no fresher one can be had.
+	 * Fetches an id_token immediately before the claim. The token captured at
+	 * login can expire during deployment, so the claim falls back to that token
+	 * only when a refresh returns no replacement.
 	 */
 	readonly freshIdToken?: () => Promise<string | undefined>;
 	readonly clientFactory?: (url: string) => OnboardClient;
@@ -286,9 +245,6 @@ const conflictStatusCode: number = StatusCodes.CONFLICT;
 
 export type SlugProblem = 'empty' | 'invalid-format';
 
-/**
-Why `value` cannot be a tenant slug, or undefined when it can.
-*/
 export function slugProblem(value: string): SlugProblem | undefined {
 	if (value === '') {
 		return 'empty';
@@ -326,9 +282,9 @@ export function slugProblemText(value: string): string | undefined {
  *
  * First the deployment must be up: its URL is resolved (the custom domain, or
  * the account's workers.dev subdomain with the script's route enabled) and the
- * unauthenticated `/_version` route is polled until it answers with the version
+ * unauthenticated `/_version` route is polled until it returns the version
  * just uploaded, since routing, DNS and the new Worker version all take time to
- * settle and an older version may answer in the meantime, with the old
+ * settle and an older version may respond in the meantime with the old
  * configuration.
  *
  * Then it is initialised: the deployer claims global admin with their id_token,
@@ -492,8 +448,8 @@ export async function onboardDeployment(
 		slug = sole.id;
 	}
 
-	// A kept R2 pair has never been proved by this run; now that a cache
-	// exists, its Durable Object (which holds the credentials) can be asked.
+	// The client cannot test a kept pair because it cannot read the stored
+	// secrets. Once a cache exists, its Durable Object can test the pair.
 	if (options.r2.kind === 'kept') {
 		await ensureWorkerR2({
 			ui,
@@ -575,9 +531,6 @@ async function resolveDeploymentUrl(
 	if (url === undefined || options.domain !== undefined) {
 		return url;
 	}
-
-	// With a custom domain the workers.dev route stays off: a private cache
-	// gains nothing from a second public hostname.
 	await options.ui.reporter().phase('Enabling the workers.dev route', () =>
 		options.api.setWorkersDevRoutes(options.controlScriptName, {
 			workersDev: true,
@@ -628,14 +581,10 @@ function describeR2Check(check: ParsedR2CredentialCheck): string {
 }
 
 /**
- * Proves the R2 pair the Worker kept, and replaces it when the proof fails.
- * The deployment performs the probe itself (the values cannot be read back),
- * inside the new cache's Durable Object. A failed probe loops: a replacement
- * pair is prompted for, checked against R2 directly before anything changes,
- * set as the tenant script's secrets, and the deployment re-probed until the
- * new pair is what answers. Nothing here fails the onboarding: a cache with
- * bad credentials still serves reads, so problems are reported as warnings and
- * left for a re-run to fix.
+ * The stored R2 secrets cannot be read back, so the Worker probes them. A
+ * failed probe prompts for a replacement pair, tests it directly against R2,
+ * stores it, and repeats the Worker probe. Credential failures warn but do not
+ * fail onboarding because they prevent pushes, not reads.
  */
 async function ensureWorkerR2(dependencies: {
 	readonly ui: DeployUi;
@@ -664,8 +613,6 @@ async function ensureWorkerR2(dependencies: {
 				return answered.r2;
 			});
 	} catch (error) {
-		// An older deployment has no check route; the credentials stay
-		// unproven.
 		if (error instanceof ORPCError) {
 			ui.warn(
 				`Could not check the R2 credentials (the deployment answered ` +
@@ -938,9 +885,6 @@ async function pollProbe<T>(
 	| {
 			readonly kind: 'gave-up';
 			readonly lastProbe: string;
-			/**
-			The status the host last answered, undefined if it never did.
-			*/
 			readonly lastStatus: number | undefined;
 			readonly lastRay: string | undefined;
 	  }
@@ -965,14 +909,13 @@ async function pollProbe<T>(
 			lastStatus = probed.status;
 			lastRay = probed.ray;
 
-			// A terminal answer will not change on a retry, so give up at once.
 			if (probed.kind === 'stop') {
 				return;
 			}
 
 			if (attempt < attempts) {
 				context.fact('attempt', attempt);
-				context.fact('last answer', probed.detail);
+				context.fact('last probe', probed.detail);
 				await delayMs(attemptDelayMs, { delay: sleep, signal });
 			}
 		}
@@ -990,19 +933,19 @@ async function attemptProbe<T>(
 		return await probe();
 	} catch (error) {
 		if (error instanceof CupboardHttpError) {
-			const answer = {
+			const response = {
 				detail: httpDetail(error),
 				status: error.status,
 				...(error.ray !== undefined && { ray: error.ray })
 			};
 
 			if (isRetryableStatus(error.status)) {
-				return { kind: 'retry', ...answer };
+				return { kind: 'retry', ...response };
 			}
 
 			// A non-retryable 5xx is the server's own fault; stop and surface it.
 			if (error.status >= serverErrorStatus) {
-				return { kind: 'stop', ...answer };
+				return { kind: 'stop', ...response };
 			}
 
 			throw error;
@@ -1037,8 +980,6 @@ function isRetryableStatus(status: number): boolean {
 	return retryableStatuses.has(status);
 }
 
-// The status with the server's own words, compacted to one short line so it
-// fits a spinner fact or a closing warning.
 function httpDetail(error: CupboardHttpError): string {
 	const body = error.body.replaceAll(/\s+/g, ' ').trim();
 	const compact = body.length <= 120 ? body : `${body.slice(0, 120)}…`;

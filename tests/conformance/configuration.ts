@@ -81,7 +81,7 @@ export class MissingNixConfigDirectoryError extends Error {
 }
 
 /**
-The effective settings reported by `nix config show`, in Nix's data shapes.
+A parsed `nix config show --json` document with typed setting accessors.
 */
 export class OracleSettings {
 	static parse(output: string): OracleSettings {
@@ -147,14 +147,8 @@ export class OracleSettings {
 	}
 }
 
-/**
-A resolved configuration-field value.
-*/
 type FieldValue = string | number | boolean | readonly string[] | undefined;
 
-/**
-Resolved fields keyed by the names in {@link fieldAdapters}.
-*/
 export type FieldValues = Readonly<Record<string, FieldValue>>;
 
 /**
@@ -163,13 +157,7 @@ export type FieldValues = Readonly<Record<string, FieldValue>>;
  * `fromOracle` converts those values to the domain field.
  */
 interface FieldAdapter {
-	/**
-	The field name used in the comparison.
-	*/
 	readonly field: string;
-	/**
-	The `nix config show` settings used to derive the oracle value.
-	*/
 	readonly settings: readonly string[];
 	readonly fromOracle: (settings: OracleSettings) => FieldValue;
 	readonly fromClient: (config: NixStoreConfig) => FieldValue;
@@ -291,9 +279,6 @@ const fieldAdapters: readonly FieldAdapter[] = [
 	}
 ];
 
-/**
-Settings consumed by the adapter table.
-*/
 export const mappedSettings: readonly string[] = sorted([
 	...new Set(fieldAdapters.flatMap((adapter) => adapter.settings))
 ]);
@@ -369,9 +354,6 @@ export const settingsAbsentFromTheOracle: readonly string[] = [
 	'filetransfer-retry-max-delay'
 ];
 
-/**
-In-scope settings the four groups do not model, reported by the suite.
-*/
 export function unmodelledSettings(
 	settings: OracleSettings
 ): readonly string[] {
@@ -382,18 +364,12 @@ export function unmodelledSettings(
 	);
 }
 
-/**
-Settings in scope but absent from the pinned oracle.
-*/
 export function settingsMissingFromOracle(
 	settings: OracleSettings
 ): readonly string[] {
 	return settingsInScope.filter((setting) => !settings.has(setting));
 }
 
-/**
- * Maximum nesting depth for `@file` entries in a builders value.
- */
 const maxMachineFileDepth = 16;
 
 export class BuildersTooDeeplyNestedError extends Error {
@@ -453,21 +429,9 @@ function readFileOrEmpty(filePath: string): string {
 	}
 }
 
-/**
-One configuration for both sides to resolve.
-*/
 export interface ConfigurationFixture {
-	/**
-	The contents of the fixture's `nix.conf`.
-	*/
 	readonly nixConf: string;
-	/**
-	A machines file written beside `nix.conf` and referenced by `builders`.
-	*/
 	readonly machines?: string;
-	/**
-	The `NIX_CONFIG` value applied by both clients after the files.
-	*/
 	readonly inlineConfig?: string;
 	/**
 	 * A configuration directory below the fixture home, selected through
@@ -477,28 +441,16 @@ export interface ConfigurationFixture {
 	readonly configDirectory?: string;
 }
 
-/**
-Every mapped field resolved by both clients.
-*/
 export interface FieldComparison {
 	readonly oracle: FieldValues;
 	readonly client: FieldValues;
 }
 
-/**
-The results from resolving one fixture through both clients.
-*/
 export interface ResolvedFixture {
 	readonly oracleAccepted: boolean;
 	readonly oracleStderr: string;
-	/**
-	The oracle's settings, absent when it rejected the configuration.
-	*/
 	readonly settings: OracleSettings | undefined;
 	readonly clientAccepted: boolean;
-	/**
-	The client error, or `undefined` when it accepted the configuration.
-	*/
 	readonly clientError: unknown;
 	/**
 	 * Both sides' fields, absent when either rejected the configuration. They
@@ -508,8 +460,6 @@ export interface ResolvedFixture {
 	readonly fields: FieldComparison | undefined;
 }
 
-// Override only the environment and home directory. The remaining discovery
-// operations use the same filesystem implementation as the CLI.
 function fixtureEnvironment(
 	home: string,
 	environment: NodeJS.ProcessEnv
@@ -521,9 +471,6 @@ function fixtureEnvironment(
 	};
 }
 
-/**
-Resolves one fixture through both clients in the same environment.
-*/
 export async function resolveFixture(
 	oracle: Oracle,
 	fixture: ConfigurationFixture
@@ -632,9 +579,6 @@ export class FixtureRejectedError extends Error {
 	}
 }
 
-/**
-The oracle settings from a fixture that was expected to be accepted.
-*/
 export function settingsOf(resolved: ResolvedFixture): OracleSettings {
 	if (resolved.settings === undefined) {
 		throw new FixtureRejectedError(resolved, 'the oracle');
@@ -643,9 +587,6 @@ export function settingsOf(resolved: ResolvedFixture): OracleSettings {
 	return resolved.settings;
 }
 
-/**
-Normalised mapped fields from both clients, ready for comparison.
-*/
 export function comparisonOf(resolved: ResolvedFixture): FieldComparison {
 	if (resolved.fields === undefined) {
 		throw new FixtureRejectedError(resolved, rejectedBy(resolved));
@@ -664,9 +605,6 @@ function rejectedBy(
 	return resolved.oracleAccepted ? 'our client' : 'the oracle';
 }
 
-/**
-Whether each client accepted the configuration.
-*/
 export function acceptanceOf(resolved: ResolvedFixture): {
 	oracleAccepted: boolean;
 	clientAccepted: boolean;

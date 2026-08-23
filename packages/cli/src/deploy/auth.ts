@@ -22,9 +22,6 @@ import {
 	cloudflareAccountIdSchema
 } from './identifiers.ts';
 
-/**
-The resolved credential can see no Cloudflare accounts at all.
-*/
 export class NoCloudflareAccountsError extends CliError {
 	constructor() {
 		super('The credential has access to no accounts.');
@@ -39,11 +36,11 @@ export interface CloudflareCredential {
 	readonly token: string;
 	readonly source: CredentialSource;
 	/**
-	The Cloudflare user behind an OAuth grant; undefined for raw tokens.
+	The Cloudflare user for an OAuth grant; `undefined` for a raw token.
 	*/
 	readonly subject: string | undefined;
 	/**
-	The grant's raw id_token, presentable to a cupboard server's signup.
+	The grant's raw ID token, which Cupboard can use for signup.
 	*/
 	readonly idToken: string | undefined;
 }
@@ -60,13 +57,13 @@ export interface CredentialChain {
 		previous: CloudflareGrant
 	) => Promise<CloudflareGrant | undefined>;
 	/**
-	Absent when a logged-in wrangler's stored token must not be used.
+	Omitted when the chain must not use Wrangler's stored token.
 	*/
 	readonly readWranglerToken?: () => Promise<string | undefined>;
 	readonly login: () => Promise<CloudflareGrant>;
 	/**
 	 * Whether an incomplete cached grant may be replaced by a fresh browser
-	 * login. A grant issued before the `openid` scope was requested carries no
+	 * login. A grant issued before the `openid` scope was requested has no
 	 * subject, and refreshing it cannot add one, so only a new login can
 	 * establish who the operator is; with no terminal to log in on, the old
 	 * grant is used as it stands. A grant missing only its id_token is upgraded
@@ -78,20 +75,11 @@ export interface CredentialChain {
 
 export interface CredentialChainOptions {
 	readonly openBrowser: (url: string) => void | Promise<void>;
-	/**
-	Whether a logged-in wrangler's stored token may be used.
-	*/
 	readonly wrangler: boolean;
-	/**
-	Whether a browser is available to upgrade an identity-less grant.
-	*/
 	readonly interactive: boolean;
 	readonly signal?: AbortSignal;
 }
 
-/**
-The production {@link CredentialChain}: real store, endpoints and browser.
-*/
 export function defaultCredentialChain(
 	options: CredentialChainOptions
 ): CredentialChain {
@@ -196,7 +184,7 @@ export async function resolveCredential(
 
 		// A grant with a subject but no stored id_token was issued with the
 		// openid scope, so a refresh reissues the id_token without a browser.
-		// The renewal is persisted even without one: the refresh token may have
+		// Persist the renewal even when it has no ID token because the refresh token may have
 		// rotated on use.
 		if (cached.subject !== undefined) {
 			const renewed = await chain.refreshGrant(cached);
@@ -229,7 +217,7 @@ export async function resolveCredential(
 		}
 
 		// A grant from before the openid scope cannot learn its identity from a
-		// refresh, and a refresh that reissued nothing leaves the identity
+		// refresh, and a refresh that did not issue an ID token leaves the identity
 		// unproven; only a fresh login can supply it.
 		const upgraded = await chain.login();
 		await chain.writeGrant(upgraded);
@@ -326,11 +314,11 @@ export interface ResolvedAccount {
 	readonly accountId: CloudflareAccountId;
 	readonly credentialSource: CredentialSource;
 	/**
-	The Cloudflare user behind an OAuth grant; undefined for raw tokens.
+	The Cloudflare user for an OAuth grant; `undefined` for a raw token.
 	*/
 	readonly subject: string | undefined;
 	/**
-	The grant's raw id_token, presentable to a cupboard server's signup.
+	The grant's raw ID token, which Cupboard can use for signup.
 	*/
 	readonly idToken: string | undefined;
 }

@@ -1,13 +1,11 @@
 # Measuring what a publication costs
 
-`scripts/measure-realisation` reports what realising a flake's targets would
-cost a runner that starts with nothing in its store: how many derivations it
-would build, how many paths it would fetch, and how many bytes those paths are
-compressed and unpacked. It reports those numbers for each target on its own and
-for the targets a manifest groups together, because the difference between the
-two is the reason to group targets. Targets that share most of a closure cost
-that shared work once when realised together, and once per target when realised
-separately.
+`scripts/measure-realisation` estimates the work required to realise a flake's
+targets in an empty store. It reports the derivations that Nix would build, the
+paths it would fetch, their compressed download size, and their uncompressed NAR
+size. The report measures each target separately and each group in the manifest.
+When targets share a closure, the grouped measurement counts that work once; the
+separate measurements count it once per target.
 
 The command reads the same target manifest as the publish workflow, so it can be
 pointed at a repository's real publication and report what that publication
@@ -17,17 +15,16 @@ recorded.
 
 ## What it measures against
 
-Every measurement uses a fresh, empty physical store directory while preserving
-the machine's logical store directory. The logical directory must remain
-`/nix/store` because it contributes to store-path hashes. Pointing Nix at
+By default, every measurement uses a fresh, empty physical store directory while
+preserving the machine's logical store directory. The logical directory must
+remain `/nix/store` because it contributes to store-path hashes. Pointing Nix at
 another logical directory changes every derivation hash, so the result no longer
 represents a real runner.
 
-Nix cannot plan a build in a store that holds none of the derivations, so the
+Nix cannot plan a build in a store that contains none of the derivations, so the
 command copies each target's derivation closure into the empty store before
-measuring. That copy is local disk to local disk and costs a real runner
-nothing: a runner evaluates the flake into the same store it builds in, so its
-derivations are already there.
+measuring. The report excludes that local copy because a runner evaluates the
+flake in the store where it builds, so the derivations are already present.
 
 The command replaces the substituter list, so the result does not depend on the
 machine's existing configuration. A developer machine with an `ssh://`
@@ -75,19 +72,22 @@ pnpm measure:realisation \
 ```
 
 The summary goes to standard output and the exact numbers to the report file.
-Pass `--report-file /dev/stdout` to read the JSON directly.
+Passing `--report-file /dev/stdout` writes the JSON followed by the human
+summary to the same stream, so the output is not a standalone JSON document.
 
 Two targets sharing a `cohort` label become a group, reported alongside what its
 members cost measured one at a time. The whole manifest is measured as one group
-as well, under `all-targets`, whenever it holds more than one target.
+as well, under `all-targets`, whenever it contains more than one target.
 
 Other options:
 
 - `--substituter <url>`, repeatable, replaces the list every measurement is
   taken against. It defaults to `https://cache.nixos.org`.
-- `--work-dir <path>` puts the diverted store at a chosen path instead of a
-  fresh temporary directory. Nix refuses a store directory reached through a
-  symlink, so the command resolves the path before use.
+- `--work-dir <path>` uses the chosen directory instead of creating a temporary
+  directory. The command reuses existing contents and deletes the directory
+  after the run unless `--keep-store` is set. Reserve this path for the command.
+  Nix refuses a store reached through a symlink, so the command resolves the
+  path first; cleanup therefore deletes the resolved target.
 - `--keep-store` leaves the diverted store behind. Nix writes everything
   read-only, so removing such a store by hand needs `chmod -R u+w` first.
 
@@ -104,10 +104,11 @@ pnpm measure:realisation \
 ```
 
 Each of `willBuild`, `willSubstitute`, `downloadSize` and `narSize` has a budget
-equal to its baseline value plus the tolerance. If a measurement exceeds its
-budget, the command reports the measurement, budget and excess, then exits 65.
-`unknown` has no budget because it counts paths unavailable from every queried
-substituter and therefore depends on network state.
+equal to the baseline multiplied by one plus the tolerance, rounded down to a
+whole number. If a measurement exceeds its budget, the command reports the
+measurement, budget and excess, then exits 65. `unknown` has no budget because
+it counts paths unavailable from every queried substituter and therefore depends
+on network state.
 
 A target or group with no baseline entry is reported as unbudgeted and does not
 breach a budget. Record a new baseline to give it a budget.

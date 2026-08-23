@@ -10,8 +10,6 @@ import { MalformedDerivationError } from './errors.ts';
 const outputPath = '/nix/store/3yyckywrmfcykcn72nsv8j38hzggnv9b-probe';
 const derivationPath = '/nix/store/3yyckywrmfcykcn72nsv8j38hzggnv9b-probe.drv';
 
-// The shape `nix-instantiate` writes: seven elements, with the environment
-// last as a list of name/value pairs.
 function derivation(
 	environment: readonly (readonly [string, string])[],
 	platform = 'aarch64-darwin'
@@ -70,28 +68,29 @@ function expectRefusal(read: () => unknown, reason: string): void {
 describe('Derivation.parse', () => {
 	it.each([
 		{
-			name: 'an output that does not hold every field',
+			name: 'rejects an output with three fields',
 			aterm: 'Derive([("out","","")],[],[],"aarch64-darwin","/bin/sh",[],[])',
 			reason: 'an output has 3 fields instead of 4'
 		},
 		{
-			name: 'an input derivation that does not name its outputs',
+			name: 'rejects an input derivation without an output-name list',
 			aterm:
 				`Derive([("out","${outputPath}","","")],[("${derivationPath}")],[],` +
 				'"aarch64-darwin","/bin/sh",[],[])',
-			reason: 'an input derivation is not a path and its outputs'
+			reason:
+				'an input derivation must contain a path and a list of output names'
 		},
 		{
-			name: 'a platform that is a list',
+			name: 'rejects a list in the platform position',
 			aterm: 'Derive([],[],[],["aarch64-darwin"],"/bin/sh",[],[])',
 			reason: 'the platform is not a string'
 		},
 		{
-			name: 'structured attributes that are not JSON',
+			name: 'rejects invalid JSON in __json',
 			aterm: derivation([['__json', 'not json']]),
 			reason: '__json is not valid JSON'
 		}
-	])('refuses $name when the derivation is parsed', ({ aterm, reason }) => {
+	])('$name', ({ aterm, reason }) => {
 		expectRefusal(() => Derivation.parse(aterm), reason);
 	});
 });
@@ -102,12 +101,12 @@ describe('Derivation.outputs', () => {
 
 	it.each([
 		{
-			name: 'an input-addressed output, whose path the derivation fixes',
+			name: 'parses an input-addressed output path',
 			outputs: `("out","${outputPath}","","")`,
 			expected: new Map([['out', outputPath]])
 		},
 		{
-			name: 'several outputs, each under its own name',
+			name: 'parses several named outputs',
 			outputs: `("dev","${developmentPath}","",""),("out","${outputPath}","","")`,
 			expected: new Map([
 				['dev', developmentPath],
@@ -115,27 +114,29 @@ describe('Derivation.outputs', () => {
 			])
 		},
 		{
-			name: 'a fixed-output derivation, whose path the hash fixes',
+			name: 'parses a fixed-output path',
 			outputs: `("out","${outputPath}","r:sha256","0f2s1n0i8g6b9a3c")`,
 			expected: new Map([['out', outputPath]])
 		},
 		{
-			name: 'a floating output, whose path the build settles',
+			name: 'uses undefined for a floating output path',
 			outputs: '("out","","r:sha256","")',
 			expected: new Map([['out', undefined]])
 		}
-	])('reads $name', ({ outputs, expected }) => {
+	])('$name', ({ outputs, expected }) => {
 		const aterm = `Derive([${outputs}],[],[],"aarch64-darwin","/bin/sh",[],[])`;
 
 		expect(Derivation.parse(aterm).outputs).toStrictEqual(expected);
 	});
 
-	it('refuses an output that does not hold a name and a path', () => {
+	it('rejects a non-string output name', () => {
 		const aterm =
-			'Derive([("out","","")],[],[],"aarch64-darwin","/bin/sh",[],[])';
+			`Derive([(["out"],"${outputPath}","","")],[],[],` +
+			'"aarch64-darwin","/bin/sh",[],[])';
 
-		expect(() => Derivation.parse(aterm).outputs).toThrow(
-			MalformedDerivationError
+		expectRefusal(
+			() => Derivation.parse(aterm).outputs,
+			'an output name and path must both be strings'
 		);
 	});
 });
@@ -146,24 +147,24 @@ describe('Derivation.inputDerivations', () => {
 
 	it.each([
 		{
-			name: 'no inputs at all',
+			name: 'parses no input derivations',
 			inputs: '',
 			expected: new Map()
 		},
 		{
-			name: 'one input and the single output it uses',
+			name: 'parses one input derivation and its output',
 			inputs: `("${compiler}",["out"])`,
 			expected: new Map([[compiler, ['out']]])
 		},
 		{
-			name: 'several inputs, each with the outputs it uses',
+			name: 'parses several input derivations and their outputs',
 			inputs: `("${compiler}",["out"]),("${library}",["dev","out"])`,
 			expected: new Map([
 				[compiler, ['out']],
 				[library, ['dev', 'out']]
 			])
 		}
-	])('reads $name', ({ inputs, expected }) => {
+	])('$name', ({ inputs, expected }) => {
 		const aterm =
 			`Derive([("out","${outputPath}","","")],[${inputs}],[],` +
 			'"aarch64-darwin","/bin/sh",[],[])';
@@ -171,13 +172,34 @@ describe('Derivation.inputDerivations', () => {
 		expect(Derivation.parse(aterm).inputDerivations).toStrictEqual(expected);
 	});
 
-	it('refuses an input that does not hold a path and its outputs', () => {
+	it.each([
+		{
+			name: 'rejects a non-string input derivation path',
+			input: `(["${compiler}"],["out"])`
+		},
+		{
+			name: 'rejects a non-list input derivation output selection',
+			input: `("${compiler}","out")`
+		}
+	])('$name', ({ input }) => {
 		const aterm =
-			`Derive([("out","${outputPath}","","")],[("${compiler}")],[],` +
+			`Derive([("out","${outputPath}","","")],[${input}],[],` +
 			'"aarch64-darwin","/bin/sh",[],[])';
 
-		expect(() => Derivation.parse(aterm).inputDerivations).toThrow(
-			MalformedDerivationError
+		expectRefusal(
+			() => Derivation.parse(aterm).inputDerivations,
+			'an input derivation path must be a string and its output names must be a list'
+		);
+	});
+
+	it('rejects a non-string input derivation output name', () => {
+		const aterm =
+			`Derive([("out","${outputPath}","","")],[("${compiler}",[["out"]])],[],` +
+			'"aarch64-darwin","/bin/sh",[],[])';
+
+		expectRefusal(
+			() => Derivation.parse(aterm).inputDerivations,
+			'an input derivation output name must be a string'
 		);
 	});
 });
@@ -188,21 +210,21 @@ describe('Derivation.inputSources', () => {
 
 	it.each([
 		{
-			name: 'no sources at all',
+			name: 'parses no input sources',
 			sources: '',
 			expected: []
 		},
 		{
-			name: 'one source',
+			name: 'parses one input source',
 			sources: `"${source}"`,
 			expected: [source]
 		},
 		{
-			name: 'several sources in derivation order',
+			name: 'preserves input-source order',
 			sources: `"${source}","${patch}"`,
 			expected: [source, patch]
 		}
-	])('reads $name', ({ sources, expected }) => {
+	])('$name', ({ sources, expected }) => {
 		const aterm =
 			`Derive([("out","${outputPath}","","")],[],[${sources}],` +
 			'"aarch64-darwin","/bin/sh",[],[])';
@@ -210,13 +232,14 @@ describe('Derivation.inputSources', () => {
 		expect(Derivation.parse(aterm).inputSources).toStrictEqual(expected);
 	});
 
-	it('refuses an input source that is not a store path', () => {
+	it('rejects a list in the input-source position', () => {
 		const aterm =
 			`Derive([("out","${outputPath}","","")],[],[["${source}"]],` +
 			'"aarch64-darwin","/bin/sh",[],[])';
 
-		expect(() => Derivation.parse(aterm).inputSources).toThrow(
-			MalformedDerivationError
+		expectRefusal(
+			() => Derivation.parse(aterm).inputSources,
+			'an input source must be a string'
 		);
 	});
 });
@@ -224,7 +247,7 @@ describe('Derivation.inputSources', () => {
 describe('Derivation.allowsSubstitutes', () => {
 	it.each([
 		{
-			name: 'a derivation that never sets the option',
+			name: 'defaults to true when the unstructured option is absent',
 			aterm: derivation([
 				['builder', '/bin/sh'],
 				['name', 'probe'],
@@ -233,7 +256,7 @@ describe('Derivation.allowsSubstitutes', () => {
 			expected: true
 		},
 		{
-			name: 'the empty value Nix writes for allowSubstitutes = false',
+			name: 'parses an empty unstructured value as false',
 			aterm: derivation([
 				['allowSubstitutes', ''],
 				['name', 'probe']
@@ -241,17 +264,17 @@ describe('Derivation.allowsSubstitutes', () => {
 			expected: false
 		},
 		{
-			name: 'the "1" Nix writes for allowSubstitutes = true',
+			name: 'parses the unstructured value "1" as true',
 			aterm: derivation([['allowSubstitutes', '1']]),
 			expected: true
 		},
 		{
-			name: 'a value that is neither empty nor "1"',
+			name: 'parses another unstructured value as false',
 			aterm: derivation([['allowSubstitutes', 'true']]),
 			expected: false
 		},
 		{
-			name: 'a repeated entry, where the last one wins',
+			name: 'uses the last duplicate unstructured value',
 			aterm: derivation([
 				['allowSubstitutes', '1'],
 				['allowSubstitutes', '']
@@ -259,7 +282,7 @@ describe('Derivation.allowsSubstitutes', () => {
 			expected: false
 		},
 		{
-			name: 'structured attributes withholding substitution',
+			name: 'parses a structured false value',
 			aterm: structuredDerivation({
 				allowSubstitutes: false,
 				name: 'probe'
@@ -267,17 +290,17 @@ describe('Derivation.allowsSubstitutes', () => {
 			expected: false
 		},
 		{
-			name: 'structured attributes allowing substitution',
+			name: 'parses a structured true value',
 			aterm: structuredDerivation({ allowSubstitutes: true }),
 			expected: true
 		},
 		{
-			name: 'structured attributes that never set the option',
+			name: 'defaults to true when the structured option is absent',
 			aterm: structuredDerivation({ name: 'probe' }),
 			expected: true
 		},
 		{
-			name: 'an environment value carrying escaped quotes and newlines',
+			name: 'parses allowSubstitutes after an escaped environment value',
 			aterm: derivation([
 				['buildCommand', 'echo "one"\n\techo \\two\n'],
 				['allowSubstitutes', '']
@@ -285,7 +308,7 @@ describe('Derivation.allowsSubstitutes', () => {
 			expected: false
 		},
 		{
-			name: 'an environment value that looks like a term',
+			name: 'does not parse term syntax inside an environment value',
 			aterm: derivation([
 				['buildCommand', 'Derive([("allowSubstitutes","1")])'],
 				['allowSubstitutes', '']
@@ -293,66 +316,66 @@ describe('Derivation.allowsSubstitutes', () => {
 			expected: false
 		},
 		{
-			name: 'an empty environment',
+			name: 'defaults to true for an empty environment',
 			aterm: derivation([]),
 			expected: true
 		}
-	])('reads $name', ({ aterm, expected }) => {
+	])('$name', ({ aterm, expected }) => {
 		expect(Derivation.parse(aterm).allowsSubstitutes).toBe(expected);
 	});
 
 	it.each([
 		{
-			name: 'bytes that are not a derivation at all',
+			name: 'rejects text without a Derive prefix',
 			aterm: 'not a derivation',
 			reason: "expected 'Derive(' at offset 0"
 		},
 		{
-			name: 'a versioned term the dynamic-derivations feature writes',
+			name: 'rejects a DrvWithVersion dynamic-derivation term',
 			aterm: 'DrvWithVersion("xp-dyn-drv",[],[],[],"","",[],[])',
 			reason: "expected 'Derive(' at offset 0"
 		},
 		{
-			name: 'a term with too few elements',
+			name: 'rejects a Derive term with six elements',
 			aterm: 'Derive([],[],[],"system","builder",[])',
-			reason: '6 elements where a derivation has 7'
+			reason: '6 elements; expected 7'
 		},
 		{
-			name: 'an unterminated string',
+			name: 'rejects an unterminated string',
 			aterm: 'Derive([],[],[],"system","builder",[],[("name","value',
 			reason: 'an unterminated string'
 		},
 		{
-			name: 'an environment entry that is not a pair',
+			name: 'rejects an environment entry with one element',
 			aterm: 'Derive([],[],[],"system","builder",[],[("name")])',
-			reason: 'an environment entry is not a name and a value'
+			reason: 'an environment entry must be a two-element name-value pair'
 		},
 		{
-			name: 'an environment entry holding a list',
+			name: 'rejects a non-string environment value',
 			aterm: 'Derive([],[],[],"system","builder",[],[("name",["value"])])',
-			reason: 'an environment entry holds something other than strings'
+			reason: 'an environment entry name and value must both be strings'
 		},
 		{
-			name: 'an environment that is a string',
+			name: 'rejects a string in the environment position',
 			aterm: 'Derive([],[],[],"system","builder",[],"environment")',
 			reason: 'the environment is not a list'
 		},
 		{
-			name: 'structured attributes that are not JSON',
+			name: 'rejects invalid JSON in __json',
 			aterm: derivation([['__json', 'not json']]),
 			reason: '__json is not valid JSON'
 		},
 		{
-			name: 'structured attributes that are not an object',
+			name: 'rejects an array in __json',
 			aterm: derivation([['__json', '[]']]),
 			reason: '__json is not an object'
 		},
 		{
-			name: 'a structured allowSubstitutes that is not a boolean',
+			name: 'rejects a non-boolean structured allowSubstitutes value',
 			aterm: structuredDerivation({ allowSubstitutes: 'no' }),
 			reason: 'the structured allowSubstitutes attribute is not a boolean'
 		}
-	])('refuses $name', ({ aterm, reason }) => {
+	])('$name', ({ aterm, reason }) => {
 		expectRefusal(() => canSubstitute(aterm), reason);
 	});
 });
@@ -360,12 +383,12 @@ describe('Derivation.allowsSubstitutes', () => {
 describe('Derivation.buildRequirements', () => {
 	it.each([
 		{
-			name: 'a derivation requiring nothing of its machine',
+			name: 'parses a platform with no required features',
 			aterm: derivation([['name', 'probe']], 'x86_64-linux'),
 			expected: { system: 'x86_64-linux', requiredSystemFeatures: [] }
 		},
 		{
-			name: 'the whitespace-joined list Nix writes for one feature',
+			name: 'parses one unstructured required feature',
 			aterm: derivation([['requiredSystemFeatures', 'kvm']]),
 			expected: {
 				system: 'aarch64-darwin',
@@ -373,7 +396,7 @@ describe('Derivation.buildRequirements', () => {
 			}
 		},
 		{
-			name: 'a list of several features, repeats collapsed',
+			name: 'parses unstructured features in order without duplicates',
 			aterm: derivation([
 				['requiredSystemFeatures', 'big-parallel  kvm big-parallel']
 			]),
@@ -383,12 +406,12 @@ describe('Derivation.buildRequirements', () => {
 			}
 		},
 		{
-			name: 'an empty list',
+			name: 'parses an empty unstructured feature list',
 			aterm: derivation([['requiredSystemFeatures', '']]),
 			expected: { system: 'aarch64-darwin', requiredSystemFeatures: [] }
 		},
 		{
-			name: 'structured attributes carrying the features as an array',
+			name: 'parses a structured feature array',
 			aterm: structuredDerivation({
 				name: 'probe',
 				requiredSystemFeatures: ['big-parallel', 'kvm']
@@ -399,12 +422,12 @@ describe('Derivation.buildRequirements', () => {
 			}
 		},
 		{
-			name: 'structured attributes that never set the features',
+			name: 'defaults absent structured features to an empty list',
 			aterm: structuredDerivation({ name: 'probe' }),
 			expected: { system: 'aarch64-darwin', requiredSystemFeatures: [] }
 		},
 		{
-			name: 'an unstructured entry beside structured attributes, which wins',
+			name: 'prefers structured features to an unstructured entry',
 			aterm: derivation([
 				['requiredSystemFeatures', 'kvm'],
 				['__json', JSON.stringify({ requiredSystemFeatures: ['uid-range'] })]
@@ -414,23 +437,23 @@ describe('Derivation.buildRequirements', () => {
 				requiredSystemFeatures: ['uid-range']
 			}
 		}
-	])('reads $name', ({ aterm, expected }) => {
+	])('$name', ({ aterm, expected }) => {
 		expect(Derivation.parse(aterm).buildRequirements).toStrictEqual(expected);
 	});
 
 	it.each([
 		{
-			name: 'a term whose platform is a list',
+			name: 'rejects a list in the platform position',
 			aterm: 'Derive([],[],[],["system"],"builder",[],[])',
 			reason: 'the platform is not a string'
 		},
 		{
-			name: 'structured features that are not a list of strings',
+			name: 'rejects a non-array structured feature value',
 			aterm: structuredDerivation({ requiredSystemFeatures: 'kvm' }),
 			reason:
 				'the structured requiredSystemFeatures attribute is not a list of strings'
 		}
-	])('refuses $name', ({ aterm, reason }) => {
+	])('$name', ({ aterm, reason }) => {
 		expectRefusal(() => readBuildRequirements(aterm), reason);
 	});
 });
@@ -438,28 +461,36 @@ describe('Derivation.buildRequirements', () => {
 describe('derivationPathOf', () => {
 	it.each([
 		{
-			name: 'a derivation with the outputs it should produce',
+			name: 'parses an all-outputs derived path',
 			installable: `${derivationPath}^*`,
 			expected: derivationPath
 		},
 		{
-			name: 'a derivation with named outputs',
+			name: 'parses named outputs from a derived path',
 			installable: `${derivationPath}^out,dev`,
 			expected: derivationPath
 		},
 		{
-			name: 'a bare derivation',
+			name: 'parses a bare derivation store path',
 			installable: derivationPath,
 			expected: derivationPath
 		},
-		{ name: 'an output path', installable: outputPath, expected: undefined },
-		{ name: 'a flake attribute', installable: '.#app', expected: undefined },
 		{
-			name: 'a path outside any store',
+			name: 'returns undefined for an output store path',
+			installable: outputPath,
+			expected: undefined
+		},
+		{
+			name: 'returns undefined for a flake attribute',
+			installable: '.#app',
+			expected: undefined
+		},
+		{
+			name: 'returns undefined for a path outside the store',
 			installable: '/tmp/probe.drv',
 			expected: undefined
 		}
-	])('reads $name', ({ installable, expected }) => {
+	])('$name', ({ installable, expected }) => {
 		expect(derivationPathOf(installable)).toBe(expected);
 	});
 });

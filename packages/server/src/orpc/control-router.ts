@@ -34,18 +34,14 @@ import { bridgedError } from './error-bridge.ts';
 const noPendingCache = (): Promise<StoredCache | undefined> =>
 	Promise.resolve(undefined);
 
-/**
-What a control procedure needs: the request (for auth and the public origin), the Worker env, and the request logger.
-*/
 export interface ControlOrpcContext {
 	readonly request: Request;
 	readonly env: Env;
 	readonly logger: Logger;
 }
 
-// Every control procedure runs behind the error bridge and the grant authoriser:
-// a control-issued token is verified, then the operation the procedure declares
-// is checked against the grants it carries before any handler runs.
+// Verify every control token and check the procedure's declared operation
+// against its grants before the handler runs.
 const os = implement(controlContract)
 	.$context<ControlOrpcContext>()
 	.use(async ({ context, next }) => {

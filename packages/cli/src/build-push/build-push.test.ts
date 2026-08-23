@@ -102,9 +102,8 @@ function pathInfo(
 	};
 }
 
-// The receipt describes every path it publishes. A fixture path the run did not
-// build is described from what the store records: the store's own work when the
-// store registered the path as ultimate, and a copy otherwise.
+// For a path that the run did not build, the receipt records whether the store
+// reports it as an ultimate path or as a copy.
 function heldSubject(storePath: StorePathString): unknown {
 	return {
 		origin: 'store-held',
@@ -163,8 +162,6 @@ function emptyStream(): ReadableStream<Uint8Array> {
 	});
 }
 
-// The NAR a store that serves its paths elsewhere would stream. This store
-// serves them on the filesystem, so nothing reads it.
 const emptyNar: AsyncIterable<Uint8Array> = {
 	[Symbol.asyncIterator]: () => ({
 		next: () => Promise.resolve({ done: true, value: undefined })
@@ -257,9 +254,6 @@ interface RecordedRun {
 	readonly results: ResultPayload[];
 	readonly warnings: { label: string; value?: string }[];
 	readonly info: string[];
-	/**
-	What the store was asked, in order, and when the run asked it.
-	*/
 	readonly storeCalls: string[];
 }
 
@@ -336,25 +330,13 @@ function recordingReporter(record: RecordedRun): Reporter {
 }
 
 interface ConstructedFlowConfig {
-	/**
-	The stub nix succeeds once it has run this many times.
-	*/
 	readonly succeedOn: number;
-	/**
-	What the cohort declares; a flake attribute unless set.
-	*/
 	readonly installables?: readonly string[];
 	readonly attempts?: number;
 	readonly rebuild?: boolean;
 	readonly requireProvenance?: boolean;
-	/**
-	Simulates a helper delivery failure after Nix completed the build.
-	*/
 	readonly suppressEvent?: boolean;
 	readonly outputProtection?: 'failed';
-	/**
-	The machine the stub's activity log attributes; empty is local.
-	*/
 	readonly machine?: string;
 }
 
@@ -365,41 +347,17 @@ interface FlowConfig {
 	readonly emitEvent?: boolean;
 	readonly emitTwoEvents?: boolean;
 	readonly emitExitStatus?: number;
-	/**
-	The emitting child exits without waiting for its message to be read.
-	*/
 	readonly emitDetached?: boolean;
 	readonly eventOutputProtection?: 'failed';
-	/**
-	The protection call that never finishes, counting from one.
-	*/
 	readonly stalledProtectionCall?: number;
 	readonly valid?: readonly StorePathString[];
-	/**
-	What the store holds until the build has run; empty unless set.
-	*/
 	readonly alreadyValid?: readonly StorePathString[];
-	/**
-	The outputs the cohort's installables resolve to before the build.
-	*/
 	readonly declaredOutputs?: readonly StorePathString[];
-	/**
-	The paths the build leaves out-links for; the valid paths unless set.
-	*/
 	readonly outPaths?: readonly StorePathString[];
-	/**
-	The paths the store holds as its own; none unless set.
-	*/
 	readonly ultimatePaths?: readonly StorePathString[];
 	readonly action?: UploadDecision['action'];
 	readonly uploadFailure?: Error;
-	/**
-	Requests the receipt in a directory the run never creates.
-	*/
 	readonly unwritableReceipt?: boolean;
-	/**
-	What preflight refuses this run with, instead of proving its endpoints.
-	*/
 	readonly preflightFailure?: Error;
 	readonly options?: Partial<BuildPushRunOptions>;
 }
@@ -503,8 +461,6 @@ async function stubNixEnvironment(
 	};
 }
 
-// The stub writes its run count as it starts, so the file's existence is what
-// the store reads to answer for the build having run.
 function stubCountFile(workspace: string): string {
 	return path.join(workspace, 'stub-count');
 }
@@ -615,10 +571,9 @@ async function runFlow(config: FlowConfig): Promise<FlowRun> {
 		}
 	};
 
-	// The store answers what it holds, and records what it was asked and when.
-	// The stub writes its count file as it starts, so that file is what marks
-	// the build as having run; a flow whose build is not the stub has no such
-	// division and holds the same paths throughout.
+	// The count file separates paths that existed before the stub build from
+	// paths that became valid during it. Flows without the stub use one stable
+	// set of valid paths throughout.
 	const hasBuilt = (): boolean =>
 		config.constructed === undefined || existsSync(stubCountFile(workspace));
 	const recordCall = (name: string): void => {
@@ -798,7 +753,6 @@ function ignore(): void {
 	return;
 }
 
-// A reporter that counts the lines written to it and does nothing else.
 function infoReporter(info: { lines: number }): Reporter {
 	return {
 		phase: (_label, body) =>
@@ -836,8 +790,6 @@ const commitTarget = {
 	narHash: nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`)
 };
 
-// A real commit session over scripted sockets, reporting its waits through the
-// reporter under test.
 function pacedSession(
 	sockets: readonly FakeCommitSocket[],
 	onWaiting: (isWaitingForCapacity: boolean) => void
@@ -873,15 +825,12 @@ function pacedSession(
 		{
 			path: commitPath,
 			timeoutSeconds: 100,
-			// Long enough that no keepalive fires during the run below.
 			keepaliveMs: 600_000,
 			onWaiting
 		}
 	);
 }
 
-// The server's side of an upgrade that paces the session by credit and has
-// none to give it.
 function grantNothing(socket: FakeCommitSocket): void {
 	socket.emit('upgrade', {
 		headers: {
@@ -900,10 +849,9 @@ describe('capacityWaitReporter', () => {
 		vi.useRealTimers();
 	});
 
-	// A cache granting one entry at a time leaves the session waiting before
-	// each path, which is ordinary pacing and not worth a line per path. The end
-	// of each wait cancels the announcement the reporter was holding, so the run
-	// stays quiet however long it continues afterwards.
+	// Short waits are normal credit pacing. If capacity arrives before the
+	// announcement delay, cancel the pending message instead of printing one for
+	// every path.
 	it('prints nothing for a wait that ends promptly', () => {
 		const info = { lines: 0 };
 		const report = capacityWaitReporter(infoReporter(info));
@@ -919,10 +867,9 @@ describe('capacityWaitReporter', () => {
 		expect(info).toStrictEqual({ lines: 0 });
 	});
 
-	// A wait that lasts is announced, and its ending is not: a run that carries
-	// on shows that capacity arrived, and a run that gave up reports the reason
-	// in its failure. A later wait is announced in its turn, so a run that waits
-	// twice prints two lines and nothing else.
+	// Announce each wait that outlasts the delay. Do not print a second message
+	// when capacity arrives because continued progress already shows that the wait
+	// ended, while a failed run reports its reason separately.
 	it('reports each wait that lasts, and nothing when one ends', () => {
 		const info = { lines: 0 };
 		const report = capacityWaitReporter(infoReporter(info));
@@ -954,12 +901,10 @@ describe('capacityWaitReporter', () => {
 		});
 	});
 
-	// The reporter and the session have to compose, and each half proves only
-	// its own side. Here a cache accepts the session and drops it, so every
-	// connected window is shorter than the delay the reporter holds its
-	// announcement for: a wait reported per connection would reach five seconds
-	// on none of them, and the user would sit out the whole budget in silence.
-	it('announces a wait the session holds across drops, and prints nothing when that wait expires', async () => {
+	// The capacity wait continues across reconnects. Each connection below lasts
+	// less than the announcement delay, so restarting the delay on every drop
+	// would leave the user waiting in silence for the entire capacity budget.
+	it('announces a capacity wait that continues across reconnects', async () => {
 		const info = { lines: 0 };
 		const dropped = [new FakeCommitSocket(), new FakeCommitSocket()];
 		const last = new FakeCommitSocket();
@@ -1070,10 +1015,6 @@ describe('classifyPublicationFailures', () => {
 			expectedCauseIndex: 1
 		},
 		{
-			// A run that gave up waiting for capacity is transient: the paths it
-			// could not commit are still publishable, and a later run may find the
-			// tenant idle. The condition itself stays in the cause chain, which the
-			// reporter renders under the failure.
 			name: 'a capacity timeout',
 			causes: [
 				new CommitCapacityTimeoutError(
@@ -1138,38 +1079,33 @@ describe('runBuildPush', () => {
 			name: 'a daemon that does not trust the client',
 			failure: new UntrustedDaemonError('not-trusted')
 		}
-	])(
-		// The cohort declares a flake attribute, which names no derivation to
-		// resolve, so the build's own out-links are what the run publishes.
-		'publishes after the build for $name',
-		async ({ failure }) => {
-			const run = await runFlow({
-				preflightFailure: failure,
-				constructed: { succeedOn: 1 },
-				valid: [pathA]
-			});
-			const receipt: unknown = JSON.parse(
-				await readFile(run.receiptFile, 'utf8')
-			);
+	])('publishes after the build for $name', async ({ failure }) => {
+		const run = await runFlow({
+			preflightFailure: failure,
+			constructed: { succeedOn: 1 },
+			valid: [pathA]
+		});
+		const receipt: unknown = JSON.parse(
+			await readFile(run.receiptFile, 'utf8')
+		);
 
-			expect({ error: run.error, info: run.info, receipt }).toStrictEqual({
-				error: undefined,
-				info: [
-					buildPushModeDescription({
-						kind: 'reconciled-local',
-						reason: failure
-					})
-				],
-				receipt: {
-					version: 3,
-					paths: [pathA],
-					subjects: [copiedSubject(pathA)],
-					childExitStatus: 0,
-					uploaded: []
-				}
-			});
-		}
-	);
+		expect({ error: run.error, info: run.info, receipt }).toStrictEqual({
+			error: undefined,
+			info: [
+				buildPushModeDescription({
+					kind: 'reconciled-local',
+					reason: failure
+				})
+			],
+			receipt: {
+				version: 3,
+				paths: [pathA],
+				subjects: [copiedSubject(pathA)],
+				childExitStatus: 0,
+				uploaded: []
+			}
+		});
+	});
 
 	it('asks which declared outputs the store holds before it builds', async () => {
 		const run = await runFlow({
@@ -1236,8 +1172,6 @@ describe('runBuildPush', () => {
 		}
 	);
 
-	// The receipt one reconciled local run writes over a cohort that realises
-	// exactly one path, under the facts each case establishes about it.
 	async function reconciledReceipt(config: FlowConfig): Promise<unknown> {
 		const run = await runFlow({
 			preflightFailure: new UntrustedDaemonError('not-trusted'),
@@ -1355,8 +1289,6 @@ describe('runBuildPush', () => {
 		});
 	});
 
-	// A failed build leaves no out-links, and its declared outputs are not in
-	// the store, so the run has nothing to publish and touches no root.
 	it('publishes nothing and exits with its own status when the build fails', async () => {
 		const run = await runFlow({
 			preflightFailure: new UntrustedDaemonError('not-trusted'),
@@ -1418,8 +1350,6 @@ describe('runBuildPush', () => {
 		});
 	});
 
-	// The build failed after the builder produced pathA, so the receipt
-	// records both the failure and the subject.
 	it('publishes failed-build survivors and still records their builder', async () => {
 		const run = await runFlow({
 			preflightFailure: new UntrustedDaemonError('not-trusted'),

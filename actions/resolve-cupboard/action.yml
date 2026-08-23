@@ -1,14 +1,14 @@
 name: Resolve cupboard
 description:
-  Resolve a reusable workflow revision to one canonical cupboard acquisition.
+  Resolve a reusable workflow revision to an exact release or source commit.
 inputs:
   cupboard-version:
     description:
-      Optional release override. Use latest or any exact published release tag.
-      Empty resolves from workflow-sha.
+      Use latest or an exact published release tag instead of resolving from
+      workflow-sha.
     required: false
   workflow-repository:
-    description: Repository containing the called reusable workflow.
+    description: Repository for the called reusable workflow.
     required: true
   workflow-ref:
     description: Full job.workflow_ref value for the called workflow.
@@ -27,7 +27,7 @@ inputs:
     required: false
 outputs:
   cupboard:
-    description: Canonical release or source acquisition as validated JSON.
+    description: Validated JSON containing the exact release or source commit.
     value: ${{ steps.resolve.outputs.cupboard }}
 runs:
   using: composite

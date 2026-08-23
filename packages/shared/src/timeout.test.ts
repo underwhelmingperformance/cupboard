@@ -2,8 +2,6 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { withDeadline } from './timeout.ts';
 
-// A caller's typed timeout error; the wrapper must reject with exactly what
-// `makeError` returns, so tests assert on the type rather than a message.
 class TestTimeoutError extends Error {
 	constructor() {
 		super('timed out');

@@ -5,7 +5,7 @@ import type { Reporter } from '@cupboard/reporter';
  * by any Nix version this client knows about. The report is emitted once for
  * the run that read the configuration.
  *
- * Nix warns about such a name and carries on, so the setting has no effect on
+ * Nix warns about such a name and continues, so the setting has no effect on
  * the run. A name reported here is usually a misspelling in a `nix.conf`, which
  * is worth telling the user about.
  */

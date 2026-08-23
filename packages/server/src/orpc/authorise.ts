@@ -20,8 +20,9 @@ import { type AccessClaims } from '../auth/auth.ts';
 import { InsufficientScopeError } from '../errors.ts';
 
 /**
-Resolves the cache a pending upload or attestation row was opened against.
-*/
+ * Returns the cache recorded by a pending upload or attestation, or `undefined`
+ * after the pending row has settled or expired.
+ */
 export type PendingCacheResolver = (
 	id: string
 ) => Promise<StoredCache | undefined>;
@@ -43,11 +44,9 @@ function inputField(input: unknown, name: string): string | undefined {
 
 interface ResolvedResource {
 	readonly resource: ResourceRequest;
-	// A declared resource field was present in the input but failed to validate, so
-	// it names no concrete grant and only a wildcard can cover the request.
+	// Only a wildcard grant can cover a resource field that failed validation.
 	readonly unresolved: boolean;
-	// A pending-row resource whose row was not found, with whether its absence
-	// must deny.
+	// Records whether an absent pending row must deny the request.
 	readonly pendingMissing: false | { readonly missingDenies: boolean };
 }
 
@@ -79,9 +78,8 @@ async function resolveResource(
 				resource.cache = selectorForCache(cache);
 			}
 		} else {
-			// A malformed selector names no concrete grant, so a scoped token is
-			// refused while a wildcard still covers; the route's own input validation
-			// renders the malformed name as a 400.
+			// A scoped grant cannot cover an invalid selector. A wildcard can,
+			// although route validation will still return 400 for the input.
 			const selector = inputField(input, spec.cache.field);
 			const parsed =
 				selector === undefined
@@ -123,10 +121,8 @@ async function resolveResource(
 	return { resource, unresolved: isUnresolved, pendingMissing };
 }
 
-// Whether any grant authorises the operation on some resource at all, ignoring
-// which one. The fallback for a benign read whose pending row has settled away:
-// the holder of the operation may still poll it, but a token that never held it
-// cannot.
+// When a benign read outlives its pending row, allow polling only if the token
+// authorises that operation for some resource.
 function hasOperation(
 	grants: AccessClaims['grants'],
 	operation: Operation
@@ -138,17 +134,14 @@ function hasOperation(
 	);
 }
 
-// A wildcard grant carries no resource and covers every operation on every
-// resource, so it is the only grant that can cover a request whose resource
-// failed to validate.
+// Only a wildcard grant can cover a request whose resource failed validation.
 function hasWildcard(grants: AccessClaims['grants']): boolean {
 	return grants.some((grant) => grant.type === 'cupboard_wildcard');
 }
 
 /**
- * Authorise a request: the operation the procedure declares must be covered by
- * the token's grants on the resource it acts on. A procedure with no `requires`
- * is denied, so a missing declaration fails closed.
+ * Requires the token to authorise the procedure's operation for its resolved
+ * resource. A procedure without a `requires` declaration is denied.
  */
 export async function authoriseRequest(
 	claims: AccessClaims,
@@ -191,11 +184,9 @@ export async function authoriseRequest(
 }
 
 /**
- * Authorise the run root a negotiate binds: `root:attach` must be covered on
- * the named cache and root, by action membership and the grant's root
- * selector, exactly as a root write's route authorisation covers `root:set`.
- * The decision is taken at negotiate, before any upload is planned; the commit
- * socket inherits the binding, so no later frame carries a root to re-check.
+ * Requires `root:attach` authority for the cache and run root selected during
+ * negotiation. The commit session inherits this binding, so later frames do
+ * not repeat the root name.
  */
 export function authoriseAttachRoot(
 	claims: AccessClaims,

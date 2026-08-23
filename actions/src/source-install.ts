@@ -17,17 +17,11 @@ export type ResolvedSourceCupboard = Extract<
 	{ readonly kind: 'source' }
 >;
 
-/**
-The Nix-built executable and the immutable source coordinate that produced it.
-*/
 export interface AcquiredSourceCupboard {
 	readonly binaryPath: string;
 	readonly cupboard: ResolvedSourceCupboard;
 }
 
-/**
-A checked-out workflow source tree to acquire as a Nix-built Cupboard.
-*/
 export interface AcquireSourceCupboardOptions {
 	readonly checkoutDirectory: string;
 	readonly installDirectory: string;
@@ -35,19 +29,12 @@ export interface AcquireSourceCupboardOptions {
 	readonly signal?: AbortSignal;
 }
 
-/**
-The captured command contract needed to verify and build a source checkout.
-*/
 export type SourceCommandRunner = (
 	command: string,
 	arguments_: readonly string[],
 	signal?: AbortSignal
 ) => Promise<{ readonly stdout: string }>;
 
-/**
- * The injectable command runner and filesystem operations used to build
- * Cupboard from a source checkout and verify the result.
- */
 export interface SourceInstallDependencies {
 	readonly runCommand?: SourceCommandRunner;
 	readonly isExecutableFile?: (candidate: string) => Promise<boolean>;
@@ -61,7 +48,7 @@ export class SourceCheckoutRepositoryMismatchError extends CodedError {
 		public readonly remote: string
 	) {
 		super(
-			`source checkout remote '${remote}' does not identify ${expectedRepository}`
+			`source checkout remote '${remote}' is not for repository ${expectedRepository}`
 		);
 		this.name = 'SourceCheckoutRepositoryMismatchError';
 	}
@@ -108,7 +95,7 @@ export class SourceInstallationVersionMismatchError extends CodedError {
 		public readonly actual: string
 	) {
 		super(
-			`source-built Cupboard should report version '${expected}', but reported '${actual}'`
+			`source-built Cupboard reported version '${actual}'; expected '${expected}'`
 		);
 		this.name = 'SourceInstallationVersionMismatchError';
 	}
@@ -282,9 +269,12 @@ async function assertCheckout(
 }
 
 /**
- * Build Cupboard from an already checked-out immutable workflow revision.
- * The checkout identity and tracked cleanliness are verified before Nix reads
- * it, then the result must contain both the CLI and its post-build hook relay.
+ * Verify the checkout's repository and commit, and reject tracked changes,
+ * before Nix reads the source. The build must return one output containing the
+ * CLI and its hook relay, and the CLI version must match the resolved commit.
+ *
+ * Keep the successful out-link as a GC root. If validation fails after the
+ * root is created, remove only the directory created for this acquisition.
  */
 export async function acquireSourceCupboard(
 	options: AcquireSourceCupboardOptions,

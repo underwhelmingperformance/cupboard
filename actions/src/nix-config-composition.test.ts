@@ -10,7 +10,7 @@ const prepareSshTransport = new URL(
 const setupCommand = new URL('commands/setup.ts', import.meta.url);
 
 describe('prepare and setup Nix configuration', () => {
-	it('keeps caller and builder settings separate from setup cache settings', async () => {
+	it('writes caller and builder settings separately from cache settings', async () => {
 		const [prepareActionContents, prepareSshTransportContents, setup] =
 			await Promise.all([
 				readFile(prepareAction, 'utf8'),

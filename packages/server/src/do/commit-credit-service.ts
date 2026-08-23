@@ -17,28 +17,22 @@ import { maxUncreditedCommitSessions } from '../policy/commit-sockets.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import { type ServerContext } from './context.ts';
 
-// The alarm closes a commit socket after 150 seconds without a client message.
-// Runtime keepalive responses do not reach this object and therefore do not
-// reset client activity.
-//
-// Keep this below the client's 600-second default commit wait. Closing an idle
-// session returns its unused credit while another client can still use it. The
-// 150-second interval also permits ordinary pauses between commits.
+// Runtime keepalive responses bypass the Durable Object, so only client frames
+// count as activity. This interval allows ordinary pauses between commits while
+// ensuring that the server reclaims unused credit before the client's
+// 600-second commit wait expires.
 export const commitSocketIdleMs = 150 * 1000;
 
-// The close code for a session closed as idle. The client may reconnect at
-// once, so this must not be 1002, the code a client treats as fatal.
+// An idle close is retryable. The client treats 1002 as a fatal protocol error.
 const idleCloseCode = 1001;
 
 const entryCountSchema = z.number().int().nonnegative();
 const epochMillisSchema = z.number().int().nonnegative();
 
-// The credit state stored in a commit socket attachment. `granted` is unused
-// credit assigned to the session. `demand` is the last number of queued entries
-// reported by the client. `hasRequested` records whether the connection has sent
-// a credit request. `unspentSince` records when the balance last increased from
-// zero. `isClosing` marks a session whose credit has already been reclaimed.
-// Older attachments omit the optional fields.
+// `unspentSince` starts when a balance changes from zero to positive.
+// `hasRequested` distinguishes a confirmed credit exchange from a possibly lost
+// opening grant, and `isClosing` prevents reclaimed credit from being counted
+// again. Older attachments can omit these fields.
 const commitCreditStateSchema = z.object({
 	granted: entryCountSchema,
 	demand: entryCountSchema,
@@ -48,12 +42,9 @@ const commitCreditStateSchema = z.object({
 });
 type CommitCreditState = z.infer<typeof commitCreditStateSchema>;
 
-// The state stored with a commit session socket across a hibernation wake. It
-// records the cache, session identifier, token expiry, closing state, credit
-// state, and time of the last client message. `credit` is absent when the server
-// does not pace the session. Attachments written by older deployments omit the
-// optional fields. On a cold start, the scheduler rebuilds this state from
-// `getWebSockets()`.
+// The scheduler rebuilds its in-memory totals and queue from socket attachments
+// after hibernation. An absent `credit` field denotes an unpaced session, and
+// older deployments can omit the other optional fields.
 export const commitSessionAttachmentSchema = z.object({
 	cache: storedCacheSchema,
 	sessionId: sessionIdSchema,
@@ -66,19 +57,6 @@ export type CommitSessionAttachment = z.infer<
 	typeof commitSessionAttachmentSchema
 >;
 
-/**
- * The accounting result for one commit message.
- *
- * `accounted` means the service debited every entry. Each entry returns its
- * credit after sending its first frame.
- *
- * `unaccounted` means the server does not pace the session. The session either
- * did not negotiate credit or did not receive its opening grant.
- *
- * `overdrawn` means the message contains more entries than the session's unused
- * credit. `refused` means removing the session from accounting would exceed the
- * tenant's limit for unpaced sessions.
- */
 export type CommitCreditDecision =
 	'accounted' | 'unaccounted' | 'overdrawn' | 'refused';
 
@@ -92,12 +70,6 @@ export function readCommitSessionAttachment(
 	return parsed.success ? parsed.data : undefined;
 }
 
-/**
- * Counts the tenant's sessions that the server does not pace. These include
- * sessions that did not negotiate credit and sessions removed from accounting
- * after a lost grant. Their messages have no per-entry credit limit, so admission
- * and downgrade enforce the same session-count limit.
- */
 export function unpacedSessions(sockets: readonly WebSocket[]): number {
 	return sockets.filter((socket) => {
 		const attachment = readCommitSessionAttachment(socket);
@@ -110,13 +82,9 @@ export function unpacedSessions(sockets: readonly WebSocket[]): number {
 	}).length;
 }
 
-/**
- * Returns the credit state of a session that remains in the accounting.
- *
- * A closing socket can remain listed until its peer completes the close
- * handshake. Its attachment retains `isClosing` so later readers exclude it
- * from totals and do not reclaim its credit twice.
- */
+// Cloudflare can continue to list a socket until its peer completes the close
+// handshake. The closing marker excludes its reclaimed balance during that
+// interval.
 function countedCredit(
 	attachment: CommitSessionAttachment | undefined
 ): CommitCreditState | undefined {
@@ -129,19 +97,10 @@ function countedCredit(
 		: credit;
 }
 
-/**
- * Returns whether the server has reclaimed the session's credit and started
- * closing it. A client message sent before the peer receives the close can still
- * arrive, but the session no longer participates in accounting.
- */
 export function isSessionClosing(attachment: CommitSessionAttachment): boolean {
 	return attachment.isClosing === true || attachment.credit?.isClosing === true;
 }
 
-/**
- * Returns whether the tenant has a paced session whose credit has not been
- * reclaimed.
- */
 export function hasPacedSession(sockets: readonly WebSocket[]): boolean {
 	return sockets.some(
 		(socket) => countedCredit(readCommitSessionAttachment(socket)) !== undefined
@@ -156,14 +115,11 @@ function writeCommitSessionAttachment(
 }
 
 /**
- * Returns whether the idle-session policy can close a session.
+ * For a positive balance, the idle interval starts when the balance changes
+ * from zero to positive. Partial spending and further requests do not reset that
+ * interval. For a zero balance, the latest client frame starts the interval.
  *
- * For a session with unused credit, the idle interval starts when its balance
- * first increases from zero and does not restart until the balance is exhausted.
- * For a session without credit, the interval starts at its last client message.
- *
- * A session with declared demand and no credit is waiting for the server and is
- * therefore not idle.
+ * Declared demand with a zero balance is a server-side wait, not client idleness.
  */
 function isIdle(attachment: CommitSessionAttachment, now: number): boolean {
 	const { credit, lastActivityAt } = attachment;
@@ -177,8 +133,7 @@ function isIdle(attachment: CommitSessionAttachment, now: number): boolean {
 	}
 
 	const isHolding = credit !== undefined && credit.granted > 0;
-	// An attachment written before `unspentSince` existed contains only its
-	// activity time.
+	// Old attachments use the activity timestamp as their holding timestamp.
 	const since = isHolding
 		? (credit.unspentSince ?? lastActivityAt)
 		: lastActivityAt;
@@ -187,34 +142,27 @@ function isIdle(attachment: CommitSessionAttachment, now: number): boolean {
 }
 
 /**
- * Admits commit work against a tenant-global budget of entry credit.
+ * Admission moves each entry from a session's unused balance to the in-flight
+ * total. Sending the entry's first frame removes it from the in-flight total and
+ * immediately makes that unit available to another waiting session.
  *
- * A session can have no more unacknowledged entries than its credit. The server
- * debits credit when a commit message arrives and returns it to the tenant after
- * sending each entry's first frame. A session declares demand for more credit,
- * and the release path assigns available credit during the same event.
- *
- * The budget limits parsed and waiting entries across the tenant. Commit
- * operations consume credit; subscribe operations contain no entries and do not.
+ * This bounds parsed commit work across all sessions for a tenant. Subscribe
+ * operations resume durable work and therefore consume no entry credit.
  */
 export class CommitCreditService {
-	// Credit granted to live sessions and not yet spent, summed across sockets.
-	// `undefined` until the first use on this instance rebuilds it from the
-	// socket attachments.
+	// `undefined` means this instance has not rebuilt the unused balances from
+	// socket attachments since waking.
 	private grantedTotal: number | undefined;
 
-	// Entries debited from a session and not yet answered with their first
-	// frame, in total and per session. They live only in this instance's memory,
-	// which is correct: an entry cannot outlive the object executing it, so a
-	// cold start begins with none.
+	// In-flight entries exist only while this object instance executes them. A
+	// hibernation wake therefore starts with no in-flight work to restore.
 	private inFlightTotal = 0;
 	private readonly inFlightPerSession = new Map<SessionId, number>();
 
-	// The sessions with unmet demand, in the order they are next served.
 	private rotation: SessionId[] = [];
 
-	// The tenant's budget, read once: the binding cannot change under a live
-	// object, and the read is on the path of every entry released.
+	// The binding is stable for the lifetime of this object, and release calls are
+	// frequent enough to justify parsing it once.
 	private budgetValue: number | undefined;
 
 	constructor(private readonly context: ServerContext) {}
@@ -225,36 +173,27 @@ export class CommitCreditService {
 		return this.budgetValue;
 	}
 
-	// The credit the tenant can grant right now.
 	private available(): number {
 		return Math.max(0, this.budget() - this.granted() - this.inFlightTotal);
 	}
 
-	// Hands free credit to the waiting sessions, one quantum each in rotation
-	// order, until either the credit or the demand runs out. A session that
-	// still wants more goes to the back, so a large publication cannot drain the
-	// budget before a small one has had a turn, and no session can be starved.
-	// Returns whether `observed` was among the sessions granted, which is how
-	// `declareDemand` tells an answered request from a queued one.
+	// Each pass gives at most one batch-sized quantum to a session before moving
+	// it behind the other waiters. This prevents a large publication from taking
+	// newly released credit before smaller publications receive a turn. The
+	// return value tells `declareDemand` whether the observed session received
+	// credit during this pass.
 	//
-	// A waiting session must never hold a pending server-side promise, timer or
-	// request. A waiter exists only as an entry in this rotation and as the
-	// demand recorded in its socket attachment, and grants happen in the release
-	// path, so an object with nothing executing hibernates while its sessions
-	// wait. A parked promise, a timer or a held request per waiter would turn
-	// that free waiting into active duration, which Durable Objects bill by the
-	// second.
+	// Waiting must remain durable without keeping the object active. The rotation
+	// and each attachment's demand are sufficient to resume allocation on a later
+	// release or alarm. A promise, timer, or held request for each waiter would
+	// prevent hibernation and incur active-duration charges.
 	private grantWaiting(now: number, observed?: SessionId): boolean {
 		let isGrantedObserved = false;
 
-		// Two constraints fix this order. Rebuild before reading the rotation: on
-		// a cold start the rotation is empty until the credit total is rebuilt,
-		// and the rebuild is what fills it, so reading the rotation first would
-		// find it empty and grant nothing to a session that is genuinely waiting.
-		// Then read the rotation before what is free: `available()` reads the
-		// tenant's budget, which a misconfigured deployment cannot supply, so a
-		// pass with nobody to grant to must not depend on it. The rebuild reads
-		// only the attachments.
+		// Rebuilding the total also reconstructs the rotation after hibernation, so
+		// it must precede the loop condition. Test the rotation before calling
+		// `available()` so a pass with no waiters does not read a misconfigured
+		// budget unnecessarily.
 		this.granted();
 
 		while (this.rotation.length > 0 && this.available() > 0) {
@@ -269,8 +208,6 @@ export class CommitCreditService {
 				socket === undefined ? undefined : readCommitSessionAttachment(socket);
 			const credit = countedCredit(attachment);
 
-			// The session hung up, has had its credit reclaimed, or has since had
-			// its demand met, so it leaves the rotation.
 			if (
 				socket === undefined ||
 				attachment === undefined ||
@@ -294,12 +231,10 @@ export class CommitCreditService {
 					...credit,
 					granted: credit.granted + quantum,
 					demand,
-					// A session that had spent everything holds credit again from
-					// now: without this a waiter granted after a long wait would
-					// carry the stamp from before the wait, and would be closed before
-					// its commit could cross the wire. A session that still held
-					// credit keeps its stamp, so topping it up cannot put the close
-					// off.
+					// Start a new holding interval only on a zero-to-positive
+					// transition. Otherwise a long queue wait would consume the next
+					// grant's idle interval, while a top-up could extend an existing
+					// interval indefinitely.
 					...(credit.granted === 0 && { unspentSince: now })
 				}
 			});
@@ -321,14 +256,9 @@ export class CommitCreditService {
 		return this.grantedTotal;
 	}
 
-	// Rebuilds the unused-credit total and the waiting-session rotation from
-	// socket attachments, optionally excluding one session. A cold start retains
-	// neither value in memory, so attachments are the complete source. The next
-	// round-robin cycle starts from `getWebSockets()` order.
-	//
-	// Rebuild every attachment because the object can hibernate while a session
-	// waits and other sessions retain unused credit. Persisted demand lets any
-	// later event resume allocation. The idle-close alarm provides such an event.
+	// Socket attachments are authoritative after hibernation, and the next cycle
+	// begins in `getWebSockets()` order. Excluding a closing session makes its
+	// balance available even while Cloudflare still lists the socket.
 	private sumGranted(excluded?: SessionId): number {
 		let granted = 0;
 		this.rotation = [];
@@ -355,22 +285,17 @@ export class CommitCreditService {
 		return granted;
 	}
 
-	// The current number of sessions before this one in the rotation. This value
-	// is diagnostic only because completing an entry advances the rotation.
+	// Releases advance the rotation after a `queued` frame is sent. Its `ahead`
+	// value is therefore a snapshot rather than a scheduling guarantee.
 	private sessionsAhead(sessionId: SessionId): number {
 		const index = this.rotation.indexOf(sessionId);
 
 		return index === -1 ? this.rotation.length : index;
 	}
 
-	// Marks a listed session as closing and resets any credit it still holds. A
-	// closed socket remains listed until the client completes the close handshake,
-	// so credit calculations must ignore it to avoid counting reassigned credit
-	// twice.
-	//
-	// The marker also makes alarm and idle-close passes ignore an unpaced session
-	// closed at its authentication deadline, even if the peer never completes the
-	// handshake.
+	// Mark before closing because Cloudflare can keep the socket listed until the
+	// peer completes the handshake. Later accounting and alarm passes must exclude
+	// its reclaimed balance and must not repeat the close if the peer never replies.
 	private markSessionClosing(sessionId: SessionId): void {
 		const socket = this.context.ctx.getWebSockets(sessionId)[0];
 		const attachment =
@@ -394,11 +319,9 @@ export class CommitCreditService {
 		});
 	}
 
-	// Takes a session out of the credit accounting for the rest of its life: its
-	// unspent credit goes back to the tenant, and from then on the server bounds
-	// it the way it bounds a session that never negotiated credit. The recompute
-	// is the one `closeSession` uses, since a session carrying no credit state is
-	// exactly a session the sum must not count.
+	// A downgrade is permanent for this connection. Removing its credit state
+	// returns the unused balance and subjects the session to the legacy unpaced
+	// session limit.
 	private downgradeSession(
 		socket: WebSocket,
 		attachment: CommitSessionAttachment,
@@ -414,21 +337,13 @@ export class CommitCreditService {
 	}
 
 	/**
-	 * Records a newly accepted commit socket and returns the credit it opens
-	 * with: half of what the tenant has free, rounded down. The caller
-	 * advertises the return value on the 101, so an uncontended tenant starts
-	 * committing without a further round trip.
+	 * The server grants half of the currently available budget. The grant is
+	 * speculative because the client has not declared demand yet. Reserving the
+	 * whole budget could block every later session until idle reclamation, while
+	 * half lets an uncontended client start immediately and leaves capacity for a
+	 * concurrent publication. The client can request the remainder.
 	 *
-	 * Half rather than all of it, because this grant is speculative: the session
-	 * has asked for nothing yet and may never commit at all. A session handed the
-	 * whole pool on arrival would starve every later session until it closed or
-	 * the idle close reclaimed its credit, which is a long time to keep a
-	 * publication waiting for capacity nothing is using. Halving bounds that by
-	 * construction and costs a session nothing it asked for, since
-	 * `request-credit` remains unbounded.
-	 *
-	 * A session that did not negotiate credit is recorded without any and opens
-	 * at zero, since nothing paces it.
+	 * A legacy session has no credit state and receives no opening grant.
 	 */
 	openSession(
 		socket: WebSocket,
@@ -450,8 +365,6 @@ export class CommitCreditService {
 		const opening = Math.floor(this.available() / 2);
 		writeCommitSessionAttachment(socket, {
 			...session,
-			// The session holds this grant from now: the idle close measures a
-			// holder from the moment its balance rose from zero.
 			credit: { granted: opening, demand: 0, unspentSince: now },
 			lastActivityAt: now
 		});
@@ -460,11 +373,8 @@ export class CommitCreditService {
 		return opening;
 	}
 
-	/**
-	 * Applies one client message to the session: records that the session was
-	 * heard from, and debits the entries the message commits. Pass zero entries
-	 * for a message that commits none.
-	 */
+	// Subscribe operations pass zero because they resume durable work and have no
+	// entry whose first result frame could release credit.
 	admitMessage(
 		socket: WebSocket,
 		attachment: CommitSessionAttachment,
@@ -485,11 +395,9 @@ export class CommitCreditService {
 				return 'overdrawn';
 			}
 
-			// Once a session leaves the accounting, nothing bounds it but the number
-			// of unpaced sessions the tenant allows, which is the bound the upgrade
-			// applies to a session that never negotiated credit. Without the same
-			// bound here, a client could take every socket it opens out of the
-			// accounting and hold as many as the socket ceiling allows.
+			// A downgraded session has the same unbounded entry rate as a legacy
+			// session. Apply the legacy session limit here or a client could escape
+			// entry accounting on every socket up to the general socket ceiling.
 			if (
 				unpacedSessions(this.context.ctx.getWebSockets()) >=
 				maxUncreditedCommitSessions
@@ -497,25 +405,20 @@ export class CommitCreditService {
 				return 'refused';
 			}
 
-			// The client declared the capability on its upgrade request, but its
-			// grant travelled back on the 101 response, and a hop that answers the
-			// handshake itself can drop that header. A session that has never asked
-			// for credit has sent nothing that shows the offer reached it, so the
-			// server reads the overdraw as a lost offer and takes the session out of
-			// the accounting.
+			// The capability request reached the server, but an intermediary can
+			// remove the opening grant from the 101 response. Before the first
+			// `request-credit`, an overdraw can therefore mean that the client never
+			// learned about credit. Preserve compatibility by downgrading the session.
 			this.downgradeSession(socket, attachment, now);
 
 			return 'unaccounted';
 		}
 
-		// Read the total before writing the attachment. A cold start rebuilds the
-		// total from these same attachments, so a rebuild triggered by the
-		// adjustment below would already include this debit and count it twice.
+		// Initialise the cached total before changing its authoritative attachment.
+		// Rebuilding after the write and then subtracting would debit these entries
+		// twice.
 		const granted = this.granted();
 
-		// The spend leaves the stamp alone: it measures how long the session has
-		// held credit without emptying it, and spending part of a balance is not
-		// emptying it.
 		writeCommitSessionAttachment(socket, {
 			...attachment,
 			credit: {
@@ -524,13 +427,10 @@ export class CommitCreditService {
 			},
 			lastActivityAt: now
 		});
-		// The entries move from the session's unspent credit into this object, so
-		// the tenant's free credit is unchanged until they are answered.
 		this.grantedTotal = granted - entries;
 
-		// A message that commits nothing puts nothing in flight. Recording it
-		// would leave a count no release ever removes, since only an entry's frame
-		// releases anything.
+		// Subscribe operations have no first commit frame and therefore no matching
+		// release call.
 		if (entries > 0) {
 			this.inFlightTotal += entries;
 			this.inFlightPerSession.set(
@@ -543,11 +443,8 @@ export class CommitCreditService {
 	}
 
 	/**
-	 * Returns credit to the tenant's pool as an entry's first frame is sent, and
-	 * passes it straight on to the waiting sessions. `entries` is how many
-	 * entries this call answers for. Every entry of a message
-	 * {@link admitMessage} accounted for must be released, whether or not the
-	 * commit that entry names ever ran.
+	 * Admission charges the whole message before execution, so the caller must also
+	 * release entries left unstarted by the batch runner.
 	 */
 	release(sessionId: SessionId, now: number, entries = 1): void {
 		this.inFlightTotal -= entries;
@@ -564,17 +461,11 @@ export class CommitCreditService {
 	}
 
 	/**
-	 * Handles a `request-credit` operation. The declared demand replaces the
-	 * previous value. The server assigns available credit during the same event or
-	 * returns `queued` when none is available. Closing the connection withdraws
-	 * demand and returns unused credit. Returns `false` for a session that did not
-	 * negotiate credit.
-	 *
-	 * A proxy can remove the opening credit header from the 101 response. On the
-	 * session's first request, reclaim any unused opening credit and return it in a
-	 * `credit` frame, which travels over the established connection. WebSocket
-	 * message ordering ensures that an earlier commit using the opening grant is
-	 * debited first. Reclamation applies only to the first credit request.
+	 * An intermediary can remove the opening grant from the 101 response. The
+	 * first request therefore replaces any unused opening balance with credit sent
+	 * over the established WebSocket. Message ordering ensures that any earlier
+	 * commit is debited before this replacement. Later requests retain the
+	 * session's existing balance.
 	 */
 	declareDemand(
 		socket: WebSocket,
@@ -587,8 +478,7 @@ export class CommitCreditService {
 		}
 
 		const { sessionId } = attachment;
-		// Read the total before writing the attachment, for the reason
-		// `admitMessage` gives: a rebuild would already include the write below.
+		// Initialise the cached total before changing its authoritative attachment.
 		const total = this.granted();
 		const orphaned =
 			attachment.credit.hasRequested === true ? 0 : attachment.credit.granted;
@@ -621,25 +511,16 @@ export class CommitCreditService {
 		return true;
 	}
 
-	/**
-	 * Reclaims a closed session's unspent credit and passes it to the sessions
-	 * still waiting. Entries the session left in flight are unaffected: each
-	 * still returns its own credit when its commit finishes.
-	 */
+	// In-flight entries remain charged until their own first frames are sent.
 	closeSession(sessionId: SessionId, now: number): void {
 		this.markSessionClosing(sessionId);
-		// Recompute from the attachments rather than adjusting a running total: a
-		// closing socket may or may not still be listed when its close is handled,
-		// and a sum that excludes the session is right either way. Sessions close
-		// rarely, so the scan costs little, and it re-seeds the rotation at the
-		// same time.
+		// A close callback may run before or after Cloudflare removes the socket.
+		// Rebuilding while explicitly excluding this session produces the same total
+		// in both cases and reconstructs the rotation at the same time.
 		this.grantedTotal = this.sumGranted(sessionId);
 		this.grantWaiting(now);
 	}
 
-	/**
-	 * The earliest access-token expiry among sessions that remain open.
-	 */
 	nextAuthenticationExpiry(): number | undefined {
 		let earliest: number | undefined;
 
@@ -662,10 +543,6 @@ export class CommitCreditService {
 		return earliest;
 	}
 
-	/**
-	 * Closes one session if the access token from its upgrade has expired.
-	 * Returns whether the caller must stop processing the session.
-	 */
 	closeIfAuthenticationExpired(
 		socket: WebSocket,
 		attachment: CommitSessionAttachment,
@@ -687,9 +564,6 @@ export class CommitCreditService {
 		return true;
 	}
 
-	/**
-	 * Closes every session whose upgrade token has expired.
-	 */
 	closeExpiredSessions(now: number): void {
 		for (const socket of this.context.ctx.getWebSockets()) {
 			const attachment = readCommitSessionAttachment(socket);
@@ -701,56 +575,39 @@ export class CommitCreditService {
 	}
 
 	/**
-	 * Closes sessions that are idle, have no entry in progress, and await no upload
-	 * verdict. Closing returns unused credit to the tenant. The client reconnects
-	 * before its next commit and thereby learns that the connection-scoped grant
-	 * has expired.
+	 * Legacy clients treat any close as the end of publication. Their sessions
+	 * hold no credit, and {@link maxUncreditedCommitSessions} bounds them, so this
+	 * pass leaves them open. Remove this exception with legacy admission.
 	 *
-	 * Do not close sessions that did not negotiate credit. Older clients treat a
-	 * close as the end of publication, and these sessions have no credit to
-	 * reclaim. {@link maxUncreditedCommitSessions} limits their number. Remove this
-	 * compatibility exception with the gate that admits those clients.
+	 * An outstanding commit or upload verdict also protects a session. Commit
+	 * execution still occupies credit, while verification can legitimately exceed
+	 * the idle interval after the `deferred` frame returned that entry's credit.
 	 *
-	 * Do not close a session that awaits a verdict. A `deferred` frame already
-	 * returned its credit, and verification can exceed the idle interval.
+	 * Close a session awaiting a verdict only when another session is waiting for
+	 * its unused balance. Opening grants are speculative, so a small publication
+	 * can finish sending and retain a surplus while it waits for verdicts. Without
+	 * competing demand, reclaiming that surplus would force periodic reconnects
+	 * without increasing throughput. With competing demand, the client can recover
+	 * its durable pending entries by subscribing again after reconnecting.
 	 *
-	 * A parked session is closed only for credit another session is waiting for.
-	 * Every connection opens on an unsolicited share of the free pool, so a
-	 * publication smaller than that share parks while still holding the rest, and
-	 * closing such a session every time it parks would cost it a reconnect every
-	 * idle period for nothing. With a session in the rotation the surplus is what
-	 * that session is queued for, and the close returns it. The close does not
-	 * lose the parked entries: the client picks them up again by subscribing to
-	 * their durable rows on the connection it reopens.
+	 * Every pass grants all currently available credit. This lets an alarm resume
+	 * a rotation rebuilt after hibernation even when no session is closed.
 	 *
-	 * Every pass ends by granting what the tenant has free, so the alarm is the
-	 * event a rebuilt rotation can always count on, whether or not the pass
-	 * closed anything.
-	 *
-	 * `awaitingVerdict` is called at most once per pass, and only for a session
-	 * that has failed the cheaper tests, so a pass over busy sessions reads no
-	 * rows.
+	 * The pass reads verdict state lazily and at most once.
 	 */
 	closeIdleSessions(
 		now: number,
 		awaitingVerdict: () => ReadonlySet<SessionId>
 	): void {
 		let parked: ReadonlySet<SessionId> | undefined;
-		// Read the granted total before the loop: on a cold start it is what
-		// rebuilds the rotation from the attachments, and the rotation is how this
-		// pass tells whether any session is waiting for the credit a parked
-		// session holds.
+		// Rebuild the rotation before deciding whether unused credit has a waiter.
 		this.granted();
 
 		for (const socket of this.context.ctx.getWebSockets()) {
 			const attachment = readCommitSessionAttachment(socket);
 
-			// A session marked closing is finished work, kept only so that a
-			// message crossing the close is recognised as one from a session the
-			// server has already closed. Its socket stays listed until the peer
-			// answers or the runtime reaps it, which for a peer that never answers
-			// is never, so testing it again would repeat a recompute and a verdict
-			// read on every firing for as long as it hangs about.
+			// The marker exists because a socket can remain listed after reclamation.
+			// Reprocessing it would repeat the close and verdict lookup on every alarm.
 			if (attachment?.credit === undefined || isSessionClosing(attachment)) {
 				continue;
 			}
@@ -778,11 +635,9 @@ export class CommitCreditService {
 			socket.close(idleCloseCode, 'idle');
 		}
 
-		// Hand out what the tenant has free, whether or not this pass closed
-		// anything. An object that woke with nothing in memory has forgotten the
-		// entries that were in flight, so the budget can read as free with a
-		// waiter recorded in an attachment and no other event due: this alarm is
-		// the event that resumes granting for it.
+		// Hibernation discards in-flight counters but preserves declared demand. The
+		// alarm must distribute any newly visible capacity even when it closes no
+		// session, because no other event may be due for the recorded waiter.
 		this.grantWaiting(now);
 	}
 }

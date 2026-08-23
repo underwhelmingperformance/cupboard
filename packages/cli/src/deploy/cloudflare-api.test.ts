@@ -162,7 +162,7 @@ function fakeCloudflare(routes: Readonly<Record<string, unknown>>): {
 	};
 }
 
-// The live consumers endpoint answers `script`, not the `script_name` the
+// The live consumers endpoint returns `script`, not the `script_name` the
 // published schema claims; this fixture mirrors a real response.
 const liveWorkerConsumer = {
 	queue_name: 'cupboard-maintenance',
@@ -436,7 +436,7 @@ describe('ensureStagingLifecycleRule', () => {
 describe('findCustomDomain', () => {
 	const domainsPath = '/accounts/acc-1/workers/domains';
 
-	it('answers the hostname routed to the script', async () => {
+	it('returns the hostname routed to the script', async () => {
 		const { client } = fakeCloudflare({
 			[`GET ${domainsPath}`]: [
 				{ hostname: 'other.example.com', service: 'other-worker' },
@@ -452,7 +452,7 @@ describe('findCustomDomain', () => {
 		expect(hostname).toBe('cupboard.supply');
 	});
 
-	it('answers undefined when no domain is routed to the script', async () => {
+	it('returns undefined when no domain is routed to the script', async () => {
 		const { client } = fakeCloudflare({
 			[`GET ${domainsPath}`]: [
 				{ hostname: 'other.example.com', service: 'other-worker' }

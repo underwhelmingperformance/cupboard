@@ -48,11 +48,11 @@ describe('unknownPathsCeilingRefusalSchema', () => {
 
 	it.each([
 		{
-			name: 'an attr carrying a control character',
+			name: 'an attr containing a control character',
 			target: { attr: 'app\n::error::forged', installable: drvPath }
 		},
 		{
-			name: 'an output selection carrying a control character',
+			name: 'an output selection containing a control character',
 			target: { attr: 'app', installable: `${drvPath}^out\n::error::forged` }
 		},
 		{
@@ -90,8 +90,8 @@ describe('describeUnknownPath', () => {
 			store: { kind: 'daemon' } as const,
 			expected:
 				`${drvPath}; target packages.x86_64-linux.app (${drvPath}^out)\n` +
-				"The local Nix daemon's store does not contain this derivation, so " +
-				'Nix cannot inspect its outputs or dependencies.'
+				"The local Nix daemon's store does not contain this derivation. " +
+				'Nix therefore cannot inspect its outputs or dependencies.'
 		},
 		{
 			name: 'an unrefreshed substituter result in the local store',
@@ -109,7 +109,7 @@ describe('describeUnknownPath', () => {
 				'transport drops per-command settings.'
 		},
 		{
-			name: 'a dependency path no target refers to, in a remote store',
+			name: 'a dependency path that no target refers to, in a remote store',
 			value: detail({ targets: [] }),
 			store: {
 				kind: 'ssh-ng',
@@ -118,8 +118,8 @@ describe('describeUnknownPath', () => {
 			expected:
 				`${outPath}\n` +
 				'The remote Nix store at ssh-ng://builder.example.test does not ' +
-				'contain this path, and no substituter the plan could query ' +
-				'provided it.'
+				'contain this path. The plan queried the available substituters, ' +
+				'but none provided it.'
 		},
 		{
 			name: 'a remote store selected by the environment, with no URI',
@@ -127,17 +127,17 @@ describe('describeUnknownPath', () => {
 			store: { kind: 'ssh-ng' } as const,
 			expected:
 				`${outPath}\n` +
-				'The remote Nix store does not contain this path, and no ' +
-				'substituter the plan could query provided it.'
+				'The remote Nix store does not contain this path. The plan queried ' +
+				'the available substituters, but none provided it.'
 		},
 		{
-			name: 'a payload naming no store',
+			name: 'a payload that does not identify a store',
 			value: detail({ targets: [] }),
 			store: undefined,
 			expected:
 				`${outPath}\n` +
-				'The selected Nix store does not contain this path, and no ' +
-				'substituter the plan could query provided it.'
+				'The selected Nix store does not contain this path. The plan ' +
+				'queried the available substituters, but none provided it.'
 		}
 	])('renders $name', ({ value, store, expected }) => {
 		expect(describeUnknownPath(value, store)).toBe(expected);
@@ -152,8 +152,8 @@ describe('describeUnknownPath', () => {
 		expect(rendered).toBe(
 			`${outPath}\n` +
 				'The remote Nix store at ssh-ng://build@builder.example.test does ' +
-				'not contain this path, and no substituter the plan could query ' +
-				'provided it.'
+				'not contain this path. The plan queried the available ' +
+				'substituters, but none provided it.'
 		);
 	});
 });
@@ -169,17 +169,17 @@ describe('describeUnknownPathsRefusal', () => {
 
 		expect(rendered).toBe(
 			'Cupboard cannot calculate the build and download work for this ' +
-				'cohort because 1 required store path is unavailable to Nix.\n\n' +
+				'cohort because Nix cannot obtain 1 required store path.\n\n' +
 				'Unavailable path:\n' +
 				`- ${outPath}; target packages.x86_64-linux.app (${drvPath}^out)\n` +
-				"  The local Nix daemon's store does not contain this path, and " +
-				'no substituter the plan could query provided it.\n\n' +
-				'The plan refuses when any required path is unavailable. Make the ' +
+				"  The local Nix daemon's store does not contain this path. The " +
+				'plan queried the available substituters, but none provided it.\n\n' +
+				'The plan refuses if Nix cannot obtain any required path. Make the ' +
 				"missing path available in the local Nix daemon's store, then retry."
 		);
 	});
 
-	it('renders several paths, the substituters the plan could not query and the fallback ceiling', () => {
+	it('renders several paths and the fallback ceiling after substituter queries fail', () => {
 		const rendered = describeUnknownPathsRefusal({
 			unknownPaths: [
 				detail({
@@ -212,21 +212,21 @@ describe('describeUnknownPathsRefusal', () => {
 
 		expect(rendered).toBe(
 			'Cupboard cannot calculate the build and download work for this ' +
-				'cohort because 2 required store paths are unavailable to Nix.\n\n' +
+				'cohort because Nix cannot obtain 2 required store paths.\n\n' +
 				'Unavailable paths:\n' +
 				`- ${drvPath}; targets packages.x86_64-linux.app (${drvPath}^out), ` +
 				`packages.x86_64-linux.dev (${drvPath}^dev)\n` +
 				'  The remote Nix store at ssh-ng://builder.example.test does not ' +
-				'contain this derivation, so Nix cannot inspect its outputs or ' +
-				'dependencies.\n' +
+				'contain this derivation. Nix therefore cannot inspect its outputs ' +
+				'or dependencies.\n' +
 				`- ${outPath}\n` +
 				'  The remote Nix store at ssh-ng://builder.example.test does not ' +
-				'contain this path, and no substituter the plan could query ' +
-				'provided it.\n\n' +
-				'These configured substituters could not be queried, so a path ' +
-				'only they serve still counts as unavailable: ' +
+				'contain this path. The plan queried the available substituters, ' +
+				'but none provided it.\n\n' +
+				'The plan could not query these configured substituters. A path ' +
+				'available only from one of them therefore counts as unavailable: ' +
 				'https://cache.example.test, s3://other-cache.\n\n' +
-				'The plan refuses when any required path is unavailable. That ' +
+				'The plan refuses if Nix cannot obtain any required path. That ' +
 				'limit applied because the daemon connection is not trusted. ' +
 				'Make the missing paths available in the remote Nix store at ' +
 				'ssh-ng://builder.example.test, then retry.'

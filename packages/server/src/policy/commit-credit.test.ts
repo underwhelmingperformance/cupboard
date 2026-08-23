@@ -23,11 +23,11 @@ function thrownBy(run: () => unknown): unknown {
 describe('commitEntryCreditBudget', () => {
 	it.each([
 		{
-			name: 'empty means the built-in budget',
+			name: 'returns the built-in budget for an empty setting',
 			value: '',
 			expected: defaultCommitEntryCreditBudget
 		},
-		{ name: 'a configured budget', value: '4', expected: 4 }
+		{ name: 'returns a configured budget', value: '4', expected: 4 }
 	])('$name', ({ value, expected }) => {
 		expect(
 			commitEntryCreditBudget({ CUPBOARD_COMMIT_ENTRY_CREDIT_BUDGET: value })

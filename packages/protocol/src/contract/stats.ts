@@ -6,7 +6,7 @@ import { statsResponseSchema, usageResponseSchema } from '../upload.ts';
 import { baseProcedure } from './base.ts';
 
 export const statsContract = {
-	// Per-cache counts and sizes; the default cache is addressed as `_default`.
+	// Use `_default` to request counts and sizes for the default cache.
 	cache: baseProcedure
 		.meta({
 			requires: 'stats:read',
@@ -16,7 +16,7 @@ export const statsContract = {
 		.input(z.strictObject({ cacheName: cacheSelectorSchema }))
 		.output(statsResponseSchema),
 
-	// Tenant-wide usage against the quota, independent of any one cache.
+	// Usage covers the tenant and therefore declares no cache resource.
 	usage: baseProcedure
 		.meta({ requires: 'stats:read' })
 		.route({ method: 'GET', path: '/usage' })

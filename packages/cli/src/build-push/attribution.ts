@@ -7,28 +7,21 @@ import type {
 import { z } from 'zod';
 
 /**
- * One build activity a JSON activity log attributed: the derivation that ran
- * and the machine it ran on. An empty machine is a local build; a non-empty
- * one names the remote builder that produced the outputs.
- */
+An empty `machine` denotes a local build.
+*/
 export interface BuildActivity {
 	readonly derivation: string;
 	readonly machine: string;
 }
 
-/**
- * One build attempt's attribution: its ordinal within the run, the identifier
- * the receipt names it by, and the activities its log recorded.
- */
 export interface BuildAttempt {
 	readonly attempt: number;
 	readonly attemptId: string;
 	readonly activities: readonly BuildActivity[];
 }
 
-// Nix's `json-log-path` writes one JSON record per line; a build starting is
-// an `action: 'start'` record of activity type 105 whose first two fields are
-// the derivation and the machine it was dispatched to.
+// `json-log-path` emits JSON lines. A `start` record with activity type 105
+// stores the derivation and dispatched machine in its first two fields.
 const buildActivityStartSchema = z.object({
 	action: z.literal('start'),
 	type: z.literal(105),
@@ -36,9 +29,8 @@ const buildActivityStartSchema = z.object({
 });
 
 /**
- * Parses a JSON activity log into the build activities it recorded, one per
- * derivation, later records winning.
- */
+Returns the last build-start record for each derivation in a JSON log.
+*/
 export function parseBuildActivities(log: string): readonly BuildActivity[] {
 	const activities = new Map<string, BuildActivity>();
 
@@ -60,10 +52,8 @@ export function parseBuildActivities(log: string): readonly BuildActivity[] {
 }
 
 /**
- * The builder for each derivation a builder built, keyed by derivation path.
- * A derivation built locally has no entry. When several attempts record the
- * same derivation, the entry is the builder from the earliest attempt, which
- * is also the attempt the receipt subject records.
+ * The first attempt for a derivation determines its remote builder, matching
+ * the attempt used for receipt attribution.
  */
 export function delegatedMachines(
 	attempts: readonly BuildAttempt[]
@@ -81,14 +71,10 @@ export function delegatedMachines(
 	return machines;
 }
 
-// An empty machine means Nix ran the build here; any other value is the
-// builder that ran it for this run.
 function verificationOf(activity: BuildActivity): SubjectVerification {
 	return activity.machine === '' ? 'local' : 'build-store';
 }
 
-// One derivation's first build within a run: the attempt that ran it and the
-// activity that attempt recorded for it.
 interface FirstBuild {
 	readonly attempt: number;
 	readonly attemptId: string;
@@ -96,13 +82,10 @@ interface FirstBuild {
 }
 
 /**
- * The receipt subjects for a run's attribution: one per final path whose
- * deriver some attempt built. Each subject carries the earliest attempt that
- * produced the path, the store the run realised it in, and whether Nix built
- * the path on this machine or a builder built it for this run. A path that was
- * already valid before the run, or whose deriver no attempt touched, is not a
- * path this run built, and the publication describes it from what the store
- * records about it instead.
+ * Attributes each newly realised final path to the first attempt that built
+ * its deriver. The subject records the selected build store and whether Nix
+ * ran the build locally or delegated it. Paths that predate the run or have no
+ * matching build activity retain store-derived provenance.
  */
 export function receiptSubjects(
 	attempts: readonly BuildAttempt[],

@@ -34,11 +34,6 @@ interface ConfirmOptions {
 	readonly audience?: Audience;
 }
 
-/**
- * The part of the derived client that the confirm command uses, in the
- * contract's input and output shapes. The real `tenantRpc(...).uploads`
- * satisfies this interface by construction.
- */
 export interface ConfirmClient {
 	confirm(input: {
 		cacheName: CacheSelector;
@@ -52,10 +47,7 @@ export function registerConfirmCommand(
 ): void {
 	program
 		.command('confirm')
-		.description(
-			'Confirm an unretained publication by store path, extending its ' +
-				'retention grace without uploading any bytes.'
-		)
+		.description('Confirm published store paths without uploading their bytes.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<store-paths...>', 'store paths already published to the cache')
 		.option(
@@ -76,7 +68,7 @@ export function registerConfirmCommand(
 			[
 				'',
 				'Example:',
-				'  # Refresh the grace deadline on paths a previous job already published',
+				'  # Confirm paths that a previous job already published',
 				'  cupboard confirm --github-oidc https://cache.example.workers.dev/t/acme \\',
 				'    /nix/store/<hash>-app /nix/store/<hash>-runtime'
 			].join('\n')
@@ -115,11 +107,9 @@ export async function runConfirm(
 	const storePathsByHash = new Map<StorePathHash, string>(
 		storePaths.map((storePath) => [StorePath.hash(storePath), storePath])
 	);
-	// The server limits how many paths one confirm request may carry, so a
-	// larger closure is split across sequential requests. A batch that succeeded
-	// has already extended the retention deadlines of its paths on the server,
-	// even when a later batch fails, so the confirmed paths are reported either
-	// way.
+	// The server caps each request, so submit larger sets in order. Report the
+	// completed batches even if a later request fails because their confirmation
+	// results are already durable.
 	const paths: ParsedUploadConfirmResponse['paths'] = [];
 	const totalBatches = Math.ceil(
 		storePathHashes.length / uploadConfirmMaxPaths

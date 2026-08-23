@@ -5,10 +5,9 @@ import { currentServer, resetTestServer } from '../test-support.ts';
 describe('cron maintenance RPC', () => {
 	beforeEach(resetTestServer);
 
-	// The scheduled Worker drives maintenance by calling these Durable Object
-	// methods directly, not over HTTP, so they carry no bearer token. Each
-	// initialises the DO and completes a pass against the empty store.
-	it('runs garbage collection and verification through unauthenticated RPC', async () => {
+	// The scheduled Worker calls these Durable Object methods directly, without
+	// an HTTP bearer token. Each method must initialise the object before it runs.
+	it('runs both maintenance passes through unauthenticated RPC', async () => {
 		const stub = currentServer();
 
 		await expect(stub.runGarbageCollection()).resolves.toBeUndefined();

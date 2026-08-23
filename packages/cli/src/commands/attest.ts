@@ -116,10 +116,13 @@ export function registerAttestCommands(
 	attest
 		.command('attach')
 		.description(
-			'Attach Sigstore DSSE attestation bundles to store paths the cache already serves.'
+			'Attach Sigstore attestation bundles to store paths the cache already serves.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.argument('<paths...>', 'published Nix store paths the bundles describe')
+		.argument(
+			'<paths...>',
+			'published Nix store paths to attach attestations to'
+		)
 		.option(
 			'--github-oidc',
 			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
@@ -134,7 +137,7 @@ export function registerAttestCommands(
 		.option('--read-password <password>', 'private-read password')
 		.option(
 			'--attestation <bundle>',
-			'Sigstore DSSE bundle whose in-toto subject matches one of the given store paths',
+			'Sigstore bundle containing a DSSE envelope; every in-toto subject must match a given store path',
 			collect,
 			[]
 		)
@@ -202,7 +205,7 @@ export function registerAttestCommands(
 	attest
 		.command('verify')
 		.description(
-			'Verify attached Sigstore DSSE attestations against a Sigstore trust root and threshold policy.'
+			'Verify Sigstore attestation bundles against a Sigstore trust root and threshold policy.'
 		)
 		.argument('[bundles...]', 'local Sigstore bundle files')
 		.option('--nar-hash <hash>', 'expected NAR hash for local bundle mode')
@@ -376,9 +379,8 @@ function bundleRows(result: VerifyResult, options: VerifyOptions): ResultRow[] {
 	];
 }
 
-// One row per subject of a build-origin statement, naming the path and where it
-// came from. A statement covers every path its run published, so the rows for a
-// bundle verified for one path include the run's other subjects as well.
+// Verification covers the entire signed build-origin statement. Report every
+// subject in that statement, including subjects other than the requested path.
 function originRows(result: VerifyResult): ResultRow[] {
 	const statement = buildOriginStatement(result);
 

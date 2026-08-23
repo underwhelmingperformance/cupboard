@@ -112,8 +112,6 @@ const defaultCeiling: AvailabilityCeilingConfig = {
 	untrustedFallback: 20
 };
 
-// A store double that records every call it receives so a test can assert
-// exactly what was asked of it, and of nothing else.
 class RecordingStore implements Pick<
 	Nix,
 	| 'queryMissing'
@@ -242,7 +240,7 @@ describe('partitionAvailability', () => {
 
 	it.each([
 		{
-			name: 'a target whose root is retained is attachOnly',
+			name: 'does not schedule a target whose root still retains it',
 			target: target(),
 			rootEnsureResults: new Map([[appRoot, retainedResult]]),
 			expected: {
@@ -253,7 +251,7 @@ describe('partitionAvailability', () => {
 			}
 		},
 		{
-			name: 'a target absent from its build-required root falls through to further classification',
+			name: 'continues checking a target absent from its build-required root',
 			target: target(),
 			rootEnsureResults: new Map([[appRoot, buildRequiredMissingSelf]]),
 			expected: {
@@ -264,7 +262,7 @@ describe('partitionAvailability', () => {
 			}
 		},
 		{
-			name: "a target present in its build-required root's list, though not the whole root, is still attachOnly",
+			name: 'does not schedule a target still present in a partially missing root',
 			target: target(),
 			rootEnsureResults: new Map([[appRoot, buildRequiredMissingOther]]),
 			expected: {
@@ -275,7 +273,7 @@ describe('partitionAvailability', () => {
 			}
 		},
 		{
-			name: 'a target with no known output path always joins the build set',
+			name: 'schedules a target whose output path is not known yet',
 			target: target({ expectedPath: undefined }),
 			rootEnsureResults: new Map(),
 			expected: {
@@ -348,7 +346,6 @@ describe('partitionAvailability', () => {
 				targets: [
 					target({ expectedPath: appPath, installable: `${appPath}^out` }),
 					target({ expectedPath: appPath, installable: `${appPath}^out` }),
-					// Served by the destination, so never a candidate.
 					target({ expectedPath: otherPath, installable: otherPath })
 				],
 				store,
@@ -499,12 +496,12 @@ describe('partitionAvailability', () => {
 
 	it.each([
 		{
-			name: 'attaches a served path the cache also holds an attestation for',
+			name: 'attaches a served path with a cache attestation',
 			attested: [appPath],
 			expected: { attachOnly: [appPath], buildSet: [], unattested: [] }
 		},
 		{
-			name: 'builds a served path the cache holds no attestation for',
+			name: 'builds a served path without a cache attestation',
 			attested: [],
 			expected: { attachOnly: [], buildSet: [appPath], unattested: [appPath] }
 		}
@@ -595,7 +592,7 @@ describe('partitionAvailability', () => {
 		});
 	});
 
-	it('builds an unattested path its retained root still serves', async () => {
+	it('builds an unattested path despite retention by its root', async () => {
 		const partition = await partitionAvailability(
 			baseOptions({
 				targets: [target({ expectedPath: appPath, installable: appPath })],
@@ -700,10 +697,9 @@ describe('partitionAvailability', () => {
 		});
 	});
 
-	// The fresh answer walks the closures of the paths it resolved, so it names
-	// paths the first answer classified by another route. Each of those is one
-	// path, however many answers named it.
-	it('counts a path both answers name once', async () => {
+	// The fresh query walks closures and can include paths that the first query
+	// classified separately. The merged partition counts each path once.
+	it('counts a path included by both answers once', async () => {
 		const unknownPath = path('33333333333333333333333333333333-unknown');
 		const sharedSubstitute = path('44444444444444444444444444444444-shared');
 		const sharedBuild = path('55555555555555555555555555555555-built');
@@ -716,9 +712,9 @@ describe('partitionAvailability', () => {
 				narSize: 20
 			})
 		);
-		// The fresh answer classifies the unknown path, names the shared paths
-		// again, and leaves one the first answer had already classified unknown.
-		// Its bytes cover both paths it classified as substitutable.
+		// The fresh answer classifies the unknown path, includes the shared paths
+		// again, and preserves one earlier unknown. Its byte totals cover both
+		// paths that it classifies as substitutable.
 		const bypassPartition = missingWith({
 			willBuild: [sharedBuild],
 			willSubstitute: [unknownPath, sharedSubstitute],
@@ -859,13 +855,13 @@ describe('partitionAvailability', () => {
 
 	it.each([
 		{
-			name: 'a derivation path as missing even when the re-query was refused',
+			name: 'a missing derivation when the re-query was refused',
 			basename: '33333333333333333333333333333333-unknown.drv',
 			requery: { kind: 'refused' as const, reason: 'not trusted' },
 			expectedCause: { kind: 'missing-derivation' }
 		},
 		{
-			name: 'an output path with a refused re-query to the unrefreshed substituter result',
+			name: 'a stale output miss when the re-query was refused',
 			basename: '44444444444444444444444444444444-unknown',
 			requery: { kind: 'refused' as const, reason: 'not trusted' },
 			expectedCause: {
@@ -874,12 +870,12 @@ describe('partitionAvailability', () => {
 			}
 		},
 		{
-			name: 'an output path that a fresh answer still left unknown to no substituter holding it',
+			name: 'an output absent from the store and substituters after a fresh query',
 			basename: '44444444444444444444444444444444-unknown',
 			requery: undefined,
 			expectedCause: { kind: 'not-in-store-or-substituters' }
 		}
-	])('attributes $name', async ({ basename, requery, expectedCause }) => {
+	])('reports $name', async ({ basename, requery, expectedCause }) => {
 		const unknownPath = path(basename);
 		const store = new RecordingStore(missingWith({ unknown: [unknownPath] }));
 
@@ -919,7 +915,7 @@ describe('partitionAvailability', () => {
 		]);
 	});
 
-	it('carries the substituters the plan could not query into the refusal', async () => {
+	it('includes unqueried substituters in the refusal', async () => {
 		const unknownPath = path('44444444444444444444444444444444-unknown');
 		const store = new RecordingStore(
 			missingWith({ unknown: [unknownPath] }),
@@ -986,7 +982,7 @@ describe('partitionAvailability', () => {
 		});
 	});
 
-	it('refuses a local closure path with no target ownership', async () => {
+	it('refuses a local closure path that no target requires', async () => {
 		const derivation = path('11111111111111111111111111111111-target.drv');
 		const source = path('22222222222222222222222222222222-source');
 		const store = new RecordingStore(
@@ -1047,7 +1043,7 @@ describe('partitionAvailability', () => {
 		});
 	});
 
-	it('moves an unknown output into the dependency build set', async () => {
+	it('adds an unknown output to the dependency build set', async () => {
 		const derivation = path('11111111111111111111111111111111-target.drv');
 		const output = path('44444444444444444444444444444444-target');
 		const dependencyDerivation = path(
@@ -1712,7 +1708,7 @@ describe('partitionAvailability', () => {
 			infoCalls: []
 		}
 	])(
-		'accounts for the substitution policy when $name',
+		'reports the resulting build and substitution work when $name',
 		async ({
 			policy,
 			canDerivationSubstitute,
@@ -1835,7 +1831,7 @@ describe('partitionAvailability', () => {
 		]);
 	});
 
-	it('retains dependency ownership when the target derivation is already present', async () => {
+	it('assigns a freshly found dependency to the target that requires it', async () => {
 		const appDerivation = path('11111111111111111111111111111111-app.drv');
 		const appOutput = path('22222222222222222222222222222222-app');
 		const otherDerivation = path('33333333333333333333333333333333-other.drv');
@@ -2246,8 +2242,8 @@ describe('partitionAvailability', () => {
 		});
 	});
 
-	// A path counted as held nowhere is held nowhere among the substituters
-	// that answered, so which ones did not answer belongs beside the counts.
+	// A miss covers only the substituters that answered. Record failed queries
+	// beside the counts so the result does not imply that every cache was checked.
 	it('records the substituters that could not be queried', async () => {
 		const unreachable = [
 			{ uri: 'https://down.example', reason: 'no-cache-info' as const }
@@ -2261,9 +2257,8 @@ describe('partitionAvailability', () => {
 		expect(partition.unreachableSubstituters).toStrictEqual(unreachable);
 	});
 
-	// A store asking the substituters as the question is put has no cache to
-	// look past, so a second query would classify no more of its unknowns and
-	// the configured ceiling stands.
+	// This store bypasses the narinfo cache on its first query. A second query
+	// cannot refresh that result, so the configured ceiling applies directly.
 	it('keeps the configured ceiling when the first answer was already fresh', async () => {
 		const unknownPath = path('33333333333333333333333333333333-unknown');
 		const store = new RecordingStore(missingWith({ unknown: [unknownPath] }));

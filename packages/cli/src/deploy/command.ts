@@ -85,9 +85,6 @@ import {
 import { planWorkerSource } from './source.ts';
 import { createDeployUi, type DeployUi, type MenuEntry } from './ui.ts';
 
-/**
-The user backed out of a prompt; the deploy stops without error output.
-*/
 export class DeployCancelledError extends CliError {
 	constructor() {
 		super('Deploy cancelled');
@@ -95,9 +92,6 @@ export class DeployCancelledError extends CliError {
 	}
 }
 
-/**
-A confirmation is needed but there is no terminal to ask on.
-*/
 export class ConfirmationRequiredError extends CliError {
 	constructor() {
 		super('Not running in a terminal: pass --yes to deploy without prompts.');
@@ -105,9 +99,6 @@ export class ConfirmationRequiredError extends CliError {
 	}
 }
 
-/**
-An account must be chosen but there is no terminal to ask on.
-*/
 export class AccountOptionRequiredError extends CliError {
 	constructor(public readonly accounts: readonly AccountSummary[]) {
 		super(
@@ -118,9 +109,6 @@ export class AccountOptionRequiredError extends CliError {
 	}
 }
 
-/**
-R2 credentials are needed but there is no terminal to ask on.
-*/
 export class R2CredentialsRequiredError extends CliError {
 	constructor() {
 		super(
@@ -132,9 +120,6 @@ export class R2CredentialsRequiredError extends CliError {
 	}
 }
 
-/**
-R2 could not be reached to probe the credential pair.
-*/
 export class R2UnreachableError extends CliError {
 	constructor(options: { readonly cause: unknown }) {
 		super('Could not reach R2 to check the credentials', options);
@@ -142,9 +127,6 @@ export class R2UnreachableError extends CliError {
 	}
 }
 
-/**
-R2 rejected the credential pair when probed.
-*/
 export class R2CredentialsRejectedError extends CliError {
 	constructor(public readonly status: number) {
 		super(
@@ -163,17 +145,11 @@ export interface DeployCliOptions {
 	readonly dryRun?: boolean;
 	readonly fromTree?: boolean;
 	readonly yes?: boolean;
-	/**
-	False when `--no-wrangler` was passed; absent means allowed.
-	*/
 	readonly wrangler?: boolean;
 }
 
 export interface DeployRuntimeOptions {
 	readonly signal?: AbortSignal;
-	/**
-	ANSI colour preference from `--colour`/`--no-colour`.
-	*/
 	readonly colour?: boolean;
 }
 
@@ -321,9 +297,6 @@ export async function chooseDeployAccount(
 	return chosen;
 }
 
-/**
-The deploy-time choices the user may tweak while reviewing the plan.
-*/
 export interface PlanState {
 	readonly accountId: CloudflareAccountId;
 	readonly domain: string | undefined;
@@ -426,18 +399,8 @@ export interface PlanReviewWorld {
 	readonly ui: DeployUi;
 	readonly render: (state: PlanState) => Promise<void>;
 	readonly accounts: () => Promise<readonly AccountSummary[]>;
-	/**
-	The deployer's identity, when the credential carries one.
-	*/
 	readonly deployer: OwnerBinding | undefined;
-	/**
-	True when `--yes` accepted the plan up front.
-	*/
 	readonly skipReview: boolean;
-	/**
-	 * Whether replacing the R2 credentials the Worker already holds is worth
-	 * offering for the given plan. Absent when the caller cannot tell.
-	 */
 	readonly canReplaceR2Credentials?: (state: PlanState) => Promise<boolean>;
 }
 
@@ -670,9 +633,6 @@ export async function reviewPlan(
 	}
 }
 
-/**
-The R2 pair from the environment, when both parts are present.
-*/
 export function envR2Credentials(
 	env: Readonly<Record<string, string | undefined>>
 ): R2Credentials | undefined {
@@ -695,9 +655,6 @@ export function envR2Credentials(
 	};
 }
 
-/**
-How the R2 credential question was resolved.
-*/
 export type R2Settlement =
 	| {
 			readonly kind: 'settled';
@@ -707,9 +664,6 @@ export type R2Settlement =
 			*/
 			readonly created: boolean;
 	  }
-	/**
-	The pair already on the Worker stays as it is.
-	*/
 	| { readonly kind: 'keep' }
 	| { readonly kind: 'cancelled' };
 
@@ -721,10 +675,6 @@ export type R2Settlement =
 export type R2KeyCreation =
 	| {
 			readonly kind: 'available';
-			/**
-			 * Whether the bucket already exists, so the menu hint can say whether
-			 * creating the key creates the bucket too.
-			 */
 			readonly isBucketPresent: boolean;
 			readonly create: () => Promise<R2Credentials>;
 	  }
@@ -742,9 +692,6 @@ export async function obtainR2Credentials(options: {
 	readonly accountId: CloudflareAccountId;
 	readonly bucketName: string;
 	readonly creation: R2KeyCreation;
-	/**
-	Set when the Worker holds a pair that was scoped to another bucket.
-	*/
 	readonly keep?: { readonly previousBucket: string };
 }): Promise<R2Settlement> {
 	const { ui, bucketName, creation } = options;
@@ -881,9 +828,6 @@ export async function verifyR2Credentials(options: {
 	readonly bucketName: string;
 	readonly initial: R2Credentials;
 	readonly signal?: AbortSignal;
-	/**
-	Probe attempts before giving up; more for a just-created token.
-	*/
 	readonly attempts?: number;
 	readonly check?: typeof checkR2Credentials;
 	readonly sleep?: (ms: number) => Promise<void>;
@@ -1064,7 +1008,7 @@ async function deployFlow(
 			...choicePlanRows(
 				artifact.config,
 				initialDomain,
-				// A dry run never authenticates, so no deployer identity exists.
+				// Dry runs do not authenticate, so derive the plan without a deployer identity.
 				defaultOwnerChoice(artifact.config)
 			)
 		]);
@@ -1137,9 +1081,8 @@ async function deployFlow(
 		return created;
 	};
 
-	// What secrets both Workers already hold, fetched once per account in a
-	// single visible step; a fresh wrapping secret is generated at most once
-	// and reused across re-renders so the value shown is the value deployed.
+	// Cache the secret-name lookup per account. Generate each new secret once so
+	// re-rendering the editable plan does not change the value that will deploy.
 	const secretChecks = new Map<
 		CloudflareAccountId,
 		Promise<{ control: readonly string[]; tenant: readonly string[] }>
@@ -1170,9 +1113,8 @@ async function deployFlow(
 
 	const r2SecretNames = new Set(['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']);
 
-	// The pair the tenant Worker already holds survives a re-deploy untouched,
-	// so it only needs settling when neither the environment nor the Worker
-	// has it. The values cannot be read back, only their presence.
+	// Existing R2 secrets survive an upload, but their values cannot be read
+	// back. Use their presence to decide whether this deploy must supply a pair.
 	const isR2AlreadySetFor = async (state: PlanState): Promise<boolean> => {
 		const { tenant } = await existingSecretsFor(state.accountId);
 
@@ -1197,8 +1139,6 @@ async function deployFlow(
 		});
 		const controlSecrets = [...assembled.secrets.control];
 		const tenantSecrets = [...assembled.secrets.tenant];
-		// The R2 pair is settled after the review (kept, created or entered),
-		// so its absence here is pending work.
 		const pendingR2 = assembled.missing.filter((name) =>
 			r2SecretNames.has(name)
 		);
@@ -1240,11 +1180,8 @@ async function deployFlow(
 			}
 		}
 
-		// Settle the per-push id signing key when the environment does not
-		// supply it: generate one on a first deploy, keep what both Workers
-		// already hold, and rotate a fresh key onto both when only one holds it
-		// (an applied value cannot be read back to copy across); see
-		// {@link settlePushIdSigningKey}.
+		// Both Workers must share the push-ID key. If only one has it, the applied
+		// value cannot be read back, so rotate a fresh key onto both.
 		if (missing.includes('PUSH_ID_SIGNING_KEY')) {
 			const existing = await existingSecretsFor(state.accountId);
 			missing = missing.filter((name) => name !== 'PUSH_ID_SIGNING_KEY');
@@ -1293,7 +1230,6 @@ async function deployFlow(
 				domain: state.domain,
 				dryRun: false,
 				secrets: { control: controlSecrets, tenant: tenantSecrets },
-				// Settled right before the deploy runs, on the agreed plan.
 				liveBuild: undefined
 			},
 			missing,
@@ -1338,8 +1274,6 @@ async function deployFlow(
 			accounts: () => apiFor(accountId).listAccounts(),
 			deployer,
 			skipReview: cliOptions.yes === true,
-			// Replacing is only a choice when the environment did not supply a pair
-			// (which already deploys as given) and the Worker already holds one.
 			canReplaceR2Credentials: async (state) =>
 				r2Credentials === undefined && (await isR2AlreadySetFor(state))
 		}
@@ -1359,9 +1293,8 @@ async function deployFlow(
 		const isReplaceRequested = agreed.replaceR2Credentials === true;
 
 		if (isAlreadySet && !isBucketRenamed && !isReplaceRequested) {
-			// The Worker keeps the pair it already holds. The values cannot be
-			// read back, so the onboarding asks the deployment to prove them
-			// once a cache exists to ask through.
+			// The values cannot be read back. Once a cache exists, onboarding has
+			// the Worker test its stored pair.
 			ui.info('Keeping the R2 credentials already set on the Worker.');
 		} else if (isInteractive) {
 			const settlement = await obtainR2Credentials({
@@ -1419,7 +1352,7 @@ async function deployFlow(
 			return;
 		}
 
-		// The probe may have replaced the pair; the deploy must set what passed.
+		// The interactive probe can replace the pair. Deploy the pair that passed.
 		r2Credentials = verified;
 	}
 
@@ -1433,8 +1366,6 @@ async function deployFlow(
 		agreed.owner.kind === 'owner' ? agreed.owner.owner : undefined
 	);
 
-	// What the deployment serves right now, so the deploy can skip uploading
-	// Workers that already run this build with this configuration.
 	const liveBuild = await ui
 		.reporter()
 		.phase('Checking the deployed build', async (context) => {
@@ -1469,9 +1400,8 @@ async function deployFlow(
 		options: { ...options, liveBuild }
 	});
 
-	// What the claim must present beyond the id_token: the signup secret this
-	// deploy just set (its value is in hand), or one already on the Worker
-	// (only the operator knows it), or none.
+	// A newly supplied signup secret is available for the claim. An existing
+	// secret is unreadable, so onboarding can only ask the operator for it.
 	const suppliedSignupSecret = options.secrets.control.find(
 		(secret) => secret.name === 'CUPBOARD_SIGNUP_SECRET'
 	)?.text;
@@ -1511,8 +1441,6 @@ async function deployFlow(
 						bucketName: agreedBucket
 					}
 				: { kind: 'fresh' },
-		// Only a grant-backed credential can reissue an id_token; raw API
-		// tokens carry no identity to begin with.
 		...((credentialSource === 'cached login' ||
 			credentialSource === 'browser login') && {
 			freshIdToken: () =>
@@ -1543,8 +1471,6 @@ async function deployFlow(
 		}
 
 		case 'unreachable': {
-			// A status means the host answered, so the host is reachable and
-			// erroring, not absent: surface the answer as a server fault.
 			if (
 				outcome.lastStatus !== undefined &&
 				outcome.lastStatus >= serverError
@@ -1569,7 +1495,7 @@ async function deployFlow(
 
 			ui.warn(
 				`Deployed, but ${outcome.url} did not come online in time ` +
-					`(last answer: ${outcome.lastProbe}).${dnsNote} Once it responds, ` +
+					`(last probe: ${outcome.lastProbe}).${dnsNote} Once it responds, ` +
 					're-run `cupboard init` to finish setting up.'
 			);
 			ui.outro('Deployed.');

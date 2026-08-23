@@ -76,9 +76,6 @@ function absentString(): string | undefined {
 	return undefined;
 }
 
-/**
-A {@link DeployUi} whose account picker answers with `choice` (or cancels).
-*/
 function pickerUi(choice?: string, uiCalls: UiCall[] = []): DeployUi {
 	return {
 		interactive: true,

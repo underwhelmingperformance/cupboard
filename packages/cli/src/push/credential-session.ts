@@ -13,38 +13,21 @@ export type IssuePushCredential = (
 ) => Promise<ParsedPushCredential>;
 
 export interface CredentialSessionOptions {
-	/**
-	Re-issue once the credential is within this long of expiry.
-	*/
 	readonly refreshMarginMs?: number;
-	/**
-	Clock, injectable for tests.
-	*/
 	readonly now?: () => number;
 }
 
-// The credential lifecycle for one push: a stable signed push id and a renewing
-// R2 credential bound to it.
 export interface CredentialSession {
-	/**
-	The signed push id every negotiate names, issued on first use.
-	*/
 	pushId(): Promise<PushId>;
-	/**
-	The provider the uploader signs with; re-issues as the credential expires.
-	*/
 	readonly provider: CredentialProvider;
 }
 
 const defaultRefreshMarginMs = 5 * 60 * 1000;
 
 /**
- * Holds one push's credential and renews it. The managed S3 upload re-invokes
- * the provider as the credential nears expiry; each renewal re-issues against the
- * same push id (refreshing the underlying access token when the issuer does), so
- * a push that outlives a single credential keeps streaming. A memoised credential
- * would instead leave the upload signing with an expired session token once the
- * short-lived write token it was capped at lapsed.
+ * Supplies renewable R2 credentials for one push. Every renewal reuses the
+ * signed push ID, so all uploads remain within the original staging prefix.
+ * The provider refreshes the underlying access token when required.
  */
 export function credentialSession(
 	issue: IssuePushCredential,

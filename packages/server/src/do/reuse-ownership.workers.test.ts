@@ -25,10 +25,9 @@ function expectCommitSocketError(
 	expect(error).toBeInstanceOf(CommitSocketError);
 }
 
-// A reuse commit binds a narinfo to bytes the tenant never re-proves, on the
-// strength of its presence edge for the hash. With the edge credited back by a
-// delete between negotiate and commit, the commit must fail towards re-upload:
-// the presence edge is gone.
+// A reuse commit relies on the tenant's existing presence edge instead of
+// uploading the bytes again. If deletion removes that edge after negotiation,
+// commit must fail so the client negotiates a fresh upload.
 describe('reuse commit ownership', () => {
 	beforeEach(resetTestServer);
 
@@ -68,9 +67,6 @@ describe('reuse commit ownership', () => {
 
 		expectCommitSocketError(commitError);
 
-		// The refused commit leaves no residue, and a fresh negotiate offers an
-		// upload: with no presence edge the reuse shortcut is gone, exactly what
-		// the client needs to re-prove the bytes.
 		expectSingleUploadDecision(await negotiateUploads(token, [second]), second);
 
 		expect({

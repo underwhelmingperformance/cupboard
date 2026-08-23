@@ -20,61 +20,43 @@ const textHeaders = {
 	'x-content-type-options': 'nosniff'
 };
 
-// The storage key of a single object in the shared R2 bucket. The key
-// constructors below are its only mint points, so a value reaching an R2
-// `get`/`put`/`delete`/`head` always came from one of them.
 export const r2ObjectKeySchema = z.string().brand('R2ObjectKey');
 export type R2ObjectKey = z.infer<typeof r2ObjectKeySchema>;
 
-// The public origin of an incoming request, threaded to where it derives an
-// absolute URL, including the issuer and endpoints in a tenant's authorisation
-// server metadata. It is minted once at the request boundary and persists across
-// a teardown or reconcile drain, so it carries its own brand end to end.
+// Preserve the request's public origin across queued reconcile and teardown
+// work. Those passes use it to construct public URLs and purge entries from the
+// same edge-cache origin.
 export const requestOriginSchema = z.string().brand('RequestOrigin');
 export type RequestOrigin = z.infer<typeof requestOriginSchema>;
 
-// The origin the scheduled (cron) handler uses to reach the Durable Object. It
-// is internal, so GC triggered through it cannot know the public URL clients
-// cached under and must not attempt to purge the edge cache.
+// Scheduled requests use this internal origin to reach the Durable Object. They
+// cannot identify the public edge-cache origin, so they must not request a purge.
 export const internalOrigin = requestOriginSchema.parse(
 	'https://cupboard.local'
 );
 
-// The most committed narinfo rows a single `GET /check` examines. The check is
-// a bounded one-shot scan; its report flags when the cache held more than this.
+// `GET /check` is a bounded one-shot scan. Its response reports when more
+// committed narinfos remain.
 export const checkBatchSize = 1000;
 
-// The most committed narinfo rows a single `POST /verify` pass reconciles. The
-// cron tick advances a cursor by one batch per run, wrapping at the end.
+// Each `POST /verify` pass advances one cursor batch and wraps after the final
+// row.
 export const verificationBatchSize = 500;
 
-// The verify-before-serve ceiling, keyed on the uncompressed NAR size
-// (`narSize`, the cost of decompress-and-hash), not the compressed
-// `fileSize`. Every commit defers to the verification pass; a blob above this
-// bound cannot be decompressed within the worker CPU budget in any single
-// pass, so the commit is rejected, since it could never be served.
-//
-// PROVISIONAL: awaits a runtime benchmark (real workerd throughput and whether
-// the Durable Object honours `cpu_ms = 300000`). The mechanism is correct at
-// any value; only the bound is unmeasured.
+// Verification decompresses and hashes the NAR, so this limit applies to
+// `narSize`, not compressed `fileSize`. Every commit waits for verification.
+// The limit must therefore fit one Worker invocation; a larger NAR is rejected
+// because it could never become servable.
 export const verifiableMaxBytes = 4 * 1024 * 1024 * 1024;
 
-// One prompt verify claim: a small row count and a cumulative uncompressed
-// byte cap over the fresh rows (reuse rows decode nothing and count zero), so
-// a single consumer pass stays far below the invocation's CPU and wall limits
-// and a lost invocation redoes at most one chunk; a backlog drains through the
-// chained continuation. The byte cap matches `verifiableMaxBytes`, the
-// single-NAR bound the CPU budget must cover anyway, and a lone over-cap row
-// is still claimable alone.
+// Bound each claim by both row count and cumulative uncompressed NAR size.
+// Reused objects require no decoding and add no bytes. Always admit the first
+// fresh row so one NAR at the verification ceiling cannot starve.
 export const verifyClaimBatchSize = 32;
 export const verifyClaimMaxNarBytes = verifiableMaxBytes;
 
-// How long a claim leases its rows to the pass working them, so an
-// overlapping pass (the alarm backstop's duplicate message, the cron crossing
-// a consumer run) claims nothing already in flight. Generous enough to
-// outlive a full byte-capped pass, fetch plus decode; a crashed pass's rows
-// free at expiry and still settle comfortably inside the client's commit
-// wait.
+// A claim prevents overlapping verification passes from processing the same
+// rows. Another pass may reclaim the rows after the lease expires.
 export const verifyClaimLeaseMs = 4 * 60 * 1000;
 
 export const maxAttestationBundleBytes = 1024 * 1024;
@@ -83,17 +65,14 @@ export const narInfoCacheTtlSeconds = 3600;
 
 export const narInfoCacheControl = `public, max-age=${String(narInfoCacheTtlSeconds)}, must-revalidate`;
 
-// A deleted narinfo can still be served from a warm edge for up to its TTL, so a
-// NAR it points at must outlive any such cached copy. The reaper arms an
-// unreferenced blob for this long before collecting it, adding a margin over the
-// TTL for edge propagation and clock skew.
+// An edge can serve a deleted narinfo until its cache TTL expires. Keep an
+// unreferenced NAR for the TTL plus a margin for propagation and clock skew.
 export const blobReaperGraceMs = (narInfoCacheTtlSeconds + 600) * 1000;
 
-// The most blobs the reaper arms or collects in a single bounded pass.
 export const blobReaperBatchSize = 500;
 
-// The canonical key's fixed parts, shared with SQL that rebuilds the key from
-// a row's `nar_hash` column to test whether an upload is a reuse.
+// Verification SQL reconstructs NAR object keys from `nar_hash`. Keep these
+// fragments in sync with that query.
 export const narObjectKeyPrefix = 'nar/';
 export const narObjectKeySuffix = '.nar.zst';
 
@@ -133,11 +112,9 @@ export function attestationListObjectKey(
 	return r2ObjectKeySchema.parse(`t/${tenant}/${suffix}`);
 }
 
-// Where a client uploads unverified bytes, private to one upload and grouped
-// under its push so a credential scoped to `staging/<pushId>/` covers the whole
-// push. The server verifies the bytes here, then promotes them into the shared
-// `nar/<narHash>` key, so the canonical object only ever holds confirmed content
-// and no client ever writes it directly.
+// Clients upload to a push-specific staging key. Verification promotes
+// confirmed bytes to the shared content-addressed NAR key, which clients never
+// write directly.
 export function stagingObjectKey(
 	pushId: PushId,
 	uploadId: UploadId
@@ -145,11 +122,10 @@ export function stagingObjectKey(
 	return r2ObjectKeySchema.parse(`staging/${pushId}/${uploadId}.nar.zst`);
 }
 
-// The root every push stages under. Each push owns the `staging/<pushId>/`
-// subtree; reconciliation scans this root for objects no pending row tracks.
 export const stagingPrefix = 'staging/';
 
-// The prefix a push's staging objects share, the scope of its upload credential.
+// Keep the trailing slash so a credential for one push cannot write beneath a
+// longer push ID with the same prefix.
 export function stagingPushPrefix(pushId: PushId): string {
 	return `${stagingPrefix}${pushId}/`;
 }
@@ -161,15 +137,10 @@ export function attestationStagingObjectKey(
 	return r2ObjectKeySchema.parse(`staging/${pushId}/attestations/${uploadId}`);
 }
 
-// The sole narinfo-key constructors: never inline the prefix elsewhere. A narinfo's
-// materialised R2 object is tenant-namespaced, so distrusting tenants never share a
-// narinfo object even for the same store-path hash; the NAR bytes it points at stay
-// in the shared, content-addressed `nar/<narHash>` namespace. A named cache nests a
-// further segment. Store path hashes never contain a slash, so the shapes cannot
+// Keep narinfos tenant-scoped because tenants can trust different signatures
+// for the same store path. NAR bytes remain shared by content hash. Named caches
+// add one segment; store-path hashes contain no slash, so the key shapes cannot
 // collide.
-
-// The R2 prefix under which all of a tenant's narinfo objects live, across every
-// cache. A reconcile lists this to find the present objects for a batch.
 export function narInfoObjectPrefix(tenant: TenantId): string {
 	return `t/${tenant}/narinfo/`;
 }
@@ -265,9 +236,6 @@ function withoutWeakPrefix(etag: string): string {
 	return etag.startsWith('W/') ? etag.slice(2) : etag;
 }
 
-/**
-The deployment-wide plain-text 404.
-*/
 export function notFoundResponse(): Response {
 	return new Response('Not found\n', {
 		status: StatusCodes.NOT_FOUND,

@@ -418,9 +418,6 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 	};
 }
 
-/**
-A subdomain lookup; called with no argument it finds none registered.
-*/
 const subdomainOf = (value?: string) => (): Promise<string | undefined> =>
 	Promise.resolve(value);
 
@@ -485,14 +482,8 @@ function orpcRejection(status: number): Error {
 }
 
 interface ClientScript {
-	/**
-	What `/_version` answers; the deployed build is `v-new`.
-	*/
 	readonly versions?: Scripted<string>[];
 	readonly signup?: Scripted<ParsedSignupResponse>[];
-	/**
-	What listing tenants answers; the claim flow always lists first.
-	*/
 	readonly lists?: Scripted<ParsedTenantSummary[]>[];
 	readonly creates?: Scripted<ParsedTenantSummary>[];
 	readonly rebuilds?: Scripted<ParsedMembershipRebuildResponse>[];
@@ -699,7 +690,7 @@ describe('onboardAdminFor', () => {
 		).toStrictEqual({ kind: 'other', owner: other });
 	});
 
-	it('is unproven when the session credential carries no identity', () => {
+	it('is unproven when the session credential has no identity', () => {
 		expect(
 			onboardAdminFor({ kind: 'owner', owner, origin: 'config' })
 		).toStrictEqual({ kind: 'unproven', owner });
@@ -881,7 +872,7 @@ describe('onboardDeployment', () => {
 		]);
 	});
 
-	it('asks for the claim secret only the Worker holds, then claims', async () => {
+	it('prompts for the configured claim secret, then claims', async () => {
 		const { ui, infos } = scriptedUi({
 			slugs: ['builds'],
 			secrets: ['hunter2']
@@ -945,8 +936,6 @@ describe('onboardDeployment', () => {
 
 		await onboardDeployment({
 			...baseOptions(ui, client),
-			// The login's snapshot ('id-token-1') can expire mid-deploy; the
-			// claim asks for a fresh token at the moment of use.
 			freshIdToken: () => Promise.resolve('id-token-fresh')
 		});
 
@@ -1011,7 +1000,6 @@ describe('onboardDeployment', () => {
 		const goodKey = 'b'.repeat(32);
 		const { ui, warnings } = scriptedUi({
 			slugs: ['builds'],
-			// The first entered pair is rejected by R2; the loop asks again.
 			textEdits: [
 				{ kind: 'set', value: 'a'.repeat(32) },
 				{ kind: 'set', value: goodKey }
@@ -1023,8 +1011,8 @@ describe('onboardDeployment', () => {
 			signup: [claimedSignup],
 			lists: [[]],
 			creates: [tenantSummary('builds')],
-			// The kept pair fails; after the new pair is set, the Worker still
-			// answers with the old env once before the restart lands.
+			// After the replacement is stored, the existing Durable Object can
+			// return one more result from its old environment before it restarts.
 			controlChecks: [
 				{ result: 'rejected', status: StatusCodes.FORBIDDEN },
 				{ result: 'rejected', status: StatusCodes.FORBIDDEN },
@@ -1215,7 +1203,7 @@ describe('onboardDeployment', () => {
 		]);
 	});
 
-	it('lists several existing caches and creates nothing', async () => {
+	it('returns already initialised when several caches exist', async () => {
 		const { ui } = scriptedUi();
 		const client = scriptedClient({
 			versions: ['v-new'],
@@ -1403,7 +1391,7 @@ describe('onboardDeployment', () => {
 		});
 	});
 
-	it('gives up on the cache URL when the new tenant never answers', async () => {
+	it('gives up on the cache URL when the new tenant never responds', async () => {
 		const { ui } = scriptedUi({ slugs: ['builds'] });
 		const client = scriptedClient({
 			versions: ['v-new'],

@@ -102,9 +102,6 @@ function gateOutcome(
 	}
 }
 
-// A well-formed token for a given issuer/audience. Issuer discovery or key
-// retrieval is unavailable in these tests, so verification never confirms the
-// signature.
 async function signedToken(options: {
 	issuer: string;
 	audience: string;
@@ -126,7 +123,7 @@ async function signedToken(options: {
 describe('signup gate', () => {
 	it.each([
 		{
-			name: 'a matching claim secret',
+			name: 'accepts a matching claim secret',
 			secret: 'sssh',
 			pinned: '',
 			localDev: '',
@@ -135,7 +132,7 @@ describe('signup gate', () => {
 			expected: gateAllowed
 		},
 		{
-			name: 'a wrong claim secret',
+			name: 'rejects an incorrect claim secret',
 			secret: 'sssh',
 			pinned: '',
 			localDev: '',
@@ -144,7 +141,7 @@ describe('signup gate', () => {
 			expected: gateForbidden
 		},
 		{
-			name: 'a missing claim secret',
+			name: 'rejects a missing claim secret',
 			secret: 'sssh',
 			pinned: '',
 			localDev: '',
@@ -153,7 +150,7 @@ describe('signup gate', () => {
 			expected: gateForbidden
 		},
 		{
-			name: 'a matching pinned subject',
+			name: 'accepts a matching pinned subject',
 			secret: '',
 			pinned: 'owner',
 			localDev: '',
@@ -162,9 +159,7 @@ describe('signup gate', () => {
 			expected: gateAllowed
 		},
 		{
-			// A deployment that never ran `wrangler secret put` has no secret
-			// binding at all: the env reads as undefined, not the empty string.
-			name: 'a pinned subject with the secret binding absent',
+			name: 'accepts a pinned subject when the secret binding is absent',
 			secret: undefined,
 			pinned: 'owner',
 			localDev: '',
@@ -173,7 +168,7 @@ describe('signup gate', () => {
 			expected: gateAllowed
 		},
 		{
-			name: 'every gate binding absent in hosted mode',
+			name: 'rejects hosted signup when every gate binding is absent',
 			secret: undefined,
 			pinned: undefined,
 			localDev: undefined,
@@ -182,7 +177,7 @@ describe('signup gate', () => {
 			expected: gateForbidden
 		},
 		{
-			name: 'a wrong pinned subject',
+			name: 'rejects a non-matching pinned subject',
 			secret: '',
 			pinned: 'owner',
 			localDev: '',
@@ -191,7 +186,7 @@ describe('signup gate', () => {
 			expected: gateForbidden
 		},
 		{
-			name: 'no gate with local dev relaxed',
+			name: 'accepts local development without a configured gate',
 			secret: '',
 			pinned: '',
 			localDev: '1',
@@ -200,7 +195,7 @@ describe('signup gate', () => {
 			expected: gateAllowed
 		},
 		{
-			name: 'no gate in hosted mode',
+			name: 'rejects hosted signup without a configured gate',
 			secret: '',
 			pinned: '',
 			localDev: '',
@@ -253,23 +248,18 @@ describe('control plane POST /signup', () => {
 		});
 	});
 
-	// A blank issuer and one that is not a usable issuer URL are the same deploy
-	// fault: no retry clears either, so both refuse before any token is read.
 	it.each([
 		{ name: 'unconfigured', configured: '' },
 		{ name: 'not an issuer URL', configured: 'http://issuer.example.test' }
-	])(
-		'reports 500 when the signup issuer is $name, issuing nothing',
-		async ({ configured }) => {
-			const response = await postSignup(
-				{ subject_token: 'x' },
-				{ CUPBOARD_SIGNUP_ISSUER: configured }
-			);
-			await response.text();
+	])('reports 500 when the signup issuer is $name', async ({ configured }) => {
+		const response = await postSignup(
+			{ subject_token: 'x' },
+			{ CUPBOARD_SIGNUP_ISSUER: configured }
+		);
+		await response.text();
 
-			expect(response.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
-		}
-	);
+		expect(response.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
+	});
 
 	it('reports 503 when the configured issuer is unavailable', async () => {
 		const issuer = currentOrigin();

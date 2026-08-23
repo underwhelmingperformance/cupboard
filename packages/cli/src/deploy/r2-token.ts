@@ -12,9 +12,6 @@ import {
 	r2SecretAccessKeySchema
 } from './r2-credentials.ts';
 
-/**
-The deploy credential may not manage account API tokens.
-*/
 export class TokenManagementNotPermittedError extends CliError {
 	constructor(options: { readonly cause: unknown }) {
 		super(
@@ -26,9 +23,6 @@ export class TokenManagementNotPermittedError extends CliError {
 	}
 }
 
-/**
-The account's token permission groups are missing the R2 object pair.
-*/
 export class R2PermissionGroupsError extends CliError {
 	constructor(public readonly wanted: readonly string[]) {
 		super(`Could not find the token permission groups: ${wanted.join(', ')}`);
@@ -36,9 +30,6 @@ export class R2PermissionGroupsError extends CliError {
 	}
 }
 
-/**
-Cloudflare answered a token request without the id or secret value.
-*/
 export class ApiTokenResponseError extends CliError {
 	constructor(
 		public readonly hasId: boolean,
@@ -54,9 +45,6 @@ export class ApiTokenResponseError extends CliError {
 // through the R2 bucket binding, not this S3 key.
 const writePermissionGroups = ['Workers R2 Storage Bucket Item Write'];
 
-/**
-The deterministic token name a deployment owns for a bucket.
-*/
 export function scopedR2TokenName(bucketName: string): string {
 	return `cupboard-r2-${bucketName}`;
 }
@@ -64,9 +52,8 @@ export function scopedR2TokenName(bucketName: string): string {
 /**
  * Creates (or, on a re-deploy, rolls) the account-owned API token that backs
  * the cache's R2 credentials: write-only on exactly one bucket. The bucket must
- * already exist; the caller creates it, visibly, first. The S3 pair is derived
- * from the token; nothing is stored anywhere except as Worker secrets, and
- * re-running rotates the secret.
+ * already exist; the caller creates it first. The S3 pair is derived from the
+ * token and stored only as Worker secrets. Re-running rotates the token secret.
  */
 export async function createScopedR2Key(
 	api: CloudflareApi,

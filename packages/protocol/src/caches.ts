@@ -4,13 +4,11 @@ import { z } from 'zod';
 import { countSchema } from './internal/counts.ts';
 import { isoTimestampSchema } from './scalars.ts';
 
-// A cache summary names a cache (the empty string is the default), its Nix
-// priority, how many store paths it holds, and its grace state: whether the
-// cache is permanently grace-managed, and the earliest live grace deadline
-// when one exists. The grace fields are optional so a summary from a server
-// that predates them still validates; the reverse skew, an older CLI's strict
-// parse against a newer server, is out of scope per the compatibility policy
-// (PLAN.md, "Compatibility").
+// The empty name identifies the default cache. The grace fields report whether
+// grace management is permanent and the earliest live deadline, when one
+// exists. These fields remain optional so responses from servers that predate
+// them still validate. The compatibility policy does not support an older CLI
+// strictly parsing fields added by a newer server (PLAN.md, "Compatibility").
 export const cacheSummarySchema = z.strictObject({
 	name: z.string(),
 	priority: cachePrioritySchema,

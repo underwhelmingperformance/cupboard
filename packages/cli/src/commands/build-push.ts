@@ -90,9 +90,6 @@ interface BuildPushOptions {
 	readonly keepGoingCohorts?: boolean;
 }
 
-// The cohorts file is deliberately small: each cohort is either a child
-// command supervised unchanged, or the installables of a constructed nix
-// invocation with its attempt settings.
 const commandCohortSchema = z.strictObject({
 	command: z.array(z.string().min(1)).min(1)
 });
@@ -112,24 +109,15 @@ const cohortsFileSchema = z.strictObject({
 });
 
 /**
- * Runs `nix store gc` at a cohort boundary when the run opted into collection.
- * `nix store gc` deletes only dead paths, so anything a local gc root keeps
- * alive survives. Paths already published are retained on the server, which a
- * local collection does not touch. A boundary runs only after the cohort's
- * publication has finished, so no batch temporary roots are held either.
+ * Configures optional garbage collection between cohorts. Collection starts
+ * only after the preceding cohort has published and released its temporary GC
+ * roots.
  *
- * Collection is an optimisation: a failed collection is reported as a warning
- * and never turns a successful build into a failure, while a collection killed
- * by a signal cancels the rest of the sequence.
+ * An ordinary collection failure produces a warning and does not fail the
+ * build. A terminating signal still cancels the remaining cohorts.
  */
 export interface BetweenCohortCollectorOptions {
-	/**
-	The enclosing CLI run's cancellation signal.
-	*/
 	readonly signal?: AbortSignal;
-	/**
-	Runs the collector child; injectable for tests.
-	*/
 	readonly runCollector?: (options: RunChildOptions) => Promise<ChildExit>;
 }
 
@@ -225,8 +213,9 @@ export function parseCohortsFile(contents: string): readonly BuildInvocation[] {
 }
 
 /**
-Successful cohort targets retained by one aggregate multi-cohort root.
-*/
+ * Deduplicates successful cohort targets and sorts them so aggregate-root
+ * contents do not depend on cohort completion order.
+ */
 export function aggregateCohortTargets(
 	cohorts: readonly (readonly StorePathString[])[]
 ): readonly StorePathString[] {
@@ -257,8 +246,10 @@ function recordAggregateSubject(
 }
 
 /**
-One schema-valid receipt over every settled cohort in a sequence.
-*/
+ * Combines version 3 cohort receipts. A `built` subject takes precedence when
+ * another cohort later finds the same path in its store, and terminal target
+ * failures remain distinct from command failures.
+ */
 export function aggregateBuildReceipts(
 	receipts: readonly ParsedBuildReceipt[]
 ): ParsedBuildReceiptV3 {
@@ -304,8 +295,9 @@ export function aggregateBuildReceipts(
 }
 
 /**
-The stable public multi-cohort envelope, or the action's explicit V3 view.
-*/
+ * Keeps the public multi-receipt envelope unless the caller explicitly asks
+ * for the version 3 aggregate used by the action output.
+ */
 export function multiCohortReceiptDocument(
 	receipts: readonly ParsedBuildReceipt[],
 	shouldAggregateReceiptV3: boolean
@@ -324,8 +316,9 @@ interface AggregateCohortRootOptions {
 }
 
 /**
-Replaces a multi-cohort root once, and only after every cohort succeeded.
-*/
+ * Leaves the aggregate root unchanged after any cohort failure. Once every
+ * cohort succeeds, replaces it with the deduplicated targets from all cohorts.
+ */
 export async function updateAggregateCohortRoot(
 	options: AggregateCohortRootOptions,
 	setRoot: (root: RootName, body: RootSetBody) => Promise<void>

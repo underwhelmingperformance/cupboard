@@ -15,9 +15,6 @@ export type ResourceLocation =
 	| { readonly field: string }
 	| { readonly pending: true; readonly missingDenies?: boolean };
 
-/**
-The resources a procedure's operation is scoped by, and where each lives.
-*/
 export interface ResourceSpec {
 	readonly cache?: ResourceLocation;
 	readonly root?: ResourceLocation;
@@ -36,10 +33,6 @@ export interface AuthzMeta {
 	readonly maintenance?: boolean;
 }
 
-/**
- * The base contract for authenticated procedures. It declares the shared
- * authorisation errors, and each procedure adds its required operation.
- */
 export const baseProcedure = oc.$meta<AuthzMeta>({}).errors({
 	UNAUTHORIZED: {},
 	FORBIDDEN: {}

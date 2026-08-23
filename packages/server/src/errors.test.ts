@@ -87,7 +87,7 @@ describe('OAuth errors', () => {
 			problem: 'subject-token-untrusted'
 		}
 	])(
-		'$name carries its RFC code and problem',
+		'$name sets error to $code and problem to $problem',
 		({ error, name, code, problem }) => {
 			expect({
 				name: error.name,
@@ -103,7 +103,7 @@ describe('OAuth errors', () => {
 		}
 	);
 
-	it('reports an unsupported grant type with the grant and no problem', () => {
+	it('UnsupportedGrantTypeError records the grant type and leaves problem undefined', () => {
 		const error = new UnsupportedGrantTypeError('authorization_code');
 
 		expect({
@@ -122,7 +122,7 @@ describe('OAuth errors', () => {
 	});
 });
 
-describe('write-stop and root errors', () => {
+describe('tenant write and root errors', () => {
 	const tenant = tenantIdSchema.parse('acme');
 
 	it.each<{ readonly tenantStatus: TenantStatus | undefined }>([
@@ -131,7 +131,7 @@ describe('write-stop and root errors', () => {
 		{ tenantStatus: 'offboarded' },
 		{ tenantStatus: undefined }
 	])(
-		'a stopped write carries the $tenantStatus status it was gated on',
+		'TenantWritesStoppedError records registry status $tenantStatus',
 		({ tenantStatus }) => {
 			const error = new TenantWritesStoppedError(tenant, tenantStatus);
 
@@ -149,7 +149,7 @@ describe('write-stop and root errors', () => {
 		}
 	);
 
-	it('unavailable root targets carry the root and its store paths', () => {
+	it('RootTargetsUnavailableError records the root name and unavailable paths', () => {
 		const rootName = rootNameSchema.parse('ci');
 		const targets = [
 			storePathSchema.parse(

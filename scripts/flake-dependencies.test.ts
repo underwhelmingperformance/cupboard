@@ -42,9 +42,6 @@ async function captureError<T>(
 	throw new TypeError('expected the call to throw');
 }
 
-/**
-A workspace holding the given hashes file, recording every write.
-*/
 function fakeWorkspace(hashes: DependenciesHashes): Workspace & {
 	writes: string[];
 } {
@@ -60,9 +57,6 @@ function fakeWorkspace(hashes: DependenciesHashes): Workspace & {
 	};
 }
 
-/**
-A fetcher yielding the given results in order, recording each purpose.
-*/
 function fakeFetcher(results: readonly (string | undefined)[]): StoreFetcher & {
 	purposes: FetchPurpose[];
 } {

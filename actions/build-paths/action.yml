@@ -1,6 +1,7 @@
 name: Build cupboard store paths
 description:
-  Build Nix installables and record which final outputs this workflow run built.
+  Build Nix installables and record current-run evidence for outputs built
+  locally.
 inputs:
   installables:
     description: Newline-delimited Nix installables to build.
@@ -16,7 +17,7 @@ inputs:
     description: Maximum local build jobs. Empty uses the Nix default.
     required: false
   allow-failure:
-    description: Treat an exhausted three-attempt build as successful.
+    description: Return successfully if all three build attempts fail.
     required: false
     default: 'false'
   require-provenance:
@@ -34,7 +35,8 @@ outputs:
     description: File containing the realised output paths.
     value: ${{ steps.build.outputs.paths-file }}
   receipt-file:
-    description: Current-run build receipt consumed by actions/attest.
+    description:
+      Path to the current-run build receipt that actions/attest reads.
     value: ${{ steps.build.outputs.receipt-file }}
 runs:
   using: composite

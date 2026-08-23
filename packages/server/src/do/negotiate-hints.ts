@@ -18,9 +18,6 @@ export const negotiateHintsTokenSchema = z
 	.brand('NegotiateHintsToken');
 export type NegotiateHintsToken = z.infer<typeof negotiateHintsTokenSchema>;
 
-// One `blob_state` row the Worker found for a requested NAR hash: the
-// presence and reuse facts negotiate reads, plus the reaper timer so the
-// Worker can clear it for the reuses the response commits to.
 export const blobStateHintSchema = z.object({
 	narHash: nixSha256HashSchema,
 	fileHash: nixSha256HashSchema,
@@ -31,11 +28,8 @@ export const blobStateHintSchema = z.object({
 });
 export type BlobStateHint = z.infer<typeof blobStateHintSchema>;
 
-// One `blob_reference` edge the Worker found for a requested store path in
-// the negotiated cache. The Durable Object compares these against its own
-// live narinfo rows, so an edge read before a recommit bumped the generation
-// simply fails to match: it fails towards "not committed", the safe
-// direction.
+// The Durable Object compares the hinted generation with its current narinfo
+// row. A hint read before a recommit therefore fails as uncommitted.
 export const committedEdgeHintSchema = z.object({
 	storePathHash: storePathHashSchema,
 	generation: narInfoGenerationSchema,
@@ -44,26 +38,20 @@ export const committedEdgeHintSchema = z.object({
 export type CommittedEdgeHint = z.infer<typeof committedEdgeHintSchema>;
 
 /**
- * The shared-fact reads for one negotiate, computed by the front Worker so
- * the Durable Object thread spends no time on them. Coverage is total: the
- * Worker probed every NAR hash in the request body, so absence from a list is
- * a definitive no-row, not an unknown. The reads preserve negotiate's
- * existence-oracle property, since ownership comes from this tenant's own
- * presence edges, never the global facts alone.
+ * Shared facts prefetched by the front Worker for one negotiation. The Worker
+ * reads every NAR hash in the request, so absence from a list means that no row
+ * existed at the time of the read. Reuse still requires this tenant's ownership
+ * row; global blob state alone never proves availability.
  */
 export const negotiateHintsSchema = z.object({
 	blobStates: z.array(blobStateHintSchema),
 	ownedNarHashes: z.array(nixSha256HashSchema),
-	// Absent when the staging Worker did not compute the edge read (an older
-	// script, or no cache resolved): the fallback is the object's own edge
-	// read, never "no edges".
+	// An older Worker, or a request with no resolved cache, can omit this field.
+	// The Durable Object must then read the edges itself.
 	committedEdges: z.array(committedEdgeHintSchema).optional()
 });
 export type NegotiateHints = z.infer<typeof negotiateHintsSchema>;
 
-/**
-Hint lookups in the shapes negotiate's decisions consume.
-*/
 export interface NegotiateFacts {
 	readonly backedNarHashes: ReadonlySet<NixSha256HashString>;
 	readonly reusableByNarHash: ReadonlyMap<NixSha256HashString, BlobStateHint>;
@@ -84,18 +72,13 @@ export function factsFromHints(hints: NegotiateHints): NegotiateFacts {
 	};
 }
 
-// A staged hint set lives just long enough for the dispatch that follows it.
 export const hintTtlMs = 30_000;
 export const hintCapacity = 64;
 
 /**
- * The in-memory, single-use staging area for negotiate hints: the Worker
- * stages a set over RPC and receives a random token, then dispatches the
- * request with the token in {@link negotiateHintsHeader}; the negotiate route
- * takes the set at most once. Unreachable over HTTP and unguessable, so hints
- * are unforgeable by clients. In-memory is enough: a lost set (eviction, an
- * unknown or expired token) falls back to the Durable Object reading its own
- * facts.
+ * Stores prefetched negotiation facts until the following dispatch consumes
+ * them. Only RPC can stage a value, and the random token is accepted once. If
+ * an instance loses or evicts the value, negotiation reads the facts itself.
  */
 export class NegotiateHintStore {
 	private readonly staged = new Map<

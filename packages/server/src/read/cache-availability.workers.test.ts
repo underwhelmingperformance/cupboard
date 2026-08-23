@@ -23,7 +23,7 @@ describe('cache availability query', () => {
 		{ name: 'the default cache', cache: undefined, path: '' },
 		{ name: 'a named cache', cache: 'builds', path: '/cache/builds' }
 	])(
-		'returns missing hashes for $name in one response',
+		'reports only absent store-path hashes for $name',
 		async ({ cache, path }) => {
 			const init = await bootstrap();
 			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -53,7 +53,7 @@ describe('cache availability query', () => {
 		}
 	);
 
-	it('uses the cache read credential for a private tenant', async () => {
+	it("requires the tenant's Basic credentials when reads are private", async () => {
 		await bootstrap();
 		await provisionFixtureTenant({
 			readMode: 'private',

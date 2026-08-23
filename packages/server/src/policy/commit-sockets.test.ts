@@ -23,11 +23,11 @@ function thrownBy(run: () => unknown): unknown {
 describe('commitSocketCeiling', () => {
 	it.each([
 		{
-			name: 'empty means the built-in ceiling',
+			name: 'returns the built-in ceiling for an empty setting',
 			value: '',
 			expected: defaultCommitSocketCeiling
 		},
-		{ name: 'a configured ceiling', value: '12', expected: 12 }
+		{ name: 'returns a configured ceiling', value: '12', expected: 12 }
 	])('$name', ({ value, expected }) => {
 		expect(commitSocketCeiling({ CUPBOARD_COMMIT_SOCKET_CEILING: value })).toBe(
 			expected

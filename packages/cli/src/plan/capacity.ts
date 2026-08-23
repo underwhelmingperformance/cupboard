@@ -1,10 +1,8 @@
 import { CliError, unavailableExitCode } from '../errors.ts';
 
 /**
- * A statfs-like probe over the selected store's own path, injected so the
- * capacity check needs no filesystem access of its own. It reports how many
- * bytes are available for use, and the store's total capacity, which the
- * fractional part of the headroom is computed from.
+ * Reports the available and total bytes for the filesystem that contains the
+ * selected store.
  */
 export type StoreCapacityProbe = (storePath: string) => Promise<{
 	readonly available: number;
@@ -27,12 +25,9 @@ function effectiveHeadroom(config: HeadroomConfig, capacity: number): number {
 }
 
 /**
- * Which remedies apply, as the caller determined from the configuration it
- * detected, passed through to a refusal unchanged. This module works out no
- * remedies of its own: it reports what the measurement found, and what the
- * caller already knows can be done about it. A cohort split is never possible
- * for an aggregate target, so the caller sets `cohortSplitPossible` per cohort
- * rather than leaving this module to infer it from the byte counts.
+ * Remedies the caller found while inspecting the build configuration. An
+ * aggregate target cannot be split into smaller cohorts, so the caller must
+ * report that distinction rather than deriving it from the byte counts.
  */
 export interface DetectedCapacityOptions {
 	readonly cohortSplitPossible: boolean;
@@ -47,11 +42,10 @@ export interface CapacityMeasurement {
 }
 
 /**
- * Raised when the measured substitutable bytes exceed the store's available
- * space less its headroom. The measurement excludes build outputs, scratch
- * space, and the NAR-to-disk gap, which all add to the real requirement, so
- * this refusal identifies a run that was never close to fitting rather than
- * predicting that a run with a narrower margin will fail.
+ * The measured substitutable NAR bytes exceed the store's available space after
+ * headroom. The measurement excludes build outputs, scratch space, and the
+ * difference between NAR and on-disk sizes, so passing this check does not
+ * guarantee that the build will fit.
  */
 export class StoreCapacityError extends CliError {
 	constructor(
@@ -70,10 +64,8 @@ export class StoreCapacityError extends CliError {
 		this.name = 'StoreCapacityError';
 	}
 
-	// Retrying the same plan on the same runner cannot resolve this: the
-	// remedy is a split, a remote store, or a larger runner, not another
-	// attempt, so this is the CLI's unavailable category rather than the
-	// transient one a routine retry could clear.
+	// A retry on the same runner cannot add capacity, so report this as
+	// unavailable rather than as a transient failure.
 	override get exitCode(): number {
 		return unavailableExitCode;
 	}
@@ -94,10 +86,9 @@ export interface CapacityCheckResult {
 }
 
 /**
- * Refuses a cohort's build before anything is fetched when its measured
- * substitutable bytes would not fit the selected store. The measurement leaves
- * costs out, so a refusal is sound but a plan that passes is not promised to
- * fit. Nothing here composes a smaller cohort or repartitions the manifest.
+ * Refuses the build before fetching when the measured substitutable NAR bytes
+ * exceed the selected store's capacity after headroom. The caller remains
+ * responsible for splitting cohorts or choosing another store.
  */
 export async function checkStoreCapacity(
 	options: CapacityPreflightOptions

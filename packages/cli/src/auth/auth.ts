@@ -25,7 +25,6 @@ import {
 	writeCachedSession
 } from './token-store.ts';
 
-// The slice of the client a session renewal needs: the two token grants.
 interface SessionTokenClient {
 	tokenRefresh(refreshToken: string): Promise<ParsedTokenResponse>;
 	tokenExchange(
@@ -48,9 +47,6 @@ export interface OwnerSessionDependencies {
 		target: URL
 	) => Promise<void>;
 	readonly now?: () => number;
-	/**
-	Aborts the token fetch the provider makes, so Ctrl-C is prompt.
-	*/
 	readonly signal?: AbortSignal;
 }
 
@@ -164,8 +160,6 @@ async function establishSession(
 	}
 }
 
-// The OAuth error responses that mean "this credential does not work", as
-// opposed to the endpoint being unreachable or broken.
 function isGrantRefusal(error: unknown): boolean {
 	return (
 		error instanceof CupboardHttpError &&
@@ -185,9 +179,6 @@ export async function authenticateGithubOidc(
 	options: {
 		readonly environment?: GithubOidcEnvironment;
 		readonly authorizationDetails?: AuthorizationDetails;
-		/**
-		Clock, injectable for tests.
-		*/
 		readonly now?: () => number;
 	} = {}
 ): Promise<TokenProvider> {
@@ -268,7 +259,6 @@ class GithubOidcTokenProvider implements TokenProvider {
 		return access_token;
 	}
 
-	// Whether the cached token still clears the renewal margin.
 	private isFresh(): boolean {
 		return (
 			this.#expiresAtMs !== undefined &&

@@ -10,9 +10,6 @@ import { type CanonicalBlob, canonicalBlobOf } from '../do/upload-metadata.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
-/**
-The verified upload a promotion binds to its canonical object.
-*/
 export interface PromotionTarget {
 	readonly narHash: NixSha256HashString;
 	readonly narSize: number;
@@ -22,8 +19,8 @@ async function ensureCanonicalObject(
 	blobs: R2Bucket,
 	stagingKey: R2ObjectKey,
 	narHash: NixSha256HashString,
-	// The blob facts verify derived for a fresh upload. A reuse promotes against
-	// an already-canonical object and derives them from it, so it passes none.
+	// Fresh verification passes metadata derived from the staging bytes. Reuse
+	// omits it and reads authoritative metadata from the canonical object.
 	blob: CanonicalBlob | undefined
 ): Promise<CanonicalBlob> {
 	const canonicalKey = narObjectKey(narHash);
@@ -44,9 +41,8 @@ async function ensureCanonicalObject(
 	}
 
 	const written = await blobs.put(canonicalKey, staged.body, {
-		// The file hash was computed over these exact staging bytes during verify,
-		// so R2 re-checking the copy against it confirms the promote moved them
-		// intact, not that a client-asserted value matched.
+		// Verification computed this hash from the staging bytes. Ask R2 to check
+		// the bytes again while it writes the canonical object.
 		sha256: NixSha256Hash.parse(blob.fileHash).digestBytes(),
 		onlyIf: { etagDoesNotMatch: '*' }
 	});
@@ -67,19 +63,15 @@ async function ensureCanonicalObject(
 }
 
 /**
- * Promotes verified staging bytes into the shared, content-addressed CAS and
- * returns the canonical object's compressed metadata. The canonical key is
- * write-once: a conditional put means the first promotion of a hash fixes the
- * stored encoding, and any later or concurrent upload of the same hash adopts
- * that encoding, so every narinfo for the hash
- * advertises the one object that is actually served, even when tenants upload
- * different zstd encodings of the same NAR. The staging object is left in
- * place; its caller deletes it only once the commit is durable, so a crash
- * between promotion and commit recovers from the surviving staging copy.
+ * The first conditional write fixes the compressed encoding for the lifetime
+ * of a canonical object. Concurrent and later promotions adopt its metadata so
+ * every narinfo for the NAR refers to the object that R2 serves. After the
+ * reaper removes that object, a fresh promotion can establish another encoding.
  *
- * Every step is idempotent and touches only the shared facts (the canonical R2
- * object and its `blob_state` row), so any actor holding the bindings may run
- * it: the tenant Durable Object or a Worker that has just verified the bytes.
+ * R2 completes before the `blob_state` write. A crash between them can leave an
+ * unrecorded canonical object; retrying adopts that object and writes the row.
+ * Staging remains until the commit is durable so earlier crash points can also
+ * be retried.
  */
 export async function promoteVerifiedBlob(
 	d1: DrizzleD1Database<typeof d1Schema>,
@@ -96,33 +88,23 @@ export async function promoteVerifiedBlob(
 		blob
 	);
 
-	// Record the shared fact together with the object, so `blob_state` exists
-	// exactly when the canonical R2 object does.
 	await upsert.run();
 
 	return canonical;
 }
 
-/**
- * A promotion that has done its per-object R2 work but not yet written the
- * shared `blob_state` fact: the caller applies the {@link upsert}, either on its
- * own or collected with others into one D1 batch, so a pass promoting many
- * objects settles their facts in a single write after the per-object R2 work.
- */
 interface StagedBlobPromotion {
 	readonly canonical: CanonicalBlob;
 	readonly upsert: BlobStateUpsert;
 }
 
-// The `blob_state` upsert kept runnable on its own and passable to `d1.batch`.
 export type BlobStateUpsert = BatchItem<'sqlite'> & {
 	run: () => Promise<unknown>;
 };
 
 /**
- * Promotes verified staging bytes into the shared CAS as {@link
- * promoteVerifiedBlob} does, but returns the `blob_state` upsert for the caller
- * to apply, so many promotions can share one D1 write.
+ * Performs the R2 promotion and returns the `blob_state` upsert. The caller must
+ * execute the upsert directly or include it in a D1 batch.
  */
 export async function stagePromotedBlob(
 	d1: DrizzleD1Database<typeof d1Schema>,
@@ -141,10 +123,9 @@ export async function stagePromotedBlob(
 	return { canonical, upsert: blobStateUpsert(d1, target, canonical) };
 }
 
-// Builds the `blob_state` upsert for a promoted object. The first writer for a
-// hash fixes the metadata; a concurrent or repeated promotion keeps it, but
-// clears any reaper grace timer, since promoting is a fresh reference to the
-// hash. A verified frame is always zstd, the only encoding the server stores.
+// An existing row retains the canonical compressed metadata. Promotion clears
+// its reaper deadline because a committed reference can follow. Verified NARs
+// use zstd, the only encoding stored here.
 function blobStateUpsert(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	target: PromotionTarget,
@@ -164,10 +145,9 @@ function blobStateUpsert(
 		})
 		.onConflictDoUpdate({
 			target: d1Schema.blobState.narHash,
-			// Advancing `verified_at` on a re-promote (which re-creates an object the
-			// reaper may have collected) makes it the optimistic-concurrency token the
-			// demote pass fences its delete on: a demote that scanned the old row will
-			// not delete the freshly re-promoted one.
+			// The demotion pass compares `verified_at` with its earlier snapshot before
+			// deleting. Refresh it on promotion so a later timestamp invalidates an
+			// older snapshot.
 			set: { deleteAfter: sql`null`, verifiedAt }
 		});
 }

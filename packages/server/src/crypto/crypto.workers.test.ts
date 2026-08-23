@@ -12,13 +12,13 @@ describe('crypto', () => {
 	);
 	const keyName = nixKeyNameSchema.parse('cupboard-1');
 
-	it('hashes token material as SHA-256 hex', async () => {
+	it("returns a string's SHA-256 digest as lowercase hex", async () => {
 		expect(await sha256Hex('cupboard-token')).toBe(
 			'e951cd4605d6f42c5bba9cf418756b172259552339512737d7abbb049935cb49'
 		);
 	});
 
-	it('signs a known Nix fingerprint fixture', async () => {
+	it('produces the expected Ed25519 signature for a known Nix fingerprint and key', async () => {
 		const privateJwk = {
 			key_ops: ['sign'],
 			ext: true,
@@ -40,7 +40,7 @@ describe('crypto', () => {
 		});
 	});
 
-	it('generates an Ed25519 keypair and signs a Nix fingerprint', async () => {
+	it('generates a Nix signing key whose public key verifies its signatures', async () => {
 		const key = await generateSigningKey(keyName);
 		const signature = await signNixFingerprint(
 			key.privateJwk,

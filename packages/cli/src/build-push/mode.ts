@@ -35,9 +35,6 @@ export async function selectBuildPushMode(
 	}
 }
 
-/**
-Describes the selected publication mode and why Cupboard selected it.
-*/
 export function buildPushModeDescription(mode: BuildPushMode): string {
 	if (mode.kind === 'streamed') {
 		return (

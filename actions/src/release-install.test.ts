@@ -102,11 +102,11 @@ describe('expectedSourceCommitFor', () => {
 		);
 	});
 
-	it('allows an action without a release coordinate', () => {
+	it('allows latest when no expected source commit is supplied', () => {
 		expect(expectedSourceCommitFor('latest', undefined)).toBeUndefined();
 	});
 
-	it('accepts an arbitrary exact tag from a canonical release coordinate', () => {
+	it('accepts an expected source commit with an arbitrary exact tag', () => {
 		expect(expectedSourceCommitFor('production', 'A'.repeat(40))).toBe(
 			'a'.repeat(40)
 		);
@@ -309,7 +309,7 @@ async function sha256File(filePath: string): Promise<string> {
 }
 
 describe('publishReleaseArchive', () => {
-	it('reuses one immutable generation for repeated identical installs', async () => {
+	it('reuses one verified generation for repeated identical installs', async () => {
 		const installDirectory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-release-install-')
 		);
@@ -533,7 +533,7 @@ describe('publishReleaseArchive', () => {
 		}
 	);
 
-	it('never executes a cached binary before proving its bytes', async () => {
+	it('verifies a cached generation before executing its binary', async () => {
 		const installDirectory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-release-install-')
 		);
@@ -1070,7 +1070,7 @@ describe('publishReleaseArchive', () => {
 		).resolves.toBe('helper');
 	});
 
-	it('cannot split activation after the final ownership assertion', async () => {
+	it('keeps activation under one live installation lock', async () => {
 		const installDirectory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-release-install-')
 		);
@@ -1957,13 +1957,13 @@ describe('downloadAsset', () => {
 });
 
 describe('assertExpectedSourceCommit', () => {
-	it('accepts the release built from the expected workflow commit', () => {
+	it('accepts the expected source commit', () => {
 		expect(() => {
 			assertExpectedSourceCommit('v1.2.3', 'a'.repeat(40), 'a'.repeat(40));
 		}).not.toThrow();
 	});
 
-	it('rejects a release built from another workflow commit', () => {
+	it('rejects a different source commit', () => {
 		expect(() => {
 			assertExpectedSourceCommit('v1.2.3', 'b'.repeat(40), 'a'.repeat(40));
 		}).toThrow(ReleaseCoordinateMismatchError);
@@ -2019,7 +2019,7 @@ describe('assetNameFor', () => {
 		);
 	});
 
-	it('prefers the stable release-scoped name and retains the legacy tag name', () => {
+	it('prefers the stable platform name and retains the legacy tag-qualified name', () => {
 		expect(assetNamesFor('channel/one', 'linux', 'x64')).toStrictEqual([
 			'cupboard-linux-x64.tar.gz',
 			'cupboard-channel/one-linux-x64.tar.gz'

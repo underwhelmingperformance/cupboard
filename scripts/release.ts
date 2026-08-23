@@ -198,9 +198,6 @@ type FetchLike = (
 	url: string
 ) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
 
-/**
-The cache signing key the deployment serves at `/pubkey`.
-*/
 export async function fetchCachePublicKey(
 	baseUrl: URL,
 	fetchLike: FetchLike = fetch
@@ -217,12 +214,6 @@ export async function fetchCachePublicKey(
 	return key.trim();
 }
 
-/**
- * The release-notes section pointing readers at the release's binary cache.
- * GitHub appends the generated notes after this body, so the draft carries the
- * section from the start; publishing the release fires the release-cache
- * workflow, which fills the cache the section names.
- */
 export function substituterSection(options: {
 	readonly baseUrl: URL;
 	readonly publicKey: string;
@@ -471,8 +462,6 @@ function publishInputs(environment: Environment): PublishInputs {
 	};
 }
 
-// Every release URL derives from this base's origin and path alone, so it is
-// checked once here and the builders take the result on trust.
 function parseCacheUrl(value: string): URL {
 	try {
 		return parseBaseUrl(new URL(value));

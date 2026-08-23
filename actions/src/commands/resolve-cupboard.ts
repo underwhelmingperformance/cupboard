@@ -35,15 +35,15 @@ export function registerResolveCupboardCommand(
 	program
 		.command('resolve-cupboard')
 		.description(
-			'Resolve a reusable workflow pin to one canonical cupboard acquisition.'
+			'Resolve a reusable workflow revision to an exact release or source commit.'
 		)
 		.option(
 			'--cupboard-version <version>',
-			"explicit release selector: 'latest' or an exact published tag"
+			"use 'latest' or an exact published release tag instead of the workflow revision"
 		)
 		.requiredOption(
 			'--workflow-repository <repository>',
-			'repository containing the called workflow'
+			'repository for the called reusable workflow'
 		)
 		.requiredOption(
 			'--workflow-ref <reference>',
@@ -53,7 +53,7 @@ export function registerResolveCupboardCommand(
 			'--workflow-sha <commit>',
 			'full job.workflow_sha of the called workflow'
 		)
-		.option('--github-token <token>', 'GitHub token used for API calls')
+		.option('--github-token <token>', 'GitHub token for release API calls')
 		.option('--github-api-url <url>', 'GitHub REST API base URL')
 		.option('--github-graphql-url <url>', 'GitHub GraphQL API URL')
 		.action((options: ResolveCupboardCommandOptions) =>

@@ -64,10 +64,10 @@ function buildModeWireValue(mode: NixBuildMode): number {
 // own requirement.
 const minimumBuildResultsMinor = 34;
 
-// From worker protocol 1.22 the substitutable-info request carries a map from
-// store path to the content address to look it up under; below that it is a
-// plain path set. The handshake already refuses daemons below 1.38, so this
-// bound documents the request encoding's own requirement.
+// From worker protocol 1.22 the substitutable-info request maps each store path
+// to an optional content address for lookup; below that it is a plain path set.
+// The handshake already refuses daemons below 1.38, so this bound documents the
+// request encoding's own requirement.
 const minimumSubstitutablePathInfosMinor = 22;
 
 // BuildResult::Status wire values in declaration order; `cached-failure` is
@@ -113,18 +113,12 @@ const stderrWrite = 0x64_61_74_16;
 const stderrLast = 0x61_6c_74_73;
 const stderrError = 0x63_78_74_70;
 const stderrStartActivity = 0x53_54_52_54;
-// Nix's `actCopyPath`. Nix starts the activity once a transfer begins, which is
-// after it has checked that the destination does not already hold the path.
+// Nix starts `actCopyPath` after the destination-missing check, when the
+// transfer begins. The event therefore proves that the transfer started.
 const copyPathActivity = 100;
 
-/**
-One field of a logger message: an integer or a string, as Nix encodes it.
-*/
 type NixLoggerField = number | string;
 
-/**
-One copy the daemon reported: the store path, and the store it came from.
-*/
 export interface NixCopyRecord {
 	readonly storePath: StorePathString;
 	readonly source: string;
@@ -141,15 +135,12 @@ interface NixDaemonStoreClientConnectionOptions {
 	readonly signal?: AbortSignal;
 }
 
-/**
-How a daemon client configures a connection after its handshake.
-*/
 export type NixDaemonStoreClientOptions =
 	NixDaemonStoreClientConnectionOptions &
 		(
 			| {
 					/**
-					Preserve the daemon's settings by omitting SetOptions.
+					Omits SetOptions so the daemon keeps its existing settings.
 					*/
 					readonly shouldPreserveDaemonOptions: true;
 					readonly setOptions?: never;
@@ -174,10 +165,11 @@ export interface NixDaemonTransport {
 }
 
 /**
- * Operations bound to one open daemon connection. A temporary root taken
+ * Operations bound to one open daemon connection. A temporary root added
  * through the session lives exactly as long as that connection: the daemon
  * releases it when the connection closes, so the connection is the unit of
- * pinning and the session's queries see the store with those roots held.
+ * pinning and the session's queries see the store while those roots remain
+ * registered.
  */
 export interface NixDaemonSession {
 	/**
@@ -186,20 +178,11 @@ export interface NixDaemonSession {
 	 * release.
 	 */
 	addTempRoot(storePath: StorePathString): Promise<void>;
-	/**
-	Build targets on this session's connection, returning keyed outcomes.
-	*/
 	buildPathsWithResults(
 		targets: readonly NixDerivedPathString[],
 		mode?: NixBuildMode
 	): Promise<readonly NixBuildResult[]>;
-	/**
-	Read one derivation through this session's selected store.
-	*/
 	readDerivation(drvPath: StorePathString): Promise<string>;
-	/**
-	Resolve path metadata for a closure on this session's connection.
-	*/
 	resolveClosure(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly NixValidPathInfo[]>;
@@ -217,9 +200,9 @@ export interface NixDaemonSession {
 		targets: readonly NixDerivedPathString[]
 	): Promise<NixMissingPartition>;
 	/**
-	 * The NAR serialisation of the given path, streamed over this session's
-	 * connection. The stream must be drained before the session issues its
-	 * next operation: the connection is a serial request/response channel.
+	 * Streams the NAR serialisation over this session's connection. The stream
+	 * must be drained before the session issues its next operation: the connection
+	 * is a serial request/response channel.
 	 */
 	narFromPath(storePath: StorePathString): AsyncIterable<Uint8Array>;
 }
@@ -387,9 +370,6 @@ export class NixDaemonStoreClient implements NixStoreClient {
 
 	private readonly copies = new Map<StorePathString, string[]>();
 
-	/**
-	Whether this client deliberately omits SetOptions on every connection.
-	*/
 	readonly preservesDaemonOptions: boolean;
 
 	constructor(options: NixDaemonStoreClientOptions = {}) {
@@ -496,10 +476,10 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		}
 	}
 
-	// One connection decides how a whole batch is answered: its handshake
-	// negotiated whether the daemon accepts the batched operation. A batch
-	// answer closes that connection; a fallback hands it on as the pool's
-	// first connection so the handshake round trip is not paid twice.
+	// One connection determines the batch encoding through its negotiated
+	// features. A batched reply closes that connection; fallback returns it to
+	// the pool as the first connection so the handshake round trip is not paid
+	// twice.
 	private async queryPathsInfoBatch(
 		storePaths: readonly StorePathString[]
 	): Promise<
@@ -608,9 +588,9 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	}
 
 	/**
-	 * The derivation's text, extracted from the single regular file its NAR
-	 * serialises. The worker protocol reaches store contents only as NARs, so
-	 * the derivation arrives wrapped in one.
+	 * Extracts derivation text from the single regular file in its NAR. The worker
+	 * protocol reaches store contents only as NARs, so the derivation arrives
+	 * wrapped in one.
 	 */
 	async readDerivation(drvPath: StorePathString): Promise<string> {
 		return new TextDecoder().decode(
@@ -619,9 +599,8 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	}
 
 	/**
-	 * The NAR serialisation of the given path, streamed over a connection
-	 * dedicated to this stream and closed when it settles: on a full drain,
-	 * on an error, and when the consumer stops early.
+	 * Streams the path's NAR over a dedicated connection. The connection closes
+	 * after a full drain, an error, or early termination by the consumer.
 	 */
 	async *narFromPath(storePath: StorePathString): AsyncIterable<Uint8Array> {
 		const connection = await this.openConnection();
@@ -634,20 +613,14 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	}
 
 	/**
-	 * The stores each path was copied from, keyed by store path and in the order
-	 * the daemon reported them. The daemon reports a copy it performs, such as a
-	 * substitution during a build, over the connection that asked for the work,
-	 * so this map holds only the copies the daemon made for this client.
+	 * Copy activity forwarded over this client's daemon connections. Existing
+	 * paths produce no `actCopyPath` event, and requests on other connections are
+	 * outside this map. Source stores are deduplicated in event order.
 	 */
 	observedCopies(): ReadonlyMap<StorePathString, readonly string[]> {
 		return this.copies;
 	}
 
-	/**
-	 * Build the given targets and report the outcome of each one, with the
-	 * realised outputs where the daemon reports them. A caller reconciling a
-	 * remote store reads those outputs after a build.
-	 */
 	async buildPathsWithResults(
 		targets: readonly NixDerivedPathString[],
 		mode: NixBuildMode = 'normal'
@@ -729,9 +702,9 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	}
 
 	/**
-	 * Run `use` against a session bound to one daemon connection, closing the
-	 * connection when `use` settles. A temporary root taken through the
-	 * session is held by that connection alone, so the callback's extent
+	 * Run `use` against a session bound to one daemon connection, then close the
+	 * connection when `use` completes. A temporary root added through the
+	 * session belongs to that connection alone, so the callback's extent
 	 * decides exactly how long the roots protect their paths.
 	 */
 	async withConnection<T>(
@@ -804,10 +777,9 @@ interface NixDaemonConnectionLease {
 	release(): void;
 }
 
-// The session over one connection: the semantic layer of the batched queries,
-// deduplicating and sorting what goes on the wire and what comes back. The
-// worker protocol is a serial request/response stream, so public operations
-// queue for exclusive ownership of the connection.
+// A session batches operations on one connection and deduplicates and sorts the
+// wire inputs and reply values. The worker protocol is a serial request/response
+// stream, so public operations queue for exclusive ownership of the connection.
 class NixDaemonConnectionSession implements NixDaemonSession {
 	private operationTail = Promise.resolve();
 
@@ -938,9 +910,9 @@ interface NixDaemonConnectionBudgetWaiter {
 	readonly abort: () => void;
 }
 
-// Every operation ultimately opens through this client-owned budget. Pools
-// still decide which of their connections to reuse, while the budget makes the
-// store URI's limit apply across pools, sessions, builds, and streaming reads.
+// Every new connection consumes this client-wide budget. Pools still decide
+// which connections to reuse, while the budget applies the store URI's limit
+// across pools, sessions, builds, and streaming reads.
 class NixDaemonConnectionBudget {
 	private active = 0;
 
@@ -1168,9 +1140,9 @@ class NixDaemonConnectionPool {
 		this.closed = true;
 		this.shutdown.abort(new NixDaemonConnectionPoolClosedError());
 
-		// Connections already registered with the pool may not carry the
-		// shutdown signal: the feature-probing connection is opened before the
-		// fallback pool exists and then reused by it. Closing every registered
+		// Connections already registered with the pool may not have been opened
+		// with the shutdown signal: the feature-probing connection opens before the
+		// fallback pool exists and is then reused by it. Closing every registered
 		// connection makes cancellation reach those in-flight operations too.
 		for (const connection of this.all) {
 			void connection.close();
@@ -1627,10 +1599,8 @@ class NixDaemonConnection {
 		return message;
 	}
 
-	// The fields of a copy activity are the store path, the store the bytes are
-	// read from and the store they are written to. The daemon forwards its own
-	// activities over this connection, so a substitution it performs for this
-	// client arrives here.
+	// `actCopyPath` logger fields are the store path, source store and destination
+	// store in that order. This client needs the first two fields for attribution.
 	private recordCopyActivity(
 		activityType: number,
 		fields: readonly NixLoggerField[]
@@ -1732,9 +1702,9 @@ class NixDaemonConnection {
 		return isPresent ? this.readInteger() : undefined;
 	}
 
-	// The built outputs arrive as a map of derivation output ids
-	// (`<drvhash>!<name>`) to realisations serialised as JSON; the output
-	// name and the realised store path are what a build outcome carries.
+	// The built outputs arrive as a map from derivation output ids
+	// (`<drvhash>!<name>`) to realisations serialised as JSON. A build outcome
+	// uses the output name and realised store path.
 	private async readBuiltOutputs(): Promise<Record<string, StorePathString>> {
 		const count = await this.readCount(
 			'derivation outputs',
@@ -1853,8 +1823,8 @@ class NixDaemonConnection {
 		yield* frames;
 	}
 
-	// A value string (file contents, a symlink target, an entry name) passes
-	// through in bounded chunks without being decoded.
+	// Copy a value string (file contents, a symlink target, or an entry name) in
+	// bounded chunks without decoding it.
 	private async *copyNarBlob(): AsyncIterable<Uint8Array> {
 		const header = await this.transport.read(8);
 		const length = integerFromWire(header);
@@ -1871,8 +1841,8 @@ class NixDaemonConnection {
 		}
 	}
 
-	// The daemon writes the NAR serialisation directly after the stderr
-	// stream settles, with no framing of its own: the NAR grammar is the only
+	// The daemon writes the NAR serialisation directly after the stderr stream
+	// ends, with no framing of its own. The NAR grammar is the only
 	// delimiter, so the copy walks the grammar to know where the archive
 	// ends while re-emitting every byte unchanged.
 	private async *copyNar(): AsyncIterable<Uint8Array> {
@@ -2005,8 +1975,8 @@ class NixDaemonConnection {
 		const request = new NixDaemonWriter();
 		request.writeInteger(opQueryValidPaths);
 		request.writeStringSet(storePaths);
-		// Whether the daemon may substitute the paths while answering; validity
-		// is a read, so substitution stays off.
+		// QueryValidPaths has an allowSubstitutes wire flag. This operation tests
+		// only local validity, so the flag stays off.
 		request.writeBoolean(false);
 
 		await this.transport.write(request.bytes());
@@ -2039,15 +2009,14 @@ class NixDaemonConnection {
 	}
 
 	/**
-	 * What the substituters this connection permits offer for each given path.
-	 * The answer describes the substituters alone, so a path this machine
-	 * already holds is reported only when a substituter serves it too, and
-	 * nothing but metadata crosses the wire.
+	 * Queries external availability through the daemon. Local validity does not
+	 * satisfy this query; a result exists only when a configured substituter offers
+	 * the path. The worker response contains the deriver, references, download
+	 * size and NAR size, but no NAR hash or signatures.
 	 *
-	 * Whether a path's signatures are acceptable is not decided here: the daemon
-	 * applies its own `trusted-public-keys` policy, so a result from this
-	 * operation does not guarantee that the daemon will accept the path when the
-	 * substitution runs.
+	 * The daemon applies `trusted-public-keys` when it later decides whether to
+	 * substitute. An offer from this operation does not prove that the daemon will
+	 * accept the path.
 	 */
 	async querySubstitutablePathInfos(
 		storePaths: readonly StorePathString[]
@@ -2061,10 +2030,9 @@ class NixDaemonConnection {
 
 		const request = new NixDaemonWriter();
 		request.writeInteger(opQuerySubstitutablePathInfos);
-		// A map from store path to the content address to look that path up
-		// under. Cupboard asks about paths exactly as the store names them, so
-		// every entry's address is absent, which the wire spells as an empty
-		// string.
+		// Protocol 1.22 and later expects a map from each store path to an
+		// optional content address. Cupboard queries each store path directly, so every
+		// optional address is encoded as an empty string.
 		request.writeInteger(storePaths.length);
 
 		for (const storePath of storePaths) {
@@ -2160,7 +2128,6 @@ class NixDaemonConnection {
 
 		await this.transport.write(request.bytes());
 		await this.processStderr();
-		// The reply carries one confirmation integer.
 		await this.readInteger();
 	}
 
@@ -2285,8 +2252,8 @@ class NixDaemonConnection {
 class NixDaemonWriter {
 	private readonly chunks: Buffer[] = [];
 
-	// The protocol carries every number in eight bytes, and reads some of them
-	// back into a signed width, so a negative value is written as its
+	// The protocol encodes every number in eight bytes and decodes some of them
+	// into a signed width, so a negative value is written as its
 	// two's-complement bytes.
 	writeInteger(value: number): void {
 		const bytes = Buffer.alloc(8);
@@ -2368,9 +2335,6 @@ class SocketNixDaemonTransport implements NixDaemonTransport {
 	}
 }
 
-/**
-The events a byte source emits for {@link ByteStreamReader} to buffer it.
-*/
 export interface ByteStreamSource {
 	on(event: 'data', listener: (chunk: Buffer) => void): unknown;
 	once(
@@ -2384,8 +2348,8 @@ export interface ByteStreamSource {
 /**
  * Buffers a byte stream (a socket, a child process pipe) and serves
  * exact-length reads, which is how the daemon protocol consumes bytes. When the
- * stream ends or fails, any pending read the buffered bytes cannot satisfy
- * fails with that error.
+ * stream ends or fails, pending reads fail if the buffered data cannot satisfy
+ * them.
  */
 export class ByteStreamReader {
 	private readonly chunks: Buffer[] = [];
@@ -2480,9 +2444,8 @@ export class ByteStreamReader {
 	}
 
 	/**
-	 * Fail any pending read with an error the source's own `error` event does not
-	 * report.
-	 */
+	Fail pending reads when the source ends without an `error` event.
+	*/
 	fail(error: Error): void {
 		this.source.pause();
 		this.failure = error;

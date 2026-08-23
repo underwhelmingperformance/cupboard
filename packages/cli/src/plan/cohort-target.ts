@@ -61,20 +61,15 @@ export const cohortInstallableSchema = z
 	.min(1)
 	.transform(parseInstallable);
 
-// One cohort member as `cupboard plan cohort` reads it from its targets
-// file: what `nix build` would realise, the concrete output path when Nix
-// can predict it before building, and the retention root the target's own
-// `roots.ensure` call names. This is the file `build-cohort` writes
-// from a plan job's cohort-matrix entry, so it stays a plain, file-portable
-// shape rather than the branded `AvailabilityTarget` the partition itself
-// consumes.
+// This file format crosses the plan and build jobs, so it uses plain serialised
+// values rather than the planner's branded in-memory types.
 export const cohortTargetSchema = z
 	.strictObject({
 		attr: attributeSchema,
 		installable: cohortInstallableSchema,
 		expectedPath: storePathSchema.optional(),
-		// The action will materialise and copy this planned derivation closure
-		// before asking the selected remote store to realise the installable.
+		// Copy this derivation closure before asking the remote store to realise the
+		// installable.
 		plannedLocalDerivation: storePathSchema.optional(),
 		root: rootNameSchema
 	})
@@ -130,33 +125,23 @@ const plannedFloatingOutputSchema = cohortInstallableSchema.refine(
 	'floating output installable must select one derivation output'
 );
 
-/**
-An output whose path is declared by a derivation in the local graph.
-*/
 export type ParsedPlannedLocalOutput = z.output<
 	typeof plannedLocalOutputSchema
 >;
 
-/**
-The targets file schema for initial cohort planning.
-*/
 export const cohortPlanInputSchema = z
 	.strictObject({
 		targets: z.array(cohortTargetSchema).min(1),
-		// Paths available for copying to the selected remote store. The plan records
-		// which remote targets require each path, and the action copies only those
-		// retained after the final availability check.
+		// Paths available for the final, target-specific copy after availability is
+		// rechecked.
 		plannedLocalClosure: z.array(storePathSchema).optional(),
-		// Derivations that permit substitution. A remote availability query can stop
-		// at a derivation that has not been copied yet, so the planner uses this list
-		// when it checks whether the known outputs can be substituted instead.
+		// A remote query can stop at a derivation that has not been copied. These
+		// derivations let the planner check their known outputs instead.
 		plannedSubstitutableDerivations: z.array(storePathSchema).optional(),
-		// Output selections whose derivations do not declare a store path. A
-		// narinfo does not provide the realisation mapping that the selected store
-		// needs for these derived paths.
+		// These output selections need the derivation's realisation mapping; a
+		// narinfo alone cannot supply it to the selected store.
 		plannedFloatingOutputs: z.array(plannedFloatingOutputSchema).optional(),
-		// The action can realise each output after copying its derivation. The path
-		// identifies the output and the installable specifies how to produce it.
+		// Pair each known output path with the derivation output that produces it.
 		plannedLocalOutputs: z.array(plannedLocalOutputSchema).optional()
 	})
 	.superRefine((input, ctx) => {
@@ -218,11 +203,9 @@ export const cohortPlanInputSchema = z
 	});
 export type ParsedCohortPlanInput = z.output<typeof cohortPlanInputSchema>;
 
-// One target as `cupboard plan measure` reads it from its targets file: the
-// target identity the caller keys the reported sizes by, and the installable
-// whose own substitutable size the store prices. No expected path and no
-// root: measurement asks the store what realising the installable would
-// require, nothing about retention or the destination.
+// Measurement asks the selected store for every missing substitutable path
+// needed to realise the installable. It does not need destination or retention
+// metadata.
 export const measureTargetSchema = z.strictObject({
 	attr: attributeSchema,
 	installable: cohortInstallableSchema

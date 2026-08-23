@@ -31,8 +31,6 @@ describe('configure RPC', () => {
 	beforeEach(resetTestServer);
 
 	it('stores the identity and seeds the owner rule from it', async () => {
-		// Initialise so the schema exists, then apply the identity. The version is
-		// above the one the harness already configured the fixture tenant with.
 		await fetchPath('/.well-known/jwks.json');
 
 		const result = await runInDurableObject(

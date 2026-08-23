@@ -38,45 +38,25 @@ export const budgetedMetrics = [
 ] as const;
 export type BudgetedMetric = (typeof budgetedMetrics)[number];
 
-/**
-The difference between two measurements, metric by metric.
-*/
 export type MeasurementDelta = Readonly<Record<BudgetedMetric, number>>;
 
-/**
-The derivation produced by evaluating a target attr, and the evaluation time.
-*/
 export interface ResolvedDerivation {
 	readonly drvPath: StorePathString;
 	readonly evaluationTimeMs: number;
 }
 
-/**
- * The store interface used for planning. Keeping this interface separate lets
- * tests produce a complete report from injected results without Nix, a store,
- * or a network.
- */
 export interface RealisationPlanner {
-	/**
-		Evaluates the target attr when necessary and returns its derivation.
-	*/
 	resolve(target: PublishTarget): Promise<ResolvedDerivation>;
 	/**
 	 * Adds the derivations to the store so it can plan against them. A store
 	 * without the derivations cannot plan the installables.
 	 */
 	seed(drvPaths: readonly StorePathString[]): Promise<void>;
-	/**
-		Returns the work required to realise the installables.
-	*/
 	plan(
 		installables: readonly NixDerivedPathString[]
 	): Promise<NixMissingPartition>;
 }
 
-/**
-A monotonic millisecond reading, injected so timings are testable.
-*/
 export type Clock = () => number;
 
 export interface TargetTimings {
@@ -133,15 +113,13 @@ export interface MeasureOptions {
 
 const defaultClock: Clock = () => performance.now();
 
-/**
-The key the whole manifest is reported under when measured as one group.
-*/
 export const combinedGroupKey = 'all-targets';
 
 /**
  * Measures each target separately and each multi-target group together against
- * an empty store. Resolve and plan targets sequentially so the report retains
- * each target's evaluation and planning times.
+ * the selected store. Every target is resolved before any derivation is seeded,
+ * and all derivations are seeded before planning begins. Plans run sequentially
+ * so the report retains each target's planning time.
  */
 export async function measureRealisation(
 	options: MeasureOptions
@@ -257,9 +235,6 @@ async function timedPlan(
 	};
 }
 
-/**
-Converts a Nix missing-work partition into report metrics.
-*/
 export function measurementFrom(
 	partition: NixMissingPartition
 ): RealisationMeasurement {
@@ -272,9 +247,6 @@ export function measurementFrom(
 	});
 }
 
-/**
-The derived installable for the outputs selected by a target.
-*/
 export function installableFor(
 	target: PublishTarget,
 	resolution: ResolvedDerivation

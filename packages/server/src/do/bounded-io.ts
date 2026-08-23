@@ -2,10 +2,6 @@ import { UnboundableIoError } from '../errors.ts';
 
 import { boundedSubrequest, unboundedCapMs } from './deadline.ts';
 
-// Wraps one async client method so every call is bounded (see
-// {@link boundedSubrequest}). The method is pre-bound to its receiver by the
-// caller. Byte-transfer methods pass `unboundedCapMs` so only an enclosing
-// critical-section deadline bounds them.
 function bounded<A extends unknown[], R>(
 	method: (...arguments_: A) => Promise<R>,
 	subrequest: string,
@@ -25,8 +21,8 @@ function unboundable(member: string): () => never {
 	};
 }
 
-// Passes through a non-intercepted member, binding methods to the real target so
-// their internal state survives, exactly as {@link meteredStorage} does.
+// Bind pass-through methods to the host object because their implementations
+// depend on the receiver.
 function passThrough(target: object, property: PropertyKey): unknown {
 	const value: unknown = Reflect.get(target, property, target);
 
@@ -41,7 +37,7 @@ function passThrough(target: object, property: PropertyKey): unknown {
 
 /**
  * An {@link R2Bucket} whose network calls are bounded. `head`/`delete`/`list`
- * are metadata calls capped at the per-call limit; `get`/`put` carry blob bytes,
+ * are metadata calls capped at the per-call limit; `get`/`put` transfer blob bytes,
  * so they are bounded only by an enclosing critical-section deadline and run
  * unbounded off the gate.
  */

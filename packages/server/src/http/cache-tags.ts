@@ -4,9 +4,6 @@ import {
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 
-/**
-The Workers Cache tag for one tenant's materialised narinfo.
-*/
 export function narInfoCacheTag(
 	tenant: string,
 	cache: StoredCache,

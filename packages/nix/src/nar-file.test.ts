@@ -35,8 +35,6 @@ function regularFileNar(
 	]);
 }
 
-// A NAR arrives from the daemon in whatever frames the socket delivered, so
-// the reader is driven with the bytes split every `chunkSize`.
 function chunked(bytes: Buffer, chunkSize: number): AsyncIterable<Uint8Array> {
 	let offset = 0;
 
@@ -72,7 +70,7 @@ describe('narRegularFileContents', () => {
 		expect(new TextDecoder().decode(contents)).toBe(derivationAterm);
 	});
 
-	it('reads an executable file, whose serialisation carries the extra marker', async () => {
+	it('reads a regular file with the executable marker', async () => {
 		const contents = await narRegularFileContents(
 			chunked(regularFileNar('#!/bin/sh\n', { executable: true }), 4096)
 		);
@@ -96,7 +94,7 @@ describe('narRegularFileContents', () => {
 					narString(word)
 				)
 			),
-			reason: "'directory' where 'regular' belongs"
+			reason: "expected 'regular', found 'directory'"
 		},
 		{
 			name: 'a symlink',
@@ -105,12 +103,12 @@ describe('narRegularFileContents', () => {
 					(word) => narString(word)
 				)
 			),
-			reason: "'symlink' where 'regular' belongs"
+			reason: "expected 'regular', found 'symlink'"
 		},
 		{
 			name: 'bytes that are not a NAR',
 			nar: narString('something else'),
-			reason: 'a grammar token of 14 bytes'
+			reason: 'a structural token declares 14 bytes; the limit is 13'
 		},
 		{
 			name: 'a truncated stream',
@@ -124,7 +122,7 @@ describe('narRegularFileContents', () => {
 					narString(word)
 				)
 			),
-			reason: "'target' where the contents belong"
+			reason: "expected 'contents' or 'executable', found 'target'"
 		}
 	])('refuses $name', async ({ nar, reason }) => {
 		let thrown: unknown;
@@ -141,34 +139,36 @@ describe('narRegularFileContents', () => {
 			return;
 		}
 
-		expect({ name: thrown.name, reason: thrown.reason }).toStrictEqual({
+		expect({
+			name: thrown.name,
+			reason: thrown.reason,
+			message: thrown.message
+		}).toStrictEqual({
 			name: 'UnexpectedNarShapeError',
-			reason
+			reason,
+			message: `Expected a NAR with a regular-file root: ${reason}`
 		});
 	});
 
-	// A producer holding a resource for the stream's lifetime, such as a
-	// dedicated daemon connection, releases it in the generator's `finally`,
-	// which runs only once the consumer says it is finished.
 	it.each([
 		{
-			name: 'a NAR it read to the end',
+			name: 'releases the stream after reading a complete NAR',
 			bytes: regularFileNar('contents'),
 			settles: 'read'
 		},
 		{
-			name: 'a NAR that ended early',
+			name: 'releases the stream after an early end',
 			bytes: narString('nix-archive-1'),
 			settles: 'refused'
 		},
 		{
-			name: 'a NAR of the wrong shape',
+			name: 'releases the stream after rejecting the wrong node type',
 			bytes: Buffer.concat(
 				['nix-archive-1', '(', 'type', 'symlink'].map((word) => narString(word))
 			),
 			settles: 'refused'
 		}
-	])('releases the stream after $name', async ({ bytes, settles }) => {
+	])('$name', async ({ bytes, settles }) => {
 		let wasReleased = false;
 		let isDelivered = false;
 		const stream: AsyncIterable<Uint8Array> = {
@@ -206,7 +206,7 @@ describe('narRegularFileContents', () => {
 		});
 	});
 
-	it('refuses a file over the byte bound rather than buffering it', async () => {
+	it('refuses a file whose declared length exceeds the byte limit', async () => {
 		let thrown: unknown;
 
 		try {
@@ -227,11 +227,14 @@ describe('narRegularFileContents', () => {
 		expect({
 			name: thrown.name,
 			byteLength: thrown.byteLength,
-			maxByteLength: thrown.maxByteLength
+			maxByteLength: thrown.maxByteLength,
+			message: thrown.message
 		}).toStrictEqual({
 			name: 'NarFileTooLargeError',
 			byteLength: 8,
-			maxByteLength: 4
+			maxByteLength: 4,
+			message:
+				'The NAR declares a file length of 8 bytes, above the 4-byte in-memory limit'
 		});
 	});
 });

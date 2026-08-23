@@ -42,11 +42,10 @@ function signatureShape(signature: string): {
 	};
 }
 
-// The vitest-pool-workers harness exposes no API to force a Durable Object to be
-// evicted and re-instantiated, so durability is asserted two ways: the per-DO
-// rows are read straight from the persisted SQLite (`state.storage`), the shared
-// blob facts from D1, and a fresh stub for the same DO name re-derives `/pubkey`
-// from that storage.
+// The worker test harness cannot evict and re-instantiate a Durable Object.
+// These tests inspect persisted SQLite and D1 rows directly, then make later
+// requests through a new stub for the same object name. They do not prove that
+// a cold instance reconstructs its state correctly.
 
 describe('durable object state', () => {
 	beforeEach(resetTestServer);
@@ -112,21 +111,18 @@ describe('durable object state', () => {
 		});
 	});
 
-	it('serves an identical pubkey and a working token after re-instantiation', async () => {
+	it('serves the same pubkey and accepts a later token through a new stub', async () => {
 		await useTestServer('durability-reads');
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
 		await pushPath(init.token, metadata);
 
-		// A fresh stub for the same DO name reads the persisted signing key.
 		const pubkeyResponse = await testServerFor('durability-reads').fetch(
 			new URL('/pubkey', currentOrigin())
 		);
 		const pubkey = await pubkeyResponse.text();
 
-		// A second bootstrap issues a JWT from the persisted auth key; it must be
-		// accepted by an admin route.
 		const second = await bootstrap();
 		const stats = await authorisedFetch(defaultCacheStatsPath, second.token);
 

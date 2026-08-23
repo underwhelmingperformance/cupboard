@@ -28,17 +28,13 @@ import { deleteObjects } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 
-// One teardown drain pass retires at most this many queued deletions before
-// yielding the gate. The narinfo rows are all removed atomically up front; only
-// the per-path R2 and edge retirement is chunked here, so the gate is never held
-// over an unbounded network fan-out.
+// Bound each narinfo retirement pass so large caches release the input gate
+// between R2 deletions and D1 edge updates.
 export const maxPathsTornDownPerRun = 1000;
 
-// DO storage KV holds one entry per cache whose teardown deletions are still
-// draining, keyed by the cache name with the purge origin as the value. The
-// single variable component is the whole suffix after the fixed prefix, so a
-// cache name containing a colon is recovered unambiguously. More than one
-// teardown can be in flight, so a per-cache key tracks each independently.
+// Each cache being torn down has its own durable marker because several cache
+// deletion queues can be active at once. The complete suffix is the cache name,
+// so names containing colons remain unambiguous.
 export const teardownEntryPrefix = 'maintenance:teardown:';
 
 export class CacheAdminService {
@@ -51,8 +47,6 @@ export class CacheAdminService {
 		return `${teardownEntryPrefix}${cache}`;
 	}
 
-	// Whether any teardown deletion for this cache is still queued, so the drain
-	// re-arms only while there is more to retire.
 	private hasQueuedDeletions(cache: StoredCache): boolean {
 		const row = this.context.db
 			.select({ cache: schema.narInfoDeletions.cache })
@@ -64,12 +58,8 @@ export class CacheAdminService {
 		return row !== undefined;
 	}
 
-	// Retires one bounded chunk of a cache's queued teardown deletions in
-	// batched operations; see {@link DeletionQueueService.retireTornDownNarInfos}
-	// for the batching and the generation fence that leaves a recommitted path's
-	// live object intact. Returns how many it retired.
-	//
-	// Runs inside the caller's critical section; must not open its own.
+	// The caller holds the input gate. The retirement service applies the
+	// generation fence that protects a recommitted path.
 	private async drainTeardownChunk(
 		cache: StoredCache,
 		origin: RequestOrigin,
@@ -91,8 +81,7 @@ export class CacheAdminService {
 		return queued.length;
 	}
 
-	// Deadlines are ISO-8601 UTC strings, so lexicographic min is chronological
-	// min and the string comparison against "now" selects only live rows.
+	// Canonical UTC timestamps sort chronologically as strings.
 	private earliestLiveGraceDeadline(
 		cache: StoredCache
 	): IsoTimestamp | undefined {
@@ -111,9 +100,6 @@ export class CacheAdminService {
 		return row?.earliest ?? undefined;
 	}
 
-	/**
-	Renders a cache's nix-cache-info body from its registry priority.
-	*/
 	cacheInfoBody(cache: StoredCache): string {
 		const row = this.context.db
 			.select({ priority: schema.caches.priority })
@@ -209,9 +195,8 @@ export class CacheAdminService {
 				.get() !== undefined;
 		await this.tearDownCache(cache, origin);
 
-		// The count is the cache's committed paths at the request, the number being
-		// removed: a large cache drains the remainder across alarm firings, but the
-		// reported total is the true count, not the first chunk's.
+		// Report the number removed from the registry, even when object and edge
+		// cleanup continues across later alarms.
 		return {
 			name: cache,
 			removed: isRegistered || committedCount > 0,
@@ -247,8 +232,6 @@ export class CacheAdminService {
 	}
 
 	loadOrCreateCache(cache: StoredCache): void {
-		// The default cache is seeded at init; a named cache is registered with
-		// the default priority on first write and adjusted later via PUT /caches.
 		if (cache === DEFAULT_CACHE) {
 			return;
 		}
@@ -264,8 +247,8 @@ export class CacheAdminService {
 			.run();
 	}
 
-	// The next cache awaiting (more) teardown drain and the origin to purge its edge
-	// cache with, or undefined when none remain. The alarm claims one per firing.
+	// Claim one cache marker per alarm so several large teardowns make progress
+	// independently.
 	async claimTeardown(): Promise<
 		{ cache: StoredCache; origin: RequestOrigin } | undefined
 	> {
@@ -274,8 +257,6 @@ export class CacheAdminService {
 			limit: 1
 		});
 
-		// A stored marker holds a plain origin string, so the value is minted
-		// through the schema on read.
 		for (const [key, origin] of entries) {
 			return {
 				cache: storedCacheSchema.parse(key.slice(teardownEntryPrefix.length)),
@@ -286,8 +267,6 @@ export class CacheAdminService {
 		return undefined;
 	}
 
-	// Whether any cache still has a teardown marker, so the alarm re-arms only
-	// while there is more to drain.
 	async hasPendingTeardown(): Promise<boolean> {
 		const remaining = await this.context.ctx.storage.list({
 			prefix: teardownEntryPrefix,
@@ -297,15 +276,10 @@ export class CacheAdminService {
 		return remaining.size > 0;
 	}
 
-	// Drops a named cache: in one transaction it removes every committed narinfo
-	// row, queues each path's retirement, and clears the roots, registry and
-	// in-flight uploads. It then retires a first bounded chunk of the queue; a cache
-	// within the cap is fully gone when the call returns, while a larger one writes a
-	// durable marker and arms the alarm to drain the rest off the gate. A crash after
-	// the transaction but before the marker leaves the queued retirements for the
-	// periodic garbage collector to flush, the same backstop a single-path delete
-	// relies on. The reaper later collects the now-unreferenced shared blobs. The
-	// optional limit caps the first chunk for tests, mirroring the resume.
+	// Remove the cache's local state atomically, then retire its published objects
+	// and D1 reference edges in bounded chunks. The deletion queue is durable, so
+	// garbage collection can resume it after a crash before the alarm marker is
+	// written. The blob reaper later collects unreferenced canonical objects.
 	tearDownCache(
 		cache: StoredCache,
 		origin: RequestOrigin,
@@ -338,13 +312,9 @@ export class CacheAdminService {
 				pendingAttestations.map((upload) => upload.r2Key)
 			);
 
-			// Queue every committed path's retirement and drop all the rows, roots,
-			// registry and in-flight uploads in one transaction. Removing every narinfo
-			// row atomically is what makes the teardown race-free: a path committed
-			// afterwards is a fresh row with no queued deletion, so no drain pass can
-			// remove it, and a recommit of a torn-down path lands a new generation the
-			// generation-fenced drain leaves alone. Only the R2 and edge retirement is
-			// chunked off the gate.
+			// Remove every narinfo row in the same transaction that queues its
+			// retirement. A later recommit creates a new generation that the queued
+			// deletion cannot remove.
 			this.context.db.transaction((tx) => {
 				tx.run(
 					sql`INSERT INTO narinfo_deletion (cache, store_path_hash, nar_hash, generation, created_at)
@@ -362,15 +332,13 @@ export class CacheAdminService {
 				tx.delete(schema.retentionRoots)
 					.where(eq(schema.retentionRoots.cache, cache))
 					.run();
-				// The grace deadlines die with the cache, and dropping the registry row
-				// drops its grace-managed marker: deletion is the one exit from
-				// grace-managed state, and no transition deadline applies.
+				// Deleting the cache is the only transition out of grace-managed state;
+				// released paths receive no grace deadline.
 				tx.delete(schema.retentionGrace)
 					.where(eq(schema.retentionGrace.cache, cache))
 					.run();
 				tx.delete(schema.caches).where(eq(schema.caches.name, cache)).run();
-				// Drop in-flight uploads negotiated under this cache so a pending
-				// commit cannot resurrect it after teardown.
+				// Remove in-flight uploads so a later commit cannot recreate the cache.
 				tx.delete(schema.pendingUploads)
 					.where(eq(schema.pendingUploads.cache, cache))
 					.run();
@@ -379,9 +347,8 @@ export class CacheAdminService {
 					.run();
 			});
 
-			// Retire a first bounded chunk now, so a cache within the cap is fully gone
-			// when the call returns; a larger one leaves a marker and arms the alarm to
-			// drain the rest off the gate.
+			// Retire the first chunk immediately. Mark only caches whose queues need
+			// another alarm pass.
 			await this.drainTeardownChunk(cache, origin, limit);
 
 			if (this.hasQueuedDeletions(cache)) {
@@ -393,10 +360,8 @@ export class CacheAdminService {
 		});
 	}
 
-	// Resumes a teardown from the alarm: retires one more bounded chunk of the
-	// cache's queued deletions and clears the marker once the queue is drained. The
-	// optional limit is a test parameter, mirroring {@link runGarbageCollection}. The
-	// caller re-arms the alarm while any marker remains.
+	// Retire one more chunk from an alarm. The caller re-arms the alarm while any
+	// cache marker remains.
 	async resumeTeardownPass(
 		cache: StoredCache,
 		origin: RequestOrigin,
@@ -405,9 +370,8 @@ export class CacheAdminService {
 		await this.context.criticalSection(async () => {
 			await this.drainTeardownChunk(cache, origin, limit);
 
-			// The queue is the source of truth: a concurrent re-teardown re-enqueues
-			// idempotently and re-arms, so the marker clears exactly when nothing is
-			// left to retire.
+			// The queue, not the marker, decides when teardown is complete. A concurrent
+			// repeated deletion can safely enqueue the same generation again.
 			if (!this.hasQueuedDeletions(cache)) {
 				await this.context.ctx.storage.delete(this.teardownKey(cache));
 			}

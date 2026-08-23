@@ -24,22 +24,22 @@ describe('CacheInfo', () => {
 
 	it.each([
 		{
-			name: 'fields in any order with extra whitespace',
+			name: 'parses fields in any order and trims whitespace',
 			text: 'Priority: 30\nStoreDir:  /nix/store\nWantMassQuery: 0\n',
 			expected: new CacheInfo(servedStoreDirectory, false, priority(30))
 		},
 		{
-			name: 'unknown lines ignored',
+			name: 'ignores unknown fields',
 			text: 'StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 40\nFuture: x\n',
 			expected: new CacheInfo(servedStoreDirectory, true, priority(40))
 		},
 		{
-			name: 'a cache serving another store directory',
+			name: 'accepts a different store directory',
 			text: 'StoreDir: /home/laney/nixstore\nWantMassQuery: 1\nPriority: 40\n',
 			expected: new CacheInfo(store('/home/laney/nixstore'), true, priority(40))
 		},
 		{
-			name: 'a cache serving a nested store directory',
+			name: 'accepts a nested store directory',
 			text: 'StoreDir: /var/lib/cupboard/nix/store\nWantMassQuery: 0\nPriority: 25\n',
 			expected: new CacheInfo(
 				store('/var/lib/cupboard/nix/store'),
@@ -47,7 +47,7 @@ describe('CacheInfo', () => {
 				priority(25)
 			)
 		}
-	])('parses $name', ({ text, expected }) => {
+	])('$name', ({ text, expected }) => {
 		expect(CacheInfo.parse(text)).toStrictEqual(expected);
 	});
 });
@@ -74,7 +74,7 @@ describe('CacheInfo.parse', () => {
 		);
 	});
 
-	it('reads a missing WantMassQuery as disabled', () => {
+	it('defaults WantMassQuery to false when the field is absent', () => {
 		expect(
 			CacheInfo.parse('StoreDir: /nix/store\nPriority: 40\n')
 		).toStrictEqual(new CacheInfo(servedStoreDirectory, false, priority(40)));

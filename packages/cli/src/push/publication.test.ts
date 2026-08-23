@@ -47,7 +47,7 @@ describe('PublicationCollection', () => {
 			]
 		},
 		{
-			name: 'carries targets alone when no intermediates are declared',
+			name: 'returns targets when no intermediates are declared',
 			input: { targets: [appPath, runtimePath] },
 			expected: [
 				{ storePath: appPath, kind: 'target', source: 'local' },
@@ -55,7 +55,7 @@ describe('PublicationCollection', () => {
 			]
 		},
 		{
-			name: 'tags reference paths as targets read from the reference source',
+			name: 'uses reference metadata for reference targets',
 			input: { targets: [appPath], referencePaths: [runtimePath] },
 			expected: [
 				{ storePath: appPath, kind: 'target', source: 'local' },
@@ -63,12 +63,12 @@ describe('PublicationCollection', () => {
 			]
 		},
 		{
-			name: 'a path declared as a target and by reference reads from the source',
+			name: 'reference metadata overrides local target metadata',
 			input: { targets: [appPath], referencePaths: [appPath] },
 			expected: [{ storePath: appPath, kind: 'target', source: 'reference' }]
 		},
 		{
-			name: 'a path declared as an intermediate and by reference is a target',
+			name: 'a reference declaration promotes an intermediate to a target',
 			input: {
 				targets: [appPath],
 				intermediatePaths: [runtimePath],

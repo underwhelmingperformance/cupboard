@@ -48,8 +48,6 @@ const selectDeletions = 'SELECT cache, store_path_hash FROM narinfo_deletion';
 const defaultCache: StoredCache = DEFAULT_CACHE;
 const buildsCache = cacheNameSchema.parse('builds');
 
-// A distinct queued teardown deletion per index, in ascending store-path-hash
-// order.
 function syntheticEntries(count: number): TornDownNarInfo[] {
 	return Array.from({ length: count }, (_unused, index) => ({
 		storePathHash: syntheticStorePathHash(index),
@@ -83,8 +81,8 @@ async function seedQueuedDeletions(
 	await runInDurableObject(currentServer(), (_instance, state) => {
 		const database = drizzle(state.storage, { schema: { narInfoDeletions } });
 
-		// Each row binds five parameters, so the insert is chunked under the
-		// driver's bound-parameter limit.
+		// Each row binds five parameters. Keep the insert below the driver's
+		// bound-parameter limit.
 		for (const batch of chunk(entries, 18)) {
 			database
 				.insert(narInfoDeletions)

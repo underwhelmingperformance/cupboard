@@ -12,18 +12,21 @@ import {
 } from '../errors.ts';
 
 /**
- * A fetcher carrying the client's shared resilience: a transient failure retries
- * with back-off, and a network fault that outlives the retries surfaces as a
- * typed {@link UnreachableHostError} naming the host. This is the fetcher every
- * remote call should use unless it has its own retry loop.
+ * Retries rejected fetches and transient status responses with backoff. After
+ * the retry budget is exhausted, a rejected `TypeError` becomes an
+ * {@link UnreachableHostError} for the requested host. Other errors pass through
+ * unchanged.
  */
 export function resilientFetcher(fetcher: typeof fetch = fetch): typeof fetch {
 	return reachableFetcher(retryingFetcher(fetcher));
 }
 
 /**
- * Parse a Worker URL, turning a malformed value into a typed usage error that
- * names the offending input.
+ * Parses and canonicalises a Worker URL. It accepts only HTTP or HTTPS without
+ * credentials, a query or a fragment, and removes trailing path slashes except
+ * for the root slash. A malformed URL throws {@link InvalidWorkerUrlError}; an
+ * invalid base throws {@link InvalidWorkerUrlBaseError}. The returned URL is a
+ * copy, so a URL supplied by the caller remains unchanged.
  */
 export function parseWorkerUrl(value: string | URL): URL {
 	let url: URL;
@@ -33,9 +36,6 @@ export function parseWorkerUrl(value: string | URL): URL {
 		throw new InvalidWorkerUrlError(String(value));
 	}
 
-	// A Worker URL is the base every route and every cache URL resolves under,
-	// so it is held to the same shape, reported here in the CLI's own usage
-	// vocabulary.
 	try {
 		return parseBaseUrl(url);
 	} catch (error: unknown) {
@@ -48,9 +48,10 @@ export function parseWorkerUrl(value: string | URL): URL {
 }
 
 /**
- * Wrap a fetcher so a network-level failure (DNS lookup, refused connection)
- * surfaces as a typed {@link UnreachableHostError} naming the host. An abort
- * is a `DOMException`, not a `TypeError`, so it propagates unchanged.
+ * Converts a rejected `TypeError` into an {@link UnreachableHostError} for the
+ * requested host. Every other rejection passes through unchanged. The wrapper
+ * cannot distinguish a network failure from another `TypeError` thrown by the
+ * supplied fetcher.
  */
 export function reachableFetcher(fetcher: typeof fetch): typeof fetch {
 	return sharedReachableFetcher(

@@ -128,7 +128,7 @@ describe('nix command arguments', () => {
 });
 
 describe('parseDerivationPath', () => {
-	it('takes the first derivation nix printed', () => {
+	it('returns the first derivation path in Nix output', () => {
 		expect(parseDerivationPath('app', `${appDrv}\n`)).toBe(appDrv);
 	});
 
@@ -136,7 +136,7 @@ describe('parseDerivationPath', () => {
 		{ name: 'nothing at all', stdout: '' },
 		{ name: 'an output path', stdout: `${appOut}\n` },
 		{ name: 'a line that is not a store path', stdout: 'error: no such attr\n' }
-	])('refuses $name', ({ stdout }) => {
+	])('rejects $name', ({ stdout }) => {
 		expect(() => parseDerivationPath('app', stdout)).toThrow(
 			DerivationNotResolvedError
 		);
@@ -241,7 +241,7 @@ describe('createDivertedStorePlanner', () => {
 		expect(commands).toStrictEqual([]);
 	});
 
-	it('carries a failed nix command as a typed error', async () => {
+	it('wraps a failed Nix command in NixCommandError', async () => {
 		const planner = plannerWith(() =>
 			Promise.reject(new Error('nix exited with 1'))
 		);
@@ -249,7 +249,7 @@ describe('createDivertedStorePlanner', () => {
 		await expect(planner.resolve(app)).rejects.toBeInstanceOf(NixCommandError);
 	});
 
-	it('plans over the store protocol against the daemon it started', async () => {
+	it('queries the spawned daemon through the store protocol', async () => {
 		const target: NixDerivedPathString = `${appDrv}^out`;
 		const commands: RecordedCommand[] = [];
 		const planner = plannerWith(
@@ -297,7 +297,7 @@ describe('createDivertedStorePlanner', () => {
 });
 
 describe('createDivertedStoreDirectory', () => {
-	it('answers with a path no symlink stands in', async () => {
+	it('returns the resolved store directory', async () => {
 		const parent = await mkdtemp(testDirectoryPrefix);
 		const linked = path.join(parent, 'link');
 

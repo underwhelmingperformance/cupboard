@@ -11,13 +11,9 @@ import ts from 'typescript-eslint';
 
 const gitignorePath = fileURLToPath(new URL('.gitignore', import.meta.url));
 
-// `unicorn/prefer-uint8array-base64` rewrites `btoa`/`atob`/`Buffer` base64
-// conversions to the TC39 Stage 3 `Uint8Array#toBase64`/`Uint8Array.fromBase64`
-// API. workerd ships it, but our Node runtime (24 LTS) does not, so adopting it
-// breaks the CLI and every Node-run test. We keep the `Buffer`/`btoa` fallbacks
-// and disable the rule *only while the linting runtime lacks the API*. The day
-// Node ships it, this flips back to `error` and the rule fires loudly on every
-// fallback, forcing the migration.
+// The rule rewrites base64 conversions to `Uint8Array#toBase64` and
+// `Uint8Array.fromBase64`. Enable it only when the linting runtime implements
+// both methods; otherwise its fixes would break Node-run code and tests.
 const hasNativeUint8ArrayBase64 =
 	'toBase64' in Uint8Array.prototype && 'fromBase64' in Uint8Array;
 
@@ -81,14 +77,9 @@ export default defineConfig(
 			'unicorn/name-replacements': [
 				'error',
 				{
-					// `name-replacements` (renamed from `prevent-abbreviations` in
-					// unicorn v68) gained default replacements in v68/v69 that would
-					// have us *abbreviate* `configuration`→`config` and
-					// `repository`→`repo`, the opposite of this rule's purpose and at
-					// odds with our deliberately verbose vocabulary (including exported
-					// error classes such as `OwnerConfigurationInvalidError`). Opt those
-					// two words out alongside the abbreviations we already allow; the
-					// rule stays on for everything else.
+					// The defaults shorten `configuration` and `repository`, including
+					// those words in public error names. Disable those replacements while
+					// retaining the rule for other names.
 					replacements: {
 						env: false,
 						ctx: false,
@@ -181,15 +172,11 @@ export default defineConfig(
 		}
 	},
 	{
-		// A raw fieldless `db.get(sql`...`)` pulls a single row with `.next()` and
-		// leaves the rest of the cursor undrained, so the Durable Object cost meter
-		// settles it before the scan's rows are counted and under-reports. The fielded
-		// query builder (and `values`/`all`, which drain via `toArray`) keeps the
-		// meter honest, so the raw `get(sql...)` forms in runtime code are banned;
-		// relying on the convention being remembered is not enough. The tagged-template and
-		// `sql.raw()` forms are caught; an aliased `sql` import or a fieldless `get()`
-		// on a prepared statement would slip past, which no static selector can see, so
-		// this is a backstop, not a proof.
+		// A fieldless `db.get(sql`...`)` consumes only the first row and leaves the
+		// cursor undrained. The cost meter then under-counts the query. Require the
+		// fielded query builder or an operation that drains the cursor. These selectors
+		// catch the direct tagged-template and `sql.raw()` forms, but not aliased imports
+		// or prepared statements, so they remain a backstop.
 		files: ['packages/server/src/**/*.{ts,js}'],
 		ignores: [
 			'packages/server/src/**/*.test.{ts,js}',
@@ -224,14 +211,9 @@ export default defineConfig(
 		}
 	},
 	{
-		// `AsyncLocalStorage` (`node:async_hooks`) scopes ambient per-request state
-		// so a request that interleaves with another on the same Durable Object
-		// never folds its state into the other's: the database cost meter uses it
-		// for row attribution, and the deadline scope uses it to bound every
-		// subrequest a critical section makes. workerd exposes it under
-		// `nodejs_compat`; it is the sanctioned Node boundary for this scoping. Only
-		// that one module is allowed: every other `node:*` import stays banned here
-		// as everywhere else.
+		// The database meter and deadline scope use `AsyncLocalStorage` to keep
+		// interleaved requests from sharing accounting or deadlines. Workerd exposes
+		// it through `nodejs_compat`; permit only `node:async_hooks` in these modules.
 		files: [
 			'packages/server/src/do/database-cost-meter.ts',
 			'packages/server/src/do/deadline.ts'

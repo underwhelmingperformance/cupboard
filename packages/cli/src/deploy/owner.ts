@@ -1,9 +1,6 @@
 import { cloudflareOauthClientId } from './cloudflare-oauth.ts';
 import type { DeploymentConfig } from './config.ts';
 
-/**
-The Cloudflare dashboard's OIDC issuer, used for deployer-bound owners.
-*/
 export const cloudflareDashIssuer = 'https://dash.cloudflare.com';
 
 /**
@@ -30,9 +27,9 @@ export type OwnerChoice =
 	| { readonly kind: 'none' };
 
 /**
- * The binding for the person deploying: their Cloudflare identity, as carried
- * in the id_token cupboard's OAuth client receives. The audience is the
- * client id, which is also what a flagless `cupboard login` presents.
+ * Builds an owner binding from the Cloudflare ID token used by deploy. The
+ * OAuth client ID is both the token audience and the audience used by a
+ * flagless `cupboard login`.
  */
 export function deployerOwner(subject: string): OwnerBinding {
 	return {
@@ -42,9 +39,6 @@ export function deployerOwner(subject: string): OwnerBinding {
 	};
 }
 
-/**
-The admin gate configured in the wrangler vars, when fully set.
-*/
 export function configuredOwner(
 	variables: Readonly<Record<string, string>>
 ): OwnerBinding | undefined {
@@ -90,9 +84,6 @@ const originLabels = {
 	config: 'from wrangler config'
 } as const;
 
-/**
-A one-line description of the choice, for the plan row and menu hint.
-*/
 export function ownerHint(choice: OwnerChoice): string {
 	if (choice.kind === 'none') {
 		return '(none: nobody can claim admin)';
@@ -107,9 +98,6 @@ export function ownerHint(choice: OwnerChoice): string {
 
 export type OwnerIssuerProblem = 'not-url' | 'not-https' | 'not-bare-url';
 
-/**
-Why `value` cannot be an owner issuer, or undefined when it can.
-*/
 export function ownerIssuerProblem(
 	value: string
 ): OwnerIssuerProblem | undefined {
@@ -154,9 +142,6 @@ export function ownerIssuerProblemText(value: string): string | undefined {
 
 export type OwnerFieldProblem = 'empty' | 'whitespace';
 
-/**
-Why `value` cannot be an owner subject or audience.
-*/
 export function ownerFieldProblem(
 	value: string
 ): OwnerFieldProblem | undefined {

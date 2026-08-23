@@ -135,7 +135,7 @@ async function transportFailure(
 	throw new Error('Expected the transport process to fail');
 }
 
-describe('prepare SSH transport implementation', () => {
+describe('SSH transport preparation', () => {
 	it.each([
 		{
 			name: 'a line feed',
@@ -307,7 +307,7 @@ describe('prepare SSH transport implementation', () => {
 		expect(failure).toContain(`store-ssh-config must not use ${directive}`);
 	});
 
-	it('accepts the documented connection-only configuration', async () => {
+	it('accepts the allowlisted connection directives', async () => {
 		const directory = await temporaryDirectory();
 
 		await expect(
@@ -690,7 +690,7 @@ describe('prepare SSH transport implementation', () => {
 		});
 	});
 
-	it('refuses a private-input key without pinned host-key evidence', async () => {
+	it('rejects a private-input key without pinned host-key evidence', async () => {
 		const directory = await temporaryDirectory();
 		let failure: unknown;
 
@@ -716,7 +716,7 @@ describe('prepare SSH transport implementation', () => {
 		);
 	});
 
-	it('fails closed when a private-input key is withheld from a managed transport', async () => {
+	it('disables ambient identities when a managed private-input key is absent', async () => {
 		const directory = await temporaryDirectory();
 		const knownHost = 'input.example.com ssh-ed25519 AAAAC3NzaInputFixture';
 
@@ -817,7 +817,7 @@ describe('prepare SSH transport implementation', () => {
 			}
 		}
 	])(
-		'fails closed when a managed $name key is withheld',
+		'disables ambient identities when the managed $name key is absent',
 		async ({ inputs }) => {
 			const directory = await temporaryDirectory();
 
@@ -845,7 +845,7 @@ describe('prepare SSH transport implementation', () => {
 		}
 	);
 
-	it('fails closed for a URI-pinned keyless store by default', async () => {
+	it('disables ambient identities for a URI-pinned store by default', async () => {
 		const directory = await temporaryDirectory();
 
 		await runTransport('configure', directory, {
@@ -938,7 +938,7 @@ describe('prepare SSH transport implementation', () => {
 		expect(failure).toContain(error);
 	});
 
-	it('keeps private-input and direct-store host pins and identities isolated', async () => {
+	it('writes separate host pins and identities for input and store access', async () => {
 		const directory = await temporaryDirectory();
 
 		await runTransport('configure-input', directory, {

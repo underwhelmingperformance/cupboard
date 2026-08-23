@@ -107,8 +107,6 @@ describe('session cache', () => {
 	testWithConfigHome(
 		'rejects a cached session whose token issuer is not the target',
 		async () => {
-			// A token whose signed issuer is a different tenant, planted under this
-			// target: the issuer binding must refuse it.
 			await writeCachedSession(
 				{ accessToken: jwt({ iss: other, aud: tenant }) },
 				tenantTarget

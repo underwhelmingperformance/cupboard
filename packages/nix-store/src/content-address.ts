@@ -1,17 +1,14 @@
 import { decodeNixHash } from './hash.ts';
 
-// The prefix on a `fixed` address whose contents are serialised as a NAR before
-// hashing. Nix accepts a `git:` prefix in the same position, but only with the
-// git-hashing experimental feature enabled, so this function does not accept
-// it.
+// In the default grammar, `r:` is the only optional method prefix after
+// `fixed:`. The `git:` method requires Nix's `git-hashing` experimental feature
+// and is outside this parser's grammar.
 const nixArchivePrefix = 'r:';
 
 /**
- * Whether Nix can parse the value as a content address. Text-addressed paths
- * use `text:<algorithm>:<digest>`. Paths addressed by the contents produced by
- * a fetch use `fixed:[r:]<algorithm>:<digest>`. Nix rejects an entire narinfo
- * when it cannot parse the `CA` field, so the narinfo reader uses this
- * validation directly.
+ * Returns whether the value uses a default Nix content-address form supported
+ * by this parser: `text:<algorithm>:<digest>` or
+ * `fixed:[r:]<algorithm>:<digest>`.
  */
 export function isContentAddress(value: string): boolean {
 	const separator = value.indexOf(':');

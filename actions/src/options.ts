@@ -30,16 +30,17 @@ function hasControlCharacter(value: string): boolean {
 }
 
 /**
-Whether a value is safe to pass to Nix as a positional argument.
-*/
+ * Reject a leading hyphen so Nix cannot parse a positional input as an option.
+ * These values later enter Nix through newline-delimited stdin, so reject
+ * control characters that could create another installable.
+ */
 export function isNixPositionalArgument(value: string): boolean {
 	return !value.startsWith('-') && !hasControlCharacter(value);
 }
 
 /**
- * A trimmed, non-empty option value, or `undefined` when the flag was absent or
- * blank. An empty string reaches a handler as "not provided", so the same
- * fallbacks apply whether the workflow omitted a flag or passed it empty.
+ * Treat a blank workflow value as absent after trimming. Omitted and empty
+ * flags therefore use the same fallback.
  */
 export function provided(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
@@ -48,9 +49,8 @@ export function provided(value: string | undefined): string | undefined {
 }
 
 /**
- * Parses a `cache` input after trimming it. An absent or blank value selects the
- * default cache. An invalid cache name causes a {@link CacheNameInvalidError}
- * before the run constructs an endpoint.
+ * Use the default cache for an absent or blank input. Reject an invalid cache
+ * name with {@link CacheNameInvalidError} before constructing an endpoint.
  */
 export function providedCache(value: string | undefined): StoredCache {
 	const parsed = storedCacheSchema.safeParse(provided(value) ?? DEFAULT_CACHE);
@@ -63,11 +63,10 @@ export function providedCache(value: string | undefined): StoredCache {
 }
 
 /**
- * The base URL specified by a URL-valued input, or `undefined` when the input is
- * absent or blank. Every endpoint derives from this URL's origin and path. A
- * query, fragment, or embedded credential therefore causes an
- * {@link UrlInputInvalidError} before any request is made. The diagnostic includes
- * only the field name because the value may contain a credential.
+ * Accept an HTTP(S) base URL containing only an origin and path. Reject a
+ * query, fragment or embedded credential before making a request. The error
+ * includes only the input name because the rejected value may contain a secret.
+ * Return `undefined` for an absent or blank input.
  */
 export function providedUrl(
 	name: UrlInputName,
@@ -87,11 +86,10 @@ export function providedUrl(
 }
 
 /**
- * The read user a `read-user` input supplies, or `''` when the input is absent.
- * The value is taken verbatim: surrounding whitespace is part of a credential.
- * A Basic credential is `user:password`, split on its first colon, so a name
- * containing a colon is refused with {@link ReadUserInvalidError} instead of
- * configuring a runner with a credential no cache can match.
+ * Preserve a read user verbatim because surrounding whitespace is part of the
+ * credential. Basic authentication separates user and password at the first
+ * colon, so reject a user containing a colon instead of creating a credential
+ * that no cache can match. Return `''` when the input is absent.
  */
 export function providedReadUser(value = ''): ReadUser | '' {
 	if (value === '') {
@@ -108,9 +106,9 @@ export function providedReadUser(value = ''): ReadUser | '' {
 }
 
 /**
- * A boolean option's value: `true` or `false` after trimming, with a blank or
- * absent value taking the fallback. Any other value refuses the input with
- * {@link BooleanInputInvalidError}, so a mistyped workflow value fails the run.
+ * Accept only the exact literals `true` and `false` after trimming. A blank or
+ * absent value uses the fallback; any other value fails the run with
+ * {@link BooleanInputInvalidError}.
  */
 export function isEnabled(
 	name: string,
@@ -134,10 +132,6 @@ export function isEnabled(
 	throw new BooleanInputInvalidError(name, trimmed);
 }
 
-/**
- * Accumulate a repeatable list option, splitting each occurrence on newlines so
- * a single newline-delimited value and repeated flags both contribute entries.
- */
 export function collectLines(
 	value: string,
 	previous: readonly string[]

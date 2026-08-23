@@ -19,17 +19,11 @@ export const readUserInputSchema = z
 	.refine((value) => !value.includes(':'))
 	.brand('ReadUser');
 
-/**
-The plaintext credential an HTTP Basic header carries.
-*/
 export interface BasicCredential {
 	readonly user: ReadUser;
 	readonly password: string;
 }
 
-/**
-Why an `authorization` header carries no Basic credential.
-*/
 export type BasicCredentialRejection =
 	'not-basic' | 'undecodable' | 'malformed';
 
@@ -38,11 +32,8 @@ export type BasicCredentialResult =
 	| { readonly ok: false; readonly reason: BasicCredentialRejection };
 
 /**
- * The HTTP Basic `authorization` header for a username and password, encoded as
- * `Basic <base64(user:password)>`. Returned as a header record so a caller can
- * spread it into a `Headers` initialiser or a plain header object. The
- * credential is named rather than positional, so a caller cannot put the
- * password in the username half.
+ * Encodes the credential as an HTTP Basic `authorization` header. The returned
+ * record can be spread into `HeadersInit` or a plain header object.
  */
 export function basicAuthHeader(credential: BasicCredential): {
 	readonly authorization: string;
@@ -53,9 +44,9 @@ export function basicAuthHeader(credential: BasicCredential): {
 }
 
 /**
- * The credential an `authorization` header carries, or why it carries none.
- * This is the inverse of {@link basicAuthHeader}: the decoded payload is split
- * on its first colon, so a password may contain colons and a user-id may not.
+ * Parses an HTTP Basic credential or returns the reason it was rejected. The
+ * decoded value is split at its first colon, so a password may contain colons
+ * but a user-id may not.
  */
 export function parseBasicAuthHeader(
 	header: string | undefined
@@ -109,8 +100,6 @@ function fromBase64(value: string): string | undefined {
 	return bytes === undefined ? undefined : textDecoder.decode(bytes);
 }
 
-// The bytes a latin1 string stands for, or `undefined` when a character is
-// outside the 0-255 range a byte can represent.
 function latin1Bytes(value: string): Uint8Array | undefined {
 	const bytes = new Uint8Array(value.length);
 

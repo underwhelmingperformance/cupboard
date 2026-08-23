@@ -30,8 +30,9 @@ export class CachedTenantReads extends WorkerEntrypoint<TenantEnv> {
 	}
 
 	/**
-	Purges cached responses carrying any of the supplied cache tags.
-	*/
+	 * Purges every supplied cache tag and rejects unless the Cache API confirms
+	 * the operation.
+	 */
 	async purgeTags(tags: string[]): Promise<void> {
 		if (this.ctx.cache === undefined) {
 			throw new WorkersCacheUnavailableError();

@@ -15,7 +15,7 @@ describe('R2Presigner', () => {
 		vi.unstubAllGlobals();
 	});
 
-	it('probes a temporary credential with a header-signed GET', async () => {
+	it('sends a header-signed GET to the credential probe key', async () => {
 		let request: Request | undefined;
 		vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
 			request = new Request(input, init);
@@ -32,9 +32,6 @@ describe('R2Presigner', () => {
 			status: response.status,
 			method: request?.method,
 			href: signed.href,
-			// The push mechanism (and so the probe) carries the session token in
-			// the header, never the query string; the request is otherwise signed
-			// with the derived credential.
 			hasSessionToken: request?.headers.has('x-amz-security-token'),
 			hasAuthorization: request?.headers.has('authorization')
 		}).toStrictEqual({

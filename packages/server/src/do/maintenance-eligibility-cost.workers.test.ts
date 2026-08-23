@@ -32,8 +32,6 @@ const methodLineSchema = z.object({
 	rowsWritten: z.number()
 });
 
-// Captures the row cost a direct, non-`fetch` entrypoint logs, by reading the
-// `method finished` line it emits while `run` executes.
 async function maintenancePassCost(
 	method: string,
 	run: () => Promise<unknown>
@@ -57,16 +55,9 @@ async function maintenancePassCost(
 	return { isLogged: line !== undefined, rowsRead: line?.rowsRead ?? -1 };
 }
 
-// A push runs the upload procedures once per store path, so any per-path work that
-// scales with the in-flight upload set turns a push into a quadratic read load on
-// the Durable Object's SQLite (the failure that breached the row-read free tier).
-// Negotiating a fresh path must read only that path's own rows, never the whole
-// pending-upload set.
-//
-// Each negotiate, including the synchronous reconcile it now runs, is measured on a
-// single object call. This guards that the per-path read stays flat against the
-// backlog: both the negotiate's own lookups and the reconcile's existence/soonest
-// checks are index-backed, so neither scales with the in-flight set.
+// Negotiation runs once per path, so its row cost must remain independent of the
+// number of pending uploads. Each measurement includes eligibility
+// reconciliation in the same Durable Object call.
 describe('upload negotiation cost', () => {
 	beforeEach(resetTestServer);
 
@@ -79,21 +70,14 @@ describe('upload negotiation cost', () => {
 
 		const largeBacklogCost = await negotiateCost(token, 'b'.repeat(32));
 
-		// The read is the same handful of rows whatever the backlog: assert the exact
-		// figure, so a constant baseline regression cannot hide behind an inequality.
 		expect({ emptyBacklogCost, largeBacklogCost }).toStrictEqual({
 			emptyBacklogCost: 14,
 			largeBacklogCost: 14
 		});
 	});
 
-	// The reconcile reaches the soonest-expiring upload, attestation, root, grace
-	// deadline and key retirement through the maintenance indexes, and decides "due
-	// now" by existence rather than a count, so its read count is the same handful
-	// whatever the backlog. This is what makes the synchronous per-mutation
-	// reconcile affordable and what these indexes buy: drop any index those lookups
-	// use and the matching scan becomes a full table scan, so the large-backlog
-	// figure climbs and the assertion fails.
+	// These exact comparisons protect the maintenance indexes. Losing an index
+	// makes the large backlog cost more rows than the small backlog.
 	it('reconciles without scanning the maintenance backlogs', async () => {
 		await initialise();
 
@@ -109,11 +93,6 @@ describe('upload negotiation cost', () => {
 		});
 	});
 
-	// "Due now" is decided by whether any deletion is queued, not how many, so the
-	// reconcile checks existence (one indexed row).
-	// That is what lets it run synchronously on every mutation: the read stays flat
-	// however large the deletion backlog grows. Drop to a `COUNT(*)` and the large
-	// figure would climb.
 	it('reconciles without counting the queued narinfo-deletion backlog', async () => {
 		await initialise();
 
@@ -129,13 +108,6 @@ describe('upload negotiation cost', () => {
 		});
 	});
 
-	// The "awaiting verification" check is an existence probe, not a count: it stops at
-	// the first matching row and short-circuits the rest of the reconcile. Every seeded
-	// row matches the `verdict` filter, so the `LIMIT 1` returns at once whether or not
-	// the index is used; what this locks is the existence-vs-count shape (a `COUNT(*)`
-	// would read one row per pending upload), the populated-match branch the deletion
-	// test above leaves empty. The `verdict` index itself is pinned by the
-	// maintenance-backlog scan test above.
 	it('reconciles without counting the pending-verification backlog', async () => {
 		await initialise();
 
@@ -172,9 +144,7 @@ async function seedNarInfoDeletions(
 	});
 }
 
-// The maintenance passes bypass `fetch`, so each is wrapped in `metered()` to log
-// its row cost. Drop a wrapper and the cost goes dark, so assert each pass emits
-// its line.
+// These entrypoints bypass `fetch`; each must retain its explicit cost meter.
 describe('maintenance pass cost', () => {
 	beforeEach(resetTestServer);
 
@@ -219,10 +189,6 @@ describe('maintenance pass cost', () => {
 		expect(isLogged).toBe(true);
 	});
 
-	// The garbage collection deletes expired refresh tokens through the
-	// `refresh_token` expiry index. No reconcile reads that table, so this is the one
-	// guard on that index: drop it and the delete scans the whole token backlog, so
-	// the large-backlog pass reads more than the small one.
 	it('deletes expired refresh tokens without scanning the backlog', async () => {
 		await initialise();
 
@@ -281,8 +247,6 @@ async function seedRefreshTokens(count: number, label: string): Promise<void> {
 					ruleId: trustRuleIdSchema.parse('rule'),
 					subject: oidcSubjectSchema.parse('subject'),
 					createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
-					// Far-future expiry so the pass deletes none and the read count is the
-					// index seek alone, not the cost of deleting rows.
 					expiresAt: isoTimestampSchema.parse('2099-01-01T00:00:00.000Z')
 				})
 				.run();
@@ -290,8 +254,6 @@ async function seedRefreshTokens(count: number, label: string): Promise<void> {
 	});
 }
 
-// Rows the Durable Object read while rebuilding the eligibility projection,
-// measured from the meter either side of a single reconcile.
 async function reconcileCost(): Promise<number> {
 	return runInDurableObject(currentServer(), async (instance) => {
 		const service = new MaintenanceEligibilityService(instance.context);
@@ -343,9 +305,6 @@ async function seedExpiredRoot(name: string): Promise<void> {
 	});
 }
 
-// Rows the Durable Object read while negotiating one fresh path, including the
-// synchronous reconcile the mutation now runs. The whole measurement runs on one
-// object call so no other request's statements fall between the readings.
 async function negotiateCost(
 	token: string,
 	storePathHash: string
@@ -388,13 +347,8 @@ async function seedPendingUploads(
 	});
 }
 
-// The Nix base32 alphabet (no e, o, t or u), for fabricating distinct
-// syntactically valid store-path hashes when a test seeds grace deadlines in
-// volume: `retention_grace`'s primary key is `(cache, store_path_hash)`, so
-// each seeded row needs its own hash. The counter is closed over rather than
-// module-level, so it advances across every call in this file and two backlogs
-// seeded into the same Durable Object (a small one followed by a large one)
-// never collide.
+// Grace rows use (cache, store_path_hash) as their primary key. Generate valid,
+// distinct Nix hashes across every backlog seeded into the same object.
 const storePathHashAlphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 
 const syntheticStorePathHash = (() => {
@@ -415,10 +369,6 @@ const syntheticStorePathHash = (() => {
 	};
 })();
 
-// Seeds a backlog in every table the reconcile reaches by index: the pending
-// uploads, plus the pending attestations, retention roots, retention grace
-// deadlines and retirable auth keys whose soonest-expiry lookups use the other
-// maintenance indexes.
 async function seedReconcileBacklog(
 	count: number,
 	label: string

@@ -1,8 +1,8 @@
 name: Push to cupboard
-description: Push Nix store paths to a cupboard cache from GitHub Actions.
+description: Push local Nix store paths to a cupboard cache.
 inputs:
   url:
-    description: cupboard Worker URL.
+    description: URL of the cupboard Worker.
     required: true
   paths:
     description:
@@ -11,17 +11,15 @@ inputs:
     required: false
   cupboard-path:
     description:
-      Pre-acquired cupboard executable from actions/setup. Skips release
-      installation.
+      Use this pre-acquired cupboard executable from actions/setup and skip
+      release installation.
     required: false
   cupboard-version:
     description:
       cupboard version to install. Use latest or an exact published release tag.
     required: false
   include-prereleases:
-    description:
-      When resolving latest, consider prereleases and install the newest release
-      of any kind.
+    description: When true, prereleases are eligible when resolving latest.
     required: false
   github-token:
     description: GitHub token used for release API calls.
@@ -38,30 +36,31 @@ inputs:
     description: Directory for the downloaded cupboard binary.
     required: false
   cache:
-    description: Named cache to push to.
+    description: Cache to receive the paths.
     required: false
   store:
     description: >-
-      Remote ssh-ng store URI the push reads path metadata and NAR bytes from.
+      Remote ssh-ng store URI to use for reading path metadata and NAR bytes.
       Empty reads the store Nix itself would use on this runner.
     required: false
   audience:
-    description: GitHub OIDC audience. Defaults to url.
+    description: GitHub OIDC audience. Defaults to the canonical form of url.
     required: false
   root:
-    description: Retention root for pushed paths.
+    description: Retention root to update with the pushed paths.
     required: false
   ttl:
     description: Retention TTL such as 7d or 12h.
     required: false
   no-retain:
     description:
-      Publish without any retention root or pin; kept only by the cache's
-      retention grace policy, if one matches. Conflicts with root and ttl.
+      Push without adding the paths to a retention root or pin. The cache keeps
+      them only while a matching grace policy applies. Conflicts with root and
+      ttl.
     required: false
     default: 'false'
   wait:
-    description: Wait for deferred blobs to become servable.
+    description: Wait until deferred paths become servable.
     required: false
     default: 'true'
   wait-timeout:
@@ -74,8 +73,8 @@ inputs:
     required: false
   require-grace:
     description:
-      Fail unless every pushed path reports a positive retention grace deadline.
-      Requires wait to stay enabled.
+      Fail if any pushed path has no retention grace deadline. Requires wait to
+      stay enabled.
     required: false
     default: 'false'
   intermediate-paths-file:
@@ -86,44 +85,44 @@ inputs:
     required: false
   reference-paths-file:
     description:
-      Newline-delimited store paths the tenant already holds, published from
-      reference-source with no local store read or NAR upload. Required together
-      with reference-source.
+      Newline-delimited store paths to publish from reference-source without
+      reading a local store or uploading NARs. Their NAR blobs must already
+      exist in the tenant. Required together with reference-source.
     required: false
   reference-source:
     description:
-      Cache endpoint from which the reference paths are read. Required together
-      with reference-paths-file.
+      Cache endpoint that serves the reference paths. Required together with
+      reference-paths-file.
     required: false
   run-root:
     description:
-      Attach each pushed path to this run root when committed. Independent of
-      root or root-groups.
+      Add each committed path to this run root. This is independent of root and
+      root-groups.
     required: false
   run-root-ttl:
     description: Expire the run root after this duration. Requires run-root.
     required: false
   root-groups:
     description: >-
-      JSON array of {root, paths} objects. The action makes one push per group
-      and atomically replaces each root. This input replaces the flat paths and
-      root inputs.
+      JSON array of {root, paths} objects. Replaces the flat paths and root
+      inputs. The action makes one push per group because each root is replaced
+      atomically.
     required: false
 outputs:
   cupboard-path:
-    description: Path to the installed cupboard binary.
+    description: Path to the cupboard executable that the action used.
     value: ${{ steps.push.outputs.cupboard-path }}
   cupboard-version:
-    description: Inspected cupboard version.
+    description: Version reported by the cupboard executable.
     value: ${{ steps.push.outputs.cupboard-version }}
   uploaded-paths:
-    description: Number of store paths uploaded to the cache.
+    description: Number of paths whose NAR blobs were uploaded to the cache.
     value: ${{ steps.push.outputs.uploaded-paths }}
   reused-blobs:
-    description: Number of paths already present in the cache and reused.
+    description: Number of paths committed using NAR blobs already in the cache.
     value: ${{ steps.push.outputs.reused-blobs }}
   skipped-paths:
-    description: Number of paths that required no upload.
+    description: Number of paths omitted because the cache already had them.
     value: ${{ steps.push.outputs.skipped-paths }}
   uploaded-bytes:
     description: Total number of bytes uploaded to the cache.
@@ -159,10 +158,10 @@ runs:
     - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
       with:
         version: ${{ steps.toolchain.outputs.pnpm-version }}
-        # Point pnpm/action-setup's manifest lookup at this action's own
-        # manifest, not the caller's checkout, whose pinned pnpm would
-        # otherwise conflict with `version`. Parity between this pin and the
-        # workspace manifest is enforced by scripts/action-tool-parity.test.ts.
+        # Read packageManager from this action's manifest. Reading the caller's
+        # checkout could select a different pnpm version and conflict with
+        # `version`. scripts/action-tool-parity.test.ts keeps this pin aligned
+        # with the workspace manifest.
         package_json_file: ${{ github.action_path }}/../../package.json
 
     - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0

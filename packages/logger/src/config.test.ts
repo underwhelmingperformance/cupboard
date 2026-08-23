@@ -36,7 +36,7 @@ describe('rootLogger with capture', () => {
 		});
 	});
 
-	it('merges parent and child fields on a child logger', () => {
+	it('preserves parent fields on a derived logger', () => {
 		capture = startCapture();
 
 		const child = rootLogger().with({ tenant: 't1' }).with({ uploadId: 'abc' });
@@ -60,7 +60,7 @@ describe('rootLogger with capture', () => {
 		expect(capture.logs[0]?.properties).toEqual({ tenant: 't1', status: 200 });
 	});
 
-	it('routes levels and keeps messages constant across calls', () => {
+	it('records each level and message independently', () => {
 		capture = startCapture();
 
 		const log = rootLogger();
@@ -80,7 +80,7 @@ describe('resolveSink', () => {
 		vi.unstubAllEnvs();
 	});
 
-	it('emits workflow commands under GitHub Actions', () => {
+	it('writes workflow-command syntax to stdout under GitHub Actions', () => {
 		const written: string[] = [];
 		const stream = {
 			write: (chunk: string) => {
@@ -103,7 +103,7 @@ describe('resolveSink', () => {
 		expect(written).toStrictEqual(['::warning::careful key=value\n']);
 	});
 
-	it('emits line-delimited JSON on stderr off GitHub Actions', () => {
+	it('writes line-delimited JSON to stderr outside GitHub Actions', () => {
 		const written: string[] = [];
 		const stream = {
 			write: (chunk: string) => {

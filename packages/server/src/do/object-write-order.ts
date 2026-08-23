@@ -3,8 +3,8 @@ import { type R2ObjectKey } from '../http/http.ts';
 
 import { boundedSubrequest } from './deadline.ts';
 
-// Both signals resolve and never reject, so awaiting them in sequence joins
-// them without racing.
+// Settlement signals never reject. Await both so a later write does not start
+// until every abandoned mutation for the key has finished.
 async function settleBoth(
 	first: Promise<void>,
 	second: Promise<void>
@@ -14,22 +14,18 @@ async function settleBoth(
 }
 
 /**
- * Orders the mutations of path-keyed R2 objects so they land in issue order.
+ * Orders mutations of path-keyed R2 objects by issue time.
  *
  * A timed-out R2 call is abandoned, not cancelled (see
- * {@link boundedSubrequest}), so it can land at the object store after later
- * calls to the same key. A content-addressed key tolerates that: any landing
- * put carries the same bytes, and the reaper's compare-and-delete is designed
- * for late deletes. A path-keyed object (a tenant narinfo, an attestation
- * list) has no such immunity: an abandoned delete landing after a fresh put
- * destroys a live object the database still records as servable.
+ * {@link boundedSubrequest}), so it can reach R2 after a later call to the
+ * same key. Content-addressed keys tolerate that ordering. Path-keyed objects,
+ * such as tenant narinfos and attestation lists, do not: a late delete could
+ * remove an object that a newer put restored.
  *
- * Every mutation of such a key therefore runs through {@link write}, which
- * first waits for the settled-signals of any abandoned mutations of the same
- * keys. The registry is in-memory and per-instance, which suffices because the
- * tenant Durable Object is the single writer of its path-keyed objects; the
- * verify/reconcile scan remains the durable backstop for an instance that dies
- * with an abandoned mutation still in flight.
+ * {@link write} waits for abandoned mutations of the same keys to settle. The
+ * registry can remain in memory because the tenant Durable Object is the only
+ * writer of its path-keyed objects. Verification and reconciliation repair
+ * state after an instance dies with a mutation still in flight.
  */
 export class ObjectWriteOrder {
 	private readonly outstanding = new Map<string, Promise<void>>();
@@ -48,9 +44,8 @@ export class ObjectWriteOrder {
 		}, 'r2.abandoned-settle');
 	}
 
-	// A bulk mutation carries one signal for every key it covered: waiting on a
-	// key the abandoned call never touched costs one settled await, while
-	// missing a key it did touch would reopen the ordering hole.
+	// Register a bulk mutation against every affected key. Otherwise a later
+	// write to one key could overtake the abandoned bulk call.
 	private registerAbandoned(
 		keys: readonly string[],
 		settled: Promise<void>

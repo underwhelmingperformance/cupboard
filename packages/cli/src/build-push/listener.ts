@@ -51,15 +51,12 @@ export interface BuildEventListenerOptions {
 		signal: AbortSignal
 	) => Promise<void> | void;
 	readonly onRejected: (error: BuildEventRejectedError) => void;
-	/**
-	Bounds the drain wait on a connection that never settles.
-	*/
 	readonly drainTimeoutMs?: number;
 }
 
 /**
  * The invocation's hook endpoint: a Unix-socket listener accepting the
- * post-build hook's events. One connection carries one newline-terminated
+ * post-build hook's events. Each connection sends one newline-terminated
  * message, so concurrent hook firings cannot interleave. Every valid event is
  * recorded immediately, and the accepted set is deliberately unbounded: even an
  * enormous build is only tens of thousands of paths, and the back-pressure comes
@@ -96,8 +93,8 @@ export class BuildEventListener {
 			});
 		});
 
-		// The owner-only invocation directory already excludes other users while
-		// the fresh socket briefly carries its umask-derived mode.
+		// The invocation directory excludes other users while the fresh socket
+		// briefly has its umask-derived mode.
 		await chmod(this.options.socketPath, 0o600);
 	}
 

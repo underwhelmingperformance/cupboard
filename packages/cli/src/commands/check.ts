@@ -15,11 +15,6 @@ interface CheckOptions {
 	readonly deep?: boolean;
 }
 
-/**
- * The part of the derived client that the check command uses, in the
- * contract's input and output shapes. The real `tenantRpc(...).check`
- * satisfies this interface by construction.
- */
 export interface CheckClient {
 	run(input: { deep: boolean }): Promise<ParsedCheckReport>;
 }
@@ -30,7 +25,7 @@ export function registerCheckCommand(
 ): void {
 	program
 		.command('check')
-		.description('Check stored objects against committed metadata.')
+		.description('Check a bounded batch of committed paths and stored objects.')
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.option('--deep', 'recompute and compare each stored NAR file hash')
 		.action(async (url: URL, options: CheckOptions) => {
@@ -74,7 +69,11 @@ export async function runCheck(
 	});
 
 	if (report.discrepancies.length === 0) {
-		reporter.info('No discrepancies.');
+		reporter.info(
+			report.complete
+				? 'No discrepancies.'
+				: 'No discrepancies in the checked batch; unchecked paths remain.'
+		);
 		return;
 	}
 

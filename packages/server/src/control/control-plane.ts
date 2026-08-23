@@ -316,9 +316,6 @@ async function verifyControlInbound(
 	}
 }
 
-/**
-The key set verifying control-issued admin tokens, as a JWKS document.
-*/
 export async function controlJwks(env: Env): Promise<{
 	keys: (JsonWebKey & { kid: string; alg: string; use: string })[];
 }> {
@@ -392,13 +389,13 @@ export async function controlAuthenticate(
 	}
 }
 
-// The admin-gated deployment check: diagnostics only the deployment itself can
-// perform. Readiness comes first: whether the control database answers, since a
+// The admin-gated deployment check covers diagnostics that only the deployment
+// itself can perform. Readiness comes first: whether the control database responds, since a
 // deploy cannot trust the version probe alone (a prior Worker version may serve
 // it before the new version's D1 binding is live). Then whether R2 accepts
 // requests signed with the configured credentials. Those credentials live on
 // the tenant script, so a tenant's Durable Object runs that probe. The
-// bindings are script-wide, so any live tenant's object gives the same answer
+// bindings are script-wide, so any live tenant's object gives the same result
 // for the whole deployment, and if no tenant is live the probe cannot run.
 export async function controlCheck(env: Env): Promise<ControlCheckReport> {
 	const databaseCheck = await controlDatabaseCheck(env);
@@ -420,8 +417,6 @@ export async function controlCheck(env: Env): Promise<ControlCheckReport> {
 	return { db: databaseCheck, r2 };
 }
 
-// Whether the control database answers a trivial read against a core table, so a
-// reachable-but-unmigrated binding reads as not ready.
 async function controlDatabaseCheck(
 	env: Env
 ): Promise<ControlCheckReport['db']> {
@@ -467,11 +462,9 @@ export async function controlTenantList(env: Env): Promise<TenantListResponse> {
 	return { tenants: await listTenants(controlDatabase(env)) };
 }
 
-// Reasserts every live tenant's admission marker and rebuilds the filter from the
-// registry, reporting how many tenants the gate now carries. The deploy runs this
-// so a change to the admission representation does not leave existing tenants
-// inadmissible until the hourly cron; it is the membership half of a cron tick,
-// with none of the tick's data-touching reclamation.
+// The deploy reasserts every live tenant's membership marker and rebuilds the
+// filter after an admission-format change. This avoids waiting for scheduled
+// maintenance before existing tenants become reachable through the new format.
 export async function controlMembershipRebuild(
 	env: Env
 ): Promise<MembershipRebuildResponse> {
@@ -535,7 +528,7 @@ export async function controlTenantCreate(
 	await writeTenantMember(env.TENANT_CACHE, summary.id);
 	await invalidateTenantRow(summary.id);
 
-	// Publish the rebuilt filter so the new tenant is isAdmittable within the filter
+	// Publish the rebuilt filter so the new tenant is admitted within the filter
 	// cache TTL. A filter negative is definitive, so the create must not report
 	// success while leaving the tenant inadmissible until the hourly cron: if the
 	// filter cannot publish, the create fails and the caller retries. The row and
@@ -606,10 +599,9 @@ export async function controlTenantOffboard(
 	const summary = await setTenantStatus(database, id, 'offboarding');
 	await invalidateTenantRow(id);
 
-	// The membership marker is left in place: an offboarding tenant is still
-	// `status != 'offboarded'`, so it stays isAdmittable to the authoritative status
-	// read, which stops its writes and 404s its reads. Finalisation deletes the
-	// marker once the drain completes.
+	// Leave the membership marker in place while offboarding. Admission must still
+	// reach the authoritative status row, which refuses writes and returns 404 for
+	// reads. Finalisation deletes the marker after the drain completes.
 	//
 	// Tell the Durable Object it is offboarding so an in-flight commit settling after
 	// the status flip cannot re-materialise an object the drain will remove.

@@ -55,8 +55,6 @@ describe('NixSha256Hash.parsePrefixed', () => {
 describe('decodeNixHashField', () => {
 	const digest = Uint8Array.from({ length: 64 }, (_, index) => index * 3);
 
-	// Nix reads the digest by its length, which is a different length for every
-	// algorithm, so each one is read in each of the three spellings.
 	it.each([
 		{ algorithm: 'md5', digestBytes: 16 },
 		{ algorithm: 'sha1', digestBytes: 20 },
@@ -126,9 +124,7 @@ describe('decodeNixHashField', () => {
 		expect(decodeNixHashField(value)).toBeUndefined();
 	});
 
-	// A content address states its algorithm before a colon, and reads through
-	// the colon spelling alone, so the integrity one states nothing to it.
-	it('reads no hash out of the integrity spelling by the colon spelling', () => {
+	it('does not parse an SRI value as a colon-prefixed hash', () => {
 		const integrity = `sha256-${bytesToBase64(digest.slice(0, 32))}`;
 
 		expect(decodeNixHash(integrity)).toBeUndefined();

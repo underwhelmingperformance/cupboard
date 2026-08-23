@@ -23,7 +23,7 @@ export class NonLoopbackConnectionError extends Error {
 		public readonly destination: RefusedDestination
 	) {
 		super(
-			`${describeOrigin(origin)} tried to connect to ${describeDestination(destination)}. The CLI's tests must reach nothing beyond the loopback interface: serve the fixture from 127.0.0.1 or a unix socket, or stub the client.`
+			`${describeOrigin(origin)} tried to connect to ${describeDestination(destination)}. CLI tests cannot connect beyond the loopback interface: serve the fixture from 127.0.0.1 or a unix socket, or stub the client.`
 		);
 		this.name = 'NonLoopbackConnectionError';
 	}

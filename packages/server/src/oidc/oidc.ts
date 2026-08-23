@@ -12,10 +12,9 @@ import {
 } from 'jose';
 import { z } from 'zod';
 
-// Inbound OIDC tokens are signed by the identity provider with an asymmetric
-// algorithm published in its JWKS. This allowlist is the outer bound: it rejects
-// `alg: none` and the public-key-as-HMAC-secret confusion regardless of what an
-// issuer advertises. EdDSA covers issuers that sign with Ed25519.
+// Accept only the asymmetric algorithms that Cupboard supports. Excluding HMAC
+// prevents a public key from the issuer's JWKS from being treated as a shared
+// secret.
 export const inboundAlgorithmAllowlist = ['RS256', 'PS256', 'ES256', 'EdDSA'];
 const inboundClockToleranceSeconds = 30;
 
@@ -23,8 +22,6 @@ const jwksCacheMaxAgeMs = 10 * 60 * 1000;
 const jwksCooldownMs = 30 * 1000;
 const jwksTimeoutMs = 5 * 1000;
 
-// `customFetch` is jose's `unique symbol`; widen it to `symbol` so it can be
-// used as a computed property key without tripping the unsafe-key lint.
 const customFetchKey: symbol = customFetch;
 
 export class OidcTokenDecodeError extends Error {
@@ -36,14 +33,15 @@ export class OidcTokenDecodeError extends Error {
 
 export class OidcTokenVerificationError extends Error {
 	constructor(options: { readonly cause: unknown }) {
-		super('Subject token failed OIDC verification', { cause: options.cause });
+		super('Subject token failed signature or required-claim verification', {
+			cause: options.cause
+		});
 		this.name = 'OidcTokenVerificationError';
 	}
 }
 
-// The issuer's keys could not be retrieved (a JWKS fetch timeout, a bad JWKS
-// response, or a network failure). This is distinct from the token itself
-// failing verification, so the caller can treat it as transient and retry.
+// Report JWKS loading failures separately from token verification failures.
+// Callers map this class to a retryable issuer response.
 export class OidcKeysUnreachableError extends Error {
 	constructor(options: { readonly cause: unknown }) {
 		super("Could not retrieve the issuer's signing keys", {
@@ -66,9 +64,9 @@ export class OidcDiscoveryError extends Error {
 }
 
 /**
- * Reads the unverified claims of an inbound token so it can be routed to a trust
- * rule. Decoding reveals only what the token asserts; the signature is checked
- * separately by {@link verifyInboundOidcToken}.
+ * Decodes unverified claims so the caller can select a trust rule. The caller
+ * must verify the token against that rule before using any claim for
+ * authorisation.
  */
 export function decodeInboundClaims(token: string): OidcClaims {
 	try {
@@ -85,16 +83,13 @@ export interface InboundVerifyOptions {
 }
 
 /**
- * Verifies an inbound OIDC token against a resolved key set, pinning the issuer,
- * audience and the supplied algorithm set. The key resolver and algorithms are
- * supplied by the caller (the Durable Object from the issuer's discovered
- * metadata, or a test from a local key set), so verification needs no network
- * of its own.
+ * Verifies the signature, issuer, audience, expiry and algorithm with the
+ * supplied key resolver. A remote resolver can fetch the issuer's JWKS while
+ * this function runs.
  */
-// `jwtVerify` fails either because the token is bad or because the issuer's keys
-// could not be fetched. These are the token-level failures; anything else (a
-// JWKS timeout, a malformed JWKS response, a raw network error) means the keys
-// were unreachable and the caller should treat the failure as transient and retry.
+// Keep token-shape, claim, signature, algorithm and key-selection failures
+// separate from failures to load the JWKS. Callers reject the former and return
+// a retryable issuer response for the latter.
 const tokenVerificationErrors = [
 	joseErrors.JWSSignatureVerificationFailed,
 	joseErrors.JWTExpired,
@@ -120,10 +115,9 @@ export async function verifyInboundOidcToken(
 ): Promise<JWTPayload> {
 	try {
 		const verified = await jwtVerify(token, resolveKey, {
-			// The rule's issuer is normalised without a trailing slash; accept the
-			// token's `iss` with or without one, since some issuers (e.g. Auth0)
-			// stamp the slash. `exp` is required so a token with no expiry cannot be
-			// replayed indefinitely.
+			// Cupboard deliberately treats issuer identifiers with and without one
+			// trailing slash as equivalent for provider compatibility. Require `exp`
+			// so every accepted token has a finite validity period.
 			issuer: [options.issuer, `${options.issuer}/`],
 			audience: options.audience,
 			algorithms: [...options.algorithms],
@@ -153,16 +147,12 @@ const oidcDiscoverySchema = z.object({
 	id_token_signing_alg_values_supported: z.array(z.string()).optional()
 });
 
-// Bounds the discovery fetch so a stalled issuer endpoint cannot hang the token
-// exchange. `fetch` honours an `AbortSignal`, so this is a real cancellation.
 const discoveryTimeoutMs = 15_000;
 
 /**
- * Fetches an issuer's OpenID Connect metadata to learn where its keys live and
- * which algorithms it signs with. The issuer URL alone configures a trust rule;
- * everything else is discovered here. The fetched metadata's own `issuer` must
- * match the one requested (OpenID Connect Discovery §4.3), so a misconfigured or
- * hostile document cannot redirect verification to another identity provider.
+ * Fetches the issuer's metadata and returns the JWKS URL and advertised ID-token
+ * algorithms. The metadata issuer must match the configured issuer under
+ * Cupboard's trailing-slash normalisation before either value is used.
  */
 export async function fetchOidcDiscovery(
 	issuer: OidcIssuer,
@@ -181,10 +171,8 @@ export async function fetchOidcDiscovery(
 	let payload: unknown;
 
 	try {
-		// Do not follow redirects: a redirect from the issuer's metadata endpoint
-		// to another host would let a compromised or hijacked endpoint serve a
-		// substitute document. A 3xx fails the `ok` check below. (The JWKS fetch,
-		// run by jose, is likewise pinned to `redirect: 'manual'`.)
+		// Keep discovery on the issuer-derived URL. The jose resolver applies the
+		// same redirect policy when it fetches the JWKS.
 		const response = await fetcher(issuerUrl.discoveryUrl, {
 			redirect: 'manual',
 			signal: AbortSignal.timeout(discoveryTimeoutMs)
@@ -222,17 +210,10 @@ export async function fetchOidcDiscovery(
 	};
 }
 
-// OpenID Connect requires every provider to support RS256, so it is the safe
-// assumption when an issuer's metadata advertises no signing algorithms.
+// OIDC discovery requires the signing-algorithm field and requires it to include
+// RS256. Use RS256 as a compatibility fallback when a provider omits the field.
 const defaultInboundAlgorithm = 'RS256';
 
-/**
- * The accepted algorithms for an issuer: the issuer's advertised set narrowed to
- * cupboard's asymmetric allowlist. An issuer that advertises nothing falls back
- * to RS256, the algorithm OpenID Connect mandates; one that advertises only
- * algorithms outside the allowlist can federate no token (the intersection is
- * empty, so verification rejects all).
- */
 export function intersectAlgorithms(
 	advertised: readonly string[] | undefined,
 	allowlist: readonly string[]
@@ -262,12 +243,9 @@ export interface OidcDiscoveryStoreOptions {
 }
 
 /**
- * A per-issuer cache of resolved OIDC metadata: the issuer's JWKS resolver and
- * its accepted algorithm set. Discovery is re-run once a cached entry is older
- * than {@link jwksCacheMaxAgeMs}, so an issuer that rotates its metadata (a new
- * `jwks_uri` or signing algorithms) is picked up without restarting the Worker.
- * The in-flight promise is cached so concurrent first requests share one
- * discovery fetch; a failed fetch is evicted so the next request retries.
+ * Caches each issuer's discovered algorithm set and JWKS resolver for ten
+ * minutes. Concurrent first resolutions share one promise. A failed resolution
+ * is removed so the next request retries.
  */
 export class OidcDiscoveryStore {
 	private readonly issuers = new Map<OidcIssuer, CachedIssuer>();
@@ -313,9 +291,8 @@ export class OidcDiscoveryStore {
 		};
 	}
 
-	// An `OidcIssuer` is normalised where it is minted, so two spellings of one
-	// issuer (a trailing slash, say) arrive here as the same value and share a
-	// single cache entry and a single discovery fetch.
+	// Trust-rule ingress removes one trailing slash, so those two configured
+	// spellings must share a cache entry.
 	resolve(issuer: OidcIssuer): Promise<ResolvedIssuer> {
 		const nowMs = this.now();
 		const cached = this.issuers.get(issuer);

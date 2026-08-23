@@ -23,12 +23,10 @@ import {
 
 import { BinaryFuse8 } from './binary-fuse-filter/index.ts';
 
-// The admission gate is layered: an in-memory membership filter (tier 1) rejects
-// unknown slugs with no network call, a per-tenant KV marker (tier 2) resolves
-// the filter's false positives at KV cost, and the authoritative D1 `tenant` row
-// (tier 3) decides admission. Tiers 1-2 are a negative cache that can only reject
-// or fall through, never admit, so the row read is always the real gate and the
-// global artifacts can never cause an availability outage, only extra D1 cost.
+// Admission first checks an in-memory filter, then a per-tenant KV marker, and
+// finally the authoritative D1 row. The first two layers can reject a slug or
+// fall through, but cannot admit it. Missing or unreadable cache data therefore
+// adds D1 work instead of making a live tenant unavailable.
 
 type Database = DrizzleD1Database<typeof d1Schema>;
 
@@ -45,11 +43,6 @@ const rowCacheTtlSeconds = 10;
 // distinct-slug spray, so this only blunts repeated probes.
 const memberKeyCacheTtlSeconds = 60;
 
-// A private cache's read verifier as the admission entry carries it: the
-// Basic-auth user and the salted hash of its password, never the plaintext. The
-// user parses under the brand alone: this reads what a tenant row already holds,
-// and a stored value the credential format cannot carry leaves that cache
-// unauthenticable, not unservable.
 const tenantReadVerifierSchema = z.object({
 	user: readUserSchema,
 	passwordHash: readPasswordHashSchema,
@@ -58,27 +51,19 @@ const tenantReadVerifierSchema = z.object({
 
 export type TenantReadVerifier = z.infer<typeof tenantReadVerifierSchema>;
 
-// What admission resolves for a provisioned slug: the authoritative row fields the
-// read and dispatch paths gate on. Built from the single `tenant` row, so it never
-// reflects a torn or stale aggregate.
 export interface TenantEntry {
 	readonly status: TenantStatus;
 	readonly readMode: TenantReadMode;
 	readonly readVerifier?: TenantReadVerifier;
 }
 
-// An admitted tenant's entry, with whether it was read fresh from D1 this
-// request. A fresh entry's status is authoritative, so a write need not re-read
-// it; a cached one may lag a suspend within its TTL, so a write still confirms
-// the status against D1.
+// A write can trust a fresh D1 status. A cached entry may lag a suspension, so
+// the write path must confirm its status against D1 before dispatch.
 export interface TenantAdmission {
 	readonly entry: TenantEntry;
 	readonly fresh: boolean;
 }
 
-// The slice of the execution context admission needs: deferred row-cache writes.
-// A structural subset of `ExecutionContext`, matching the read path, so a Hono
-// `executionCtx` passes without the global-type mismatch.
 interface DeferredContext {
 	waitUntil(promise: Promise<unknown>): void;
 }
@@ -131,9 +116,6 @@ async function lookupTenantMember(
 	}
 }
 
-// The membership filter is a binary fuse8: a static, immutable structure with no
-// false negatives, built wholesale from the live slug set and queried read-only,
-// exactly as the cron rebuild and the admission gate use it.
 export function buildMembershipFilter(slugs: readonly TenantId[]): Uint8Array {
 	return BinaryFuse8.build(slugs).serialise();
 }
@@ -193,10 +175,8 @@ function rowCacheKey(slug: TenantId): Request {
 	);
 }
 
-// The authoritative row read with one bounded retry: a transient D1 fault on
-// this read sits on every push and fetch, so it must not surface as an
-// internal error. A persistent fault maps to a retryable refusal instead;
-// Nix and the CLI both retry a 503 carrying Retry-After.
+// Every content request depends on this row. After the bounded retry, report a
+// persistent D1 fault as a retryable refusal rather than an internal error.
 async function readTenantRow(
 	database: Database,
 	slug: TenantId
@@ -248,10 +228,9 @@ function entryFromRow(row: TenantAdmissionRow): TenantEntry {
 	return { status: row.status, readMode: row.readMode };
 }
 
-// Tier 3: the authoritative single-row read. A public tenant's entry is cached at
-// the edge for a short TTL; a private tenant's is never cached, so a rotated or
-// revoked read credential takes effect at once. The single-row read is atomic, so
-// there is no torn read and nothing staged.
+// Tier 3 reads one authoritative row. Public entries have a short edge-cache
+// TTL. Private entries are never cached, so credential rotation and revocation
+// take effect immediately.
 async function readTenantEntry(
 	env: Env,
 	ctx: DeferredContext,
@@ -288,10 +267,9 @@ async function readTenantEntry(
 	return { entry, fresh: true };
 }
 
-// Resolves a tenant slug through the layered gate, returning its authoritative
-// entry or `undefined` for a slug that is not an isAdmittable tenant. Reads only KV
-// for known-absent and most present slugs; the D1 row is consulted on a filter
-// positive with a present marker, or whenever a KV fault forces fail-open.
+// Returns the tenant's admission entry, or undefined when the layered gate can
+// prove that the slug is absent. A cache fault falls through to the authoritative
+// D1 row instead of rejecting the tenant.
 export async function admitTenant(
 	env: Env,
 	ctx: DeferredContext,
@@ -312,11 +290,9 @@ export async function admitTenant(
 	return readTenantEntry(env, ctx, slug);
 }
 
-// Rebuilds the membership filter from the authoritative registry and reasserts
-// every live tenant's marker, run inline each cron tick. Building the filter as a
-// unit gives it a well-defined as-of; reasserting the markers backstops a
-// create-write that was dropped, so a tier-2 miss stays a sound 404. Returns the
-// number of live tenants now carried, so a caller can report what it repaired.
+// Scheduled maintenance rebuilds the filter from one registry snapshot and
+// reasserts every live tenant's marker. Reassertion repairs a marker lost during
+// creation, which keeps a definitive marker miss safe to return as 404.
 export async function refreshTenantMembership(env: Env): Promise<number> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const live = await liveTenantSlugs(database);
@@ -329,11 +305,9 @@ export async function refreshTenantMembership(env: Env): Promise<number> {
 	return live.length;
 }
 
-// Rebuilds and republishes just the membership filter from the live registry, the
-// sole writer of the filter key. The control plane calls this after a create so a
-// new tenant is isAdmittable within the filter cache TTL, not blocked on the
-// hourly cron, without rewriting every marker. A filter negative is definitive, so
-// a tenant absent from the filter 404s at tier 1 until a rebuild includes it.
+// After creation, publish the live registry immediately so the new tenant need
+// not wait for scheduled maintenance. This is the sole writer of the filter key;
+// a negative result remains definitive until a later rebuild includes the tenant.
 export async function rebuildMembershipFilter(env: Env): Promise<void> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 

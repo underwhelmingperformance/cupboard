@@ -12,9 +12,6 @@ import {
 } from '../errors.ts';
 import { rootLogger } from '../observability/logging.ts';
 
-// Maps a thrown error to an HTTP response: an OAuth error to its RFC 6749 JSON
-// body, any other `ServerHttpError` to its status and message. Anything else
-// is not ours to map and returns undefined.
 function errorResponse(error: unknown): Response | undefined {
 	if (error instanceof OAuthError) {
 		return Response.json(
@@ -36,9 +33,9 @@ function errorResponse(error: unknown): Response | undefined {
 }
 
 function serverHttpErrorResponse(error: ServerHttpError): Response {
-	// A retryable refusal must never be cached, on any route: a reader that
-	// stored this response would keep retrying against a cache instead of the
-	// origin, well past whatever made it transient.
+	// A cache could retain a transient refusal after the origin has recovered.
+	// Mark every retryable Hono response no-store so the next attempt reaches the
+	// origin.
 	const headers =
 		error.retryAfterSeconds === undefined
 			? undefined
@@ -53,9 +50,8 @@ function serverHttpErrorResponse(error: ServerHttpError): Response {
 	});
 }
 
-// Hono error handler carrying the same mapping. A D1 overload or a fault the
-// runtime marks retryable is a transient refusal, not a server fault; anything
-// else we do not model is answered by {@link unmappedErrorResponse}.
+// D1 overloads and faults that Cloudflare marks as retryable become transient
+// refusals. Other unmodelled errors use the redacted 500 response below.
 export const serverErrorHandler: ErrorHandler = (error, context) => {
 	const mapped = errorResponse(error);
 
@@ -76,9 +72,9 @@ export const serverErrorHandler: ErrorHandler = (error, context) => {
 	return unmappedErrorResponse(error, context);
 };
 
-// The request logger seeded by the app's first middleware, or a fallback carrying
-// just the ray when the fault was raised before that middleware ran (a malformed
-// path, say). Either way the line lands in Workers observability keyed to the ray.
+// An error can reach this handler before the first middleware creates the
+// request logger. In that case, create a logger with the ray so Workers
+// observability still associates the error with the request.
 function loggerFor(context: Context): Logger {
 	const seeded = (context.var as { logger?: Logger }).logger;
 
@@ -91,8 +87,7 @@ function loggerFor(context: Context): Logger {
 	return ray === undefined ? rootLogger() : rootLogger().with({ ray });
 }
 
-// The flags the Workers runtime sets on a fault it knows to be transient: a
-// Durable Object reset or overload that killed the request mid-flight.
+// Cloudflare can mark a runtime fault as retryable through any of these fields.
 const runtimeFaultFlags = z.object({
 	retryable: z.boolean().optional(),
 	durableObjectReset: z.boolean().optional(),
@@ -117,10 +112,8 @@ function isRuntimeRetryable(error: unknown): boolean {
 	);
 }
 
-// An unmodelled error would otherwise escape into Cloudflare's generic exception
-// page, which carries no usable detail. Log the full error instead (it lands in
-// Workers observability, keyed to this invocation) and answer with a small JSON
-// body carrying the request's ray, the handle that finds the logged line.
+// Log the full error, but return only the request ray. The ray lets an operator
+// find the corresponding Workers log without exposing the error to the client.
 function unmappedErrorResponse(error: unknown, context: Context): Response {
 	const ray = context.req.raw.headers.get('cf-ray') ?? undefined;
 

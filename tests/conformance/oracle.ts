@@ -23,9 +23,6 @@ import { isolatedEnvironment } from '../support/nix.ts';
 
 const repositoryRoot = path.resolve(import.meta.dirname, '..', '..');
 
-/**
-The recorded Nix version, loaded once for test assertions.
-*/
 export const recordedOracle: OracleRecord = parseOracleRecord(
 	readFileSync(path.join(import.meta.dirname, oracleFileName), 'utf8')
 );

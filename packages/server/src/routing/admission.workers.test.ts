@@ -83,8 +83,6 @@ async function admit(slug: string): Promise<TenantEntry | undefined> {
 	return entry?.entry;
 }
 
-// Reads the public tenant once so its active entry lands in the row cache, so a
-// following admission serves it from cache and the write reconfirms the status.
 async function primeRowCache(slug: string): Promise<void> {
 	const ctx = createExecutionContext();
 	await worker.fetch(
@@ -100,7 +98,7 @@ describe('layered admission gate', () => {
 		expect(await admit('ghost')).toBeUndefined();
 	});
 
-	it('admits a provisioned tenant once the filter is rebuilt, carrying its row state', async () => {
+	it('admits a provisioned tenant after the filter is rebuilt and returns its row state', async () => {
 		await ensureTenant(database(), createBody('acme'), now);
 		await refreshTenantMembership(env);
 
@@ -122,7 +120,7 @@ describe('layered admission gate', () => {
 		expect(await refreshTenantMembership(env)).toBe(1);
 	});
 
-	it('keeps a suspended tenant isAdmittable, carrying its status for the caller to gate', async () => {
+	it('passes a suspended tenant to the caller with its status', async () => {
 		await ensureTenant(database(), createBody('acme'), now);
 		await refreshTenantMembership(env);
 		await setTenantStatus(
@@ -140,7 +138,6 @@ describe('layered admission gate', () => {
 	it('rejects a filter-positive slug whose membership marker is gone without reading the row', async () => {
 		await ensureTenant(database(), createBody('acme'), now);
 		await refreshTenantMembership(env);
-		// The filter still reports the slug, but its marker is gone (a tier-2 miss).
 		await env.TENANT_CACHE.delete(
 			tenantMemberKey(tenantIdSchema.parse('acme'))
 		);
@@ -149,13 +146,10 @@ describe('layered admission gate', () => {
 	});
 
 	it('admits a tenant created through the control plane without waiting on the cron', async () => {
-		// An existing filter that predates the new tenant, cached by a read.
 		await ensureTenant(database(), createBody('acme'), now);
 		await refreshTenantMembership(env);
 		const seeded = await admit('acme');
 
-		// Creating another tenant through the control path rebuilds the filter, so it
-		// is isAdmittable at once.
 		await controlTenantCreate(env, createBody('beta'), 'https://cupboard.test');
 		const created = await admit('beta');
 
@@ -166,7 +160,6 @@ describe('layered admission gate', () => {
 	});
 
 	it('fails the create when the filter cannot be published, leaving the tenant recoverable', async () => {
-		// A populated filter that excludes the tenant about to be created.
 		await ensureTenant(database(), createBody('acme'), now);
 		await refreshTenantMembership(env);
 
@@ -183,9 +176,6 @@ describe('layered admission gate', () => {
 			outcome = 'failed';
 		}
 
-		// The create reports failure: the stale
-		// filter still excludes beta, so it 404s until the cron rebuild includes it
-		// (the row and marker persisted, so recovery needs no re-create).
 		const beforeRecovery = await admit('beta');
 		await refreshTenantMembership(env);
 		const afterRecovery = await admit('beta');
@@ -204,8 +194,6 @@ describe('layered admission gate', () => {
 	it('re-asserts a dropped membership marker on the next refresh', async () => {
 		await ensureTenant(database(), createBody('acme'), now);
 		await refreshTenantMembership(env);
-		// A create-write that was dropped: the marker is gone though the tenant is
-		// live, so admission 404s until the cron reasserts it.
 		await env.TENANT_CACHE.delete(
 			tenantMemberKey(tenantIdSchema.parse('acme'))
 		);
@@ -223,9 +211,8 @@ describe('layered admission gate', () => {
 	it('rejects an offboarded tenant at the row read before the filter drops it', async () => {
 		await ensureTenant(database(), createBody('acme'), now);
 		await refreshTenantMembership(env);
-		// The tenant is retired in D1 but the filter and marker still carry it (no
-		// rebuild yet), so admission reaches the authoritative row: a retired
-		// tombstone must read as a clean 404, indistinguishable from never-existed.
+		// Leave the stale filter and marker in place so admission must reject the
+		// authoritative offboarded row.
 		await database()
 			.update(d1Schema.tenant)
 			.set({ status: 'offboarded' })
@@ -324,8 +311,6 @@ describe('layered admission gate', () => {
 
 		const response = await writeWithGateFaults(1, gateSlug);
 
-		// Past the gate, the unconfigured tenant object answers however it will;
-		// what matters is the gate did not surface its blip as a retryable refusal.
 		expect(response.headers.get('retry-after')).toBeNull();
 	});
 
@@ -349,8 +334,8 @@ describe('layered admission gate', () => {
 		await ensureTenant(database(), createBody('acme'), now);
 		await refreshTenantMembership(env);
 
-		// A private tenant is never cached, so admission reads it fresh and the write
-		// trusts that status: the gate query never runs, so faulting it has no effect.
+		// Private rows are never cached, so admission has already read this status
+		// from D1 and the write gate does not repeat the query.
 		const response = await writeWithGateFaults(Number.MAX_SAFE_INTEGER, 'acme');
 
 		expect(response.headers.get('retry-after')).toBeNull();
@@ -376,7 +361,6 @@ describe('layered admission gate', () => {
 		);
 		await waitOnExecutionContext(ctx);
 
-		// The cache still holds the active entry; the gate's re-read sees the suspend.
 		expect(response.status).toBe(StatusCodes.FORBIDDEN);
 	});
 
@@ -466,7 +450,7 @@ describe('layered admission gate', () => {
 		}
 	);
 
-	it('answers the admission refusal as a 503 with Retry-After', async () => {
+	it('returns the admission refusal as a 503 with Retry-After', async () => {
 		const app = new Hono();
 
 		app.onError(serverErrorHandler);

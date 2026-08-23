@@ -168,11 +168,9 @@ describe('offboarding drain', () => {
 			objects: await tenantObjectKeys(id),
 			row: await tenantRow(id),
 			usage: await isTenantUsagePresent(id),
-			// The shared blob is now unreferenced but not yet reaped.
 			blobState: await blobStateNarHashes()
 		};
 
-		// The reaper collects the freed shared blob across its grace.
 		await runBlobReaper(rootLogger(), env);
 		vi.setSystemTime(afterGrace());
 		await runBlobReaper(rootLogger(), env);
@@ -217,8 +215,6 @@ describe('offboarding drain', () => {
 
 		await offboardTenant(id);
 
-		// One row and one object per tick: the first tick cannot finish, so the tenant
-		// stays `offboarding` with residue and is not finalised early.
 		await runOffboardBatch(rootLogger(), env, 10, 1, 1);
 
 		const midRow = await tenantRow(id);
@@ -229,7 +225,6 @@ describe('offboarding drain', () => {
 			objects: await tenantObjectKeys(id)
 		};
 
-		// Further ticks drain the remainder and finalise the tenant.
 		await runOffboardBatch(rootLogger(), env, 10, 1, 1);
 		await runOffboardBatch(rootLogger(), env, 10, 1, 1);
 
@@ -365,8 +360,6 @@ describe('offboarding drain', () => {
 		});
 		const status = await attemptPushToTenant(id, token, metadata, nar);
 
-		// The commit is refused and, crucially, no second edge is published: only the
-		// pre-offboarding path's edge remains, so the drain cannot be outrun.
 		expect({ status, edges: await tenantEdges(id) }).toStrictEqual({
 			status: StatusCodes.FORBIDDEN,
 			edges: [
@@ -390,8 +383,6 @@ describe('offboarding drain', () => {
 			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
 			id
 		);
-		// The row read fails closed on the tombstone, so the slug 404s at once despite
-		// the stale filter; the next rebuild then drops it from the filter too.
 		const isBefore = await isAdmittable(id);
 
 		await refreshTenantMembership(env);
@@ -414,8 +405,6 @@ describe('offboarding drain', () => {
 
 		await offboardTenant(id);
 
-		// The whole tick: the maintenance batch skips the offboarding tenant, the
-		// offboard pass drains and finalises it, and the reaper arms its freed blob.
 		await runCronTick(rootLogger(), env);
 		vi.setSystemTime(afterGrace());
 		await runCronTick(rootLogger(), env);

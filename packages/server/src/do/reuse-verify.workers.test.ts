@@ -52,11 +52,8 @@ async function replantStuckPending(row: PendingRow): Promise<void> {
 	});
 }
 
-// A reuse upload binds a new store path to a blob already in the verified CAS, so
-// its pending row points at the shared canonical key, not a private staging
-// object. When such a row settles through the deferred verify pass, clearing it
-// must not delete the canonical object other paths still reference.
-
+// A reuse row points to canonical bytes that other paths also use, not to a
+// private staging object. Clearing the pending row must never delete those bytes.
 describe('deferred reuse verification', () => {
 	beforeEach(resetTestServer);
 
@@ -74,9 +71,6 @@ describe('deferred reuse verification', () => {
 
 		await commitPath(token, first, nar);
 
-		// A second store path reuses the same blob, so its pending row points at the
-		// shared canonical key. Deferring it pushes the reuse through the background
-		// verify pass.
 		const second = uploadMetadata({
 			name: 'second',
 			storePathHash: 'b'.repeat(32),
@@ -96,7 +90,6 @@ describe('deferred reuse verification', () => {
 		const servedFirst = await fetchNarInfo(first.storePathHash);
 		const servedSecond = await fetchNarInfo(second.storePathHash);
 
-		// Settling the reuse must not delete the canonical object both paths share.
 		expect({
 			canonicalPresent:
 				(await env.BLOBS.head(narObjectKey(nar.narHash))) !== null,
@@ -109,7 +102,7 @@ describe('deferred reuse verification', () => {
 		});
 	});
 
-	it('reclaims a crashed reuse commit’s reserved row when its canonical object is gone', async () => {
+	it('reclaims a reserved row after a reuse commit crashes and its canonical object disappears', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('reuse-orphan');
 		const first = uploadMetadata({
@@ -136,19 +129,17 @@ describe('deferred reuse verification', () => {
 		);
 		await markUploadPendingVerification(reuse.uploadId);
 
-		// A reuse commit that crashed after reserving second's narinfo row, then the
-		// shared canonical object vanished, so the reuse can never materialise.
+		// Reserve the narinfo row before deleting the canonical object. The crash
+		// state exists only while the reservation remains and the object is missing.
 		await seedReservedNarInfo(second, 0);
 		await env.BLOBS.delete(narObjectKey(nar.narHash));
 
 		await currentServer().recordMissingObject(reuse.uploadId);
 
-		// The stranded reserved row is reclaimed, so no root can reference a dead
-		// target and no reconcile pass has to clean it up later.
 		expect(await narInfoGeneration(second.storePathHash)).toBeUndefined();
 	});
 
-	it('keeps a rooted reuse path when a stale missing verdict loses to its commit', async () => {
+	it('does not prune a rooted reuse path after a stale missing-object report', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('reuse-committed');
 		const first = uploadMetadata({
@@ -173,14 +164,12 @@ describe('deferred reuse verification', () => {
 			await negotiateUploads(token, [second]),
 			second
 		);
-		// Snapshot the reuse's pending row, then commit it fully so its generation
-		// materialises (its reference edge and object land).
+		// Restore the captured pending row only after the generation and its root
+		// have committed. This reproduces a delayed report against a rooted path.
 		const staged = await snapshotPendingRow(reuse.uploadId);
 		await commitUpload(token, reuse.uploadId);
 		await setRoot(token, { name: 'main', targets: [second.storePath] });
 
-		// A stale missing verdict re-drives the settled row: it must not prune the
-		// root, because the generation already committed and the path serves.
 		await replantStuckPending(staged);
 		await currentServer().recordMissingObject(reuse.uploadId);
 

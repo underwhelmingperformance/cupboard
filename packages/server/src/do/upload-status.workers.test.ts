@@ -23,14 +23,6 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
-// A deferred upload's status is derived from the durable per-upload verdict: it
-// reports `pending` while the background pass works and retains the terminal
-// `mismatch` and `over-quota` verdicts. A settled upload leaves no residue, so
-// its status reads `absent` and servability is observed at the narinfo itself.
-
-// Stages a deferred upload (negotiate, upload, mark pending) and returns its
-// uploadId, the state every fresh upload reaches before the background pass
-// runs.
 async function stageDeferred(nar: {
 	readonly narHash: NixSha256HashString;
 	readonly narSize: number;
@@ -65,7 +57,7 @@ describe('deferred upload status', () => {
 		await clearBlobStorage();
 	});
 
-	it('reports pending, then clears the settled upload once the path serves', async () => {
+	it('reports pending during verification and absent after materialisation', async () => {
 		const nar = await verifiableNar('status-servable');
 		const uploadId = await stageDeferred(nar);
 
@@ -87,11 +79,11 @@ describe('deferred upload status', () => {
 		});
 	});
 
-	it('reports mismatch when the background NAR-hash check fails', async () => {
+	it('retains a mismatch after background NAR verification fails', async () => {
 		const good = await verifiableNar('status-good');
 		const wrong = await verifiableNar('status-wrong');
-		// Bytes whose checksum matches the declared fileHash but which decompress to a
-		// different NAR than the declared hash: a background mismatch.
+		// The compressed bytes pass file-hash integrity but decode to a different NAR.
+		// This isolates the background NAR-hash check.
 		const uploadId = await stageDeferred({
 			narHash: good.narHash,
 			narSize: good.narSize,
@@ -104,7 +96,7 @@ describe('deferred upload status', () => {
 		expect(await uploadStatus(uploadId)).toBe('mismatch');
 	});
 
-	it('reports over-quota when the canonical size exceeds the quota', async () => {
+	it('retains over-quota when the canonical size exceeds the tenant quota', async () => {
 		const nar = await verifiableNar('status-over');
 		const uploadId = await stageDeferred(nar);
 		await provisionFixtureTenant({ quotaBytes: nar.narBytes.byteLength - 1 });

@@ -44,7 +44,7 @@ export class GithubOidcRequestError extends CliError {
 	}
 }
 
-// A 200 response whose body did not carry a token `value`. Distinct from a failed
+// A 200 response without a token `value`. Keep this distinct from a failed
 // request so it is not reported as "failed with 200".
 export class GithubOidcResponseError extends CliError {
 	constructor(public readonly kind: 'missing-token' | 'non-json') {

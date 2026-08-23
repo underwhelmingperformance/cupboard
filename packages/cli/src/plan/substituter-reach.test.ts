@@ -50,7 +50,7 @@ describe('isReachableElsewhere', () => {
 			reachable: false
 		},
 		{
-			name: 'a store URI whose scheme names no binary cache',
+			name: 'a store URI whose protocol is not an HTTP binary cache',
 			substituter: 'ssh-ng://builder.example',
 			reachable: false
 		},

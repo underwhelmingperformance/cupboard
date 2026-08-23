@@ -33,7 +33,7 @@ describe('bridgedError', () => {
 		capture.stop();
 	});
 
-	it('maps a CacheNotEmptyError to its defined contract error with data', () => {
+	it('returns CACHE_NOT_EMPTY with the cache name', () => {
 		const bridged = bridgedError(
 			rootLogger(),
 			new CacheNotEmptyError(storedCacheSchema.parse('builds'))
@@ -43,13 +43,14 @@ describe('bridgedError', () => {
 		expect(bridged).toMatchObject({
 			code: 'CACHE_NOT_EMPTY',
 			status: StatusCodes.CONFLICT,
-			message: 'The cache contains store paths. Pass force to delete it.',
+			message:
+				'The cache contains store paths. Set force to true to delete it.',
 			data: { cache: 'builds' }
 		});
 		expect(capture.logs).toStrictEqual([]);
 	});
 
-	it('keeps the status and message of any other ServerHttpError', () => {
+	it('preserves the status and message of a generic ServerHttpError', () => {
 		const bridged = bridgedError(
 			rootLogger(),
 			new UploadNotFoundError(uploadIdSchema.parse('upload-1'))

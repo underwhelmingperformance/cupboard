@@ -8,9 +8,6 @@ const twoLevelChain = new Error('the step failed', {
 	})
 });
 
-// An error whose `cause` chain refers back to the error itself. Only a
-// subclass can build the loop: `Error` takes its `cause` at construction, so
-// the inner error cannot refer to an outer error that does not exist yet.
 class SelfReferringError extends Error {
 	override readonly cause: Error;
 
@@ -21,7 +18,6 @@ class SelfReferringError extends Error {
 	}
 }
 
-// A cause object that refers to itself, which `JSON.stringify` rejects.
 interface CircularCause {
 	code: string;
 	self?: CircularCause;
@@ -30,8 +26,6 @@ interface CircularCause {
 const circularCause: CircularCause = { code: 'EAGAIN' };
 circularCause.self = circularCause;
 
-// An error whose message is `level depth`, with a `cause` chain descending to
-// `level 0`.
 function nestedError(depth: number): Error {
 	let error = new Error('level 0');
 

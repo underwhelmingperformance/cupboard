@@ -70,8 +70,6 @@ interface GateBatchSnapshot {
 	readonly candidates: readonly CandidateRow[];
 }
 
-// The canonical compressed metadata a virtual narinfo joins in from
-// `blob_state`, keyed by NAR hash.
 interface BlobFields {
 	readonly fileHash: NixSha256HashString;
 	readonly fileSize: number;
@@ -106,9 +104,8 @@ function candidateVersionKey(
 	]);
 }
 
-// The exclusive upper bound of the cache-name range a non-empty prefix
-// selector matches: the prefix with its last code unit incremented. Cache
-// names are ASCII, so the successor never overflows a code point.
+// Increment the last code unit to form an exclusive upper bound. Cache names
+// are ASCII, so this cannot split or overflow a code point.
 function prefixUpperBound(prefix: string): string {
 	const last = prefix.codePointAt(prefix.length - 1);
 
@@ -144,28 +141,21 @@ function selectorCondition(selector: {
 }
 
 /**
- * Serves reuse-view narinfo lookups. This is a deliberate exception to the
- * read architecture: ordinary narinfo reads never enter the Durable Object,
- * but a view needs the definition-revision fence and the stored row fields,
- * so it pays the round trip. The gate is held only for synchronous row reads;
- * the D1 edge, ownership and shared-fact reads and the canonical-object
- * probes all run between the two gate entries, and the second entry
- * revalidates everything the first snapshotted.
+ * Resolves narinfos through a reuse view. Unlike ordinary narinfo reads, this
+ * path enters the Durable Object so it can fence the view revision and local
+ * candidate generations. Shared D1 and R2 reads run outside the input gate,
+ * followed by a synchronous revalidation under the gate.
  */
 export class ReuseViewLookupService {
-	// An over-limit view is a configuration state, not an event: probed at
-	// planner concurrency it would repeat this warning per lookup and drown
-	// the genuinely rare integrity events on the same channel, so each view
-	// warns once per instance lifetime.
+	// Planner concurrency can repeat an over-limit lookup many times. Warn once
+	// per view so these configuration warnings do not obscure integrity events.
 	private readonly warnedOverLimitViews = new Set<string>();
 
 	constructor(private readonly context: ServerContext) {}
 
-	// Gate 1: the view definition and the local candidate rows, read
-	// synchronously under the input gate so they are one consistent snapshot.
-	// Each selector issues one bounded query against the (store_path_hash,
-	// cache) index, so the work scales with the selector list and the copies
-	// of this hash, not with everything the source caches hold.
+	// Read the view revision and candidates in one input-gate snapshot. Each
+	// selector uses the (store_path_hash, cache) index and returns a bounded
+	// number of rows.
 	private snapshotCandidates(
 		logger: Logger,
 		view: ParsedReuseViewName,
@@ -362,11 +352,9 @@ export class ReuseViewLookupService {
 		};
 	}
 
-	// Between the gates: retain only candidates backed by the exact committed
-	// D1 edge, this tenant's ownership fact, the shared blob fact, and a live
-	// canonical object. A local row carries no reservation state, so an
-	// in-flight commit's reserved generation shows up here with no edge and is
-	// rejected. Persistent D1 or R2 failure refuses retryably.
+	// A local narinfo row can describe a generation that is still reserved.
+	// Require the exact committed edge, tenant ownership, blob metadata, and a
+	// live canonical object before using a candidate.
 	private async verifyOffGate(
 		snapshot: GateSnapshot
 	): Promise<VerifiedCandidates> {
@@ -571,19 +559,12 @@ export class ReuseViewLookupService {
 		};
 	}
 
-	// Gate 2: the answer is only served if the definition revision and every
-	// verified candidate identity are exactly as gate 1 read them, so a
-	// concurrent view change, recommit, or deletion produces a miss instead of
-	// admitting a stale generation. Candidates the off-gate phase already
-	// discarded contribute nothing to the answer, so churn on those rows is
-	// not rechecked: a reclaimed reservation would otherwise turn the lookup
-	// into a miss, and Nix caches a miss in its negative narinfo cache, so the
-	// reader would keep missing after the churn had passed. The conflict
-	// computation is decided against the gate-1 snapshot: a copy whose first
-	// commit lands after that snapshot affects the next lookup (answers are
-	// no-store), exactly as a commit landing just after the response would.
-	// The revision sequence survives view deletion, so a deleted-and-recreated
-	// view can never present the revision this lookup captured.
+	// Revalidate the view revision and each surviving candidate under the input
+	// gate. A concurrent view edit, recommit, or deletion then produces a miss
+	// instead of serving a stale generation. Do not recheck candidates already
+	// rejected off-gate: churn in an unusable row must not create a negative Nix
+	// cache entry. Revision numbers also survive deletion, so recreating a view
+	// cannot match a revision captured before deletion.
 	private revalidateSnapshot(
 		snapshot: GateSnapshot,
 		view: ParsedReuseViewName,
@@ -682,10 +663,9 @@ export class ReuseViewLookupService {
 		return verified;
 	}
 
-	// Group by the semantic fields signed into or carried by the narinfo;
-	// signature sets may differ across key rotation without making two copies
-	// conflict, and Nix signatures cover the common fingerprint (whose
-	// references are a sorted set), so grouping compares sorted references.
+	// Signature sets may differ after key rotation without making two copies
+	// conflict. Compare the common fingerprint fields instead, with references
+	// sorted because the fingerprint treats them as a set.
 	private hasSingleSemanticCandidate(
 		logger: Logger,
 		view: ParsedReuseViewName,
@@ -780,8 +760,7 @@ export class ReuseViewLookupService {
 			)
 		].toSorted(byCodeUnit);
 
-		// The virtual narinfo is served beneath `/reuse/<view>/`, two segments
-		// deep, and points back at the tenant's canonical NAR route.
+		// This narinfo is two path segments below the tenant's canonical NAR route.
 		return new NarInfo(
 			new StorePath(row.storePath),
 			`../../${narObjectKey(row.narHash)}`,
@@ -797,10 +776,8 @@ export class ReuseViewLookupService {
 		);
 	}
 
-	// Wraps the authoritative shared-fact reads behind the serve: a fault that
-	// survives the bounded retry refuses retryably rather than answering,
-	// since a miss here would send the reader off to rebuild a path that
-	// exists.
+	// A shared-state fault must remain distinguishable from a missing path. The
+	// latter can make Nix rebuild a path that the cache still has.
 	private async sharedFacts<T>(read: () => Promise<T>): Promise<T> {
 		try {
 			return await read();
@@ -810,12 +787,10 @@ export class ReuseViewLookupService {
 	}
 
 	/**
-	 * Resolves one store-path hash through a view: the rendered virtual
-	 * narinfo on a verified single-candidate answer, or `undefined` for every
-	 * kind of miss (unknown view, no candidates, over the candidate limit,
-	 * conflicting candidates, or a concurrent mutation detected by the second
-	 * gate entry). Persistent D1 or R2 failure throws retryably instead of
-	 * answering: a miss would read as the path not existing.
+	 * Returns a virtual narinfo when every usable source agrees on the path.
+	 * Unknown views, absent or conflicting candidates, over-limit candidate
+	 * sets, and concurrent mutations return `undefined`. Shared-state failures
+	 * throw a retryable error instead of appearing to be a missing path.
 	 */
 	async lookup(
 		logger: Logger,
@@ -843,7 +818,9 @@ export class ReuseViewLookupService {
 	}
 
 	/**
-	 * Finds the requested hashes which a reuse view cannot serve.
+	 * Deduplicates the requested hashes and returns those without one verified,
+	 * unambiguous candidate. A concurrent view mutation invalidates the complete
+	 * batch rather than mixing revisions.
 	 */
 	async missingStorePathHashes(
 		logger: Logger,

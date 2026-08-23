@@ -52,11 +52,6 @@ interface ConfirmableOptions {
 	readonly yes?: boolean;
 }
 
-/**
- * The part of the derived client that the policy commands use, in the
- * contract's input and output shapes. The real `tenantRpc(...).policies`
- * satisfies this interface by construction.
- */
 export interface PolicyClient {
 	list(): Promise<ParsedRetentionPolicyListResponse>;
 	add(input: RetentionPolicyAddBody): Promise<ParsedRetentionPolicySummary>;
@@ -313,7 +308,8 @@ export async function runPolicyRemove(
 ): Promise<void> {
 	const outcome = await ui.confirm({
 		message: `Remove retention policy ${id}?`,
-		detail: 'Paths kept only by this policy fall back to the default retention.'
+		detail:
+			'Existing roots keep their expiry. New roots no longer use this policy.'
 	});
 
 	if (outcome !== 'yes') {

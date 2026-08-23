@@ -8,17 +8,15 @@ import { z } from 'zod';
 const reportedErrors = new WeakSet<object>();
 
 /**
-Records that a diagnostic for an error has already been emitted.
-*/
+ * Records an error object's identity globally so another reporter can suppress
+ * a duplicate diagnostic. Primitive thrown values cannot be tracked.
+ */
 export function markErrorReported(error: unknown): void {
 	if (typeof error === 'object' && error !== null) {
 		reportedErrors.add(error);
 	}
 }
 
-/**
-Whether a reporter has already emitted a diagnostic for an error.
-*/
 export function wasErrorReported(error: unknown): boolean {
 	return (
 		typeof error === 'object' && error !== null && reportedErrors.has(error)
@@ -28,23 +26,20 @@ export function wasErrorReported(error: unknown): boolean {
 export interface PhaseContext {
 	fact(label: string, value: string | number): void;
 	/**
-	 * Records a warning for this unit. The renderer emits it without interrupting
-	 * an active animation and repeats it when the unit ends, so clearing a spinner
-	 * or task log does not remove the warning.
+	 * Reports a warning for this unit. JSON and GitHub modes emit it immediately.
+	 * Terminal spinners and progress bars defer it until the animation ends; a
+	 * task log shows it live and repeats it after the task closes.
 	 */
 	warn(label: string, value?: string): void;
 }
 
-/**
-Drives a quantitative progress bar over a known total.
-*/
 export interface ProgressHandle {
 	/**
 	Advance the bar by `step` units (default 1), optionally retitling it.
 	*/
 	advance(step?: number, message?: string): void;
 	/**
-	Annotate the bar with a live key/value, like {@link PhaseContext.fact}.
+	Adds or replaces a live key/value annotation.
 	*/
 	fact(label: string, value: string | number): void;
 	/**
@@ -54,24 +49,15 @@ export interface ProgressHandle {
 }
 
 export interface ProgressOptions {
-	/**
-	The value the bar reaches when the work is complete.
-	*/
 	readonly total: number;
 }
 
-/**
-One named group of sub-steps within a {@link StepLog}.
-*/
 export interface StepGroup {
 	message(message: string): void;
 	success(message: string): void;
 	error(message: string): void;
 }
 
-/**
-A task whose body reports grouped sub-steps as it runs.
-*/
 export interface StepLog {
 	message(message: string): void;
 	group(name: string): StepGroup;
@@ -87,80 +73,65 @@ export interface ResultRow {
 }
 
 /**
- * A command result with terminal rows and a typed machine payload. Terminal
- * mode renders `rows` as a card. JSON mode emits `{event:'result', kind, data}`.
- * `kind` is the stable result identifier and `data` is the typed value.
+ * `kind` and `data` are the stable machine result. JSON mode emits them as a
+ * result event, and every mode appends them to `resultFile` when configured.
+ * Terminal mode renders `rows` as a card; GitHub mode writes them as plain
+ * `label: value` lines. Rows and `empty` are display-only.
  */
 export interface ResultPayload<T = unknown> {
 	readonly kind: string;
 	readonly data: T;
 	readonly rows: readonly ResultRow[];
 	/**
-	 * Text to render in terminal mode when `rows` is empty. Machine mode still
-	 * emits the empty `data` value.
+	 * Terminal and GitHub modes render this text when `rows` is empty. JSON mode
+	 * still emits the empty `data` value.
 	 */
 	readonly empty?: string;
 }
 
 export interface Reporter {
-	/**
-	A unit of work shown as a spinner with live qualitative facts.
-	*/
 	phase<T>(
 		label: string,
 		body: (context: PhaseContext) => Promise<T> | T
 	): Promise<T>;
-	/**
-	A unit of work shown as a progress bar over a known total.
-	*/
 	progress<T>(
 		label: string,
 		options: ProgressOptions,
 		body: (bar: ProgressHandle) => Promise<T> | T
 	): Promise<T>;
-	/**
-	A unit of work shown as a task with grouped sub-steps.
-	*/
 	steps<T>(label: string, body: (log: StepLog) => Promise<T> | T): Promise<T>;
 	result(payload: ResultPayload): void;
 	/**
-	 * Writes a raw payload, followed by a newline, to stdout in both terminal and
-	 * JSON modes. This is the reporter's only stdout sink: progress, results and
-	 * diagnostics all go to stderr, so a payload written here can be redirected on
-	 * its own (`cupboard pubkey <url> > key.txt`).
+	 * Writes a raw payload followed by a newline to `out`. JSON mode keeps `out`
+	 * separate from its event stream. GitHub mode writes all rendering to `out`.
+	 * The terminal adapter uses `out` for data while Clack writes its UI directly.
 	 */
 	data(text: string): void;
 	warn(label: string, value?: string): void;
 	info(message: string): void;
 	/**
-	 * Reports a sub-step that completed its work: a green marker line in terminal
-	 * mode, or one `{event:'success', message}` in JSON mode.
+	 * Reports completed work as a terminal success marker, a JSON `success` event,
+	 * or a GitHub notice when workflow commands are active.
 	 */
 	success(message: string): void;
 	/**
-	 * Reports a sub-step that was skipped because there was nothing to do: a
-	 * neutral marker line in terminal mode, or one `{event:'step', message}` in
-	 * JSON mode.
+	 * Reports skipped work as a terminal step marker, a JSON `step` event, or a
+	 * plain GitHub log line.
 	 */
 	step(message: string): void;
 	/**
-	 * Reports a terminal failure: a red marker line in terminal mode, with the
-	 * error's `cause` chain indented under it, or one `{event:'error', name,
-	 * message}` in JSON mode, with an added `causes` array when the error has a
-	 * `cause`.
+	 * Reports a failure with its cause chain. Terminal mode renders an indented
+	 * error, JSON mode emits an `error` event, and GitHub mode uses an annotation
+	 * when workflow commands are active.
 	 */
 	error(error: unknown): void;
 }
 
-/**
-Terminal (clack), line-delimited JSON, or GitHub Actions output.
-*/
 export type ReporterMode = 'terminal' | 'json' | 'github';
 
 /**
- * The phases `cupboard build-push` reports, in run order. Each value is the
- * phase label emitted in every reporter mode. JSON consumers identify phase
- * events by this label.
+ * Build-push emits these phase labels in run order. The labels remain stable
+ * because JSON consumers use them to identify phase events.
  */
 export const buildPushPhases = {
 	build: 'Building',
@@ -174,15 +145,13 @@ export type BuildPushPhase = keyof typeof buildPushPhases;
 
 export interface ReporterOptions {
 	/**
-	 * Where progress and diagnostics are written, one line at a time; defaults to
-	 * `process.stderr`. Tests can pass an in-memory `node:stream.Writable` to
-	 * assert on the output.
+	 * Destination for JSON events. {@link createReporter} defaults it to stderr;
+	 * terminal and GitHub reporters do not use it.
 	 */
 	readonly stream?: NodeJS.WritableStream;
 	/**
-	 * Where `data` payloads are written; defaults to `process.stdout`. Kept
-	 * separate from `stream` so a payload can be redirected without the progress
-	 * output. Tests can pass an in-memory stream to assert on it.
+	 * Destination for JSON and terminal `data` payloads, and for all GitHub
+	 * rendering. Defaults to stdout.
 	 */
 	readonly out?: NodeJS.WritableStream;
 	/**
@@ -190,16 +159,12 @@ export interface ReporterOptions {
 	*/
 	readonly now?: () => number;
 	/**
-	 * An absolute path to append one JSONL result event to for every
-	 * {@link Reporter.result}, in every mode. Read the file back with
-	 * {@link parseReporterResults}.
+	 * A path to which every mode appends one JSONL event for each
+	 * {@link Reporter.result}. Read it with {@link parseReporterResults}.
 	 */
 	readonly resultFile?: string;
 }
 
-/**
-One result event as persisted to a `--result-file`, carrying its machine payload.
-*/
 export const reporterResultEventSchema = z.strictObject({
 	kind: z.string(),
 	data: z.unknown()
@@ -207,9 +172,6 @@ export const reporterResultEventSchema = z.strictObject({
 
 export type ReporterResultEvent = z.infer<typeof reporterResultEventSchema>;
 
-/**
-Thrown by {@link parseReporterResults} for a line that is not a valid result event.
-*/
 export class MalformedResultLineError extends Error {
 	constructor(readonly line: string) {
 		super('reporter result line is not a valid result event');
@@ -275,14 +237,10 @@ export function appendResultEvent(
 	);
 }
 
-// A no-op when no result file is configured, otherwise an appender bound to it,
-// so each reporter's `result` can record unconditionally.
 function resultAppender(resultFile?: string): (payload: ResultPayload) => void {
 	if (resultFile === undefined) {
 		return () => {
-			/*
-			no result file: nothing to persist
-			*/
+			// Intentionally empty result appender.
 		};
 	}
 
@@ -295,13 +253,13 @@ function warnText(label: string, value?: string): string {
 	return value === undefined ? label : `${label}: ${value}`;
 }
 
-// A long progress phase emits an interim `progress` event at most this often.
-// CI receives periodic updates without receiving one event for every byte.
+// Emit at most one interim update per interval. This keeps long operations
+// visible without producing one event or line for every unit of work.
 const progressIntervalMs = 2000;
 
 /**
- * The line-delimited JSON reporter: the machine-readable contract. Terminal
- * rendering lives in `@cupboard/cli-ui`, which selects it for machine mode.
+ * Emits the machine-readable contract as line-delimited JSON to `stream` and
+ * writes raw data to `out`. The defaults are stderr and stdout respectively.
  */
 export function createReporter(options: ReporterOptions = {}): Reporter {
 	return createJsonReporter(
@@ -313,10 +271,11 @@ export function createReporter(options: ReporterOptions = {}): Reporter {
 }
 
 /**
- * The GitHub Actions reporter renders phases and tasks as collapsible log
- * groups. It renders facts and results as `label: value` lines, maps warnings,
- * successes and failures to workflow-command annotations, writes the run log to
- * stdout, and records results in the configured result file.
+ * Writes all output to `out`, which defaults to stdout. When
+ * `GITHUB_ACTIONS=true`, phases and tasks use workflow groups and warnings,
+ * successes and failures use command annotations. Otherwise the shared command
+ * emitter degrades them to plain lines. Results use `label: value` lines in
+ * either environment.
  */
 export function createGithubReporter(options: ReporterOptions = {}): Reporter {
 	return buildGithubReporter(
@@ -354,8 +313,8 @@ function createJsonReporter(
 		async phase(label, body) {
 			const facts: Record<string, string> = {};
 			const startedAt = now();
-			// Measured from the start, so a phase short enough to finish within one
-			// interval emits no interim event, only the final summary.
+			// Start the interval clock with the phase, so short phases emit only the
+			// final event.
 			let lastEmitAt = startedAt;
 
 			try {
@@ -406,8 +365,8 @@ function createJsonReporter(
 			const facts: Record<string, string> = {};
 			const startedAt = now();
 			let completed = 0;
-			// Measured from the start, so a phase short enough to finish within one
-			// interval emits no interim event, only the final summary.
+			// Start the interval clock with the phase, so short phases emit only the
+			// final event.
 			let lastEmitAt = startedAt;
 
 			const finish = (status: 'ok' | 'failed', extra: object): void => {
@@ -550,9 +509,6 @@ function createJsonReporter(
 	};
 }
 
-// Splits any thrown value into the fields of the JSON error event. `causes` is
-// omitted when the error has no cause, so an event for such an error keeps its
-// two fields.
 function describeError(error: unknown): {
 	name: string;
 	message: string;
@@ -607,8 +563,8 @@ function buildGithubReporter(
 			return;
 		}
 
-		// commands.error escapes newlines, so the multi-line text stays one
-		// annotation.
+		// With `GITHUB_ACTIONS=true`, the command emitter escapes newlines so the
+		// complete cause chain remains in one annotation.
 		commands.error(formatErrorWithCauses(error));
 		markErrorReported(error);
 	};
@@ -645,8 +601,8 @@ function buildGithubReporter(
 
 			const facts = new Map<string, string>();
 			const startedAt = now();
-			// Measured from the start, so a phase short enough to finish within one
-			// interval emits no interim line, only the final summary.
+			// Start the interval clock with the phase, so short phases emit only the
+			// final line.
 			let lastEmitAt = startedAt;
 			let completed = 0;
 

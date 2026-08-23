@@ -16,8 +16,8 @@ import {
 import { type ExactWorkflowReference } from './convention.ts';
 
 /**
- * Confirms that an exact workflow reference resolves to a workflow file on
- * GitHub and, for a tag, an immutable published release.
+ * Checks that GitHub currently returns a workflow file for an exact reference.
+ * For a tag, GitHub must also report that the associated release is immutable.
  */
 export async function verifyWorkflowReference(
 	parsed: ExactWorkflowReference,

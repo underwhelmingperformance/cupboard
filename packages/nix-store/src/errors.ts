@@ -9,10 +9,6 @@ export class MalformedNarInfoLineError extends ProtocolError {
 	}
 }
 
-/**
- * A narinfo that is missing a field required by Nix. The reader rejects the
- * entire document as corrupt.
- */
 export class CorruptNarInfoError extends ProtocolError {
 	constructor(public readonly storePath: StorePathString) {
 		super(`The narinfo served for ${storePath} is missing required fields`);
@@ -20,9 +16,6 @@ export class CorruptNarInfoError extends ProtocolError {
 	}
 }
 
-/**
-A narinfo that describes a path other than the requested path.
-*/
 export class MismatchedNarInfoPathError extends ProtocolError {
 	constructor(public readonly storePath: StorePathString) {
 		super(`The narinfo served does not describe ${storePath}`);

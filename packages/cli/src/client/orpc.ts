@@ -22,12 +22,6 @@ import { CupboardHttpError } from '../errors.ts';
 import { type AccessCredential, bearerAttempt } from './credentials.ts';
 import { reachableFetcher } from './transport.ts';
 
-/**
- * The tenant admin client, derived entirely from the contract: every
- * procedure, path, input and output comes from @cupboard/protocol/contract,
- * and every response is validated against the contract's output schemas
- * before the caller sees it.
- */
 export type TenantRpc = JsonifiedClient<
 	ContractRouterClient<typeof tenantContract>
 >;
@@ -35,28 +29,20 @@ export type TenantRpc = JsonifiedClient<
 export interface TenantRpcOptions {
 	readonly credential?: AccessCredential;
 	readonly signal?: AbortSignal;
-	/**
-	Test hook standing in for global fetch.
-	*/
 	readonly fetcher?: typeof fetch;
 }
 
 const unauthorizedStatusCode = 401;
 
-/**
- * The control-plane admin client, derived from the control contract the same
- * way {@link TenantRpc} derives from the tenant one.
- */
 export type ControlRpc = JsonifiedClient<
 	ContractRouterClient<typeof controlContract>
 >;
 
 /**
- * Builds the derived client against a tenant base URL (the worker origin, or
- * `https://host/t/<slug>` for a hosted tenant; the link preserves the path
- * prefix). The credential binds at construction; a provider-backed credential
- * is refreshed once on a 401 and the request retried, matching the long-push
- * behaviour of the hand-written client.
+ * Creates a tenant admin client from the protocol contract and validates each
+ * successful response against the procedure's output schema. The client
+ * preserves a tenant path prefix in the base URL. After a 401, it refreshes a
+ * provider-backed credential once and retries the request.
  */
 export function tenantRpc(
 	baseUrl: URL,
@@ -66,8 +52,9 @@ export function tenantRpc(
 }
 
 /**
- * Builds the derived control client against the deployment's bare host; the
- * contract's procedures live under its `/control` prefix.
+ * Creates a control-plane client from the protocol contract and validates each
+ * successful response against the procedure's output schema. The client appends
+ * `/control` to the deployment's bare URL.
  */
 export function controlRpc(
 	baseUrl: URL,
@@ -96,13 +83,9 @@ function derivedClient<C extends AnyContractRouter>(
 
 			return {};
 		},
-		// Bodies are buffered JSON, so cloning the request per attempt is cheap. A
-		// 401 refreshes the bearer once; a transient failure (a network fault or a
-		// gateway/overload status: 429, 502, 503, 504) backs off and retries, so a
-		// single Durable Object blip does not fail a long push of negotiate and
-		// commit calls. The contract's procedures are idempotent or self-healing
-		// under a repeat (a re-negotiate's unused rows are reaped), so a retried
-		// call is safe.
+		// Each attempt clones the buffered JSON request. A 401 refreshes the bearer
+		// once. A rejected fetch or a 429, 502, 503 or 504 response uses the shared
+		// transient retry budget.
 		fetch: async (request, init) => {
 			const requestHeaders = Object.fromEntries(request.headers.entries());
 			let attempt = await bearerAttempt(credential, requestHeaders);
@@ -152,20 +135,19 @@ function derivedClient<C extends AnyContractRouter>(
 
 const serverErrorThreshold: number = StatusCodes.INTERNAL_SERVER_ERROR;
 
-// The 5xx statuses the contract maps to typed errors the CLI acts on; they are
-// left for oRPC to decode so `translateRpcError` can turn them into their
-// actionable forms (an over-quota write, a deployment in maintenance).
+// Leave 503 and 507 responses for oRPC to decode. Of these statuses,
+// `translateRpcError` converts only 507 to a CLI quota error; 503 remains an
+// ORPCError so callers can inspect its code and data.
 const typedServerErrorStatuses = new Set<number>([
 	StatusCodes.SERVICE_UNAVAILABLE,
 	StatusCodes.INSUFFICIENT_STORAGE
 ]);
 
 /**
- * Turns an unmapped server failure into a {@link CupboardHttpError} carrying the
- * request, status and Cloudflare ray id, so a bare `500 Internal server error`
- * arrives with the handle that ties it to its server log line. Statuses the
- * contract maps to typed errors pass through
- * unchanged for oRPC to decode.
+ * For an unmapped 5xx response, throws {@link CupboardHttpError} with the
+ * decoded oRPC message or raw response body and the `cf-ray` header when
+ * present. Contract-declared 503 and 507 responses pass through for oRPC to
+ * decode.
  */
 async function settleServerError(
 	request: Request,
@@ -187,8 +169,8 @@ async function settleServerError(
 	);
 }
 
-// A worker 5xx is an oRPC error envelope; let oRPC decode it so the message is
-// the one it would have surfaced. A raw gateway 5xx is not, so keep its body.
+// Use the decoded message when the body is an oRPC error envelope. Otherwise
+// preserve the trimmed response text without attributing its source.
 async function serverErrorDetail(response: Response): Promise<string> {
 	const body = await response.text();
 
@@ -199,7 +181,7 @@ async function serverErrorDetail(response: Response): Promise<string> {
 			return createORPCErrorFromJson(json).message;
 		}
 	} catch {
-		// Not JSON; fall back to the raw body below.
+		// Preserve non-JSON response text below.
 	}
 
 	return body.trim();

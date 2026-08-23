@@ -113,13 +113,10 @@ async function hasSameReadVerifier(
 	);
 }
 
-// Writes the authoritative `tenant` row, returning its summary. It is the first
-// step of provisioning; the caller then configures the Durable Object and only
-// then publishes the admission manifest, so a tenant is admitted only once its
-// object is configured. This is idempotent: a retry after a mid-provision failure
-// finds the existing row and, when the request matches it, returns it so the caller
-// can replay the configure and publish. A different config for an existing slug is
-// a genuine conflict.
+// This is the first provisioning step. The caller configures the Durable Object
+// before publishing its membership marker and filter, so requests cannot reach
+// an unconfigured object. A matching retry returns the existing row and can
+// safely repeat the later steps; a different configuration is a conflict.
 export async function ensureTenant(
 	database: Database,
 	body: ParsedTenantCreateBody,
@@ -151,13 +148,13 @@ export async function ensureTenant(
 		return toSummary(row);
 	}
 
-	// A conflicting slug: validate the existing tenant config before touching the
-	// usage row, so a request that does not match cannot write a wrong-quota usage row
-	// on the way to rejecting and poison a later legitimate retry.
+	// Validate the existing configuration before touching usage. Otherwise a
+	// conflicting request could create a usage row with the wrong quota and make a
+	// later matching retry fail.
 	const existing = await loadTenant(database, body.id);
 
-	// A slug that has begun or finished offboarding is retired: never re-provisioned,
-	// so a re-used slug can never resurrect a removed tenant's identity.
+	// Never reuse a slug after offboarding has begun; doing so could restore the
+	// removed tenant's identity.
 	if (existing?.status === 'offboarding' || existing?.status === 'offboarded') {
 		throw new TenantAlreadyExistsError(body.id);
 	}
@@ -166,10 +163,8 @@ export async function ensureTenant(
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
-	// The config matches: ensure the usage row idempotently (recovering a crash that
-	// left only the tenant row), then accept the quota only if it matches the stored
-	// one. `onConflictDoNothing` keeps an existing quota, so a different quota is a
-	// genuine conflict, surfaced immediately.
+	// A crash can leave the tenant row without its usage row. Recreate the usage
+	// row idempotently, but accept an existing row only when its quota matches.
 	await ensureUsageRow(database, body, now);
 	const existingQuota = await loadQuota(database, body.id);
 
@@ -180,9 +175,8 @@ export async function ensureTenant(
 	return toSummary(existing);
 }
 
-// The Durable Object needs a usage row to charge against before the tenant takes
-// any write. Created idempotently, so a fresh provision and a crash-recovery retry
-// both leave exactly one row, keeping any quota already stored.
+// The usage row must exist before the tenant accepts writes. Conflict handling
+// preserves any quota already stored during a provisioning retry.
 async function ensureUsageRow(
 	database: Database,
 	body: ParsedTenantCreateBody,
@@ -238,21 +232,18 @@ export async function listTenants(
 	return rows.map((row) => toSummary(row));
 }
 
-// Sets a tenant's status, returning its summary. The caller republishes the
-// admission manifest after this so the change reaches the read path. Suspending
-// stops new writes at once (the Worker reads status from D1 before dispatching a
-// write) and reads after the manifest TTL; offboarding marks the tenant so nothing
-// new is admitted while its bounded drain runs.
+// The caller invalidates the admission cache after this update. Writes read D1
+// before dispatch, so suspension stops them immediately; reads observe the new
+// status after their short cache TTL. Offboarding keeps the tenant reachable only
+// for its bounded drain.
 export async function setTenantStatus(
 	database: Database,
 	id: TenantId,
 	status: 'suspended' | 'offboarding'
 ): Promise<ParsedTenantSummary> {
-	// `offboarded` is terminal: the conditional update never moves a tenant out of it,
-	// so a repeated delete after finalisation cannot flip the slug back to offboarding
-	// (and the caller's manifest republish never re-admits it). An update that matches
-	// no row is either a missing tenant or a retired one; the follow-up read tells them
-	// apart so each gets its own error.
+	// `offboarded` is terminal. The conditional update prevents a repeated delete
+	// from moving the slug back to offboarding. A follow-up read distinguishes a
+	// missing tenant from a retired one when the update matches no row.
 	const updated = await database
 		.update(d1Schema.tenant)
 		.set({ status })
@@ -279,9 +270,8 @@ export async function setTenantStatus(
 	throw new TenantRetiredError(id);
 }
 
-// Resumes a suspended tenant, returning its summary. Only a `suspended` tenant
-// moves back to `active`; an already-active tenant is a conflict and a draining or
-// retired one is gone, so resume never silently no-ops or resurrects a tenant.
+// Only a suspended tenant can return to active. An active tenant is a conflict,
+// while an offboarding or retired tenant remains terminal.
 export async function resumeTenant(
 	database: Database,
 	id: TenantId
@@ -312,8 +302,9 @@ export async function resumeTenant(
 	throw new TenantNotSuspendedError(id);
 }
 
-// Sets a tenant's read mode, returning its summary. Only an active or suspended
-// tenant is mutated; a draining or retired one is refused.
+/**
+Changes the read mode only while the tenant is active or suspended.
+*/
 export async function setTenantReadMode(
 	database: Database,
 	id: TenantId,
@@ -322,10 +313,9 @@ export async function setTenantReadMode(
 	return updateLiveTenant(database, id, { readMode });
 }
 
-// Sets a tenant's read credential (the Basic-auth user and a freshly salted hash
-// of its password), returning its summary. Only an active or suspended tenant is
-// mutated, so a credential is never reintroduced into a draining or scrubbed
-// tenant.
+/**
+Replaces the read credential only while the tenant is active or suspended.
+*/
 export async function setTenantReadCredential(
 	database: Database,
 	id: TenantId,
@@ -340,8 +330,8 @@ export async function setTenantReadCredential(
 	});
 }
 
-// Clears a tenant's read credential, returning its summary; a private cache with
-// no credential then fails closed. Only an active or suspended tenant is mutated.
+// A private tenant without a complete read credential fails closed. Do not clear
+// credentials after offboarding has begun.
 export async function clearTenantReadCredential(
 	database: Database,
 	id: TenantId
@@ -353,9 +343,6 @@ export async function clearTenantReadCredential(
 	});
 }
 
-// Applies a column update to a tenant only while it is active or suspended,
-// refusing a draining (`offboarding`) or retired (`offboarded`) one, and telling a
-// missing tenant apart from a retired one.
 async function updateLiveTenant(
 	database: Database,
 	id: TenantId,
@@ -386,14 +373,10 @@ async function updateLiveTenant(
 	throw new TenantRetiredError(id);
 }
 
-// Finalises a drained tenant into its terminal scrubbed tombstone in one atomic
-// batch: the registry row stays (so the slug is never reused) with its status set to
-// `offboarded`, its read credential cleared, and its owner OIDC identity blanked (the
-// not-null columns cannot be dropped, so they are emptied), and the usage row is
-// dropped. The Durable Object's own storage (signing keys, identity, narinfos) is
-// wiped through its `purgeStorage` RPC by the caller; what remains here is an
-// auditable record that the slug existed and is retired, holding no tenant identity or
-// secret.
+// Keep a tombstone so the slug cannot be reused, but clear the read credential,
+// owner identity, and usage in one batch. The caller separately purges the
+// tenant's Durable Object. The owner columns are not nullable, so finalisation
+// stores empty strings rather than deleting them.
 export async function finaliseOffboardedTenant(
 	database: Database,
 	id: TenantId

@@ -31,29 +31,21 @@ import {
 import { queryMissingOver } from './realisation-partition.ts';
 import type { SubstituterClient } from './substituter.ts';
 
-/**
- * A read view of the local Nix store's SQLite database, narrowed to the
- * queries path metadata reads need. Injected so the client is tested without a
- * real database.
- */
 export interface NixStoreDatabase {
 	pathRow(storePath: string): NixStoreRow | undefined;
 	references(id: number): readonly string[];
 	/**
-	The subset of the given paths registered as valid, in database order.
+	Returns registered paths in database order.
 	*/
 	validPaths(storePaths: readonly string[]): readonly string[];
 	/**
-	 * The registered output paths of the given derivations, deduplicated and
+	 * Returns registered output paths for the given derivations, deduplicated and
 	 * sorted.
 	 */
 	derivationOutputs(drvPaths: readonly string[]): readonly string[];
 	close(): void;
 }
 
-/**
-Reads a store file, injected for tests.
-*/
 export type ReadStoreFile = (filePath: string) => Promise<string>;
 
 const defaultReadStoreFile: ReadStoreFile = async (filePath) => {
@@ -72,9 +64,6 @@ const defaultReadStoreFile: ReadStoreFile = async (filePath) => {
 	}
 };
 
-/**
-A store file larger than a derivation can be.
-*/
 export class StoreFileTooLargeError extends NixStoreError {
 	constructor(
 		public readonly filePath: string,
@@ -93,7 +82,7 @@ const defaultStoreDirectory = storeDirectorySchema.parse('/nix/store');
 export interface NixStoreRow {
 	readonly id: number;
 	/**
-	The NAR hash as stored: `sha256:` followed by a base16 digest.
+	Stored in the database as `sha256:<base16>`.
 	*/
 	readonly hash: string;
 	readonly narSize: number;
@@ -103,17 +92,11 @@ export interface NixStoreRow {
 	readonly ca: string | undefined;
 }
 
-/**
-What a local store reads beyond its database.
-*/
 export interface NixLocalStoreOptions {
-	/**
-	The directory the store's paths are named under.
-	*/
 	readonly storeDirectory?: StoreDirectory;
 	/**
-	 * The physical store directory used to read derivations. A rooted store
-	 * retains its logical store paths while placing their contents below the root.
+	 * Reads derivations from this physical store directory. A rooted store retains
+	 * its logical store paths while placing their contents below the root.
 	 */
 	readonly realStoreDirectory?: string;
 	readonly readStoreFile?: ReadStoreFile;
@@ -123,12 +106,9 @@ export interface NixLocalStoreOptions {
 	 */
 	readonly substituters?: SubstituterClient;
 	/**
-	Abandons a walk between levels, raising the signal's reason.
+	Aborts a missing-path traversal between levels with the signal's reason.
 	*/
 	readonly signal?: AbortSignal;
-	/**
-	The `substitute` and `always-allow-substitutes` settings.
-	*/
 	readonly substitution?: {
 		readonly substitute: boolean;
 		readonly alwaysAllowSubstitutes: boolean;
@@ -136,11 +116,10 @@ export interface NixLocalStoreOptions {
 }
 
 /**
- * Reads path information straight from the local store database, the way Nix's
- * `LocalStore` does, so closures resolve on a store with no running
- * `nix-daemon`. When substituter queries are supplied, this client also reports
- * what those substituters have, the way libstore does when it runs inside the
- * client.
+ * Reads path validity and metadata directly from the local store database, as
+ * Nix's `LocalStore` does. Closure and path queries therefore work without a
+ * running daemon. When configured with substituter queries, the client also
+ * performs the availability operations that libstore handles in-process.
  */
 export class NixLocalStoreClient implements NixStoreClient {
 	private readonly storeDirectory: StoreDirectory;
@@ -302,8 +281,8 @@ export class NixLocalStoreClient implements NixStoreClient {
 				path.join(this.realStoreDirectory, path.basename(drvPath))
 			);
 		} catch (error) {
-			// A reader error already describes what went wrong, so it is rethrown;
-			// any other error means the store does not hold the path.
+			// Keep validation failures such as StoreFileTooLargeError. Only filesystem
+			// read failures become missing-path errors.
 			if (error instanceof NixStoreError) {
 				throw error;
 			}
@@ -338,10 +317,6 @@ function requirePathInfo(
 	return pathInfoFromRow(database, storePath, row);
 }
 
-/**
- * Reads path metadata from the store database, or returns `undefined` when the
- * path is not valid.
- */
 export function pathInfoIn(
 	database: NixStoreDatabase,
 	storePath: StorePathString
@@ -411,9 +386,6 @@ export function openLocalStoreDatabase(
 	);
 }
 
-/**
-Adapt an open `node:sqlite` database to the queries the local store needs.
-*/
 export function nixStoreDatabaseFromSqlite(
 	database: DatabaseSync
 ): NixStoreDatabase {

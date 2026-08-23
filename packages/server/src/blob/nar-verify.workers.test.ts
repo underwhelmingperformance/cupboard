@@ -29,9 +29,8 @@ async function compressedBytes(bytes: Uint8Array): Promise<Uint8Array> {
 }
 
 describe('verifyDecompressedNar', () => {
-	// ~3 MB so the stream cycles the bridge's chunk queue in multiple pieces; a
-	// true multi-hundred-MB bounded-memory check belongs in the runtime
-	// benchmark, not the unit suite.
+	// Keep the payload large enough to cross the bridge in several chunks. The
+	// runtime benchmark covers bounded memory with multi-hundred-megabyte NARs.
 	const encoder = new TextEncoder();
 	const nar = encoder.encode('nar payload '.repeat(250_000));
 
@@ -87,10 +86,9 @@ describe('verifyDecompressedNar', () => {
 		const narHash = await nixNarHash(nar);
 		const declaredNarSize = 1024;
 
-		// Declaring a size far below the ~3 MB payload trips the overrun guard after
-		// the first over-limit chunk, so the read loop bails without draining the
-		// stream (the zstd-bomb defence). A reported size past the limit but well
-		// short of the full payload proves it stopped mid-stream.
+		// A declaration far below the payload size must trip the overrun guard before
+		// the stream drains. A reported size above the declaration but below the full
+		// payload proves that the zstd-bomb defence stopped decompression mid-stream.
 		const result = await verifyDecompressedNar(compressedStream(nar), {
 			narHash,
 			narSize: declaredNarSize

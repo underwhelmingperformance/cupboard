@@ -21,8 +21,7 @@ export interface Bundler {
 // The same options wrangler's deployment bundle uses for a module Worker under
 // `nodejs_compat`: keep `node:`/`cloudflare:` imports external (the runtime
 // supplies them), resolve workerd's export conditions, and inline the Durable
-// Object's `.sql` migration files as text. Validated by bundling both server
-// Workers and running them in Miniflare.
+// Object's `.sql` migration files as text.
 const baseOptions: BuildOptions = {
 	bundle: true,
 	format: 'esm',

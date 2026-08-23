@@ -26,9 +26,8 @@ import { RetentionService } from './retention-service.ts';
 
 const uploadGraceMs = 15 * 60 * 1000;
 
-// The real wall-clock instant R2 stamps onto an object written now, recovered
-// past the harness's faked `Date`, so the collection's clock can be moved
-// relative to an object's uploaded time.
+// R2 uses the real clock for `uploaded`, while this harness can replace `Date`.
+// Read an R2 timestamp before moving the fake clock past the grace period.
 async function realUploadInstant(): Promise<number> {
 	await env.BLOBS.put('probe/now', new Uint8Array([0]));
 	const head = await env.BLOBS.head('probe/now');
@@ -41,8 +40,6 @@ async function realUploadInstant(): Promise<number> {
 	return head.uploaded.getTime();
 }
 
-// A bucket whose delete rejects for `failKey`, counting the rejection, and
-// delegates every other operation: the shape of an R2 delete that does not land.
 function stagingDeleteFailingBucket(
 	target: R2Bucket,
 	failKey: string,
@@ -82,7 +79,7 @@ describe('garbage collection best-effort staging deletes', () => {
 		await clearBlobStorage();
 	});
 
-	it('keeps the outcome and runs the orphan reclaim when a staging delete fails', async () => {
+	it('reports the expired upload and still deletes orphan staging when one R2 delete fails', async () => {
 		const realNow = await realUploadInstant();
 		await initialise();
 
@@ -93,8 +90,7 @@ describe('garbage collection best-effort staging deletes', () => {
 		const orphanKey = 'staging/orphan-push/orphan.nar.zst';
 		await env.BLOBS.put(orphanKey, new Uint8Array([1, 2, 3]));
 
-		// The collection's clock sits past the upload grace so the orphan object ages
-		// into reclaimable range.
+		// Advance from R2's timestamp so the orphan is older than the upload grace.
 		vi.setSystemTime(new Date(realNow + uploadGraceMs + 5 * 60 * 1000));
 
 		const { outcome, failedDeletes } = await runInDurableObject(

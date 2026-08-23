@@ -36,8 +36,6 @@ const audience = oidcAudienceSchema.parse('client-id.apps.example.com');
 const now = new Date('2026-01-01T00:00:00.000Z');
 const kid = 'idp-key-1';
 
-// The issuer a trust rule holds after the admin API accepted it, the only way an
-// `OidcIssuer` reaches discovery from a configured rule.
 function configuredRuleIssuer(configured: string): OidcIssuer {
 	return oidcTrustAddBodySchema.parse({
 		issuer: configured,
@@ -318,7 +316,7 @@ describe('verifyInboundOidcToken', () => {
 		});
 	});
 
-	it('rejects an inbound token that carries no expiry', async () => {
+	it('rejects an inbound token without an expiry', async () => {
 		const idp = await inboundIssuer();
 		const token = await idp.signWithoutExpiry({ sub: 'owner' });
 
@@ -342,7 +340,7 @@ describe('verifyInboundOidcToken', () => {
 		});
 	});
 
-	it('accepts a token whose issuer carries a trailing slash', async () => {
+	it('treats issuer identifiers with and without one trailing slash as equivalent', async () => {
 		const idp = await inboundIssuer();
 		const token = await idp.signWithIssuer(`${issuer}/`, { sub: 'owner' });
 
@@ -380,7 +378,7 @@ describe('verifyInboundOidcToken', () => {
 		});
 	});
 
-	it('surfaces a JWKS retrieval failure as unreachable, not a bad token', async () => {
+	it('classifies a JWKS retrieval failure as an unreachable issuer', async () => {
 		const idp = await inboundIssuer();
 		const token = await idp.sign({ sub: 'owner' });
 
@@ -408,22 +406,22 @@ describe('verifyInboundOidcToken', () => {
 describe('intersectAlgorithms', () => {
 	it.each([
 		{
-			name: 'falls back to RS256 when the issuer advertises none',
+			name: 'uses RS256 when metadata omits the signing algorithms',
 			advertised: undefined,
 			expected: ['RS256']
 		},
 		{
-			name: 'narrows to the advertised asymmetric algorithms',
+			name: 'returns algorithms present in both the metadata and the allowlist',
 			advertised: ['RS256'],
 			expected: ['RS256']
 		},
 		{
-			name: 'drops advertised algorithms outside the allowlist',
+			name: 'removes an advertised algorithm outside the allowlist',
 			advertised: ['RS256', 'HS256'],
 			expected: ['RS256']
 		},
 		{
-			name: 'yields nothing when the issuer advertises only excluded algorithms',
+			name: 'returns an empty list when no advertised algorithm is allowed',
 			advertised: ['HS256'],
 			expected: []
 		}
@@ -435,7 +433,7 @@ describe('intersectAlgorithms', () => {
 });
 
 describe('fetchOidcDiscovery', () => {
-	it('reads the jwks_uri and signing algorithms, ignoring a trailing slash', async () => {
+	it('removes one trailing slash before fetching issuer metadata', async () => {
 		const requested: string[] = [];
 		const fetcher: typeof fetch = (input) => {
 			requested.push(requestUrl(input));
@@ -464,7 +462,7 @@ describe('fetchOidcDiscovery', () => {
 		});
 	});
 
-	it('omits the algorithms when the issuer does not advertise them', async () => {
+	it('returns no algorithm list when metadata omits the field', async () => {
 		const discovery = await fetchOidcDiscovery(issuer, () =>
 			Promise.resolve(
 				Response.json({
@@ -492,7 +490,7 @@ describe('fetchOidcDiscovery', () => {
 				Promise.resolve(Response.json({ issuer }))
 		},
 		{
-			name: 'metadata whose issuer does not match the requested one',
+			name: 'metadata with a different issuer',
 			fetcher: (): Promise<Response> =>
 				Promise.resolve(
 					Response.json({
@@ -502,7 +500,7 @@ describe('fetchOidcDiscovery', () => {
 				)
 		},
 		{
-			name: 'a jwks_uri served over plain http',
+			name: 'metadata with a non-loopback HTTP jwks_uri',
 			fetcher: (): Promise<Response> =>
 				Promise.resolve(
 					Response.json({
@@ -521,7 +519,7 @@ describe('fetchOidcDiscovery', () => {
 					})
 				)
 		}
-	])('throws OidcDiscoveryError on $name', async ({ fetcher }) => {
+	])('rejects $name with OidcDiscoveryError', async ({ fetcher }) => {
 		const error = await rejectedBy(() => fetchOidcDiscovery(issuer, fetcher));
 
 		expect(error).toBeInstanceOf(OidcDiscoveryError);
@@ -601,7 +599,7 @@ describe('OidcDiscoveryStore', () => {
 		]);
 	});
 
-	it('shares one fetch across the spellings a trust rule can be configured with', async () => {
+	it('shares one fetch for configured issuer values that differ only by a trailing slash', async () => {
 		const requested: string[] = [];
 		const fetcher: typeof fetch = (input) => {
 			requested.push(requestUrl(input));
@@ -623,7 +621,7 @@ describe('OidcDiscoveryStore', () => {
 		expect({ requested }).toStrictEqual({ requested: [metadataUrl] });
 	});
 
-	it('dedupes concurrent first loads into a single discovery fetch', async () => {
+	it('uses one discovery fetch for concurrent first resolutions', async () => {
 		const requested: string[] = [];
 		const fetcher: typeof fetch = (input) => {
 			requested.push(requestUrl(input));

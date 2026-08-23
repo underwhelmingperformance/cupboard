@@ -22,8 +22,6 @@ import { RetentionService } from './retention-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
 
-// The pipeline over a live instance's context, as the server itself builds it;
-// mirrors commit-batching.workers.test.ts's construction.
 function pipelineFor(context: ServerContext): CommitPipelineService {
 	const narInfoObjects = new NarInfoObjectsService(context);
 	const attestationCas = new AttestationCasService(context);
@@ -49,8 +47,6 @@ function pipelineFor(context: ServerContext): CommitPipelineService {
 	);
 }
 
-// A ReadableStream whose `pull` never resolves, modelling a stalled R2 byte
-// stream, and whose `cancel` records that it was invoked.
 function neverProducingBody(): {
 	readonly stream: ReadableStream<Uint8Array>;
 	readonly wasCancelled: () => boolean;
@@ -60,7 +56,7 @@ function neverProducingBody(): {
 	const stream = new ReadableStream<Uint8Array>({
 		pull() {
 			return new Promise(() => {
-				// Never resolves: models a stalled R2 body stream.
+				// Keep this promise pending so the body stalls until verification cancels it.
 			});
 		},
 		cancel() {
@@ -71,10 +67,6 @@ function neverProducingBody(): {
 	return { stream, wasCancelled: () => wasCancelled };
 }
 
-// Wraps a real R2 object so its `body` is replaced by the given stream, every
-// other property and method passing through to the genuine object: the shape
-// of a staging object whose network read has stalled, with every other field
-// (size, checksums, etc.) still real.
 function withStalledBody(
 	object: R2ObjectBody,
 	body: ReadableStream<Uint8Array>
@@ -98,9 +90,6 @@ function withStalledBody(
 	});
 }
 
-// A bucket whose `get` of `stalledKey` answers with `stalledObject`, every
-// other key and method passing through to the real bucket; the env-patching
-// Proxy pattern shared with object-write-order.workers.test.ts.
 function stubbedGetBucket(
 	bucket: R2Bucket,
 	stalledKey: string,
@@ -131,7 +120,7 @@ function stubbedGetBucket(
 	});
 }
 
-describe('verifyPendingNar bound against a stalled body stream', () => {
+describe('verification of a stalled staging stream', () => {
 	beforeEach(resetTestServer);
 
 	it('times out and cancels the stalled stream instead of hanging indefinitely', async () => {

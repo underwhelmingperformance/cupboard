@@ -24,10 +24,6 @@ interface FakeCupboardOptions {
 	readonly supportsResultFile?: boolean;
 }
 
-// A stand-in for the cupboard binary: an executable script that records the
-// argv it received, appends the given result events to the `--result-file` it
-// was passed, and exits with the given code. It lets the tests exercise
-// runCupboard's spawn-and-read contract without the real binary.
 async function fakeCupboard(options: FakeCupboardOptions): Promise<string> {
 	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-fake-'));
 	const scriptPath = path.join(directory, 'cupboard.cjs');
@@ -91,7 +87,7 @@ const summaryEvent = {
 };
 
 describe('runCupboard', () => {
-	it('drives the binary in GitHub mode with a result file under RUNNER_TEMP', async () => {
+	it('passes GitHub output and result-file arguments under RUNNER_TEMP', async () => {
 		const temporary = await runnerTemporary();
 		const captureArgvFile = path.join(temporary, 'argv.json');
 		const binary = await fakeCupboard({
@@ -211,7 +207,7 @@ describe('runCupboard', () => {
 		});
 	});
 
-	it('carries the recorded results and status when the binary exits non-zero', async () => {
+	it('includes recorded results and status when the binary exits non-zero', async () => {
 		const temporary = await runnerTemporary();
 		const binary = await fakeCupboard({ results: [summaryEvent], exitCode: 3 });
 
@@ -238,7 +234,7 @@ describe('runCupboard', () => {
 		});
 	});
 
-	it('tolerates a missing result file when a failed run wrote nothing', async () => {
+	it('reports the failed exit when the binary creates no result file', async () => {
 		const temporary = await runnerTemporary();
 		const binary = await fakeCupboard({
 			results: [],
@@ -262,7 +258,7 @@ describe('runCupboard', () => {
 		}).toStrictEqual({ status: 2, results: [] });
 	});
 
-	it('fails with a command error when the binary cannot run', async () => {
+	it('throws CommandFailedError when the binary cannot start', async () => {
 		const temporary = await runnerTemporary();
 
 		const error = await rejectionOf(

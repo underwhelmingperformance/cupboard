@@ -43,11 +43,6 @@ class FakeEmitter<Events extends Record<keyof Events, readonly unknown[]>> {
 	}
 }
 
-/**
- * A scriptable commit socket standing in for a `ws` connection: tests play
- * the server's side through {@link FakeEmitter.emit} and observe the traffic
- * the client sent and whether it closed the socket.
- */
 export class FakeCommitSocket
 	extends FakeEmitter<CommitSocketEvents>
 	implements CommitSocket
@@ -83,13 +78,11 @@ export class FakeCommitSocket
 	}
 
 	/**
-	 * Closes the connection as `ws` does, so that a session which closes a
-	 * connection itself still sees the events a real close delivers. A socket
-	 * still in its handshake is aborted, which `ws` reports as an error followed
-	 * by an abnormal close; an open socket reports the close alone, with the
-	 * status `ws` uses when no close frame carried one. Both events arrive after
-	 * the caller's turn, so a test can reach the state where a late event from a
-	 * superseded connection meets the session's guards.
+	 * Match the close events and ordering from `ws`. Closing during the handshake
+	 * emits an error followed by an abnormal close with status 1006. Closing an
+	 * open socket emits only status 1005, which `ws` uses when no close frame
+	 * supplies a status. Queue the events so tests can deliver a late event from
+	 * a superseded connection after the session has changed state.
 	 */
 	close(): void {
 		if (this.closed) {
@@ -114,9 +107,6 @@ export class FakeCommitSocket
 	}
 }
 
-/**
-The HTTP response of a refused upgrade, scripted the same way.
-*/
 export class FakeUpgradeFailure
 	extends FakeEmitter<UpgradeFailureEvents>
 	implements UpgradeFailure

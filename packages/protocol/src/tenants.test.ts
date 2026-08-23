@@ -32,7 +32,7 @@ describe('tenantReadCredentialSchema', () => {
 		{ name: 'a colon', user: 'ali:ce' },
 		{ name: 'a leading colon', user: ':alice' },
 		{ name: 'nothing', user: '' }
-	])('rejects a user carrying $name', ({ user }) => {
+	])('rejects a user with $name', ({ user }) => {
 		expect(
 			tenantReadCredentialSchema.safeParse({
 				user,

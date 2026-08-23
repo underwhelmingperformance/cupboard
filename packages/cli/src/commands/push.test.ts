@@ -147,9 +147,6 @@ describe('validateRetentionChoice', () => {
 			options: { githubOidc: true, dryRun: true }
 		},
 		{ name: 'an interactive push naming neither', options: {} },
-		// A run root is independent of the target-root choice: an unretained
-		// push may still bind one, attaching its commits to the run root while
-		// declaring no target root.
 		{
 			name: 'explicit unretained publication with a run root',
 			options: {
@@ -166,7 +163,7 @@ describe('validateRetentionChoice', () => {
 });
 
 describe('observedCopiesFrom', () => {
-	it('reads the copies a supervising build recorded', async () => {
+	it('parses the copy observations written by a supervising build', async () => {
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-copies-'));
 		const copiedFromFile = path.join(directory, 'observed-copies.json');
 		const appPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
@@ -185,11 +182,11 @@ describe('observedCopiesFrom', () => {
 		}
 	});
 
-	it('returns nothing when the run supplied no file', async () => {
+	it('returns undefined when the run supplied no file', async () => {
 		await expect(observedCopiesFrom(undefined)).resolves.toBeUndefined();
 	});
 
-	it('refuses a file that does not describe observed copies', async () => {
+	it('rejects a file that does not describe copy observations', async () => {
 		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-copies-'));
 		const copiedFromFile = path.join(directory, 'observed-copies.json');
 
@@ -232,7 +229,7 @@ describe('receiptBuildStore', () => {
 			},
 			expected: 'ssh-ng://builder.example'
 		}
-	])('resolves $name', ({ options, expected }) => {
+	])('returns the build store for $name', ({ options, expected }) => {
 		expect(receiptBuildStore(options)).toBe(expected);
 	});
 

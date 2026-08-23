@@ -126,53 +126,59 @@ export function registerSetupCommand(
 	program
 		.command('setup')
 		.description(
-			'Install cupboard and optionally export Nix binary cache configuration.'
+			'Acquire cupboard and optionally export Nix binary cache configuration.'
 		)
-		.option('--cupboard <json>', 'canonical cupboard acquisition JSON')
 		.option(
-			'--cupboard-version <version>',
-			'cupboard version to install: latest or an exact published release tag'
+			'--cupboard <json>',
+			'canonical acquisition JSON from resolve-cupboard'
 		)
+		.option('--cupboard-version <version>', 'release tag to install, or latest')
 		.option(
 			'--include-prereleases <value>',
 			'when resolving latest, consider prereleases: true or false'
 		)
-		.option('--github-token <token>', 'GitHub token used for release API calls')
+		.option(
+			'--github-token <token>',
+			'GitHub token for release, asset and attestation requests'
+		)
 		.option(
 			'--release-repository <repository>',
-			'repository that publishes cupboard release assets'
+			'repository that publishes cupboard releases and provenance'
 		)
 		.option(
 			'--expected-source-commit <commit>',
-			'require the release to have been built from this full commit id'
+			'require the release provenance to identify this full commit id'
 		)
 		.option(
 			'--install-dir <directory>',
-			'directory for the downloaded cupboard binary'
+			'directory for acquired cupboard files'
 		)
 		.option(
 			'--add-to-path <value>',
-			'add the install directory to PATH: true or false'
+			'add the directory containing the acquired binary to PATH: true or false'
 		)
 		.option(
 			'--cache-url <url>',
-			'cupboard Worker URL to add to Nix substituters'
+			'cupboard tenant URL to add to Nix substituters'
 		)
-		.option('--cache <name>', 'named cache to read from')
+		.option('--cache <name>', 'cache to use at the tenant URL')
 		.option(
 			'--reuse-view <name>',
 			'named tenant reuse view to add as a second substituter'
 		)
 		.option(
 			'--trusted-public-key <key>',
-			'Nix trusted public key for the cupboard cache'
+			'Nix signing key to trust for cache reads'
 		)
 		.option('--read-user <user>', 'username for private cache reads')
 		.option('--read-password <password>', 'password for private cache reads')
-		.option('--nix-config-file <path>', 'Nix config file to append to')
+		.option(
+			'--nix-config-file <path>',
+			'existing Nix config file to append generated settings to'
+		)
 		.option(
 			'--checkout-dir <directory>',
-			'workflow source checkout used for source acquisition'
+			'source checkout to build for a source acquisition'
 		)
 		.action((options: SetupOptions) =>
 			setupAction(options, environment, undefined, {
@@ -327,9 +333,6 @@ export async function setupAction(
 	);
 }
 
-/**
-Render the PATH entry for either a downloaded or immutable Nix binary.
-*/
 export function cupboardPathEntry(binaryPath: string): string {
 	return `${path.dirname(binaryPath)}\n`;
 }
@@ -419,14 +422,13 @@ export interface ResolveSubstitutersOptions {
 }
 
 /**
- * The ordered substituter list for generated Nix config: the destination
- * cache first, then, when a reuse view is configured, the view URL once its
- * `nix-cache-info` priority has been checked against the destination's.
- * Destination-before-view is an invariant (see PLAN.md, "Named tenant reuse
- * views"): a divergent input-addressed path already adopted by the
- * destination must never be replaced by a view candidate. Both fetches carry
- * the Basic read credential when one is configured; the runner's netrc only
- * covers Nix's own reads, not this check's.
+ * When a reuse view is configured, fetches both `nix-cache-info` documents and
+ * requires the destination's priority to be numerically lower. The destination
+ * remains first in the returned list. The check and ordering prevent a
+ * divergent input-addressed path in the view from replacing the destination's
+ * choice.
+ * The probes use Basic authentication because the runner's netrc applies only
+ * to later Nix reads.
  */
 export async function resolveSubstituters(
 	options: ResolveSubstitutersOptions,
@@ -463,8 +465,6 @@ export async function resolveSubstituters(
 			dependencies.signal
 		)
 	]);
-	// The priority came from the view's own `nix-cache-info`, so it is a
-	// reuse-view priority and is parsed as one.
 	const viewPriority = reuseViewPrioritySchema.parse(rawViewPriority);
 
 	if (!isDestinationPreferred(destinationPriority, viewPriority)) {
@@ -485,9 +485,8 @@ async function configureNix(
 		inputs.trustedPublicKey === ''
 			? await fetchTrustedPublicKey(inputs, reporter, dependencies)
 			: inputs.trustedPublicKey;
-	// A private tenant's reuse view lives under the same host as its
-	// destination cache, so the netrc entry built below already covers it:
-	// netrc is host-scoped, not path-scoped.
+	// A private reuse view and its destination use the same host. Netrc entries
+	// are host-scoped, so one entry supplies credentials for both paths.
 	const substituters = await resolveSubstituters(
 		{
 			cacheUrl: inputs.cacheUrl,
@@ -560,15 +559,12 @@ async function fetchTrustedPublicKey(
 	);
 
 	reporter.warn(
-		'No trusted-public-key was supplied; trusting the cache signing key from /pubkey for this run.'
+		"No trusted-public-key was supplied. This run will trust the key returned by the cache's /pubkey endpoint."
 	);
 
 	return trimmedPublicKey;
 }
 
-/**
-Fetch and validate the signing key returned by a cache's public-key endpoint.
-*/
 export async function fetchCachePublicKeyAt(
 	endpoint: URL,
 	fetcher: typeof fetch = fetch,

@@ -11,9 +11,6 @@ import {
 	pushUploadActions
 } from './temporary-credentials.ts';
 
-// A staging key a push credential's prefix scope would cover, used only to probe
-// that R2 accepts a temporary credential. Nothing is written; the probe reads a
-// key that never exists.
 const credentialProbeKey = 'staging/.cupboard-credential-probe/probe';
 const credentialProbePrefix = 'staging/.cupboard-credential-probe/';
 
@@ -32,14 +29,10 @@ export class R2Presigner {
 	}
 
 	/**
-	 * Proves R2 accepts a temporary credential issued the way a push does, the
-	 * mechanism uploads actually use. A push signs with a short-lived credential
-	 * derived from the configured pair, so a valid pair alone is not enough: R2
-	 * must also honour the derived credential, granted by the same write-only
-	 * action set. The probe reads a never-present key under a staging prefix the
-	 * credential is confined to; a rejected credential answers 400, and a valid
-	 * one answers 403 (the write-only grant may not read) or 404. Nothing is
-	 * written.
+	 * Sends a header-signed GET with the same derived, action-only and
+	 * prefix-scoped credential used by pushes. A 400 response means R2 rejected
+	 * the credential; 2xx, 403 and 404 responses show that the request reached R2.
+	 * The probe does not write an object.
 	 */
 	async probeTemporaryCredential(now: Date): Promise<Response> {
 		const credential = await createR2TemporaryCredentials(
@@ -67,8 +60,8 @@ export class R2Presigner {
 	}
 }
 
-// The generated env types say `string`, but a secret never put has no binding
-// at all and reads as undefined; both spellings of "missing" must count.
+// An unbound Worker secret is undefined even though the generated binding type
+// says string. Treat both undefined and an empty value as missing.
 export interface R2PresignEnv {
 	readonly R2_ACCOUNT_ID: string | undefined;
 	readonly R2_ACCESS_KEY_ID: string | undefined;

@@ -86,7 +86,7 @@ interface PushOptions {
  * conflicts with `--root` and with `--ttl`. A mutating GitHub OIDC push must
  * choose either a named root or explicit unretained publication before it
  * requests a token, so a CI run never obtains a token for a retention plan it
- * cannot carry out. A dry run publishes nothing, so it does not need that
+ * cannot execute. A dry run publishes nothing, so it does not need that
  * choice.
  */
 export function validateRetentionChoice(
@@ -166,10 +166,9 @@ export function receiptBuildStore(
 }
 
 /**
- * The copies a supervising build recorded, read back from the file it wrote.
- * The push runs in its own process after the build, so it observes no copy
- * itself. Returns undefined when the run supplies no file, and the receipt
- * then records no source for any path it publishes.
+ * Reads the copy observations written by a supervising build. The push runs in
+ * a separate process after the build and cannot observe those copies itself.
+ * Without this file, the receipt records no source for any published path.
  */
 export async function observedCopiesFrom(
 	copiedFromFile: string | undefined
@@ -219,11 +218,6 @@ function collect(
 	return [...(previous ?? []), value];
 }
 
-/**
- * Splits a newline-delimited path file into its lines: each is trimmed and
- * blank lines are dropped. {@link PublicationCollection} validates every line
- * as a store path.
- */
 export function parsePathFile(contents: string): string[] {
 	return contents
 		.split(/\r?\n/u)
@@ -261,9 +255,8 @@ function resolvePushPaths(values: readonly string[]): string[] {
 	return values.map((value) => resolvePushPath(value));
 }
 
-// The store path containing a resolved location: the shortest leading run of
-// segments that parses as a store path, which is the entry directly under the
-// store directory.
+// A location inside a store path belongs to the shortest prefix that parses as
+// a store path. That prefix is the entry directly under the store directory.
 function containingStorePath(resolved: string): string | undefined {
 	const segments = resolved.split('/');
 

@@ -9,7 +9,7 @@ import type { ResolvedCupboard } from '../cupboard-resolution.ts';
 import { resolveCupboardAction } from './resolve-cupboard.ts';
 
 describe('resolveCupboardAction', () => {
-	it('writes one canonical acquisition from the workflow identity', async () => {
+	it('writes the resolved release to the cupboard job output', async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-resolve-'));
 		const outputFile = path.join(directory, 'output');
 		const cupboard: ResolvedCupboard = {

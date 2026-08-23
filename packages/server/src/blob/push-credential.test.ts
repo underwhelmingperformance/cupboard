@@ -35,7 +35,7 @@ function jwtPayload(sessionToken: string): unknown {
 }
 
 describe('pushCredentialTtlSeconds', () => {
-	it('caps the credential at what the access token has left', () => {
+	it("uses the access token's remaining whole seconds", () => {
 		const tokenExpiresAt = new Date(now.getTime() + 600 * 1000);
 
 		expect(pushCredentialTtlSeconds(tokenExpiresAt, now)).toBe(
@@ -43,13 +43,13 @@ describe('pushCredentialTtlSeconds', () => {
 		);
 	});
 
-	it('falls back to the maximum when the token outlives it', () => {
+	it('caps the credential lifetime at six hours', () => {
 		const tokenExpiresAt = new Date(now.getTime() + 10 * 24 * 60 * 60 * 1000);
 
 		expect(pushCredentialTtlSeconds(tokenExpiresAt, now)).toBe(maxTtlSeconds);
 	});
 
-	it('returns one second for an all-but-expired token', () => {
+	it('returns the one-second minimum after the token has expired', () => {
 		const tokenExpiresAt = new Date(now.getTime() - 1000);
 
 		expect(pushCredentialTtlSeconds(tokenExpiresAt, now)).toBe(
@@ -66,10 +66,7 @@ describe('PushCredentialIssuer', () => {
 	const ttlSeconds = ttlSecondsSchema.parse(900);
 	const issuedAt = Math.floor(now.getTime() / 1000);
 
-	it('grants the write-only actions and no scope, under the staging prefix', async () => {
-		// R2 rejects a credential carrying both a scope and an actions claim, so
-		// the push grants by the write-only action set alone and confines it with
-		// the staging prefix.
+	it("grants only the upload actions within the push's staging prefix", async () => {
 		const credential = await issuer.issueFor(
 			pushIdSchema.parse('push-1'),
 			ttlSeconds,

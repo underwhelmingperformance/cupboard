@@ -35,8 +35,8 @@ export const cacheOperations = [
 	'stats:read'
 ] as const;
 
-// Tenant-domain operations, authority over the tenant the issuer established,
-// with no resource of their own.
+// Tenant-domain operations use authority over the tenant established by the
+// issuer. They have no separate resource selector.
 export const domainOperations = [
 	'cache:list',
 	'stats:read',
@@ -61,7 +61,7 @@ export const domainOperations = [
 	'reuse-view:remove'
 ] as const;
 
-// Control operations that act on a specific tenant (an exact slug).
+// These control operations require an exact tenant slug as their resource.
 export const tenantOperations = [
 	'tenant:create',
 	'tenant:suspend',
@@ -72,7 +72,7 @@ export const tenantOperations = [
 	'tenant:clear-read-credential'
 ] as const;
 
-// Resource-free control operations.
+// These control operations do not select a resource.
 export const controlOperations = [
 	'control:check',
 	'instance:read',
@@ -88,7 +88,8 @@ export const controlOperations = [
 	'control-oidc-trust:remove'
 ] as const;
 
-// Every operation, deduplicated (`gc:run`/`stats:read` span two grant types).
+// `gc:run` and `stats:read` occur in two grant types but appear once in this
+// combined schema.
 export const operationSchema = z.enum([
 	'upload:negotiate',
 	'upload:preview',
@@ -147,17 +148,12 @@ export const operationSchema = z.enum([
 ]);
 export type Operation = z.infer<typeof operationSchema>;
 
-/**
-The concrete resource a route acts on, resolved before authorisation.
-*/
 export interface ResourceRequest {
 	readonly cache?: CacheSelector;
 	readonly root?: RootName;
 	readonly tenant?: TenantId;
 }
 
-// ── Concrete grants (what a token carries; RFC 9396 authorization_details) ──
-//
 // Issued grants carry only concrete selectors. Cache and tenant selectors are
 // exact; a root selector is an exact name or a trailing-slash prefix. The
 // wildcard is the only non-concrete grant and covers its whole domain.
@@ -202,9 +198,6 @@ export type AuthorizationDetail = z.infer<typeof authorizationDetailSchema>;
 export const authorizationDetailsSchema = z.array(authorizationDetailSchema);
 export type AuthorizationDetails = z.infer<typeof authorizationDetailsSchema>;
 
-/**
-A requested root is within a granted root selector: exact, or prefix.
-*/
 function isRootWithin(requested: string, granted: string): boolean {
 	return granted.endsWith('/')
 		? requested.startsWith(granted)
@@ -218,7 +211,8 @@ const impliedAtIssuance: Partial<Record<Operation, Operation>> = {
 	'upload:preview': 'upload:negotiate'
 };
 
-// Apply the same implication when checking authority from a presented token.
+// A presented negotiate grant also authorises preview during route checks and
+// attenuation.
 const impliedByPresentedAuthority: Partial<Record<Operation, Operation>> = {
 	'upload:preview': 'upload:negotiate'
 };
@@ -238,9 +232,9 @@ function isOperationImplied(
 }
 
 /**
- * Returns whether `actions` permits `operation` at token issuance. The set
- * permits an operation either directly or through {@link impliedAtIssuance}.
- * This check applies only to a stored rule during token exchange.
+ * Checks whether a stored trust-rule grant permits `operation` when the server
+ * issues or refreshes a token. The operation can be listed directly or implied
+ * by {@link impliedAtIssuance}.
  */
 export function isOperationPermittedAtIssuance(
 	actions: readonly Operation[],
@@ -250,10 +244,9 @@ export function isOperationPermittedAtIssuance(
 }
 
 /**
- * Returns whether the actions from a presented token authorise `operation`.
- * Authority can be direct or follow
- * {@link impliedByPresentedAuthority}. Route authorisation, attenuation, and
- * refresh narrowing all use this check.
+ * Checks whether a presented token authorises `operation`. Route checks and
+ * attenuation accept either a listed operation or one implied by
+ * {@link impliedByPresentedAuthority}.
  */
 export function isOperationSatisfiedByPresentedActions(
 	actions: readonly Operation[],
@@ -299,9 +292,9 @@ function isCoveredByGrant(
 }
 
 /**
- * Whether any grant on the token authorises `operation` on `resource`. The
- * single authorisation decision, shared by the server (after token
- * verification) and the CLI (when constructing requested grants).
+ * Checks whether any presented grant authorises `operation` on `resource`.
+ * The server uses this after token verification, and the CLI uses the same
+ * decision for its preflight check.
  */
 export function isCoveredByToken(
 	grants: readonly AuthorizationDetail[],
@@ -311,8 +304,6 @@ export function isCoveredByToken(
 	return grants.some((grant) => isCoveredByGrant(grant, operation, resource));
 }
 
-// The concrete resource a requested grant acts on, read straight from its
-// selectors (it carries no bindings).
 function detailResource(detail: AuthorizationDetail): ResourceRequest {
 	switch (detail.type) {
 		case 'cupboard_cache': {
@@ -328,10 +319,9 @@ function detailResource(detail: AuthorizationDetail): ResourceRequest {
 }
 
 /**
- * Returns whether `grants` authorises every operation in `detail` for its
- * selected resource. Attenuation and refresh narrowing use this check to prevent
- * a new token from exceeding the presenter's authority. Only a wildcard grant
- * covers a requested wildcard.
+ * Checks whether `grants` authorises every operation in `detail` for its
+ * selected resource. Attenuation uses this to prevent a new token from exceeding
+ * the presenter's authority. Only a wildcard grant covers a requested wildcard.
  */
 export function isAuthorizationDetailCovered(
 	grants: readonly AuthorizationDetail[],
@@ -349,8 +339,6 @@ export function isAuthorizationDetailCovered(
 	);
 }
 
-// ── Stored trust-rule grants (resources are bindings, not concrete values) ──
-
 export const templateMaxLength = 256;
 export const capturePatternMaxLength = 512;
 export const captureGroupMaxLength = 64;
@@ -363,9 +351,6 @@ const templatePlaceholderPattern = /\{([A-Za-z_][A-Za-z0-9_]*)\}/gu;
 
 export const templateSchema = z.string().min(1).max(templateMaxLength);
 
-/**
-The variable names a `{name}` template references, in order, with repeats.
-*/
 export function templateVariables(template: string): string[] {
 	const variables: string[] = [];
 
@@ -385,7 +370,6 @@ const captureSchema = z.strictObject({
 	group: z.string().min(1).max(captureGroupMaxLength)
 });
 
-// A substitution names a verified claim and an optional single transform.
 export const substitutionSchema = z
 	.strictObject({
 		claim: z.string().min(1).max(claimNameMaxLength),
@@ -403,17 +387,12 @@ const substitutionMapSchema = z
 		message: `A binding may define at most ${String(maxSubstitutionsPerBinding)} substitutions`
 	});
 
-// The fields every binding shares: a template-or-exact source for a value
-// validated against its destination grammar once rendered.
 const bindingShape = {
 	equalsTemplate: templateSchema.optional(),
 	exact: z.string().min(1).optional(),
 	substitutions: substitutionMapSchema.optional()
 };
 
-// Exactly one source must be set, and every variable a template references must
-// have a substitution. A relational binding sets `equalsResource` instead, so a
-// root may equal the cache its grant resolved.
 function refineBinding(
 	value: {
 		readonly equalsTemplate?: string;
@@ -421,7 +400,8 @@ function refineBinding(
 		readonly substitutions?: Record<string, Substitution>;
 		readonly equalsResource?: 'cache';
 	},
-	ctx: z.RefinementCtx
+	ctx: z.RefinementCtx,
+	canUseResource: boolean
 ): void {
 	const choices = [
 		value.equalsTemplate !== undefined,
@@ -432,7 +412,9 @@ function refineBinding(
 	if (choices !== 1) {
 		ctx.addIssue({
 			code: 'custom',
-			message: 'Set exactly one of equalsTemplate, exact, and equalsResource'
+			message: canUseResource
+				? 'Set exactly one of equalsTemplate, exact, and equalsResource'
+				: 'Set exactly one of equalsTemplate and exact'
 		});
 	}
 
@@ -454,17 +436,23 @@ function refineBinding(
 
 export const cacheBindingSchema = z
 	.strictObject({ ...bindingShape, validate: z.literal('cacheName') })
-	.superRefine(refineBinding);
+	.superRefine((value, ctx) => {
+		refineBinding(value, ctx, false);
+	});
 export const rootBindingSchema = z
 	.strictObject({
 		...bindingShape,
 		validate: z.literal('rootName'),
 		equalsResource: z.literal('cache').optional()
 	})
-	.superRefine(refineBinding);
+	.superRefine((value, ctx) => {
+		refineBinding(value, ctx, true);
+	});
 export const tenantBindingSchema = z
 	.strictObject({ ...bindingShape, validate: z.literal('tenant') })
-	.superRefine(refineBinding);
+	.superRefine((value, ctx) => {
+		refineBinding(value, ctx, false);
+	});
 
 export const oidcTrustDisplaySchema = z.strictObject({
 	provider: z.string().max(displayFieldMaxLength).optional(),

@@ -44,36 +44,27 @@ import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type RetentionService } from './retention-service.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 
-// One collection deletes at most this many committed paths before returning, so
-// a chunk holds the Durable Object's gate only for its own deletes. When a
-// collection stops at this cap the caller resumes it on an alarm, draining the
-// backlog across chunks.
+// Bound the paths deleted under one critical section. An alarm resumes a scan
+// that reaches this limit.
 export const maxPathsCollectedPerRun = 1000;
 
-// Root expiry drains targets in bounded batches. The root row remains until its
-// last target has moved to grace, so a larger or historical root resumes safely
-// without a separate cursor or a reachability gap.
+// Keep the root row until every target has entered grace. This bounded batch can
+// then resume without a cursor and without leaving a target unprotected.
 export const maxExpiredRootTargetsPerRun = 1000;
 
-// Empty and small roots should drain together, while the target cap above
-// remains the bound on path work.
 export const maxRootsExpiredPerRun = 32;
 
-// An upload credential is scoped to `staging/<pushId>/` and a client may write
-// any key beneath it, including keys it never negotiated. The negotiated keys
-// have pending rows the reaper owns; the rest are orphans only this
-// reconciliation reclaims. Matching the upload TTL, an object younger than this
-// may still belong to an in-flight upload, so the reclaim leaves it for a later
-// pass; the bucket lifecycle rule is the lazy backstop for anything beyond the
-// per-run cap.
+// An upload credential can write any key below `staging/<pushId>/`, including
+// keys without pending rows. Preserve young objects because their row may not
+// exist in the snapshot yet. Pending-row reaping owns tracked keys, and the R2
+// lifecycle rule removes anything this bounded orphan scan does not reach.
 const orphanStagingGraceMs = 15 * 60 * 1000;
 
-// One R2 `list` page; the platform caps a page at 1000 keys.
+// R2 limits one list page to 1,000 keys.
 const orphanListPageSize = 1000;
 
-// At most this many orphans are deleted per collection, so a flood of staged
-// objects cannot make a single GC run unbounded. Whatever remains is reclaimed
-// by the next collection and, failing that, the bucket lifecycle rule.
+// Bound each orphan scan. Later collections and the R2 lifecycle rule remove
+// any remaining objects.
 const maxOrphanReclaim = 1000;
 
 export class GarbageCollectionService {
@@ -208,9 +199,8 @@ export class GarbageCollectionService {
 		rootTargetsExpired: number;
 		hasMoreExpiredRoots: boolean;
 	} {
-		// Expire TTL'd roots first, regardless of whether a collection follows,
-		// so an expiring channel always lapses. A NULL expiry (permanent) never
-		// matches.
+		// Expire roots even when no unreachable path is collected. Permanent roots
+		// have a null expiry and cannot match this query.
 		const expiredRootCandidates = this.context.db
 			.select({
 				name: schema.retentionRoots.name,
@@ -237,11 +227,8 @@ export class GarbageCollectionService {
 			)
 		);
 
-		// Each expiring root's targets receive a grace deadline before the root is
-		// removed, anchored to the root's nominal expiry rather than this
-		// collection's time, so a late collection cannot extend retention. The
-		// `lte` filter above cannot match a NULL expiry, so the narrowing here
-		// never drops a root.
+		// Anchor each target's grace period to the root's recorded expiry. Using the
+		// collection time would extend retention whenever collection runs late.
 		const expiredRootTargetCandidates =
 			expiredRootNames.length === 0
 				? []
@@ -270,8 +257,8 @@ export class GarbageCollectionService {
 		let rootsExpired = 0;
 
 		this.context.db.transaction((tx) => {
-			// The deadline and target removal share one transaction: a crash between
-			// them could otherwise release a target with no grace source in its place.
+			// Add the grace deadline and remove the root target atomically. A crash
+			// between separate operations could leave the path with no retention source.
 			this.retention.applyGraceTransitions(
 				cache,
 				expiredRootTargets.flatMap((target) => {
@@ -940,8 +927,6 @@ export class GarbageCollectionService {
 		};
 	}
 
-	// Read only when the collection would otherwise skip an unreachable cache, so
-	// the common retained case costs no extra row.
 	private cacheGraceManaged(cache: StoredCache): boolean {
 		const row = this.context.db
 			.select({ graceManaged: schema.caches.graceManaged })
@@ -952,10 +937,8 @@ export class GarbageCollectionService {
 		return row?.graceManaged ?? false;
 	}
 
-	// The r2Keys of every live pending upload and attestation: the staging objects
-	// a row vouches for, which the reaper, not the orphan reclaim, owns. Read once
-	// per collection, and only when there is a staging object to reconcile, so an
-	// idle store with an empty staging root never scans the pending tables.
+	// Pending rows own their staging keys. The orphan scan must not delete those
+	// objects even when the rows appear after its R2 listing began.
 	private trackedStagingKeys(): ReadonlySet<string> {
 		return new Set<string>([
 			...this.context.db
@@ -971,8 +954,8 @@ export class GarbageCollectionService {
 		]);
 	}
 
-	// An object is reclaimable when no pending row tracks it and it predates the
-	// upload grace, so an in-flight upload whose row this snapshot raced survives.
+	// Require both an absent pending row and an age beyond the upload grace. The
+	// age check protects an in-flight upload whose row was missing from the snapshot.
 	private isReclaimableOrphan(
 		object: R2Object,
 		tracked: ReadonlySet<string>,
@@ -981,11 +964,6 @@ export class GarbageCollectionService {
 		return !tracked.has(object.key) && object.uploaded.getTime() < orphanBefore;
 	}
 
-	// Lists the staging root and gathers the orphan keys, stopping at the per-run
-	// cap. The tracked set is loaded lazily on the first object seen, so a run
-	// over an empty staging root reads no rows. `wasCapped` is true when the cap
-	// was reached with orphans still unlisted, so the caller can record that the
-	// next collection and the lifecycle rule finish the job.
 	private async collectOrphanStagingKeys(
 		orphanBefore: number
 	): Promise<{ keys: R2ObjectKey[]; wasCapped: boolean }> {
@@ -1018,10 +996,6 @@ export class GarbageCollectionService {
 		return { keys, wasCapped: false };
 	}
 
-	// Reclaims staging objects no pending row tracks: keys a client wrote under
-	// its `staging/<pushId>/` credential beyond what it negotiated, and the
-	// remnants of pushes whose rows have already been reaped. Bounded per run and
-	// gated on an upload-grace age so an in-flight upload survives.
 	private async reclaimOrphanStaging(
 		logger: Logger,
 		now: Date
@@ -1110,22 +1084,15 @@ export class GarbageCollectionService {
 		const startedAt = new Date();
 		const now = isoTimestamp(startedAt);
 
-		// The staging objects this collection reaps, deleted after the critical
-		// section closes so an R2 stall cannot hold the gate. The rows are removed
-		// under the gate; a delete that does not land leaves an object the orphan
-		// reclaim deletes later, exactly as it backstops any untracked staging
-		// object.
+		// Remove pending rows under the critical section, but delete their staging
+		// objects afterwards so an R2 stall cannot hold the section. The orphan scan
+		// retries objects left by a failed delete.
 		let stagingKeys: R2ObjectKey[] = [];
 
 		const reaped = await this.context.criticalSection(async () => {
-			// A `pending` or `committing` upload is a live commit saga (awaiting
-			// background verification, or a crashed inline commit the verify pass
-			// re-drives), not abandoned, so it and its staged bytes must survive the
-			// collection until the verify pass resolves it. The reapable states once
-			// expired are a null-verdict row still awaiting its bytes and the
-			// terminal verdicts (`servable`, `mismatch`, `over-quota`) whose
-			// status-observation window has passed; their staging bytes are already
-			// gone.
+			// `pending` and `committing` are live commit states, even after expiry;
+			// verification may still resume them. Reap only uploads without a verdict
+			// and terminal `servable`, `mismatch`, or `over-quota` uploads.
 			const reapable = and(
 				lt(schema.pendingUploads.expiresAt, now),
 				or(
@@ -1147,9 +1114,8 @@ export class GarbageCollectionService {
 				.where(lt(schema.pendingAttestations.expiresAt, now))
 				.all();
 
-			// An abandoned upload's private staging object is reclaimed directly; a
-			// reuse upload's r2Key is the shared canonical key, which the reaper owns,
-			// so it is left alone.
+			// Delete only private staging objects here. A reuse upload points at the
+			// shared canonical NAR, whose lifetime is owned by the global reaper.
 			stagingKeys = [
 				...expiredUploads
 					.filter((upload) => upload.r2Key !== narObjectKey(upload.narHash))
@@ -1162,17 +1128,11 @@ export class GarbageCollectionService {
 				.delete(schema.pendingAttestations)
 				.where(lt(schema.pendingAttestations.expiresAt, now))
 				.run();
-			// An expired refresh token nobody presented again still holds a row;
-			// the collection reclaims it. A live session is untouched (rotation
-			// renews its expiry on every use).
 			this.context.db
 				.delete(schema.refreshTokens)
 				.where(lt(schema.refreshTokens.expiresAt, now))
 				.run();
 
-			// A tenant-wide run advances through one registered cache at a time; a
-			// scoped run works only its named cache. The selected cache's persistent
-			// mark/frontier state bounds this pass without re-reading earlier chunks.
 			const collectionCache = cache ?? this.tenantCollectionCache();
 			const collected =
 				collectionCache === undefined
@@ -1193,9 +1153,9 @@ export class GarbageCollectionService {
 			const narInfosDeleted =
 				await this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin);
 
-			// Queue retirement may delete the collected paths' grace rows. It runs under
-			// the same gate, so absorbing that revision here cannot hide an external
-			// mutation and prevents the scan from restarting on its own cleanup.
+			// Queue retirement can change the scan revision by deleting grace rows. It
+			// runs under this critical section, so adopting that revision ignores only
+			// the scan's own cleanup and still detects external changes.
 			if (collectionCache !== undefined && collected.hasMoreWork) {
 				this.synchroniseScanRevision(collectionCache);
 			}
@@ -1211,20 +1171,15 @@ export class GarbageCollectionService {
 			};
 		});
 
-		// The reaped staging objects and the orphan reclaim both delete R2 objects,
-		// so they run outside the critical section. The orphan reclaim reconciles
-		// against the live pending rows by their keys, not a snapshot taken earlier,
-		// and skips anything within the upload grace, so a row created while it runs
-		// is never mistaken for an orphan.
-		//
-		// The rows were removed under the gate, so this delete is best-effort: a
-		// failure must not lose the outcome counters or skip the orphan reclaim,
-		// which deletes whatever did not land.
+		// Delete R2 objects outside the critical section. The orphan scan then reads
+		// current pending rows and applies the age fence, so a concurrent upload is
+		// not mistaken for an orphan. A failed first delete must not discard the
+		// collection counters or prevent that reconciliation.
 		try {
 			await deleteObjects(this.context.env.BLOBS, stagingKeys);
 		} catch (error) {
 			log.warn(
-				'staging object delete did not land; orphan reclaim will delete it',
+				'staging object deletion failed; orphan reconciliation will retry it',
 				{
 					error,
 					stagedKeys: stagingKeys.length

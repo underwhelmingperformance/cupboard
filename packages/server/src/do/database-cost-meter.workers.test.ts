@@ -33,11 +33,9 @@ const costLineSchema = z.object({
 	rowsWritten: z.number()
 });
 
-// The meter reports the rows the Durable Object's SQLite actually read and wrote,
-// the figure the platform bills on, so the cost-regression tests assert on a real
-// measurement. A full table scan reads one
-// row per row present, so the read count tracks the table and a read writes
-// nothing.
+// The platform bills the SQLite rows that the Durable Object reads and writes.
+// These tests use those runtime measurements rather than an estimate. A full
+// table scan reads one row per stored row and writes none.
 describe('db cost meter', () => {
 	beforeEach(resetTestServer);
 
@@ -141,10 +139,8 @@ describe('db cost meter', () => {
 			capture.stop();
 		}
 
-		// The meter is integrated into the entrypoint, not just exercised in
-		// isolation, so a real request emits one cost line reporting the exact rows
-		// the request moved. A mis-count that stayed positive would slip past a
-		// `> 0` assertion.
+		// Assert the exact entrypoint measurement because a positive but incorrect
+		// count would still pass a looser integration check.
 		const negotiate = capture.logs
 			.filter((entry) => entry.message === 'request finished')
 			.map((entry) => costLineSchema.parse(entry.properties))
@@ -203,7 +199,6 @@ describe('db cost meter', () => {
 	});
 });
 
-// Reads every pending-upload row and returns how many rows that scan read.
 function scanUploads(
 	database: SchemaWriter,
 	databaseCost: DatabaseCostMeter

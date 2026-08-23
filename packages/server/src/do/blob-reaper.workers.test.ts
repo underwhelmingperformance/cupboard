@@ -27,10 +27,9 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
-// The reaper works the shared `blob_state` facts in two bounded passes: arm
-// every blob no `blob_ref` references with a grace timer, then collect those whose
-// grace has elapsed and that are still unreferenced. A commit that re-references a
-// hash clears the timer, sparing the blob.
+// The reaper first gives each unreferenced `blob_state` row a grace deadline.
+// A later pass deletes the object only if the deadline has elapsed and no
+// `blob_ref` has appeared. A new reference clears the deadline.
 
 describe('blob reaper', () => {
 	beforeEach(async () => {
@@ -55,8 +54,6 @@ describe('blob reaper', () => {
 		await commitPath(token, metadata, nar);
 		await deletePath(token, metadata.storePathHash);
 
-		// The first pass arms the now-unreferenced blob but, the grace not yet
-		// elapsed, leaves both the fact and the object in place.
 		await runBlobReaper(rootLogger(), env);
 
 		expect({
@@ -67,7 +64,6 @@ describe('blob reaper', () => {
 			blobPresent: true
 		});
 
-		// Past the grace, the second pass collects the fact and then the object.
 		vi.setSystemTime(afterGrace());
 		await runBlobReaper(rootLogger(), env);
 
@@ -140,8 +136,6 @@ describe('blob reaper', () => {
 		await runBlobReaper(rootLogger(), env);
 		await commitPath(token, second, nar);
 
-		// Past the original grace, the reaper must not collect it: it is referenced
-		// again, and its timer was cleared.
 		vi.setSystemTime(afterGrace());
 		await runBlobReaper(rootLogger(), env);
 

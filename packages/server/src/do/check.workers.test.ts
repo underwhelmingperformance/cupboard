@@ -61,7 +61,7 @@ describe('storage check', () => {
 		}
 	);
 
-	it('flags a narinfo whose R2 object has gone missing', async () => {
+	it('reports a missing narinfo R2 object', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
@@ -85,7 +85,7 @@ describe('storage check', () => {
 		});
 	});
 
-	it('reports a missing NAR once per narinfo that shares it', async () => {
+	it('reports a missing NAR for every narinfo that references it', async () => {
 		const token = await initialise();
 		const alpha = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -123,7 +123,7 @@ describe('storage check', () => {
 		});
 	});
 
-	it('catches a corrupted NAR blob via its compressed hash only on a deep check', async () => {
+	it('reports tampered compressed bytes only during a deep check', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
@@ -170,9 +170,9 @@ describe('storage check', () => {
 
 		await pushPath(token, metadata, DEFAULT_CACHE, nar);
 
-		// Place the genuine bytes under the claimed hash's key (their compressed
-		// metadata still matches the narinfo, but they decompress to `nar`, not
-		// `claimed`), and repoint the narinfo at that key.
+		// Do not create blob_state for the claimed hash. Otherwise the deep check
+		// rejects the canonical compressed-file facts before it verifies the
+		// decompressed NAR.
 		await env.BLOBS.put(narObjectKey(claimed.narHash), nar.narBytes, {
 			sha256: await crypto.subtle.digest('SHA-256', nar.narBytes)
 		});

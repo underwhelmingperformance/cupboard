@@ -94,9 +94,8 @@ const appDigest = digest(1, 123);
 const runtimeDigest = digest(2, 234);
 const compressedNarBytes = Buffer.from('compressed nar');
 
-// The served metadata a reference entry resolves for `appPath`: the path fields
-// negotiate carries, the blob fields from the served narinfo, and the
-// signatures the source published over the path.
+// Reference metadata for `appPath`. Upload negotiation uses its path fields;
+// publication provenance also uses the blob fields and source signatures.
 const referenceSignature = 'cache.example.workers.dev-1:c2ln';
 
 function referenceUploadFields(): UploadPathMetadataFields {
@@ -128,27 +127,18 @@ function fallbackCommitResponse() {
 	};
 }
 
-// The default `preview` a mutating-push fixture gets: mutating pushes never
-// call it, so a call here means the flow under test regressed into calling
-// preview instead of negotiate.
 function unexpectedPreviewCall(): Promise<ParsedUploadPreviewResponse> {
 	return Promise.reject(
 		new Error('preview should not be called during a mutating push')
 	);
 }
 
-// The `negotiate` twin a dry-run fixture gets: `--dry-run` never negotiates,
-// so a call here means the flow under test regressed into negotiating
-// instead of previewing.
 function unexpectedNegotiateCall(): Promise<never> {
 	return Promise.reject(
 		new Error('negotiate should not be called during a dry run')
 	);
 }
 
-// A dry run stages no bytes, commits nothing, and records no retention: these
-// three stand in for a fixture's `uploadNar`/`commit`/`setRoot` so a call to
-// any of them during `--dry-run` fails the test loudly.
 function unexpectedUploadNarCall(): Promise<never> {
 	return Promise.reject(
 		new Error('uploadNar should not be called during a dry run')
@@ -397,7 +387,7 @@ describe('runPush', () => {
 		]);
 	});
 
-	it('carries the run root into the negotiate request', async () => {
+	it('includes the run root in the negotiation request', async () => {
 		const negotiations: Omit<UploadNegotiateRequest, 'pushId'>[] = [];
 
 		await runPush(publication([appPath]), reporter([]), {
@@ -491,8 +481,8 @@ describe('runPush', () => {
 					running += 1;
 					peak = Math.max(peak, running);
 
-					// Once a full batch is in flight, release the gate so the rest can
-					// run; the peak then reveals how many uploaded at once.
+					// Release the gate after the expected batch starts. The recorded peak
+					// then measures the upload concurrency.
 					if (running >= limit) {
 						release();
 					}
@@ -555,8 +545,8 @@ describe('runPush', () => {
 					commitAttempts.push(target.uploadId);
 
 					if (target.uploadId === 'commit-stale') {
-						// The slot expired and was reaped during a long upload phase,
-						// taking the staged bytes with it.
+						// Simulate expiry of the pending row and its staged bytes during a
+						// long upload phase.
 						return Promise.reject(
 							new CupboardHttpError('POST', '/commit', 404, 'Upload expired')
 						);
@@ -609,9 +599,8 @@ describe('runPush', () => {
 				negotiate() {
 					negotiations += 1;
 
-					// The first negotiate offers a reuse of a shared blob; by commit
-					// time the blob was collected, so the re-negotiate (the tenant's
-					// presence edge credited back) plans a fresh upload.
+					// The first negotiation reuses a shared blob. Simulate collection
+					// before commit so the replacement negotiation requests an upload.
 					if (negotiations === 1) {
 						return Promise.resolve(
 							uploadNegotiateResponseSchema.parse({
@@ -680,7 +669,7 @@ describe('runPush', () => {
 		});
 	});
 
-	it('re-negotiates when a deferred commit settles absent', async () => {
+	it('re-negotiates when deferred verification reports the path absent', async () => {
 		let negotiations = 0;
 		const uploadedKeys: string[] = [];
 		const commitAttempts: string[] = [];
@@ -693,10 +682,9 @@ describe('runPush', () => {
 				negotiate() {
 					negotiations += 1;
 
-					// The first negotiate offers a reuse; the canonical object is
-					// collected while the deferred commit awaits its verdict, so the
-					// verify pass answers absent and the re-negotiate plans a fresh
-					// upload.
+					// The first negotiation reuses a shared blob. Simulate collection
+					// before deferred verification so the replacement negotiation
+					// requests an upload.
 					if (negotiations === 1) {
 						return Promise.resolve(
 							uploadNegotiateResponseSchema.parse({
@@ -749,8 +737,8 @@ describe('runPush', () => {
 			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
 		});
 
-		// The re-drive replaced the reuse with a real upload, so the summary
-		// counts the work that actually happened.
+		// The replacement negotiation requested an upload. The summary must count
+		// that final action rather than the original reuse.
 		expect({
 			negotiations,
 			uploadedKeys,
@@ -777,16 +765,16 @@ describe('runPush', () => {
 		});
 	});
 
-	it('re-negotiates when a deferred verdict settles absent in the wait phase', async () => {
+	it('re-negotiates in the wait phase when deferred verification reports the path absent', async () => {
 		let negotiations = 0;
 		const uploadedKeys: string[] = [];
 		const commitAttempts: string[] = [];
 		const payloads: ResultPayload[] = [];
 		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
 
-		// The deferred verdict rejects `absent` on `settled`, not on the ack, so only
-		// the wait phase's re-drive recovers it. Assert-and-observe the rejection so
-		// it is never unhandled before the wait phase awaits it.
+		// The acknowledgement succeeds before `settled` rejects with `absent`, so
+		// only the wait phase can recover the path. Attach an assertion immediately
+		// to keep the rejection handled until that phase awaits it.
 		const absentVerdict = Promise.reject(
 			new UploadVerificationFailedError('upload-defer', 'absent')
 		);
@@ -800,8 +788,8 @@ describe('runPush', () => {
 				negotiate() {
 					negotiations += 1;
 
-					// The re-negotiate finds the path already in the store, so the
-					// re-drive needs no fresh upload.
+					// The replacement negotiation finds the path already in the cache,
+					// so recovery requires no upload.
 					if (negotiations === 1) {
 						return Promise.resolve(
 							uploadNegotiateResponseSchema.parse({
@@ -852,8 +840,8 @@ describe('runPush', () => {
 			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
 		});
 
-		// The push succeeds: the absent verdict re-negotiated and the store already
-		// held the path, so no verification failure is reported.
+		// The replacement negotiation found the path in the cache, so the push
+		// succeeds without a verification failure.
 		expect({
 			negotiations,
 			uploadedKeys,
@@ -1247,9 +1235,9 @@ describe('runPush', () => {
 	});
 
 	it('attaches a deferred path’s attestation only after committing and waiting', async () => {
-		// A deferred path has no committed narinfo row until its verdict settles, and
-		// the server refuses an attestation attach on such a path. So the attach must
-		// run after retention and the wait, not before: assert it follows `setRoot`.
+		// The server accepts an attestation only after verification has materialised
+		// the narinfo row. Assert that attachment follows both the root update and
+		// the wait.
 		const events: string[] = [];
 		const appHash = StorePath.hash(appPath);
 		const bundle = sigstoreBundleBytes(
@@ -1755,7 +1743,7 @@ describe('runPush', () => {
 				{
 					label: 'incomplete',
 					value:
-						'1 path(s) failed to commit; retention not recorded, re-run cupboard push to finish'
+						'1 path(s) failed to publish; retention not recorded, re-run cupboard push to finish'
 				}
 			]
 		});
@@ -1864,7 +1852,7 @@ describe('runPush', () => {
 		});
 	});
 
-	it('publishes declared intermediates without naming them in the root', async () => {
+	it('publishes declared intermediates without adding them to the root', async () => {
 		const roots: SetRootCall[] = [];
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
@@ -2022,7 +2010,7 @@ describe('runPush', () => {
 		});
 	});
 
-	it('reports an upload demanded for a reference entry as a typed per-path failure', async () => {
+	it('reports a typed per-path failure when a reference entry requires an upload', async () => {
 		const payloads: ResultPayload[] = [];
 		const uploadDemand = new ReferenceUploadRequiredError(appPath);
 		let narReads = 0;
@@ -2665,8 +2653,8 @@ describe('runPush', () => {
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		});
 
-		// An unretained push renders its per-path grace rows even when nothing
-		// matched, and warns: grace is the only thing that would keep the paths.
+		// Without a root, grace is the only protection from collection. Show the
+		// per-path absence and warn even when no policy matched.
 		expect({ clientCalls, roots, results, warns }).toStrictEqual({
 			clientCalls: [{ method: 'negotiate', paths: [appPath] }],
 			roots: [],
@@ -3073,7 +3061,7 @@ describe('runPush', () => {
 		});
 	});
 
-	it('parks the commit for a deferred upload, then records retention', async () => {
+	it('forwards wait settings and records retention after commit', async () => {
 		const events: string[] = [];
 		const commitOptions: CommitOptions[] = [];
 
@@ -3087,8 +3075,6 @@ describe('runPush', () => {
 					events.push('commit');
 					commitOptions.push(options);
 
-					// The client parks on the commit socket and settles once the
-					// verification verdict arrives.
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
 						narHash: appDigest.narHash.value,
@@ -3109,8 +3095,6 @@ describe('runPush', () => {
 			events,
 			commitOptions: commitOptions.map((options) => ({
 				timeoutSeconds: options.timeoutSeconds,
-				// The session reports its capacity waits, so a push held up by a
-				// busy cache says so rather than sitting silent.
 				reportsWaiting: typeof options.onWaiting === 'function'
 			}))
 		}).toStrictEqual({
@@ -3180,7 +3164,7 @@ describe('runPush', () => {
 			{
 				label: 'incomplete',
 				value:
-					'1 path(s) failed to commit; retention not recorded, re-run cupboard push to finish'
+					'1 path(s) failed to publish; retention not recorded, re-run cupboard push to finish'
 			}
 		]);
 	});
@@ -3189,9 +3173,9 @@ describe('runPush', () => {
 		const warnings: { label: string; value?: string }[] = [];
 		const events: string[] = [];
 
-		// The deferred verdict fails after the ack. Assert its rejection, which also
-		// observes it from creation so the gap before the wait phase awaits it never
-		// surfaces an unhandled rejection.
+		// The acknowledgement succeeds before the deferred verdict rejects. Attach
+		// an assertion immediately so the rejection remains handled until the wait
+		// phase awaits it.
 		const failedVerdict = Promise.reject(
 			new UploadVerificationFailedError('upload-app', 'mismatch')
 		);
@@ -3756,9 +3740,8 @@ describe('runPush', () => {
 		});
 	});
 
-	// An unknown tenant answers a routing-level 404 on every route, preview
-	// and its empty-closure probe alike, so the too-old diagnosis only stands
-	// once the tenant proves it answers at all.
+	// An unknown tenant returns a routing-level 404 for both preview requests.
+	// Diagnose an old server only after another route confirms the tenant.
 	it.each([
 		['does not answer', (): Promise<boolean> => Promise.resolve(false)],
 		['probe fails', (): Promise<boolean> => Promise.reject(new Error('down'))]
@@ -3860,7 +3843,7 @@ describe('runPush', () => {
 		});
 	});
 
-	it('with --dry-run --no-retain, names a matched zero-grace policy in the row and the warning', async () => {
+	it('with --dry-run --no-retain, distinguishes a zero-grace match in the row and warning', async () => {
 		const results: ResultRow[][] = [];
 		const warns: { label: string; value?: string }[] = [];
 
@@ -3900,7 +3883,7 @@ describe('runPush', () => {
 			pathRows: [
 				{
 					label: StorePath.hash(appPath),
-					value: 'matched a zero-grace policy; nothing retains it'
+					value: 'matched a zero-grace policy; no grace period applies'
 				}
 			]
 		});
@@ -3945,8 +3928,6 @@ describe('runPush', () => {
 	});
 });
 
-// A push whose target is uploaded and committed while its intermediate is
-// already served. Both end servable, so the receipt describes both.
 function receiptPush(
 	appInfo: NixValidPathInfo,
 	dependencies: Pick<
@@ -3995,8 +3976,6 @@ function receiptPush(
 describe('the build receipt a push writes', () => {
 	const appDrv = '/nix/store/8123456789abcdfghijklmnpqrsvwxyz-app.drv';
 	const buildStore = 'ssh-ng://builder.example';
-	// The store registered the intermediate as its own work, so every receipt
-	// below describes it the same way.
 	const runtimeSubject = {
 		origin: 'store-held',
 		storePath: runtimePath,
@@ -4004,7 +3983,7 @@ describe('the build receipt a push writes', () => {
 		buildStore
 	};
 
-	it('records each published target the build store holds a deriver for', async () => {
+	it('records build provenance when store metadata supplies a deriver', async () => {
 		const receipt = await receiptPush(
 			pathInfo(appPath, appDigest, [], appDrv),
 			{ buildStore }
@@ -4156,7 +4135,7 @@ describe('the build receipt a push writes', () => {
 		}
 	);
 
-	it('describes a reference entry by the cache its metadata came from', async () => {
+	it('records the source cache for a reference entry', async () => {
 		const receipt = await runPush(
 			PublicationCollection.of({ targets: [], referencePaths: [appPath] }),
 			reporter([]),
@@ -4207,7 +4186,7 @@ describe('the build receipt a push writes', () => {
 		});
 	});
 
-	it('writes no receipt when the push names no build store', async () => {
+	it('writes no receipt when no build store is specified', async () => {
 		const receipt = await receiptPush(
 			pathInfo(appPath, appDigest, [], appDrv),
 			{}
@@ -4264,8 +4243,6 @@ function deferredDependencies() {
 	} satisfies Partial<PushDependencies>;
 }
 
-// The NAR serialisation a fake store client streams for a path: one chunk
-// carrying the digest's bytes, the way FakeNarArchive yields them.
 async function* narBytes(digestValue: NarDigest): AsyncIterable<Uint8Array> {
 	await Promise.resolve();
 
@@ -4588,9 +4565,6 @@ function skipClient(roots: SetRootCall[], clientCalls: unknown[]): PushClient {
 	};
 }
 
-// A cache that already holds every negotiated path, but with a NAR hash other
-// than the one the client computed locally: the two sides realised the same
-// store path with different bytes.
 function divergentSkipClient(
 	cacheNarHash: string,
 	roots: SetRootCall[],

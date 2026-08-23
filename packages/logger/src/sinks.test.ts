@@ -85,7 +85,7 @@ describe('cloudflareSink', () => {
 		}).toStrictEqual({ warn: 1, error: 1 });
 	});
 
-	it('explodes an error field into name, message and stack', () => {
+	it('writes an error as indexed name, message and stack fields', () => {
 		const { target, calls } = fakeConsole();
 		const boom = new Error('boom');
 
@@ -107,7 +107,7 @@ describe('cloudflareSink', () => {
 		);
 	});
 
-	it('surfaces a wrapped error’s cause chain', () => {
+	it('writes the underlying cause of a wrapped error', () => {
 		const { target, calls } = fakeConsole();
 		const root = new Error('D1_ERROR: no such column: reconciled_at');
 		const wrapped = new Error('Failed query: delete from x', { cause: root });
@@ -166,7 +166,7 @@ describe('githubActionsSink', () => {
 
 	it.each([
 		{
-			name: 'maps error to an error annotation with the fields appended',
+			name: 'writes an error annotation with appended fields',
 			overrides: {
 				level: 'error',
 				message: ['boom'],
@@ -175,27 +175,27 @@ describe('githubActionsSink', () => {
 			expected: ['::error::boom ray=r1\n']
 		},
 		{
-			name: 'maps a fatal record to an error annotation',
+			name: 'writes a fatal record as an error annotation',
 			overrides: { level: 'fatal', message: ['gone'] },
 			expected: ['::error::gone\n']
 		},
 		{
-			name: 'maps warning to a warning annotation',
+			name: 'writes a warning annotation',
 			overrides: { level: 'warning', message: ['careful'] },
 			expected: ['::warning::careful\n']
 		},
 		{
-			name: 'maps debug to a debug command',
+			name: 'writes a debug command',
 			overrides: { level: 'debug', message: ['detail'] },
 			expected: ['::debug::detail\n']
 		},
 		{
-			name: 'maps trace to a debug command',
+			name: 'writes trace as a debug command',
 			overrides: { level: 'trace', message: ['deep detail'] },
 			expected: ['::debug::deep detail\n']
 		},
 		{
-			name: 'prints info as a plain line, not an annotation',
+			name: 'writes info as a plain line',
 			overrides: { level: 'info', message: ['hello'] },
 			expected: ['hello\n']
 		}
@@ -205,7 +205,7 @@ describe('githubActionsSink', () => {
 		expect(written).toStrictEqual(expected);
 	});
 
-	it('expands an error field into its name, message and stack', () => {
+	it('appends an error name, message and stack to the annotation', () => {
 		const boom = new Error('exploded');
 
 		sink(

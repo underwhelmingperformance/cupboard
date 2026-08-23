@@ -42,9 +42,6 @@ export function compilePattern(pattern: string): RE2JS {
 	}
 }
 
-/**
-Whether a pattern is an anchored expression RE2 can compile.
-*/
 export function isAnchoredRe2(pattern: string): boolean {
 	try {
 		compilePattern(pattern);
@@ -55,9 +52,8 @@ export function isAnchoredRe2(pattern: string): boolean {
 }
 
 /**
- * Whether `value` matches the anchored pattern in full. Fails closed: a pattern
- * that does not compile yields `false`, so claim matching never faults a token
- * exchange.
+ * An invalid pattern returns `false` instead of faulting a token exchange. A
+ * valid pattern is anchored and must match the complete value.
  */
 export function isPatternMatch(pattern: string, value: string): boolean {
 	try {
@@ -68,10 +64,10 @@ export function isPatternMatch(pattern: string, value: string): boolean {
 }
 
 /**
- * Compile a capture pattern, requiring it to be anchored and to define at least
- * one named group (each named group becomes a template variable). Throws
- * {@link InvalidCapturePatternError} for an unanchored pattern, a pattern RE2
- * cannot compile, or one with no named group.
+ * Capture patterns must be anchored and define at least one named group. Each
+ * named group becomes a template variable. This function throws
+ * {@link InvalidCapturePatternError} if the pattern violates either constraint
+ * or RE2 cannot compile it.
  */
 export function compileCapture(pattern: string): RE2JS {
 	const compiled = compilePattern(pattern);
@@ -85,23 +81,17 @@ export function compileCapture(pattern: string): RE2JS {
 	return compiled;
 }
 
-/**
-The named groups a capture pattern defines.
-*/
 export function captureGroups(pattern: string): string[] {
 	return Object.keys(compileCapture(pattern).namedGroups());
 }
 
-/**
-Quote text for literal interpolation into an RE2 pattern.
-*/
 export function quotePatternLiteral(value: string): string {
 	return RE2JS.quote(value);
 }
 
 /**
- * Resolve a substitution to a concrete string from the verified claims. Throws
- * {@link SubstitutionError} when the claim is absent or a capture does not match.
+ * Substitutions read values from verified claims. A missing claim or a capture
+ * that does not match throws {@link SubstitutionError}.
  */
 export function applyTransform(
 	substitution: Substitution,

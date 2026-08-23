@@ -252,9 +252,8 @@ function postHandshakeFrame(version: string): Buffer {
 	return response.bytes();
 }
 
-// A daemon response that forwards one start-activity record for each copy it
-// performs, then completes the operation. The fields of a copy record are the
-// store path, the store the bytes came from and the store they went to.
+// Encode `actCopyPath` logger fields in worker-protocol order: store path,
+// source store, destination store.
 function substitutingResponse(
 	buildPaths: readonly string[],
 	copies: readonly { readonly storePath: string; readonly source: string }[]
@@ -508,7 +507,7 @@ const buildResultCases: readonly BuildResultCase[] = [
 ];
 
 describe('ByteStreamReader', () => {
-	it('pauses the producer while the consumer holds its next read', async () => {
+	it('pauses the producer while a consumer read remains pending', async () => {
 		const source = new PausableByteSource();
 		const reader = new ByteStreamReader(source);
 		const firstRead = reader.read(2);
@@ -531,9 +530,9 @@ describe('ByteStreamReader', () => {
 });
 
 describe('connectToNixDaemon', () => {
-	// The fakes elsewhere bypass the socket transport entirely, so this is the
-	// one place its write/read path meets a real socket (where Node calls the
-	// write callback with null, not undefined, on success).
+	// The fakes elsewhere bypass the socket transport. This integration test
+	// exercises its read and write paths against a real socket, where Node calls
+	// the write callback with null rather than undefined on success.
 	it('writes and reads through a real unix socket', async () => {
 		const directory = await mkdtemp(path.join(os.tmpdir(), 'cupboard-nix-'));
 		const socketPath = path.join(directory, 'socket');
@@ -752,7 +751,7 @@ describe('Nix daemon response bounds', () => {
 describe('NixDaemonStoreClient copy observation', () => {
 	const libraryPath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib';
 
-	it('records the store each forwarded copy was read from', async () => {
+	it("records each forwarded copy's source store", async () => {
 		const transport = new ScriptedDaemonTransport({
 			operation: substitutingResponse(
 				[],
@@ -795,7 +794,7 @@ describe('NixDaemonStoreClient copy observation', () => {
 			source: ''
 		}
 	])(
-		'records nothing for $name',
+		'records no copy source for $name',
 		async ({ activityType, storePath, source }) => {
 			const response = new ProtocolWriter();
 			response.writeInteger(stderrStartActivity);
@@ -831,7 +830,7 @@ describe('NixDaemonStoreClient copy observation', () => {
 });
 
 describe('NixDaemonStoreClient', () => {
-	it('closes an in-flight connection and raises the abort reason', async () => {
+	it('closes an in-flight connection and rejects with the abort reason', async () => {
 		const controller = new AbortController();
 		const reason = new Error('stop querying the daemon');
 		let closes = 0;
@@ -989,9 +988,9 @@ describe('NixDaemonStoreClient', () => {
 		expect(connections).toBe(1);
 	});
 
-	// Nix counts the silent time in a signed width, so a configuration stating
-	// a negative sends one, and the daemon reads back the number it was sent.
-	it('writes a negative silent time as the daemon reads one', async () => {
+	// max-silent-time uses a signed wire field, so negative configured values are
+	// encoded unchanged.
+	it('encodes a negative max-silent-time value', async () => {
 		const client = new NixDaemonStoreClient({
 			setOptions: { maxSilentTime: -1 },
 			connect: () =>
@@ -1067,7 +1066,7 @@ describe('NixDaemonStoreClient', () => {
 		);
 	});
 
-	it('writes the default SetOptions fields when nothing is configured', async () => {
+	it('writes the default SetOptions fields when no settings are configured', async () => {
 		const client = new NixDaemonStoreClient({
 			connect: () =>
 				Promise.resolve(
@@ -1165,7 +1164,7 @@ describe('NixDaemonStoreClient', () => {
 		expect(transport?.closed).toBe(true);
 	});
 
-	it('asks the configured substituters for paths in one daemon operation', async () => {
+	it('queries the configured substituters for paths in one daemon operation', async () => {
 		let transport: FakeDaemonTransport | undefined;
 		const client = new NixDaemonStoreClient({
 			connect: () => {
@@ -1194,7 +1193,7 @@ describe('NixDaemonStoreClient', () => {
 		expect(transport?.closed).toBe(true);
 	});
 
-	it('reports what the substituters offer, omitting a path none of them serves', async () => {
+	it('reports external offers and omits paths absent from every substituter', async () => {
 		let transport: FakeDaemonTransport | undefined;
 		const client = new NixDaemonStoreClient({
 			connect: () => {
@@ -1256,7 +1255,7 @@ describe('NixDaemonStoreClient', () => {
 		});
 	});
 
-	it('answers an empty substitutable-info batch without opening a connection', async () => {
+	it('returns an empty substitutable-info result without opening a connection', async () => {
 		const client = new NixDaemonStoreClient({
 			connect: () => {
 				throw new Error('the empty batch must not open a connection');
@@ -1735,7 +1734,7 @@ describe('NixDaemonStoreClient', () => {
 		);
 	});
 
-	it('answers an empty build request without opening a connection', async () => {
+	it('returns an empty build result without opening a connection', async () => {
 		let connections = 0;
 		const client = new NixDaemonStoreClient({
 			connect: () => {
@@ -1749,10 +1748,10 @@ describe('NixDaemonStoreClient', () => {
 		expect(connections).toBe(0);
 	});
 
-	// This one reassembles 150 kilobytes of NAR across a dozen frames, where
-	// every other test here moves a few hundred bytes, so under a full parallel
-	// check it lands either side of the 5 second default. It gets the budget
-	// the server's suites get, leaving every other test on the default.
+	// This test reassembles 150 kilobytes of NAR across a dozen frames. Every
+	// other test here moves a few hundred bytes, and the full parallel check can
+	// push this one past the five-second default. Give it the same timeout as the
+	// server suites and leave every other test on the default.
 	it('streams a NAR reassembled across daemon frames in order', async () => {
 		const bigContent = 'x'.repeat(150_000);
 		const contentFrame = narFrame(bigContent);
@@ -1837,7 +1836,7 @@ describe('NixDaemonStoreClient', () => {
 		expect(connections).toBe(2);
 	});
 
-	it('reads a derivation out of the single regular file its NAR holds', async () => {
+	it('reads a derivation from the single regular file in its NAR', async () => {
 		const aterm = 'Derive([],[],[],"aarch64-linux","builder",[],[])';
 		let transport: FakeDaemonTransport | undefined;
 		const client = new NixDaemonStoreClient({
@@ -1874,7 +1873,7 @@ describe('NixDaemonStoreClient', () => {
 		});
 	});
 
-	it('surfaces a typed error for bytes that do not form a NAR', async () => {
+	it('rejects malformed NAR bytes with a typed error', async () => {
 		let transport: FakeDaemonTransport | undefined;
 		const client = new NixDaemonStoreClient({
 			connect: () => {
@@ -2002,7 +2001,7 @@ describe('NixDaemonStoreClient', () => {
 		}
 	});
 
-	it('builds, holds temporary roots and queries on one session connection', async () => {
+	it('builds and queries with temporary roots on one session connection', async () => {
 		const build = buildResultCases[0];
 
 		if (build === undefined) {
@@ -2106,7 +2105,7 @@ describe('NixDaemonStoreClient', () => {
 		});
 	});
 
-	it('holds session exclusivity until a concurrent NAR stream is drained', async () => {
+	it('keeps the session exclusive until a concurrent NAR stream is drained', async () => {
 		const frames = [
 			narFrame('nix-archive-1'),
 			narFrame('(', 'type', 'regular', 'contents', 'session nar', ')')
@@ -2302,7 +2301,7 @@ describe('NixDaemonStoreClient', () => {
 		expect(transport?.closed).toBe(true);
 	});
 
-	it('answers an empty QueryMissing without opening a connection', async () => {
+	it('returns an empty QueryMissing result without opening a connection', async () => {
 		let connections = 0;
 		const client = new NixDaemonStoreClient({
 			connect: () => {
@@ -2534,7 +2533,7 @@ describe('NixDaemonStoreClient', () => {
 			pathInfo(runtimePath, runtimeHash, 789, [])
 		]);
 
-		// The root is one frontier on its own; its two references form the next,
+		// The root forms the first frontier; its two references form the next,
 		// so the pool opens a second connection to query them at the same time.
 		expect(transports.map((transport) => transport.closed)).toStrictEqual([
 			true,
@@ -2576,9 +2575,7 @@ describe('NixDaemonStoreClient', () => {
 		});
 	});
 
-	// The daemon states the references, so one that does not name a store path is
-	// refused at the reply rather than carried into the closure.
-	it('rejects a daemon reference that does not name a store path', async () => {
+	it('rejects an invalid store-path reference from the daemon', async () => {
 		const client = new NixDaemonStoreClient({
 			connect: () =>
 				Promise.resolve(
@@ -2603,7 +2600,7 @@ describe('NixDaemonStoreClient', () => {
 		{ name: 'an untrusted client', wire: 2, expected: 'not-trusted' },
 		{ name: 'an unset trust flag', wire: 0, expected: 'unknown' }
 	])(
-		'surfaces the handshake trust flag for $name',
+		'reports the handshake trust flag for $name',
 		async ({ wire, expected }) => {
 			let transport: FakeDaemonTransport | undefined;
 			const client = new NixDaemonStoreClient({
@@ -2619,7 +2616,7 @@ describe('NixDaemonStoreClient', () => {
 		}
 	);
 
-	it('rejects daemon protocol minors older than the SetOptions frame it sends', async () => {
+	it('rejects protocol minors below the SetOptions requirement', async () => {
 		let transport: FakeDaemonTransport | undefined;
 		const client = new NixDaemonStoreClient({
 			connect: () => {

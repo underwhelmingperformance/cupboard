@@ -49,10 +49,8 @@ import {
 	verifiableNarStored
 } from '../test-support.ts';
 
-// Two encodings of the same NAR: a real zstd frame (smaller) and a stored frame
-// (larger). They share a `narHash` but differ in compressed size, so a commit that
-// adopts one as canonical while staging the other charges a different size than it
-// staged.
+// Both encodings decompress to the same NAR and therefore share a narHash. Only
+// their compressed sizes differ.
 async function divergentEncodings(
 	seed: string
 ): Promise<{ small: VerifiableNar; large: VerifiableNar }> {
@@ -77,12 +75,6 @@ function expectCommitVerdictError(
 	expect(error).toBeInstanceOf(CommitVerdictError);
 }
 
-// `tenant_usage` is charged once per tenant per unique NAR hash on the 0-to-1
-// presence transition and credited symmetrically on the 1-to-0. The charge is
-// applied in the reservation's atomic batch, gated so a replay neither
-// double-charges nor double-references, and an over-quota charge fails the
-// table's CHECK so the whole reservation rolls back.
-
 describe('per-tenant quota', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
@@ -92,7 +84,7 @@ describe('per-tenant quota', () => {
 		await clearBlobStorage();
 	});
 
-	it('charges bytes and counts once per unique nar hash, narinfos per edge', async () => {
+	it('charges each NAR hash once and counts each narinfo reference', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('quota-once');
 		const first = uploadMetadata({
@@ -115,8 +107,6 @@ describe('per-tenant quota', () => {
 		});
 
 		await commitPath(token, first, nar);
-		// The second path shares the hash, so it reuses the tenant's own presence edge:
-		// a new narinfo edge but no second blob charge.
 		await commitSharedPath(token, second);
 
 		expect(await tenantUsageRow()).toStrictEqual({
@@ -165,7 +155,7 @@ describe('per-tenant quota', () => {
 		});
 	});
 
-	it('credits the charge back as references are deleted', async () => {
+	it('credits NAR storage only after the last narinfo reference is deleted', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('quota-credit');
 		const first = uploadMetadata({
@@ -189,11 +179,8 @@ describe('per-tenant quota', () => {
 
 		await commitPath(token, first, nar);
 		await commitSharedPath(token, second);
-		// Removing the first edge credits a narinfo back, but the blob stays charged
-		// while the second edge still references it.
 		await deletePath(token, first.storePathHash);
 		const afterFirst = await tenantUsageRow();
-		// Removing the last edge credits the blob's bytes and unique-blob count back.
 		await deletePath(token, second.storePathHash);
 		const afterSecond = await tenantUsageRow();
 
@@ -217,7 +204,7 @@ describe('per-tenant quota', () => {
 		});
 	});
 
-	it('rejects an over-quota commit, charging and referencing nothing', async () => {
+	it('rejects an over-quota commit without recording usage or references', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('quota-over');
 		const metadata = uploadMetadata({
@@ -228,7 +215,6 @@ describe('per-tenant quota', () => {
 			fileHash: nar.fileHash,
 			fileSize: nar.narBytes.byteLength
 		});
-		// A quota one byte short of this blob.
 		await provisionFixtureTenant({ quotaBytes: nar.narBytes.byteLength - 1 });
 
 		const decision = expectSingleUploadDecision(
@@ -318,8 +304,6 @@ describe('per-tenant quota', () => {
 		const token = await initialise();
 		const { small, large } = await divergentEncodings('quota-encoding-fit');
 
-		// The small encoding is already the available canonical blob; the quota fits it
-		// but not the larger encoding this commit stages and would adopt it over.
 		await seedCanonicalBlob(small);
 		await provisionFixtureTenant({ quotaBytes: small.narBytes.byteLength });
 
@@ -333,8 +317,6 @@ describe('per-tenant quota', () => {
 		});
 		await commitPath(token, metadata, large);
 
-		// It commits and charges the adopted canonical size, so the advisory pre-check
-		// did not reject on the larger staged size.
 		expect(await tenantUsageRow()).toStrictEqual({
 			bytes: small.narBytes.byteLength,
 			narinfos: 1,
@@ -345,14 +327,13 @@ describe('per-tenant quota', () => {
 		});
 	});
 
-	it('rejects cleanly when the canonical size exceeds quota though the staged size fits', async () => {
+	it('rejects the canonical size terminally when the smaller staged size fits the quota', async () => {
 		const token = await initialise();
 		const { small, large } = await divergentEncodings('quota-encoding-over');
 
-		// Only the large canonical object exists, with no `blob_state` row, so the
-		// advisory pre-check sees the smaller staged size and passes; the promote then
-		// adopts the larger canonical size, which the authoritative check rejects. The
-		// quota fits the staged size but not the canonical one.
+		// Leave blob_state absent so the advisory check uses the smaller staged
+		// size. Promotion adopts the larger canonical object, and the authoritative
+		// charge must reject that size.
 		await putNarBytes(narObjectKey(large.narHash), large);
 		await provisionFixtureTenant({ quotaBytes: small.narBytes.byteLength });
 
@@ -370,8 +351,6 @@ describe('per-tenant quota', () => {
 		);
 		await putNarBytes(decision.r2Key, small);
 		const commitError = await commitUploadRejection(token, decision.uploadId);
-		// A retry must not hang reporting pending: the over-quota verdict is
-		// terminal and its staging reclaimed, so the retry is refused outright.
 		const retryError = await commitUploadRejection(token, decision.uploadId);
 
 		const usage = await tenantUsageRow();
@@ -396,7 +375,7 @@ describe('per-tenant quota', () => {
 		});
 	});
 
-	it('reclaims an over-quota deferred upload in the verify pass and never makes it servable', async () => {
+	it('reclaims an over-quota deferred upload, keeps it unservable, and later reaps the verdict', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('quota-deferred');
 		const metadata = uploadMetadata({
@@ -408,9 +387,6 @@ describe('per-tenant quota', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		// Stage the upload and mark it pending, the state a too-large-to-verify-inline
-		// upload reaches, then lower the quota below the blob so the background verify
-		// pass, not the commit pre-check, is what finds it over quota.
 		const upload = expectSingleUploadDecision(
 			await negotiateUploads(token, [metadata]),
 			metadata
@@ -420,8 +396,8 @@ describe('per-tenant quota', () => {
 		await provisionFixtureTenant({ quotaBytes: nar.narBytes.byteLength - 1 });
 
 		await currentServer().runVerification();
-		// A second pass must not restore the reclaimed row's object and make an
-		// unreferenced, uncharged path servable.
+		// Run verification again to prove that the reclaimed reservation cannot
+		// republish the narinfo object.
 		await currentServer().runVerification();
 
 		const usage = await tenantUsageRow();
@@ -443,23 +419,19 @@ describe('per-tenant quota', () => {
 			objectPresent: false
 		});
 
-		// The terminal over-quota row is reaped once its observation window has passed,
-		// the same as a mismatch row.
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
 		await currentServer().runGarbageCollection();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 	});
 
-	it('materialises both deferred paths that share a narHash when quota fits one charge', async () => {
+	it('refreshes shared-NAR ownership so two deferred uploads consume one charge', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('quota-shared-hash');
 
-		// Two distinct store paths backed by the same NAR bytes. Both are staged and
-		// deferred before either is verified, so the prefetch reads isOwned: false for
-		// both. The first path to materialise charges the blob; the second's prefetched
-		// isOwned flag is then stale and would double-count the charge. The retry with
-		// a fresh probe sees isOwned: true and passes under quota.
+		// Both uploads are prefetched before either materialises. After the first
+		// charges the shared NAR, the second must refresh its stale ownership fact
+		// before treating the upload as over quota.
 		const first = await deferFreshUpload(
 			token,
 			'quota-shared-hash',
@@ -471,7 +443,6 @@ describe('per-tenant quota', () => {
 			'b'.repeat(32)
 		);
 
-		// Quota that fits exactly one charge of the blob.
 		await provisionFixtureTenant({ quotaBytes: nar.narBytes.byteLength });
 
 		await currentServer().runVerification();
@@ -520,14 +491,8 @@ async function probeWindowState(storePathHash: StorePathHash): Promise<{
 	};
 }
 
-// The quota pre-checks read the account outside the gate, so a quota or
-// status change can land between the probe and the charge. The charge batch's
-// CHECK constraint and the in-gate status re-read are the authorities behind
-// the probed decision; these drive that window deliberately through the
-// background verify pass, holding the probe's canonical head (its account
-// read has already resolved) while the account changes underneath it. Real
-// timers: the hold is released through a polled R2 marker, and no waiter
-// socket is involved, so nothing retries around the hold.
+// Status and quota are read before the gate, but the charge batch rechecks
+// both. These tests pause after the advisory read and mutate the tenant row.
 describe('the probe-to-charge window', () => {
 	beforeEach(async () => {
 		await resetTestServer();
@@ -536,10 +501,9 @@ describe('the probe-to-charge window', () => {
 
 	const releaseKey = 'test/probe-window-release';
 
-	// Holds the verify pass at the probe's canonical head (the second head of
-	// the canonical key: the promote's own comes first) until the release
-	// marker object appears. Every promise stays in the Durable Object's own
-	// request context; the test signals through R2 state instead.
+	// Promotion performs the first canonical head, so pause on the second head
+	// during materialisation. An R2 marker coordinates the requests without
+	// moving a promise outside the Durable Object request context.
 	function holdProbeHead(canonicalKey: string): {
 		spy: MockInstance;
 		heads: () => number;
@@ -601,16 +565,14 @@ describe('the probe-to-charge window', () => {
 		return { nar, metadata, decision, held, pass };
 	}
 
-	it('recovers cleanly when the charge loses the quota race', async () => {
+	it('rejects a charge after quota shrinks between the pre-check and charge', async () => {
 		const { nar, metadata, decision, held, pass } = await heldVerify(
 			(fits) => fits.narBytes.byteLength
 		);
 
 		try {
-			// The quota shrinks while the probe is held: its account read already
-			// resolved under the old quota, so the pre-checks pass and the charge
-			// batch is what discovers the loss. The recovery must read that as
-			// genuinely over quota, settling terminally with nothing stranded.
+			// The advisory read has already observed the old quota. The charge batch
+			// must detect the lower value and settle the upload terminally.
 			await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 				.update(d1Schema.tenantUsage)
 				.set({ quotaBytes: nar.narBytes.byteLength - 1 })
@@ -634,15 +596,14 @@ describe('the probe-to-charge window', () => {
 		}
 	});
 
-	it('stops a commit whose tenant was suspended past the probe', async () => {
+	it('rejects a commit after the tenant is suspended between the pre-check and charge', async () => {
 		const { metadata, decision, held, pass } = await heldVerify(
 			(fits) => fits.narBytes.byteLength * 2
 		);
 
 		try {
-			// The suspension lands while the probe is held, after its account read
-			// resolved active: only the charge batch's status fence stands between
-			// it and the charge.
+			// The advisory read has already observed an active tenant. The charge
+			// batch must reject the newly suspended tenant.
 			await suspendTenant(fixtureTenant);
 			await env.BLOBS.put(releaseKey, 'go');
 			await pass;

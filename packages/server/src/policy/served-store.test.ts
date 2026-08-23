@@ -27,7 +27,7 @@ function thrownBy(paths: readonly StorePathString[]): unknown {
 
 describe('requireServedStorePaths', () => {
 	it.each([
-		{ name: 'no paths at all', paths: [] },
+		{ name: 'an empty list', paths: [] },
 		{ name: 'a single served path', paths: [served] },
 		{
 			name: 'several served paths',

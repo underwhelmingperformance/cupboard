@@ -23,8 +23,8 @@ on:
         default: ''
       root:
         description:
-          Retention root prefix recorded over the pushed paths. The builder's
-          Nix system is appended, so one prefix serves every platform.
+          Prefix for the retention root. The workflow appends the builder's Nix
+          system, creating a separate root for each platform.
         required: false
         type: string
         default: ''
@@ -105,8 +105,6 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
-      # Resolve either the explicit selector or this workflow revision to one
-      # validated acquisition coordinate.
       - uses: ./.cupboard-workflow/actions/resolve-cupboard
         id: resolve-cupboard
         with:

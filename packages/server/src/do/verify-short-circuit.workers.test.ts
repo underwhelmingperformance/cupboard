@@ -37,9 +37,6 @@ async function snapshotPendingRow(uploadId: UploadId): Promise<PendingRow> {
 	return row;
 }
 
-// Re-plants a cleared pending row as still awaiting its verdict, the state an
-// eviction leaves when the narinfo object published but the clear-marker step
-// never ran.
 async function replantStuckPending(row: PendingRow): Promise<void> {
 	await runInDurableObject(currentServer(), (_instance, state) => {
 		drizzle(state.storage, { schema: { pendingUploads } })
@@ -49,17 +46,14 @@ async function replantStuckPending(row: PendingRow): Promise<void> {
 	});
 }
 
-// A verify pass re-claiming a row that already verified and materialised must
-// finish its bookkeeping, not re-run the whole decode/promote/materialise saga.
-// Here the private staging bytes are already gone, so a re-decode would wrongly
-// fail the row `mismatch` and prune its root; the short-circuit settles it
-// `servable` on the durable evidence: the generation-scoped reference edge and
-// the published narinfo object.
-describe('verify short-circuits an already-committed re-claim', () => {
+// A crash after publishing narinfo but before clearing the pending row can leave
+// no private staging bytes. Re-decoding that row would turn a committed upload
+// into `mismatch` and prune its root.
+describe('verification with a pending row left after commit', () => {
 	beforeEach(resetTestServer);
 
 	it.each(['cron', 'queue'] as const)(
-		'finalises a stuck already-committed row over the %s path',
+		'clears the stale pending row without changing the committed path when started by %s',
 		async (entry) => {
 			const token = await initialise();
 			const upload = await deferFreshUpload(
@@ -69,8 +63,6 @@ describe('verify short-circuits an already-committed re-claim', () => {
 			);
 			const staged = await snapshotPendingRow(upload.uploadId);
 
-			// Materialise it: the narinfo object publishes, the marker clears, and the
-			// private staging object is reclaimed.
 			await currentServer().runVerification();
 			await setRoot(token, {
 				name: 'main',

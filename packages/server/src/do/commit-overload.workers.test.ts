@@ -23,16 +23,15 @@ import {
 	uploadMetadata
 } from '../test-support.ts';
 
-// The D1 overload text the binding injects when it sheds load. Only this test
-// file and the detection helper in transient.ts ever reference this text; the
-// detection helper is the single location that matches on message text.
+// Keep this exact Cloudflare D1 text aligned with `transient.ts`, which must
+// identify this overload condition from the error message.
 const d1OverloadText =
 	'D1_ERROR: D1 DB is overloaded. Too many requests queued.';
 
 describe('commit socket overload handling', () => {
 	beforeEach(resetTestServer);
 
-	it('answers a commit whose D1 charge batch hits an overload with a 503 error frame', async () => {
+	it('sends a 503 error frame when D1 rejects the commit as overloaded', async () => {
 		const token = await initialise();
 		const path = uploadMetadata({ storePathHash: 'a'.repeat(32), fileSize: 1 });
 		const negotiated = await negotiateUploads(token, [path]);
@@ -45,8 +44,6 @@ describe('commit socket overload handling', () => {
 		const { uploadId, r2Key } = decision;
 		await putNarBytes(r2Key);
 
-		// Make every D1 batch call throw the overload message so the commit
-		// pipeline's charge batch faults with the D1 signal.
 		const batchSpy = vi
 			.spyOn(env.CUPBOARD_DB, 'batch')
 			.mockRejectedValue(new Error(d1OverloadText));
@@ -107,8 +104,8 @@ async function liveSocketCount(): Promise<number> {
 	);
 }
 
-// The ceiling the test environment binds, well below the deployed one so a
-// suite can reach it with a handful of sockets.
+// The test environment configures a lower ceiling than production so the suite
+// can reach it with a small number of sockets.
 const ceiling = commitSocketCeiling(env);
 
 describe('commit socket ceiling', () => {
@@ -161,10 +158,10 @@ describe('commit socket ceiling', () => {
 		closeAll([reopened, ...rest]);
 	});
 
-	// A session that does not negotiate credit sends as fast as it likes, so the
-	// tenant holds only a few of them at once; a credited session is still
-	// admitted at that point, since the server paces it.
-	it('admits fewer sessions that credit cannot pace', async () => {
+	// The server cannot pace a session that did not negotiate credit, so it uses
+	// a lower limit for those sessions. A credited session remains admissible at
+	// that limit because the server controls its send budget.
+	it('applies the lower uncredited limit without refusing a credited session', async () => {
 		const token = await initialise();
 		const unpaced = await openSessions(token, maxUncreditedCommitSessions);
 

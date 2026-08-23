@@ -22,8 +22,12 @@ function thrownBy(run: () => unknown): unknown {
 
 describe('coldPathTtlSeconds', () => {
 	it.each([
-		{ name: 'empty means permanent', value: '', expected: undefined },
-		{ name: 'a valid TTL', value: '3600', expected: 3600 }
+		{
+			name: 'returns undefined for an empty setting',
+			value: '',
+			expected: undefined
+		},
+		{ name: 'returns a valid TTL', value: '3600', expected: 3600 }
 	])('$name', ({ value, expected }) => {
 		expect(coldPathTtlSeconds({ CUPBOARD_COLD_PATH_TTL_SECONDS: value })).toBe(
 			expected
@@ -59,7 +63,7 @@ describe('coldPathTtlSeconds', () => {
 describe('resolveRootExpiry', () => {
 	it.each([
 		{
-			name: 'an explicit TTL on a named root',
+			name: 'uses an explicit TTL for a named root',
 			explicitTtlSeconds: 3600,
 			policyTtlSeconds: undefined,
 			rootName: 'github:owner/repo/main',
@@ -67,7 +71,7 @@ describe('resolveRootExpiry', () => {
 			expected: '2026-01-01T01:00:00.000Z'
 		},
 		{
-			name: 'a matching policy on a named root',
+			name: 'uses a matching policy for a named root',
 			explicitTtlSeconds: undefined,
 			policyTtlSeconds: 7200,
 			rootName: 'github:owner/repo/main',
@@ -75,7 +79,7 @@ describe('resolveRootExpiry', () => {
 			expected: '2026-01-01T02:00:00.000Z'
 		},
 		{
-			name: 'a policy winning over the cold-path default on a pin',
+			name: 'uses a policy instead of the cold-path default for a pin',
 			explicitTtlSeconds: undefined,
 			policyTtlSeconds: 7200,
 			rootName: pinName,
@@ -83,7 +87,7 @@ describe('resolveRootExpiry', () => {
 			expected: '2026-01-01T02:00:00.000Z'
 		},
 		{
-			name: 'an explicit TTL winning over a policy',
+			name: 'uses an explicit TTL instead of a policy',
 			explicitTtlSeconds: 3600,
 			policyTtlSeconds: 7200,
 			rootName: pinName,
@@ -91,7 +95,7 @@ describe('resolveRootExpiry', () => {
 			expected: '2026-01-01T01:00:00.000Z'
 		},
 		{
-			name: 'the cold-path default on an implicit pin',
+			name: 'uses the cold-path default for an implicit pin',
 			explicitTtlSeconds: undefined,
 			policyTtlSeconds: undefined,
 			rootName: pinName,
@@ -99,7 +103,7 @@ describe('resolveRootExpiry', () => {
 			expected: '2026-01-01T02:00:00.000Z'
 		},
 		{
-			name: 'a named root staying permanent under the cold-path default',
+			name: 'keeps a named root permanent when only the cold-path default is set',
 			explicitTtlSeconds: undefined,
 			policyTtlSeconds: undefined,
 			rootName: 'github:owner/repo/main',
@@ -107,7 +111,7 @@ describe('resolveRootExpiry', () => {
 			expected: undefined
 		},
 		{
-			name: 'an implicit pin staying permanent with nothing configured',
+			name: 'keeps an implicit pin permanent when no TTL is configured',
 			explicitTtlSeconds: undefined,
 			policyTtlSeconds: undefined,
 			rootName: pinName,

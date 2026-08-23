@@ -23,11 +23,6 @@ interface RetireOptions {
 	readonly yes?: boolean;
 }
 
-/**
- * The slice of the derived control client the control-key commands consume,
- * in the contract's input and output shapes; the real `controlRpc(...).keys`
- * satisfies it by construction.
- */
 export interface ControlKeyClient {
 	list(): Promise<ParsedControlKeyListResponse>;
 	rotate(): Promise<ParsedControlKeyRotateResponse>;

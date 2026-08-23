@@ -36,9 +36,6 @@ import {
 	type NixSubstitutionSettings
 } from './store-config.ts';
 
-/**
-A machine offering nothing a build can ask for beyond the portable names.
-*/
 const bareMachine: NixMachineProbes = {
 	canReadWrite: () => false,
 	isFilePresent: () => false,
@@ -76,14 +73,8 @@ interface Probes {
 
 const noFiles = new Map<string, string>();
 
-/**
-The directory these fixtures run in. A relative path resolves against it.
-*/
 const workingDirectory = '/work/dir';
 
-/**
-A machine that reports no home directory, as one with no passwd entry does.
-*/
 function noHomeDirectory(): string | undefined {
 	return noFiles.get('home');
 }
@@ -134,10 +125,20 @@ describe('resolveStoreBackend', () => {
 	};
 
 	it.each([
-		{ name: 'daemon', uri: 'daemon', probes: {}, expected: daemon },
-		{ name: 'local', uri: 'local', probes: {}, expected: local },
 		{
-			name: 'an empty reference, which names the automatic store',
+			name: 'the daemon reference to the configured socket',
+			uri: 'daemon',
+			probes: {},
+			expected: daemon
+		},
+		{
+			name: 'the local reference to the configured directories',
+			uri: 'local',
+			probes: {},
+			expected: local
+		},
+		{
+			name: 'an empty reference through automatic selection',
 			uri: '',
 			probes: { canWrite: true },
 			expected: local
@@ -191,7 +192,7 @@ describe('resolveStoreBackend', () => {
 			}
 		},
 		{
-			name: 'an ssh-ng store naming its remote program',
+			name: 'an ssh-ng URI with remote-program',
 			uri: 'ssh-ng://example.test?remote-program=/opt/nix/bin/nix-daemon',
 			probes: {},
 			expected: {
@@ -203,16 +204,13 @@ describe('resolveStoreBackend', () => {
 				}
 			}
 		}
-	])('selects $name', ({ uri, probes, expected }) => {
+	])('resolves $name', ({ uri, probes, expected }) => {
 		expect(resolve(uri, probes)).toStrictEqual(expected);
 	});
 
-	// A local store URI names its own directories. `root` puts the store and
-	// the state under one directory, while `store`, `state` and `real` name
-	// one each; a parameter naming one outright is the one that stands.
 	it.each<{ name: string; uri: string; expected: StoreBackend }>([
 		{
-			name: 'a root the store and the state sit under',
+			name: 'a root parameter for both store and state',
 			uri: 'local?root=/rooted',
 			expected: {
 				backend: 'local',
@@ -222,7 +220,7 @@ describe('resolveStoreBackend', () => {
 			}
 		},
 		{
-			name: 'the same root behind the scheme separator',
+			name: 'a root parameter on local://',
 			uri: 'local://?root=/rooted',
 			expected: {
 				backend: 'local',
@@ -232,9 +230,7 @@ describe('resolveStoreBackend', () => {
 			}
 		},
 		{
-			// A `local://` URI can name a path. That path is the store's root. A
-			// reference written as a path resolves to the same store.
-			name: 'a root in the URI',
+			name: 'a local URI path used as the root',
 			uri: 'local:///rooted',
 			expected: {
 				backend: 'local',
@@ -254,7 +250,7 @@ describe('resolveStoreBackend', () => {
 			}
 		},
 		{
-			name: 'a root in the URI, with parameters after it',
+			name: 'a local URI path with a state parameter',
 			uri: 'local:///rooted?state=/named/state',
 			expected: {
 				backend: 'local',
@@ -264,9 +260,7 @@ describe('resolveStoreBackend', () => {
 			}
 		},
 		{
-			// Nix takes the root from the URI only when no parameter names one, so
-			// a `root` parameter wins.
-			name: 'a root parameter, which wins over the URI',
+			name: 'a root parameter overriding the URI path',
 			uri: 'local:///named?root=/rooted',
 			expected: {
 				backend: 'local',
@@ -276,7 +270,7 @@ describe('resolveStoreBackend', () => {
 			}
 		},
 		{
-			name: 'the root directory, where this machine keeps its store',
+			name: 'the filesystem root without another prefix',
 			uri: 'local:///',
 			expected: {
 				backend: 'local',
@@ -286,7 +280,7 @@ describe('resolveStoreBackend', () => {
 			}
 		},
 		{
-			name: 'a store and a state directory named one at a time',
+			name: 'independent store and state parameters',
 			uri: 'local?store=/named/store&state=/named/state',
 			expected: {
 				backend: 'local',
@@ -295,7 +289,7 @@ describe('resolveStoreBackend', () => {
 			}
 		},
 		{
-			name: 'a state directory over the one a root would settle',
+			name: 'a state parameter overriding the root-derived state directory',
 			uri: 'local?root=/rooted&state=/named/state',
 			expected: {
 				backend: 'local',
@@ -305,7 +299,7 @@ describe('resolveStoreBackend', () => {
 			}
 		},
 		{
-			name: 'a real directory over the one a root would settle',
+			name: 'a real parameter overriding the root-derived store directory',
 			uri: 'local?root=/rooted&real=/elsewhere',
 			expected: {
 				backend: 'local',
@@ -324,8 +318,7 @@ describe('resolveStoreBackend', () => {
 			}
 		},
 		{
-			// Nix reads the first assignment of a parameter named twice.
-			name: 'the first of two roots',
+			name: 'the first of two root assignments',
 			uri: 'local?root=/first&root=/second',
 			expected: {
 				backend: 'local',
@@ -335,9 +328,7 @@ describe('resolveStoreBackend', () => {
 			}
 		},
 		{
-			// A parameter Nix has no setting for is one it warns about and
-			// reads nothing out of.
-			name: 'a parameter naming no setting, alongside one that does',
+			name: 'an unknown parameter alongside a valid root',
 			uri: 'local?no-such-parameter=1&root=/rooted',
 			expected: {
 				backend: 'local',
@@ -347,9 +338,7 @@ describe('resolveStoreBackend', () => {
 			}
 		},
 		{
-			// A directory named with characters a URI escapes is the directory
-			// those characters spell.
-			name: 'a root written with an escaped character',
+			name: 'a percent-encoded root',
 			uri: 'local?root=/rooted%20store',
 			expected: {
 				backend: 'local',
@@ -359,28 +348,26 @@ describe('resolveStoreBackend', () => {
 			}
 		},
 		{
-			// An empty value names no directory, which leaves the parameter
-			// settling nothing.
-			name: 'an empty root, which settles nothing',
+			name: 'an empty root parameter',
 			uri: 'local?root=',
 			expected: local
 		},
 		{
-			name: 'an assignment carrying no value at all',
+			name: 'a root parameter without an equals sign',
 			uri: 'local?root',
 			expected: local
 		}
-	])('selects $name', ({ uri, expected }) => {
+	])('resolves directories for $name', ({ uri, expected }) => {
 		expect(resolve(uri)).toStrictEqual(expected);
 	});
 
 	it.each([
 		{ name: 'a root that is not an absolute path', uri: 'local?root=rooted' },
-		{ name: 'a state directory that is not one', uri: 'local?state=state' },
-		{ name: 'a real directory that is not one', uri: 'local?real=store' },
-		{ name: 'a store directory that is not one', uri: 'local?store=store' },
+		{ name: 'a relative state directory', uri: 'local?state=state' },
+		{ name: 'a relative real store directory', uri: 'local?real=store' },
+		{ name: 'a relative logical store directory', uri: 'local?store=store' },
 		{
-			name: 'a store directory no store path could sit under',
+			name: 'a logical store directory containing a parent segment',
 			uri: 'local?store=/nix/../store'
 		}
 	])('rejects $name', ({ uri }) => {
@@ -390,33 +377,18 @@ describe('resolveStoreBackend', () => {
 	it.each([
 		{ name: 'an unsupported scheme', uri: 'ssh://builder' },
 		{ name: 'an ssh-ng store with no destination', uri: 'ssh-ng://' },
-		{
-			// A binary cache serves narinfos and NARs, which is not a store
-			// this client can read path information from.
-			name: 'a binary cache',
-			uri: 'https://cache.example'
-		},
-		{
-			name: 'a store URI naming another scheme entirely',
-			uri: 'local-x?root=/a'
-		}
+		{ name: 'an HTTP binary cache', uri: 'https://cache.example' },
+		{ name: 'an unsupported local-x scheme', uri: 'local-x?root=/a' }
 	])('rejects $name', ({ uri }) => {
 		expect(() => resolve(uri)).toThrow(UnsupportedNixStoreError);
 	});
 
-	// Nix sets up a store of the user's own when there is no `/nix` to read,
-	// no daemon to ask, and nothing in the environment naming directories it
-	// should use instead. That is what an ordinary Linux user who has never
-	// installed Nix gets.
-	describe('the chroot store an unserved Linux machine falls back to', () => {
+	describe('automatic fallback on Linux without a local store or daemon', () => {
 		const unserved: Probes = {
 			canWrite: false,
 			socket: false,
 			stateDirectoryExists: false
 		};
-		// The store keeps naming its paths the way the configuration names
-		// them, and holds them under the root, which is how Nix reaches any
-		// store under one.
 		const chroot = (root: string): StoreBackend => ({
 			backend: 'local',
 			stateDirectory: `${root}/nix/var/nix`,
@@ -442,21 +414,21 @@ describe('resolveStoreBackend', () => {
 			readonly expected: StoreBackend;
 		}>([
 			{
-				name: 'the data directory under the home directory',
+				name: 'the HOME fallback',
 				env: {},
 				expected: chroot('/home/u/.local/share/nix/root')
 			},
 			{
-				name: 'the data home the environment names',
+				name: 'XDG_DATA_HOME',
 				env: { XDG_DATA_HOME: '/xdg/data' },
 				expected: chroot('/xdg/data/nix/root')
 			},
 			{
-				name: "Nix's own data home, ahead of the XDG one",
+				name: 'NIX_DATA_HOME ahead of XDG_DATA_HOME',
 				env: { NIX_DATA_HOME: '/nix/data', XDG_DATA_HOME: '/xdg/data' },
 				expected: chroot('/nix/data/root')
 			}
-		])('roots at $name', ({ env, expected }) => {
+		])('uses $name as the chroot root', ({ env, expected }) => {
 			expect(resolveOnLinux(unserved, env)).toStrictEqual(expected);
 		});
 
@@ -476,12 +448,12 @@ describe('resolveStoreBackend', () => {
 				env: {}
 			},
 			{
-				name: 'the environment names a store directory',
+				name: 'the environment specifies a store directory',
 				probes: unserved,
 				env: { NIX_STORE_DIR: '/env/store' }
 			},
 			{
-				name: 'the environment names a state directory',
+				name: 'the environment specifies a state directory',
 				probes: unserved,
 				env: { NIX_STATE_DIR: '/env/state' }
 			},
@@ -494,8 +466,6 @@ describe('resolveStoreBackend', () => {
 			expect(resolveOnLinux(probes, env)).toStrictEqual(local);
 		});
 
-		// A machine reporting no home directory has nowhere to root a store of
-		// the user's own, so the configured one stands.
 		it('keeps the configured store with no home directory to root under', () => {
 			expect(resolveOnLinux(unserved, {}, noHomeDirectory)).toStrictEqual(
 				local
@@ -509,19 +479,19 @@ describe('resolveStoreBackend', () => {
 });
 
 describe('createNixStoreClient', () => {
-	it('builds a daemon client for a daemon store', () => {
+	it('creates a daemon client for a daemon store', () => {
 		expect(
 			createNixStoreClient(environment({ NIX_REMOTE: 'daemon' }))
 		).toBeInstanceOf(NixDaemonStoreClient);
 	});
 
-	it('builds a local client for a local store', () => {
+	it('creates a local client for a local store', () => {
 		expect(
 			createNixStoreClient(environment({ NIX_REMOTE: 'local' }))
 		).toBeInstanceOf(NixLocalStoreClient);
 	});
 
-	it('builds a daemon client for an ssh-ng store', () => {
+	it('creates a daemon client for an ssh-ng store', () => {
 		expect(
 			createNixStoreClient(
 				environment({ NIX_REMOTE: 'ssh-ng://build@example.test' })
@@ -530,10 +500,6 @@ describe('createNixStoreClient', () => {
 	});
 });
 
-// A daemon reads the settings its client sends it through the configuration
-// layer, so an override reaching a store this process drives has to be read
-// the same way: Nix accepts three spellings for each of a setting's two
-// values, and refuses the rest.
 describe('createAvailabilityStoreClient', () => {
 	it('keeps an explicitly local store local when the daemon socket exists', () => {
 		const store = createAvailabilityStoreClient(
@@ -545,7 +511,7 @@ describe('createAvailabilityStoreClient', () => {
 		expect(store.kind).toBe('local-filesystem');
 	});
 
-	it('carries a local URI store directory into the opened store', () => {
+	it('returns the logical store directory from a local URI', () => {
 		const store = createAvailabilityStoreClient(
 			daemonEnvironment({ canWrite: true, socket: false }),
 			baseConfig,
@@ -557,7 +523,7 @@ describe('createAvailabilityStoreClient', () => {
 		expect(store.storeDirectory).toBe('/named/store');
 	});
 
-	it('carries an ssh remote-store directory into the opened store', () => {
+	it('returns the logical directory from an ssh-ng remote-store', () => {
 		const store = createAvailabilityStoreClient(
 			daemonEnvironment({ canWrite: true, socket: false }),
 			baseConfig,
@@ -570,31 +536,38 @@ describe('createAvailabilityStoreClient', () => {
 		expect(store.storeDirectory).toBe('/remote/store');
 	});
 
-	it('refuses an override Nix would not read as a setting value', () => {
+	it('rejects an invalid boolean substitution override', () => {
 		expect(() => localWithSubstitute('off')).toThrow(NixConfigSettingError);
 	});
 
-	// Nix refuses to open a store it cannot read. Answering from the configured
-	// store instead would report on a store the caller never named.
 	it.each([
-		{ name: 'a binary cache', storeUri: 'https://cache.example' },
-		{ name: 'a scheme that opens no store here', storeUri: 'ssh://builder' },
-		{ name: 'an ssh-ng store with no destination', storeUri: 'ssh-ng://' }
-	])('refuses $name', ({ storeUri }) => {
-		expect(() => openForAvailability({ storeUri })).toThrow(
-			UnsupportedNixStoreError
-		);
-	});
+		{
+			name: 'an explicitly requested binary cache',
+			storeUri: 'https://cache.example'
+		},
+		{
+			name: 'an explicitly requested unsupported scheme',
+			storeUri: 'ssh://builder'
+		},
+		{
+			name: 'an explicitly requested ssh-ng store with no destination',
+			storeUri: 'ssh-ng://'
+		}
+	])(
+		'rejects $name instead of opening the configured store',
+		({ storeUri }) => {
+			expect(() => openForAvailability({ storeUri })).toThrow(
+				UnsupportedNixStoreError
+			);
+		}
+	);
 
-	// A path names a local store rooted at that path. Nix resolves the
-	// reference before it opens the store, so a caller naming a path reads that
-	// store rather than the configured one.
 	it.each([
 		{ name: 'an absolute path', storeUri: '/rooted' },
 		{ name: 'a relative path', storeUri: './rooted' },
-		{ name: 'the URI a path resolves to', storeUri: 'local:///rooted' },
+		{ name: 'an equivalent local URI path', storeUri: 'local:///rooted' },
 		{ name: 'a root parameter', storeUri: 'local?root=/rooted' }
-	])('opens the store named by $name', ({ storeUri }) => {
+	])('selects a local-filesystem backend for $name', ({ storeUri }) => {
 		expect(openForAvailability({ storeUri }).kind).toBe('local-filesystem');
 	});
 });
@@ -623,17 +596,17 @@ describe('overriddenSubstitution', () => {
 		readonly expected: NixSubstitutionSettings;
 	}>([
 		{
-			name: 'settling nothing',
+			name: 'leaves discovered settings unchanged with no overrides',
 			overrides: {},
 			expected: discovered
 		},
 		{
-			name: 'replacing the configured list',
+			name: 'replaces the configured substituter list',
 			overrides: { substituters: 'https://only.example' },
 			expected: { ...discovered, substituters: ['https://only.example'] }
 		},
 		{
-			name: 'appending to the configured list',
+			name: 'appends to the configured substituter list',
 			overrides: { 'extra-substituters': 'https://extra.example' },
 			expected: {
 				...discovered,
@@ -641,7 +614,7 @@ describe('overriddenSubstitution', () => {
 			}
 		},
 		{
-			name: 'replacing and appending together',
+			name: 'replaces and then appends to the substituter list',
 			overrides: {
 				substituters: 'https://only.example',
 				'extra-substituters': 'https://extra.example'
@@ -652,14 +625,12 @@ describe('overriddenSubstitution', () => {
 			}
 		},
 		{
-			name: 'replacing the list with none',
+			name: 'clears the substituter list with an empty assignment',
 			overrides: { substituters: '' },
 			expected: { ...discovered, substituters: [] }
 		},
 		{
-			// A daemon holds what its client sends it as the list setting it is,
-			// so a substituter named twice is held twice there as well.
-			name: 'naming the same substituter twice',
+			name: 'preserves duplicate substituter entries',
 			overrides: {
 				substituters: 'https://one.example https://one.example'
 			},
@@ -669,21 +640,21 @@ describe('overriddenSubstitution', () => {
 			}
 		},
 		{
-			name: 'turning substitution off',
+			name: 'disables substitution',
 			overrides: { substitute: 'no' },
 			expected: { ...discovered, substitute: false }
 		},
 		{
-			name: 'overruling a derivation that withholds substitution',
+			name: 'enables always-allow-substitutes',
 			overrides: { 'always-allow-substitutes': 'true' },
 			expected: { ...discovered, alwaysAllowSubstitutes: true }
 		},
 		{
-			name: 'tolerating a substituter that fails',
+			name: 'enables fallback',
 			overrides: { fallback: '1' },
 			expected: { ...discovered, fallback: true }
 		}
-	])('settles the settings an override $name', ({ overrides, expected }) => {
+	])('$name', ({ overrides, expected }) => {
 		expect(overriddenSubstitution(discovered, overrides)).toStrictEqual(
 			expected
 		);
@@ -711,7 +682,7 @@ describe('createNixDaemonStoreClient', () => {
 			socket: false
 		}
 	])(
-		'raises an abort reason before connecting to $name',
+		'rejects with the abort reason before connecting to $name',
 		async ({ storeUri, socket }) => {
 			const reason = new Error('stop opening the store');
 			let connections = 0;
@@ -736,7 +707,7 @@ describe('createNixDaemonStoreClient', () => {
 	it.each([
 		{ name: 'a writable state directory', canWrite: true },
 		{ name: 'a read-only state directory', canWrite: false }
-	])('selects the daemon over $name when its socket exists', ({ canWrite }) => {
+	])('opens the daemon when its socket exists with $name', ({ canWrite }) => {
 		expect(
 			createNixDaemonStoreClient(daemonEnvironment({ canWrite, socket: true }))
 		).toBeInstanceOf(NixDaemonStoreClient);
@@ -774,7 +745,7 @@ describe('createNixDaemonStoreClient', () => {
 		});
 	});
 
-	it('probes the socket a unix store URI names', () => {
+	it('probes the socket path from a unix store URI', () => {
 		let outcome:
 			{ value: NixDaemonStoreClient } | { error: { socketPath: string } };
 		try {
@@ -827,7 +798,7 @@ describe('createNixDaemonStoreClient', () => {
 		expect(client.preservesDaemonOptions).toBe(true);
 	});
 
-	it('opens the ssh-ng store a per-call storeUri names over a local configuration', async () => {
+	it('uses a per-call ssh-ng storeUri instead of the configured local store', async () => {
 		const storePath = storePathSchema.parse(
 			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
 		);

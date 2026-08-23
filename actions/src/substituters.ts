@@ -11,9 +11,8 @@ export function cacheUrlFor(baseUrl: URL, cache: StoredCache): URL {
 }
 
 /**
- * The URL for a named tenant reuse view. Unlike {@link cacheUrlFor}, this
- * always hangs off the tenant base: a reuse view spans caches, so it has no
- * per-cache prefix to nest under.
+ * A reuse view spans every cache in a tenant. Build its URL from the tenant
+ * base rather than nesting it under a cache-specific prefix.
  */
 export function reuseViewUrlFor(baseUrl: URL, view: string): URL {
 	return reuseViewUrl(baseUrl, view.trim());

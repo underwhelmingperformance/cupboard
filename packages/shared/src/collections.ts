@@ -1,6 +1,3 @@
-/**
-Splits `items` into consecutive runs of at most `size`.
-*/
 export function chunk<T>(items: readonly T[], size: number): T[][] {
 	const chunks: T[][] = [];
 

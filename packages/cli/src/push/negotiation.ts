@@ -1,8 +1,5 @@
 import { UploadNegotiationMismatchError } from '../errors.ts';
 
-/**
-The identity shared by one requested path and the decision answering it.
-*/
 export interface UploadNegotiationIdentity {
 	readonly storePathHash: string;
 	readonly narHash: string;
@@ -17,8 +14,8 @@ function identityKey(identity: UploadNegotiationIdentity): string {
 }
 
 /**
- * Requires a negotiate or preview response to answer every requested path
- * exactly once and nothing else.
+ * Requires a negotiate or preview response to return exactly one decision for
+ * every requested path and no decision for another path.
  */
 export function exactUploadDecisions<
 	Decision extends UploadNegotiationDecisionIdentity
@@ -35,10 +32,9 @@ export function exactUploadDecisions<
 	const answered = new Set<string>();
 
 	for (const decision of decisions) {
-		// A skip reports the NAR hash the destination already serves. It may differ
-		// from the requested one, which is the divergent skip that callers warn
-		// about; the store-path hash still identifies the request the decision
-		// answers.
+		// A skip reports the NAR hash that the destination already serves. It may
+		// differ from the requested hash, but the store-path hash still identifies
+		// the corresponding request.
 		const requestedIdentity =
 			requestedByKey.get(identityKey(decision)) ??
 			(decision.action === 'skip'

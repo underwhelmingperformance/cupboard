@@ -35,8 +35,6 @@ interface Offer {
 	readonly narHash: NixSha256Hash;
 }
 
-// A store holding a path, as the walk reads it: the references it follows and
-// the NAR hash an offer is compared against.
 function held(
 	storePath: StorePathString,
 	references: readonly StorePathString[] = [],
@@ -56,8 +54,6 @@ function offer(downloadSize = 0, narSize = 0, narHash = sameBytes): Offer {
 	return { downloadSize, narSize, narHash };
 }
 
-// The two sides the walk asks: what this store holds, and what the permitted
-// substituters offer. A path with no entry is one that side does not have.
 class FakeStore {
 	readonly heldBatches: (readonly StorePathString[])[] = [];
 
@@ -113,7 +109,7 @@ class FakeStore {
 }
 
 describe('resolveSubstitutableClosure', () => {
-	it('proves a closure the substituters hold in full, one round per level', async () => {
+	it('returns served, sums offer sizes and batches each closure level', async () => {
 		const store = new FakeStore(
 			new Map([
 				[appPath, held(appPath, [libraryPath, runtimePath])],
@@ -140,9 +136,7 @@ describe('resolveSubstitutableClosure', () => {
 		});
 	});
 
-	// The defect this walk exists for: a path the local store holds, and only
-	// the local store, still leaves a hole in what a consumer can fetch.
-	it('reports the first reference no substituter offers and stops querying', async () => {
+	it('returns not-served for the first unoffered reference and makes no later query', async () => {
 		const store = new FakeStore(
 			new Map([
 				[appPath, held(appPath, [localOnlyPath])],
@@ -162,10 +156,7 @@ describe('resolveSubstitutableClosure', () => {
 		});
 	});
 
-	// A substituter that advertises fewer references than the path really has
-	// cannot shrink what it has to answer for: the closure walked is the one
-	// this store recorded when it realised the path.
-	it('follows the references this store holds, not the ones an offer advertises', async () => {
+	it('uses local-store references when an offer advertises fewer', async () => {
 		const store = new FakeStore(
 			new Map([
 				[appPath, held(appPath, [localOnlyPath])],
@@ -182,9 +173,7 @@ describe('resolveSubstitutableClosure', () => {
 		});
 	});
 
-	// A path offered under a different NAR hash is a different path by the
-	// same name, so a consumer fetching it would not get what this store has.
-	it('refuses an offer whose NAR hash is not the one this store holds', async () => {
+	it('returns divergent when the offered NAR hash differs from local metadata', async () => {
 		const store = new FakeStore(
 			new Map([[appPath, held(appPath, [], sameBytes)]]),
 			new Map([[appPath, offer(0, 0, otherBytes)]])
@@ -200,10 +189,7 @@ describe('resolveSubstitutableClosure', () => {
 		});
 	});
 
-	// A consumer refuses a path it cannot verify however well a substituter
-	// serves it, so an offer it would refuse is a hole exactly as an absent
-	// one is.
-	it('reports a path whose offer a consumer would not accept', async () => {
+	it('returns refused for the first offer rejected by consumer policy', async () => {
 		const store = new FakeStore(
 			new Map([
 				[appPath, held(appPath, [libraryPath])],
@@ -223,7 +209,7 @@ describe('resolveSubstitutableClosure', () => {
 		).resolves.toStrictEqual({ kind: 'refused', storePath: libraryPath });
 	});
 
-	it('takes every offer when the caller states no policy', async () => {
+	it('accepts every offer when the caller omits a policy', async () => {
 		const store = new FakeStore(
 			new Map([[appPath, held(appPath)]]),
 			new Map([[appPath, offer()]])
@@ -239,7 +225,7 @@ describe('resolveSubstitutableClosure', () => {
 		});
 	});
 
-	it('reports a path this store does not hold', async () => {
+	it('returns not-held-locally for the first path absent from the local store', async () => {
 		const store = new FakeStore(new Map(), new Map([[appPath, offer()]]));
 
 		await expect(
@@ -258,18 +244,15 @@ describe('resolveSubstitutableClosure', () => {
 		).resolves.toStrictEqual({ kind: 'not-served', storePath: appPath });
 	});
 
-	// A reference cycle is what a self-referential path produces, and a
-	// diamond is what a shared dependency produces; both must terminate with
-	// each path asked about exactly once.
 	it.each([
 		{
-			name: 'a self-reference',
+			name: 'visits a self-referenced path once',
 			local: new Map([[appPath, held(appPath, [appPath])]]),
 			expectedBatches: [[appPath]],
 			expectedPathCount: 1
 		},
 		{
-			name: 'a cycle between two paths',
+			name: 'visits each path in a cycle once',
 			local: new Map([
 				[appPath, held(appPath, [libraryPath])],
 				[libraryPath, held(libraryPath, [appPath])]
@@ -278,7 +261,7 @@ describe('resolveSubstitutableClosure', () => {
 			expectedPathCount: 2
 		},
 		{
-			name: 'a diamond over a shared dependency',
+			name: 'visits a shared dependency once in a diamond',
 			local: new Map([
 				[appPath, held(appPath, [libraryPath, runtimePath])],
 				[libraryPath, held(libraryPath, [runtimePath])],
@@ -287,29 +270,26 @@ describe('resolveSubstitutableClosure', () => {
 			expectedBatches: [[appPath], [libraryPath, runtimePath]],
 			expectedPathCount: 3
 		}
-	])(
-		'visits each path once through $name',
-		async ({ local, expectedBatches, expectedPathCount }) => {
-			const store = new FakeStore(
-				local,
-				new Map(local.keys().map((storePath) => [storePath, offer()]))
-			);
+	])('$name', async ({ local, expectedBatches, expectedPathCount }) => {
+		const store = new FakeStore(
+			local,
+			new Map(local.keys().map((storePath) => [storePath, offer()]))
+		);
 
-			const verdict = await resolveSubstitutableClosure(appPath, store.queries);
+		const verdict = await resolveSubstitutableClosure(appPath, store.queries);
 
-			expect({ verdict, batches: store.offeredBatches }).toStrictEqual({
-				verdict: {
-					kind: 'served',
-					pathCount: expectedPathCount,
-					downloadSize: 0,
-					narSize: 0
-				},
-				batches: expectedBatches
-			});
-		}
-	);
+		expect({ verdict, batches: store.offeredBatches }).toStrictEqual({
+			verdict: {
+				kind: 'served',
+				pathCount: expectedPathCount,
+				downloadSize: 0,
+				narSize: 0
+			},
+			batches: expectedBatches
+		});
+	});
 
-	it('gives up once the closure passes the cap', async () => {
+	it('returns over-cap before querying a frontier above the limit', async () => {
 		const store = new FakeStore(
 			new Map([
 				[appPath, held(appPath, [libraryPath, runtimePath])],
@@ -334,13 +314,14 @@ describe('resolveSubstitutableClosure', () => {
 		});
 	});
 
-	it('raises the signal reason and makes no further queries after cancellation', async () => {
+	it('rejects with the signal reason before making any query', async () => {
 		const store = new FakeStore(
 			new Map([[appPath, held(appPath)]]),
 			new Map([[appPath, offer()]])
 		);
 		const controller = new AbortController();
-		controller.abort(new Error('the plan was cancelled'));
+		const reason = new Error('the plan was cancelled');
+		controller.abort(reason);
 
 		let thrown: unknown;
 
@@ -352,14 +333,13 @@ describe('resolveSubstitutableClosure', () => {
 			thrown = error;
 		}
 
-		expect({
-			isError: thrown instanceof Error,
-			batches: store.offeredBatches
-		}).toStrictEqual({ isError: true, batches: [] });
+		expect(thrown).toBe(reason);
+		expect(store.offeredBatches).toStrictEqual([]);
 	});
 
-	it('stops walking when the signal aborts between rounds', async () => {
+	it('rejects with the signal reason before starting the next round', async () => {
 		const controller = new AbortController();
+		const reason = new Error('the plan was cancelled');
 		const store = new FakeStore(
 			new Map([
 				[appPath, held(appPath, [libraryPath])],
@@ -372,7 +352,7 @@ describe('resolveSubstitutableClosure', () => {
 		);
 		const offered: QuerySubstitutablePathInfos = async (storePaths) => {
 			const infos = await store.offered(storePaths);
-			controller.abort(new Error('the plan was cancelled'));
+			controller.abort(reason);
 
 			return infos;
 		};
@@ -389,9 +369,7 @@ describe('resolveSubstitutableClosure', () => {
 			thrown = error;
 		}
 
-		expect({
-			isError: thrown instanceof Error,
-			batches: store.offeredBatches
-		}).toStrictEqual({ isError: true, batches: [[appPath]] });
+		expect(thrown).toBe(reason);
+		expect(store.offeredBatches).toStrictEqual([[appPath]]);
 	});
 });

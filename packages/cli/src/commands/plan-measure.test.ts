@@ -19,9 +19,7 @@ import { registerPlanCommands } from './plan-cohort.ts';
 import { type PlanMeasureResult, runPlanMeasure } from './plan-measure.ts';
 
 function noop(): void {
-	/*
-	test double: nothing to record
-	*/
+	// Intentionally empty test callback.
 }
 
 const appPath = storePathSchema.parse(
@@ -50,8 +48,8 @@ function missing(downloadSize: number, narSize: number): NixMissingPartition {
 	};
 }
 
-// Answers each installable with its own partition, so a test proves the
-// command asks per target rather than pricing the union.
+// Reject a batched query so the test proves that each measurement covers one
+// target rather than the union of all targets.
 function storeByInstallable(
 	answers: ReadonlyMap<string, NixMissingPartition | Error>
 ): Pick<Nix, 'queryMissing'> {
@@ -224,7 +222,7 @@ async function runMeasureCommand(
 }
 
 describe('plan measure command', () => {
-	it('rejects a --store URI that names no ssh-ng destination before reading targets', async () => {
+	it('rejects a --store URI that is not an ssh-ng store before reading targets', async () => {
 		const error = await runMeasureCommand([
 			'--targets-file',
 			'targets.json',
@@ -248,7 +246,7 @@ describe('plan measure command', () => {
 			JSON.stringify({ targets: [{ attr: 'app' }] })
 		],
 		[
-			'names an installable outside the store',
+			'contains an installable outside the store',
 			JSON.stringify({ targets: [{ attr: 'app', installable: '/tmp/app' }] })
 		]
 	])(

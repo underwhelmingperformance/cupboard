@@ -43,8 +43,6 @@ function isWithinSunPath(socketPath: string, limitBytes: number): boolean {
 	return Buffer.byteLength(socketPath, 'utf8') < limitBytes;
 }
 
-// The bases a run prefers for its own directory, in order, before the
-// operating system's temporary directory.
 function environmentBases(
 	options: InvocationRuntimeOptions
 ): readonly string[] {
@@ -74,7 +72,7 @@ export function planInvocationDirectory(
  * Where one invocation's hook endpoint lives: an owner-only directory holding
  * the listening socket, chosen so the socket path fits `sun_path`. Candidate
  * bases are tried in order (`$XDG_RUNTIME_DIR`, `$RUNNER_TEMP`, the operating
- * system's temporary directory), each carrying a `cupboard/<invocation id>`
+ * system's temporary directory), each with a `cupboard/<invocation id>`
  * suffix, and the first whose socket path fits wins.
  */
 export function planInvocationRuntime(
@@ -119,9 +117,6 @@ export async function createInvocationRuntimeDirectory(
 	return plan;
 }
 
-/**
-Creates one of a run's own directories, owner-only.
-*/
 export async function createRuntimeDirectory(directory: string): Promise<void> {
 	await mkdir(directory, { mode: 0o700, recursive: true });
 	// The process umask masks the mode `mkdir` applies, so the owner-only mode
@@ -313,9 +308,6 @@ export async function createRootLinkDirectory(
 	};
 }
 
-/**
-Removes the invocation directory and the socket inside it.
-*/
 export async function removeInvocationRuntimeDirectory(
 	directory: string
 ): Promise<void> {

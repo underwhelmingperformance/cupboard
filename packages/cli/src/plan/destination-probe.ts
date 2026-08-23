@@ -30,9 +30,6 @@ export interface DestinationProbeOptions {
 	readonly fetcher?: typeof fetch;
 }
 
-/**
-Which of `paths` the destination cache already serves.
-*/
 export function destinationServedPaths(
 	options: DestinationProbeOptions & {
 		readonly baseUrl: URL;
@@ -47,8 +44,8 @@ export function destinationServedPaths(
 }
 
 /**
- * Which of `paths` a named tenant reuse view serves. This is separate from
- * destination availability and does not indicate destination retention.
+ * Reuse-view results permit publication by reference; they do not show that the
+ * destination cache serves or retains a path.
  */
 export function viewServedPaths(
 	options: DestinationProbeOptions & {
@@ -64,14 +61,13 @@ export function viewServedPaths(
 }
 
 /**
- * Which of `paths` the destination cache holds build provenance for. The cache
- * serves one attestation list per store-path hash, so the probe requests one
- * list per distinct hash and reads a 404 as "no attestation for that path".
+ * The cache serves one attestation list per store-path hash, so this probe
+ * requests each distinct hash once. A 404 means that the path has no
+ * attestation.
  *
- * Only a SLSA build-provenance statement counts. A cupboard build-origin
- * statement covers every path its run published, including paths the run
- * copied into its store, so its presence alone would let a path the workflow
- * never built pass as attested.
+ * A cupboard build-origin statement is not sufficient evidence. It covers all
+ * paths published by a run, including paths copied into the run's store, and
+ * therefore does not prove that the workflow built a path.
  */
 export function attestedServedPaths(
 	options: DestinationProbeOptions & {
@@ -82,11 +78,6 @@ export function attestedServedPaths(
 	return attestedPathsAt(cacheUrl(options.baseUrl, options.cache), options);
 }
 
-/**
- * Configuration that binds probes to one tenant, cache and credential. When no
- * reuse view is configured, the view probe returns an empty set without making
- * a request.
- */
 export interface TenantProbeOptions {
 	readonly baseUrl: URL;
 	readonly cache: StoredCache;
@@ -95,19 +86,12 @@ export interface TenantProbeOptions {
 	readonly fetcher?: typeof fetch;
 }
 
-/**
- * Destination probes for partitioning and reprobing: destination availability,
- * reuse-view availability, and build-provenance availability.
- */
 export interface TenantProbes extends DestinationProbes {
 	readonly attestedServed: (
 		paths: readonly StorePathString[]
 	) => Promise<ReadonlySet<StorePathString>>;
 }
 
-/**
-The destination-side probes bound to one tenant, cache and credential.
-*/
 export function tenantProbesFor(options: TenantProbeOptions): TenantProbes {
 	const shared = {
 		baseUrl: options.baseUrl,
@@ -122,6 +106,7 @@ export function tenantProbesFor(options: TenantProbeOptions): TenantProbes {
 		destinationServed: (paths) =>
 			destinationServedPaths({ ...shared, paths, cache: options.cache }),
 		viewServed: (paths) =>
+			// Do not make a request when no reuse view is configured.
 			view === undefined
 				? Promise.resolve(new Set())
 				: viewServedPaths({ ...shared, paths, view }),

@@ -374,7 +374,6 @@ describe('BuildEventListener', () => {
 		const clientB = createConnection(harness.socketPath);
 		await Promise.all([once(clientA, 'connect'), once(clientB, 'connect')]);
 
-		// Interleave partial writes so each connection's framing stands alone.
 		clientA.write(first.slice(0, 10));
 		clientB.write(second.slice(0, 10));
 		clientA.write(`${first.slice(10)}\n`);

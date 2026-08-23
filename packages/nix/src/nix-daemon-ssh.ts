@@ -16,61 +16,24 @@ import { isEnabledSettingValue } from './store-config.ts';
 const sshNgScheme = 'ssh-ng://';
 const defaultRemoteProgram = ['nix-daemon'] as const;
 
-/**
-The remote daemon an `ssh-ng` store URI names.
-*/
 export interface NixSshStoreSpec {
-	/**
-	The ssh destination: `host` or `user@host`.
-	*/
 	readonly destination: string;
-	/**
-	Whether Nix normalises the URI authority to exactly `localhost`.
-	*/
 	readonly isNativeLocalhost?: true;
-	/**
-	The host, without a user or port.
-	*/
 	readonly host?: string;
-	/**
-	The SSH port stated by the authority.
-	*/
 	readonly port?: number;
-	/**
-	The private key named by the store.
-	*/
 	readonly sshKey?: string;
-	/**
-	The decoded public host key named by the store.
-	*/
 	readonly sshPublicHostKey?: string;
-	/**
-	Whether SSH transport compression is enabled.
-	*/
 	readonly compress?: boolean;
-	/**
-	The greatest number of concurrent daemon connections.
-	*/
 	readonly maxConnections?: number;
-	/**
-	The maximum age in seconds at which an idle connection is reused.
-	*/
 	readonly maxConnectionAge?: number;
-	/**
-	The daemon command started on the remote host.
-	*/
 	readonly remoteProgram?: readonly string[];
-	/**
-	The store reference the remote daemon opens.
-	*/
 	readonly remoteStore?: string;
 }
 
 /**
- * The connection spec an `ssh-ng` store URI carries: the destination from
- * its authority and the daemon command from its `remote-program` query
- * parameter. `undefined` for any other URI, including an `ssh-ng` one with
- * no destination.
+ * Parses an `ssh-ng` store URI into the settings needed to start its daemon.
+ * Returns `undefined` when the scheme, authority or path does not identify a
+ * usable `ssh-ng` store. Invalid query-setting values throw instead.
  */
 export function parseSshNgStoreUri(uri: string): NixSshStoreSpec | undefined {
 	if (!uri.startsWith(sshNgScheme)) {
@@ -241,20 +204,17 @@ interface KnownHostsFile {
 	dispose(): void;
 }
 
-/**
- * The process environment and filesystem access used while opening SSH,
- * injected for tests.
- */
 export interface NixSshConnectorDependencies {
 	readonly env?: Readonly<Record<string, string | undefined>>;
 	readonly knownHostsFile?: (host: string, publicKey: string) => KnownHostsFile;
 }
 
 /**
- * A connector that reaches the daemon an `ssh-ng` store names. Every daemon
- * connection owns one SSH child, so closing a completed operation cannot tear
- * down another operation's transport. A temporary known-hosts file has the same
- * lifetime as that child.
+ * Creates one child for each SSH daemon connection. Closing a connection
+ * terminates only its child and removes that child's temporary known-hosts
+ * file. `NixDaemonStoreClient` closes this transport when an operation is
+ * aborted. A native `localhost` authority with no user or explicit port runs
+ * the remote program locally, matching Nix's `ssh-ng` behaviour.
  */
 export function createSshNixDaemonConnector(
 	spec: NixSshStoreSpec,
@@ -311,10 +271,10 @@ export function createSshNixDaemonConnector(
 		const commandArguments = [
 			spec.destination,
 			'-x',
-			// OpenSSH uses the first value it obtains for these scalar options.
-			// Put URI-provided values before inherited NIX_SSHOPTS so ambient
-			// configuration cannot replace the store's explicit port, compression
-			// policy, host-key policy or positional daemon command.
+			// OpenSSH uses the first value for scalar options. Put values from the
+			// store URI, including RemoteCommand=none, before NIX_SSHOPTS so inherited
+			// settings cannot replace its port, compression or host-key policy, or
+			// divert execution from the positional daemon command.
 			...uriScalarOptions,
 			...sshOptions,
 			...(spec.sshKey === undefined ? [] : ['-i', spec.sshKey]),
@@ -379,7 +339,9 @@ function decodeHostKey(encoded: string): string {
 	const canonicalDecoded = decoded.toString('base64').replace(/=+$/u, '');
 
 	if (canonicalInput !== canonicalDecoded || decoded.length === 0) {
-		throw new Error('base64-ssh-public-host-key is not valid base64');
+		throw new Error(
+			"Nix configuration setting 'base64-ssh-public-host-key' is not valid base64"
+		);
 	}
 
 	return decoded.toString('utf8');
@@ -452,7 +414,9 @@ function shellSplit(source: string): readonly string[] {
 	}
 
 	if (quote !== undefined) {
-		throw new Error(`cannot split NIX_SSHOPTS: unfinished quote`);
+		throw new Error(
+			'Could not parse NIX_SSHOPTS: a quoted value has no closing quote'
+		);
 	}
 
 	if (isStarted) {

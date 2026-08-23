@@ -18,8 +18,6 @@ function cohortInvocation(ordinal: number): BuildInvocation {
 	return { kind: 'command', command: ['sh', '-c', `exit ${String(ordinal)}`] };
 }
 
-// One cohort's receipt, distinguishable by the evaluation time it records so
-// aggregation order is visible in the assertions.
 function receiptFor(cohort: number): ParsedBuildReceipt {
 	return buildReceiptSchema.parse({
 		version: 2,

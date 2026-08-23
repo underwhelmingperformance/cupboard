@@ -75,7 +75,7 @@ describe('grant store', () => {
 		}
 	);
 
-	testWithConfigHome('returns undefined when nothing is cached', async () => {
+	testWithConfigHome('returns undefined when the cache is absent', async () => {
 		expect(await readCachedGrant()).toBeUndefined();
 	});
 

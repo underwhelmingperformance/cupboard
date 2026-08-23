@@ -16,19 +16,15 @@ import * as schema from '../db/schema.ts';
 
 import { type ServerContext } from './context.ts';
 
-// A tenant with work due now should be woken on the scheduler's next pass. We store a
-// fixed past instant, so the many mutations of a single push leave the wake time
-// unchanged and skip the redundant D1 write.
+// Use one fixed past instant for work due now. Repeated mutations in the same
+// push then leave the published wake time unchanged.
 const wakeImmediately = isoTimestamp(new Date(0));
 
 export class MaintenanceEligibilityService {
 	constructor(private readonly context: ServerContext) {}
 
-	// Whether the tenant has work due now: an upload awaiting verification, or a
-	// queued narinfo deletion. Both are existence checks served by an index, so
-	// each costs a single indexed row lookup whatever the size of the in-flight
-	// set. The wake time can therefore be recomputed on every mutation in a
-	// large push without the read load becoming quadratic.
+	// Indexed existence checks keep this calculation independent of the number
+	// of pending uploads and queued deletions.
 	private hasImmediateWork(): boolean {
 		const awaitingVerification = this.context.db
 			.select({ present: sql`1` })
@@ -114,9 +110,8 @@ export class MaintenanceEligibilityService {
 		);
 	}
 
-	// The soonest deferred deadline once there is nothing due now: an upload or
-	// attestation expiry, a retention-root TTL, a retention-grace deadline, or an
-	// auth-key retirement.
+	// When no work is due now, wake for the earliest upload, attestation, root,
+	// grace, or auth-key deadline.
 	private earliestFutureWake(): IsoTimestamp | undefined {
 		return [
 			this.earliestUploadExpiry(),
@@ -146,12 +141,9 @@ export class MaintenanceEligibilityService {
 			.run();
 	}
 
-	// Recomputes the tenant's wake time and publishes it to D1 where the scheduler
-	// reads it. A single conditional upsert settles the publish atomically: the row is
-	// rewritten only when the wake time actually moves, and a stale reconcile racing a
-	// fresher one cannot overwrite it (see `maintenanceWakeWins`). So a push whose
-	// mutations all leave the same wake time costs one effective D1 write, not one per
-	// path, and concurrent same-tenant reconciles need no external lock.
+	// Publish with a conditional upsert so stale reconciliation cannot overwrite
+	// a newer wake time. Repeated mutations that calculate the same time do not
+	// rewrite D1.
 	async reconcile(now: Date = new Date()): Promise<void> {
 		const tenant = this.context.requireTenant();
 		const reconciledAt = isoTimestamp(now);
@@ -172,16 +164,9 @@ export class MaintenanceEligibilityService {
 	}
 }
 
-// The conflict rule that keeps the published wake time atomic without a lock. On a
-// conflict the row is rewritten only when the new wake time differs from the stored
-// one and this reconcile is strictly newer than the stored one, so neither a stale
-// reconcile nor a same-instant one can clobber a fresher publish. The second clause
-// lets any real incoming wake that is sooner than the stored one win whatever the
-// timestamps, where a stored NULL (an idle tenant, no wake) counts as the latest
-// possible time so a tenant that just became due always wins, even on a timestamp tie:
-// publishing too early only costs a wasted scheduler tick, whereas publishing too late
-// would strand due work, so ties resolve towards waking. The comparisons run against
-// the values this upsert binds, so no `excluded` reference is needed.
+// Prefer an earlier wake even when reconciliation timestamps tie. Waking too
+// early costs one scheduler pass; accepting a later stale value can strand
+// work. Otherwise, only a strictly newer reconciliation may change the wake.
 function maintenanceWakeWins(
 	nextWakeAt: IsoTimestamp | undefined,
 	reconciledAt: IsoTimestamp

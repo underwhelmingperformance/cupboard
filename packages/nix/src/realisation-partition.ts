@@ -14,8 +14,9 @@ import {
 } from './nix-store.ts';
 
 /**
-Maximum number of derivations read concurrently within one level.
-*/
+ * Caps concurrent derivation reads so a wide traversal level does not open all
+ * derivation NARs at once.
+ */
 export const defaultDerivationReadConcurrency = 16;
 
 /**
@@ -25,44 +26,41 @@ export const defaultDerivationReadConcurrency = 16;
 export const defaultRealisationWalkCap = 50_000;
 
 /**
- * A walk that exceeded its path limit. A partial walk cannot describe the
- * complete work required by a plan.
+ * The walk reached its path limit before it could claim the next derived path.
+ * A partial partition cannot describe all work required by the targets.
  */
 export class RealisationWalkOverCapError extends NixStoreError {
 	constructor(public readonly maxPaths: number) {
 		super(
-			`Working out what to realise visited more than ${String(maxPaths)} derived paths`
+			`Realisation planning reached the limit of ${String(maxPaths)} derived paths before the walk was complete`
 		);
 		this.name = 'RealisationWalkOverCapError';
 	}
 }
 
-/**
-A target whose `^` is followed by no output names at all.
-*/
 export class EmptyOutputSelectionError extends NixStoreError {
 	constructor(public readonly drvPath: StorePathString) {
-		super(`${drvPath} names no outputs to realise`);
+		super(`The target '${drvPath}^' selects no outputs to realise`);
 		this.name = 'EmptyOutputSelectionError';
 	}
 }
 
-/**
-A target naming an output its derivation does not produce.
-*/
 export class UndeclaredOutputError extends NixStoreError {
 	constructor(
 		public readonly drvPath: StorePathString,
 		public readonly outputName: string
 	) {
-		super(`${drvPath} does not have an output named '${outputName}'`);
+		super(
+			`Derivation ${drvPath} does not declare an output named '${outputName}'`
+		);
 		this.name = 'UndeclaredOutputError';
 	}
 }
 
 /**
- * A floating output whose store path is determined by its build. The walk must
- * build the derivation because no output path is available to query.
+ * A floating output has no store path before its build. This dry-run walk
+ * cannot query its validity or substitution availability, so it rejects the
+ * target.
  */
 export class FloatingOutputUnsupportedError extends NixStoreError {
 	constructor(
@@ -70,44 +68,32 @@ export class FloatingOutputUnsupportedError extends NixStoreError {
 		public readonly outputName: string
 	) {
 		super(
-			`The '${outputName}' output of ${drvPath} is content-addressed and floating, so its path is not known before it is built`
+			`Cannot plan the '${outputName}' output of ${drvPath}: the output is floating and has no store path until it is built`
 		);
 		this.name = 'FloatingOutputUnsupportedError';
 	}
 }
 
-/**
-Store and substituter operations used by the walk.
-*/
 export interface RealisationPartitionSource {
-	/**
-	Which of the given paths are valid in this store.
-	*/
 	validPaths(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly StorePathString[]>;
-	/**
-	The derivation at the given path, which the store holds as a file.
-	*/
 	readDerivation(drvPath: StorePathString): Promise<Derivation>;
-	/**
-	The substituter offers for the given paths.
-	*/
 	substitutablePathInfos(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly NixSubstitutablePathInfo[]>;
 	/**
-	The `substitute` setting: with it off, everything invalid is built.
-	*/
+	 * When false, missing outputs build without a substituter query.
+	 */
 	readonly substitute: boolean;
 	/**
-	 * How many derived paths the walk may visit (default:
-	 * {@link defaultRealisationWalkCap}).
+	 * Limits the number of derived paths visited by the walk. Defaults to
+	 * {@link defaultRealisationWalkCap}.
 	 */
 	readonly maxPaths?: number;
 	/**
-	Abandons the walk between levels, raising the signal's reason.
-	*/
+	 * Abandons the walk between levels and rejects with the signal's reason.
+	 */
 	readonly signal?: AbortSignal;
 	/**
 	 * The `always-allow-substitutes` setting, which overrules a derivation's
@@ -117,14 +103,15 @@ export interface RealisationPartitionSource {
 }
 
 /**
- * Computes what realising the given targets would require, the way Nix's
- * `queryMissing` does: a walk out from each target that stops wherever the
- * store already has a path, follows a substitutable path into its
- * references, and follows a path that must be built into the derivations it
- * builds from.
+ * Computes the work required to realise the targets, following Nix's
+ * `queryMissing` rules. Valid paths need no work. Offered paths and their
+ * references become substitution work. A derivation builds when any requested
+ * missing output cannot be substituted, and the walk then follows its input
+ * derivations and sources. Missing derivation files and unoffered opaque paths
+ * are unknown.
  *
- * A path is reached once however many targets lead to it, so the sizes count
- * the work one run does over all its targets.
+ * Shared store paths are claimed once, so download and NAR sizes count the work
+ * once across all targets. Result paths are sorted by code unit.
  */
 export async function queryMissingOver(
 	targets: readonly NixDerivedPathString[],
@@ -137,14 +124,11 @@ export async function queryMissingOver(
 	return walk.partition();
 }
 
-/**
-A derivation target and its requested outputs.
-*/
 interface BuiltTarget {
 	readonly drvPath: StorePathString;
 	/**
-	The output names wanted, or `undefined` for every one the derivation has.
-	*/
+	 * When absent, the walk includes every output declared by the derivation.
+	 */
 	readonly outputNames?: ReadonlySet<string>;
 }
 
@@ -170,11 +154,9 @@ class RealisationWalk {
 
 	constructor(private readonly source: RealisationPartitionSource) {}
 
-	// Visit each derived path once so shared dependencies are not counted twice.
-	//
-	// The cap is applied here, as each path is reached, so a substituter that
-	// offers an endless chain of references is stopped at the path that exceeds
-	// the cap, before a whole level of those references is gathered.
+	// Claim each derived path once so shared dependencies do not add their sizes
+	// twice. Check the cap before insertion so the first over-cap path is never
+	// added, even when one offer supplies a wide set of references.
 	private claim(target: DerivedPath): boolean {
 		const key = keyOf(target);
 
@@ -193,15 +175,10 @@ class RealisationWalk {
 		return true;
 	}
 
-	/**
-	The given targets this walk has not reached, now claimed for it.
-	*/
 	private claimed(targets: readonly DerivedPath[]): readonly DerivedPath[] {
 		return targets.filter((target) => this.claim(target));
 	}
 
-	// Valid paths need no work. Offered paths are fetched with their references.
-	// A path with neither an offer nor a derivation is unknown.
 	private async openOpaque(
 		storePaths: readonly StorePathString[]
 	): Promise<readonly DerivedPath[]> {
@@ -232,10 +209,8 @@ class RealisationWalk {
 		return edges;
 	}
 
-	// The whole level is opened together: the derivations are read at once,
-	// then every declared output is queried in one batch, so a level of
-	// a thousand derivations costs one validity query and one substituter
-	// query.
+	// Read the level's derivations with bounded concurrency, then check every
+	// declared output with one validity batch and at most one substituter batch.
 	private async openBuilt(
 		targets: readonly BuiltTarget[]
 	): Promise<readonly DerivedPath[]> {
@@ -247,8 +222,8 @@ class RealisationWalk {
 			await this.invalid(targets.map(({ drvPath }) => drvPath))
 		);
 
-		// Without the derivation file, the walk cannot discover its outputs or
-		// dependencies.
+		// Without the derivation file, the walk cannot discover outputs or
+		// dependencies, so the derivation itself is unknown.
 		for (const drvPath of absent) {
 			this.unknown.add(drvPath);
 		}
@@ -297,10 +272,9 @@ class RealisationWalk {
 			return [];
 		}
 
-		// Nix takes the outputs together: a derivation whose every wanted
-		// output can be fetched is fetched, and one that runs produces all of
-		// them, so a single output nobody offers means the whole derivation
-		// builds.
+		// Nix handles the requested outputs together. It substitutes them only when
+		// every missing output has an offer; otherwise it builds the derivation once
+		// and produces all its outputs.
 		if (
 			!this.mayBeSubstituted(entry.derivation) ||
 			entry.missing.some((storePath) => !offers.has(storePath))
@@ -374,10 +348,9 @@ class RealisationWalk {
 	}
 
 	/**
-	 * Walks out from the given targets a level at a time, so every path a
-	 * level reaches is queried in one batch. Each substituter lookup costs a
-	 * request, and a closure can hold thousands of paths, so batching keeps the
-	 * number of requests down.
+	 * Walks out from the targets one level at a time. Each level uses batched
+	 * validity and substituter queries, so a wide closure does not issue one
+	 * request per path.
 	 */
 	async from(targets: readonly NixDerivedPathString[]): Promise<void> {
 		let frontier = this.claimed(
@@ -407,8 +380,6 @@ class RealisationWalk {
 	}
 }
 
-// Either a plain store path or a derivation with the outputs wanted from it.
-// A target and every edge of the walk take this form.
 type DerivedPath =
 	| { readonly kind: 'opaque'; readonly storePath: StorePathString }
 	| ({ readonly kind: 'built' } & BuiltTarget);
@@ -482,16 +453,14 @@ function partitionTargets(
 	return [builtTargets, opaquePaths];
 }
 
-// The store paths of the wanted outputs. A floating output has no path until it
-// is built, so it is refused.
 function wantedOutputs(
 	derivation: Derivation,
 	target: BuiltTarget
 ): readonly StorePathString[] {
 	const wanted: StorePathString[] = [];
 
-	// Reject requested outputs that the derivation does not declare. Silently
-	// skipping one would incorrectly report that the target needs no work.
+	// Reject undeclared selections. Skipping one would incorrectly report that
+	// the target needs no work.
 	const named = target.outputNames ?? new Set<string>();
 
 	for (const outputName of named) {

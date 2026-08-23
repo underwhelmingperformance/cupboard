@@ -100,23 +100,17 @@ function effectiveSignatureGeneration(row: NarInfoRow): SigningKeyGeneration {
 	return row.pendingSignatureGeneration ?? row.signatureGeneration;
 }
 
-// A committed reference edge as read from D1: the path, the generation the row
-// must still name, and the NAR hash it points at.
 interface CommittedReferenceEdge {
 	readonly storePathHash: StorePathHash;
 	readonly generation: NarInfoGeneration;
 	readonly narHash: NixSha256HashString;
 }
 
-// The canonical compressed metadata a narinfo advertises, the subset of
-// `blob_state` {@link NarInfoObjectsService.buildNarInfo} needs.
 type NarInfoBlobFields = Pick<
 	typeof d1Schema.blobState.$inferSelect,
 	'fileHash' | 'fileSize' | 'compression'
 >;
 
-// Identifies a committed reference edge by the three columns negotiate matches a
-// narinfo row against: the path, its generation, and the hash it points at.
 function referenceKey(
 	storePathHash: StorePathHash,
 	generation: NarInfoGeneration,
@@ -126,14 +120,13 @@ function referenceKey(
 }
 
 export class NarInfoObjectsService {
-	// The in-flight publish per (cache, path); see {@link publishNarInfoObject}.
 	private readonly publishes = new Map<string, Promise<void>>();
 
 	constructor(private readonly context: ServerContext) {}
 
-	// The link a publish adds to its path's chain: settle behind the previous
-	// publish (however it settled; its own caller heard any failure), then put
-	// the object and fence it.
+	// A failed publish must not break the per-path sequence. Its caller receives
+	// the failure, but the next publish still waits until the failed attempt has
+	// finished before writing the same object.
 	private async chainedPublish(
 		previous: Promise<void> | undefined,
 		cache: StoredCache,
@@ -146,8 +139,7 @@ export class NarInfoObjectsService {
 			try {
 				await previous;
 			} catch {
-				// The earlier publish's caller heard its failure; this link only
-				// needs it settled so the puts stay ordered.
+				// Continue the sequence; the earlier caller receives this failure.
 			}
 		}
 
@@ -192,13 +184,10 @@ export class NarInfoObjectsService {
 		);
 	}
 
-	// The post-publish fence: the object landed outside any gate, so re-read the
-	// row under one. A row still naming the published version means nothing
-	// moved and the publish stands, at no gate cost beyond the synchronous read.
-	// Anything else means a delete or recommit gated between the charge and the
-	// object landing, so the object is rewritten from the row as this gate sees
-	// it: deleted with the row, or re-rendered to the version that superseded
-	// the published one.
+	// The R2 put runs outside the critical section. Re-read the row under the
+	// critical section so a put that finishes after a delete or recommit cannot
+	// restore stale metadata. Remove the object if the row was deleted, or render
+	// the version that superseded the late publish.
 	private async confirmPublishedObjectLocked(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
@@ -235,8 +224,7 @@ export class NarInfoObjectsService {
 
 		const narInfo = await this.narInfoFromRow(row);
 
-		// No shared fact means the blob was demoted; the demote path owns the
-		// object from here.
+		// Demotion owns the object after the shared blob state disappears.
 		if (narInfo === undefined) {
 			return;
 		}
@@ -253,18 +241,15 @@ export class NarInfoObjectsService {
 		);
 	}
 
-	// Re-materialises a missing or stale narinfo object when the row, the matching
-	// reference edge, and the shared blob are still present. The caller must already
-	// hold the DO critical section: running against a freshly read row inside one is
-	// what stops a concurrent delete from being undone by re-materialising from a
-	// stale copy.
+	// The caller must hold the critical section. Reading the row and restoring its
+	// object under the same section prevents a concurrent delete from being undone
+	// with stale row data.
 	private async materialiseIfRecoverable(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
 		committedEdges?: readonly CommittedReferenceEdge[]
 	): Promise<void> {
-		// A tenant being offboarded must not have its objects re-materialised, or the
-		// drain would chase an object this path recreated behind it.
+		// Offboarding must not recreate an object while the drain is deleting it.
 		if (this.context.offboarding) {
 			return;
 		}
@@ -298,8 +283,7 @@ export class NarInfoObjectsService {
 
 		const narInfo = await this.narInfoFromRow(row);
 
-		// No shared fact means the blob was demoted; leave the path non-servable
-		// until a re-upload re-promotes it.
+		// Demotion owns the object after the shared blob state disappears.
 		if (narInfo === undefined) {
 			return;
 		}
@@ -316,11 +300,9 @@ export class NarInfoObjectsService {
 		);
 	}
 
-	// Whether the row's exact version is still committed. Given a batch of edges
-	// already read from D1 it first checks the snapshot in memory; if the
-	// snapshot does not match, a fresh single-row D1 read confirms before
-	// returning false, so a generation the snapshot predates does not cause a
-	// false negative. Without a snapshot it goes directly to the D1 read.
+	// A missing edge in the supplied snapshot is not conclusive because a commit
+	// can replace the row and edge after that snapshot. Confirm a miss with D1
+	// before treating the current row as uncommitted.
 	private async rowStillCommitted(
 		cache: StoredCache,
 		row: NarInfoRow,
@@ -336,15 +318,12 @@ export class NarInfoObjectsService {
 			return true;
 		}
 
-		// The snapshot may predate a commit that advanced this row's generation.
-		// Confirm with a fresh D1 read before treating the absence as uncommitted.
 		return this.hasCommittedReference(cache, row);
 	}
 
-	// {@link demoteUnbacked}'s body, run inside the critical section so the
-	// object-absence check and the delete cannot interleave with a concurrent commit
-	// materialising the path between them, which would otherwise let the demote delete
-	// a freshly re-materialised object.
+	// The row check, NAR absence check, and object delete must share the caller's
+	// critical section. Otherwise a commit could restore the NAR and narinfo object
+	// before this method deletes the newly restored object.
 	private async demoteUnbackedLocked(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
@@ -374,9 +353,6 @@ export class NarInfoObjectsService {
 		await this.deleteNarInfoObject(cache, storePathHash);
 	}
 
-	// Rewrites legacy, missing, or stale objects with version metadata using a
-	// bounded fan-out. Publication happens outside the input gate and its normal
-	// post-publish fence repairs or removes an object if the row moved meanwhile.
 	private async repairNarInfoObjects(
 		cache: StoredCache,
 		rows: readonly NarInfoRow[]
@@ -398,14 +374,10 @@ export class NarInfoObjectsService {
 		});
 	}
 
-	// Publishes a freshly materialised narinfo's object, keeping the R2 put out
-	// of the caller's critical section. Two guards keep a put that lands late
-	// from outliving what a gated delete or recommit decided meanwhile: the
-	// publishes for one path run in order behind each other, and each one
-	// re-reads the row under a short gate after its put. A row still naming the
-	// published version is the common case and costs the gate nothing beyond
-	// synchronous SQLite; anything else hands the path to the recovery that
-	// deletes or re-renders the object against the row as the gate sees it.
+	// Publishes for one path run in order. After each R2 put, a short critical
+	// section compares the published generation and NAR hash with the live row.
+	// This prevents a late put from restoring metadata deleted or replaced by a
+	// concurrent commit.
 	async publishNarInfoObject(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
@@ -433,11 +405,9 @@ export class NarInfoObjectsService {
 		}
 	}
 
-	// Renders a narinfo by joining the tenant row (identity, uncompressed NarHash/
-	// NarSize, references, signature) with the canonical compressed metadata in
-	// `blob_state` (the narinfo row holds no compressed fields of its own). Returns
-	// undefined when the shared fact is gone (a demoted blob), so the caller leaves
-	// the path non-servable until a re-upload heals it.
+	// Returns undefined after the shared blob state is removed. Callers must leave
+	// the path non-servable because the tenant row does not contain the compressed
+	// metadata needed to render the narinfo.
 	async narInfoFromRow(
 		row: typeof schema.narInfos.$inferSelect
 	): Promise<NarInfo | undefined> {
@@ -458,9 +428,6 @@ export class NarInfoObjectsService {
 		return this.buildNarInfo(row, blob);
 	}
 
-	// Renders a narinfo from a row and the canonical compressed metadata the caller
-	// has already read, so a caller holding the `blob_state` row does not read it
-	// again. {@link narInfoFromRow} is the form that fetches the metadata itself.
 	buildNarInfo(
 		row: typeof schema.narInfos.$inferSelect,
 		blob: NarInfoBlobFields
@@ -488,7 +455,7 @@ export class NarInfoObjectsService {
 		);
 	}
 
-	// Opens its own critical section; callers must be outside one.
+	// Opens a critical section; callers must not already hold one.
 	async ensureNarInfoObject(
 		cache: StoredCache,
 		storePathHash: StorePathHash
@@ -498,12 +465,10 @@ export class NarInfoObjectsService {
 		);
 	}
 
-	// The availability predicate the read path serves on: a materialised tenant
-	// narinfo R2 object exists. A recoverable gap is repaired first, so a path whose
-	// object was lost but whose shared fact is still `available` counts as available
-	// once re-materialised; a pending, demoted, or unknown path stays unavailable.
-	// Serving, root activation, and root summaries share this so they cannot drift.
-	// Opens its own critical section; callers must be outside one.
+	// A missing narinfo object is still servable when its current row, exact D1
+	// edge, and canonical NAR remain present. Repair that object before checking
+	// availability. Pending, demoted, and unknown paths remain unavailable.
+	// Opens a critical section; callers must not already hold one.
 	async isServable(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
@@ -514,9 +479,8 @@ export class NarInfoObjectsService {
 		);
 	}
 
-	// {@link isServable} for a caller that already holds the DO critical section, so
-	// it can check the predicate and act on it (e.g. activate a root) atomically,
-	// without a delete racing across an `await`.
+	// The caller must hold the critical section so the availability check and its
+	// dependent action cannot be separated by a deletion.
 	async isServableLocked(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
@@ -553,10 +517,9 @@ export class NarInfoObjectsService {
 		return reference !== undefined;
 	}
 
-	// The store-path hashes among `rows` whose committed reference edge still names
-	// the row's exact version, the batched form of {@link hasCommittedReference}.
-	// One D1 read per chunk replaces a read per path, so a large negotiate settles
-	// its committed-ness in a handful of queries.
+	// Returns only rows with a D1 edge for the same path, generation, and NAR hash.
+	// Reads the edges in bounded batches to keep large negotiations within D1's
+	// parameter limit.
 	async committedReferences(
 		cache: StoredCache,
 		rows: readonly NarInfoRow[]
@@ -573,11 +536,7 @@ export class NarInfoObjectsService {
 		return this.committedReferencesFrom(edges, rows);
 	}
 
-	// The committed reference edges D1 holds for `storePathHashes`, read in a
-	// single chunked batch that stays under D1's bound-parameter cap. {@link
-	// committedReferences} pairs these with live rows; a caller that heals per
-	// path can also thread them into {@link isServable} so the gated re-check
-	// settles in memory.
+	// Reads D1 reference edges in chunks that stay below the bound-parameter limit.
 	async committedReferenceEdges(
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
@@ -610,9 +569,6 @@ export class NarInfoObjectsService {
 		return results.flat();
 	}
 
-	// The committed narinfo rows for `storePathHashes`, read from the DO's own
-	// SQLite in chunks that stay under the bound-parameter cap. A caller pairs
-	// these live rows with {@link committedReferenceEdges} to decide committedness.
 	narInfoRowsFor(
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
@@ -636,10 +592,8 @@ export class NarInfoObjectsService {
 		);
 	}
 
-	// The pure comparison half of {@link committedReferences}: which of `rows`
-	// the given edges name at their exact version. The rows are the Durable
-	// Object's own live SQLite state, so an edge read before a recommit bumped
-	// a generation simply fails to match, failing towards "not committed".
+	// An older edge must not authorise a row created by a later recommit of the
+	// same path. Match the path, generation, and NAR hash as one identity.
 	committedReferencesFrom(
 		edges: readonly CommittedReferenceEdge[],
 		rows: readonly NarInfoRow[]
@@ -664,9 +618,8 @@ export class NarInfoObjectsService {
 		return committed;
 	}
 
-	// The row identities recorded by the tenant narinfo objects in R2, gathered
-	// with a bounded fan-out of `head` reads. The caller matches these against its
-	// subsequent row snapshot, so a recommit during the probes fails towards heal.
+	// Probe R2 before reading the row snapshot. If a recommit occurs during the
+	// probes, the later row cannot match the older object and takes the repair path.
 	async existingNarInfoObjects(
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
@@ -695,12 +648,10 @@ export class NarInfoObjectsService {
 		);
 	}
 
-	// The versioned paths whose live row, exact committed reference and canonical
-	// R2 objects form a substitutable publication. R2 narinfo heads run before the
-	// row snapshot so a recommit during the probes fails towards the gated heal
-	// path. Callers that settle work from this result revalidate the returned
-	// generation after the asynchronous probes. A missing or stale narinfo object
-	// is repaired when the canonical NAR still exists.
+	// A version is servable only when its live row, exact D1 edge, canonical NAR,
+	// and generation-matched narinfo object are all present. The R2 probes precede
+	// the row snapshot so a concurrent recommit takes the repair path. Callers that
+	// complete work from this result must revalidate the returned generation.
 	async servableNarInfoVersions(
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
@@ -762,8 +713,6 @@ export class NarInfoObjectsService {
 		return servable;
 	}
 
-	// Most callers need only membership; reconnect settlement uses the versioned
-	// form above because it must fence a same-NAR recommit.
 	async servableStorePathHashes(
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
@@ -796,6 +745,9 @@ export class NarInfoObjectsService {
 			return undefined;
 		}
 
+		// The D1 edge identifies this exact generation and NAR hash. Re-read the
+		// local row after the D1 await so a concurrent recommit cannot return a row
+		// that no longer matches the edge.
 		const current = this.context.db
 			.select()
 			.from(schema.narInfos)
@@ -817,15 +769,11 @@ export class NarInfoObjectsService {
 		return current;
 	}
 
-	// De-materialises this tenant's narinfo object for a hash the global reaper found
-	// has lost its shared object, so the read path stops serving a narinfo that points
-	// at a NAR that is gone. It is gated on the live row still naming that hash (a
-	// recommit at a different hash is left alone) and on the object still being absent
-	// (a concurrent re-promote brought it back, so the path is healthy and kept), which
-	// makes it idempotent and collateral-free: the reaper routes it through here, the
-	// single writer of the tenant's objects, and re-drives it until the `blob_state`
-	// row is gone, so a partial run converges.
-	// Opens its own critical section; callers must be outside one.
+	// The global reaper owns canonical NAR removal, but this service is the only
+	// writer for tenant narinfo objects. Delete the tenant narinfo object only while
+	// its live row still refers to the reaped hash and the canonical NAR is absent.
+	// These checks protect a concurrent recommit or re-upload and make retries
+	// idempotent. Opens a critical section; callers must not already hold one.
 	async demoteUnbacked(
 		cache: StoredCache,
 		storePathHash: StorePathHash,
@@ -859,11 +807,9 @@ export class NarInfoObjectsService {
 		);
 	}
 
-	// Deletes one path's tenant narinfo object. Every narinfo-object delete
-	// routes through here or the bulk form: the objects are path-keyed and not
-	// healed on read, so the delete must order behind any abandoned mutation of
-	// the same key, or an abandoned delete could destroy an object a later
-	// commit wrote.
+	// Narinfo objects are path-keyed. Order every delete behind abandoned
+	// mutations for the same key so a late delete cannot remove an object written
+	// by a later commit.
 	async deleteNarInfoObject(
 		cache: StoredCache,
 		storePathHash: StorePathHash
@@ -879,8 +825,6 @@ export class NarInfoObjectsService {
 		);
 	}
 
-	// The bulk form of {@link deleteNarInfoObject}, one ordered R2 delete for a
-	// teardown chunk's paths.
 	async deleteNarInfoObjects(
 		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]

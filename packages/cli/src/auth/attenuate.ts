@@ -4,10 +4,9 @@ import {
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
 
-// What a push needs from a token: it always uploads, optionally attaches
-// attestations, and optionally sets a retention root. The grant it requests is
-// exactly this, so a CI exchange (which must name its `authorization_details`)
-// receives a token confined to the one cache it pushes to.
+// A CI exchange must request explicit `authorization_details`. Build the grant
+// from the operations this push will perform so its token is confined to one
+// cache and does not receive unused authority.
 export interface PushGrantIntent {
 	readonly cacheSelector: string;
 	readonly attest: boolean;
@@ -56,9 +55,9 @@ const attestActions = ['attestation:negotiate', 'attestation:attach'];
 
 /**
  * The concrete `authorization_details` a push requests: a single cache grant on
- * the target cache, carrying upload (and, when used, attestation and `root:set`)
- * operations. Built and validated client-side so a CI run asks for the least it
- * needs and no more.
+ * the target cache, with upload (and, when used, attestation and `root:set`)
+ * operations. Built and validated client-side so a CI run requests only the
+ * authority it needs.
  */
 export function pushAuthorizationDetails(
 	intent: PushGrantIntent
@@ -110,8 +109,9 @@ export function attestAttachAuthorizationDetails(
 }
 
 /**
-The root-scoped authority a CI preflight needs to retain an existing path.
-*/
+ * Requests only `root:ensure` for the selected cache and root. This lets a CI
+ * preflight verify retention without granting permission to change the root.
+ */
 export function rootEnsureAuthorizationDetails(
 	intent: RootEnsureGrantIntent
 ): AuthorizationDetails {
@@ -129,7 +129,7 @@ export function rootEnsureAuthorizationDetails(
  * The read-only authority needed by a CI read of a cache's roots, or of one
  * root's targets: exactly `root:list`, never `root:set`, so a plan job's
  * exchanged token can read a root's reconciled list but cannot refresh
- * retention unless it separately holds `root:set`.
+ * retention unless it also has `root:set`.
  */
 export function rootListAuthorizationDetails(
 	intent: RootListGrantIntent

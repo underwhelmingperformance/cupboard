@@ -87,8 +87,6 @@ describe('control plane tenant administration', () => {
 		}).toStrictEqual({
 			createStatus: StatusCodes.OK,
 			created: { id: 'acme', status: 'active', readMode: 'private' },
-			// The harness provisions the fixture `v1` tenant, so the list carries it
-			// alongside the one this test creates; `listTenants` orders by slug.
 			listedIds: ['acme', 'v1'],
 			suspended: { id: 'acme', status: 'suspended' },
 			offboarded: { id: 'acme', status: 'offboarding' }
@@ -128,7 +126,7 @@ describe('control plane tenant administration', () => {
 		});
 	});
 
-	it('re-creates a matching slug idempotently but refuses a conflicting config', async () => {
+	it('accepts a repeated create with matching configuration and rejects a conflict', async () => {
 		const token = await issueControlAdminToken();
 
 		const first = await controlFetch(

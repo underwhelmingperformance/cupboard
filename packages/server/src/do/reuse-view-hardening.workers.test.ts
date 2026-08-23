@@ -50,10 +50,6 @@ const viewName = reuseViewNameSchema.parse('reuse');
 const pr1Cache = cacheNameSchema.parse('pr-1');
 const pr2Cache = cacheNameSchema.parse('pr-2');
 
-// Drives a lookup on the fixture Worker's Durable Object through a service
-// whose shared-fact reads go through the given D1 plan, so a test can fail
-// them or interleave a mutation at the exact point the lookup sits between
-// its two gate entries.
 async function lookupWithPlan(
 	storePathHash: string,
 	plan: (instance: CupboardServer) => FlakyD1Plan
@@ -97,7 +93,6 @@ const requestLineSchema = z.object({
 	rowsRead: z.number()
 });
 
-// The row cost the Durable Object logged for one reuse lookup request.
 async function lookupCost(storePathHash: string): Promise<{
 	status: number;
 	rowsRead: number;
@@ -120,8 +115,6 @@ async function lookupCost(storePathHash: string): Promise<{
 	return { status, rowsRead: line?.rowsRead ?? -1 };
 }
 
-// Two-character store-path-hash prefixes drawn from the nix base32 alphabet,
-// so generated test hashes always parse.
 const hashAlphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 
 function generatedHash(index: number): string {
@@ -163,8 +156,8 @@ describe('reuse-view lookup hardening', () => {
 		await insertUnbackedRow('pr-2', path.storePathHash, path.narHash);
 		await setView([{ kind: 'prefix', pattern: 'pr-' }]);
 
-		// The pr-2 row was discarded off-gate (it has no committed edge), so
-		// its reclamation between the gates must not fail the verified answer.
+		// The pr-2 row has no committed edge. Its removal between the gates must
+		// not invalidate the surviving candidate.
 		const served = await lookupWithPlan(path.storePathHash, (instance) =>
 			betweenGates(() => {
 				instance.context.db
@@ -257,7 +250,7 @@ describe('reuse-view lookup hardening', () => {
 		).rejects.toBeInstanceOf(SharedFactsUnavailableError);
 	});
 
-	it('answers a canonical-object probe fault as a retryable 503, not a miss', async () => {
+	it('returns a retryable 503 when the canonical-object probe fails', async () => {
 		const path = await committedPath('harden-probe', 'pr-1', {
 			storePathHash: 'g1'.repeat(16)
 		});
@@ -289,7 +282,7 @@ describe('reuse-view lookup hardening', () => {
 	// too: a corrupt stored row surfaces as a server error, and a shared cache
 	// that stored it would keep serving the error long after the row is
 	// repaired or recommitted.
-	it('answers a corrupt stored row as an uncached server error', async () => {
+	it('returns an uncached server error for a corrupt stored row', async () => {
 		const path = await committedPath('harden-corrupt', 'pr-1', {
 			storePathHash: 'h1'.repeat(16)
 		});
@@ -343,9 +336,8 @@ describe('reuse-view lookup hardening', () => {
 			throw new Error('the committed path must have a narinfo row');
 		}
 
-		// A backlog of stale-generation edges sharing this candidate's (tenant,
-		// cache, store_path_hash) but none of its generations, the shape an
-		// undrained deletion backlog leaves behind.
+		// Use the same tenant, cache, and path hash but older generations. This is
+		// the shape left by an undrained deletion backlog.
 		const staleCount = 20;
 		const d1 = drizzleD1(env.CUPBOARD_DB, {
 			schema: { blobReference: d1Schema.blobReference }
@@ -427,8 +419,6 @@ describe('reuse-view lookup hardening', () => {
 
 		const baseline = await lookupCost(path.storePathHash);
 
-		// Unrelated rows: other hashes in a matching cache, and the same hash in
-		// a cache outside the selector's range. Neither may add to the read.
 		const narHash = nixSha256HashSchema.parse(path.narHash);
 		await runInDurableObject(fixtureWorkerServer(), (instance) => {
 			const unrelated = Array.from({ length: 200 }, (_, index) => ({
@@ -444,8 +434,6 @@ describe('reuse-view lookup hardening', () => {
 				createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
 			}));
 
-			// The Durable Object's SQLite binds at most ~100 variables per
-			// statement, so the seed rows go in during small batches.
 			for (let start = 0; start < unrelated.length; start += 10) {
 				instance.context.db
 					.insert(schema.narInfos)
@@ -469,10 +457,6 @@ describe('reuse-view lookup hardening', () => {
 
 		const withBacklog = await lookupCost(path.storePathHash);
 
-		// The one extra read is the range scan touching its boundary row (the
-		// same hash in the out-of-range cache); the two hundred same-cache rows
-		// add nothing. Exact pins, so a constant regression cannot hide behind
-		// an inequality.
 		expect({ baseline, withBacklog }).toStrictEqual({
 			baseline: { status: StatusCodes.OK, rowsRead: 9 },
 			withBacklog: { status: StatusCodes.OK, rowsRead: 10 }

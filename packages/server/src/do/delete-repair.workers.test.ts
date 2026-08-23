@@ -22,13 +22,7 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
-// The delete saga is row-first/edge-last with no timestamp phase columns: the
-// `narinfo_deletion` row, carrying the captured `(nar_hash, generation)`, is the
-// durable marker, and the GC flush is the repair pass. These tests plant the
-// cross-store state a crash leaves at each phase and assert the repair converges,
-// proving the replay is correct by captured-identity idempotency alone.
-
-describe('delete-saga crash replay', () => {
+describe('delete marker replay', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
@@ -37,7 +31,7 @@ describe('delete-saga crash replay', () => {
 		await clearBlobStorage();
 	});
 
-	it('drives a delete crashed after the row transaction, before the edge and object go', async () => {
+	it('finishes deletion after row removal when the edge and object remain', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('phase-row-only');
 		const metadata = uploadMetadata({
@@ -50,8 +44,8 @@ describe('delete-saga crash replay', () => {
 
 		await commitPath(token, metadata, nar);
 
-		// The state right after the delete's row transaction: the narinfo row is gone
-		// and its marker is queued, but the edge, shared fact and R2 object survive.
+		// Row removal queues the marker before the D1 edge and R2 object are
+		// retired. Reproduce a crash at that boundary.
 		await deleteNarInfoRow(metadata.storePathHash);
 		await seedNarInfoDeletion({
 			storePathHash: metadata.storePathHash,
@@ -79,7 +73,7 @@ describe('delete-saga crash replay', () => {
 		});
 	});
 
-	it('drives a delete crashed after retiring the edge, before deleting the object', async () => {
+	it('replays idempotently when the reference edge is already absent', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('phase-edge-gone');
 		const metadata = uploadMetadata({
@@ -92,7 +86,6 @@ describe('delete-saga crash replay', () => {
 
 		await commitPath(token, metadata, nar);
 
-		// The edge was retired but the object delete and marker clear did not run.
 		await deleteNarInfoRow(metadata.storePathHash);
 		await deleteBlobReferenceEdge(metadata.storePathHash, 0);
 		await seedNarInfoDeletion({
@@ -121,7 +114,7 @@ describe('delete-saga crash replay', () => {
 		});
 	});
 
-	it('drives a delete crashed after deleting the object, before clearing the marker', async () => {
+	it('clears the marker when the row, edge and object are already absent', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('phase-object-gone');
 		const metadata = uploadMetadata({
@@ -134,7 +127,6 @@ describe('delete-saga crash replay', () => {
 
 		await commitPath(token, metadata, nar);
 
-		// Every step but the final marker clear ran: row, edge and object are gone.
 		await deleteNarInfoRow(metadata.storePathHash);
 		await deleteBlobReferenceEdge(metadata.storePathHash, 0);
 		await env.BLOBS.delete(
@@ -155,7 +147,7 @@ describe('delete-saga crash replay', () => {
 		}).toStrictEqual({ markers: [], edges: [], blobState: [] });
 	});
 
-	it('replays a stale deletion against a newer recommit without harming it', async () => {
+	it('ignores a stale deletion marker after the path is recommitted', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('phase-recommit');
 		const metadata = uploadMetadata({
@@ -166,10 +158,8 @@ describe('delete-saga crash replay', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		// Commit, delete, recommit the same NAR hash: the live edge and object reach a
-		// higher generation, while a stale marker from the first delete captured
-		// generation 0. The delete drained the presence edge, so the recommit
-		// re-uploads (oracle-safe) and the promote adopts the surviving canonical blob.
+		// The deletion marker captures generation 0. Recommitting the same NAR
+		// creates generation 1, which replay must leave servable.
 		await commitPath(token, metadata, nar);
 		await deletePath(token, metadata.storePathHash);
 		await commitPath(token, metadata, nar);
@@ -179,9 +169,6 @@ describe('delete-saga crash replay', () => {
 			generation: 0
 		});
 
-		// Replaying the stale generation-0 deletion retires no edge (only generation 1
-		// exists) and, finding the path live, clears itself without touching the
-		// servable generation-1 narinfo or its blob.
 		await reapBlobsPastGrace();
 
 		expect({

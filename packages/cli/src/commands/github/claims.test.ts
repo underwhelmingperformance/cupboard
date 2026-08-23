@@ -12,7 +12,7 @@ const audience = 'https://cupboard.example.workers.dev/t/acme';
 const exactWorkflowReference = `${workflowPath}@refs/tags/v1.2.3`;
 
 describe('GitHub Actions claims', () => {
-	it('models the default pull-request subject and deterministic claims', () => {
+	it('returns the default pull-request claim set', () => {
 		expect(
 			githubPullRequestClaims(audience, identity, {
 				pullRequestNumber: 42,
@@ -33,7 +33,7 @@ describe('GitHub Actions claims', () => {
 		});
 	});
 
-	it('models the default branch subject and deterministic claims', () => {
+	it('returns the default branch claim set', () => {
 		expect(
 			githubBranchClaims(audience, identity, {
 				branch: 'main',
@@ -55,7 +55,7 @@ describe('GitHub Actions claims', () => {
 		});
 	});
 
-	it('omits claims whose values are not fixed during pattern setup', () => {
+	it('omits claims that setup cannot determine for tag patterns', () => {
 		expect({
 			pullRequest: githubPullRequestClaims(audience, identity),
 			branch: githubBranchClaims(audience, identity, { branch: 'main' })

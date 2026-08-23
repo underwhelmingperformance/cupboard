@@ -41,24 +41,17 @@ async function deferUpload(
 	return { uploadId: upload.uploadId, narHash: metadata.narHash };
 }
 
-// The batched `recordVerifications` settles a whole verify pass in one RPC. Its
-// per-verdict try/catch is what keeps one upload's apply failure from aborting
-// the rest of the batch or failing the queue message, the isolation the
-// per-upload RPCs had. This drives a batch where one upload's promote fails while
-// a sibling's succeeds.
 describe('batched verify fault isolation', () => {
 	beforeEach(resetTestServer);
 
-	it('commits the siblings of a verdict whose apply fails, leaving it for retry', async () => {
+	it('settles a sibling when another verdict fails and leaves the failed upload pending', async () => {
 		const token = await initialise();
 		const failing = await deferUpload(token, 'apply-fails', 'a'.repeat(32));
 		const sibling = await deferUpload(token, 'apply-ok', 'b'.repeat(32));
 
-		// Fail only the failing upload's promote: its canonical object write
-		// throws, while every other R2 write (including the sibling's) goes
-		// through. The consumer's decode still succeeds; its own promote fails on
-		// the same write, so it falls back to the plain verified verdict, and the
-		// settle's promote then fails the apply.
+		// Fail this upload's canonical write in both the consumer and the settle.
+		// The consumer therefore reports a verified verdict, whose application also
+		// fails, while the sibling can still settle.
 		const failingKey = narObjectKey(failing.narHash);
 		const originalPut = env.BLOBS.put.bind(env.BLOBS);
 		const put = vi
@@ -70,8 +63,6 @@ describe('batched verify fault isolation', () => {
 			);
 
 		try {
-			// The pass must not throw, so a poison verdict cannot fail and retry the
-			// whole message.
 			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 		} finally {
 			put.mockRestore();
@@ -81,20 +72,17 @@ describe('batched verify fault isolation', () => {
 			sibling: await pendingUploadVerdict(sibling.uploadId),
 			failing: await pendingUploadVerdict(failing.uploadId)
 		}).toStrictEqual({
-			// The sibling settled and its row cleared; the failing upload is left
-			// pending for the next pass.
 			sibling: undefined,
 			failing: 'pending'
 		});
 	});
 
-	it('survives a D1 fault inside the settle critical section', async () => {
+	it('keeps the Durable Object instance usable and the upload pending when D1 rejects inside the settle gate', async () => {
 		const token = await initialise();
 		const upload = await deferUpload(token, 'd1-fault', 'c'.repeat(32));
 
-		// An in-memory marker whose survival proves the instance was not broken:
-		// the runtime replaces a broken object, and a fresh instance builds a
-		// fresh discovery store.
+		// The runtime replaces a Durable Object whose gated callback throws. This
+		// marker survives only if the current instance remains usable.
 		const marker = new OidcDiscoveryStore();
 		await runInDurableObject(currentServer(), (instance) => {
 			instance.context.discovery = marker;
@@ -117,7 +105,6 @@ describe('batched verify fault isolation', () => {
 			});
 
 		try {
-			// The pass must not throw and must leave the upload for a retry.
 			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 		} finally {
 			prepare.mockRestore();
@@ -154,7 +141,6 @@ describe('batched verify fault isolation', () => {
 			batch.mockRestore();
 		}
 
-		// The pass degraded to per-path probes and still settled the upload.
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 	});
 
@@ -182,8 +168,6 @@ describe('batched verify fault isolation', () => {
 		const sent = await collectVerificationPasses();
 
 		try {
-			// A full batch of two whose applies all fail: the gate sees claims equal to
-			// the batch size but nothing applied.
 			await verifyTenant(rootLogger(), env, currentServerTenant(), 2);
 		} finally {
 			put.mockRestore();
@@ -194,8 +178,6 @@ describe('batched verify fault isolation', () => {
 			first: await pendingUploadVerdict(first.uploadId),
 			second: await pendingUploadVerdict(second.uploadId)
 		}).toStrictEqual({
-			// Nothing applied, so the pass backs off to the cron and chains no
-			// continuation that would re-claim and re-fail the same rows.
 			sent: 0,
 			first: 'pending',
 			second: 'pending'

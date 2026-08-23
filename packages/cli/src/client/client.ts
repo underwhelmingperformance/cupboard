@@ -67,9 +67,8 @@ export class CupboardClient {
 	constructor(
 		public readonly baseUrl: URL,
 		public readonly fetcher: typeof fetch = fetch,
-		// Prepended to path-scoped routes for a named cache (e.g. `/cache/builds`);
-		// empty for the default cache. Not baked into `baseUrl`, so resolving an
-		// absolute path against the base never discards it.
+		// Keep the cache selector separate from `baseUrl`. Resolving an absolute
+		// route can discard the base path, including a tenant prefix.
 		public readonly cachePrefix = '',
 		public readonly signal?: AbortSignal,
 		private readonly connectSocket: CommitSocketConnect = connectCommitSocket
@@ -97,17 +96,16 @@ export class CupboardClient {
 		return body.trimEnd();
 	}
 
-	// Routes on the contract address the default cache by its wire alias, so the
-	// selector form is always prefixed.
+	// Contract routes require an explicit cache selector, including the wire
+	// alias for the default cache.
 	private selectorScoped(path: string): string {
 		return this.cachePrefix === ''
 			? `/cache/${WIRE_DEFAULT_CACHE}${path}`
 			: `${this.cachePrefix}${path}`;
 	}
 
-	// Resolves a route under the base URL's full path, so a tenant base like
-	// `https://host/t/<tenant>` keeps its prefix. A plain `new URL('/path', base)`
-	// would discard the base path, because an absolute path replaces it.
+	// Append routes to the complete base path. `new URL('/path', base)` would
+	// replace a tenant prefix such as `/t/<tenant>`.
 	private resolve(path: string): URL {
 		const url = new URL(this.baseUrl);
 		url.pathname = `${url.pathname.replace(/\/+$/, '')}${path}`;
@@ -145,10 +143,9 @@ export class CupboardClient {
 	private async commitSocketCredentials(
 		credential: AccessCredential
 	): Promise<CommitSocketCredentials> {
-		// The client starts pacing from its own `commit-credit` declaration because
-		// an intermediary can remove the capability from the upgrade response. If
-		// the server does not support credit, its `unsupported` frame moves the
-		// connection back to the client's local window.
+		// Declare credit pacing on every upgrade. The server enforces the request
+		// declaration even if an intermediary strips the response capability. An
+		// `unsupported` frame is the only signal that permits the local window.
 		const headers = {
 			[commitAcceptCapabilitiesHeader]: `${commitBatchCapability},${commitCreditCapability}`
 		};
@@ -157,10 +154,8 @@ export class CupboardClient {
 		return { initial: await authorise(), authorise };
 	}
 
-	// A failed token grant fails the whole CI run or push behind it. The client's
-	// fetcher already retries a transient refusal (a network fault, a gateway
-	// blip, an overloaded 503) with backoff, so this only maps a settled non-ok
-	// response to a typed error.
+	// The shared fetcher has already exhausted retries for transient transport
+	// and gateway failures. Convert only the final non-success response here.
 	private async postTokenForm(
 		form: Readonly<Record<string, string>>
 	): Promise<Response> {
@@ -214,25 +209,19 @@ export class CupboardClient {
 		return result.data;
 	}
 
-	// The route renders the key set with a trailing newline; the keys themselves
-	// carry none, so the newline is trimmed before the key set is returned.
 	publicKey(): Promise<string> {
 		return this.fetchText('/pubkey');
 	}
 
-	/**
-	 * The build version the deployment answers on its unauthenticated
-	 * `/_version` route, without the trailing newline the route renders.
-	 */
 	version(): Promise<string> {
 		return this.fetchText('/_version');
 	}
 
 	/**
-	 * Opens a commit session over one WebSocket. The upgrade request carries the
-	 * write token; every path in the push commits over the returned session, and
-	 * a deferred upload parks on the same socket for the server's verification
-	 * verdict (or resolves `pending` straight away when `wait` is off).
+	 * Opens a commit session over one WebSocket. The upgrade request includes the
+	 * write token. Every path in the push commits over the returned session, and
+	 * a deferred upload waits on the same socket for the server's verification
+	 * verdict. With `wait` disabled, the upload returns `pending` immediately.
 	 */
 	async openCommitSession(
 		token: AccessCredential,
@@ -267,22 +256,19 @@ export class CupboardClient {
 			try {
 				outcome = await session.commit(target);
 			} catch (error) {
-				// The ack itself failed (a pre-ack error frame that tears down only
-				// this entry, or a refused upgrade). Close the one-shot session so its
-				// socket never leaks; close is idempotent when a failure already tore
-				// it down.
+				// An acknowledgement failure leaves no verdict to wait for. Close the
+				// one-shot session here; teardown may already have closed the socket.
 				session.close();
 				throw error;
 			}
 
-			// The ack is in; keep the one-shot session open until the verdict
-			// settles, then close it. The caller still observes a failed verdict on
-			// `outcome.settled`; this awaits only to gate the close.
+			// A deferred outcome still needs this socket for its verdict. Close only
+			// after `settled`, while leaving that promise's result to the caller.
 			const closeOnceSettled = async (): Promise<void> => {
 				try {
 					await outcome.settled;
 				} catch {
-					// Failed or timed out: closing the session is all this arm owes.
+					// The caller observes this rejection through `outcome.settled`.
 				} finally {
 					session.close();
 				}
@@ -299,8 +285,8 @@ export class CupboardClient {
 	/**
 	 * Claims (or idempotently re-claims) global admin of the deployment at the
 	 * bootstrap `POST /signup` endpoint. The endpoint is unauthenticated (the
-	 * external OIDC subject token is the credential, judged against the
-	 * deployment's signup gate) and takes a urlencoded body.
+	 * external OIDC subject token is the credential, which the server evaluates
+	 * against the deployment's signup gate) and takes a urlencoded body.
 	 */
 	async signup(request: SignupRequest): Promise<ParsedSignupResponse> {
 		throwIfAborted(this.signal);
@@ -375,8 +361,8 @@ export class CupboardClient {
 	/**
 	 * Renews a session at the OAuth `POST /token` endpoint with the RFC 6749
 	 * refresh_token grant. The refresh token is the credential and the server
-	 * rotates it on every use: the response carries its successor, and the
-	 * presented token is spent whether or not the caller stores it.
+	 * rotates it on every use: the response returns its successor, and the
+	 * presented token is spent whether or not the caller stores the replacement.
 	 */
 	async tokenRefresh(refreshToken: string): Promise<ParsedTokenResponse> {
 		const response = await this.postTokenForm({
@@ -394,12 +380,11 @@ export interface CupboardClientOptions {
 }
 
 /**
- * The upload a commit settles: its id and the path identity negotiated for it.
- * The identity lets the client report a verdict that arrives before the
- * server's deferred frame. Set `retention` when the upload negotiated a
- * retention plan: on a reconnect the server resolves a row it has already
- * cleared by that identity, and the marker makes it answer with the path's
- * stored grace fact instead of none.
+ * The path identity lets a verdict settle the upload even if it arrives before
+ * the acknowledgement.
+ * `retention` is set when the original negotiation response acknowledged
+ * `upload-grace-facts`. On an identity-based reconnect, it asks a capable server
+ * to return the stored grace fact after the pending row has been cleared.
  */
 export interface CommitTarget {
 	readonly uploadId: UploadId;
@@ -410,19 +395,14 @@ export interface CommitTarget {
 
 export interface CommitOptions {
 	/**
-	 * Bounds how long a parked upload waits for its verdict, and how long the
-	 * session as a whole waits for the server to grant it capacity to commit
-	 * under.
+	 * Bounds how long a deferred upload waits for its verdict, and how long the
+	 * session as a whole waits for the server to grant commit capacity.
 	 */
 	readonly timeoutSeconds?: number;
-	/**
-	 * Called on each connection with the capabilities the server advertised in
-	 * the 101 response. Useful for logging the negotiated mode.
-	 */
 	readonly onCapabilities?: (capabilities: AdvertisedCapabilities) => void;
 	/**
-	 * Called when the session starts waiting for capacity to commit under, and
-	 * again when it stops, so a progress display can report the fact.
+	 * Called when the session starts waiting for commit capacity, and again when
+	 * it stops, so a progress display can report the fact.
 	 */
 	readonly onWaiting?: (isWaitingForCapacity: boolean) => void;
 }
@@ -432,8 +412,8 @@ const defaultCommitWaitSeconds = 600;
 const connectCommitSocket: CommitSocketConnect = (url, headers) =>
 	new WebSocket(url, { headers: { ...headers } });
 
-// Cloudflare stamps every response with a `cf-ray` at the edge, so a server-side
-// failure can be tied to its log line. Absent off Cloudflare (a local server).
+// Cloudflare stamps edge responses with `cf-ray`, which ties a server failure to
+// its log entry. Local and non-Cloudflare responses can omit the header.
 function rayOf(response: Response): string | undefined {
 	return response.headers.get('cf-ray') ?? undefined;
 }

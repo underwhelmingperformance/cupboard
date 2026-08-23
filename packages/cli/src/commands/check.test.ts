@@ -179,4 +179,21 @@ describe('runCheck', () => {
 			}
 		});
 	});
+
+	it('qualifies a clean result when unchecked paths remain', async () => {
+		const calls: { deep: boolean }[] = [];
+		const captured: Captured = { results: [], infos: [], warnings: [] };
+		const report = checkReportSchema.parse({
+			narInfosChecked: 1000,
+			narBlobsChecked: 900,
+			complete: false,
+			discrepancies: []
+		});
+
+		await runCheck(false, reporter(captured), checkClient(report, calls));
+
+		expect(captured.infos).toStrictEqual([
+			'No discrepancies in the checked batch; unchecked paths remain.'
+		]);
+	});
 });

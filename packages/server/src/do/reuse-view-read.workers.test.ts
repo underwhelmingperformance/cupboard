@@ -74,7 +74,7 @@ describe('reuse-view nix-cache-info', () => {
 		});
 	});
 
-	it('answers HEAD with an empty body and the same headers as GET', async () => {
+	it('returns HEAD with an empty body and the same headers as GET', async () => {
 		await setView('reuse', 55);
 
 		const fullResponse = await readFetch('/reuse/reuse/nix-cache-info');
@@ -105,8 +105,6 @@ describe('reuse-view nix-cache-info', () => {
 		const unknown = await readFetch('/reuse/nonexistent/nix-cache-info');
 		const invalid = await readFetch('/reuse/Bad_NAME!/nix-cache-info');
 
-		// A cacheable negative answer would keep 404ing after the view is
-		// created, so the misses are no-store like every other reuse response.
 		expect({
 			unknown: unknown.status,
 			unknownCacheControl: unknown.headers.get('cache-control'),
@@ -156,8 +154,6 @@ describe('reuse-view nix-cache-info', () => {
 		const narPath = await readFetch('/reuse/reuse/nar/whatever.nar.zst');
 		const arbitrary = await readFetch('/reuse/reuse/some/other/path');
 
-		// Like every reuse response, the catch-all 404 must never be cached: a
-		// stored negative answer would outlive a deploy that adds the route.
 		expect({
 			narPath: narPath.status,
 			narPathCacheControl: narPath.headers.get('cache-control'),

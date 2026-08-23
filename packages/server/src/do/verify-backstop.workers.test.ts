@@ -37,20 +37,17 @@ async function backstopState(): Promise<{
 }
 
 function fireAlarm(): Promise<void> {
-	// Request-armed alarms do not fire through `runDurableObjectAlarm` in this
-	// pool, so the handler is driven directly.
 	return runInDurableObject(currentServer(), (instance) => instance.alarm());
 }
 
 describe('verify alarm backstop', () => {
-	// Anchored at the real current instant: the runtime clamps an alarm set in
-	// the past to now and fires it at once, so a base in the past would have
-	// every armed backstop auto-fire mid-test.
+	// The runtime clamps a past alarm to the current time and fires it immediately.
+	// Use a real current instant so no backstop fires unexpectedly during setup.
 	let base: Date;
 
 	beforeEach(async () => {
-		// A mocked clock can leak in from an earlier suite in this isolate, so
-		// the real instant is read only after restoring real timers.
+		// Fake timers can leak from an earlier suite in this isolate. Restore real
+		// timers before reading the base time.
 		vi.useRealTimers();
 		base = new Date();
 		vi.useFakeTimers();
@@ -136,8 +133,6 @@ describe('verify alarm backstop', () => {
 			'a'.repeat(32)
 		);
 
-		// Past the delay the request is stale, so the backstop's re-request is a
-		// real send, and its arming starts the next cycle.
 		const firedAt = base.getTime() + verifyBackstopDelayMs;
 		vi.setSystemTime(new Date(firedAt));
 		await fireAlarm();
@@ -150,7 +145,6 @@ describe('verify alarm backstop', () => {
 			marker
 		}).toStrictEqual({
 			sent: [request, request],
-			// A fresh row never settles here: decode belongs to the queue consumer.
 			verdict: 'pending',
 			marker: firedAt + verifyBackstopDelayMs
 		});
@@ -185,8 +179,8 @@ describe('verify alarm backstop', () => {
 
 		await markUploadPendingVerification(reuse.uploadId);
 
-		// Installed after the seeding commit, whose own deferral traffic is not
-		// under test here.
+		// Install the collector after the seeding commit because the commit also
+		// sends verification requests. Those requests are unrelated to the backstop.
 		const sent = await collectVerificationPasses();
 
 		await currentServer().requestVerificationPass();
@@ -208,7 +202,7 @@ describe('verify alarm backstop', () => {
 		});
 	});
 
-	it('answers absent for a reuse whose canonical object vanished', async () => {
+	it('clears a pending reuse row when its canonical object is missing', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('backstop-reuse-vanished');
 		const first = uploadMetadata({
@@ -239,8 +233,6 @@ describe('verify alarm backstop', () => {
 		await collectVerificationPasses();
 		await currentServer().requestVerificationPass();
 
-		// The canonical object was collected before the backstop fired. It cannot
-		// reappear, so the settle must answer the waiter terminally.
 		await env.BLOBS.delete(narObjectKey(nar.narHash));
 
 		vi.setSystemTime(new Date(base.getTime() + verifyBackstopDelayMs));
@@ -258,7 +250,7 @@ describe('verify alarm backstop', () => {
 		});
 	});
 
-	it('leaves reuse rows a consumer claim holds alone', async () => {
+	it('does not settle reuse rows leased to a consumer', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('backstop-reuse-claimed');
 		const first = uploadMetadata({
@@ -288,8 +280,7 @@ describe('verify alarm backstop', () => {
 		await markUploadPendingVerification(reuse.uploadId);
 		await collectVerificationPasses();
 
-		// A consumer pass holds the claim; the backstop's settle must stay off
-		// its rows.
+		// The consumer lease must exclude this row from the backstop pass.
 		await currentServer().claimVerificationBatch(10, Number.MAX_SAFE_INTEGER);
 		await currentServer().requestVerificationPass();
 

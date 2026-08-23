@@ -35,7 +35,7 @@ describe('cache schemas', () => {
 			}
 		},
 		{
-			name: 'a grace-managed summary with no live deadline',
+			name: 'a summary for a cache without grace management',
 			value: { ...summary, graceManaged: false },
 			expected: { ...summary, graceManaged: false }
 		}

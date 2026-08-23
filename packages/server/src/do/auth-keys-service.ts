@@ -38,9 +38,6 @@ import {
 	type TenantIdentityService
 } from './tenant-identity-service.ts';
 
-/**
-The RFC 8414 document a tenant advertises for its token endpoint.
-*/
 export interface AuthorizationServerMetadata {
 	issuer: string;
 	token_endpoint: string;
@@ -58,9 +55,8 @@ export class AuthKeysService {
 		private readonly tenantIdentity: TenantIdentityService
 	) {}
 
-	// Identity is the sole source for the issuer and audience the tenant issues and
-	// verifies under. An unconfigured Durable Object has no identity and cannot issue
-	// or verify; an unconfigured tenant always fails with a 500.
+	// Token issuance and verification use the identity assigned during tenant
+	// configuration. An unconfigured object cannot authenticate tokens.
 	private requireIdentity(): TenantIdentity {
 		const identity = this.tenantIdentity.current();
 
@@ -72,9 +68,8 @@ export class AuthKeysService {
 	}
 
 	private authKeys(): Promise<readonly AuthKey[]> {
-		// A shared in-flight promise so concurrent first requests against an
-		// empty DO generate and insert the bootstrap key exactly once. A failed
-		// attempt clears the cache so a later request can create it.
+		// Share bootstrap key creation across concurrent first requests. Clear a
+		// failed promise so a later request can retry.
 		this.authKeysPromise ??= this.loadAuthKeysClearingCacheOnFailure();
 
 		return this.authKeysPromise;
@@ -92,8 +87,8 @@ export class AuthKeysService {
 	}
 
 	private async loadOrCreateAuthKeys(): Promise<readonly AuthKey[]> {
-		// Insertion order (rowid) decides which key is active, so a rotation always
-		// supersedes the previous key regardless of timestamp resolution.
+		// Use insertion order instead of timestamps so every rotation has a strict
+		// order even within one clock tick.
 		const rows = this.context.db
 			.select()
 			.from(schema.authKeys)
@@ -123,8 +118,7 @@ export class AuthKeysService {
 	}
 
 	private authKeyFromRow(row: typeof schema.authKeys.$inferSelect): AuthKey {
-		// A pre-rotation row predates `kid`; give it one on first load so every
-		// key the verifier and JWKS see is addressable.
+		// Backfill legacy rows so every verification key is addressable by `kid`.
 		const kid = row.kid === '' ? this.backfillAuthKeyKid(row.id) : row.kid;
 
 		return {
@@ -153,7 +147,6 @@ export class AuthKeysService {
 		const active = await this.activeAuthKey();
 		const keys = await this.authKeys();
 
-		// Listed in insertion order, the same order that decides the active key.
 		return keys
 			.filter((key) => !key.retired)
 			.map((key) => ({
@@ -166,11 +159,8 @@ export class AuthKeysService {
 			}));
 	}
 
-	// RFC 8414 authorization-server metadata. Served from the Durable Object (not the
-	// edge) so an unconfigured tenant 500s through the fetch guard and advertises
-	// no identity until one has been assigned. The endpoints are built from
-	// the request's own path-based URL, which provisioning stamps as the issuer, so
-	// the advertised issuer equals the `iss` of a token this tenant issues.
+	// Build RFC 8414 metadata from the assigned tenant URL. An unconfigured tenant
+	// publishes no issuer, and the advertised issuer matches its token `iss` value.
 	authorizationServerMetadata(
 		origin: RequestOrigin
 	): AuthorizationServerMetadata {
@@ -206,8 +196,8 @@ export class AuthKeysService {
 		this.authKeysPromise = undefined;
 	}
 
-	// The issuing key: the last key inserted that is still in service, so a fresh
-	// rotation takes over issuing at once.
+	// The newest live, non-retiring key signs new tokens. Retiring keys remain
+	// available for verification.
 	async activeAuthKey(): Promise<AuthKey> {
 		const keys = await this.authKeys();
 		const active =
@@ -231,11 +221,9 @@ export class AuthKeysService {
 	}
 
 	async rotateAuthKey(): Promise<AuthKeyRotateResponse> {
-		// Generate the new key pair before the gate: it is independent of the
-		// stored key set, so the keygen need not hold the input gate. Only the read
-		// of the outgoing key, the insert and the cache reset need the critical
-		// section, which must not interleave with a concurrent rotation or a
-		// verification reading the key set.
+		// Generate independent key material before entering the input gate. Read the
+		// outgoing key and insert its replacement atomically with respect to other
+		// rotations and key-set reads.
 		const generated = await generateAuthKeyPair();
 		const kid = authKeyIdSchema.parse(crypto.randomUUID());
 		const rotatedAt = new Date();
@@ -270,10 +258,9 @@ export class AuthKeysService {
 	}
 
 	async retireAuthKey(kid: AuthKeyId): Promise<AuthKeyRetireResponse> {
-		// The last-key check and the retirement share one critical section so two
-		// concurrent retirements cannot both see themselves as safe. A refused
-		// retirement is returned as an outcome and thrown afterwards: throwing
-		// inside blockConcurrencyWhile would break the input gate.
+		// Check and retire inside one critical section so concurrent calls cannot
+		// remove the last key. Return refusal from the gate and throw afterwards;
+		// an exception inside `blockConcurrencyWhile` would break the input gate.
 		const outcome = await this.context.criticalSection(
 			async (): Promise<{ retired: boolean } | { refused: true }> => {
 				const keys = await this.authKeys();
@@ -361,9 +348,8 @@ export class AuthKeysService {
 		}));
 	}
 
-	// Authenticate the bearer token and return its claims (subject and grants).
-	// Authorisation against what those grants cover is a separate decision the
-	// router makes via the contract's per-procedure metadata.
+	// Authentication verifies the token and returns its subject and grants. The
+	// router separately checks those grants against procedure metadata.
 	async authenticate(request: Request): Promise<AccessClaims> {
 		const token = bearerToken(request);
 

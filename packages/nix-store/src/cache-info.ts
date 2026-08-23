@@ -6,13 +6,6 @@ import {
 	storeDirectorySchema
 } from './scalars.ts';
 
-/**
- * The store directory a cupboard cache serves. A binary cache serves exactly
- * one, which is why `nix-cache-info` contains `StoreDir`: a client substituting
- * from the cache must be running the same store. This constant is the only
- * definition of that directory, so what the cache advertises and what it
- * accepts always agree.
- */
 export const servedStoreDirectory = storeDirectorySchema.parse('/nix/store');
 
 export class CacheInfo {
@@ -23,11 +16,10 @@ export class CacheInfo {
 	);
 
 	/**
-	 * Parses a `nix-cache-info` document. `StoreDir` and `Priority` are
-	 * required and refused with {@link CacheInfoParseError} when absent or
-	 * malformed, so a consumer comparing priorities reads the cache's real
-	 * value instead of a guessed default. An absent `WantMassQuery` is
-	 * disabled and unknown lines are ignored.
+	 * Parses a `nix-cache-info` document. `StoreDir` and `Priority` are required;
+	 * a missing or malformed value throws {@link CacheInfoParseError} for that
+	 * field. `WantMassQuery` defaults to false when omitted and otherwise accepts
+	 * only `0` or `1`. Unknown fields are ignored.
 	 */
 	static parse(source: string): CacheInfo {
 		const fields = new Map<string, string>();

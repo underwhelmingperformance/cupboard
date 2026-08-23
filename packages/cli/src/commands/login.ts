@@ -37,9 +37,6 @@ interface LoginOptions {
 	readonly headless?: boolean;
 }
 
-/**
-The issuer refused the device grant for cupboard's own OAuth client.
-*/
 export class DeviceGrantNotEnabledError extends CliError {
 	constructor(options: { readonly cause: unknown }) {
 		super(
@@ -74,10 +71,6 @@ export function loginScopeForClient(clientId: string): string | undefined {
 		: undefined;
 }
 
-/**
- * What to tell the user to do for the device flow, preferring the complete
- * verification URL (the code filled in) when the issuer provides one.
- */
 function deviceLoginInstruction(verification: {
 	readonly userCode: string;
 	readonly verificationUri: string;
@@ -97,9 +90,6 @@ function deviceLoginInstruction(verification: {
 	);
 }
 
-/**
-A fresh Cloudflare login answered without an id_token to present.
-*/
 export class LoginIdTokenMissingError extends CliError {
 	constructor() {
 		super(
@@ -111,9 +101,9 @@ export class LoginIdTokenMissingError extends CliError {
 }
 
 /**
- * The id_token a cupboard-client login presents. The built-in client shares
- * the deploy's grant, so a cached or refreshable login answers without a
- * browser; only a missing, unrefreshable or expired one logs in afresh, with
+ * The ID token presented by a Cupboard-client login. The built-in client shares
+ * the deploy grant, so it can use or refresh a cached login without opening a
+ * browser. A missing, unrefreshable or expired token starts a fresh login with
  * the client's full registered scope set (the dashboard errors on a bare
  * `openid` authorize, and a narrower grant would desynchronise the cache the
  * deploy reuses). A fresh login is persisted for both flows to share.
@@ -128,9 +118,9 @@ export async function cupboardIdToken(dependencies: {
 	const cached = await freshIdToken(dependencies.chain);
 	const expiry = cached === undefined ? undefined : jwtExpiryMs(cached);
 
-	// `freshIdToken` falls back to a stale token when the refresh declines;
-	// that is fine for a claim that may still land, but a login presenting a
-	// token known to be expired would only bounce, so it goes to the browser.
+	// `freshIdToken` can return a stale ID token when refresh fails because the
+	// deployment path can still use its claims. Login must not present a token
+	// known to be expired, so it starts the browser flow instead.
 	if (
 		cached !== undefined &&
 		(expiry === undefined || expiry > dependencies.chain.now())

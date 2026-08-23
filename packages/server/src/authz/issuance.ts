@@ -16,10 +16,10 @@ import {
 } from '../errors.ts';
 
 /**
- * Parse the `authorization_details` form field a client sent. It is carried as
- * an opaque JSON string so that a non-JSON or malformed value is the token
- * endpoint's `invalid_authorization_details`, not the body validator's
- * `invalid_request`. Absent, returns undefined.
+ * Parses a non-empty `authorization_details` form value. The request schema
+ * leaves it JSON-encoded so invalid JSON or an invalid grant array is reported
+ * as `invalid_authorization_details`. An omitted value remains undefined; an
+ * empty form value is rejected earlier as `invalid_request`.
  */
 export function parseRequestedGrants(
 	raw: string | undefined
@@ -46,15 +46,11 @@ export function parseRequestedGrants(
 }
 
 /**
- * The grants a token request earns from its matched rule and verified claims.
- *
- * The interactive owner/admin class (a rule that permits a wildcard) may omit
- * `authorization_details` and receive its wildcard. A claim-bound rule must name
- * the grants it wants, so the token endpoint never reconstructs authority from
- * claims; an omitted request is `invalid_request`. Every requested detail is
- * verified against the rule's bindings before any is issued: an empty array or
- * an unpermitted detail rejects the whole request with
- * `invalid_authorization_details`, never a silent narrowing.
+ * Resolves grants against the matched rule and verified claims. A rule that
+ * permits wildcard authority may omit `authorization_details` and receive that
+ * wildcard. Every other rule must request explicit grants; omission is
+ * `invalid_request`. An empty request or any unpermitted grant rejects the whole
+ * request as `invalid_authorization_details`; no partial subset is returned.
  */
 export function resolveRequestedGrants(
 	rule: OidcTrustRule,
@@ -83,11 +79,10 @@ export function resolveRequestedGrants(
 }
 
 /**
- * The grants an attenuation earns: a requested subset of what the presented
- * self-issued token already carries, never a superset. Omitting
- * `authorization_details` reissues the presented grants unchanged; a request is
- * verified against them detail by detail, all-or-nothing, so a narrowed token
- * can never reach a resource the presenter could not.
+ * Omitting `authorization_details` preserves the presented grants. An empty
+ * request or any grant outside the presented authority rejects the whole
+ * exchange. A successful result cannot authorise an operation or resource that
+ * the presented token did not authorise.
  */
 export function attenuatedGrants(
 	presented: AuthorizationDetails,

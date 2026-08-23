@@ -69,8 +69,8 @@ async function seedNarInfoDeletions(count: number): Promise<void> {
 }
 
 async function fireAlarm(): Promise<void> {
-	// The handler is invoked directly: the continuation relies on the same entry
-	// point in production, and the test pool's alarm delivery is racy to observe.
+	// The test pool does not deliver alarms predictably, so invoke the same handler
+	// directly.
 	await runInDurableObject(currentServer(), (instance) => instance.alarm());
 }
 
@@ -156,8 +156,6 @@ describe('garbage collection cap', () => {
 		await pushPath(token, first);
 		await pushPath(token, second);
 
-		// Retaining `kept` makes the other two collectable while keeping the cache
-		// off the empty-cache skip guard.
 		await setRoot(token, { name: 'channel', targets: [kept.storePath] });
 
 		const collectableRemaining = async (): Promise<number> => {
@@ -172,12 +170,8 @@ describe('garbage collection cap', () => {
 
 		expect(await collectableRemaining()).toBe(2);
 
-		// A cap of one path per collection records a continuation.
 		await currentServer().runGarbageCollection(1);
 
-		// The continuation drains the remaining collectable paths a chunk at a time
-		// and clears itself, so the capped run still collects everything. The
-		// alarm is driven here because the test pool's delivery is racy to observe.
 		await drainContinuation();
 
 		expect({
@@ -185,7 +179,6 @@ describe('garbage collection cap', () => {
 			continuation: await continuation()
 		}).toStrictEqual({ collectable: 0, continuation: undefined });
 
-		// The retained path is never collected.
 		expect(await narInfoGeneration(kept.storePathHash)).not.toBeUndefined();
 	});
 
@@ -491,10 +484,9 @@ describe('garbage collection narinfo-deletion continuation', () => {
 		const backlog = maxNarInfoDeletionsFlushedPerRun + 5;
 		await seedNarInfoDeletions(backlog);
 
-		// The collection and the storage reads share one Durable Object turn, so the
-		// armed continuation alarm cannot fire and drain the backlog before it is
-		// observed. No committed paths are collected, so the continuation is armed
-		// solely by the queued narinfo-deletion backlog the capped flush leaves.
+		// Read the backlog in the same Durable Object turn as collection so the alarm
+		// cannot drain it first. With no committed paths, only the capped deletion
+		// flush can arm this continuation.
 		const observed = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {

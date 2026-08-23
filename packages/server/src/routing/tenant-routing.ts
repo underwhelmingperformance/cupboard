@@ -2,7 +2,6 @@ import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
 
 const tenantPrefix = '/t/';
 
-// The tenant a path addresses and the tenant-relative remainder of that path.
 export interface TenantRoute {
 	readonly tenant: TenantId;
 	readonly rest: string;

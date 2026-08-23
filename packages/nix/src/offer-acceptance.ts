@@ -10,28 +10,20 @@ import type { NixSubstituterOffer } from './nix-store.ts';
 import type { NixSignatureSettings } from './store-config.ts';
 import type { AcceptsOffer } from './substitutable-closure.ts';
 
-/**
-Reads a configured secret key file, or returns `undefined` on failure.
-*/
 export type ReadKeyFile = (filePath: string) => string | undefined;
 
 /**
- * Builds the policy check applied before fetching a path from a
- * substituter: with `require-sigs` on, the path must carry at least one
- * signature from a key the consumer trusts, and a substituter configured as
- * trusted is accepted without a signature.
+ * Creates the acceptance policy for offers discovered through substituters.
+ * Disabling `require-sigs` accepts every offer. Otherwise, an offer must come
+ * from a trusted substituter or have a valid signature from a configured
+ * public key or the public half of a readable secret key. An unreadable or
+ * malformed secret key file contributes no key.
  *
- * The keys are the `trusted-public-keys` list plus the published half of every
- * `secret-key-files` entry, since a store trusts what it signs itself. A file
- * this process cannot read contributes no key, which is ordinary on a machine
- * where the keys belong to another user.
- *
- * A content-addressed path is accepted by Nix without a signature, because the
- * path name commits to the contents. This implementation still requires a
- * signature. Applying the exemption would mean reconstructing the store path
- * from the content address, and a mistake there would drop the signature
- * requirement for a path that does not qualify. The cost of refusing an offer
- * here is only that Nix builds the path instead of fetching it.
+ * Nix exempts content-addressed paths from the signature requirement. This
+ * policy does not, because applying that exemption safely would require
+ * reconstructing and validating the store path from the content address. A
+ * false rejection makes Nix build the path; a false exemption could fetch
+ * unverified contents.
  */
 export function offerAcceptance(
 	settings: NixSignatureSettings,
@@ -68,8 +60,8 @@ function publishedHalves(
 	});
 }
 
-// The fingerprint a signature is made over, which commits to the uncompressed
-// NAR and the references.
+// Nix signatures cover the store path, uncompressed NAR hash and size, and
+// reference basenames.
 function offerFingerprint(offer: NixSubstituterOffer): NixFingerprint {
 	return narFingerprint(
 		new StorePath(offer.storePath),

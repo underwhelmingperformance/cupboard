@@ -36,18 +36,16 @@ export interface AttestationPolicyOptions extends IdentityPolicyOptions {
 	readonly timestampThreshold?: number;
 }
 
-/**
-A Rekor transparency-log entry a verified bundle was recorded in.
-*/
 export interface VerifyTlogEntry {
 	readonly logIndex: string;
 	readonly integratedTime?: string;
 }
 
 /**
- * The trust evidence that Sigstore used to verify a bundle. This records the
- * signing time, matching transparency-log entries, and the number of verified
- * signed timestamps. The verifier enforces the configured thresholds.
+ * Evidence extracted from the bundle after Sigstore verifies it. `signedAt` is
+ * the earliest Rekor integration time, not the time when the signature was
+ * created. `timestampCount` is the number of signed timestamp records in the
+ * bundle.
  */
 export interface VerifyTrust {
 	readonly signedAt?: string;
@@ -250,8 +248,8 @@ export async function verifyBundle(
 }
 
 /**
- * Check a verified bundle against an expected subject digest and predicate
- * type, returning a flattened result.
+ * Requires the expected subject digest and predicate type, then returns the
+ * verified identity, predicate, provenance summary, and trust evidence.
  */
 export function resultFor(
 	bundle: string,
@@ -309,11 +307,6 @@ function trustFor(verified: VerifiedBundle): VerifyTrust {
 	};
 }
 
-/**
- * A Rekor integrated time, a UNIX-seconds string, as an ISO 8601 instant.
- * Returns undefined when the value is not a positive finite number, so an
- * absent or malformed time is simply not shown.
- */
 function isoFromUnixSeconds(seconds: string): string | undefined {
 	const value = Number(seconds);
 

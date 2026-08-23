@@ -66,9 +66,9 @@ export class TokenExchangeService {
 			throw new SubjectTokenRequiredError();
 		}
 
-		// Attenuation is detected by signature, not the declared token type: a
-		// subject token this tenant itself issued is narrowed to a requested subset
-		// of its own grants.
+		// Verification with this tenant's keys selects attenuation. The declared
+		// token type cannot force a self-issued token through external trust matching
+		// or make an external token eligible for attenuation.
 		const presented = await this.verifySelfIssued(body.subject_token);
 
 		if (presented !== undefined) {
@@ -87,9 +87,9 @@ export class TokenExchangeService {
 			);
 		}
 
-		// Matching routes the token to a rule on its unverified claims; the
-		// signature is then checked against that rule's issuer JWKS before any
-		// cupboard token is issued, so a forged claim cannot earn a scope.
+		// Decode the claims only to select a trust rule. Verify the token against that
+		// rule's issuer, audience, and JWKS before resolving grants. Unverified claims
+		// cannot authorise the exchange.
 		const claims = this.oidcTrust.decodeInbound(body.subject_token);
 		const rule = matchOidcTrust(this.oidcTrust.enabledOidcTrustRules(), claims);
 
@@ -107,8 +107,6 @@ export class TokenExchangeService {
 				: rule.id
 		);
 
-		// Bindings are evaluated against the verified payload, never the unverified
-		// claims used only to route the token to a rule.
 		return this.issuedResponse(
 			rule,
 			subject,
@@ -118,12 +116,12 @@ export class TokenExchangeService {
 		);
 	}
 
-	// The refusal for a token no rule matched. When a rule pins both GitHub
-	// repository ids to the token's claimed values, the refusal names that
-	// rule's first failing claim; anything else stays flat. The routing claims
-	// are unverified, so nothing is disclosed until the token's signature
-	// verifies against the candidate rule's issuer: only a genuine token from
-	// the pinned repository learns the rule's shape.
+	// Return a generic refusal unless both claimed repository IDs exactly match an
+	// enabled rule and the token passes signature, issuer, and audience verification
+	// for that rule. The caller then receives the first binding mismatch. This
+	// allows a caller from that repository to diagnose stale branch or workflow
+	// claims. Forged tokens and tokens from other repositories receive no details
+	// about the rule.
 	private async untrustedRefusal(
 		claims: OidcClaims,
 		subjectToken: string
@@ -138,12 +136,10 @@ export class TokenExchangeService {
 		try {
 			verified = await this.oidcTrust.verifyInbound(candidate, subjectToken);
 		} catch {
-			// Verification failures and issuer trouble alike stay flat: the
-			// exchange is refused either way, and no claim value reaches an
-			// unverified caller. Reaching this verification at all is slower
-			// than the no-candidate refusal, so rule existence for a claimed
-			// repository id leaks through latency; PLAN.md's diagnostic-refusal
-			// risk bullet records that as accepted.
+			// Collapse signature failures and issuer outages to the same generic
+			// refusal. Neither failure can expose a claim value. Candidate verification
+			// adds latency, so callers can infer whether the claimed repository IDs
+			// selected a rule. PLAN.md records this diagnostic timing leak as accepted.
 			return new TenantSubjectTokenUntrustedError();
 		}
 
@@ -156,8 +152,8 @@ export class TokenExchangeService {
 		return new TenantSubjectTokenClaimMismatchError(candidate.id, mismatch);
 	}
 
-	// The most specific enabled rule whose configured `repository_id` and
-	// `repository_owner_id` both exactly equal the token's claimed values.
+	// Prefer the rule with more claim bindings so a broad repository rule cannot
+	// hide a narrower branch or workflow mismatch. Rule IDs make ties deterministic.
 	private repositoryPinnedCandidate(
 		claims: OidcClaims
 	): OidcTrustRule | undefined {
@@ -180,10 +176,6 @@ export class TokenExchangeService {
 			.at(0);
 	}
 
-	// Verifies a subject token against this tenant's own auth keys. A token that
-	// verifies is one cupboard issued; anything else (an external OIDC token, a
-	// forgery) returns undefined and falls through to the trust-rule path, so the
-	// branch cannot be chosen by a client-declared type.
 	private async verifySelfIssued(
 		token: string
 	): Promise<AccessClaims | undefined> {
@@ -204,9 +196,8 @@ export class TokenExchangeService {
 		}
 	}
 
-	// Reissues a presented self-token narrowed to a requested subset of its
-	// grants, with no refresh token: attenuation is storage-free and the
-	// presenter already holds a session.
+	// Attenuation creates no refresh token because the presented token already
+	// authenticates an existing session.
 	private async attenuatedResponse(
 		presented: AccessClaims,
 		requested: AuthorizationDetails | undefined
@@ -249,12 +240,10 @@ export class TokenExchangeService {
 			throw new StaleRefreshTokenError();
 		}
 
-		// Hash the presented secret before touching the row. The hash is the only
-		// await in the verify-and-consume path; doing it first leaves the lookup and
-		// the compare-and-delete with no await between them, so a second presentation
-		// of the same token cannot interleave the input gate and issue a second
-		// session. The durable-SQLite reads and writes are synchronous, so the block
-		// below runs to completion before any concurrent request resumes.
+		// Compute the hash before reading the row. This is the only await in the
+		// consume path. The synchronous lookup and conditional delete then run without
+		// yielding the Durable Object's input gate, so concurrent presentations cannot
+		// both consume the same refresh token.
 		const presentedHash = await sha256Hex(presented.secret);
 
 		const row = this.context.db
@@ -270,10 +259,6 @@ export class TokenExchangeService {
 			throw new StaleRefreshTokenError();
 		}
 
-		// Compare-and-delete: consume the row only while it still carries the
-		// presented secret, returning what was removed. Of two concurrent
-		// presentations only the one that removes the row proceeds; the loser removes
-		// nothing and is refused.
 		const consumed = this.context.db
 			.delete(schema.refreshTokens)
 			.where(
@@ -286,7 +271,6 @@ export class TokenExchangeService {
 			.all();
 		const claimed = consumed.at(0);
 
-		// Lost the consume race, or the row was expired (reclaimed on touch): refused.
 		const nowIso = isoTimestamp(new Date());
 
 		if (claimed === undefined || claimed.expiresAt <= nowIso) {
@@ -297,15 +281,14 @@ export class TokenExchangeService {
 			.enabledOidcTrustRules()
 			.find((candidate) => candidate.id === claimed.ruleId);
 
-		// The row is already consumed, so a retired rule simply refuses the grant.
+		// The refresh token has already been consumed. If its rule is now absent or
+		// disabled, end the session without issuing a successor.
 		if (rule === undefined) {
 			throw new StaleRefreshTokenError();
 		}
 
-		// A refresh only happens for an interactive session, so the rule still
-		// permits a wildcard and the claims it would bind against go unused. A
-		// refreshed session may narrow itself by naming `authorization_details`,
-		// verified against the rule the same way an exchange is.
+		// Refresh tokens originate only from interactive rules. Resolve any requested
+		// narrowing against the rule again before issuing the next session.
 		return this.issuedResponse(
 			rule,
 			claimed.subject,
@@ -315,9 +298,6 @@ export class TokenExchangeService {
 		);
 	}
 
-	// Issues the access token (and, for an interactive session, a successor
-	// refresh token) for a rule, reading the rule's current grants so a refreshed
-	// session never outlives an edit to its rule.
 	private async issuedResponse(
 		rule: OidcTrustRule,
 		subject: OidcSubject,
@@ -335,9 +315,9 @@ export class TokenExchangeService {
 			ttlSeconds
 		);
 
-		// Only an interactive session gets a refresh token: a CI exchange
-		// federates a fresh subject token per run, so a stored grant would only
-		// accumulate rows.
+		// Issue refresh tokens only for interactive rules. CI exchanges authenticate
+		// each run with a fresh external subject token. A refresh token would turn one
+		// federated CI exchange into a persistent session.
 		const refreshToken = isInteractive
 			? await this.issueRefreshToken(rule.id, subject)
 			: undefined;
@@ -417,8 +397,6 @@ export class TokenExchangeService {
 	}
 }
 
-// The wire form is `<id>.<secret>`: the id addresses the row, the secret
-// proves possession against the stored hash.
 function parseRefreshToken(
 	token: string
 ): undefined | { id: string; secret: string } {

@@ -13,7 +13,7 @@ import {
 } from './rule-builder.ts';
 
 describe('jobWorkflowReferenceClaim', () => {
-	it('matches the workflow file at any ref when the value carries no @ref', () => {
+	it('matches the workflow file at any ref when the value omits @ref', () => {
 		expect(
 			jobWorkflowReferenceClaim('acme/infra/.github/workflows/publish.yml')
 		).toStrictEqual({
@@ -21,7 +21,7 @@ describe('jobWorkflowReferenceClaim', () => {
 		});
 	});
 
-	it('matches exactly when the value carries an @ref', () => {
+	it('matches exactly when the value includes @ref', () => {
 		const value = 'acme/infra/.github/workflows/publish.yml@refs/heads/main';
 
 		expect(jobWorkflowReferenceClaim(value)).toBe(value);
@@ -171,7 +171,7 @@ describe('buildCacheGrant', () => {
 		});
 	});
 
-	it('an attach allowance binds the named root like a root allowance does', () => {
+	it('binds the named root for an attach allowance', () => {
 		expect(
 			buildCacheGrant({ allow: ['push', 'attach'], root: 'github:acme/ci/' })
 		).toStrictEqual({
@@ -190,7 +190,7 @@ describe('buildCacheGrant', () => {
 		});
 	});
 
-	it('an attach allowance alone binds the root to the cache itself', () => {
+	it('uses the cache binding as the root for an attach-only allowance', () => {
 		expect(buildCacheGrant({ allow: ['attach'] })).toStrictEqual({
 			type: 'cupboard_cache',
 			actions: ['root:attach'],
@@ -216,7 +216,7 @@ describe('buildCacheGrant', () => {
 		});
 	});
 
-	it('drops a template variable the cache does not reference', () => {
+	it('omits unused template substitutions from an exact cache binding', () => {
 		const substitutions = collectSubstitutions({
 			templateSource: 'github-pr',
 			captures: []

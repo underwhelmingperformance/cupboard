@@ -7,44 +7,26 @@ import process from 'node:process';
 import type { ChildEnvironment } from './nix-config.ts';
 import { removeInvocationRuntimeDirectory } from './runtime-directory.ts';
 
-/**
-An argv array with the executable first.
-*/
 export type ChildCommand = readonly [string, ...string[]];
 
-/**
-How the child ended: an exit status, or the signal that killed it.
-*/
 export interface ChildExit {
 	readonly status: number | undefined;
 	readonly signal: NodeJS.Signals | undefined;
 }
 
-/**
-Where the forwarded signals arrive; `process` in production.
-*/
 export interface SignalSource {
 	on(signal: 'SIGINT' | 'SIGTERM', listener: () => void): unknown;
 	off(signal: 'SIGINT' | 'SIGTERM', listener: () => void): unknown;
 }
 
-/**
-A pending forced child termination that can be cancelled after child exit.
-*/
 export interface ScheduledChildTermination {
 	cancel(): void;
 }
 
-/**
-Schedules forced child termination after the graceful shutdown window.
-*/
 export interface ChildTerminationScheduler {
 	schedule(run: () => void, delayMs: number): ScheduledChildTermination;
 }
 
-/**
-Time allowed for an interrupted child to exit before SIGKILL.
-*/
 export const childTerminationGracePeriodMs = 10_000;
 
 const defaultChildTerminationScheduler: ChildTerminationScheduler = {
@@ -71,9 +53,6 @@ export interface RunChildOptions {
 export interface SuperviseOptions {
 	readonly command: ChildCommand;
 	readonly environment: ChildEnvironment;
-	/**
-	The invocation runtime directory, removed once the run is over.
-	*/
 	readonly runtimeDirectory: string;
 	/**
 	 * Runs after the child exits and before the runtime directory is removed:
@@ -197,11 +176,6 @@ export async function superviseBuild(
 	}
 }
 
-/**
- * One constructed build attempt: its ordinal within the run, the identifier
- * the receipt names it by, the JSON activity log it left, and how its child
- * ended.
- */
 export interface SupervisedAttempt {
 	readonly attempt: number;
 	readonly attemptId: string;
@@ -210,46 +184,26 @@ export interface SupervisedAttempt {
 }
 
 export interface AttemptedBuildOptions {
-	/**
-	Composes one attempt's argv around its JSON activity log file.
-	*/
 	readonly command: (logFile: string) => ChildCommand;
 	/**
 	Maximum attempts; the loop stops at the first success.
 	*/
 	readonly attempts: number;
 	readonly environment: ChildEnvironment;
-	/**
-	The invocation runtime directory, removed once the run is over.
-	*/
 	readonly runtimeDirectory: string;
 	readonly signalSource?: SignalSource;
 	readonly terminationScheduler?: ChildTerminationScheduler;
-	/**
-	Names each attempt; injectable for tests.
-	*/
 	readonly nextAttemptId?: () => string;
-	/**
-	Starts the cancellable wait between attempts; injectable for tests.
-	*/
 	readonly startDelay?: StartDelay;
 }
 
 export interface AttemptedBuildResult {
-	/**
-	The last attempt's ending, which is the run's build verdict.
-	*/
 	readonly exit: ChildExit;
 	readonly attempts: readonly SupervisedAttempt[];
 }
 
-// A failed attempt often failed on a transient (a flaky fetch, a lost remote
-// builder), so the next one waits a little longer than the one before.
 const attemptDelayMs = 15_000;
 
-/**
-A retry wait whose event-loop resource can be released immediately.
-*/
 export interface CancellableDelay {
 	readonly completed: Promise<void>;
 	cancel(): void;

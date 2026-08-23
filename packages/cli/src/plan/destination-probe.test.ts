@@ -69,8 +69,8 @@ function recordingFetcher(
 }
 
 describe('attestedServedPaths', () => {
-	// A build-origin statement covers every path its run published, so a path
-	// that carries one and no build provenance is not attested as built.
+	// A build-origin statement covers each accepted receipt subject. Without a
+	// build-provenance statement, the path is not attested as built.
 	it('passes over a path whose only attestation is not build provenance', async () => {
 		const attested = await attestedServedPaths({
 			baseUrl,
@@ -110,7 +110,7 @@ describe('attestedServedPaths', () => {
 		});
 	});
 
-	it('asks a named cache once for paths that share a hash part, and reports both as attested', async () => {
+	it('requests a shared hash once from a named cache and reports both paths as attested', async () => {
 		const requests: ProbeRequest[] = [];
 
 		const attested = await attestedServedPaths({

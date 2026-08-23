@@ -10,7 +10,6 @@ import {
 	SigningKeyRotationInProgressError
 } from '../errors.ts';
 
-// The oRPC error codes for the statuses our ServerHttpError hierarchy uses.
 const codeByStatus: Record<number, string> = {
 	[StatusCodes.BAD_REQUEST]: 'BAD_REQUEST',
 	[StatusCodes.UNAUTHORIZED]: 'UNAUTHORIZED',
@@ -25,15 +24,14 @@ const codeByStatus: Record<number, string> = {
 };
 
 /**
- * Maps a thrown ServerHttpError to the ORPCError the contract speaks.
- * Classes the CLI acts on become defined contract errors carrying data (the
- * server re-validates them against the procedure's error map, so they arrive
- * typed); any other ServerHttpError keeps its status and message under the
- * matching generic code. An ORPCError (a defined contract error or an auth
- * rejection) passes through untouched. Anything else is an unexpected fault
- * oRPC will mask as a context-free 500, so it is logged (through the request
- * logger, which already carries the ray) the way the wire routes' unmapped-error
- * handler does, before being returned unchanged for the handler's own 500 path.
+ * Converts `CacheNotEmptyError` to the contract's `CACHE_NOT_EMPTY` error.
+ * Other `ServerHttpError` statuses in `codeByStatus` use the corresponding
+ * generic oRPC code. An unlisted status uses `INTERNAL_SERVER_ERROR`, while the
+ * original HTTP status and message remain unchanged.
+ *
+ * Existing `ORPCError` values pass through. Unexpected errors are logged with
+ * the request logger and returned unchanged so oRPC can mask them with its own
+ * 500 response.
  */
 export function bridgedError(logger: Logger, error: unknown): unknown {
 	if (error instanceof CacheNotEmptyError) {

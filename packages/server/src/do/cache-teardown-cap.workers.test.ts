@@ -98,8 +98,6 @@ describe('cache teardown', () => {
 		});
 		const removed = cacheRemoveResponseSchema.parse(await response.json());
 
-		// Within the cap, the rows and their objects go in the one synchronous pass,
-		// nothing is left queued, and the reported count is the full committed total.
 		expect({
 			status: response.status,
 			removed,
@@ -124,18 +122,10 @@ describe('cache teardown', () => {
 			await pushPath(token, metadata, 'builds');
 		}
 
-		// A cap of one path takes the over-cap branch with only three pushed: the
-		// transaction removes every row at once, the first chunk retires a single
-		// object, and the remainder is left queued behind the marker. The rows are
-		// gone synchronously; the marker and the queued objects drain on the resume,
-		// whose delivery the pool races, so only the converged state is asserted.
 		await currentServer().runCacheTeardown(buildsCache, origin, 1);
 
 		expect(await rowsRemaining(paths)).toBe(0);
 
-		// Each capped resume retires one queued object, and the resume that
-		// empties the queue clears the marker in the same pass, so the drain
-		// needs at most one resume per queued path.
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(1),
 			async () => (await teardownPending('builds')) === undefined,
@@ -152,11 +142,6 @@ describe('cache teardown', () => {
 		}).toStrictEqual({ objectsLeft: 0, pending: undefined });
 	});
 
-	// Seeding the paths costs far more than the teardown this asserts on, and it
-	// is the part that stretches under load: the body settles in a couple of
-	// seconds on an idle machine and in about nine when the whole workspace runs
-	// in parallel around it. The budget below leaves room for a runner slower
-	// again than that.
 	it('retires a chunk-spanning teardown with correct accounting', async () => {
 		await useTestServer('teardown-batch');
 		const { token } = await bootstrap();
@@ -185,11 +170,6 @@ describe('cache teardown', () => {
 
 		const pathsWithNars = paths.map((p, index) => [p, nars[index]] as const);
 
-		// The paths are independent, so seed them with bounded concurrency: the
-		// sequential negotiate/upload/commit round-trips, not the teardown under
-		// test, dominate the wall-clock. The bound keeps the commit fan-in well
-		// short of a D1 overload of its own and below the commit sockets one
-		// tenant may hold at once, so no seeding push is turned away.
 		const pushConcurrency = 8;
 		for (
 			let start = 0;
@@ -251,8 +231,6 @@ describe('cache teardown', () => {
 
 		await currentServer().runCacheTeardown(buildsCache, origin, 1);
 
-		// The queue holds the path's two generations and each capped resume
-		// retires one, so the drain needs at most two resumes.
 		await driveToCompletion(
 			() => currentServer().resumeCacheTeardown(1),
 			async () => (await teardownPending('builds')) === undefined,
@@ -288,8 +266,6 @@ describe('cache teardown', () => {
 		const torn = buildMetadata('a');
 		const kept = buildMetadata('b');
 
-		// Two caches share the blob. Tearing one down retires its edge, but the
-		// sibling's edge must keep the presence row and its byte charge.
 		await pushPath(token, torn, 'builds');
 		await pushPath(token, kept, 'other');
 
@@ -370,8 +346,6 @@ describe('cache teardown', () => {
 
 		const recommittedGeneration = await narInfoGeneration(path.storePathHash);
 
-		// Flushing the queue drains the stale retirement. The generation fence must
-		// leave the recommit's row and object, retiring only the superseded edge.
 		const response = await authorisedFetch('/gc', token, { method: 'POST' });
 
 		expect({

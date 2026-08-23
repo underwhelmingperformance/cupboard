@@ -31,7 +31,7 @@ interface ActionSignalSource {
 }
 
 /**
-A runner signal whose conventional shell exit status the action preserves.
+Maps runner cancellation signals to their conventional shell exit statuses.
 */
 export class ActionSignalError extends CodedError {
 	constructor(public readonly signal: 'SIGINT' | 'SIGTERM') {
@@ -45,10 +45,9 @@ export class ActionSignalError extends CodedError {
 }
 
 /**
- * The `cupboard-action` command: the composite GitHub Action's `setup`, `push`,
- * `attest` and `plan` steps run through it, with the runner-contract
- * environment threaded to each subcommand so its handler can resolve
- * runner-derived defaults.
+ * Creates the command tree for the composite GitHub Action. The supplied
+ * environment is passed to each subcommand so it can resolve runner-derived
+ * defaults.
  */
 export function buildProgram(
 	environment: Environment = env,
@@ -82,9 +81,8 @@ export function buildProgram(
 }
 
 /**
- * Parse `argument` and run the matching subcommand, returning the process exit
- * code. The action runs under Node on a CI runner, so logging auto-configures
- * to GitHub Actions workflow commands.
+ * Parses the arguments, runs the matching subcommand, and returns its process
+ * exit code. Logging uses GitHub Actions workflow commands.
  */
 export async function runAction(
 	argument: readonly string[],
@@ -163,7 +161,6 @@ export function reportActionFailure(
 	if (!wasErrorReported(error)) {
 		githubActions.error(formatErrorWithCauses(error));
 	}
-	// The full error, with its stack, goes to the Actions debug log.
 	rootLogger().debug('action failed', { error });
 
 	return genericExitCode;

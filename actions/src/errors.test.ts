@@ -304,7 +304,7 @@ describe('action errors', () => {
 });
 
 describe('CupboardReportedError', () => {
-	it('carries the status and recorded results', () => {
+	it('records the status and result events', () => {
 		const results = [{ kind: 'push-summary', data: { uploadedPaths: 0 } }];
 		const error = new CupboardReportedError(2, results);
 
@@ -334,7 +334,7 @@ describe('GithubApiError', () => {
 		});
 	});
 
-	it('carries the status and cause the caller supplies', () => {
+	it('records the supplied status and cause', () => {
 		const cause = new Error('root cause');
 		const error = new GithubApiError('failed to fetch attestations', {
 			status: 404,
@@ -347,13 +347,13 @@ describe('GithubApiError', () => {
 });
 
 describe('InvalidChecksumLineError', () => {
-	it('carries the offending line', () => {
+	it('records the offending line', () => {
 		expect(new InvalidChecksumLineError('garbage').line).toBe('garbage');
 	});
 });
 
 describe('MissingChecksumError', () => {
-	it('carries the asset name', () => {
+	it('records the asset name', () => {
 		expect(new MissingChecksumError('cupboard.tar.gz').assetName).toBe(
 			'cupboard.tar.gz'
 		);
@@ -361,7 +361,7 @@ describe('MissingChecksumError', () => {
 });
 
 describe('ChecksumMismatchError', () => {
-	it('carries the asset name and both digests', () => {
+	it('records the asset name and both digests', () => {
 		const error = new ChecksumMismatchError('cupboard.tar.gz', 'aa', 'bb');
 
 		expect({
@@ -377,7 +377,7 @@ describe('ChecksumMismatchError', () => {
 });
 
 describe('AttestationNotFoundError', () => {
-	it('carries the archive name', () => {
+	it('records the archive name', () => {
 		expect(new AttestationNotFoundError('cupboard.tar.gz').archiveName).toBe(
 			'cupboard.tar.gz'
 		);
@@ -385,7 +385,7 @@ describe('AttestationNotFoundError', () => {
 });
 
 describe('InvalidReleaseAssetUrlError', () => {
-	it('carries the asset and expected API origin without echoing the unsafe URL', () => {
+	it('records the asset and API origin without echoing the unsafe URL', () => {
 		const error = new InvalidReleaseAssetUrlError(
 			'cupboard.tar.gz',
 			'https://api.github.com'
@@ -405,7 +405,7 @@ describe('InvalidReleaseAssetUrlError', () => {
 });
 
 describe('ReleaseAttestationSearchTooLargeError', () => {
-	it('carries both policy limits and observed totals', () => {
+	it('records both policy limits and observed totals', () => {
 		const error = new ReleaseAttestationSearchTooLargeError(100, 10, 101, 1);
 
 		expect({
@@ -423,7 +423,7 @@ describe('ReleaseAttestationSearchTooLargeError', () => {
 });
 
 describe('ReleaseDiscoverySearchTooLargeError', () => {
-	it('carries every release discovery policy limit and observed total', () => {
+	it('records every discovery limit and observed total', () => {
 		const error = new ReleaseDiscoverySearchTooLargeError(
 			100,
 			1000,
@@ -461,7 +461,7 @@ describe('AttestationVerificationFailedError', () => {
 		});
 	});
 
-	it('carries the last bundle failure as its cause', () => {
+	it('uses the last bundle failure as its cause', () => {
 		const cause = new Error('untrusted signer');
 		const error = new AttestationVerificationFailedError('cupboard.tar.gz', 2, {
 			cause
@@ -472,7 +472,7 @@ describe('AttestationVerificationFailedError', () => {
 });
 
 describe('AttestationSourceMismatchError', () => {
-	it('carries the tag, tag commit and resolved source commit', () => {
+	it('records the tag, tag commit, and resolved source commit', () => {
 		const error = new AttestationSourceMismatchError(
 			'v1.0.0',
 			'a'.repeat(40),
@@ -502,7 +502,7 @@ describe('AttestationSourceMismatchError', () => {
 });
 
 describe('CachePublicKeyRequestFailedError', () => {
-	it('carries the url and status', () => {
+	it('records the URL and status', () => {
 		const error = new CachePublicKeyRequestFailedError(
 			'https://cache.example.test/pubkey',
 			500
@@ -516,7 +516,7 @@ describe('CachePublicKeyRequestFailedError', () => {
 });
 
 describe('CachePublicKeyEmptyResponseError', () => {
-	it('carries the url', () => {
+	it('records the URL', () => {
 		expect(
 			new CachePublicKeyEmptyResponseError('https://cache.example.test/pubkey')
 				.url
@@ -529,7 +529,7 @@ describe('MalformedReleaseResponseError', () => {
 		expect(new MalformedReleaseResponseError().cause).toBeUndefined();
 	});
 
-	it('carries the cause a failed schema parse supplies', () => {
+	it('uses the schema parse failure as its cause', () => {
 		const cause = new Error('invalid shape');
 		const error = new MalformedReleaseResponseError({ cause });
 
@@ -542,7 +542,7 @@ describe('CommandFailedError', () => {
 		expect(new CommandFailedError('cupboard', 1).cause).toBeUndefined();
 	});
 
-	it('carries the cause a spawn failure supplies', () => {
+	it('uses the spawn failure as its cause', () => {
 		const cause = new Error('spawn cupboard ENOENT');
 		const error = new CommandFailedError('cupboard', 1, cause.message, {
 			cause
@@ -553,7 +553,7 @@ describe('CommandFailedError', () => {
 });
 
 describe('TargetEvaluationError', () => {
-	it('carries the attribute and the evaluator failure as its cause', () => {
+	it('records the attribute and uses the evaluator failure as its cause', () => {
 		const cause = new Error('cannot fetch the private input');
 		const error = new TargetEvaluationError('.#app', { cause });
 
@@ -565,13 +565,13 @@ describe('TargetEvaluationError', () => {
 });
 
 describe('TargetRootUnresolvedError', () => {
-	it('carries the target attribute', () => {
+	it('records the target attribute', () => {
 		expect(new TargetRootUnresolvedError('.#app').attribute).toBe('.#app');
 	});
 });
 
 describe('DerivationGraphShapeError', () => {
-	it('carries the attribute and the parse failure as its cause', () => {
+	it('records the attribute and uses the parse failure as its cause', () => {
 		const cause = new z.ZodError([]);
 		const error = new DerivationGraphShapeError('.#app', { cause });
 
@@ -583,7 +583,7 @@ describe('DerivationGraphShapeError', () => {
 });
 
 describe('DerivationRootCountError', () => {
-	it('carries the attribute and the root count', () => {
+	it('records the attribute and root count', () => {
 		const error = new DerivationRootCountError('.#app', 2);
 
 		expect({ attribute: error.attribute, count: error.count }).toStrictEqual({
@@ -594,7 +594,7 @@ describe('DerivationRootCountError', () => {
 });
 
 describe('DerivationNodeMissingError', () => {
-	it('carries the attribute and the missing derivation path', () => {
+	it('records the attribute and missing derivation path', () => {
 		const error = new DerivationNodeMissingError('.#app', '/nix/store/app.drv');
 
 		expect({
@@ -605,19 +605,19 @@ describe('DerivationNodeMissingError', () => {
 });
 
 describe('DuplicateGroupKeyError', () => {
-	it('carries the colliding key', () => {
+	it('records the colliding key', () => {
 		expect(new DuplicateGroupKeyError('seed-a').key).toBe('seed-a');
 	});
 });
 
 describe('PublishPlanInvariantError', () => {
-	it('carries the missing subject', () => {
+	it('records the missing subject', () => {
 		expect(new PublishPlanInvariantError('index 0').subject).toBe('index 0');
 	});
 });
 
 describe('CacheInfoInvalidError', () => {
-	it('carries the causal error by reference', () => {
+	it('uses the parse failure as its cause', () => {
 		const cause = new Error('root cause');
 
 		expect(
@@ -628,7 +628,7 @@ describe('CacheInfoInvalidError', () => {
 });
 
 describe('RootEnsureCommandError', () => {
-	it('carries the root and the runner failure as its cause', () => {
+	it('records the root and uses the runner failure as its cause', () => {
 		const cause = new Error('spawn cupboard ENOENT');
 		const error = new RootEnsureCommandError('main', { cause });
 
@@ -640,13 +640,13 @@ describe('RootEnsureCommandError', () => {
 });
 
 describe('RootEnsureResultMissingError', () => {
-	it('carries the root', () => {
+	it('records the root', () => {
 		expect(new RootEnsureResultMissingError('main').root).toBe('main');
 	});
 });
 
 describe('RootEnsureResultInvalidError', () => {
-	it('carries the root and the parse failure as its cause', () => {
+	it('records the root and uses the parse failure as its cause', () => {
 		const cause = new Error('malformed result line');
 		const error = new RootEnsureResultInvalidError('main', { cause });
 

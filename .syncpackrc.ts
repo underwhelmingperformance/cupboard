@@ -3,8 +3,8 @@ import type { RcFile } from 'syncpack';
 export default {
 	indent: '\t',
 	semverGroups: [
-		// Linters and formatters are pinned to exact versions so a patch bump
-		// cannot silently change lint or format results; Renovate pins them too.
+		// Pin linters and formatters exactly so dependency resolution cannot change
+		// lint or formatting results without an explicit update.
 		{
 			range: '',
 			dependencyTypes: ['dev', 'prod'],

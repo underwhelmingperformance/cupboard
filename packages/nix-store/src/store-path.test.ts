@@ -17,9 +17,8 @@ const app = storePathSchema.parse(
 const library = storePathSchema.parse(
 	'/nix/store/1123456789abcdfghijklmnpqrsvwxyz-lib'
 );
-// A path whose store directory is not the default. Its basename is a suffix of
-// a different length, so anything reading the hash at a fixed offset reads the
-// wrong slice.
+// Use a non-default store directory with a different-length suffix so a fixed
+// hash offset would select the wrong characters.
 const homeStoreApp = storePathSchema.parse(
 	'/home/laney/nixstore/2123456789abcdfghijklmnpqrsvwxyz-app'
 );
@@ -56,7 +55,7 @@ describe('StorePath', () => {
 				hash: '3123456789abcdfghijklmnpqrsvwxyz'
 			}
 		}
-	])('carries the store, basename and hash of $name', ({ value, expected }) => {
+	])('returns the store, basename and hash of $name', ({ value, expected }) => {
 		const storePath = new StorePath(value);
 
 		expect({

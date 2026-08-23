@@ -9,9 +9,8 @@ interface ColdPathEnv {
 }
 
 /**
- * The configured cold-path TTL in seconds, or `undefined` when implicit pins
- * are permanent. An empty (or absent) variable means permanent; any other value
- * must be a valid TTL, otherwise the deployment is misconfigured.
+ * Parses `CUPBOARD_COLD_PATH_TTL_SECONDS`. An empty setting keeps implicit pins
+ * permanently; a non-empty setting must be a valid TTL.
  */
 export function coldPathTtlSeconds(env: ColdPathEnv): number | undefined {
 	const raw = env.CUPBOARD_COLD_PATH_TTL_SECONDS;
@@ -38,9 +37,9 @@ interface RootExpiryInput {
 }
 
 /**
- * The expiry a root takes, as an ISO timestamp, or `undefined` for permanent.
- * Precedence: an explicit TTL wins, then a matching retention policy, then the
- * cold-path default for an implicit pin, and otherwise the root is permanent.
+ * Uses the first available TTL from the explicit request, a matching retention
+ * policy, or the cold-path default for an implicit pin. Returns `undefined`
+ * when the root is permanent.
  */
 export function resolveRootExpiry(
 	input: RootExpiryInput

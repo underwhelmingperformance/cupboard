@@ -50,10 +50,6 @@ interface RecordedPlan {
 	readonly installables: readonly NixDerivedPathString[];
 }
 
-/**
- * A planner that answers from a script keyed by the installables it is asked
- * about, so a whole report is produced with no Nix, no store and no network.
- */
 class ScriptedPlanner implements RealisationPlanner {
 	readonly plans: RecordedPlan[] = [];
 
@@ -118,8 +114,6 @@ function partition(options: {
 	};
 }
 
-// A clock that advances one millisecond per reading, so every timing in the
-// report is a fixed number and the whole report can be asserted at once.
 function steppingClock(): Clock {
 	let reading = 0;
 
@@ -309,7 +303,7 @@ describe('measureRealisation', () => {
 		});
 	});
 
-	it('measures nothing as a group when the manifest holds one target', async () => {
+	it('omits group measurements when the manifest has one target', async () => {
 		const planner = new ScriptedPlanner(
 			{ app: appDrv },
 			{

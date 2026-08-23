@@ -52,7 +52,7 @@ async function runVerify(token: string, limit?: number): Promise<VerifyReport> {
 describe('background verification', () => {
 	beforeEach(resetTestServer);
 
-	it('re-materialises a missing narinfo object', async () => {
+	it('restores a missing narinfo object', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
@@ -96,12 +96,10 @@ describe('background verification', () => {
 		await pushPath(token, sound);
 		await pushPath(token, poison);
 
-		// Corrupt the poison row's deriver with a control character it could never
-		// have been uploaded with: rendering its narinfo now throws, the residue a
-		// pre-validation upload could once have left.
+		// Upload validation rejects this control character. Writing it directly
+		// reproduces a legacy row whose narinfo cannot be rendered.
 		await corruptCommittedNarInfo(poison.storePathHash, { deriver: 'a\nb' });
 
-		// Both narinfo objects are gone, so the pass tries to restore each.
 		await env.BLOBS.delete(
 			narInfoObjectKey(fixtureTenant, sound.storePathHash)
 		);
@@ -111,8 +109,6 @@ describe('background verification', () => {
 
 		const report = await runVerify(token);
 
-		// The unrenderable row is skipped, but the pass still restores the sound
-		// row and advances its cursor to the end.
 		expect({
 			report,
 			soundRestored:
@@ -137,7 +133,7 @@ describe('background verification', () => {
 		});
 	});
 
-	it('re-materialises a missing narinfo object in a named cache', async () => {
+	it('restores a missing narinfo object in a named cache', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
@@ -164,7 +160,7 @@ describe('background verification', () => {
 		});
 	});
 
-	it('reconciles a dangling narinfo whose NAR object is gone, leaving the blob for the reaper', async () => {
+	it('removes a narinfo after its NAR disappears and leaves its blob state for the reaper', async () => {
 		await useTestServer('verify-reconcile');
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -177,8 +173,6 @@ describe('background verification', () => {
 			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
 
-		// Verify removes the dangling narinfo and retires its edge; the now-
-		// unreferenced shared fact is left for the reaper to collect, not deleted here.
 		expect({
 			report,
 			narInfoObjectGone: narInfoObject === null,
@@ -269,7 +263,7 @@ describe('background verification', () => {
 		});
 	});
 
-	it('reconciles dangling narinfos for one NAR across caches, retiring both edges', async () => {
+	it('removes dangling narinfos for one NAR across caches and retires both edges', async () => {
 		await useTestServer('verify-cross-cache');
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -301,8 +295,6 @@ describe('background verification', () => {
 				cursorCache: '',
 				wrapped: true
 			},
-			// Both narinfos are removed and their edges retired; the single shared fact
-			// is left, now unreferenced, for the reaper to collect once.
 			state: { blobs: 1, narInfos: 0 }
 		});
 	});
@@ -318,13 +310,13 @@ describe('background verification', () => {
 		expect(response.status).toBe(StatusCodes.FORBIDDEN);
 	});
 
-	it('does not falsely restore a named-cache object the cursor sorts after', async () => {
+	it('keeps a present named-cache object unchanged when its R2 key sorts before the scan cursor', async () => {
 		await useTestServer('verify-crossorder');
 		const token = await initialise();
 
-		// A default-cache hash that sorts after a named cache's name, so in R2 key
-		// order the named-cache object (`narinfo/aa/…`) sorts before the default one
-		// (`narinfo/zzz…`), the opposite of the (cache, storePathHash) scan order.
+		// R2 puts the named-cache object (`narinfo/aa/…`) before the default-cache
+		// object (`narinfo/zzz…`), while the database scan visits them in the
+		// opposite order.
 		await pushPath(
 			token,
 			uploadMetadata({
@@ -343,8 +335,8 @@ describe('background verification', () => {
 			'aa'
 		);
 
-		// One row per batch: the second batch (the named cache) resumes after the
-		// default 'z' cursor, whose key sorts after the named-cache object.
+		// One-row batches make the named-cache scan resume after the default `z`
+		// cursor, whose R2 key sorts after the named-cache object.
 		const first = await runVerify(token, 1);
 		const second = await runVerify(token, 1);
 
@@ -354,7 +346,7 @@ describe('background verification', () => {
 		}).toStrictEqual({ first: 0, second: 0 });
 	});
 
-	it('heads a divergent batch instead of rescanning the whole prefix', async () => {
+	it('avoids an R2 list when scan order and object-key order diverge', async () => {
 		await useTestServer('verify-divergent');
 		const token = await initialise();
 
@@ -376,12 +368,11 @@ describe('background verification', () => {
 			'aa'
 		);
 
-		// Advance the cursor onto the default 'z' row.
 		await runVerify(token, 1);
 
-		// The next batch is the named cache, whose object sorts before the 'z'
+		// The next batch is the named cache, whose object sorts before the `z`
 		// cursor. Resuming from the cursor would skip it and listing from the start
-		// would rescan the prefix, so the batch heads each row: it must not list.
+		// would rescan the prefix. The batch must use per-row heads instead.
 		const list = vi.spyOn(env.BLOBS, 'list');
 
 		try {
@@ -402,8 +393,6 @@ describe('background verification', () => {
 			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
 
-		// The bulk narinfo-object listing fails, so the reconcile must fall back to a
-		// per-row head and still restore the missing object, rather than aborting.
 		const list = vi
 			.spyOn(env.BLOBS, 'list')
 			.mockRejectedValue(new Error('r2 list unavailable'));
@@ -433,10 +422,9 @@ describe('background verification', () => {
 		});
 		await pushPath(token, first);
 
-		// A second path reserved at commit for the same NAR: its narinfo row exists
-		// but has no reference edge and no object yet. The verify pass, not the
-		// reconcile, owns it, so it must not be restored and served before its own
-		// bytes verify.
+		// The second path has a reserved narinfo row but no reference edge or
+		// narinfo object. Reconciliation must ignore it so the path cannot be served
+		// before its bytes are verified.
 		const second = uploadMetadata({
 			fileSize: narBytes.byteLength,
 			storePathHash: 'f'.repeat(32),

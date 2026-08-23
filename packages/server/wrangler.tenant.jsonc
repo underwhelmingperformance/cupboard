@@ -43,8 +43,8 @@
 			"migrations_dir": "drizzle-d1"
 		}
 	],
-	// A commit that stores a blob too large to verify inline asks for a prompt
-	// verification pass over this queue; the hourly cron remains the backstop.
+	// Fresh uploads are verified through this queue. The hourly cron retries work
+	// after a queue request is lost.
 	"queues": {
 		"producers": [
 			{

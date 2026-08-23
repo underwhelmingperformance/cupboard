@@ -35,12 +35,10 @@ export interface CupboardRunDependencies {
 }
 
 /**
- * Run the installed cupboard binary, letting its own output (workflow commands,
- * groups and annotations) stream straight to the runner log. A binary that
- * supports the result-file protocol records its machine-readable results under
- * `RUNNER_TEMP`; an older release is driven in JSON mode and its result events
- * are read from stderr instead. A non-zero exit throws
- * {@link CupboardReportedError}, carrying whatever results the run recorded.
+ * Run the cupboard binary and stream its output to the runner log. Current
+ * releases write machine-readable results to a file under `RUNNER_TEMP`. Older
+ * releases emit JSON events on stderr. A non-zero exit throws
+ * {@link CupboardReportedError} with any results that the process recorded.
  */
 export async function runCupboard(
 	binaryPath: string,
@@ -63,9 +61,6 @@ export async function runCupboard(
 	return run.results;
 }
 
-/**
-Run cupboard using a result protocol that the caller has already detected.
-*/
 export async function runCupboardWithProtocol(
 	binaryPath: string,
 	arguments_: readonly string[],
@@ -327,9 +322,10 @@ async function readResults(
 	return parseReporterResults(await readResultFile(resultFile, status));
 }
 
-// A failed run may exit before it opens the result file at all; treat a missing
-// file as no results in that case, so the exit status is what surfaces. On a
-// clean exit the file is expected, so a read failure propagates.
+// A failed process can exit before creating the result file. In that case,
+// ENOENT means that no results were recorded, and the exit status remains the
+// reported failure. A successful process must create the file, so read errors
+// still propagate.
 async function readResultFile(
 	resultFile: string,
 	status: number | null

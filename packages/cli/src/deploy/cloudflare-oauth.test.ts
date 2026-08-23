@@ -41,9 +41,6 @@ async function rejectedBy<T extends Error>(
 	return rejection;
 }
 
-/**
-An unsigned id_token carrying just a `sub`, as the decoder reads it.
-*/
 function idToken(subject: string): string {
 	const header = Buffer.from(JSON.stringify({ alg: 'RS256' })).toString(
 		'base64url'
@@ -60,10 +57,6 @@ interface RecordedRequest {
 	readonly form: URLSearchParams;
 }
 
-/**
- * A fetcher standing in for Cloudflare's token endpoint, answering with
- * `tokenBody`. Any other request is unexpected and fails the test.
- */
 function fakeCloudflare(options: {
 	readonly tokenBody: Record<string, unknown>;
 	readonly tokenStatus?: number;
@@ -93,9 +86,6 @@ function fakeCloudflare(options: {
 	return { fetcher, tokenRequests };
 }
 
-/**
-Follows the authorize URL like a browser that approves the login.
-*/
 function approvingBrowser(code: string): (url: string) => Promise<void> {
 	return async (url) => {
 		const authorize = new URL(url);

@@ -12,7 +12,6 @@ import {
 	FloatingOutputUnsupportedError,
 	queryMissingOver,
 	type RealisationPartitionSource,
-	RealisationWalkOverCapError,
 	UndeclaredOutputError
 } from './realisation-partition.ts';
 
@@ -32,9 +31,6 @@ const sourceReferencePath = path('k', 'source-reference');
 const unavailableSourcePath = path('l', 'unavailable-source');
 const heldSourcePath = path('m', 'held-source');
 
-/**
-A derivation naming the outputs it produces and the ones it builds from.
-*/
 function derivation(options: {
 	readonly outputs: readonly (readonly [string, StorePathString | ''])[];
 	readonly inputs?: readonly (readonly [StorePathString, readonly string[]])[];
@@ -60,18 +56,12 @@ function quoted(names: readonly string[]): string {
 	return names.map((name) => `"${name}"`).join(',');
 }
 
-/**
-The derivations a store holds, by the path each one sits at.
-*/
 function stored(
 	...entries: readonly (readonly [StorePathString, Derivation])[]
 ): ReadonlyMap<StorePathString, Derivation> {
 	return new Map(entries);
 }
 
-/**
-What the substituters offer, as a store path to the references it brings.
-*/
 function offers(
 	...entries: readonly (readonly [
 		StorePathString,
@@ -81,9 +71,6 @@ function offers(
 	return new Map(entries);
 }
 
-// One substituter's answer for a path. The client that answers this question
-// reads the path's narinfo, so an offer it reports names the NAR hash and the
-// signatures the substituter published alongside the sizes the walk counts.
 function offer(
 	storePath: StorePathString,
 	references: readonly StorePathString[],
@@ -101,13 +88,7 @@ function offer(
 }
 
 interface SourceOptions {
-	/**
-	The paths this store already holds.
-	*/
 	readonly valid?: readonly StorePathString[];
-	/**
-	The derivation at each path the store holds.
-	*/
 	readonly derivations?: ReadonlyMap<StorePathString, Derivation>;
 	readonly offered?: ReadonlyMap<StorePathString, readonly StorePathString[]>;
 	readonly substitute?: boolean;
@@ -115,9 +96,6 @@ interface SourceOptions {
 }
 
 interface RecordingSource extends RealisationPartitionSource {
-	/**
-	Each batch of paths the substituters were asked about.
-	*/
 	readonly substituterBatches: StorePathString[][];
 }
 
@@ -171,7 +149,7 @@ const nothingMissing: NixMissingPartition = {
 };
 
 describe('queryMissingOver', () => {
-	it('needs nothing for a path the store already holds', async () => {
+	it('returns an empty partition for a valid store path', async () => {
 		const held = source({ valid: [appPath] });
 
 		await expect(queryMissingOver([appPath], held)).resolves.toStrictEqual(
@@ -179,9 +157,7 @@ describe('queryMissingOver', () => {
 		);
 	});
 
-	// A substituted path arrives with its closure, so the walk follows its
-	// references and counts each of them once.
-	it('counts a substitutable path and everything it references', async () => {
+	it('adds a substitutable path and its references to the aggregate sizes', async () => {
 		const cached = source({
 			offered: offers([appPath, [libraryPath]], [libraryPath, []])
 		});
@@ -195,8 +171,6 @@ describe('queryMissingOver', () => {
 		});
 	});
 
-	// Two targets sharing a dependency pay for it once, which is what a cohort
-	// is for.
 	it('counts a path two targets share only once', async () => {
 		const cached = source({
 			offered: offers(
@@ -217,14 +191,14 @@ describe('queryMissingOver', () => {
 		});
 	});
 
-	it('reports a path nothing offers and nothing builds as unknown', async () => {
+	it('reports an unoffered opaque path as unknown', async () => {
 		await expect(queryMissingOver([appPath], source())).resolves.toStrictEqual({
 			...nothingMissing,
 			unknown: [appPath]
 		});
 	});
 
-	it('needs nothing for a derivation whose outputs the store holds', async () => {
+	it('returns an empty partition when every requested output is valid', async () => {
 		const built = source({
 			valid: [appDrv, appPath],
 			derivations: stored([appDrv, derivation({ outputs: [['out', appPath]] })])
@@ -235,7 +209,7 @@ describe('queryMissingOver', () => {
 		).resolves.toStrictEqual(nothingMissing);
 	});
 
-	it('substitutes a derivation whose outputs a substituter offers', async () => {
+	it('substitutes every requested output when the substituter offers all of them', async () => {
 		const cached = source({
 			valid: [appDrv],
 			derivations: stored([
@@ -256,9 +230,7 @@ describe('queryMissingOver', () => {
 		});
 	});
 
-	// Nix takes a derivation's outputs together: it runs once and produces all
-	// of them, so one output nobody offers means the whole derivation builds.
-	it('builds a derivation when one of its outputs is not offered', async () => {
+	it('builds the whole derivation when any requested output has no offer', async () => {
 		const built = derivation({
 			outputs: [
 				['out', appPath],
@@ -284,9 +256,7 @@ describe('queryMissingOver', () => {
 		});
 	});
 
-	// A derivation that must build needs what it builds from, so the walk
-	// carries on into its inputs.
-	it('follows a derivation it must build into its input derivations', async () => {
+	it('follows input derivations after classifying a derivation for build', async () => {
 		const built = derivation({
 			outputs: [['out', appPath]],
 			inputs: [[libraryDrv, ['out']]]
@@ -309,7 +279,7 @@ describe('queryMissingOver', () => {
 		});
 	});
 
-	it('accounts for every source needed by a derivation it must build', async () => {
+	it('follows every input source after classifying a derivation for build', async () => {
 		const built = derivation({
 			outputs: [['out', appPath]],
 			inputSources: [heldSourcePath, sourcePath, unavailableSourcePath]
@@ -334,39 +304,38 @@ describe('queryMissingOver', () => {
 		});
 	});
 
-	// A target naming an output its derivation does not produce names
-	// something that cannot be realised. Reading it as nothing to do would
-	// report a plan where every target is already available.
 	it.each([
 		{
-			name: 'an output the derivation does not declare',
+			name: 'rejects an undeclared output selection',
 			target: `${appDrv}^typo` as const,
-			expected: UndeclaredOutputError
+			expected: UndeclaredOutputError,
+			expectedMessage: `Derivation ${appDrv} does not declare an output named 'typo'`
 		},
 		{
-			// A caller that wrote the separator and stopped asked for nothing,
-			// which is a different mistake from asking for something that is not
-			// there, and reads as one.
-			name: 'no output at all',
+			name: 'rejects an empty output selection after ^',
 			target: `${appDrv}^` as const,
-			expected: EmptyOutputSelectionError
+			expected: EmptyOutputSelectionError,
+			expectedMessage: `The target '${appDrv}^' selects no outputs to realise`
 		}
-	])('refuses a target naming $name', async ({ target, expected }) => {
+	])('$name', async ({ target, expected, expectedMessage }) => {
 		const built = source({
 			valid: [appDrv],
 			derivations: stored([appDrv, derivation({ outputs: [['out', appPath]] })])
 		});
 
-		await expect(queryMissingOver([target], built)).rejects.toThrow(expected);
+		const result = queryMissingOver([target], built);
+
+		await expect(result).rejects.toBeInstanceOf(expected);
+		await expect(result).rejects.toMatchObject({ message: expectedMessage });
 	});
 
-	it('reports a derivation the store does not hold as unknown', async () => {
+	it('reports a missing derivation file as unknown', async () => {
 		await expect(
 			queryMissingOver([`${appDrv}^out`], source())
 		).resolves.toStrictEqual({ ...nothingMissing, unknown: [appDrv] });
 	});
 
-	it('takes every output of a derivation asked for with `^*`', async () => {
+	it('includes every declared output when the target uses `^*`', async () => {
 		const built = derivation({
 			outputs: [
 				['out', appPath],
@@ -390,9 +359,7 @@ describe('queryMissingOver', () => {
 		});
 	});
 
-	// A derivation naming several outputs is only asked about the ones the
-	// target wants, so an output nobody wants never enters the plan.
-	it('leaves out an output the target did not ask for', async () => {
+	it('does not query or include unselected derivation outputs', async () => {
 		const built = derivation({
 			outputs: [
 				['out', appPath],
@@ -422,34 +389,32 @@ describe('queryMissingOver', () => {
 		});
 	});
 
-	// The settings decide whether a substituter is consulted at all, and a
-	// derivation's own option decides for itself unless overruled.
 	it.each([
 		{
-			name: 'the substitute setting is off',
+			name: 'builds when substitute is false',
 			settings: { substitute: false },
 			allowSubstitutes: true,
 			isBuilt: true
 		},
 		{
-			name: 'the derivation withholds substitution',
+			name: 'builds when the derivation disables substitution',
 			settings: {},
 			allowSubstitutes: false,
 			isBuilt: true
 		},
 		{
-			name: 'always-allow-substitutes overrules the derivation',
+			name: 'substitutes when always-allow-substitutes overrides the derivation',
 			settings: { alwaysAllowSubstitutes: true },
 			allowSubstitutes: false,
 			isBuilt: false
 		},
 		{
-			name: 'nothing stands in the way',
+			name: 'substitutes when both settings and the derivation allow it',
 			settings: {},
 			allowSubstitutes: true,
 			isBuilt: false
 		}
-	])('builds when $name', async ({ settings, allowSubstitutes, isBuilt }) => {
+	])('$name', async ({ settings, allowSubstitutes, isBuilt }) => {
 		const built = derivation({
 			outputs: [['out', appPath]],
 			allowSubstitutes
@@ -476,23 +441,21 @@ describe('queryMissingOver', () => {
 		);
 	});
 
-	// A floating output's path follows from what its build produces, so there
-	// is nothing to check validity or a substituter for.
-	it('refuses a derivation with a floating output', async () => {
+	it('rejects a target whose selected output is floating', async () => {
 		const floating = source({
 			valid: [appDrv],
 			derivations: stored([appDrv, derivation({ outputs: [['out', '']] })])
 		});
 
-		await expect(queryMissingOver([`${appDrv}^out`], floating)).rejects.toThrow(
-			FloatingOutputUnsupportedError
-		);
+		const result = queryMissingOver([`${appDrv}^out`], floating);
+
+		await expect(result).rejects.toBeInstanceOf(FloatingOutputUnsupportedError);
+		await expect(result).rejects.toMatchObject({
+			message: `Cannot plan the 'out' output of ${appDrv}: the output is floating and has no store path until it is built`
+		});
 	});
 
-	// Every edge the walk follows comes from an answer a substituter gave, so
-	// a substituter offering a fresh reference for every path it is asked
-	// about decides how far the walk goes.
-	it('refuses a walk that passes its cap', async () => {
+	it('rejects before claiming the first path above the cap', async () => {
 		let issued = 0;
 		const endless: RealisationPartitionSource = {
 			substitute: true,
@@ -509,8 +472,6 @@ describe('queryMissingOver', () => {
 
 						return offer(
 							storePath,
-							// Wider than the cap, so a walk that gathered a whole
-							// level before checking would hold all of them.
 							Array.from({ length: 50 }, (_, index) =>
 								path('a', `fresh-${String(issued)}-${String(index)}`)
 							),
@@ -520,24 +481,23 @@ describe('queryMissingOver', () => {
 				)
 		};
 
-		await expect(queryMissingOver([appPath], endless)).rejects.toThrow(
-			RealisationWalkOverCapError
-		);
+		await expect(queryMissingOver([appPath], endless)).rejects.toMatchObject({
+			name: 'RealisationWalkOverCapError',
+			maxPaths: 20,
+			message:
+				'Realisation planning reached the limit of 20 derived paths before the walk was complete'
+		});
 
-		// The cap stops the walk as the path that passes it is reached, so no
-		// further round of questions is asked.
 		expect(issued).toBe(1);
 	});
 
-	it('abandons a walk whose signal is already aborted', async () => {
+	it('rejects with the signal reason before starting the walk', async () => {
 		const reason = new Error('the caller gave up');
 		const abandoned = { ...source(), signal: AbortSignal.abort(reason) };
 
 		await expect(queryMissingOver([appPath], abandoned)).rejects.toBe(reason);
 	});
 
-	// Every path a level reaches is asked about together, so a wide closure
-	// costs one round of requests per level.
 	it('asks the substituters once for each level of the walk', async () => {
 		const cached = source({
 			offered: offers(

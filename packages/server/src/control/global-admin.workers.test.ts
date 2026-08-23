@@ -87,7 +87,6 @@ describe('claimGlobalAdmin', () => {
 
 		expect({ outcome, ...state }).toStrictEqual({
 			outcome: { claimed: false },
-			// The original claim time is preserved; the re-claim did not overwrite it.
 			admin: { issuer, subject: 'owner', claimedAt: t0 },
 			trust: [
 				{
@@ -128,7 +127,6 @@ describe('claimGlobalAdmin', () => {
 
 		const state = await adminAndTrust(database);
 
-		// The singleton and the only trust rule still belong to the first claimant.
 		expect({
 			error: { name: error.name, status: error.status },
 			state

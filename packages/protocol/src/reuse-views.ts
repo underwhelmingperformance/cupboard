@@ -51,8 +51,8 @@ export const reuseViewSelectorSchema = z
 	);
 export type ParsedReuseViewSelector = z.output<typeof reuseViewSelectorSchema>;
 
-// A reuse view accepts at most 32 source selectors. This is above expected
-// definitions and bounds abusive request bodies.
+// A request can contain at most 32 selectors, which bounds request size and
+// selector matching work.
 export const reuseViewMaxSelectors = 32;
 
 function hasDuplicateSelector(
@@ -84,10 +84,10 @@ export const reuseViewPrioritySchema = z
 	.brand('ReuseViewPriority');
 export type ReuseViewPriority = z.output<typeof reuseViewPrioritySchema>;
 
-// The default is 50, ten lower in preference than the cache-registry default of
-// 40. A fixed value is appropriate because source caches can have different
-// priorities. The view needs to follow its sources but does not track any one
-// source priority.
+// The default numeric priority is 50, ten greater than the cache-registry
+// default of 40. Nix prefers lower numeric priorities, so a destination at the
+// registry default remains preferred. The fixed value cannot follow a source
+// priority because a view can select sources with different priorities.
 export const reuseViewDefaultPriority = reuseViewPrioritySchema.parse(50);
 
 export const reuseViewSetBodySchema = z.strictObject({
@@ -131,10 +131,6 @@ export type ParsedReuseViewRemoveResponse = z.output<
 	typeof reuseViewRemoveResponseSchema
 >;
 
-// The shapes a builder assembles: a schema's input is unbranded, so the CLI
-// constructs a request body and the server a response body from these forms
-// directly. The `Parsed…` outputs above are what a successful parse yields, and
-// code that consumes a validated value takes that branded form.
 export type ReuseViewSelector = z.input<typeof reuseViewSelectorSchema>;
 export type ReuseViewSetBody = z.input<typeof reuseViewSetBodySchema>;
 export type ReuseViewSummary = z.input<typeof reuseViewSummarySchema>;
@@ -143,13 +139,14 @@ export type ReuseViewRemoveResponse = z.input<
 	typeof reuseViewRemoveResponseSchema
 >;
 
-// The gap by which a reuse view's priority is set below its destination cache,
-// so Nix prefers the destination while still consulting the view.
+// The amount added to a destination cache's numeric priority when assigning a
+// priority to the reuse view. Nix therefore prefers the destination's lower
+// value.
 export const viewPriorityMargin = 10;
 
 /**
- * Whether a destination cache stays preferred over a reuse view: true when the
- * view's priority is strictly greater, since Nix prefers the lower priority.
+ * Returns true when Nix will prefer the destination cache to the reuse view.
+ * Nix prefers lower priorities, so the view's value must be strictly greater.
  */
 export function isDestinationPreferred(
 	destinationPriority: CachePriority,

@@ -36,12 +36,12 @@ describe('reuseViewNameSchema', () => {
 describe('reuseViewSelectorSchema', () => {
 	it.each([
 		{
-			name: 'an exact selector naming a valid cache',
+			name: 'an exact selector for a valid cache',
 			kind: 'exact',
 			pattern: 'pr-1'
 		},
 		{
-			name: 'an exact selector naming the default cache',
+			name: 'an exact selector for the default cache',
 			kind: 'exact',
 			pattern: '_default'
 		},
@@ -69,7 +69,7 @@ describe('reuseViewSelectorSchema', () => {
 			pattern: ''
 		},
 		{
-			name: 'an exact selector naming an uppercase cache',
+			name: 'an exact selector with an uppercase cache name',
 			kind: 'exact',
 			pattern: 'PR-1'
 		},
@@ -104,7 +104,7 @@ describe('reuseViewSelectorSchema', () => {
 });
 
 describe('reuseViewSetBodySchema', () => {
-	it('accepts a bounded, non-empty, deduplicated selector list with no priority', () => {
+	it('accepts a non-empty selector list without duplicates or a priority', () => {
 		const value = {
 			selectors: [
 				{ kind: 'exact', pattern: 'pr-1' },
@@ -164,7 +164,7 @@ describe('reuseViewSetBodySchema', () => {
 });
 
 describe('reuseViewSummarySchema, list and remove responses', () => {
-	it('accepts a full summary and the list and remove responses built from it', () => {
+	it('accepts a summary and the list and remove responses', () => {
 		const view = {
 			name: 'reuse',
 			revision: 1,
@@ -203,17 +203,17 @@ describe('reuseViewSummarySchema, list and remove responses', () => {
 describe('isDestinationPreferred', () => {
 	it.each([
 		{
-			name: 'a higher view priority keeps the destination preferred',
+			name: 'a greater numeric view priority keeps the destination preferred',
 			view: 50,
 			expected: true
 		},
 		{
-			name: 'an equal view priority does not keep the destination preferred',
+			name: 'an equal numeric priority does not prefer the destination',
 			view: 40,
 			expected: false
 		},
 		{
-			name: 'a lower view priority does not keep the destination preferred',
+			name: 'a lower numeric view priority prefers the view',
 			view: 30,
 			expected: false
 		}
@@ -223,7 +223,7 @@ describe('isDestinationPreferred', () => {
 		).toBe(expected);
 	});
 
-	it('keeps the destination preferred when the view sits a margin below', () => {
+	it("keeps the destination preferred when the view's numeric priority is 10 greater than the destination's", () => {
 		expect(
 			isDestinationPreferred(
 				destinationPriority(40),

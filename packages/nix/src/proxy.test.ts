@@ -21,86 +21,87 @@ const proxy = 'http://proxy.example:3128';
 const other = 'http://other.example:3128';
 
 const cases: readonly ProxyCase[] = [
-	{ name: 'an environment with no proxy variables', env: {}, expected: {} },
 	{
-		name: 'a proxy for each scheme',
+		name: 'returns no settings when the environment has no proxy variables',
+		env: {},
+		expected: {}
+	},
+	{
+		name: "selects each scheme's own proxy",
 		env: { http_proxy: proxy, https_proxy: other },
 		expected: { httpProxy: proxy, httpsProxy: other }
 	},
 	{
-		name: 'one proxy for everything',
+		name: 'uses all_proxy for both schemes',
 		env: { all_proxy: proxy },
 		expected: { httpProxy: proxy, httpsProxy: proxy }
 	},
 	{
-		name: 'a scheme of its own over the one for everything',
+		name: 'uses https_proxy ahead of all_proxy',
 		env: { all_proxy: other, https_proxy: proxy },
 		expected: { httpProxy: other, httpsProxy: proxy }
 	},
 	{
-		name: 'the upper-case spelling of the one for everything',
+		name: 'reads ALL_PROXY',
 		env: { ALL_PROXY: proxy },
 		expected: { httpProxy: proxy, httpsProxy: proxy }
 	},
 	{
-		name: 'the upper-case spelling for https',
+		name: 'reads HTTPS_PROXY',
 		env: { HTTPS_PROXY: proxy },
 		expected: { httpsProxy: proxy }
 	},
 	{
-		// A CGI script runs with the request headers in its environment, so a
-		// request carrying a `Proxy:` header would choose the proxy for every
-		// transfer that script made.
-		name: 'the upper-case spelling for http, which is ignored',
+		name: 'ignores HTTP_PROXY',
 		env: { HTTP_PROXY: proxy },
 		expected: {}
 	},
 	{
-		name: 'the hosts that go direct',
+		name: 'reads no_proxy',
 		env: { http_proxy: proxy, no_proxy: 'cache.example,.internal' },
 		expected: { httpProxy: proxy, noProxy: 'cache.example,.internal' }
 	},
 	{
-		name: 'the upper-case spelling of the hosts that go direct',
+		name: 'reads NO_PROXY',
 		env: { https_proxy: proxy, NO_PROXY: '*' },
 		expected: { httpsProxy: proxy, noProxy: '*' }
 	},
 	{
-		// A variable set to nothing is how one is unset for a single command,
-		// so it configures no proxy and the next spelling is read instead.
-		name: 'an empty value, over which the one for everything is read',
+		name: 'skips an empty http_proxy and falls back to all_proxy',
 		env: { http_proxy: '', all_proxy: proxy },
 		expected: { httpProxy: proxy, httpsProxy: proxy }
 	}
 ];
 
 describe('proxySettingsFrom', () => {
-	it.each(cases)('reads $name', ({ env, expected }) => {
+	it.each(cases)('$name', ({ env, expected }) => {
 		expect(proxySettingsFrom(env)).toStrictEqual(expected);
 	});
 });
 
 describe('proxiedFetch', () => {
-	// Nothing stands between the request and the network when no variable
-	// configures a proxy, so the request takes the route every other one takes.
 	it.each([
-		{ name: 'an environment with no proxy', env: {}, routed: false },
 		{
-			name: 'an environment with only the hosts that go direct',
+			name: 'returns no proxy fetcher when the environment has no proxy',
+			env: {},
+			routed: false
+		},
+		{
+			name: 'returns no proxy fetcher when the environment only sets no_proxy',
 			env: { no_proxy: '*' },
 			routed: false
 		},
 		{
-			name: 'an environment with a proxy',
+			name: 'creates a proxy fetcher for http_proxy',
 			env: { http_proxy: proxy },
 			routed: true
 		},
 		{
-			name: 'an environment with one proxy for everything',
+			name: 'creates a proxy fetcher for all_proxy',
 			env: { all_proxy: proxy },
 			routed: true
 		}
-	])('routes $name through a proxy: $routed', ({ env, routed }) => {
+	])('$name', ({ env, routed }) => {
 		expect(proxiedFetch(env) !== undefined).toBe(routed);
 	});
 

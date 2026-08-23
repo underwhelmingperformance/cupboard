@@ -22,9 +22,6 @@ jobs:
   # The reusable workflow stays on @main for the tenant trust rule, while its
   # CLI is pinned to a specific release. This avoids resolving a release from
   # the mutable ref during the run.
-  # Each pull request publishes its flake build to a cache of its own, expiring
-  # two weeks after the last push. The trust rule on the tenant routes it there
-  # and nowhere else, keyed on the pull-request number in the token.
   publish-pr:
     name: publish (pr cache)
     if: github.event_name == 'pull_request'
@@ -44,8 +41,6 @@ jobs:
       ttl: 14d
       cupboard-version: v0.0.19
 
-  # Pushes to main publish to the tenant's default cache, which is what
-  # consumers of the flake substitute from.
   publish-main:
     name: publish (default cache)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

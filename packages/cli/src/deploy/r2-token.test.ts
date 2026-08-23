@@ -154,9 +154,6 @@ const options = {
 	bucketName: 'cupboard-blobs'
 };
 
-/**
-A token directory: lookups miss naturally when a name is absent.
-*/
 const findIn =
 	(tokens: Readonly<Record<string, string>>) =>
 	(name: string): Promise<string | undefined> =>

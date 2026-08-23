@@ -19,11 +19,6 @@ interface DeleteOptions {
 	readonly yes?: boolean;
 }
 
-/**
- * The part of the derived client that the delete command uses, in the
- * contract's input and output shapes. The real `tenantRpc(...).paths`
- * satisfies this interface by construction.
- */
 export interface DeleteClient {
 	remove(input: {
 		cacheName: string;

@@ -132,14 +132,17 @@ describe('resolved cupboard JSON', () => {
 			repository: 'owner/cupboard',
 			sourceCommit: workflowSha
 		}
-	])('round trips $kind coordinates in canonical form', (resolved) => {
-		const json = serialiseResolvedCupboard(resolved);
+	])(
+		'serialises and parses a $kind coordinate without changing it',
+		(resolved) => {
+			const json = serialiseResolvedCupboard(resolved);
 
-		expect({ json, parsed: parseResolvedCupboard(json) }).toStrictEqual({
-			json: JSON.stringify(resolved),
-			parsed: resolved
-		});
-	});
+			expect({ json, parsed: parseResolvedCupboard(json) }).toStrictEqual({
+				json: JSON.stringify(resolved),
+				parsed: resolved
+			});
+		}
+	);
 
 	it.each([
 		JSON.stringify({
@@ -170,7 +173,7 @@ describe('resolveCupboard', () => {
 		await expect(run).rejects.toBeInstanceOf(WorkflowShaInvalidError);
 	});
 
-	it('canonicalises an arbitrary explicit release tag without resolving a colliding branch', async () => {
+	it('resolves an explicit release through refs/tags when a branch has the same name', async () => {
 		const requests: string[] = [];
 		const fetcher: typeof fetch = (input) => {
 			const url = requestUrl(input);
@@ -209,7 +212,7 @@ describe('resolveCupboard', () => {
 		]);
 	});
 
-	it('canonicalises an explicit exact version independently of the workflow ref', async () => {
+	it('resolves an explicit release without using the reusable workflow ref', async () => {
 		const requests: RequestRecord[] = [];
 		const fetcher: typeof fetch = (input, init) => {
 			const url = requestUrl(input);
@@ -290,7 +293,7 @@ describe('resolveCupboard', () => {
 		]);
 	});
 
-	it('canonicalises explicit latest to the exact release and commit', async () => {
+	it('resolves latest to the selected release tag and its commit', async () => {
 		const fetcher: typeof fetch = (input) => {
 			const url = requestUrl(input);
 
@@ -617,7 +620,7 @@ describe('resolveCupboard', () => {
 		).rejects.toThrow(GithubApiError);
 	});
 
-	it('preserves an HTTP-successful GraphQL API failure', async () => {
+	it('rejects a GraphQL error returned with HTTP 200', async () => {
 		const failure = resolveCupboard(options(), {
 			fetch: () =>
 				Promise.resolve(

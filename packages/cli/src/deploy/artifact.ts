@@ -18,7 +18,7 @@ export interface DeploymentArtifact {
 	readonly tenantBundle: WorkerBundle;
 	readonly d1Migrations: readonly D1Migration[];
 	/**
-	The version the bundled Workers answer on `/_version`.
+	The version the bundled Workers return from `/_version`.
 	*/
 	readonly buildVersion: string;
 }
@@ -54,11 +54,9 @@ const serverDirectory = 'packages/server';
 const buildInfoPath = `${serverDirectory}/src/build-info.generated.ts`;
 const migrationsDirectory = `${serverDirectory}/drizzle-d1`;
 
-// The server entrypoints import `build-info.generated.ts`, which is produced by
-// `scripts/build-info.ts` and not committed. Regenerate it before bundling: the
-// onboarding compares this version against the live `/_version` to know the new
-// deployment is serving, so a stale file (matching what is already deployed)
-// would defeat that comparison. Returns the version the bundle will embed.
+// The server entrypoints import an uncommitted generated build version.
+// Regenerate it before bundling because onboarding waits for `/_version` to
+// return this value. A stale value could make the old deployment appear current.
 async function ensureBuildInfo(checkoutRoot: string): Promise<string> {
 	const outputPath = path.join(checkoutRoot, buildInfoPath);
 	const version = await resolveBuildVersion(checkoutRoot);
@@ -130,10 +128,6 @@ export async function buildEmbeddedPayload(
 	};
 }
 
-/**
- * Assemble the deployment artifact from a checkout: bundle from live source and
- * parse both wrangler configs.
- */
 export async function buildArtifactFromTree(
 	checkoutRoot: string,
 	bundler: Bundler

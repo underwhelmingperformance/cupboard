@@ -114,7 +114,7 @@ export function registerRootCommands(
 	root
 		.command('ensure')
 		.description(
-			'Retain targets already present in the cache, or report that a build is required. ' +
+			'Retain targets the cache can serve, or report that a build is required. ' +
 				'Both outcomes exit 0; the reported status is either retained or build required.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)

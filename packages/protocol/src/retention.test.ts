@@ -22,12 +22,12 @@ const storePath = `/nix/store/${storePathHash}-name`;
 describe('rootSetBodySchema', () => {
 	it.each([
 		{
-			name: 'targets only',
+			name: 'a target list without a TTL',
 			value: { targets: [storePath] },
 			expected: { targets: [storePath] }
 		},
 		{
-			name: 'targets and ttl',
+			name: 'a target list with a TTL',
 			value: { targets: [storePath], ttlSeconds: 3600 },
 			expected: { targets: [storePath], ttlSeconds: 3600 }
 		},
@@ -75,7 +75,7 @@ describe('rootSetBodySchema', () => {
 });
 
 describe('rootEnsureBodySchema', () => {
-	it('accepts the targets it is asked about', () => {
+	it('accepts a non-empty target list', () => {
 		const value = { targets: [storePath], ttlSeconds: 3600 };
 
 		expect(rootEnsureBodySchema.parse(value)).toStrictEqual(value);
@@ -138,7 +138,7 @@ describe('rootListResponseSchema', () => {
 
 	it.each([
 		{
-			name: 'an entry carrying inline targets',
+			name: 'an entry with inline targets',
 			value: { roots: [{ ...listedRoot, targets: [] }] }
 		},
 		{
@@ -212,7 +212,7 @@ describe('retention policy schemas', () => {
 				ttlSeconds: 1_209_600
 			}
 		}
-	])('accepts add body: $name', ({ value, expected }) => {
+	])('accepts $name', ({ value, expected }) => {
 		expect(retentionPolicyAddBodySchema.parse(value)).toStrictEqual(expected);
 	});
 
@@ -229,7 +229,7 @@ describe('retention policy schemas', () => {
 			name: 'an out-of-range ttl',
 			value: { scope: 'root-name-prefix', pattern: 'pr-', ttlSeconds: 0 }
 		}
-	])('rejects add body: $name', ({ value }) => {
+	])('rejects $name', ({ value }) => {
 		expect(retentionPolicyAddBodySchema.safeParse(value).success).toBe(false);
 	});
 
@@ -269,7 +269,7 @@ describe('retention grace policy schemas', () => {
 			value: { cachePrefix: 'pr-', graceSeconds: 0 },
 			expected: { cachePrefix: 'pr-', graceSeconds: 0 }
 		}
-	])('accepts add body: $name', ({ value, expected }) => {
+	])('accepts $name', ({ value, expected }) => {
 		expect(gracePolicyAddBodySchema.parse(value)).toStrictEqual(expected);
 	});
 
@@ -290,10 +290,8 @@ describe('retention grace policy schemas', () => {
 			name: 'an unknown field',
 			value: { cachePrefix: 'pr-', graceSeconds: 0, extra: true }
 		},
-		// A prefix no cache name can start with silently matches nothing;
-		// rejecting it at the contract catches the typo at add time.
 		{
-			name: 'an upper-case prefix no cache name can carry',
+			name: 'an upper-case prefix that cannot match a cache name',
 			value: { cachePrefix: 'PR-', graceSeconds: 86_400 }
 		},
 		{
@@ -304,7 +302,7 @@ describe('retention grace policy schemas', () => {
 			name: 'a prefix over the cache-name length bound',
 			value: { cachePrefix: 'a'.repeat(64), graceSeconds: 86_400 }
 		}
-	])('rejects add body: $name', ({ value }) => {
+	])('rejects $name', ({ value }) => {
 		expect(gracePolicyAddBodySchema.safeParse(value).success).toBe(false);
 	});
 

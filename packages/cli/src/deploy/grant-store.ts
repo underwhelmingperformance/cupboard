@@ -58,7 +58,7 @@ export async function readCachedGrant(): Promise<CloudflareGrant | undefined> {
 }
 
 /**
-Persists a Cloudflare grant, readable only by the current user.
+Writes the cached grant with permissions restricted to the current user.
 */
 export async function writeCachedGrant(grant: CloudflareGrant): Promise<void> {
 	const stored: z.infer<typeof storedGrantSchema> = {

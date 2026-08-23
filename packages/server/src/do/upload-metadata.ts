@@ -16,9 +16,9 @@ import {
 import { type R2ObjectKey } from '../http/http.ts';
 import { parseStoredJson } from '../http/parse.ts';
 
-// The compressed metadata of the one canonical object served for a NAR hash.
-// Read from the object itself so a committed narinfo always advertises the
-// encoding actually stored, regardless of which upload promoted it.
+// When a canonical object already exists, use its checksum and size instead of
+// the staging upload's values. This keeps `blob_state` aligned with the bytes R2
+// serves after a repeated or concurrent promotion.
 export interface CanonicalBlob {
 	readonly fileHash: NixSha256HashString;
 	readonly fileSize: number;

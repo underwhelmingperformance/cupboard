@@ -187,7 +187,6 @@ jobs:
       id-token: write
     uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@vX.Y.Z
     with:
-      # The tenant URL is an ordinary value in this file; edit it here.
       url: https://cupboard.example.workers.dev/t/acme
       targets: .#cupboardOutputs
       preset: pull-request-and-branch
@@ -398,15 +397,15 @@ already exists; `actions/attest` below produces one with the right subjects:
 
 ## `actions/build-paths` and `actions/attest`
 
-`actions/push` attaches a bundle but does not create one. cupboard files a
-bundle against a store path only when the bundle's in-toto subject digest equals
-that path's NAR hash. An attestation built over a file's own digest, which is
-what `actions/attest-build-provenance` records by default, therefore does not
-match. `actions/build-paths` builds the requested installables and writes a
-current-run receipt recording which final outputs Nix actually built. After
-publication, the attest action verifies those paths and NAR hashes against the
-destination's committed narinfos, then signs two attestations over them: a SLSA
-build-provenance attestation and a cupboard build-origin attestation.
+`actions/push` attaches a bundle but does not create one. Cupboard attaches a
+bundle to a store path only when the bundle's in-toto subject digest equals the
+path's NAR hash. An attestation over a file's own digest, which is what
+`actions/attest-build-provenance` records by default, therefore does not match.
+`actions/build-paths` builds the requested installables and writes a version 2
+receipt for the final outputs that Nix built during the run. After publication,
+`actions/attest` verifies those paths and NAR hashes against the destination's
+committed narinfos, then signs a SLSA build-provenance attestation over the
+accepted subjects.
 
 ```yaml
 permissions:
@@ -451,13 +450,12 @@ steps:
 newline-delimited file and passed as `installables-file`, which avoids runner
 limits on the size of action inputs and environment variables. The build action
 retries three times and outputs the realised `paths`, a `paths-file`, and the
-`receipt-file` consumed by the attest action. The receipt records every path
-published by the run and classifies its origin: built during this run, already
-registered in the build store as local work, or copied into the store. Only the
-first class counts as built. Outputs returned by a remote builder are rebuilt
-and compared with `nix build --rebuild` before they qualify. When the run built
-nothing, no build provenance is signed and `bundle-path` is empty.
-`actions/push` treats an empty `bundle-path` as a push with no attestations.
+`receipt-file` consumed by the attest action. A version 2 receipt records only
+the final outputs that the action observed being built during this run. Outputs
+returned by a remote builder are rebuilt and compared with `nix build --rebuild`
+before they qualify. When the run built nothing, no build provenance is signed
+and `bundle-path` is empty. `actions/push` treats an empty `bundle-path` as a
+push with no attestations.
 
 Set `require-provenance` when publication must not succeed without provenance
 for every final output. If a final output came from a cache or was already
@@ -466,13 +464,14 @@ before adding it to the receipt; its dependencies may still be substituted. This
 is useful when a failed signing or attachment step will be retried after the
 path was pushed.
 
-The action outputs the two signed bundles, `bundle-path` and
-`origin-bundle-path`, along with the checksums each one was signed over.
-`built-checksums-file` and `built-subject-count` describe the build-provenance
-bundle; `checksums-file` and `subject-count` describe the build-origin bundle.
+The action defines outputs for both supported receipt versions. `bundle-path`,
+`built-checksums-file`, and `built-subject-count` describe the SLSA
+build-provenance bundle. A version 2 receipt produces no build-origin bundle, so
+`origin-bundle-path` is empty. Version 3 receipts from `build-cohort` also use
+`checksums-file` and `subject-count` for their build-origin bundle.
 `id-token: write` lets the action obtain its Sigstore signing certificate, and
-`attestations: write` records the attestations on the repository, so
-`gh attestation verify` finds them.
+`attestations: write` records the attestations on the repository so
+`gh attestation verify` can find them.
 
 The action signs both statements directly so it can retry transient signing
 failures. A workflow cannot retry a `uses:` step, and neither
@@ -482,45 +481,42 @@ starts with a new key, certificate and log entry. The action retries only when
 Fulcio or a witness does not respond, or responds with 408, 429 or a 5xx status.
 It stops immediately when the OIDC token cannot be read or decoded, or when
 Fulcio refuses to issue the certificate. If all attempts fail, the step fails
-and publication does not continue without a bundle.
+and does not attach a bundle. Publication has already completed at this point.
 
 The two bundles make different claims over different subjects. The SLSA
 build-provenance bundle covers paths built by the workflow. It records the
 repository, commit, workflow file and runner.
 
-The build-origin bundle covers every path published by the run and records its
-origin from the receipt. For a path the run built, it records the store path,
-the NAR hash, the derivation that produced it, the store where the build ran,
-whether the coordinating machine watched the build or the build store reported
-it, and the builder from the activity log when there was one. For a path the
-build store had already registered as its own work, it records the store and
-that the run did not build the path. For a path that entered the store by copy,
-it records the signatures the store holds over the path, the content address
-when the path has one, and the stores the run watched the path being copied
-from. That last field comes from Nix's activity log, which names the source of
-each copy Nix performs, so it reports only copies this run saw happen. A path
-that was already valid when the run started, or that some other store fetched
-where the run could not see it, has no source recorded.
+Only a version 3 receipt from `build-cohort` produces a build-origin bundle. The
+bundle covers every accepted receipt subject. It records origin information from
+events observed during the run. For a path the run built, it records the store
+path, the NAR hash, the derivation that produced it, the store where the build
+ran, whether the coordinating machine watched the build or the build store
+reported it, and the builder from the activity log when one was reported. For a
+path already registered in the build store, it records the store and that the
+run did not observe the build. For a copied path, it records the signatures
+reported by the store, the content address when present, and sources from the
+copy activities that the run observed. Those activities can include failed copy
+attempts. A path that was already valid when the run started, or that another
+store fetched without the run observing it, has no source recorded.
 
-A path published by reference is recorded differently again, because no store
-the push can query holds it. The run read the path's metadata from another cache
-and asked the destination to serve the copy it already had, so the statement
-records that cache, the NAR hash the destination serves the path under, the
-deriver and content address that cache reported, and the signatures it published
-over the path. Those signatures are made over the path's fingerprint, which the
-destination serves unchanged, so a reader can check them against keys it trusts.
-The run transferred no bytes, so the statement does not record the origin of the
-destination's copy.
+A path published by reference has no local store entry. The run reads its
+metadata from another cache and asks the destination to publish bytes already
+stored there. The statement records the source cache, the NAR hash under which
+the destination publishes the path, and the deriver, content address, and
+signatures reported by the source cache. A verifier can check those signatures
+against keys it trusts. The run transfers no bytes, so this metadata does not
+establish where the destination obtained its copy.
 
 The statement does not claim reproducibility, producer trust, an unobserved copy
 source, or that a republished path's bytes came from the cache that served its
 metadata. Its predicate type is
 `https://github.com/underwhelmingperformance/cupboard/predicate/build-origin/v2`,
 and `cupboard attest verify --predicate-type` takes that value to verify it. One
-statement covers every path of the run, so verifying it for one path also
-reports the origin of the others. A version 2 receipt records no origin, so such
-a run produces the build-provenance bundle alone and leaves `origin-bundle-path`
-empty.
+statement covers every accepted subject in the receipt, so verifying it for one
+path also reports the recorded origin of the others. A version 2 receipt records
+no origin, so such a run produces only the build-provenance bundle and leaves
+`origin-bundle-path` empty.
 
 Publication comes before signing because the attest action verifies every
 receipt subject against the destination's committed narinfo. The attach action
@@ -574,11 +570,12 @@ steps:
         ${{ steps.attest.outputs.origin-bundle-path }}
 ```
 
-`setup` adds the cache as a substituter, `build-paths` records what this run
-built, `push` commits the paths, `attest` verifies and signs those paths' NAR
-hashes, and `attest-attach` attaches the bundle to them. Pushing needs a trust
-rule on the tenant that accepts this repository's GitHub Actions token, added
-with `cupboard oidc-trust`; see [docs/trust-rules.md](./trust-rules.md).
+`setup` adds the cache as a substituter, `build-paths` records the final outputs
+that the run built, `push` commits the paths, `attest` verifies and signs those
+paths' NAR hashes, and `attest-attach` attaches the bundle to them. Pushing
+needs a trust rule on the tenant that accepts this repository's GitHub Actions
+token, added with `cupboard oidc-trust`; see
+[docs/trust-rules.md](./trust-rules.md).
 
 ## The reusable workflow
 
@@ -616,18 +613,18 @@ later push replaces its paths. Appending the system prevents a later push for
 one platform from replacing retained paths for another. A Linux build and a
 macOS build of the same pull request therefore remain under separate roots.
 
-The remaining inputs: `installable` picks what to build (the default is `.`, the
-flake at the repository root), `attest` turns provenance signing off for tenants
-that do not accept it, `runs-on` picks the runner, and `trusted-public-key`
-configures the substituter. `cupboard-version` is an optional explicit release
-override; normally the workflow derives cupboard from its own pin. When `attest`
-is enabled, the workflow requires provenance for every final output. A target
-the cache already serves is left unbuilt only when the cache also holds an
-attestation for its output path. Every other final derivation is rebuilt locally
-before the workflow signs it, while its dependencies may still substitute. A
-rerun after a failed signing or attachment step therefore builds the output
-again and attaches the provenance that is missing, instead of finishing with an
-empty receipt.
+The other inputs configure the build and publication. `installable` selects the
+build target (the default is `.`, the flake at the repository root), `attest`
+turns provenance signing off for tenants that do not accept it, `runs-on`
+selects the runner, and `trusted-public-key` configures the substituter.
+`cupboard-version` is an optional explicit release override; normally the
+workflow derives Cupboard from its own pin. When `attest` is enabled, the
+workflow requires provenance for every final output. A target the cache already
+serves is left unbuilt only when the cache also holds an attestation for its
+output path. Every other final derivation is rebuilt locally before the workflow
+signs it, while its dependencies may still substitute. A rerun after a failed
+signing or attachment step therefore builds the output again and attaches the
+provenance that is missing, instead of finishing with an empty receipt.
 
 Pin this workflow to an immutable published release tag. With no explicit
 `cupboard-version`, the workflow selects that release and verifies its source
@@ -927,10 +924,10 @@ do not enable it on a shared runner or one that holds unrelated SSH identities.
 
 ### Component publication for aggregate targets
 
-A NixOS system or a home-manager profile is a `buildEnv` over its packages: one
-target whose input closure can exceed a runner's disk even though every package
-in it is ordinary. A manifest target opts out of building that aggregate at all
-by declaring `components` instead:
+Some aggregate targets, including NixOS systems and Home Manager profiles, have
+input closures that exceed a runner's disk even though their individual
+components fit. A manifest target can omit the aggregate build and declare
+`components` instead:
 
 ```nix
 {
@@ -946,17 +943,18 @@ by declaring `components` instead:
 }
 ```
 
-With `components` present, Cupboard does not evaluate, query or build the
-aggregate attribute. It publishes each component as a separate target. This
-reduces the runner's peak disk use from the whole environment closure to the
-largest component input closure. Every component publishes under the aggregate's
+With `components` present, Cupboard does not evaluate, query, or build the
+aggregate attribute. It publishes each component as a separate target. Separate
+cohorts can reduce peak disk use because each job realises only its component
+and dependencies. Shared dependencies, build scratch space, and an explicit
+shared cohort can change that peak, so it is not necessarily the size of the
+largest component closure. Every component publishes under the aggregate's
 `rootSuffix`, with one retention root containing every component path. If a
 manifest exceeds the 1,000-path root limit, the workflow refuses it before
 building because paging would not preserve atomic replacement. Components
-inherit the aggregate's system, os, remote, best-effort flag and cohort label,
-so by default each is its own cohort and its own job, and a shared `cohort`
-label on the aggregate groups them into one job exactly as it would for ordinary
-targets.
+inherit the aggregate's system, os, remote, best-effort flag, and cohort label.
+By default each component is its own cohort and job; a shared `cohort` label on
+the aggregate groups them as it would ordinary targets.
 
 The machine that activates the environment (a NixOS host running
 `nixos-rebuild switch`, a home-manager user running `home-manager switch`)

@@ -32,10 +32,9 @@ export function isConstantTimeEqual(left: string, right: string): boolean {
 	return difference === 0;
 }
 
-// `crypto.subtle.generateKey` is typed to return `CryptoKey | CryptoKeyPair`,
-// so the cast narrows the result to the key pair that the Ed25519 parameters
-// guarantee. Centralising it keeps the curve choice and the cast in one place
-// for every signing key.
+// The Workers type also covers algorithms that return one key, but Ed25519
+// generation returns a key pair. Keep the pair extractable because callers
+// persist the private JWK and the public key.
 export async function generateEd25519KeyPair(): Promise<CryptoKeyPair> {
 	return (await crypto.subtle.generateKey('Ed25519', true, [
 		'sign',
@@ -43,9 +42,9 @@ export async function generateEd25519KeyPair(): Promise<CryptoKeyPair> {
 	])) as CryptoKeyPair;
 }
 
-// The name-independent half of a signing key: the entropy and the exports. Split
-// out so a rotation can generate it before taking the critical section, since
-// only the public-key rendering needs the name read inside that section.
+// Rotation generates and exports this material before entering its critical
+// section. It assigns the generation-dependent Nix key name only after reading
+// the key sequence inside the gate.
 export async function generateSigningKeyMaterial(): Promise<{
 	readonly privateJwk: JsonWebKey;
 	readonly publicRaw: Uint8Array;
@@ -81,8 +80,9 @@ const rsaOtherPrimeInfoSchema = z.object({
 	t: z.string().optional()
 });
 
-// The standard JWK fields, with only `kty` required; whether the key material
-// is usable is decided when it is imported for signing or verification.
+// Validate the stored value against the Workers `JsonWebKey` shape. This does
+// not prove that the key supports an operation; Web Crypto or jose validates
+// the algorithm and key material when it imports the key.
 const jsonWebKeySchema = z.object({
 	kty: z.string(),
 	alg: z.string().optional(),
@@ -104,7 +104,6 @@ const jsonWebKeySchema = z.object({
 	oth: z.array(rsaOtherPrimeInfoSchema).optional()
 }) satisfies z.ZodType<JsonWebKey>;
 
-// Deserialises a stored JSON Web Key.
 export function parseJwk(json: string): JsonWebKey {
 	const value: unknown = JSON.parse(json);
 	const parsed = jsonWebKeySchema.safeParse(value);

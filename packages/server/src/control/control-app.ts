@@ -31,9 +31,8 @@ function buildControlApp() {
 	// the handlers or the error handler is logged with the request's fields.
 	app.use(loggerMiddleware);
 
-	// The admin procedures declared in @cupboard/protocol/contract, served under
-	// the /control prefix. Their responses carry admin state, so they are never
-	// cached.
+	// Admin procedure responses contain mutable control-plane state, so never
+	// cache them.
 	app.use('/control/*', async (context, next) => {
 		const { matched: isMatched, response } = await controlOrpcHandler.handle(
 			context.req.raw,

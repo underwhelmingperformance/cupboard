@@ -40,7 +40,6 @@ function delegatedSubject(): ParsedBuildOriginSubject {
 	});
 }
 
-// The build store reported the path and the activity log recorded no builder.
 function reportedSubject(): ParsedBuildOriginSubject {
 	return buildOriginSubjectSchema.parse({
 		origin: 'built',
@@ -104,7 +103,7 @@ describe('buildOriginStatement', () => {
 		});
 	});
 
-	// Another project's predicate may happen to carry a `subjects` array. Only
+	// Another project's predicate may happen to contain a `subjects` array. Only
 	// the predicate type selects the build-origin schema, so such a bundle is
 	// neither read as a statement nor refused.
 	it.each([
@@ -119,11 +118,11 @@ describe('buildOriginStatement', () => {
 			predicate: { buildDefinition: {} }
 		},
 		{
-			name: 'a bundle carrying no predicate at all',
+			name: 'a bundle with no predicate at all',
 			predicateType: 'https://example.test/predicate/v1',
 			predicate: undefined
 		}
-	])('reports no statement for $name', ({ predicateType, predicate }) => {
+	])('returns undefined for $name', ({ predicateType, predicate }) => {
 		expect(
 			buildOriginStatement(verified({ predicateType, predicate }))
 		).toBeUndefined();
@@ -199,29 +198,29 @@ describe('describeBuildOrigin', () => {
 			expected: `ssh://builder-1 built it, and ${buildStore} reported the build`
 		},
 		{
-			name: 'a path the build store reported without a builder',
+			name: 'a path reported without an observed builder',
 			subject: reportedSubject(),
-			expected: `${buildStore} reports it as its own work, and this run did not watch the build`
+			expected: `${buildStore} reported that it built the path, but this run did not observe which machine performed the build`
 		},
 		{
-			name: 'a path the store registered as its own work',
+			name: 'a locally built path without an observed build time',
 			subject: storeHeldSubject(),
-			expected: `${buildStore} registered it as its own work, and this run did not build it`
+			expected: `${buildStore} reported the path as locally built, but the receipt does not record when it was built`
 		},
 		{
-			name: 'a copied path the run watched being fetched',
+			name: 'a copied path with an observed source attempt',
 			subject: copiedSubject({ copiedFrom: ['https://cache.example.org'] }),
 			expected:
-				'this run copied it from https://cache.example.org; signed by cache.example.org-1'
+				'this run observed copy attempts from https://cache.example.org; the build-store metadata lists unverified Nix signatures for cache.example.org-1'
 		},
 		{
-			name: 'a copied path the run did not watch being fetched',
+			name: 'a copied path without an observed source',
 			subject: copiedSubject(),
 			expected:
-				'it was copied into the build store, but this run did not watch the copy; signed by cache.example.org-1'
+				'the build store reported a copied path, but this run did not observe the source; the build-store metadata lists unverified Nix signatures for cache.example.org-1'
 		},
 		{
-			name: 'a path republished from another cache',
+			name: 'a path whose narinfo came from another cache',
 			subject: buildOriginSubjectSchema.parse({
 				origin: 'republished',
 				storePath: otherPath,
@@ -231,10 +230,10 @@ describe('describeBuildOrigin', () => {
 				metadataSource: 'https://cache.example.test/t/acme'
 			}),
 			expected:
-				'this run republished it from https://cache.example.test/t/acme; signed by cache.example.org-1'
+				'this run read its narinfo from https://cache.example.test/t/acme; the narinfo lists unverified Nix signatures for cache.example.org-1'
 		},
 		{
-			name: 'a republished path the source published no signature for',
+			name: 'a republished path whose source narinfo has no signatures',
 			subject: buildOriginSubjectSchema.parse({
 				origin: 'republished',
 				storePath: otherPath,
@@ -243,13 +242,13 @@ describe('describeBuildOrigin', () => {
 				metadataSource: 'https://cache.example.test/t/acme'
 			}),
 			expected:
-				'this run republished it from https://cache.example.test/t/acme; that cache published no signature for it'
+				'this run read its narinfo from https://cache.example.test/t/acme; the narinfo lists no Nix signatures'
 		},
 		{
-			name: 'a copied path the store holds no signature for',
+			name: 'a copied path whose build-store metadata has no signatures',
 			subject: copiedSubject({ signatures: [] }),
 			expected:
-				'it was copied into the build store, but this run did not watch the copy; the store holds no signature for it'
+				'the build store reported a copied path, but this run did not observe the source; the build-store metadata lists no Nix signatures'
 		}
 	])('describes $name', ({ subject, expected }) => {
 		expect(describeBuildOrigin(subject)).toBe(expected);

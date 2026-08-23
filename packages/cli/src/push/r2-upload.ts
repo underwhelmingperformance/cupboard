@@ -7,13 +7,8 @@ import { type ParsedPushCredential } from '@cupboard/protocol/upload';
 // a few parts at a time.
 const partBytes = 8 * 1024 * 1024;
 
-// Re-fetches the push's credential. The S3 client calls it when it has no
-// credential yet and again once the cached one nears expiry, so a long push
-// renews mid-upload without the caller driving the refresh.
 export type CredentialProvider = () => Promise<ParsedPushCredential>;
 
-// Streams one compressed NAR to R2; the managed upload chooses single PutObject
-// or multipart by size on its own.
 export type BlobUploader = (
 	r2Key: string,
 	body: ReadableStream<Uint8Array>

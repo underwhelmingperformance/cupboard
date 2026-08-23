@@ -89,14 +89,13 @@ export type ParsedControlCheckReport = z.output<
 >;
 
 // The `kind` under which `cupboard push` emits its final summary result. A
-// consumer that reads the reporter's result file addresses the summary by this
-// name.
+// consumer uses this value to find the summary in the reporter's result file.
 export const pushSummaryResultKind = 'push-summary';
 
 // A path that failed to resolve, upload, commit or verify. The push presses on
 // with the rest, so a failure is reported alongside whatever succeeded, not in
-// place of it. The `resolve` stage names a declared target the store no longer
-// held when its metadata was read.
+// place of it. The `resolve` stage applies when the store no longer holds a
+// declared target at metadata-read time.
 export const pushFailureSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	storePath: storePathSchema,
@@ -110,9 +109,10 @@ export type ParsedPushFailure = z.output<typeof pushFailureSchema>;
 // reused blob completed. `pending` means `--no-wait` returned before background
 // verification completed. `collected` means the store removed an intermediate
 // before its metadata or NAR could be read. `grace` contains `retainUntil` for a
-// committed path or `graceSeconds` while a pending path has no deadline. It is
-// absent for collected paths, unmatched policies, and legacy responses without
-// a retention plan.
+// committed path or `graceSeconds` while a pending path has no deadline. When
+// grace reporting is enabled, `{}` means that no policy matched. The property is
+// omitted for collected paths and for legacy responses that do not report grace
+// facts.
 export const pushSummaryPathSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	storePath: storePathSchema.optional(),
@@ -135,8 +135,8 @@ export const pushSummarySchema = z.strictObject({
 export type ParsedPushSummary = z.output<typeof pushSummarySchema>;
 
 // The `kind` under which `cupboard attest attach` emits its final summary
-// result. A consumer that reads the reporter's result file addresses the
-// summary by this name.
+// result. A consumer uses this value to find the summary in the reporter's
+// result file.
 export const attestationAttachSummaryResultKind = 'attestation-attach-summary';
 
 // One named path's attachment outcome. `attached` means at least one bundle was
@@ -153,9 +153,6 @@ export type ParsedAttestationAttachPath = z.output<
 	typeof attestationAttachPathSchema
 >;
 
-// The attach summary result data: bundle-level attached and reused counts,
-// the number of unservable paths, the staged bundle bytes, and each covered
-// path's outcome.
 export const attestationAttachSummarySchema = z.strictObject({
 	attached: countSchema,
 	reused: countSchema,
@@ -168,8 +165,7 @@ export type ParsedAttestationAttachSummary = z.output<
 >;
 
 // The `kind` under which `cupboard build-push` emits its final summary result.
-// A consumer that reads the reporter's result file addresses the summary by
-// this name.
+// A consumer uses this value to find the summary in the reporter's result file.
 export const buildSummaryResultKind = 'build-summary';
 
 // The build-push summary records the publication mode and store, path and queue

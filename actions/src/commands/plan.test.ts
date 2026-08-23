@@ -84,9 +84,6 @@ const cohortToleranceSchema = z.object({
 	include: z.array(cohortToleranceEntrySchema)
 });
 
-// Each emitted cohort's members and the tolerance the job spends as its
-// continue-on-error, ordered by the members themselves so the assertion does
-// not depend on the key digests cohort ordering runs on.
 async function cohortMatrixTolerance(
 	outputFile: string
 ): Promise<readonly { attrs: readonly string[]; bestEffort: boolean }[]> {
@@ -193,7 +190,7 @@ describe('planAction', () => {
 			]
 		}
 	])(
-		'carries the cohort tolerance into the matrix for $name',
+		'sets bestEffort on each cohort matrix entry for $name',
 		async ({ targets, expected }) => {
 			const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
 			const output = path.join(directory, 'output');
@@ -415,8 +412,6 @@ describe('resolvePlanInputs', () => {
 		).toBe(false);
 	});
 
-	// `isEnabled` accepts only the exact spellings `true` and `false`, so a
-	// case variant is a mistyped workflow value rather than a synonym.
 	it('rejects when optimise is not true or false', () => {
 		expect(() =>
 			resolvePlanInputs({ ...baseOptions, optimise: 'False' }, environment)
@@ -475,7 +470,7 @@ describe('resolvePlanInputs', () => {
 
 	it.each([
 		['is not an http(s) URL', 'cupboard.example/t/acme'],
-		['carries a fragment', 'https://cupboard.example/t/acme#copied']
+		['contains a fragment', 'https://cupboard.example/t/acme#copied']
 	])('rejects when url %s', (_name, url) => {
 		expect(() =>
 			resolvePlanInputs({ ...baseOptions, url }, environment)
@@ -553,7 +548,7 @@ describe('validateRemoteOutputPredictability', () => {
 		}).toThrow(RemoteOutputPathUnknownDuringPlanningError);
 	});
 
-	it('keeps local publication and predictable remote multi-output targets valid', () => {
+	it('accepts local publication and remote targets whose selected output paths are known', () => {
 		const predictable = {
 			...evaluation('multi', storePath(`/nix/store/${'5'.repeat(32)}-out`)),
 			target: {
@@ -612,7 +607,7 @@ describe('ensureAvailableTargets', () => {
 		directory = await mkdtemp(path.join(tmpdir(), 'cupboard-ensure-'));
 	});
 
-	it('maps a runner launch failure to a RootEnsureCommandError carrying its cause', async () => {
+	it('wraps a runner launch failure in RootEnsureCommandError and preserves its cause', async () => {
 		const value = storePath('/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app');
 		const failure = new Error('spawn /missing/cupboard ENOENT');
 		const runner: EnsureRunner = () => Promise.reject(failure);
@@ -766,7 +761,7 @@ describe('ensureAvailableTargets', () => {
 		);
 	});
 
-	it('collects only the rootSuffixes whose ensure result is retained', async () => {
+	it('returns only root suffixes with a retained ensure result', async () => {
 		const retainedPath = storePath(`/nix/store/${'1'.repeat(32)}-first`);
 		const buildRequiredPath = storePath(`/nix/store/${'2'.repeat(32)}-second`);
 		const runner: EnsureRunner = async (_command, arguments_) => {
@@ -795,10 +790,7 @@ describe('ensureAvailableTargets', () => {
 		expect(retained).toStrictEqual(new Set(['first']));
 	});
 
-	// A manifest may spell a suffix with a leading slash; the parse
-	// canonicalises it, and the ensure call and the push matrix construct the
-	// root from that one canonical suffix, so both name the identical root.
-	it('ensures the exact root the push matrix carries for a slashed spelling', async () => {
+	it('uses the same canonical root for retention and the target matrix', async () => {
 		const value = storePath(`/nix/store/${'3'.repeat(32)}-app`);
 		const ensured: string[] = [];
 		const runner: EnsureRunner = async (_command, arguments_) => {
@@ -883,7 +875,7 @@ describe('ensureAvailableTargets', () => {
 			JSON.stringify({ kind: 'root-ensure', data: { status: 'retained' } })
 		],
 		[
-			'a build-required result names no unavailable paths',
+			'a build-required result contains no unavailable paths',
 			JSON.stringify({
 				kind: 'root-ensure',
 				data: { status: 'build-required', unavailable: [] }
@@ -971,7 +963,7 @@ function ensureRootArgument(arguments_: readonly string[]): string {
 	const root = arguments_.at(index + 2);
 
 	if (root === undefined) {
-		throw new Error('the ensure command did not carry a root argument');
+		throw new Error('the ensure command did not include a root argument');
 	}
 
 	return root;
@@ -982,7 +974,9 @@ function resultFileArgument(arguments_: readonly string[]): string {
 	const file = arguments_.at(index + 1);
 
 	if (file === undefined) {
-		throw new Error('the ensure command did not carry a result file argument');
+		throw new Error(
+			'the ensure command did not include a result file argument'
+		);
 	}
 
 	return file;
@@ -1020,8 +1014,6 @@ function buildRequiredResultLine(unavailable: readonly string[]): string {
 const alwaysAvailableFetcher: typeof fetch = () =>
 	Promise.resolve(Response.json({ missingStorePathHashes: [] }));
 
-// Returns an empty `missingStorePathHashes` list for every request and records
-// each request URL, so a test can assert which requests the plan made.
 function recordingFetcher(): {
 	readonly requestedUrls: readonly string[];
 	readonly fetcher: typeof fetch;
@@ -1038,9 +1030,6 @@ function recordingFetcher(): {
 	};
 }
 
-// Every command the pre-filter issues carries either 'targets' or 'ensure' at
-// the same position `root ensure`'s own argument list already uses, so one
-// index finds either one's root argument.
 function rootCommandTarget(arguments_: readonly string[]): string {
 	const index = arguments_.includes('targets')
 		? arguments_.indexOf('targets')
@@ -1048,7 +1037,7 @@ function rootCommandTarget(arguments_: readonly string[]): string {
 	const root = arguments_.at(index + 2);
 
 	if (root === undefined) {
-		throw new Error('the command did not carry a root argument');
+		throw new Error('the command did not include a root argument');
 	}
 
 	return root;
@@ -1065,11 +1054,6 @@ function rootTargetsResultLine(storePaths: readonly StorePathString[]): string {
 	})}\n`;
 }
 
-// Drives both calls the pre-filter makes for one target's root: `root
-// targets` answers with whatever reconciled list the test names for that
-// root (empty when unnamed), and `root ensure` answers retained or
-// build-required from a named set, refusing to answer for a root a test
-// wants to fail instead.
 function preFilterRunner(options: {
 	readonly targetsByRoot?: ReadonlyMap<string, readonly StorePathString[]>;
 	readonly ensureRetainedRoots?: ReadonlySet<string>;
@@ -1359,10 +1343,6 @@ describe('cohortPreFilter', () => {
 		expect(decisions).toStrictEqual([{ key: 'cohort-broken', pruned: false }]);
 	});
 
-	// Component publication's target root is shared: every component of one
-	// aggregate declares the same rootSuffix, so the pre-filter reconciles one
-	// root's list against several targets, each covered by its own path
-	// within it, exactly the mechanism any other root already uses.
 	it('prunes a component-publication cohort only once every component is covered by the shared root', async () => {
 		const componentA: TargetEvaluation = {
 			target: {
@@ -1526,15 +1506,12 @@ describe('cohort-matrix output', () => {
 
 		const outputs = await readFile(path.join(planDirectory, 'output'), 'utf8');
 
-		// The target is retained (its own output is fully cached), so the
-		// ordinary target matrix already carries nothing to build; the cohort
-		// matrix independently confirms the same target's cohort needs no job.
 		expect(outputs).toContain('target-matrix={"include":[]}\n');
 		expect(outputs).toContain('cohort-matrix={"include":[]}\n');
 		expect(outputs).toContain('cohort-count=0\n');
 	});
 
-	it('carries the evaluated expected path and query installable for a surviving cohort', async () => {
+	it('includes the evaluated expected path and derived installable in a surviving cohort', async () => {
 		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
 		const appStorePath = `/nix/store/${'1'.repeat(32)}-app`;
 		const appNode = {
@@ -1560,10 +1537,6 @@ describe('cohort-matrix output', () => {
 				evaluator,
 				storeDirectory: storeDirectorySchema.parse('/nix/store'),
 				fetcher: alwaysAvailableFetcher,
-				// No reconciled targets and no retained root: the pre-filter's
-				// coverage check comes back not-covered and the cohort is not
-				// pruned, letting this test observe the surviving entry's
-				// evaluated fields.
 				runner: preFilterRunner({})
 			}
 		);
@@ -1662,9 +1635,6 @@ describe('cohort packing', () => {
 
 	it('packs both surviving cohorts into one job when enabled and measured', async () => {
 		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
-		// Comfortably above the default 5 GiB headroom floor, so the packing
-		// budget it leaves (about 1 GiB) dwarfs both measured sizes below and
-		// the two cohorts land in one bin.
 		const packCapacity = String(6 * 1024 ** 3);
 
 		const groups = await cohortAttributeGroups(
@@ -1707,7 +1677,7 @@ describe('cohort packing', () => {
 		expect(groups).toStrictEqual([[target.attr], [targetB.attr]]);
 	});
 
-	it('threads the sizes the plan measure invocation records into the packed grouping', async () => {
+	it('uses the NAR sizes from plan measure when packing cohorts', async () => {
 		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
 		const packCapacity = String(6 * 1024 ** 3);
 
@@ -1752,10 +1722,6 @@ function measureResultLine(
 	return `${JSON.stringify({ kind: 'plan-measure', data: { measurements } })}\n`;
 }
 
-// The production measurer answers over the same runner protocol as every
-// other cupboard invocation, so the planAction packing tests drive it without
-// an injected measurer: the recorded sizes reach packCohorts, and a failed
-// A failed production measurement keeps the cohorts from the manifest.
 function packingRunner(options: {
 	readonly measurements?: Readonly<
 		Record<string, { downloadSize: number; narSize: number }>
@@ -1783,9 +1749,7 @@ function packingRunner(options: {
 }
 
 function noop(): void {
-	/*
-	test double: nothing to record
-	*/
+	// Intentionally empty test callback.
 }
 
 const neverMeasuresRunner: EnsureRunner = () =>
@@ -1820,7 +1784,7 @@ function argumentAfter(arguments_: readonly string[], flag: string): string {
 	const value = arguments_.at(arguments_.indexOf(flag) + 1);
 
 	if (value === undefined) {
-		throw new Error(`the command did not carry a ${flag} argument`);
+		throw new Error(`the command did not include a ${flag} argument`);
 	}
 
 	return value;
@@ -1863,12 +1827,12 @@ describe('packingMeasurer', () => {
 	it.each([
 		{ name: "this runner's own store", store: '', storeArguments: [] },
 		{
-			name: 'the store the cohorts build against',
+			name: 'the selected build store',
 			store: 'ssh-ng://builds.example',
 			storeArguments: ['--store', 'ssh-ng://builds.example']
 		}
 	])(
-		'measures every evaluated cohort target against $name and keys each NAR size by attr',
+		'invokes plan measure for each evaluated target against $name and returns NAR sizes keyed by attr',
 		async ({ store, storeArguments }) => {
 			const first = evaluation('first', outPath);
 			const second = evaluation('second', developmentPath);
@@ -1931,7 +1895,7 @@ describe('packingMeasurer', () => {
 		}
 	);
 
-	it('never runs the command when no cohort target carries an evaluated installable', async () => {
+	it('never runs the command when no cohort target has an evaluated installable', async () => {
 		const first = evaluation('first', outPath);
 		const measurer = packingMeasurer(
 			planInputs({ temporaryDirectory: directory }),

@@ -152,7 +152,7 @@ describe('oidc-trust admin API', () => {
 		});
 	});
 
-	it('shows a single rule by id', async () => {
+	it('returns a single rule by id', async () => {
 		const token = await adminToken();
 		const added = await addRule(token, additionBody);
 		const { id } = oidcTrustSummarySchema.parse(await added.json());
@@ -245,7 +245,7 @@ describe('oidc-trust admin API', () => {
 		});
 	});
 
-	it('refuses a write token', async () => {
+	it('requires admin scope to list rules', async () => {
 		await initialise();
 		const token = await issueServerSignedToken(cacheWriteGrants());
 
@@ -256,7 +256,7 @@ describe('oidc-trust admin API', () => {
 
 	it.each([
 		{
-			name: 'a rule with no claims to bind it',
+			name: 'a rule without claim requirements',
 			body: { ...additionBody, claims: {} }
 		},
 		{

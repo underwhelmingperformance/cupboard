@@ -30,14 +30,15 @@ export interface SigningKey {
 	readonly createdAt: IsoTimestamp;
 }
 
-// The key an empty object creates for itself. Rotations issue a UUID, so this
-// fixed id marks the key a tenant started with.
+// An empty tenant key store creates generation 1 with this contract-defined
+// identifier. Later rotations use UUIDs, while retirement continues to address
+// the bootstrap key as `active`.
 export const bootstrapKeyId = signingKeyIdSchema.parse('active');
 
-// The stored public key is the only record of the name its signatures carry, so
-// a row that does not render as `<name>:<base64>` fails here rather than
-// producing a name that no client trusts. The id is the handle the key contract
-// uses to retire a key, so it is held to the same form the contract accepts.
+// Parse persisted key material at the storage boundary. The rendered public key
+// contains the Nix name used for signatures, so malformed material must fail
+// before the key is published or used for signing. Parse the identifier through
+// the retirement API's schema so every loaded key remains addressable.
 export function signingKeyFromRow(
 	row: typeof schema.signingKeys.$inferSelect
 ): SigningKey {
@@ -52,8 +53,9 @@ export function signingKeyFromRow(
 	};
 }
 
-// A stable order keeps the rendered `/pubkey` body and the narinfo `Sig:`
-// lines deterministic, so a re-materialised narinfo hashes identically.
+// Sort by the rendered public-key value before serving or signing. This keeps
+// `/pubkey` lines and narinfo `Sig:` lines deterministic, so rematerialising a
+// narinfo produces the same body.
 export function byPublicKey(left: SigningKey, right: SigningKey): number {
 	return left.publicKey.value > right.publicKey.value ? 1 : -1;
 }

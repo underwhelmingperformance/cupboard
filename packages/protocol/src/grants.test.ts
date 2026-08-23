@@ -25,8 +25,6 @@ interface ResourceFields {
 	tenant?: string;
 }
 
-// The concrete resource a route resolves, with each field parsed through its
-// scalar schema so it carries the brand the resolver produces.
 function resource(fields: ResourceFields): ResourceRequest {
 	return {
 		...(fields.cache !== undefined && {
@@ -41,8 +39,6 @@ function resource(fields: ResourceFields): ResourceRequest {
 	};
 }
 
-// Fixtures are parsed through the schema so the branded cache/root/tenant
-// selectors are well-typed (and the schema itself is exercised).
 const cacheGrant = authorizationDetailSchema.parse({
 	type: 'cupboard_cache',
 	actions: ['upload:commit', 'root:set', 'gc:run'],
@@ -581,20 +577,63 @@ describe('permittedGrantSchema', () => {
 		).toBe(true);
 	});
 
-	it('rejects a binding that sets both equalsTemplate and exact', () => {
-		expect(
-			permittedGrantSchema.safeParse({
+	it.each([
+		[
+			'a cache binding',
+			{
 				type: 'cupboard_cache',
 				actions: ['upload:commit'],
 				resources: {
 					cache: {
 						equalsTemplate: 'pr-{n}',
 						exact: 'pr-1',
+						substitutions: { n: { claim: 'ref' } },
 						validate: 'cacheName'
 					}
 				}
-			}).success
-		).toBe(false);
+			},
+			'Set exactly one of equalsTemplate and exact'
+		],
+		[
+			'a root binding',
+			{
+				type: 'cupboard_cache',
+				actions: ['root:set'],
+				resources: {
+					cache: { exact: 'pr-1', validate: 'cacheName' },
+					root: {
+						equalsTemplate: 'root-{n}',
+						exact: 'root-1',
+						equalsResource: 'cache',
+						substitutions: { n: { claim: 'ref' } },
+						validate: 'rootName'
+					}
+				}
+			},
+			'Set exactly one of equalsTemplate, exact, and equalsResource'
+		],
+		[
+			'a tenant binding',
+			{
+				type: 'cupboard_tenant',
+				actions: ['tenant:suspend'],
+				resources: {
+					tenant: {
+						equalsTemplate: 'tenant-{n}',
+						exact: 'tenant-1',
+						substitutions: { n: { claim: 'sub' } },
+						validate: 'tenant'
+					}
+				}
+			},
+			'Set exactly one of equalsTemplate and exact'
+		]
+	])('reports the valid sources for %s', (_name, value, expected) => {
+		const result = permittedGrantSchema.safeParse(value);
+
+		expect(
+			result.success ? [] : result.error.issues.map((issue) => issue.message)
+		).toStrictEqual([expected]);
 	});
 
 	it('rejects a template variable with no substitution', () => {

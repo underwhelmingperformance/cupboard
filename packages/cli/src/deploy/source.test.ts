@@ -20,8 +20,6 @@ function thrownBy(run: () => unknown): unknown {
 	return thrown;
 }
 
-// A checkout rooted at `/repo`: the workspace marker and the server entry exist
-// under it and nowhere else.
 function isInCheckout(filePath: string): boolean {
 	return (
 		filePath === '/repo/pnpm-workspace.yaml' ||

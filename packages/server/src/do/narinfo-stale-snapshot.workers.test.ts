@@ -24,19 +24,16 @@ import {
 
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 
-// The committed-edges snapshot that `servableTargets` reads from D1 before
-// entering the heal gate can become stale when a concurrent commit advances a
-// row's generation between the snapshot read and the `isServable` call. Inside
-// the gate, `rowStillCommitted` sees the fresh row at gen N+1 against a snapshot
-// that only holds the gen-N edge, finds no match, and can leave the narinfo
-// object unmaterialised (or delete it) when it should heal or keep it.
-describe('isServable with a stale committed-edges snapshot', () => {
+// A D1 edge snapshot can predate a recommit. If the snapshot does not contain
+// the current generation, servability must read D1 again before deleting the
+// narinfo object or declining to repair it.
+describe('servability after a committed-edge snapshot becomes stale', () => {
 	beforeEach(async () => {
 		await resetTestServer();
 		await clearBlobStorage();
 	});
 
-	it('heals a narinfo object when the committed-edges snapshot predates a concurrent recommit', async () => {
+	it('heals a missing narinfo object after a recommit makes the edge snapshot stale', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('stale-snapshot-nar');
 
@@ -48,11 +45,8 @@ describe('isServable with a stale committed-edges snapshot', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		// Commit the path at generation 0.
 		await commitPath(token, metadata, nar);
 
-		// Capture the committed-edges snapshot while the row is at generation 0.
-		// This is the snapshot that `servableTargets` would have read.
 		const staleSnapshot = await runInDurableObject(
 			currentServer(),
 			(instance) => {
@@ -63,10 +57,8 @@ describe('isServable with a stale committed-edges snapshot', () => {
 			}
 		);
 
-		// Simulate a concurrent recommit advancing the row to generation 1, the
-		// state a commit arriving between the snapshot read and the isServable call
-		// would leave. The DO row's generation is bumped and a generation-1 edge is
-		// written to D1 directly, without going through the full commit pipeline.
+		// Advance the row and edge without the normal commit pipeline, which would
+		// also republish the narinfo object.
 		await runInDurableObject(currentServer(), (instance) => {
 			instance.context.db
 				.update(schema.narInfos)
@@ -105,14 +97,10 @@ describe('isServable with a stale committed-edges snapshot', () => {
 			.onConflictDoNothing()
 			.run();
 
-		// Drop the narinfo object so `materialiseIfRecoverable` must re-create it.
 		await env.BLOBS.delete(
 			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
 
-		// `isServable` with the stale gen-0 snapshot: the row is now at gen 1, so
-		// `rowStillCommitted` finds no match in the snapshot and must confirm with
-		// a fresh D1 read before it may treat the row as uncommitted.
 		const isServableResult = await runInDurableObject(
 			currentServer(),
 			(instance) => {

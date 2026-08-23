@@ -9,15 +9,11 @@ import {
 } from '../errors.ts';
 import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
-// The subset of an R2 object the commit step verifies before trusting it: its
-// byte length and the SHA-256 the store computed on upload.
 export interface UploadedObject {
 	readonly size: number;
 	readonly checksums: { readonly sha256?: ArrayBuffer };
 }
 
-// What a stored NAR blob must satisfy: it exists, its size is exact, and its
-// SHA-256 equals the recorded file hash.
 export interface ExpectedNarBlob {
 	readonly narHash: NixSha256HashString;
 	readonly fileHash: NixSha256HashString;
@@ -25,11 +21,9 @@ export interface ExpectedNarBlob {
 }
 
 /**
- * Confirms a stored R2 object matches the NAR blob it is meant to hold: it
- * exists, its size is exact, and its SHA-256 is the recorded file hash. Each
- * failure raises a typed error carrying the offending values. The commit step
- * verifies a freshly uploaded object; the storage check re-verifies a committed
- * one.
+ * Checks that an R2 object exists and has the expected compressed size and
+ * stored SHA-256 checksum. This check does not decompress or verify the NAR
+ * contents.
  */
 export function verifyStoredBlob(
 	object: UploadedObject | undefined,

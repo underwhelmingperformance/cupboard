@@ -2,25 +2,18 @@ import { createHash } from 'node:crypto';
 
 import { type Cohort, isBestEffortCohort } from './publish-plan.ts';
 
-/**
- * `checkStoreCapacity` (packages/cli/src/plan/capacity.ts) applies this headroom
- * calculation to one build. Packing applies the same calculation to a candidate
- * group. `actions/` cannot import `packages/cli`, so the formula and its
- * provisional defaults are mirrored here rather than shared. Keep the defaults
- * here and in `capacity.ts` numerically identical until both can import the
- * formula from one package.
- */
 export interface PackingHeadroom {
 	readonly absoluteMinimum: number;
 	readonly fraction: number;
 }
 
+// `actions/` cannot import the CLI implementation of store-capacity headroom,
+// so packing mirrors its formula and defaults. Keep this code identical to
+// `packages/cli/src/plan/capacity.ts` until both packages can import one shared
+// implementation.
 export const defaultPackingHeadroomAbsoluteMinimum = 5 * 1024 ** 3;
 export const defaultPackingHeadroomFraction = 0.1;
 
-// Build scratch requirements do not scale with store size. The effective
-// headroom is therefore the greater of the absolute minimum and the configured
-// fraction. This matches `effectiveHeadroom` in capacity.ts.
 function effectivePackingHeadroom(
 	headroom: PackingHeadroom,
 	capacity: number
@@ -29,30 +22,15 @@ function effectivePackingHeadroom(
 }
 
 export interface PackCohortsOptions {
-	/**
-	When false, packing does not run and {@link packCohorts} returns `undefined`.
-	The caller retains the cohorts from the manifest.
-	*/
 	readonly enabled: boolean;
 	readonly cohorts: readonly Cohort[];
-	/**
-	Measured substitutable NAR size for each target, keyed by attr. A target
-	without a measurement remains in its original cohort.
-	*/
 	readonly measurements: ReadonlyMap<string, number>;
 	readonly capacity: number;
 	readonly headroom?: Partial<PackingHeadroom>;
 }
 
 export interface PackingResult {
-	/**
-	The cohorts from the manifest after eligible single-target cohorts have been
-	combined. Explicit multi-target cohorts remain unchanged.
-	*/
 	readonly cohorts: readonly Cohort[];
-	/**
-	The total measured size of each emitted cohort, keyed by the cohort's key. A cohort whose targets were not all measured has no entry.
-	*/
 	readonly measuredSizes: ReadonlyMap<string, number>;
 }
 
@@ -61,12 +39,9 @@ interface SizedCohort {
 	readonly size: number;
 }
 
-// A cohort's own execution context: cohorts sharing a job's runner, remote
-// setting and failure tolerance are the only ones packing may combine, since
-// a job runs under one label, one builder configuration and one
-// continue-on-error. A best-effort target's failure is tolerated only where
-// every member of its job tolerates failure, so the tolerance belongs in the
-// context packing groups by.
+// A job has one runner label, one builder configuration and one
+// continue-on-error value. Pack cohorts together only when all three match. In
+// particular, a best-effort target cannot share a job with a required target.
 function executionContextKey(cohort: Cohort): string {
 	return JSON.stringify([
 		cohort.system,
@@ -77,21 +52,13 @@ function executionContextKey(cohort: Cohort): string {
 }
 
 /**
- * Groups eligible single-target cohorts under a disk budget using first-fit
- * decreasing. It sorts targets by measured substitutable NAR size, then places
- * each target in the first group with enough capacity or starts a new group.
- * Ties retain the cohort order from the manifest.
+ * Pack measured single-target cohorts within each execution context using
+ * first-fit decreasing. Sort by measured substitutable NAR size and preserve
+ * manifest order when sizes match.
  *
- * Packing combines targets only when they have the same execution context.
- * Failure tolerance is part of that context, so a best-effort target is never
- * packed alongside a required target.
- *
- * Packing does not split or merge an explicit multi-target cohort. A target
- * without a measurement remains in its original cohort because measured
- * packing has no basis for moving it.
- *
- * Returns `undefined` only when disabled. An enabled run returns a
- * `PackingResult` even when it combines no cohorts.
+ * Never split or merge an explicit multi-target cohort. Leave a target in its
+ * original cohort when it has no measurement. Return `undefined` only when
+ * packing is disabled; an enabled run returns a result even if nothing moves.
  */
 export function packCohorts(
 	options: PackCohortsOptions
@@ -167,9 +134,6 @@ function measuredSizeOf(
 	return total;
 }
 
-// First-fit decreasing, run independently per execution context: a job runs
-// under one runner label, one remote setting and one failure tolerance, so
-// packing only ever combines cohorts that already share all three.
 function packContext(
 	candidates: readonly SizedCohort[],
 	budget: number

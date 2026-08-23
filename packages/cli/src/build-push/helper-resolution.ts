@@ -21,12 +21,11 @@ async function isFile(candidate: string): Promise<boolean> {
 }
 
 /**
- * The absolute path of the compiled hook helper, resolved from this
- * installation itself: resolution evaluates nothing, runs no subprocess and
- * depends on no substituter. The release tarball unpacks the helper beside
- * the `cupboard` executable, and the Nix package installs it under the
- * sibling `libexec/cupboard/` directory. Preflight calls this before the
- * expensive build starts, so an installation missing its helper refuses early.
+ * Finds the compiled hook helper in either supported installation layout. A
+ * release archive places it beside `cupboard`; the Nix package places it under
+ * the sibling `libexec/cupboard` directory. Resolution performs no evaluation
+ * or substitution, so preflight can reject an incomplete installation before
+ * starting the build.
  */
 export async function resolveHookHelper(
 	options: HelperResolutionOptions = {}

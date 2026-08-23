@@ -6,7 +6,7 @@ on:
   workflow_call:
     inputs:
       url:
-        description: cupboard tenant URL.
+        description: Cupboard tenant URL.
         required: true
         type: string
       targets:
@@ -17,15 +17,13 @@ on:
         type: string
       preset:
         description: >-
-          Derive cache, root-prefix and ttl from the triggering event instead of
-          passing them explicitly. 'pull-request-and-branch' gives a
-          pull_request run its own pr-<number> cache with a 14-day TTL and a run
-          on the configured branch the default cache, each under
-          github:<repository>/<cache or branch>. Other refs are refused before
-          planning. Applies reuse-view to branch runs only, announcing with a
-          notice when a pull-request run drops a configured view. Mutually
-          exclusive with cache, root-prefix and ttl; empty keeps the explicit
-          inputs.
+          Derive cache, root-prefix, and ttl from the triggering event.
+          'pull-request-and-branch' gives each pull_request run a pr-<number>
+          cache with a 14-day TTL. A run on the configured branch uses the
+          default cache. Both roots start with github:<repository>; other refs
+          are rejected before planning. Only branch runs use reuse-view. This
+          input is mutually exclusive with cache, root-prefix, and ttl; leave it
+          empty to use those explicit inputs.
         required: false
         default: ''
         type: string
@@ -55,19 +53,17 @@ on:
         type: string
       run-root-ttl:
         description:
-          TTL for the per-run root every cohort job's push attaches to, such as
-          7d or 12h. Streamed work stays reachable under it for the rest of the
-          run, so a later cohort can substitute an earlier one's shared output
-          instead of rebuilding it.
+          TTL for the per-run root attached by every cohort push, such as 7d or
+          12h. It keeps streamed work available so later cohorts can substitute
+          shared outputs instead of rebuilding them.
         required: false
         default: '24h'
         type: string
       reuse-view:
         description:
-          Named tenant reuse view to opt into for shared intermediates missing
-          from the destination. setup refuses to configure a view whose
-          nix-cache-info priority ties or beats the destination's; empty
-          disables reading through a view.
+          Named tenant reuse view for shared intermediates missing from the
+          destination. setup rejects a view whose nix-cache-info priority is
+          equal to or lower than the destination's. Empty disables the view.
         required: false
         default: ''
         type: string
@@ -89,7 +85,8 @@ on:
         type: boolean
       push:
         description:
-          Publish results; false only builds each cohort's targets directly.
+          Publish cohort results. When false, build every cohort directly
+          without cache planning or publication.
         required: false
         default: true
         type: boolean
@@ -172,17 +169,16 @@ on:
         type: string
       enable-packing:
         description: >-
-          Opt in to measured cohort packing: price candidate cohort groupings
-          from measured store sizes under pack-capacity, rather than one cohort
-          job per manifest cohort. Off by default; never repartitions a manifest
-          without a measurement to price the result against.
+          Pack cohorts within pack-capacity using measured store sizes, rather
+          than creating one job for each manifest cohort. Off by default; a
+          cohort without a measurement is not repartitioned.
         required: false
         default: false
         type: boolean
       pack-capacity:
         description:
-          Disk budget, in bytes, that measured cohort packing prices candidate
-          groupings against. Required when enable-packing is true.
+          Disk limit in bytes for measured cohort packing. Required when
+          enable-packing is true.
         required: false
         default: ''
         type: string
@@ -214,10 +210,10 @@ on:
           input-known-hosts.
         required: false
       read_user:
-        description: Basic-auth credentials for tenants whose reads are private.
+        description: Basic-auth user for a tenant whose reads are private.
         required: false
       read_password:
-        description: Basic-auth credentials for tenants whose reads are private.
+        description: Basic-auth password for a tenant whose reads are private.
         required: false
 
 permissions: {}
@@ -229,7 +225,6 @@ jobs:
   configure:
     name: Resolve the publication inputs
     runs-on: ${{ inputs.plan-runner }}
-    # A hung leg must not burn the 360-minute default.
     timeout-minutes: 10
     permissions:
       contents: read # resolve cupboard releases and check out workflow code
@@ -383,9 +378,6 @@ jobs:
               fi
               ;;
             pull-request-and-branch)
-              # A caller either states the event arithmetic or delegates it,
-              # never half of each: a preset alongside any input it derives is
-              # refused.
               if [ -n "${CACHE}${ROOT_PREFIX}${TTL}" ]; then
                 echo '::error::preset is mutually exclusive with cache, root-prefix and ttl'
                 exit 1
@@ -420,13 +412,7 @@ jobs:
   plan:
     name: Plan the publication
     needs: configure
-    # The plan job receives the input SSH key, read credentials and OIDC
-    # permission, and evaluates the flake, so where it runs is the operator's
-    # choice like any other job: the label comes from the plan-runner input.
-    # Self-hosted estates should read docs/runner-provenance.md before
-    # pointing it at their own machines.
     runs-on: ${{ inputs.plan-runner }}
-    # A hung leg must not burn the 360-minute default.
     timeout-minutes: 30
     permissions:
       attestations: read # verify a selected cupboard release
@@ -553,7 +539,6 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.cohort-matrix) }}
     name: ${{ matrix.key }}
     runs-on: ${{ matrix.runsOn }}
-    # A hung leg must not burn the 360-minute default.
     timeout-minutes: 180
     permissions:
       attestations: write # record build provenance on the repository
@@ -619,9 +604,6 @@ jobs:
           read-password: ${{ secrets.read_password }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
 
-      # build-cohort partitions availability, supervises the build and retries,
-      # records attribution, publishes the results, and sets each target root to
-      # its complete declared path list.
       - uses: ./.cupboard-workflow/actions/build-cohort
         id: build-cohort
         with:

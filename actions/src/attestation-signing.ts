@@ -7,33 +7,18 @@ import { z } from 'zod';
 
 import { AttestationSigningError } from './errors.ts';
 
-/**
-An in-toto subject: a store path's base name and its NAR hash digest.
-*/
 export interface AttestationSubject {
 	readonly name: string;
 	readonly sha256: string;
 }
 
-/**
-The predicate half of an in-toto statement. The signer adds the subjects.
-*/
 export interface AttestationStatement {
 	readonly predicateType: string;
 	readonly predicate: object;
 }
 
-/**
-The outcome of signing one statement.
-*/
 export interface SignedAttestation {
-	/**
-	The Sigstore bundle, as the text of a `.sigstore.json` document.
-	*/
 	readonly bundle: string;
-	/**
-	The identifier the GitHub API returns for the record it stored.
-	*/
 	readonly attestationId?: string;
 }
 
@@ -42,15 +27,13 @@ export type StatementSigner = (
 ) => Promise<SignedAttestation>;
 
 /**
- * The stage that failed, as `@sigstore/sign` reports it on the error it throws.
- * The package declares the union of codes but does not export it, so the type
- * comes from the error class it does export.
+ * `@sigstore/sign` does not export its stage-code union. Derive it from the
+ * exported error class so this type stays aligned with the installed package.
  */
 export type SigningStageCode = InternalError['code'];
 
 /**
- * The stage codes that come from a call to Fulcio or to a witness. Such a call
- * can fail because the service was briefly unreachable. The identity codes
+ * Retry only stages that call Fulcio or a witness. The identity codes
  * (`IDENTITY_TOKEN_READ_ERROR`, `IDENTITY_TOKEN_PARSE_ERROR`) are left out,
  * because an OIDC token the job cannot read or decode is no more readable a few
  * seconds later.
@@ -63,10 +46,10 @@ const serviceCallCodes = [
 ] as const satisfies readonly SigningStageCode[];
 
 /**
- * The statuses that mean the service could not serve the request this time.
- * Fulcio uses a 4xx to refuse a certificate and Rekor uses one to reject an
- * entry; the same request would get the same refusal, so every status outside
- * this set fails the step at once.
+ * Retry only statuses that can reflect a temporary service failure. Fulcio may
+ * use another 4xx status to refuse a certificate, and Rekor may use one to
+ * reject an entry. Repeating those requests would get the same refusal, so
+ * every status outside this set fails the step at once.
  */
 const retryableSigningStatuses = new Set<number>([
 	StatusCodes.REQUEST_TIMEOUT,
@@ -85,10 +68,9 @@ const signingFailureSchema = z.object({
 const httpFailureSchema = z.object({ statusCode: z.number() });
 
 /**
- * Whether a signing failure is worth another attempt. A call to Fulcio or to a
- * witness is transient when it got no answer at all, or when the service
- * answered with one of {@link retryableSigningStatuses}. Everything else is
- * final, including a failure that carries no code this action recognises.
+ * Retries a recognised Fulcio or witness call when it received no response or
+ * one of {@link retryableSigningStatuses}. Everything else is final, including
+ * a failure with no recognised stage code.
  */
 export function isTransientSigningFailure(error: unknown): boolean {
 	const failure = signingFailureSchema.safeParse(error);
@@ -99,7 +81,7 @@ export function isTransientSigningFailure(error: unknown): boolean {
 
 	const http = httpFailureSchema.safeParse(failure.data.cause);
 
-	// A cause without a status code means the request never got an answer: a
+	// A cause without a status code means the request received no response: a
 	// DNS failure, a refused connection or a timed-out socket.
 	if (!http.success) {
 		return true;
@@ -108,15 +90,9 @@ export function isTransientSigningFailure(error: unknown): boolean {
 	return retryableSigningStatuses.has(http.data.statusCode);
 }
 
-/**
-The most attempts one statement gets before the step fails.
-*/
 export const maxSigningAttempts = 4;
 
 export interface SigningDependencies {
-	/**
-	Waits before the next attempt. Tests pass a wait that returns at once.
-	*/
 	readonly delay?: (attempt: number) => Promise<void>;
 }
 
@@ -190,8 +166,8 @@ export function githubStatementSigner(
 }
 
 /**
- * The SLSA build provenance for this workflow run, built from the run's OIDC
- * claims. `actions/attest-build-provenance` signs the same predicate.
+ * Uses the same OIDC-derived SLSA predicate as
+ * `actions/attest-build-provenance`.
  */
 export async function slsaProvenanceStatement(): Promise<AttestationStatement> {
 	const predicate = await buildSLSAProvenancePredicate();

@@ -1,36 +1,28 @@
-/**
- * Supplies bearer tokens to the client and can refresh them. The CLI obtains a
- * short-lived access token by OIDC token-exchange and caches it; a long push can
- * outlive that token. Each transport can obtain the current token from the
- * provider and refresh it after an authentication failure.
- */
 export interface TokenProvider {
 	get(): Promise<string>;
 	refresh(): Promise<string>;
 }
 
-/**
-Either a fixed bearer token or a provider that can refresh one.
-*/
 export type AccessCredential = string | TokenProvider;
 
 /**
- * Describes one authenticated HTTP request or WebSocket upgrade. `headers`
- * includes the bearer token and any transport headers supplied by the caller.
+ * A provider-backed attempt can refresh once after a 401. `headers` combines
+ * the bearer token with any transport headers supplied by the caller.
  */
 export interface BearerAttempt {
 	readonly headers: Readonly<Record<string, string>>;
 	/**
-	 * Refreshes a provider-backed credential once. Returns `undefined` for a
-	 * fixed credential or after the attempt has already refreshed it.
+	 * After a 401, returns one attempt with a refreshed provider credential.
+	 * Returns `undefined` for a fixed credential or after the refresh was used.
 	 */
 	refreshAfterAuthenticationFailure(): Promise<BearerAttempt | undefined>;
 }
 
 /**
- * Resolves a bearer credential for one HTTP request or WebSocket upgrade.
- * The caller can refresh a provider-backed credential once if the server
- * returns 401 or closes a WebSocket because the token expired.
+ * Creates the authentication attempt for one HTTP request or WebSocket
+ * upgrade. Its refresh method handles a 401 on that attempt. After a WebSocket
+ * expiry close, the commit session calls its authorisation provider to create a
+ * new attempt instead.
  */
 export async function bearerAttempt(
 	credential: AccessCredential | undefined,

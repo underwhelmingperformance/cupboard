@@ -20,16 +20,8 @@ import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 import { exactUploadDecisions } from '../push/negotiation.ts';
 import type { CompressNar, PushClient, PushNarArchive } from '../push/push.ts';
 
-// How long accepted paths accumulate before a flush. A batch is sent once it
-// reaches the commit batch size or this wait elapses, and each flush goes
-// through the ordinary batched negotiation. Cachix batches narinfos at one
-// hundred paths or half a second, and Attic uses session timers of the same
-// order.
 export const flushMaxWaitMs = 500;
 
-/**
-The store operations a batch can perform while its paths are protected.
-*/
 export interface BatchSession {
 	protectPath(storePath: StorePathString): Promise<void>;
 	queryPathInfo(storePath: StorePathString): Promise<NixValidPathInfo>;
@@ -67,15 +59,11 @@ export interface BatchPathFailure {
 export interface BuildOutputBatcherOptions {
 	readonly store: BatchStore;
 	readonly client: PushClient;
-	/**
-	The run root every flush's negotiation binds, exactly as a push does.
-	*/
 	readonly runRoot?: UploadAttachRoot;
 	readonly commitOptions?: CommitOptions;
 	/**
 	 * The run's shared commit session. When it is present, every flush commits
-	 * over it, so the whole publication holds one socket and the server paces it
-	 * as one run.
+	 * over it. The server then applies one credit budget to the whole run.
 	 */
 	readonly session?: CommitSession;
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
@@ -310,16 +298,10 @@ export class BuildOutputBatcher {
 		}
 	}
 
-	/**
-	The terminal per-path outcomes recorded so far.
-	*/
 	get outcomes(): ReadonlyMap<StorePathString, BatchPathOutcome> {
 		return this.recorded;
 	}
 
-	/**
-	The paths awaiting a flush, including any returned by a failure.
-	*/
 	get candidates(): readonly StorePathString[] {
 		return [...this.waiting];
 	}

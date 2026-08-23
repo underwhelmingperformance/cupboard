@@ -24,34 +24,19 @@ import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { CliError, CliUsageError, transientExitCode } from '../errors.ts';
 
 /**
- * The information needed to classify one manifest target: what `nix build`
- * would realise, the concrete output path when Nix can predict it before
- * building, and the retention root for its `roots.ensure` call. A target with
- * no `expectedPath` is content-addressed or otherwise floating.
+ * A target with no `expectedPath` is content-addressed or otherwise floating.
  * Its path does not exist yet, so the module cannot query it in the
  * destination, a reuse view or an upstream substituter. It therefore always
  * joins the build set.
  */
 export interface AvailabilityTarget {
-	/**
-	The manifest attribute that identifies this target to the operator.
-	*/
 	readonly attr: string;
 	readonly installable: NixDerivedPathString;
 	readonly expectedPath?: StorePathString;
-	/**
-	The planned derivation for this target.
-	*/
 	readonly plannedLocalDerivation?: StorePathString;
 	readonly root: RootName;
 }
 
-/**
- * The probes for destination availability, which the planner cannot determine
- * from the local store. One probe asks the destination cache and the other
- * asks the tenant's configured reuse view. Both accept a batch of paths,
- * matching the existing `availableCachePaths` HTTP probe.
- */
 export interface DestinationProbes {
 	readonly destinationServed: (
 		paths: readonly StorePathString[]
@@ -73,8 +58,7 @@ export interface AvailabilityCeilingConfig {
 }
 
 /**
- * A target that may be excluded from publication because an upstream
- * substituter serves it. The candidate includes the installable because a
+ * The candidate includes the installable because a
  * derivation can disable substitutes for its own outputs, and that setting
  * cannot be read from the store path alone.
  */
@@ -84,29 +68,20 @@ export interface UpstreamAvailabilityCandidate {
 }
 
 /**
- * The result of checking whether an upstream substituter can serve a candidate.
  * Only `confirmed` excludes the target from publication. Every other result
  * records why the target must be built or published.
  */
 export type UpstreamAvailabilityVerdict =
 	| { readonly kind: 'confirmed' }
-	/**
-	The `substitute` setting is off, so Nix would not fetch the path.
-	*/
 	| { readonly kind: 'substitution-disabled' }
-	/**
-	The derivation disables substitutes and no setting overrides it.
-	*/
 	| { readonly kind: 'substitutes-not-allowed' }
-	/**
-	The derivation could not be read, so its option is unknown.
-	*/
 	| { readonly kind: 'derivation-unreadable'; readonly errorName: string }
 	/**
 	 * The daemon does not trust the confirmation's connection. It drops such a
-	 * client's settings, so the substituters that answered are the runner's own,
-	 * and their answers may come from a narinfo cache the confirmation asked to
-	 * bypass. Neither fact shows that a consumer elsewhere could fetch the path.
+	 * client's settings, so the runner's substituters answer instead. Their
+	 * responses may also come from a narinfo cache despite the confirmation's
+	 * bypass setting. Neither fact shows that an external consumer could fetch
+	 * the path.
 	 */
 	| {
 			readonly kind: 'connection-not-trusted';
@@ -117,9 +92,9 @@ export type UpstreamAvailabilityVerdict =
 			readonly missing: StorePathString;
 	  }
 	/**
-	 * A path in the candidate's closure that this store does not hold. The
-	 * confirmation has nothing to compare a substituter's offer against, so it
-	 * cannot check the rest of the closure.
+	 * The selected store has no local NAR hash for a path in the candidate's
+	 * closure. Confirmation cannot compare the upstream offer with this run's
+	 * content.
 	 */
 	| {
 			readonly kind: 'closure-not-held-locally';
@@ -137,16 +112,12 @@ export type UpstreamAvailabilityVerdict =
 			readonly offered: string;
 	  }
 	/**
-	 * A path in the closure carries no signature this configuration would
-	 * accept, so a consumer would refuse to fetch it however well the
-	 * substituter serves it.
+	 * The consumer's policy accepts none of the signatures on a narinfo in the
+	 * candidate's closure, so the consumer would refuse that path.
 	 */
 	| { readonly kind: 'closure-unsigned'; readonly storePath: StorePathString }
 	| { readonly kind: 'closure-over-cap'; readonly maxPaths: number };
 
-/**
-One rejected candidate, as the partition reports it.
-*/
 export type LeftUpstreamRejection = Exclude<
 	UpstreamAvailabilityVerdict,
 	{ readonly kind: 'confirmed' }
@@ -154,9 +125,6 @@ export type LeftUpstreamRejection = Exclude<
 
 export type CeilingSource = 'configured' | 'untrusted-fallback';
 
-/**
-What substituting one path would cost, as the store reported it.
-*/
 export interface SubstitutablePathSize {
 	readonly downloadSize: number;
 	readonly narSize: number;
@@ -187,8 +155,7 @@ export interface AvailabilityCeiling {
 }
 
 /**
- * Whether the selected store uses the substitution settings that the planner
- * can read. An SSH store preserves the remote daemon's settings, so its policy
+ * An SSH store preserves the remote daemon's settings, so its policy
  * is unknown until the derivation has been copied. For an unknown policy, the
  * plan accounts for both the build and substitution branches.
  */
@@ -202,35 +169,15 @@ export type PlannedSubstitutionPolicy =
 
 export interface AvailabilityPartitionOptions {
 	readonly targets: readonly AvailabilityTarget[];
-	/**
-	Paths that the caller can copy to the selected store before realisation.
-	*/
 	readonly plannedLocalClosure?: ReadonlySet<StorePathString>;
-	/**
-	Derivations in `plannedLocalClosure` whose own policy permits substitution.
-	*/
 	readonly plannedSubstitutableDerivations?: ReadonlySet<StorePathString>;
-	/**
-	Derived-path installables whose output paths the local derivations do not
-	declare.
-	*/
 	readonly plannedFloatingOutputs?: ReadonlySet<NixDerivedPathString>;
 	readonly plannedSubstitutionPolicy: PlannedSubstitutionPolicy;
-	/**
-	Outputs the caller can realise after it copies their derivations to the
-	selected store, keyed by their expected store path.
-	*/
 	readonly plannedLocalOutputs?: ReadonlyMap<
 		StorePathString,
 		readonly NixDerivedPathString[]
 	>;
-	/**
-	The kind and URI of the selected store, for refusal diagnostics.
-	*/
 	readonly storeIdentity: PlanStore;
-	/**
-	The selected store's own availability queries; no override applied.
-	*/
 	readonly store: Pick<
 		Nix,
 		| 'queryMissing'
@@ -241,8 +188,8 @@ export interface AvailabilityPartitionOptions {
 	>;
 	readonly destinationProbes: DestinationProbes;
 	/**
-	 * Which of the given paths the destination cache holds build provenance
-	 * for. A plan that requires attested availability sets this field, and a
+	 * Returns the given paths with build provenance in the destination cache. A
+	 * plan that requires attested availability sets this field, and a
 	 * destination-served path with no provenance then joins the build set.
 	 * When the field is unset, a target is attach-only whenever the destination
 	 * cache serves its path.
@@ -250,9 +197,6 @@ export interface AvailabilityPartitionOptions {
 	readonly attestedServed?: (
 		paths: readonly StorePathString[]
 	) => Promise<ReadonlySet<StorePathString>>;
-	/**
-	One `roots.ensure` result per target root, keyed by root name.
-	*/
 	readonly rootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse>;
 	/**
 	 * Re-queries paths whose availability remained unknown, bypassing any cache
@@ -262,10 +206,9 @@ export interface AvailabilityPartitionOptions {
 		storePaths: readonly StorePathString[]
 	) => Promise<UnknownRequeryOutcome>;
 	/**
-	 * Verifies that a candidate is available from substituters a consumer
-	 * elsewhere could reach, and that Nix would fetch it rather than build it.
-	 * Asked only of the targets the classification would otherwise leave
-	 * upstream. Other targets do not require this verification.
+	 * Confirms that permitted upstream substituters offer the same closure held
+	 * locally and that the consumer's policy accepts every offer. Called only
+	 * for a candidate that the raw substitutability result would leave upstream.
 	 */
 	readonly confirmUpstreamAvailability: (
 		candidate: UpstreamAvailabilityCandidate
@@ -273,12 +216,6 @@ export interface AvailabilityPartitionOptions {
 	readonly ceiling: AvailabilityCeilingConfig;
 }
 
-/**
- * The work required to realise and publish a manifest's targets. The four
- * target lists distinguish attachment, publication by reference, upstream
- * availability, and realisation. `dependencyBuilds` contains output paths to
- * realise before the targets that need them.
- */
 export interface AvailabilityPartition {
 	readonly attachOnly: readonly StorePathString[];
 	readonly publishByReference: readonly StorePathString[];
@@ -291,13 +228,13 @@ export interface AvailabilityPartition {
 	readonly buildSet: readonly NixDerivedPathString[];
 	/**
 	 * Outputs to realise before the targets in `buildSet` that require them. The
-	 * owner list lets the action remove dependencies of targets withdrawn by the
-	 * final probe.
+	 * `requiredBy` lets the action remove dependencies used only by targets that
+	 * the final probe withdraws.
 	 */
 	readonly dependencyBuilds: readonly AvailabilityDependencyBuild[];
 	/**
 	 * Local closure paths to copy before realising the targets that require them.
-	 * The owner list lets the action omit paths used only by withdrawn targets.
+	 * `requiredBy` lets the action omit paths used only by withdrawn targets.
 	 */
 	readonly dependencyCopies: readonly AvailabilityDependencyCopy[];
 	/**
@@ -321,14 +258,11 @@ export interface AvailabilityPartition {
 	readonly downloadSize: number;
 	readonly narSize: number;
 	/**
-	 * The targets this store already held when the plan ran. A run that builds
-	 * afterwards realised everything else it publishes, so a receipt claiming
-	 * what the run built claims none of these.
+	 * The targets already present in this store when the plan ran. A later build
+	 * realises every other target that it publishes, so its build receipt must
+	 * exclude these paths.
 	 */
 	readonly alreadyValid: readonly StorePathString[];
-	/**
-	 * Equal to `counts.unknown`, for direct use by the capacity preflight.
-	 */
 	readonly unknownCount: number;
 	readonly ceiling: AvailabilityCeiling;
 	/**
@@ -339,12 +273,6 @@ export interface AvailabilityPartition {
 	readonly unreachableSubstituters: readonly UnreachableSubstituter[];
 }
 
-/**
- * An output to realise before the cohort targets that require it. `installables`
- * contains the candidate derived-path installables that can produce the output.
- * `requiredBy` contains the target installables whose substitute closures refer
- * to it.
- */
 export interface AvailabilityDependencyBuild {
 	readonly path: StorePathString;
 	readonly installables: readonly [
@@ -357,9 +285,6 @@ export interface AvailabilityDependencyBuild {
 	];
 }
 
-/**
- * A local closure path and the cohort targets whose substitutes require it.
- */
 export interface AvailabilityDependencyCopy {
 	readonly path: StorePathString;
 	readonly requiredBy: readonly [
@@ -368,10 +293,6 @@ export interface AvailabilityDependencyCopy {
 	];
 }
 
-/**
- * Raised when the final availability check leaves more unresolved paths than
- * the configured limit permits.
- */
 export class UnknownPathsCeilingError extends CliError {
 	public readonly unknownCount: number;
 
@@ -395,17 +316,13 @@ export class UnknownPathsCeilingError extends CliError {
 		this.unknownCount = unknownPaths.length;
 	}
 
-	// A different attempt, a trusted connection, or a cleared narinfo
-	// negative cache can all resolve what today's answer could not, so this
-	// is the CLI's transient category rather than a bare unclassified exit.
+	// A later attempt may use a trusted connection or a refreshed narinfo cache
+	// and resolve these paths. Report the refusal as transient.
 	override get exitCode(): number {
 		return transientExitCode;
 	}
 }
 
-/**
-Reports remote targets whose selected output paths are unknown until after realisation.
-*/
 export class RemoteFloatingOutputUnsupportedError extends CliUsageError {
 	constructor(
 		public readonly targets: readonly {
@@ -459,9 +376,10 @@ function shouldQueryAvailabilityForTarget(
 /**
  * Partitions a manifest's targets by what realising and publishing each one
  * actually requires. Machine-independent facts (destination- and
- * view-serving) come from the caller's HTTP probes; everything else is asked
- * of the selected store directly, batched into as few daemon round trips as
- * the three availability questions allow.
+ * view-serving) come from the caller's HTTP probes. The selected store reports
+ * local validity, build work, and raw substitutability through batched daemon
+ * queries. Upstream confirmation then checks the exact offered closure and the
+ * consumer's signature policy.
  */
 export async function partitionAvailability(
 	options: AvailabilityPartitionOptions
@@ -721,11 +639,10 @@ async function includeMissingSubstituteReferences(
 		readonly candidate: Candidate;
 		readonly partition: NixMissingPartition;
 	}
-	// The joint answer lists the outputs and substitute closures of every stopped
-	// candidate together, so it can stand in for each candidate only when every
-	// one of them is counted. A candidate whose derivation refuses substitution
-	// is left out of `substitutionAnswers` below, and its outputs would then be
-	// priced through the candidates that remain.
+	// The combined query reports the outputs and substitute closures for all
+	// stopped candidates. Reuse that result only when every candidate contributes
+	// to the estimate. Otherwise query each candidate so a refused derivation
+	// cannot add its output sizes through another candidate's result.
 	const refusedCandidateCount = stoppedCandidates.filter(
 		(candidate) => candidate.substitution === 'refused'
 	).length;
@@ -1193,11 +1110,6 @@ function accountForLocalDerivations(
 	};
 }
 
-/**
- * Where one target belongs once the three availability questions have been
- * answered for it: a named bucket together with the store path that is already
- * served, or the build set.
- */
 export type Classification =
 	| {
 			readonly bucket: 'attachOnly' | 'publishByReference' | 'leftUpstream';
@@ -1210,16 +1122,13 @@ interface ClassifiedTarget {
 	readonly classification: Classification;
 }
 
-/**
- * How many candidates are confirmed at once. Each confirmation walks a
- * closure over its own daemon connections, so the fan-out stays small.
- */
+// Each confirmation walks a closure over its own daemon connections, so keep
+// the fan-out small.
 const maximumConcurrentConfirmations = 4;
 
-// Confirm only targets that could be excluded from publication because an
-// upstream substituter serves them. Two targets can resolve to the same store
-// path through different installables, and a derivation can disable substitutes
-// for its own outputs, so confirm each path-and-installable pair separately.
+// Raw substitutability only identifies candidates for upstream availability.
+// Confirm each path-and-installable pair because aliases can share a path while
+// their derivations apply different substitution policies.
 async function confirmCandidates(
 	classified: readonly ClassifiedTarget[],
 	options: AvailabilityPartitionOptions
@@ -1262,8 +1171,6 @@ async function confirmCandidates(
 	);
 }
 
-// If confirmation fails, put the candidate in the build set as though no
-// substituter had offered it.
 function confirmed(
 	classification: Classification,
 	rejectedPaths: ReadonlySet<StorePathString>
@@ -1278,12 +1185,6 @@ function confirmed(
 	return { bucket: 'buildSet' };
 }
 
-/**
- * The attach-only paths the destination cache serves without an attestation.
- * The set is empty when the run did not ask for attested availability. Only an
- * attach-only classification can change, so the query asks about the
- * attach-only paths and no others.
- */
 function unattestedPaths(
 	classified: readonly ClassifiedTarget[],
 	attestedServedPaths: ReadonlySet<StorePathString> | undefined
@@ -1309,11 +1210,11 @@ function unattestedPaths(
 	);
 }
 
-// Attaching a target to its root publishes the path the destination cache
-// already serves. When that cache holds no attestation for the path, the
+// Attaching a target to its root publishes a path already served by the
+// destination cache. When that cache holds no attestation for the path, the
 // published target has no provenance, so a run that requires attested
 // availability puts the target in the build set and attaches an attestation to
-// the output it builds.
+// the newly built output.
 function builtWhenUnattested(
 	classification: Classification,
 	unattested: ReadonlySet<StorePathString>
@@ -1385,10 +1286,10 @@ function addToBucket(
 	buckets[classification.bucket].push(classification.path);
 }
 
-// `roots.ensure` reports on the exact target list the root last reconciled. A
-// `retained` answer means the cache serves all of those targets; any other
-// answer lists the ones it does not serve in `unavailable`, so a target absent
-// from that list is served.
+// `roots.ensure` reports the exact target list from the root's last
+// reconciliation. A `retained` answer means the cache serves all of those
+// targets. Every other answer lists unserved targets in `unavailable`, so any
+// target absent from that list is served.
 function isServedByRootEnsure(
 	target: AvailabilityTarget,
 	rootEnsureResults: ReadonlyMap<RootName, ParsedRootEnsureResponse>
@@ -1406,9 +1307,8 @@ function isServedByRootEnsure(
 	return !result.unavailable.includes(target.expectedPath);
 }
 
-// An unknown path is one no substituter offered. That answer may have come
-// from a cache holding an earlier absence, so the store is given one more
-// chance to answer it afresh.
+// The first query can classify a path as unknown from a cached narinfo miss.
+// Re-query unknown paths without that cache before enforcing the ceiling.
 async function classifyUnknowns(
 	missing: Awaited<ReturnType<Nix['queryMissing']>>,
 	dependencyOwners: ReadonlyMap<
@@ -1537,10 +1437,9 @@ function mergeRequeryAnswer(
 }
 
 /**
- * The download and NAR bytes that both answers counted. Each answer reports one
- * total over the paths it classified as substitutable, so adding the two totals
- * counts a path both of them classified that way twice. The caller subtracts
- * what this returns.
+ * The download and NAR bytes included in both answers. Each answer reports one
+ * total for its substitutable paths, so adding the totals counts their
+ * intersection twice. The caller subtracts what this function returns.
  *
  * The per-path figures come from the re-query, which is enough on its own: a
  * path in both totals is one the re-query classified as substitutable, so the
@@ -1572,8 +1471,6 @@ function bytesCountedTwice(
 	return { downloadSize, narSize };
 }
 
-// Every path listed by either answer, included once each, in the order the
-// paths first appear.
 function eachOnce(
 	first: readonly StorePathString[],
 	second: readonly StorePathString[]

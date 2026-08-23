@@ -10,9 +10,6 @@ const eventLimit = 20;
 
 export interface ClaimLogDependencies {
 	readonly api: Pick<CloudflareApi, 'queryWorkerLogs'>;
-	/**
-	The cf-ray of the refused request, matched against each event.
-	*/
 	readonly ray: string;
 	readonly now: () => number;
 	readonly sleep: (ms: number) => Promise<void>;
@@ -23,7 +20,7 @@ export interface ClaimLogDependencies {
 /**
  * The exception lines the control Worker logged for a refused request, found by
  * its cf-ray. Workers Observability lags the request by a few seconds, so the
- * query is retried before giving up. An empty result means nothing was found
+ * query is retried before giving up. An empty result means no matching lines were found
  * (observability is off, the credential cannot read it, the query failed, or
  * the log has not been ingested yet), leaving the caller to fall back to
  * pointing at the logs.

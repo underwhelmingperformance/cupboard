@@ -58,8 +58,6 @@ async function negotiateWithRoot(
 	return uploadNegotiateResponseSchema.parse(await response.json());
 }
 
-// Runs one path through negotiate, upload and commit under a run root, the way
-// a build-time push does.
 async function pushWithRoot(
 	token: string,
 	metadata: ReturnType<typeof uploadMetadata>,
@@ -333,7 +331,7 @@ describe('root attach at commit', () => {
 		});
 	});
 
-	it('a skip answered at negotiate attaches to the bound run root', async () => {
+	it('a skip returned by negotiation attaches to the bound run root', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -422,8 +420,8 @@ describe('root attach at commit', () => {
 
 		const whileLive = await runGcResult();
 
-		// Past the run root's expiry, its attached path has nothing retaining
-		// it; the permanently rooted path stays.
+		// After the run root expires, only the permanently rooted path still has a
+		// retention target.
 		vi.setSystemTime(new Date(testBase.getTime() + 2 * 3600 * 1000));
 		const afterExpiry = await runGcResult();
 

@@ -50,7 +50,7 @@ function buildStart(derivation: string) {
 }
 
 describe('buildActivities', () => {
-	it('collects derivations whose build activity started', () => {
+	it('returns derivations from build-start activities', () => {
 		const derivation = `${app}.drv`;
 		const log = buildStart(derivation);
 
@@ -76,7 +76,7 @@ describe('buildActivities', () => {
 });
 
 describe('derivationsRequiringVerification', () => {
-	it('selects remote and earlier-attempt activities for final outputs', () => {
+	it('requires local verification for a derivation from an earlier attempt and for a remotely built derivation', () => {
 		const appDerivation = `${app}.drv`;
 		const libraryDerivation = `${library}.drv`;
 
@@ -165,7 +165,7 @@ describe('buildAction', () => {
 		}
 	);
 
-	it('rejects an invalid attempt count by type', async () => {
+	it('rejects an attempt count below one', async () => {
 		await expect(
 			buildAction({ installables: ['.#app'], attempts: '0' }, {})
 		).rejects.toBeInstanceOf(BuildAttemptsInvalidError);
@@ -261,7 +261,7 @@ process.stdin.on('end', () => {
 		]);
 	});
 
-	it('verifies a partial failed attempt before attributing it after retry', async () => {
+	it('rebuilds a derivation recorded during a failed attempt before attributing the final output', async () => {
 		const directory = await mkdtemp(
 			path.join(tmpdir(), 'cupboard-build-test-')
 		);
@@ -521,7 +521,7 @@ function pathInfo(storePath: StorePathString, deriver?: string) {
 }
 
 describe('receiptSubjects', () => {
-	it('unions retry attempts and intersects them with final outputs', () => {
+	it('returns the first build attempt for a final output that was absent before the build', () => {
 		const appDerivation = `${app}.drv`;
 		const libraryDerivation = `${library}.drv`;
 		const subjects = receiptSubjects(
@@ -603,7 +603,7 @@ describe('receiptSubjects', () => {
 });
 
 describe('plannedOutputPaths', () => {
-	it('collects known outputs and leaves unknown content-addressed outputs out', () => {
+	it('returns known output paths and omits unresolved content-addressed outputs', () => {
 		expect(
 			plannedOutputPaths(
 				`[{"outputs":{"out":"${app}","dev":null}},{"outputs":{"out":"${library}"}}]`

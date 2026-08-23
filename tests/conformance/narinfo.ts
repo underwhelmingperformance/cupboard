@@ -47,22 +47,13 @@ export function pathInfoArguments(
 	];
 }
 
-/**
-The store directory served by the fixture cache and configured on both sides.
-*/
 export const servedStoreDirectory: StoreDirectory =
 	storeDirectorySchema.parse('/nix/store');
 
-/**
-The path every fixture describes.
-*/
 export const fixtureStorePath: StorePathString = storePathSchema.parse(
 	'/nix/store/00000000000000000000000000000000-conformance-1.0'
 );
 
-/**
-The filename used to serve the fixture path's narinfo.
-*/
 export const fixtureNarinfoFile = '00000000000000000000000000000000.narinfo';
 
 // Nix writes a sha256 digest in its own base32 in a narinfo, and reports it
@@ -92,9 +83,6 @@ const wellFormedFields: readonly (readonly [string, string])[] = [
 	['Sig', fixtureSignature]
 ];
 
-/**
-Changes applied to the valid narinfo for one test case.
-*/
 export interface NarinfoFixture {
 	/**
 	 * Values replacing the well-formed document's, keyed by field name.
@@ -105,9 +93,6 @@ export interface NarinfoFixture {
 	Whole lines added after the document, for a field written twice.
 	*/
 	readonly extraLines?: readonly string[];
-	/**
-	Whether the cache serves a document for the path at all.
-	*/
 	readonly served?: boolean;
 	/**
 	Whether the document ends with a newline, which Nix requires.
@@ -117,8 +102,6 @@ export interface NarinfoFixture {
 
 const wellFormedValues = new Map(wellFormedFields);
 
-// Append fields that are absent from the base document so fixtures can add
-// optional fields that Nix parses when present.
 export function narinfoDocument(fixture: NarinfoFixture): string {
 	const changed = fixture.fields ?? {};
 	const names = [
@@ -138,14 +121,8 @@ export function narinfoDocument(fixture: NarinfoFixture): string {
 	return fixture.endsWithNewline === false ? document : `${document}\n`;
 }
 
-/**
-One client's result for a narinfo.
-*/
 export type NarinfoVerdict = 'accepted' | 'absent' | 'rejected';
 
-/**
-The fields reported by both clients for an accepted path.
-*/
 export interface OfferFields {
 	readonly narHash: string;
 	readonly narSize: number;
@@ -155,23 +132,11 @@ export interface OfferFields {
 	readonly signatures: readonly string[];
 }
 
-/**
-The results from reading one narinfo through both clients.
-*/
 export interface NarinfoOutcome {
 	readonly oracle: NarinfoVerdict;
 	readonly client: NarinfoVerdict;
-	/**
-	Nix's error output when it rejected the document.
-	*/
 	readonly oracleStderr: string;
-	/**
-	Both sides' fields, present when both accepted the document.
-	*/
 	readonly fields: { oracle: OfferFields; client: OfferFields } | undefined;
-	/**
-	The error thrown by our client when it rejected the document.
-	*/
 	readonly clientError: unknown;
 }
 
@@ -260,13 +225,7 @@ function sorted(values: readonly string[]): readonly string[] {
 	return values.toSorted(compareStrings);
 }
 
-/**
-Our client's result for the fixture cache and path.
-*/
 export interface ClientAnswer {
-	/**
-	The cache offer, converted to the oracle's data shapes.
-	*/
 	readonly offer: OfferFields | undefined;
 	/**
 	The configured caches the client could not query.
@@ -339,9 +298,6 @@ async function readAsClient(directory: string): Promise<ClientOutcome> {
 	}
 }
 
-/**
-Serves one narinfo from a `file://` cache and queries it through both clients.
-*/
 export async function readNarinfo(
 	oracle: Oracle,
 	fixture: NarinfoFixture
@@ -420,9 +376,6 @@ export class NarinfoNotComparedError extends Error {
 	}
 }
 
-/**
-Both sides' fields, for a document they both accepted.
-*/
 export function comparedFields(outcome: NarinfoOutcome): {
 	oracle: OfferFields;
 	client: OfferFields;

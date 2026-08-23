@@ -6,17 +6,11 @@ import { storePathSchema, type StorePathString } from './scalars.ts';
 const structuredAttributesSchema = z.looseObject({});
 const featureListSchema = z.array(z.string());
 
-/**
- * A derivation parsed from its serialised store file. Graph walks read several
- * properties from the same derivation, so the constructor parses the term
- * once.
- */
 export class Derivation {
 	/**
-	 * Reads the `Derive(...)` term in the given serialised derivation. A
-	 * derivation written in any other shape, such as the versioned term the
-	 * dynamic-derivations feature produces, is refused with
-	 * {@link MalformedDerivationError}.
+	 * Parses a serialised `Derive(...)` term. This reader supports the unversioned
+	 * seven-element grammar and rejects `DrvWithVersion(...)`, which Nix uses for
+	 * derivations with dynamic inputs, with {@link MalformedDerivationError}.
 	 */
 	static parse(aterm: string): Derivation {
 		return new Derivation(derivationTerm(aterm));
@@ -27,22 +21,17 @@ export class Derivation {
 	private readonly structured: Readonly<Record<string, unknown>> | undefined;
 
 	/**
-	 * The derivation's declared outputs, keyed by output name. The path is
-	 * `undefined` for a floating content-addressed output because the build
-	 * determines its path.
+	 * A floating content-addressed output maps to `undefined` because its store
+	 * path depends on the result of the build.
 	 */
 	readonly outputs: ReadonlyMap<string, StorePathString | undefined>;
 
 	/**
-	 * The input derivations, with the output names used from each one. These
-	 * outputs must be available before this derivation can be built.
+	 * The output names required from each input derivation. Nix must make the
+	 * selected outputs available before it can build this derivation.
 	 */
 	readonly inputDerivations: ReadonlyMap<StorePathString, readonly string[]>;
 
-	/**
-	 * Store paths this derivation reads directly rather than through another
-	 * derivation's output.
-	 */
 	readonly inputSources: readonly StorePathString[];
 
 	private constructor(elements: readonly ATermValue[]) {
@@ -55,11 +44,9 @@ export class Derivation {
 	}
 
 	/**
-	 * The system and system features required to build this derivation. Nix
-	 * builds a derivation locally only on a machine whose `system` (or
-	 * `extra-platforms`) covers
-	 * the platform and whose `system-features` cover every required feature;
-	 * anything else needs a builder that does.
+	 * The platform and system features that a machine must provide to build this
+	 * derivation. Nix matches the platform against `system` and `extra-platforms`,
+	 * and every required feature must appear in `system-features`.
 	 */
 	get buildRequirements(): DerivationBuildRequirements {
 		return {
@@ -95,8 +82,8 @@ function canSubstitute(
 
 	const value = environment.get('allowSubstitutes');
 
-	// Nix reads an unstructured environment variable as a boolean by
-	// comparing it with `"1"`, so any other spelling is false.
+	// Nix parses an unstructured environment variable as true only when its
+	// value is `"1"`.
 	return value === undefined || value === '1';
 }
 
@@ -118,23 +105,14 @@ function canSubstituteStructured(
 	return value;
 }
 
-/**
-The machine requirements for building a derivation.
-*/
 export interface DerivationBuildRequirements {
-	/**
-	The derivation's platform: the system its builder runs on.
-	*/
 	readonly system: string;
 	/**
-	 * The `requiredSystemFeatures` the building machine must offer, in the
-	 * order the derivation lists them and deduplicated.
+	 * The required system features in derivation order, without duplicates.
 	 */
 	readonly requiredSystemFeatures: readonly string[];
 }
 
-// `[(name, path, hashAlgo, hash), ...]`. A floating content-addressed output
-// writes an empty path, since its path follows from what the build produces.
 function derivationOutputs(
 	elements: readonly ATermValue[]
 ): ReadonlyMap<string, StorePathString | undefined> {
@@ -157,7 +135,7 @@ function derivationOutputs(
 
 		if (typeof name !== 'string' || typeof path !== 'string') {
 			throw new MalformedDerivationError(
-				'an output name or path is not a string'
+				'an output name and path must both be strings'
 			);
 		}
 
@@ -167,9 +145,6 @@ function derivationOutputs(
 	return declared;
 }
 
-// `[(drvPath, [outputName, ...]), ...]`. A derivation with dynamic input
-// derivations serialises as `DrvWithVersion(...)`, which `readDerive` refuses
-// before this function runs, so every node here is a plain list.
 function derivationInputs(
 	elements: readonly ATermValue[]
 ): ReadonlyMap<StorePathString, readonly string[]> {
@@ -184,7 +159,7 @@ function derivationInputs(
 	for (const input of inputs) {
 		if (!isSequence(input) || input.length !== 2) {
 			throw new MalformedDerivationError(
-				'an input derivation is not a path and its outputs'
+				'an input derivation must contain a path and a list of output names'
 			);
 		}
 
@@ -196,7 +171,7 @@ function derivationInputs(
 			!isSequence(outputNames)
 		) {
 			throw new MalformedDerivationError(
-				'an input derivation path is not a string or its outputs are not a list'
+				'an input derivation path must be a string and its output names must be a list'
 			);
 		}
 
@@ -205,7 +180,7 @@ function derivationInputs(
 			outputNames.map((outputName) => {
 				if (isSequence(outputName)) {
 					throw new MalformedDerivationError(
-						'an input derivation output is not a name'
+						'an input derivation output name must be a string'
 					);
 				}
 
@@ -217,8 +192,6 @@ function derivationInputs(
 	return required;
 }
 
-// `[storePath, ...]`. These are opaque store paths the builder reads directly,
-// distinct from the selected outputs of the input derivations above.
 function derivationSources(
 	elements: readonly ATermValue[]
 ): readonly StorePathString[] {
@@ -230,14 +203,13 @@ function derivationSources(
 
 	return sources.map((source) => {
 		if (isSequence(source)) {
-			throw new MalformedDerivationError('an input source is not a path');
+			throw new MalformedDerivationError('an input source must be a string');
 		}
 
 		return storePathSchema.parse(source);
 	});
 }
 
-// `"<system>"`. The platform the derivation's builder runs on.
 function derivationPlatform(elements: readonly ATermValue[]): string {
 	const platform = elements[platformIndex];
 
@@ -253,7 +225,8 @@ function requiredSystemFeatures(
 	structured: Readonly<Record<string, unknown>> | undefined
 ): readonly string[] {
 	if (structured === undefined) {
-		// Nix writes an unstructured list as its whitespace-joined members.
+		// Nix serialises an unstructured feature list by joining its members with
+		// whitespace.
 		return orderedUnique(
 			(environment.get('requiredSystemFeatures') ?? '').split(/\s+/u)
 		);
@@ -281,9 +254,9 @@ function orderedUnique(values: readonly string[]): readonly string[] {
 const derivationSuffix = '.drv';
 
 /**
- * The derivation path referenced by an installable, or `undefined` if it does
- * not reference a derivation. A derived path appends `^` and its expected
- * outputs to the derivation path, so this function removes that suffix.
+ * Extracts the `.drv` store path from a derivation installable. This includes
+ * derived-path forms that append `^` and an output selection. Returns
+ * `undefined` for other installables.
  */
 export function derivationPathOf(
 	installable: string
@@ -299,9 +272,6 @@ export function derivationPathOf(
 	return parsed.data;
 }
 
-// Nix stores a derivation's structured attributes as JSON in the `__json`
-// environment entry. A derivation without that entry has no structured
-// attributes.
 function structuredAttributes(
 	environment: ReadonlyMap<string, string>
 ): Readonly<Record<string, unknown>> | undefined {
@@ -328,21 +298,15 @@ function structuredAttributes(
 	return structured.data;
 }
 
-/**
- * A derivation ATerm as far as this module reads it: a nested value is either
- * a string or a sequence. Lists and tuples both parse as sequences because
- * this module does not distinguish between them.
- */
 type ATermValue = string | readonly ATermValue[];
 
 function isSequence(value: ATermValue): value is readonly ATermValue[] {
 	return typeof value !== 'string';
 }
 
+// The unversioned grammar has exactly seven positional elements:
 // `Derive(outputs, inputDerivations, inputSources, platform, builder, args,
-// environment)`. An ATerm records no offsets, so reaching an element means
-// parsing every element in front of it. The reader parses all seven and this
-// module picks the ones it needs out by position.
+// environment)`.
 const derivePrefix = 'Derive(';
 const deriveElementCount = 7;
 const outputIndex = 0;
@@ -351,17 +315,14 @@ const inputSourceIndex = 2;
 const platformIndex = 3;
 const environmentIndex = 6;
 
-// `(name, path, hashAlgo, hash)`.
 const outputFieldCount = 4;
 
-// The seven elements of the `Derive(...)` term in the given ATerm text.
 function derivationTerm(aterm: string): readonly ATermValue[] {
 	return new ATermReader(aterm).readDerive();
 }
 
-// The environment as a map from name to value. A derivation may repeat a
-// name, and Nix keeps the last one it reads, which is what a map assignment
-// does.
+// Nix permits duplicate environment names and uses the last value. Repeated
+// Map assignments preserve that behaviour.
 function derivationEnvironment(
 	elements: readonly ATermValue[]
 ): ReadonlyMap<string, string> {
@@ -376,7 +337,7 @@ function derivationEnvironment(
 	for (const entry of environment) {
 		if (!isSequence(entry) || entry.length !== 2) {
 			throw new MalformedDerivationError(
-				'an environment entry is not a name and a value'
+				'an environment entry must be a two-element name-value pair'
 			);
 		}
 
@@ -384,7 +345,7 @@ function derivationEnvironment(
 
 		if (typeof name !== 'string' || typeof value !== 'string') {
 			throw new MalformedDerivationError(
-				'an environment entry holds something other than strings'
+				'an environment entry name and value must both be strings'
 			);
 		}
 
@@ -394,8 +355,8 @@ function derivationEnvironment(
 	return entries;
 }
 
-// The escape sequences Nix writes inside an ATerm string: newline, carriage
-// return, tab, double quote and backslash.
+// Nix serialises newlines, carriage returns, tabs, double quotes and
+// backslashes with these ATerm escapes.
 const escapedCharacters = new Map([
 	['n', '\n'],
 	['r', '\r'],
@@ -504,11 +465,6 @@ class ATermReader {
 		);
 	}
 
-	/**
-	 * The seven elements of a `Derive(...)` term. A derivation written in any
-	 * other shape, such as the versioned term the dynamic-derivations feature
-	 * produces, is refused rather than guessed at.
-	 */
 	readDerive(): readonly ATermValue[] {
 		this.expect(derivePrefix);
 
@@ -516,7 +472,7 @@ class ATermReader {
 
 		if (elements.length !== deriveElementCount) {
 			throw new MalformedDerivationError(
-				`${String(elements.length)} elements where a derivation has ${String(deriveElementCount)}`
+				`${String(elements.length)} elements; expected ${String(deriveElementCount)}`
 			);
 		}
 

@@ -10,10 +10,8 @@ export type R2CredentialScope =
 	| 'admin-read-only'
 	| 'admin-read-write';
 
-// A credential's permission is granted either by a preset scope or by an
-// explicit S3-operation allow-list, never both: R2 rejects a JWT carrying both a
-// `scope` and an `actions` claim (InvalidArgument on X-Amz-Security-Token), even
-// its own documented example.
+// R2 accepts either a preset scope or an explicit S3-operation allow-list. A
+// credential that includes both `scope` and `actions` is rejected.
 export type R2CredentialGrant =
 	| { readonly scope: R2CredentialScope }
 	| { readonly actions: readonly string[] };
@@ -24,10 +22,8 @@ export type R2TemporaryCredentialOptions = R2CredentialGrant & {
 	readonly ttlSeconds: TtlSeconds;
 };
 
-// The S3 operations a push needs to stage a blob: a single PutObject for a NAR
-// small enough to hold in memory, and the multipart calls for a large one that
-// streams. Read and list are left out, so the credential can only write, not
-// read back another upload's staged bytes.
+// Include PutObject and the multipart lifecycle, but no read or list operation.
+// The resulting credential can stage bytes without reading another upload.
 export const pushUploadActions = [
 	'PutObject',
 	'CreateMultipartUpload',
@@ -85,13 +81,10 @@ async function sha256Hex(value: string): Promise<string> {
 }
 
 /**
- * Issues a short-lived R2 credential by signing a scope JWT with the parent
- * secret access key, the offline form of R2's Temporary Credentials API. R2
- * recognises the reused parent access key id, validates the JWT signature with
- * the parent secret, and enforces the bucket, scope and path claims; the
- * temporary secret access key the holder signs requests with is the SHA-256 of
- * the JWT. No call leaves the Worker and no credential beyond the R2 secret the
- * presigner already holds is needed.
+ * Creates an R2 temporary credential locally. The parent secret signs an HS256
+ * JWT, the parent access key ID is reused, and the temporary secret is the
+ * SHA-256 digest of the JWT. R2 enforces the JWT's bucket, grant and path claims.
+ * This operation makes no network request.
  */
 export async function createR2TemporaryCredentials(
 	configuration: R2PresignerConfiguration,

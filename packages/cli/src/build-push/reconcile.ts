@@ -49,11 +49,6 @@ import {
 
 import type { BatchPathOutcome } from './batching.ts';
 
-/**
- * One manifest target as reconciliation sees it: the installable the build
- * realises, the output path Nix could predict before building, and the
- * retention root this target contributes to when the run declares one.
- */
 export interface ReconcileTarget {
 	readonly installable: NixDerivedPathString;
 	readonly expectedPath?: StorePathString;
@@ -61,9 +56,9 @@ export interface ReconcileTarget {
 }
 
 /**
- * The publication classification from before the build. Reconciliation
- * preserves `leftUpstream` even when another target's build realises the same
- * path, so root contents do not depend on cohort composition.
+ * Preserves the planner's pre-build classifications. `leftUpstream` remains
+ * authoritative even if another target realises the same path during this
+ * build, keeping root contents independent of which targets share a cohort.
  */
 export interface ReconcilePartition {
 	readonly attachOnly: readonly StorePathString[];
@@ -78,56 +73,35 @@ export interface ReconcilePartition {
 	readonly narSize: number;
 }
 
-/**
- * The derivation graph captured before the build: the derivation each
- * installable resolved to, and how long the evaluation that captured it took,
- * recorded in the receipt because a cold evaluation on a large flake costs
- * minutes.
- */
 export interface DerivationSnapshot {
 	readonly derivations: ReadonlyMap<NixDerivedPathString, DerivationPath>;
+	/**
+	 * Recorded in the receipt because a cold evaluation of a large flake can take
+	 * minutes and form a material part of the run's cost.
+	 */
 	readonly evaluationTimeMs?: number;
 }
 
 export interface ReconcileOptions {
 	readonly targets: readonly ReconcileTarget[];
 	readonly partition?: ReconcilePartition;
-	/**
-	The streaming session's terminal per-path outcomes.
-	*/
 	readonly outcomes: ReadonlyMap<StorePathString, BatchPathOutcome>;
-	/**
-	Paths that failed to publish during streaming and await reconciliation.
-	*/
 	readonly candidates: readonly StorePathString[];
 	readonly snapshot: DerivationSnapshot;
-	/**
-	Exact per-target results when the run drove the build itself.
-	*/
 	readonly buildResults?: readonly NixBuildResult[];
-	/**
-	Paths published alongside the targets without joining any target root.
-	*/
 	readonly intermediatePaths?: readonly StorePathString[];
 	readonly store: Pick<
 		Nix,
 		'queryValidPathsInfo' | 'queryDerivationOutputPaths'
 	>;
 	readonly client: PushClient;
-	/**
-	The run root re-driven publications bind at negotiate, exactly as a flush does.
-	*/
 	readonly runRoot?: UploadAttachRoot;
 	readonly ttlSeconds?: TtlSeconds;
-	/**
-	Whether deferred verification verdicts are awaited; defaults to true.
-	*/
 	readonly wait?: boolean;
 	readonly commitOptions?: CommitOptions;
 	/**
-	 * The run's shared commit session. When it is present, every path
-	 * reconciliation publishes commits over it, sharing the socket the streaming
-	 * phase used.
+	 * Reuse the streaming phase's commit session so the server applies one credit
+	 * budget across all phases.
 	 */
 	readonly session?: CommitSession;
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
@@ -136,29 +110,19 @@ export interface ReconcileOptions {
 	readonly childExitStatus?: number;
 	readonly terminalFailure?: TerminalBuildFailure;
 	/**
-	 * The subjects the run attributed to its own build. The receipt describes
-	 * every other published path from that path's store metadata.
+	 * Subjects established before reconciliation take precedence over store
+	 * metadata read afterward.
 	 */
 	readonly subjects?: readonly BuildSubjectV3[];
-	/**
-	The stores the run watched each path being copied from.
-	*/
 	readonly copiedFrom?: ReadonlyMap<StorePathString, readonly NixStoreUri[]>;
 }
 
-/**
-One declared target root's reconciliation: replaced, or left untouched.
-*/
 export interface ReconciledRoot {
 	readonly root: RootName;
 	readonly applied: boolean;
 	readonly targets: readonly StorePathString[];
 }
 
-/**
- * One path whose publication the run could not complete, with the failure that
- * stopped it, kept so the command layer can classify the run's exit.
- */
 export interface ReconcileFailure {
 	readonly storePath: StorePathString;
 	readonly reason: TargetFailureReason;
@@ -171,9 +135,6 @@ export interface ReconcileResult {
 	readonly failures: readonly ReconcileFailure[];
 }
 
-// How the planner classified one target before the build. A `publish` target is
-// this run's to realise and publish; every other classification was decided
-// before the build.
 type TargetClassification =
 	'publish' | 'attach-only' | 'publish-by-reference' | 'left-upstream';
 
@@ -187,9 +148,8 @@ interface ResolvedTarget {
 	readonly resolution: TargetResolution;
 }
 
-// The store path an outcome reports for a target that realised nothing: the
-// predicted output path when there was one, otherwise the derivation part of
-// the installable, which is itself a store path.
+// When a target produces no output, report its predicted path if available;
+// otherwise report the derivation portion of the installable.
 function fallbackPath(target: ReconcileTarget): StorePathString {
 	if (target.expectedPath !== undefined) {
 		return target.expectedPath;
@@ -225,10 +185,9 @@ function classify(
 	return 'publish';
 }
 
-// Resolves one target to the output paths the selected store registered for it.
-// Three sources are tried in order: the build result when the run drove the
-// build itself, then the outputs the store reports for the snapshot's
-// derivation, then the pre-build prediction.
+// Resolve in order from the direct build result, outputs registered for the
+// pre-build derivation, then the predicted path. A prediction must not override
+// an observed build result.
 async function resolveTarget(
 	target: ReconcileTarget,
 	options: ReconcileOptions,
@@ -264,9 +223,8 @@ async function resolveTarget(
 	return { kind: 'build-failed' };
 }
 
-// A derivation with no registered outputs answers an empty list; a store that
-// refuses the query for an unregistered derivation answers the same way, so a
-// later source can still resolve the target.
+// A store may return no outputs or reject an unregistered derivation. Treat
+// both as unavailable evidence so resolution can try the predicted path.
 async function queryRegisteredOutputs(
 	store: ReconcileOptions['store'],
 	derivation: DerivationPath
@@ -297,9 +255,7 @@ function assertNarMetadata(info: NixValidPathInfo, digest: NarDigest): void {
 	);
 }
 
-// The mutable record the publication pass fills in: which paths ended
-// servable, which this run published, which failed and why, and which
-// intermediates the store collected before publication.
+// Track final availability separately from paths published by this run.
 interface PublicationLedger {
 	readonly servable: Set<StorePathString>;
 	readonly published: Set<StorePathString>;
@@ -323,9 +279,8 @@ function recordFailure(
 	ledger.failures.set(storePath, { reason, cause });
 }
 
-// Whether a NAR read failed because the store no longer holds the path: the
-// store client's typed refusal, or the filesystem's for a read that started
-// after the path was collected.
+// A source store can report collection through its typed error or through
+// `ENOENT` when a filesystem NAR read starts after the path disappears.
 function isVanishedPathError(error: unknown): boolean {
 	if (error instanceof NixStorePathNotFoundError) {
 		return true;
@@ -334,9 +289,8 @@ function isVanishedPathError(error: unknown): boolean {
 	return error instanceof Error && 'code' in error && error.code === 'ENOENT';
 }
 
-// A path the local store no longer holds: collected for an intermediate, a
-// failure for a target, unless the streaming session already confirmed it
-// against the destination, in which case its local copy is no longer needed.
+// Destination confirmation makes loss of the local copy harmless. Otherwise,
+// report a missing target as failed and a missing intermediate as collected.
 function settleLocallyMissing(
 	storePath: StorePathString,
 	isTarget: boolean,
@@ -366,11 +320,10 @@ type PublishableDecision = Extract<
 	{ action: 'upload' | 'commit' }
 >;
 
-// Publishes one negotiated path the way a streaming flush does: stream and
-// check the NAR for an upload decision, then commit, awaiting a deferred
-// verdict when the run waits. A path that vanished mid-read settles as
-// locally missing; an upload loss and a verification loss are recorded under
-// their own reasons so a build failure can never be mistaken for either.
+// Complete one negotiated decision. Uploads verify streamed NAR metadata before
+// commit. If the path is collected during the read, preserve any destination
+// confirmation or report the missing target or intermediate. Upload and verdict
+// failures retain distinct receipt reasons.
 async function publishDecision(
 	decision: PublishableDecision,
 	info: NixValidPathInfo,
@@ -485,14 +438,11 @@ async function publishInfoBatch(
 	);
 }
 
-// Re-queries the destination for every path that must be available when the
-// run completes. A path already uploaded during the build receives a cheap
-// skip decision. A failed streaming upload instead goes through the ordinary
-// upload and commit steps. Each negotiation covers a bounded batch, so one
-// failed response does not prevent later batches from being published.
-//
-// The function returns the store metadata it read so the receipt can describe
-// every published path without querying the store again.
+// Read current store metadata for every path required after streaming, then
+// renegotiate each path with the destination. Existing destination paths become
+// skip decisions, while failed streaming publications retry the normal upload
+// and commit flow. Bound negotiation batches so one rejection does not block
+// later batches. Return the same store metadata for receipt provenance.
 async function publishRequired(
 	required: ReadonlyMap<StorePathString, boolean>,
 	options: ReconcileOptions,
@@ -584,10 +534,8 @@ function targetOutcome(
 		: { outcome: 'destination-served', storePath: first };
 }
 
-// Every target of a declared root must be confirmed before the root is replaced.
-// A pre-build classification other than `publish` needs no publication from
-// this run and is already confirmed. A `left-upstream` target contributes no
-// destination root paths.
+// Root replacement requires every `publish` target to resolve to servable
+// paths. Other planner classifications require no publication in this run.
 function isConfirmed(
 	resolved: ResolvedTarget,
 	ledger: PublicationLedger
@@ -603,7 +551,6 @@ function isConfirmed(
 	return resolved.resolution.paths.every((path) => ledger.servable.has(path));
 }
 
-// The paths a target resolves to, whichever cache ends up serving them.
 function resolvedPathsOf(resolved: ResolvedTarget): readonly StorePathString[] {
 	if (resolved.resolution.kind === 'resolved') {
 		return resolved.resolution.paths;
@@ -612,8 +559,6 @@ function resolvedPathsOf(resolved: ResolvedTarget): readonly StorePathString[] {
 	return [fallbackPath(resolved.target)];
 }
 
-// The paths a target adds to its destination root. A `left-upstream` target adds
-// none because an external substituter serves it.
 function rootContentsOf(resolved: ResolvedTarget): readonly StorePathString[] {
 	if (resolved.classification === 'left-upstream') {
 		return [];
@@ -622,12 +567,10 @@ function rootContentsOf(resolved: ResolvedTarget): readonly StorePathString[] {
 	return resolvedPathsOf(resolved);
 }
 
-// Replaces each target root only after all of its targets are confirmed. If any
-// target remains unconfirmed, reconciliation does not modify the root. If every
-// target was excluded from publication because an upstream substituter serves
-// it, reconciliation replaces the root with an empty path list and releases
-// its previous paths. The run root is attached during commit and is not
-// modified here.
+// Replace a target root only after every target is confirmed. Preserve its
+// prior contents if any target is unconfirmed. A group classified entirely as
+// `left-upstream` deliberately replaces the root with an empty list. Run roots
+// are attached during commit and are not handled here.
 async function applyTargetRoots(
 	resolvedTargets: readonly ResolvedTarget[],
 	options: ReconcileOptions,
@@ -669,8 +612,8 @@ async function applyTargetRoots(
 			});
 			roots.push({ root, applied: true, targets });
 		} catch (error) {
-			// Record the refusal against every resolved target path, not only the
-			// new root contents. A root with an empty target list can still fail.
+			// Attribute a rejected replacement to every resolved target. The new
+			// root contents can be empty.
 			for (const storePath of resolvedPaths) {
 				recordFailure(ledger, storePath, 'retention', error);
 			}
@@ -682,15 +625,8 @@ async function applyTargetRoots(
 	return roots;
 }
 
-/**
- * The final reconciliation of a supervised build: resolves the manifest's
- * targets to their output paths in the selected store, re-queries the
- * destination so already uploaded paths are cheap no-ops, re-drives what
- * streaming lost, waits for deferred verification, applies each declared
- * target root only when every one of its targets confirmed servable, and
- * writes the receipt that records how the run ended. Streaming is an
- * optimisation over this explicit final state, never the source of truth.
- */
+// Streaming records prior progress but is not the source of truth. Re-negotiate
+// every required path and await its required verdict before replacing roots.
 export async function reconcileBuild(
 	options: ReconcileOptions
 ): Promise<ReconcileResult> {
@@ -707,11 +643,10 @@ export async function reconcileBuild(
 		});
 	}
 
-	// Everything the run must end with servable, in one deduplicated pass: the
-	// publish targets' resolved paths, every accepted event's path whether or
-	// not its streaming settled, and the declared intermediates. The flag records
-	// whether the path belongs to a target, which decides how a vanished copy is
-	// reported.
+	// Deduplicate every path whose final availability must be checked: resolved
+	// publish targets, streaming outcomes and candidates, and declared
+	// intermediates. The boolean records target membership so local collection is
+	// reported as a target failure only when appropriate.
 	const required = new Map<StorePathString, boolean>();
 	const requireAll = (
 		paths: Iterable<StorePathString>,
@@ -742,8 +677,8 @@ export async function reconcileBuild(
 		collected: new Set()
 	};
 
-	// A path the streaming session published counts as published by this run; the
-	// re-query below confirms that each such path is servable.
+	// Preserve publication provenance from streaming. `publishRequired`
+	// independently confirms final availability.
 	for (const [storePath, streamed] of options.outcomes) {
 		if (streamed.outcome === 'published') {
 			ledger.published.add(storePath);

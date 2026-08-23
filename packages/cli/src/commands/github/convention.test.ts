@@ -178,7 +178,7 @@ describe('parseWorkflowReference', () => {
 });
 
 describe('parseExactWorkflowReference', () => {
-	it('accepts an immutable release tag', () => {
+	it('accepts a tag reference for later GitHub validation', () => {
 		expect(
 			parseExactWorkflowReference(`${workflowPath}@refs/tags/v1.2.3`)
 		).toStrictEqual({
@@ -260,7 +260,7 @@ describe('workflowReferenceClaimsOverlap', () => {
 		).toBe(false);
 	});
 
-	it('reports an unknown result for a non-canonical pattern', () => {
+	it('returns undefined for a non-canonical pattern pair', () => {
 		expect(
 			workflowReferenceClaimsOverlap(
 				{ pattern: '^.*$' },

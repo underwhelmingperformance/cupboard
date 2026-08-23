@@ -77,11 +77,6 @@ export interface GithubSetupOptions {
 	readonly readPassword?: string;
 }
 
-/**
- * The part of the derived client that github setup uses, in the contract's
- * input and output shapes. The real `tenantRpc(...)` sub-clients satisfy this
- * interface by construction.
- */
 export interface GithubSetupClient {
 	readonly policies: Pick<PolicyClient, 'graceList' | 'graceAdd'>;
 	readonly reuseViews: Pick<ReuseViewClient, 'list' | 'set'>;
@@ -99,10 +94,9 @@ export interface GithubSetupDependencies {
 	readonly signal?: AbortSignal;
 }
 
-// One converging step's outcome. `drift` means the stored state differs from
-// what setup would write; setup leaves it in place and reports it for the
-// operator to resolve. `missing` means setup would have created the state but
-// wrote nothing, because another step drifted.
+// For `drift`, setup leaves the stored state unchanged for the operator to
+// resolve. `missing` means setup deferred a creation because another step had
+// drifted.
 export interface SetupStep {
 	readonly step: string;
 	readonly outcome:
@@ -124,10 +118,9 @@ interface CacheInfoFetcherDependencies {
 const cacheInfoTimeoutMs = 30_000;
 
 /**
- * A `nix-cache-info` fetcher that uses the given read credential. A private
- * tenant's read routes answer 401 without a credential, so setup and check send
- * the same Basic credential a reader would use. Supplying only one half of the
- * pair is refused before any request.
+ * Reads `nix-cache-info` with the supplied Basic credential. Private tenant
+ * routes return 401 without one. Supplying only one part of the credential pair
+ * fails before the request starts.
  */
 export function cacheInfoFetcher(
 	options: ReadCredentialOptions,
@@ -234,9 +227,8 @@ function isDeepEqual(left: unknown, right: unknown): boolean {
 	);
 }
 
-// A stored rule and a desired body agree when everything that affects
-// matching and issuance is identical; the summary's own id and disabled flag
-// are not part of the comparison.
+// Rule ids and disabled state do not form part of a rule body. Compare every
+// field that affects matching or the authority issued by an exchange.
 function isRuleMatchingBody(
 	rule: OidcTrustSummary,
 	body: OidcTrustAddBody
@@ -306,10 +298,6 @@ interface RuleMatchEvaluation {
 
 const noMatch: RuleMatchEvaluation = { outcome: 'no', unknownClaims: [] };
 
-// Whether the rule can match a token the desired rule serves: `match` when
-// every configured claim is satisfied by the token's known claims, `possible`
-// when nothing mismatches but some configured claims are not in the token
-// model, `no` on any mismatch.
 function evaluateRuleMatch(
 	rule: OidcTrustSummary,
 	desired: DesiredTrustRule,
@@ -355,11 +343,10 @@ interface ClassifiedTrustRule {
 	readonly unknownClaims: readonly string[];
 }
 
-// `conflicts` will match the new workflow's tokens and must go before setup
-// proceeds. `uncertain` rules pin claims outside the token model, so setup
-// cannot tell whether they would match; they are only ever removed on an
-// explicit interactive selection. `superseded` rules pin a different workflow
-// reference and may coexist.
+// Remove `conflicts` before setup completes because the modelled claims match
+// them. Never remove `uncertain` automatically: they contain claims outside the
+// model and require an explicit interactive selection. `superseded` rules use a
+// different workflow reference and can coexist with the new rules.
 interface TrustRuleClassification {
 	readonly conflicts: readonly ClassifiedTrustRule[];
 	readonly uncertain: readonly ClassifiedTrustRule[];
@@ -482,8 +469,6 @@ function classifyTrustRules(
 	};
 }
 
-// A stored claim names one reviewed workflow version only when it parses as
-// an exact pin; a tag pattern names a namespace instead.
 function pinnedReference(
 	reference: string
 ): ReturnType<typeof parseExactWorkflowReference> | undefined {
@@ -508,9 +493,6 @@ function workflowReferenceDescription(
 	return 'any workflow reference';
 }
 
-// The caveat a rule's row and menu entry carry: claims setup cannot evaluate,
-// or a workflow reference that names whatever lands on a branch or movable
-// tag rather than one released version.
 function ruleCaveat(classified: ClassifiedTrustRule): string | undefined {
 	if (classified.unknownClaims.length > 0) {
 		return `setup cannot check ${classified.unknownClaims.join(', ')}`;
@@ -719,13 +701,14 @@ export async function runGithubSetup(
 			workflowReference.reference
 		);
 
-		await reporter.phase('Verifying workflow reference', () =>
+		await reporter.phase('Checking workflow reference on GitHub', () =>
 			verifyReference(exactWorkflowReference, lookupOptions)
 		);
 	}
 
-	const identity = await reporter.phase('Resolving repository', () =>
-		resolveRepository(options.repo, lookupOptions)
+	const identity = await reporter.phase(
+		'Reading repository identity from GitHub',
+		() => resolveRepository(options.repo, lookupOptions)
 	);
 	const prBody = githubPrAddBody(url, identity, {
 		repo: options.repo,
@@ -736,9 +719,10 @@ export async function runGithubSetup(
 		branch: options.branch,
 		jobWorkflowRef: options.workflowRef
 	});
-	// The claims a run of the new workflow presents, as far as they are
-	// deterministic. A job that deploys to a GitHub environment presents an
-	// environment-form `sub` instead of the defaults below.
+	// These are the default claims that setup can determine without seeing a
+	// token. GitHub environments and custom subject templates can change `sub`,
+	// so this classification is a preflight model rather than evidence from a
+	// workflow run.
 	const desiredRules: readonly DesiredTrustRule[] = [
 		{
 			step: 'pull-request trust rule',
@@ -789,12 +773,14 @@ export async function runGithubSetup(
 		.toSorted((left, right) => left.reference.localeCompare(right.reference));
 
 	if (previousWorkflowReferences.length > 0) {
-		await reporter.phase('Verifying previous workflow references', () =>
-			Promise.all(
-				previousWorkflowReferences.map((reference) =>
-					verifyReference(reference, lookupOptions)
+		await reporter.phase(
+			'Checking previous workflow references on GitHub',
+			() =>
+				Promise.all(
+					previousWorkflowReferences.map((reference) =>
+						verifyReference(reference, lookupOptions)
+					)
 				)
-			)
 		);
 	}
 
@@ -887,8 +873,8 @@ export async function runGithubSetup(
 				await plan.apply?.();
 			}
 
-			// The new rules go in before the old ones come out, so a failure part
-			// way through never leaves the repository without a matching rule.
+			// Add the new rules before removing old ones. A partial failure must not
+			// leave the repository without a matching trust rule.
 			const remainingRules = rules.filter(
 				(rule) => !removedRuleIds.has(rule.id)
 			);
@@ -1009,25 +995,28 @@ export function registerGithubCommands(
 	const github = program
 		.command('github')
 		.description(
-			'Set up and verify GitHub repositories that publish to this tenant.'
+			'Configure and check tenant state for publication from GitHub.'
 		);
 
 	github
 		.command('setup')
 		.description(
-			'Write the tenant-side configuration for cache-aware flake publishing: the grace policy, the pull-request reuse view and both trust rules, idempotently.'
+			'Configure the grace policy, pull-request reuse view and trust rules for cache-aware flake publication.'
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.requiredOption('--repo <owner/name>', 'GitHub repository to trust.')
+		.requiredOption(
+			'--repo <owner/name>',
+			'GitHub repository that will publish.'
+		)
 		.option('--branch <name>', 'Branch whose pushes publish.', 'main')
 		.option('--grace <duration>', 'Tenant-wide retention grace period.', '24h')
 		.requiredOption(
 			'--workflow-ref <owner/repo/path@ref>',
-			'The job_workflow_ref claim: an immutable release tag, a full commit id, or a tag pattern such as @refs/tags/v*.'
+			'Match job_workflow_ref to a full commit id, a tag ref for a release GitHub reports as immutable, or a tag pattern such as @refs/tags/v*. A pattern also trusts matching tags created later.'
 		)
 		.option(
 			'-y, --yes',
-			'Confirm removing conflicting trust rules; retain every other rule.'
+			'Remove conflicting trust rules without prompting; retain uncertain and superseded rules.'
 		)
 		.option(
 			'--read-user <user>',
@@ -1069,18 +1058,21 @@ export function registerGithubCommands(
 	github
 		.command('check')
 		.description(
-			'Verify the invariants a publishing run depends on before its first CI run: trust-rule matching and grant coverage, grace coverage, reuse-view definition and priority, and root-prefix nesting.'
+			"Check tenant state against the quickstart's modelled pull-request and branch publications: trust rules and grants, grace coverage, reuse-view configuration and root-prefix nesting."
 		)
 		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
-		.requiredOption('--repo <owner/name>', 'GitHub repository to verify.')
+		.requiredOption(
+			'--repo <owner/name>',
+			'GitHub repository whose tenant configuration to check.'
+		)
 		.option('--branch <name>', 'Branch whose pushes publish.', 'main')
 		.requiredOption(
 			'--workflow-ref <owner/repo/path@ref>',
-			'The exact immutable release tag or full commit id currently used by the caller.'
+			"Exact full commit id or tag ref for a release GitHub reports as immutable, as used by the caller's workflow."
 		)
 		.option(
 			'--root-prefix <value>',
-			"The caller workflow's root-prefix input, for the nesting check."
+			"root-prefix value passed by the caller's workflow."
 		)
 		.option(
 			'--read-user <user>',

@@ -189,7 +189,7 @@ const cohortMatrixEntrySchema = z
 				ctx.addIssue({
 					code: 'custom',
 					path: [field],
-					message: `${field} must carry one entry per attr (${String(entry.attrs.length)})`
+					message: `${field} must contain one entry per attr (${String(entry.attrs.length)})`
 				});
 			}
 		}
@@ -328,16 +328,27 @@ function describeRefusal(refusal: PlanCohortRefusalData): string {
 
 		// An older cupboard reports no per-path detail, so its refusal keeps
 		// a count-and-limit sentence.
+		const pathUnit = refusal.unknownCount === 1 ? 'path' : 'paths';
+		const availabilityVerb = refusal.unknownCount === 1 ? 'is' : 'are';
+		const downloadUnit = refusal.downloadSize === 1 ? 'byte' : 'bytes';
+		const narUnit = refusal.narSize === 1 ? 'byte' : 'bytes';
+
 		return (
-			`${String(refusal.unknownCount)} path(s) have unknown availability, ` +
-			`over the limit of ${String(refusal.ceiling.value)} ` +
-			`(${String(refusal.downloadSize)} download byte(s), ${String(refusal.narSize)} NAR byte(s))`
+			`Cupboard could not determine whether ${String(refusal.unknownCount)} required store ${pathUnit} ${availabilityVerb} available. ` +
+			`The limit is ${String(refusal.ceiling.value)}. Nix reported ` +
+			`${String(refusal.downloadSize)} download ${downloadUnit} and ` +
+			`${String(refusal.narSize)} NAR ${narUnit}.`
 		);
 	}
 
+	const narUnit = refusal.measured.narSize === 1 ? 'byte' : 'bytes';
+	const availableUnit = refusal.available === 1 ? 'byte' : 'bytes';
+	const headroomUnit = refusal.headroom === 1 ? 'byte' : 'bytes';
+
 	return (
-		`measured ${String(refusal.measured.narSize)} substitutable NAR byte(s) against ` +
-		`${String(refusal.available)} available byte(s) with a ${String(refusal.headroom)} byte headroom`
+		`The cohort needs ${String(refusal.measured.narSize)} substitutable NAR ${narUnit}, ` +
+		`but the store has ${String(refusal.available)} ${availableUnit} available and must ` +
+		`retain ${String(refusal.headroom)} ${headroomUnit} of headroom.`
 	);
 }
 
@@ -593,7 +604,7 @@ export function registerBuildCohortCommand(
 		)
 		.option(
 			'--reference-paths-file <path>',
-			'where to write paths the tenant already holds, publishable by reference'
+			'where to write paths the tenant already serves, publishable by reference'
 		)
 		.option(
 			'--left-upstream-file <path>',
@@ -2845,9 +2856,9 @@ function startDiscardedNixProcess(
 }
 
 /**
- * Evaluates a cohort's complete derivation graph so the store holds every
- * derivation in it. The graph's JSON grows with the closure and nothing here
- * reads it, so the command's stdout goes to /dev/null.
+ * Evaluates a cohort's complete derivation graph and materialises every
+ * derivation in the evaluation store. The JSON can exceed a pipe's buffer for
+ * a large closure, so discard it at the child process rather than capturing it.
  */
 export async function materialiseDerivationGraph(
 	installables: readonly string[],
@@ -3078,8 +3089,8 @@ function openLocalDerivationRootStore(
 }
 
 /**
- * Keep planned derivations and their materialised closure live during use.
- * A multi-user installation holds them through its system daemon. A
+ * Keeps planned derivations and their materialised closure live during use.
+ * A multi-user installation roots them through its system daemon. A
  * single-user installation has no daemon socket, so it falls back to a scoped
  * stdio daemon serving the explicit local store where evaluation materialised
  * them.

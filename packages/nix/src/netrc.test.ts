@@ -12,57 +12,53 @@ interface NetrcCase {
 
 const cases: readonly NetrcCase[] = [
 	{
-		name: 'an entry naming the host',
+		name: 'reads credentials from a matching machine entry',
 		source: 'machine cache.example login reader password secret\n',
 		expected: { login: 'reader', password: 'secret' }
 	},
 	{
-		name: 'an entry written over several lines',
+		name: 'reads a machine entry across line breaks',
 		source: 'machine cache.example\n\tlogin reader\n\tpassword secret\n',
 		expected: { login: 'reader', password: 'secret' }
 	},
 	{
-		name: 'a host named in another case',
+		name: 'matches host names case-insensitively',
 		source: 'machine CACHE.EXAMPLE login reader password secret\n',
 		expected: { login: 'reader', password: 'secret' }
 	},
 	{
-		name: 'keywords written in another case',
+		name: 'matches netrc keywords case-insensitively',
 		source: 'MACHINE cache.example LOGIN reader PASSWORD secret\n',
 		expected: { login: 'reader', password: 'secret' }
 	},
 	{
-		name: 'the first of two entries naming the host',
+		name: 'uses the first complete matching machine entry',
 		source:
 			'machine cache.example login first password one\n' +
 			'machine cache.example login second password two\n',
 		expected: { login: 'first', password: 'one' }
 	},
 	{
-		name: 'an entry for another host alone',
+		name: 'returns undefined when every entry belongs to another host',
 		source: 'machine other.example login reader password secret\n',
 		expected: undefined
 	},
 	{
-		name: 'a default entry, for a host nothing else names',
+		name: 'uses default when no machine entry matches',
 		source:
 			'machine other.example login them password theirs\n' +
 			'default login anyone password shared\n',
 		expected: { login: 'anyone', password: 'shared' }
 	},
 	{
-		// A default entry answers for every host, so one written ahead of the
-		// machine entries answers ahead of all of them.
-		name: 'a default entry written before the entry naming the host',
+		name: 'uses an early complete default before a later matching machine',
 		source:
 			'default login anyone password shared\n' +
 			'machine cache.example login reader password secret\n',
 		expected: { login: 'anyone', password: 'shared' }
 	},
 	{
-		// An entry naming no password is left behind when the next one starts,
-		// so what the rest of the file names answers instead.
-		name: 'a matching entry naming no password, before a default',
+		name: 'skips a login-only match when a later default is complete',
 		source:
 			'machine cache.example login reader\n' +
 			'machine other.example login them password theirs\n' +
@@ -70,17 +66,17 @@ const cases: readonly NetrcCase[] = [
 		expected: { login: 'anyone', password: 'shared' }
 	},
 	{
-		name: 'a matching entry naming a login and no password, at the end',
+		name: 'supplies an empty password for a login-only entry at EOF',
 		source: 'machine cache.example login reader\n',
 		expected: { login: 'reader', password: '' }
 	},
 	{
-		name: 'a matching entry naming a password and no login',
+		name: 'supplies an empty login for a password-only entry',
 		source: 'machine cache.example password secret\n',
 		expected: { login: '', password: 'secret' }
 	},
 	{
-		name: 'a comment line',
+		name: 'ignores full-line comments',
 		source:
 			'# the reader for the shared cache\n' +
 			'  # indented, and still a comment\n' +
@@ -88,40 +84,36 @@ const cases: readonly NetrcCase[] = [
 		expected: { login: 'reader', password: 'secret' }
 	},
 	{
-		// A `#` is a comment only where a line starts, so one inside a value is
-		// an ordinary character of it.
-		name: 'a password holding a hash',
+		name: 'keeps # inside an ordinary token',
 		source: 'machine cache.example login reader password se#ret\n',
 		expected: { login: 'reader', password: 'se#ret' }
 	},
 	{
-		name: 'a quoted password holding spaces',
+		name: 'decodes spaces in a quoted password',
 		source: 'machine cache.example login reader password "two words"\n',
 		expected: { login: 'reader', password: 'two words' }
 	},
 	{
-		name: 'a quoted password holding a quote and a backslash',
+		name: 'decodes escaped quotes and backslashes',
 		source:
 			String.raw`machine cache.example login reader password "a\"b\\c"` + '\n',
 		expected: { login: 'reader', password: String.raw`a"b\c` }
 	},
 	{
-		name: 'a quoted password holding the escapes for the characters no token holds',
+		name: 'decodes newline, tab and carriage-return escapes',
 		source:
 			String.raw`machine cache.example login reader password "a\nb\tc\rd"` +
 			'\n',
 		expected: { login: 'reader', password: 'a\nb\tc\rd' }
 	},
 	{
-		name: 'a keyword neither side reads, and the value after it',
+		name: 'ignores an unrecognised keyword and its value',
 		source:
 			'machine cache.example account books login reader password secret\n',
 		expected: { login: 'reader', password: 'secret' }
 	},
 	{
-		// A macro definition runs to the blank line that ends it, and nothing
-		// inside it names a machine.
-		name: 'a macro definition naming another machine',
+		name: 'skips a macdef body through its terminating blank line',
 		source:
 			'macdef upload\n' +
 			'machine trap.example login trapped password trap\n' +
@@ -130,7 +122,7 @@ const cases: readonly NetrcCase[] = [
 		expected: { login: 'reader', password: 'secret' }
 	},
 	{
-		name: 'a macro body naming the requested machine',
+		name: 'ignores the requested machine inside a macdef body',
 		source:
 			'macdef upload\n' +
 			'machine cache.example login trapped password trap\n' +
@@ -140,34 +132,30 @@ const cases: readonly NetrcCase[] = [
 		expected: { login: 'reader', password: 'secret' }
 	},
 	{
-		name: 'an entry naming an address a URL states in brackets',
+		name: 'matches a bracketed IPv6 URL host to an unbracketed machine',
 		source: 'machine ::1 login reader password secret\n',
 		host: '[::1]',
 		expected: { login: 'reader', password: 'secret' }
 	},
 	{
-		name: 'nothing at all',
+		name: 'returns undefined for an empty netrc',
 		source: '',
 		expected: undefined
 	},
 	{
-		name: 'a machine keyword naming nothing after it',
+		name: 'returns undefined when machine has no host',
 		source: 'machine\n',
 		expected: undefined
 	}
 ];
 
 describe('netrcCredentialFor', () => {
-	it.each(cases)('reads $name', ({ source, host, expected }) => {
+	it.each(cases)('$name', ({ source, host, expected }) => {
 		expect(netrcCredentialFor(source, host ?? 'cache.example')).toStrictEqual(
 			expected
 		);
 	});
 
-	// libcurl reads a token as every character above a space, so a carriage
-	// return sits where a token was expected. Each of these sources leaves the
-	// reader part-way through a token, which is a syntax error rather than a
-	// file that supplies no credentials.
 	it.each([
 		{ name: 'a line ending in a carriage return', source: 'machine a\r\n' },
 		{

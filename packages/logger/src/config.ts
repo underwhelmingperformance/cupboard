@@ -18,13 +18,8 @@ import { githubActionsSink, jsonLinesSink } from './sinks.ts';
 export type { Logger, LogLevel, LogRecord, Sink } from '@logtape/logtape';
 export { getLogger } from '@logtape/logtape';
 
-// The root category for all Cupboard loggers. Request- and operation-scoped
-// loggers add fields with `.with(fields)`.
 export const loggerCategory = ['cupboard'] as const;
 
-/**
-Options for {@link configureLogging}.
-*/
 export interface LoggingOptions {
 	/**
 	 * The sink that receives log records. If this is omitted, {@link resolveSink}
@@ -32,15 +27,15 @@ export interface LoggingOptions {
 	 */
 	readonly sink?: Sink;
 	/**
-	The lowest level to emit; defaults to `debug`.
+	Defaults to `debug`.
 	*/
 	readonly lowestLevel?: LogLevel;
 }
 
 /**
- * Selects a sink when the caller does not specify one. GitHub Actions receives
- * workflow commands, and other environments receive line-delimited JSON on
- * stderr. Entrypoints that select their own output format pass a sink to
+ * When `GITHUB_ACTIONS=true`, the default sink writes workflow-command syntax
+ * to stdout. Other environments receive line-delimited JSON on stderr.
+ * Entrypoints that select their own output format pass an explicit sink to
  * {@link configureLogging}.
  */
 export function resolveSink(streams: WorkflowCommandStreams = {}): Sink {
@@ -54,11 +49,10 @@ export function resolveSink(streams: WorkflowCommandStreams = {}): Sink {
 }
 
 /**
- * Configures LogTape once for the current isolate or process. Later calls return
- * without changing the existing configuration, which lets several entrypoints
- * share an isolate. Callers add request context through `.with(...)` child
- * loggers. Every Cupboard sink is synchronous, so this function uses LogTape's
- * synchronous configuration API.
+ * Configures LogTape once for the current isolate or process. Later calls leave
+ * the global configuration unchanged, which lets several entrypoints share an
+ * isolate. Callers add request context through `.with(...)` child loggers. Every
+ * Cupboard sink is synchronous, so configuration is synchronous too.
  */
 export function configureLogging(options: LoggingOptions = {}): void {
 	if (getConfig() !== null) {
@@ -83,8 +77,8 @@ export function configureLogging(options: LoggingOptions = {}): void {
 }
 
 /**
- * The application's root logger. Callers add request or operation fields with
- * `.with(fields)`, then pass the resulting logger to downstream functions.
+ * Callers derive request or operation loggers with `.with(fields)` and pass the
+ * resulting logger to downstream functions.
  */
 export function rootLogger(): Logger {
 	return getLogger(loggerCategory);

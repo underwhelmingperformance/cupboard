@@ -17,8 +17,8 @@ import {
 
 import { baseProcedure } from './base.ts';
 
-// The listings page through query parameters: an opaque cursor resumes where
-// the previous page stopped, and the limit stays within the shared page bound.
+// Both listing routes accept the opaque cursor from the previous page and a
+// limit within the shared page bound.
 const listPageQuerySchema = z
 	.strictObject({
 		cursor: z.string().min(1).optional(),
@@ -47,8 +47,8 @@ export const rootsContract = {
 		)
 		.output(rootListResponseSchema),
 
-	// A root's targets, one bounded page at a time: the per-target serve probe
-	// runs per page, so a run root grown past any single request stays
+	// Fetch targets one bounded page at a time. Each page checks whether its
+	// targets can be served, so a run root can grow beyond one request and remain
 	// listable.
 	targets: baseProcedure
 		.meta({
@@ -71,12 +71,10 @@ export const rootsContract = {
 		)
 		.output(rootTargetsPageSchema),
 
-	// CI sets roots with a token whose grant names the cache and root; the
-	// authoriser enforces both from the grant. The declared list may be empty,
-	// which clears the root's targets while keeping the root and its expiry. The
-	// `root set` and `root ensure` commands each require at least one store-path
-	// argument, so a caller clears a root by sending an empty list in the request
-	// body, and a mistyped command cannot clear one by accident.
+	// The token must grant `root:set` for both this cache and this root. An empty
+	// target list clears the targets but keeps the root and its expiry. The CLI's
+	// `root set` and `root ensure` commands require at least one store path, so
+	// clearing a root requires a direct request with an empty list.
 	set: baseProcedure
 		.meta({
 			requires: 'root:set',

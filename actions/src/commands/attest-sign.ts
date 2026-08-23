@@ -37,19 +37,8 @@ export interface AttestSignOptions {
 }
 
 export interface AttestSignInputs {
-	/**
-	 * The subjects of the build-origin statement: every path the receipt
-	 * describes.
-	 */
 	readonly checksumsFile: string;
-	/**
-	The subjects of the build-provenance statement: the paths the run built.
-	*/
 	readonly builtChecksumsFile: string;
-	/**
-	 * Path to the build-origin predicate. An empty path signs the provenance
-	 * alone.
-	 */
 	readonly predicateFile: string;
 	readonly predicateType: string;
 	readonly bundleFile: string;
@@ -59,16 +48,12 @@ export interface AttestSignInputs {
 
 export interface AttestSignDependencies extends SigningDependencies {
 	/**
-	 * Builds the signer for the run's subjects. Defaults to
-	 * {@link githubStatementSigner}.
+	 * Defaults to {@link githubStatementSigner}.
 	 */
 	readonly signerFor?: (
 		subjects: readonly AttestationSubject[],
 		githubToken: string
 	) => StatementSigner;
-	/**
-	Produces this run's SLSA build provenance statement.
-	*/
 	readonly provenanceStatement?: () => Promise<AttestationStatement>;
 }
 
@@ -85,32 +70,23 @@ export function registerAttestSignCommand(
 	program
 		.command('attest-sign')
 		.description(
-			'Sign the resolved attestation subjects into Sigstore bundles.'
+			'Sign build provenance and build-origin statements for the resolved subjects.'
 		)
 		.requiredOption(
 			'--checksums-file <path>',
-			'checksums of every path the receipt describes, written by the attest command'
+			'checksums for all accepted receipt subjects'
 		)
 		.requiredOption(
 			'--built-checksums-file <path>',
-			'checksums of the paths the run built, written by the attest command'
+			'checksums for accepted subjects built by this run'
 		)
-		.option(
-			'--predicate-file <path>',
-			'build-origin predicate to sign as a second statement'
-		)
+		.option('--predicate-file <path>', 'optional build-origin predicate')
 		.option(
 			'--predicate-type <type>',
 			'in-toto predicate type of the build-origin predicate'
 		)
-		.option(
-			'--bundle-file <path>',
-			'where to write the SLSA build-provenance bundle'
-		)
-		.option(
-			'--origin-bundle-file <path>',
-			'where to write the build-origin bundle'
-		)
+		.option('--bundle-file <path>', 'path for the SLSA build-provenance bundle')
+		.option('--origin-bundle-file <path>', 'path for the build-origin bundle')
 		.option('--github-token <token>', 'GitHub token for the attestation store')
 		.action((options: AttestSignOptions) =>
 			attestSignAction(options, environment)
@@ -145,8 +121,6 @@ export function resolveAttestSignInputs(
 		throw new PredicateTypeRequiredError();
 	}
 
-	// Both bundles default to the directory of the checksums file, so a caller
-	// that chose its own checksums path gets the bundles beside it.
 	const bundleDirectory = path.dirname(path.resolve(checksumsFile));
 
 	return {
@@ -202,14 +176,11 @@ async function writeBundle(
 }
 
 /**
- * Signs the subjects that the `attest` command resolved. The first bundle
- * carries GitHub's SLSA build provenance. When the run recorded an origin for
- * those subjects, a second bundle carries cupboard's build-origin statement.
- *
- * The two bundles cover different subjects. Build provenance claims that this
- * workflow produced its subjects, so it covers only the paths the run built,
- * and a run that built none of the paths it published signs no provenance at
- * all. The build-origin statement covers every path the receipt describes.
+ * The two statements cover different subjects. Build provenance claims that
+ * this workflow produced its subjects, so it covers only paths built by this
+ * run. The action signs no build provenance when this run built none of the
+ * published paths. The build-origin statement covers every accepted receipt
+ * subject.
  */
 export async function attestSignAction(
 	options: AttestSignOptions,
@@ -278,8 +249,6 @@ interface ProvenanceSigning {
 	readonly signing: SigningDependencies;
 }
 
-// Signs this run's build provenance over the paths it built, and returns the
-// path of the bundle it wrote.
 async function signProvenance(
 	inputs: AttestSignInputs,
 	options: ProvenanceSigning

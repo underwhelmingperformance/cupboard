@@ -7,8 +7,6 @@ import {
 } from '@cupboard/shared/github-actions';
 import { type LogRecord, type Sink } from '@logtape/logtape';
 
-// The console method each LogTape level maps to. Workers Logs and a terminal
-// both separate warnings and errors from ordinary output this way.
 function consoleMethodFor(
 	level: LogRecord['level']
 ): 'debug' | 'info' | 'warn' | 'error' {
@@ -30,16 +28,12 @@ function consoleMethodFor(
 	}
 }
 
-// Returns the record's message as a string. Method-call syntax without
-// placeholders already produces a constant string. This also joins interleaved
-// message parts.
 function messageOf(record: LogRecord): string {
 	return record.message
 		.map((part) => (typeof part === 'string' ? part : String(part)))
 		.join('');
 }
 
-// A value rendered for the log without risking a `[object Object]`.
 function renderValue(value: unknown): string {
 	if (typeof value === 'string') {
 		return value;
@@ -64,10 +58,9 @@ function renderValue(value: unknown): string {
 	return Object.prototype.toString.call(value);
 }
 
-// Follows an error's `cause` chain and returns the underlying messages. Drizzle,
-// for example, wraps a D1 error in `Failed query: …` and stores the original
-// error in `cause`. Without this traversal, the log would contain only the
-// wrapper. The traversal stops after eight causes or when it detects a cycle.
+// Drizzle can wrap the useful D1 message in a generic `Failed query` error.
+// Follow at most eight causes so the log retains the underlying messages, and
+// stop early if the chain contains a cycle.
 function causeChain(
 	error: Error
 ): { readonly message: string; readonly stack?: string } | undefined {
@@ -100,8 +93,8 @@ function causeChain(
 	};
 }
 
-// Expands an `error` field into indexed fields for the error name, message,
-// stack, and cause. Workers Logs can then query each field separately.
+// Workers Logs can index the name, message, stack and cause only when they are
+// separate fields rather than properties of an Error object.
 function expandError(
 	properties: Record<string, unknown>
 ): Record<string, unknown> {
@@ -138,9 +131,6 @@ function logObject(record: LogRecord): Record<string, unknown> {
 	};
 }
 
-/**
-The slice of `console` the Workers sink calls, injectable for tests.
-*/
 export interface ConsoleLike {
 	debug(payload: unknown): void;
 	info(payload: unknown): void;
@@ -161,10 +151,8 @@ export function cloudflareSink(target: ConsoleLike = console): Sink {
 }
 
 /**
- * Writes one JSON object per line through `write` for the CLI's machine-readable
- * mode. The caller usually supplies stderr. Accepting a writer keeps this module
- * free of Node imports, so the Worker can bundle it with
- * {@link cloudflareSink}.
+ * Writes one JSON object per line through the supplied callback. The caller
+ * chooses the destination; the default logger and CLI normally supply stderr.
  */
 export function jsonLinesSink(write: (line: string) => void): Sink {
 	return (record) => {
@@ -174,10 +162,6 @@ export function jsonLinesSink(write: (line: string) => void): Sink {
 	};
 }
 
-// The record's properties as space-separated `key=value` pairs, so the
-// structured context stays legible in a GitHub Actions log line. An `error`
-// property is first expanded into its name, message, stack and cause (see
-// {@link expandError}).
 function actionFields(properties: Record<string, unknown>): string {
 	const parts: string[] = [];
 	const fields = expandError(properties);
@@ -223,9 +207,9 @@ function emitToActions(
 }
 
 /**
- * Emits records as GitHub Actions workflow commands. Warnings and errors become
- * annotations. Trace and debug records use `::debug::` and appear only when step
- * debugging is enabled. Informational records use ordinary log lines.
+ * When `GITHUB_ACTIONS=true`, warnings and errors become annotations and trace
+ * and debug records use `::debug::`. Informational records remain plain lines.
+ * Outside GitHub Actions, the shared command emitter falls back to plain lines.
  */
 export function githubActionsSink(streams: WorkflowCommandStreams = {}): Sink {
 	const commands = workflowCommands(streams);

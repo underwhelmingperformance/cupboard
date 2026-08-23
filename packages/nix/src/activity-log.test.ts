@@ -10,8 +10,6 @@ const libraryPath = storePathSchema.parse(
 	'/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib'
 );
 
-// Nix starts a copy with a record whose fields are the store path, the store
-// the bytes come from and the store they go to.
 function copyLine(
 	storePath: string,
 	source: string,
@@ -67,7 +65,7 @@ describe('copySources', () => {
 			])
 		},
 		{
-			name: 'nothing from a record of any other shape',
+			name: 'no sources from records of other shapes',
 			logs: [
 				[
 					'not json at all',
@@ -93,11 +91,11 @@ describe('copySources', () => {
 			expected: new Map()
 		},
 		{
-			name: 'nothing for a run with no log at all',
+			name: 'no sources for a run without logs',
 			logs: [],
 			expected: new Map()
 		}
-	])('records $name', ({ logs, expected }) => {
+	])('extracts $name', ({ logs, expected }) => {
 		expect(copySources(logs)).toStrictEqual(expected);
 	});
 });

@@ -7,37 +7,25 @@
 export const genericExitCode = 1;
 export const usageExitCode = 2;
 
-/**
-An error that carries the process exit code its failure should produce.
-*/
 export abstract class CodedError extends Error {
 	get exitCode(): number {
 		return genericExitCode;
 	}
 }
 
-/**
-A misuse: a bad argument value or an unsupported combination of them.
-*/
 export abstract class UsageError extends CodedError {
 	override get exitCode(): number {
 		return usageExitCode;
 	}
 }
 
-/**
-How many levels of a `cause` chain a diagnostic shows.
-*/
 const maxRenderedCauses = 5;
 
 /**
- * The `cause` chain behind a thrown value, nearest cause first. An `Error` is
- * described as `name: message`, an object as JSON, and any other value by its
- * string form. Returns an empty array for a value without a cause.
- *
- * The walk stops after {@link maxRenderedCauses} levels, and at any value
- * already described, so a chain that refers back to an earlier error does not
- * loop forever.
+ * Returns descriptions of up to five causes, starting with the nearest cause.
+ * Errors use `name: message`, objects use JSON, and other values use their
+ * string form. The walk stops when it reaches a repeated object, so a cyclic
+ * cause chain terminates.
  */
 export function errorCauses(error: unknown): string[] {
 	const described: string[] = [];
@@ -80,11 +68,8 @@ function describeCause(cause: unknown): string {
 	return String(cause);
 }
 
-// An object cause as JSON, so its fields appear in the diagnostic. `String`
-// gives `[object Object]` for an object that does not define its own
-// `toString`, and a cause that is not an error is usually a plain object.
-// `JSON.stringify` throws on a structure it cannot represent, such as a
-// circular one or one holding a BigInt, so those fall back to the object's tag.
+// Use JSON so a plain object's fields appear in the diagnostic. Fall back to
+// the object's tag when JSON cannot represent the value.
 function describeObject(cause: object): string {
 	try {
 		return serialise(cause) ?? Object.prototype.toString.call(cause);
@@ -93,9 +78,8 @@ function describeObject(cause: object): string {
 	}
 }
 
-// `JSON.stringify` returns undefined when the value's `toJSON` returns
-// undefined, but its declared return type is plain `string`. Keep that
-// possibility in this wrapper's type so the caller has to handle it.
+// `JSON.stringify` can return undefined through `toJSON`, despite its declared
+// return type. Expose that possibility to the caller.
 function serialise(value: object): string | undefined {
 	return JSON.stringify(value);
 }

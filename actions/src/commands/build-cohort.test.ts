@@ -550,7 +550,7 @@ describe('nixBuildArguments', () => {
 		]);
 	});
 
-	it('carries an explicit max-jobs through', () => {
+	it('passes an explicit max-jobs value to Nix', () => {
 		expect(
 			nixBuildArguments(['.#a^out'], '4', '', outLinks, logFile)
 		).toStrictEqual([
@@ -1027,7 +1027,7 @@ describe('captured Nix subprocesses', () => {
 });
 
 describe('runWithLocalDerivationRoots', () => {
-	it('uses the system daemon and holds each derivation for the callback extent', async () => {
+	it('uses the system daemon and roots each derivation for the callback', async () => {
 		const daemon = new FakeDaemonTransport({}, { expectSetOptions: false });
 		const storeDirectory = storeDirectorySchema.parse('/nix/store');
 		const nix = Nix.forStore(
@@ -3525,7 +3525,7 @@ describe('buildCohortAction', () => {
 		).rejects.toBe(failure);
 	});
 
-	it('settles successful local outputs before rejecting a mixed non-publishing build', async () => {
+	it('records successful local outputs before rejecting a mixed non-publishing build', async () => {
 		const inputs = resolveBuildCohortInputs(baseOptions(), environment);
 		const runCupboardMock = vi.fn<typeof runCupboard>(cupboardStub());
 		const runNixBuild = vi.fn(() =>
@@ -3750,7 +3750,7 @@ describe('buildCohortAction', () => {
 		);
 	});
 
-	it('propagates a ceiling refusal, rendering the detail with the store the plan reported', async () => {
+	it('uses the store from a ceiling-refusal event in the CohortPlanRefusedError message', async () => {
 		const unknownPath =
 			'/nix/store/5123456789abcdfghijklmnpqrsvwxyz-unknown.drv';
 		const refusalData = {
@@ -3817,7 +3817,7 @@ describe('buildCohortAction', () => {
 		});
 	});
 
-	it('recognises a refusal from an older cupboard that reports no per-path detail', async () => {
+	it('preserves the transient exit code for an older ceiling-refusal payload', async () => {
 		const refusalEvents: readonly ReporterResultEvent[] = [
 			{
 				kind: 'plan-cohort-refusal',
@@ -3853,20 +3853,25 @@ describe('buildCohortAction', () => {
 			error = error_;
 		}
 
-		// The refusal classification, and with it the transient exit code,
-		// must survive running against a cupboard that predates the per-path
-		// detail.
 		if (!(error instanceof CohortPlanRefusedError)) {
 			expect.unreachable('the refusal must surface as CohortPlanRefusedError');
 		}
 
 		expect({
 			exitCode: error.exitCode,
+			message: error.message,
 			buildRuns
-		}).toStrictEqual({ exitCode: 75, buildRuns: [] });
+		}).toStrictEqual({
+			exitCode: 75,
+			message:
+				'Cupboard could not determine whether 2 required store paths are ' +
+				'available. The limit is 0. Nix reported 111 download bytes and ' +
+				'222 NAR bytes.',
+			buildRuns: []
+		});
 	});
 
-	it('propagates a store-capacity refusal with the measured numbers', async () => {
+	it('includes the measured capacity and headroom in a store-capacity refusal', async () => {
 		const refusalEvents: readonly ReporterResultEvent[] = [
 			{
 				kind: 'plan-cohort-refusal',
@@ -3915,8 +3920,8 @@ describe('buildCohortAction', () => {
 		}).toStrictEqual({
 			exitCode: 69,
 			message:
-				'measured 1000 substitutable NAR byte(s) against 100 available ' +
-				'byte(s) with a 20 byte headroom'
+				'The cohort needs 1000 substitutable NAR bytes, but the store has ' +
+				'100 bytes available and must retain 20 bytes of headroom.'
 		});
 	});
 
@@ -6382,7 +6387,7 @@ describe('buildCohortAction publication', () => {
 		});
 	});
 
-	it('settles an all-failed remote cohort before reporting target failures', async () => {
+	it('writes an empty receipt before reporting an all-failed remote cohort', async () => {
 		const receiptFile = path.join(directory, 'cupboard-cohort-receipt.json');
 
 		await expect(

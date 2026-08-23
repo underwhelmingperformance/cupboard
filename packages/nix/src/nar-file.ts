@@ -1,16 +1,15 @@
 import { NixStoreError } from './nix-store.ts';
 
 /**
- * The largest file this reader will hold in memory while reading a NAR. A
- * derivation is the only file read this way and is far smaller, so a stream
- * longer than this bound is not a derivation and is refused instead of
- * buffered.
+ * The largest regular-file payload accepted by default. The reader checks the
+ * declared length before allocating the destination buffer, so daemon
+ * derivation reads reject unexpectedly large files.
  */
 export const maxNarFileByteLength = 32 * 1024 * 1024;
 
 export class UnexpectedNarShapeError extends NixStoreError {
 	constructor(public readonly reason: string) {
-		super(`The NAR does not serialise a single regular file: ${reason}`);
+		super(`Expected a NAR with a regular-file root: ${reason}`);
 		this.name = 'UnexpectedNarShapeError';
 	}
 }
@@ -21,17 +20,17 @@ export class NarFileTooLargeError extends NixStoreError {
 		public readonly maxByteLength: number
 	) {
 		super(
-			`The NAR contains a ${String(byteLength)}-byte file, more than the ${String(maxByteLength)}-byte limit for reading a file into memory`
+			`The NAR declares a file length of ${String(byteLength)} bytes, above the ${String(maxByteLength)}-byte in-memory limit`
 		);
 		this.name = 'NarFileTooLargeError';
 	}
 }
 
 /**
- * The bytes of the single regular file a NAR serialises. A store path holding a
- * single file (a derivation, a text file added to the store) serialises to
- * exactly that, so this reads the whole file into memory; a NAR of any other
- * shape is refused.
+ * Reads the contents when a NAR's root node is a regular file, including one
+ * with the optional executable marker. The payload is buffered in memory up to
+ * `maxByteLength`; any other root shape is rejected. The input iterator is
+ * released after success or failure.
  */
 export async function narRegularFileContents(
 	chunks: AsyncIterable<Uint8Array>,
@@ -39,10 +38,9 @@ export async function narRegularFileContents(
 ): Promise<Uint8Array> {
 	const reader = new NarReader(chunks);
 
-	// The reader stops as soon as it has the file, leaving the stream
-	// suspended. Releasing the stream here lets a producer that holds a resource
-	// for the stream's lifetime, such as a dedicated daemon connection, close
-	// that resource when this function returns.
+	// Parsing stops after the closing regular-file marker, before the producer
+	// necessarily reports the end of the stream. Release the iterator so a
+	// producer such as `narFromPath` can close its dedicated daemon connection.
 	try {
 		await reader.expectWord('nix-archive-1');
 		await reader.expectWord('(');
@@ -56,7 +54,7 @@ export async function narRegularFileContents(
 			await reader.expectWord('contents');
 		} else if (marker !== 'contents') {
 			throw new UnexpectedNarShapeError(
-				`'${marker}' where the contents belong`
+				`expected 'contents' or 'executable', found '${marker}'`
 			);
 		}
 
@@ -69,11 +67,12 @@ export async function narRegularFileContents(
 	}
 }
 
-// The longest fixed word of the NAR grammar this reader accepts; anything
-// longer in a structural position is malformed.
+// Structural words in this NAR subset are no longer than `nix-archive-1`.
+// Reject a larger declared token before allocating or decoding it.
 const maxNarWordLength = 'nix-archive-1'.length;
 
-// A NAR is a stream of 64-bit-length-prefixed, 8-byte-padded byte strings.
+// NAR values use a little-endian 64-bit length followed by the bytes and enough
+// zero padding to reach an eight-byte boundary.
 class NarReader {
 	private buffered: Uint8Array[] = [];
 
@@ -125,7 +124,9 @@ class NarReader {
 		).getBigUint64(0, true);
 
 		if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
-			throw new UnexpectedNarShapeError('a length too large to read');
+			throw new UnexpectedNarShapeError(
+				"a declared length exceeds JavaScript's safe integer range"
+			);
 		}
 
 		return Number(value);
@@ -139,9 +140,6 @@ class NarReader {
 		}
 	}
 
-	/**
-	Tells the stream this reader is finished with it.
-	*/
 	async release(): Promise<void> {
 		await this.iterator.return?.();
 	}
@@ -151,7 +149,7 @@ class NarReader {
 
 		if (byteLength > maxNarWordLength) {
 			throw new UnexpectedNarShapeError(
-				`a grammar token of ${String(byteLength)} bytes`
+				`a structural token declares ${String(byteLength)} bytes; the limit is ${String(maxNarWordLength)}`
 			);
 		}
 
@@ -166,7 +164,7 @@ class NarReader {
 
 		if (word !== expected) {
 			throw new UnexpectedNarShapeError(
-				`'${word}' where '${expected}' belongs`
+				`expected '${expected}', found '${word}'`
 			);
 		}
 	}
@@ -185,7 +183,6 @@ class NarReader {
 	}
 }
 
-// The buffered chunks with the first `consumed` bytes dropped.
 function remaining(
 	chunks: readonly Uint8Array[],
 	consumed: number
