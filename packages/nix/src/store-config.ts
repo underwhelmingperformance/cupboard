@@ -632,7 +632,9 @@ function canonicalDirectory(value: string): string {
 
 	const normalised = path.posix.normalize(value);
 
-	return normalised.length > 1 ? normalised.replace(/\/+$/u, '') : normalised;
+	return normalised.length > 1 && normalised.endsWith('/')
+		? normalised.slice(0, -1)
+		: normalised;
 }
 
 // Merge all sources for this process, but mark only user and inline assignments
