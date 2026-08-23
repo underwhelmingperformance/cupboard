@@ -3216,12 +3216,13 @@ grants under the same covering test the authoriser uses. The new token is an
 ordinary short-lived access token with fewer grants.
 
 The exchange touches no storage. Subset is decided from the presented token's
-own grants, so there is no record to consult and none to revoke; the narrower
-token expires on its own schedule like any other. Attenuation is issuer-side:
-the holder calls the token endpoint to narrow, reusing the existing asymmetric
-signing keys and published JWKS. A privileged step narrows before handing a
-token to an untrusted one, and the owner's CLI can drop to a single cache before
-running a script.
+own grants, so there is no record to consult and none to revoke. The narrower
+token expires no later than the presented token, with the normal write-token
+lifetime as an additional upper bound. Attenuation is issuer-side: the holder
+calls the token endpoint to narrow, reusing the existing asymmetric signing keys
+and published JWKS. A privileged step narrows before handing a token to an
+untrusted one, and the owner's CLI can drop to a single cache before running a
+script.
 
 Refresh is the stored-session path for interactive owner/admin logins. The
 presence of a `refresh_token` member in the token response is the wire signal

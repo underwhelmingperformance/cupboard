@@ -47,11 +47,10 @@ import {
 	adminJwtTtlSeconds,
 	bearerToken,
 	issueAccessJwt,
-	verifyAccessJwt,
-	writeJwtTtlSeconds
+	verifyAccessJwt
 } from '../auth/auth.ts';
 import {
-	attenuatedGrants,
+	issueAttenuatedAccessToken,
 	parseRequestedGrants,
 	resolveRequestedGrants
 } from '../authz/issuance.ts';
@@ -201,30 +200,19 @@ export async function controlTokenExchange(
 
 		await ensureControlKey(database, wrappingSecret, isoTimestamp(now));
 		const active = await activeControlKey(database, wrappingSecret);
-		const granted = attenuatedGrants(
-			presented.grants,
-			parseRequestedGrants(exchange.authorization_details)
-		);
-		const accessToken = await issueAccessJwt(
-			active.privateJwk,
+		const response = await issueAttenuatedAccessToken(
 			{
+				privateJwk: active.privateJwk,
+				kid: active.kid,
 				issuer: controlIssuer(request),
 				audience,
-				subject: presented.subject,
-				grants: granted,
-				kid: active.kid,
-				ttlSeconds: writeJwtTtlSeconds
+				presented,
+				requested: parseRequestedGrants(exchange.authorization_details)
 			},
 			now
 		);
 
-		return oauthJsonResponse({
-			access_token: accessToken,
-			token_type: 'Bearer',
-			expires_in: writeJwtTtlSeconds,
-			issued_token_type: issuedAccessTokenType,
-			authorization_details: granted
-		} satisfies TokenResponse);
+		return oauthJsonResponse(response);
 	}
 
 	if (exchange.subject_token_type !== subjectTokenTypeIdToken) {
