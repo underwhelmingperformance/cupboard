@@ -1,11 +1,12 @@
 import type { OidcAudience, OidcIssuer } from '@cupboard/protocol/oidc';
-import { isAllowedIssuerUrl, IssuerUrl } from '@cupboard/protocol/oidc-issuer';
+import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 import type { OidcClaims } from '@cupboard/protocol/oidc-trust-match';
 import { readResponseBytes } from '@cupboard/shared/response-body';
 import {
 	createRemoteJWKSet,
 	customFetch,
 	decodeJwt,
+	decodeProtectedHeader,
 	errors as joseErrors,
 	type FetchImplementation,
 	type JWTPayload,
@@ -13,6 +14,8 @@ import {
 	type JWTVerifyGetKey
 } from 'jose';
 import { z } from 'zod';
+
+import { isAllowedIssuerTransport } from './issuer-policy.ts';
 
 // Accept only the asymmetric algorithms that Cupboard supports. Excluding HMAC
 // prevents a public key from the issuer's JWKS from being treated as a shared
@@ -125,11 +128,23 @@ export async function verifyInboundOidcToken(
 	options: InboundVerifyOptions,
 	now: Date
 ): Promise<JWTPayload> {
+	let expectedTokenType: 'JWT' | undefined;
+
+	if (options.requireIdTokenClaims) {
+		try {
+			expectedTokenType =
+				decodeProtectedHeader(token).typ === undefined ? undefined : 'JWT';
+		} catch (error) {
+			throw new OidcTokenVerificationError({ cause: error });
+		}
+	}
+
 	try {
 		const verified = await jwtVerify(token, resolveKey, {
 			issuer: options.issuer,
 			audience: options.audience,
 			algorithms: [...options.algorithms],
+			typ: expectedTokenType,
 			requiredClaims: options.requireIdTokenClaims
 				? ['exp', 'sub', 'iat']
 				: ['exp'],
@@ -158,6 +173,19 @@ export async function verifyInboundOidcToken(
 		}
 
 		const tokenAudience = verified.payload.aud;
+		const authorisedParty = verified.payload.azp;
+
+		if (
+			authorisedParty !== undefined &&
+			(typeof authorisedParty !== 'string' ||
+				authorisedParty !== options.audience)
+		) {
+			throw new OidcTokenVerificationError({
+				cause: new Error(
+					'ID token authorised party does not match the expected audience'
+				)
+			});
+		}
 
 		if (Array.isArray(tokenAudience)) {
 			const distinctAudiences = new Set(tokenAudience);
@@ -196,13 +224,40 @@ export interface OidcDiscovery {
 	readonly signingAlgValues: readonly string[];
 }
 
-const oidcDiscoverySchema = z.object({
-	issuer: z.url(),
-	jwks_uri: z.url().refine(isAllowedIssuerUrl),
-	response_types_supported: z.array(z.string()).min(1),
-	subject_types_supported: z.array(z.string()).min(1),
-	id_token_signing_alg_values_supported: z.array(z.string()).min(1)
-});
+function oidcVerificationDiscoverySchema(canUseLoopbackHttp: boolean) {
+	const endpointSchema = z
+		.url()
+		.refine((endpoint) =>
+			isAllowedIssuerTransport(endpoint, canUseLoopbackHttp)
+		);
+
+	return z
+		.looseObject({
+			issuer: z.url(),
+			jwks_uri: endpointSchema,
+			id_token_signing_alg_values_supported: z
+				.array(z.string())
+				.min(1)
+				.refine((algorithms) => algorithms.includes('RS256'))
+		})
+		.superRefine((metadata, context) => {
+			for (const [field, endpoint] of Object.entries(metadata)) {
+				if (!field.endsWith('_endpoint')) {
+					continue;
+				}
+
+				if (endpointSchema.safeParse(endpoint).success) {
+					continue;
+				}
+
+				context.addIssue({
+					code: 'custom',
+					message: 'OIDC endpoint must use an allowed transport',
+					path: [field]
+				});
+			}
+		});
+}
 
 const discoveryTimeoutMs = 15_000;
 
@@ -238,31 +293,32 @@ async function fetchBoundedResponse(
 }
 
 /**
- * Fetches the issuer's metadata and returns the JWKS URL and advertised ID-token
- * algorithms. The metadata issuer must match the configured issuer under
- * Cupboard's trailing-slash normalisation before either value is used.
+ * Fetches the issuer's metadata and returns its JWKS URL and advertised
+ * ID-token algorithms. The metadata issuer must exactly match the configured
+ * issuer before either value is used.
  */
 export async function fetchOidcDiscovery(
 	issuer: OidcIssuer,
-	fetcher: typeof fetch = fetch
+	fetcher: typeof fetch = fetch,
+	canUseLoopbackHttp = false
 ): Promise<OidcDiscovery> {
 	const issuerUrl = IssuerUrl.parse(issuer);
 
-	if (issuerUrl === undefined) {
+	if (
+		issuerUrl === undefined ||
+		!isAllowedIssuerTransport(issuerUrl.value, canUseLoopbackHttp)
+	) {
 		throw new OidcDiscoveryError(issuer, {
-			cause: new Error(
-				'issuer must use HTTPS, except that a loopback issuer may use HTTP'
-			)
+			cause: new Error('issuer must use HTTPS')
 		});
 	}
 
 	let payload: unknown;
 
 	try {
-		// Do not follow redirects: a redirect from the issuer's metadata endpoint
-		// to another host would let a compromised or hijacked endpoint serve a
-		// substitute document. A 3xx fails the `ok` check below. (The JWKS fetch,
-		// run by jose, is likewise pinned to `redirect: 'manual'`.)
+		// Do not follow redirects. Otherwise a compromised discovery endpoint could
+		// send verification to another server. JOSE also requests the JWKS with
+		// `redirect: 'manual'`.
 		const response = await fetchBoundedResponse(
 			fetcher,
 			issuerUrl.discoveryUrl,
@@ -282,12 +338,23 @@ export async function fetchOidcDiscovery(
 			);
 		}
 
+		const mediaType = response.headers
+			.get('content-type')
+			?.split(';', 1)[0]
+			?.trim()
+			.toLowerCase();
+
+		if (mediaType !== 'application/json') {
+			throw new Error('discovery did not return application/json');
+		}
+
 		payload = await response.json();
 	} catch (error) {
 		throw new OidcDiscoveryError(issuer, { cause: error });
 	}
 
-	const metadata = oidcDiscoverySchema.safeParse(payload);
+	const metadata =
+		oidcVerificationDiscoverySchema(canUseLoopbackHttp).safeParse(payload);
 
 	if (!metadata.success) {
 		throw new OidcDiscoveryError(issuer, { cause: metadata.error });
@@ -308,10 +375,8 @@ export async function fetchOidcDiscovery(
 }
 
 /**
- * The accepted algorithms for an issuer: the issuer's advertised set narrowed to
- * Cupboard's asymmetric allowlist. An issuer that advertises only algorithms
- * outside the allowlist produces an empty set, so verification rejects every
- * token from that issuer.
+ * Returns the algorithms that the issuer advertises and Cupboard permits. An
+ * empty result causes verification to reject every token from that issuer.
  */
 export function intersectAlgorithms(
 	advertised: readonly string[],
@@ -333,6 +398,7 @@ interface CachedIssuer {
 export interface OidcDiscoveryStoreOptions {
 	readonly now?: () => number;
 	readonly fetcher?: typeof fetch;
+	readonly canUseLoopbackHttp?: boolean;
 }
 
 /**
@@ -346,10 +412,12 @@ export class OidcDiscoveryStore {
 	private readonly now: () => number;
 
 	private readonly fetcher: typeof fetch;
+	private readonly canUseLoopbackHttp: boolean;
 
 	constructor(options: OidcDiscoveryStoreOptions = {}) {
 		this.now = options.now ?? (() => Date.now());
 		this.fetcher = options.fetcher ?? ((input, init) => fetch(input, init));
+		this.canUseLoopbackHttp = options.canUseLoopbackHttp ?? false;
 	}
 
 	private async forgetIfFailed(
@@ -368,7 +436,11 @@ export class OidcDiscoveryStore {
 	}
 
 	private async discover(issuer: OidcIssuer): Promise<ResolvedIssuer> {
-		const discovery = await fetchOidcDiscovery(issuer, this.fetcher);
+		const discovery = await fetchOidcDiscovery(
+			issuer,
+			this.fetcher,
+			this.canUseLoopbackHttp
+		);
 		const jwksFetcher: FetchImplementation = (url, options) =>
 			fetchBoundedResponse(this.fetcher, url, options, {
 				description: 'OIDC JWKS response',

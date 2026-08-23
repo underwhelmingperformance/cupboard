@@ -7,7 +7,6 @@ import {
 	oidcSubjectSchema,
 	refreshTokenGrantType,
 	subjectTokenTypeIdToken,
-	subjectTokenTypeJwt,
 	tokenExchangeGrantType,
 	type TokenResponse,
 	tokenResponseSchema,
@@ -27,6 +26,7 @@ import {
 	OwnerConfigurationInvalidError,
 	RefreshTokenRequiredError,
 	StaleRefreshTokenError,
+	StoredOidcTrustInvalidError,
 	SubjectTokenNotJwtError,
 	SubjectTokenRequiredError,
 	TenantSubjectTokenUntrustedError,
@@ -146,7 +146,7 @@ describe('POST /token', () => {
 		const response = await postToken({
 			grant_type: tokenExchangeGrantType,
 			subject_token: 'x',
-			subject_token_type: 'urn:ietf:params:oauth:token-type:access_token'
+			subject_token_type: 'urn:ietf:params:oauth:token-type:jwt'
 		});
 		const body = oauthErrorShape(await response.json());
 
@@ -168,7 +168,7 @@ describe('POST /token', () => {
 	it('rejects a token exchange with no subject token', async () => {
 		const error = await tokenExchangeError({
 			grant_type: tokenExchangeGrantType,
-			subject_token_type: subjectTokenTypeJwt
+			subject_token_type: subjectTokenTypeIdToken
 		});
 
 		expect(error).toBeInstanceOf(SubjectTokenRequiredError);
@@ -212,7 +212,7 @@ describe('POST /token', () => {
 			body: async () => ({
 				grant_type: tokenExchangeGrantType,
 				subject_token: await untrustedToken(),
-				subject_token_type: subjectTokenTypeJwt
+				subject_token_type: subjectTokenTypeIdToken
 			}),
 			error: TenantSubjectTokenUntrustedError
 		},
@@ -280,7 +280,7 @@ describe('POST /token', () => {
 			form: async () => ({
 				grant_type: tokenExchangeGrantType,
 				subject_token: await issueServerSignedToken(adminGrants()),
-				subject_token_type: subjectTokenTypeJwt
+				subject_token_type: 'urn:ietf:params:oauth:token-type:jwt'
 			}),
 			problem: 'unsupported-subject-token-type'
 		},
@@ -481,6 +481,37 @@ describe('POST /token', () => {
 		});
 	});
 
+	it('refuses an existing loopback HTTP trust row in production', async () => {
+		const error = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				await migrateThrough(state, latestMigrationIndex);
+				drizzle(state.storage, { schema: { oidcTrust } })
+					.insert(oidcTrust)
+					.values({
+						id: trustRuleIdSchema.parse('legacy-http'),
+						issuer: 'http://127.0.0.1:8788',
+						audience: 'cupboard-aud',
+						claimsJson: JSON.stringify({ sub: 'ci' }),
+						permittedGrantsJson: JSON.stringify(trustClassGrants.write),
+						createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
+					})
+					.run();
+
+				const tenantIdentity = new TenantIdentityService(instance.context);
+				const service = new OidcTrustService(instance.context, tenantIdentity);
+
+				try {
+					service.enabledOidcTrustRules();
+				} catch (error_) {
+					return error_;
+				}
+			}
+		);
+
+		expect(error).toBeInstanceOf(StoredOidcTrustInvalidError);
+	});
+
 	it('retries one issuer fetch failure and completes the exchange', async () => {
 		const subjectToken = await installTrustedIdp('admin', {
 			failFirstFetches: 1
@@ -489,6 +520,28 @@ describe('POST /token', () => {
 		const exchanged = await exchange(subjectToken);
 
 		expect(exchanged.status).toBe(StatusCodes.OK);
+	});
+
+	it('does not relabel an external access JWT as an ID token', async () => {
+		const subjectToken = await installTrustedIdp('admin', {
+			protectedType: 'at+jwt'
+		});
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenTypeIdToken
+		});
+		const body = oauthErrorShape(await response.json());
+
+		expect({
+			status: response.status,
+			error: body.error,
+			problem: body.problem
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_request',
+			problem: 'subject-token-invalid'
+		});
 	});
 });
 
@@ -505,13 +558,19 @@ const trustClassGrants = {
 
 async function installTrustedIdp(
 	scope: 'admin' | 'write',
-	options: { failFirstFetches?: number } = {}
+	options: { failFirstFetches?: number; protectedType?: string } = {}
 ): Promise<string> {
 	const idp = await generateKeyPair('RS256', { extractable: true });
 	const jwk = await exportJWK(idp.publicKey);
 	const signer = new SignJWT({});
 	const subjectToken = await signer
-		.setProtectedHeader({ alg: 'RS256', kid: 'idp' })
+		.setProtectedHeader({
+			alg: 'RS256',
+			kid: 'idp',
+			...(options.protectedType !== undefined && {
+				typ: options.protectedType
+			})
+		})
 		.setIssuer('https://idp.test')
 		.setAudience('cupboard-aud')
 		.setSubject('alice')
@@ -549,6 +608,7 @@ async function installTrustedIdp(
 				Response.json({
 					issuer: 'https://idp.test',
 					jwks_uri: 'https://idp.test/jwks',
+					authorization_endpoint: 'https://idp.test/authorize',
 					response_types_supported: ['id_token'],
 					subject_types_supported: ['public'],
 					id_token_signing_alg_values_supported: ['RS256']
@@ -1164,7 +1224,7 @@ describe('attenuation', () => {
 		const response = await postToken({
 			grant_type: tokenExchangeGrantType,
 			subject_token: forged,
-			subject_token_type: subjectTokenTypeJwt,
+			subject_token_type: subjectTokenTypeIdToken,
 			authorization_details: JSON.stringify([{ type: 'cupboard_wildcard' }])
 		});
 

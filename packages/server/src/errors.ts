@@ -84,6 +84,15 @@ export class OwnerConfigurationInvalidError extends ServerHttpError {
 	}
 }
 
+export class OidcIssuerTransportRequiredError extends ServerHttpError {
+	readonly status = StatusCodes.BAD_REQUEST;
+
+	constructor(public readonly issuer: OidcIssuer) {
+		super('OIDC issuers must use HTTPS');
+		this.name = 'OidcIssuerTransportRequiredError';
+	}
+}
+
 export class CommitUpgradeRequiredError extends ServerHttpError {
 	readonly status = StatusCodes.UPGRADE_REQUIRED;
 

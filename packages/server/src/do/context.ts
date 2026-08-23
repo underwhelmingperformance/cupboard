@@ -53,6 +53,10 @@ import {
 	TenantNotConfiguredError
 } from '../errors.ts';
 import { parseStored } from '../http/parse.ts';
+import {
+	canUseLoopbackHttp,
+	isAllowedIssuerTransport
+} from '../oidc/issuer-policy.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 
 import { boundedBlobs, boundedD1 } from './bounded-io.ts';
@@ -145,7 +149,7 @@ export class ServerContext {
 	readonly dbCost = new DatabaseCostMeter();
 	env: RuntimeEnv;
 	readonly ctx: DurableObjectState;
-	discovery = new OidcDiscoveryStore();
+	discovery: OidcDiscoveryStore;
 	// This closes the warm-instance race between an in-flight commit and the
 	// offboarding drain. New writes are already rejected at the Worker.
 	offboarding = false;
@@ -160,6 +164,9 @@ export class ServerContext {
 		// stalled request inside the input gate can force the runtime to reset the
 		// Durable Object after about 30 seconds.
 		this.env = { ...env, BLOBS: boundedBlobs(env.BLOBS) };
+		this.discovery = new OidcDiscoveryStore({
+			canUseLoopbackHttp: canUseLoopbackHttp(env)
+		});
 		this.db = drizzle(meteredStorage(ctx.storage, this.dbCost), { schema });
 		this.d1 = drizzleD1(boundedD1(env.CUPBOARD_DB), { schema: d1Schema });
 	}
@@ -246,10 +253,15 @@ export class ServerContext {
 }
 
 export function oidcTrustRuleFromRow(
-	row: typeof schema.oidcTrust.$inferSelect
+	row: typeof schema.oidcTrust.$inferSelect,
+	canUseLoopbackHttp = false
 ): OidcTrustRule {
 	const fault = (cause: Error): StoredOidcTrustInvalidError =>
 		new StoredOidcTrustInvalidError(row.id, cause);
+
+	if (!isAllowedIssuerTransport(row.issuer, canUseLoopbackHttp)) {
+		throw fault(new Error('an OIDC trust issuer must use HTTPS'));
+	}
 
 	return {
 		id: row.id,
@@ -268,9 +280,10 @@ export function oidcTrustRuleFromRow(
 }
 
 export function oidcTrustSummaryFromRow(
-	row: typeof schema.oidcTrust.$inferSelect
+	row: typeof schema.oidcTrust.$inferSelect,
+	canUseLoopbackHttp = false
 ): OidcTrustSummary {
-	const rule = oidcTrustRuleFromRow(row);
+	const rule = oidcTrustRuleFromRow(row, canUseLoopbackHttp);
 
 	return {
 		id: rule.id,

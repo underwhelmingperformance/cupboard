@@ -1,19 +1,22 @@
 import {
 	issuedAccessTokenType,
 	subjectTokenTypeIdToken,
-	subjectTokenTypeJwt,
 	tokenExchangeGrantType,
 	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
-import { generateKeyPair, SignJWT } from 'jose';
+import { exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
-import { controlTokenExchange } from '../control/control-plane.ts';
+import {
+	controlOidcTrustRemove,
+	controlTokenExchange
+} from '../control/control-plane.ts';
 import {
 	ControlSubjectTokenUntrustedError,
+	StoredControlTrustInvalidError,
 	SubjectTokenNotJwtError,
 	UnsupportedGrantTypeError,
 	UnsupportedSubjectTokenTypeError
@@ -126,6 +129,55 @@ async function signedToken(options: {
 		.sign(privateKey);
 }
 
+async function trustedControlToken(protectedType: string): Promise<string> {
+	const issuer = `https://idp-${crypto.randomUUID()}.example.test`;
+	const audience = 'cupboard-control';
+	const { publicKey, privateKey } = await generateKeyPair('RS256', {
+		extractable: true
+	});
+	const publicJwk = await exportJWK(publicKey);
+
+	await seedControlTrust({
+		issuer,
+		audience,
+		claims: { sub: 'global-admin' }
+	});
+	vi.stubGlobal('fetch', (input: RequestInfo | URL) => {
+		const url = input instanceof Request ? input.url : String(input);
+
+		if (url === `${issuer}/.well-known/openid-configuration`) {
+			return Promise.resolve(
+				Response.json({
+					issuer,
+					jwks_uri: `${issuer}/jwks`,
+					id_token_signing_alg_values_supported: ['RS256']
+				})
+			);
+		}
+
+		if (url === `${issuer}/jwks`) {
+			return Promise.resolve(
+				Response.json({
+					keys: [{ ...publicJwk, kid: 'idp', alg: 'RS256', use: 'sig' }]
+				})
+			);
+		}
+
+		return Promise.resolve(
+			new Response(undefined, { status: StatusCodes.NOT_FOUND })
+		);
+	});
+
+	return new SignJWT({})
+		.setProtectedHeader({ alg: 'RS256', kid: 'idp', typ: protectedType })
+		.setIssuer(issuer)
+		.setAudience(audience)
+		.setSubject('global-admin')
+		.setIssuedAt()
+		.setExpirationTime('5m')
+		.sign(privateKey);
+}
+
 describe('control plane POST /token', () => {
 	beforeEach(resetTestServer);
 	afterEach(() => {
@@ -136,7 +188,7 @@ describe('control plane POST /token', () => {
 		const error = await tokenExchangeError({
 			grant_type: tokenExchangeGrantType,
 			subject_token: 'x',
-			subject_token_type: 'urn:ietf:params:oauth:token-type:access_token'
+			subject_token_type: 'urn:ietf:params:oauth:token-type:jwt'
 		});
 
 		expect(error).toBeInstanceOf(UnsupportedSubjectTokenTypeError);
@@ -240,7 +292,7 @@ describe('control plane POST /token', () => {
 			form: async () => ({
 				grant_type: tokenExchangeGrantType,
 				subject_token: await issueControlAdminToken('global-admin'),
-				subject_token_type: subjectTokenTypeJwt
+				subject_token_type: 'urn:ietf:params:oauth:token-type:jwt'
 			}),
 			problem: 'unsupported-subject-token-type'
 		},
@@ -387,6 +439,26 @@ describe('control plane POST /token', () => {
 		});
 	});
 
+	it('does not relabel an external access JWT as an ID token', async () => {
+		const subjectToken = await trustedControlToken('at+jwt');
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenTypeIdToken
+		});
+		const body = oauthErrorShape(await response.json());
+
+		expect({
+			status: response.status,
+			error: body.error,
+			problem: body.problem
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_request',
+			problem: 'subject-token-invalid'
+		});
+	});
+
 	it('reports 503, not invalid_grant, when the matched issuer is unavailable', async () => {
 		const issuer = currentOrigin();
 
@@ -412,6 +484,91 @@ describe('control plane POST /token', () => {
 		await response.text();
 
 		expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
+	});
+
+	it('refuses an exchange when its control trust rule is removed during verification', async () => {
+		const issuer = `https://idp-${crypto.randomUUID()}.example.test`;
+		const audience = 'cupboard-control';
+		const { publicKey, privateKey } = await generateKeyPair('RS256', {
+			extractable: true
+		});
+		const publicJwk = await exportJWK(publicKey);
+		const ruleId = await seedControlTrust({
+			issuer,
+			audience,
+			claims: { sub: 'global-admin' }
+		});
+		const { promise: discoveryHeld, resolve: releaseDiscovery } =
+			Promise.withResolvers<undefined>();
+		const { promise: discoveryRequested, resolve: discoveryStarted } =
+			Promise.withResolvers<undefined>();
+
+		vi.stubGlobal('fetch', async (input: RequestInfo | URL) => {
+			const url = input instanceof Request ? input.url : String(input);
+
+			if (url === `${issuer}/.well-known/openid-configuration`) {
+				discoveryStarted(undefined);
+				await discoveryHeld;
+
+				return Response.json({
+					issuer,
+					jwks_uri: `${issuer}/jwks`,
+					id_token_signing_alg_values_supported: ['RS256']
+				});
+			}
+
+			if (url === `${issuer}/jwks`) {
+				return Response.json({
+					keys: [{ ...publicJwk, kid: 'idp', alg: 'RS256', use: 'sig' }]
+				});
+			}
+
+			return new Response(undefined, { status: StatusCodes.NOT_FOUND });
+		});
+
+		const subjectToken = await new SignJWT({})
+			.setProtectedHeader({ alg: 'RS256', kid: 'idp', typ: 'JWT' })
+			.setIssuer(issuer)
+			.setAudience(audience)
+			.setSubject('global-admin')
+			.setIssuedAt()
+			.setExpirationTime('5m')
+			.sign(privateKey);
+		const exchange = tokenExchangeError({
+			grant_type: tokenExchangeGrantType,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenTypeIdToken
+		});
+
+		await discoveryRequested;
+		await controlOidcTrustRemove(
+			Object.assign({}, env, testControlEnv),
+			ruleId
+		);
+		releaseDiscovery(undefined);
+
+		expect(await exchange).toBeInstanceOf(ControlSubjectTokenUntrustedError);
+	});
+
+	it('refuses an existing loopback HTTP control trust row in production', async () => {
+		await seedControlTrust({
+			issuer: 'http://127.0.0.1:8788',
+			audience: 'cupboard-control',
+			claims: { sub: 'global-admin' }
+		});
+		const subjectToken = await signedToken({
+			issuer: 'http://127.0.0.1:8788',
+			audience: 'cupboard-control',
+			subject: 'global-admin'
+		});
+
+		const error = await tokenExchangeError({
+			grant_type: tokenExchangeGrantType,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenTypeIdToken
+		});
+
+		expect(error).toBeInstanceOf(StoredControlTrustInvalidError);
 	});
 
 	it.each<{ name: string; override: Readonly<Record<string, string>> }>([

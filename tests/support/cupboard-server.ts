@@ -127,6 +127,7 @@ export class CupboardTestServer {
 		// Object across scripts via `scriptName`.
 		const tenantBindings = {
 			CUPBOARD_COLD_PATH_TTL_SECONDS: '',
+			CUPBOARD_LOCAL_DEV: 'true',
 			PUSH_ID_SIGNING_KEY: 'e2e-push-id-signing-key',
 			R2_ACCESS_KEY_ID: r2Credentials.accessKeyId,
 			R2_ACCOUNT_ID: r2Credentials.accountId,

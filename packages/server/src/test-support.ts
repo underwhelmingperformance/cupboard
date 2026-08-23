@@ -36,6 +36,7 @@ import {
 	type OidcIssuer,
 	oidcIssuerSchema,
 	oidcSubjectSchema,
+	type TrustRuleId,
 	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import type {
@@ -1022,18 +1023,21 @@ export async function seedControlTrust(fields: {
 	readonly issuer: string;
 	readonly audience: string;
 	readonly claims?: Readonly<Record<string, string>>;
-}): Promise<void> {
+}): Promise<TrustRuleId> {
 	const createdAt = new Date();
+	const id = trustRuleIdSchema.parse(crypto.randomUUID());
 	await drizzleD1(env.CUPBOARD_DB, { schema: { controlTrust } })
 		.insert(controlTrust)
 		.values({
-			id: trustRuleIdSchema.parse(crypto.randomUUID()),
+			id,
 			issuer: fields.issuer,
 			audience: fields.audience,
 			claimsJson: JSON.stringify(fields.claims ?? {}),
 			createdAt: isoTimestamp(createdAt)
 		})
 		.run();
+
+	return id;
 }
 
 export async function authorisedFetch(

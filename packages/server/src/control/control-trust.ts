@@ -15,31 +15,45 @@ import {
 } from '@cupboard/protocol/oidc';
 import type { OidcTrustRule } from '@cupboard/protocol/oidc-trust-match';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
-import { asc, eq, isNull } from 'drizzle-orm';
+import { and, asc, eq, isNull } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	ControlTrustSubjectRequiredError,
+	OidcIssuerTransportRequiredError,
 	OidcTrustRuleNotFoundError,
 	StoredControlTrustInvalidError
 } from '../errors.ts';
 import { parseStored } from '../http/parse.ts';
+import { isAllowedIssuerTransport } from '../oidc/issuer-policy.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
 type ControlTrustRow = typeof d1Schema.controlTrust.$inferSelect;
+
+export interface ControlTrustRuleSnapshot {
+	readonly rule: OidcTrustRule;
+	readonly row: ControlTrustRow;
+}
 
 // Reading must admit every claim value the admin contract stores: an exact
 // string or a `{ pattern }` match. The subject guard below still requires an
 // exact string `sub`, so a pattern `sub` fails that check.
 const storedClaimsSchema = z.record(z.string(), claimMatchSchema);
 
-function ruleFromRow(row: ControlTrustRow): OidcTrustRule {
+function ruleFromRow(
+	row: ControlTrustRow,
+	canUseLoopbackHttp: boolean
+): OidcTrustRule {
 	const fault = (cause: Error): StoredControlTrustInvalidError =>
 		new StoredControlTrustInvalidError(row.id, cause);
 
 	const claims = parseStored(storedClaimsSchema, row.claimsJson, fault);
+
+	if (!isAllowedIssuerTransport(row.issuer, canUseLoopbackHttp)) {
+		throw fault(new Error('a control OIDC trust issuer must use HTTPS'));
+	}
 
 	// A control rule MUST pin a subject. Without it the rule would match every
 	// subject of the trusted issuer and audience (the highest-privilege grant in
@@ -64,8 +78,11 @@ function ruleFromRow(row: ControlTrustRow): OidcTrustRule {
 	};
 }
 
-function summaryFromRow(row: ControlTrustRow): OidcTrustSummary {
-	const rule = ruleFromRow(row);
+function summaryFromRow(
+	row: ControlTrustRow,
+	canUseLoopbackHttp: boolean
+): OidcTrustSummary {
+	const rule = ruleFromRow(row, canUseLoopbackHttp);
 
 	return {
 		id: rule.id,
@@ -79,19 +96,65 @@ function summaryFromRow(row: ControlTrustRow): OidcTrustSummary {
 }
 
 export async function controlTrustRules(
-	database: Database
+	database: Database,
+	canUseLoopbackHttp = false
 ): Promise<OidcTrustRule[]> {
+	const snapshots = await controlTrustRuleSnapshots(
+		database,
+		canUseLoopbackHttp
+	);
+
+	return snapshots.map(({ rule }) => rule);
+}
+
+export async function controlTrustRuleSnapshots(
+	database: Database,
+	canUseLoopbackHttp = false
+): Promise<ControlTrustRuleSnapshot[]> {
 	const rows = await database
 		.select()
 		.from(d1Schema.controlTrust)
 		.where(isNull(d1Schema.controlTrust.disabledAt))
 		.all();
 
-	return rows.map((row) => ruleFromRow(row));
+	return rows.map((row) => ({
+		rule: ruleFromRow(row, canUseLoopbackHttp),
+		row
+	}));
+}
+
+export async function isControlTrustSnapshotCurrent(
+	database: Database,
+	snapshot: ControlTrustRuleSnapshot
+): Promise<boolean> {
+	const { row } = snapshot;
+	const displayMatches =
+		row.displayJson === null
+			? isNull(d1Schema.controlTrust.displayJson)
+			: eq(d1Schema.controlTrust.displayJson, row.displayJson);
+	const current = await database
+		.select({ id: d1Schema.controlTrust.id })
+		.from(d1Schema.controlTrust)
+		.where(
+			and(
+				eq(d1Schema.controlTrust.id, row.id),
+				eq(d1Schema.controlTrust.issuer, row.issuer),
+				eq(d1Schema.controlTrust.audience, row.audience),
+				eq(d1Schema.controlTrust.claimsJson, row.claimsJson),
+				eq(d1Schema.controlTrust.permittedGrantsJson, row.permittedGrantsJson),
+				displayMatches,
+				eq(d1Schema.controlTrust.createdAt, row.createdAt),
+				isNull(d1Schema.controlTrust.disabledAt)
+			)
+		)
+		.get();
+
+	return current !== undefined;
 }
 
 export async function listControlTrust(
-	database: Database
+	database: Database,
+	canUseLoopbackHttp = false
 ): Promise<OidcTrustListResponse> {
 	const rows = await database
 		.select()
@@ -102,12 +165,13 @@ export async function listControlTrust(
 		)
 		.all();
 
-	return { rules: rows.map((row) => summaryFromRow(row)) };
+	return { rules: rows.map((row) => summaryFromRow(row, canUseLoopbackHttp)) };
 }
 
 export async function getControlTrust(
 	database: Database,
-	id: TrustRuleId
+	id: TrustRuleId,
+	canUseLoopbackHttp = false
 ): Promise<OidcTrustSummary> {
 	const row = await database
 		.select()
@@ -119,14 +183,19 @@ export async function getControlTrust(
 		throw new OidcTrustRuleNotFoundError(id);
 	}
 
-	return summaryFromRow(row);
+	return summaryFromRow(row, canUseLoopbackHttp);
 }
 
 export async function addControlTrust(
 	database: Database,
 	body: ParsedOidcTrustAddBody,
-	now: IsoTimestamp
+	now: IsoTimestamp,
+	canUseLoopbackHttp = false
 ): Promise<OidcTrustSummary> {
+	if (!isAllowedIssuerTransport(body.issuer, canUseLoopbackHttp)) {
+		throw new OidcIssuerTransportRequiredError(body.issuer);
+	}
+
 	// A control rule must pin a subject: without it the rule would match every
 	// subject of the trusted issuer and audience, handing out control authority on
 	// issuer membership alone.

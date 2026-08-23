@@ -163,13 +163,30 @@ describe('discoverOidcLogin', () => {
 		expect(signal).toBe(controller.signal);
 	});
 
-	it('throws when the metadata lacks endpoints', async () => {
+	it.each([
+		{
+			name: 'an authorization endpoint',
+			metadata: {
+				issuer: endpoints.issuer,
+				...discoveryCapabilities,
+				token_endpoint: endpoints.tokenEndpoint
+			}
+		},
+		{
+			name: 'a token endpoint',
+			metadata: {
+				issuer: endpoints.issuer,
+				...discoveryCapabilities,
+				authorization_endpoint: endpoints.authorizationEndpoint
+			}
+		}
+	])('throws when the metadata lacks $name', async ({ metadata }) => {
 		const requests: string[] = [];
 		const caught = await rejectedBy(() =>
 			discoverOidcLogin('https://idp.example.com', (input) => {
 				requests.push(requestUrl(input));
 
-				return Promise.resolve(Response.json({}));
+				return Promise.resolve(Response.json(metadata));
 			})
 		);
 

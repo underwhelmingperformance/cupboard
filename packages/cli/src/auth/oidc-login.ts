@@ -176,7 +176,7 @@ export interface OidcLoginEndpoints {
 // cannot redirect those credentials to a plain-HTTP server.
 const endpointUrl = z.url().refine(isAllowedIssuerUrl);
 
-const endpointsSchema = z.object({
+const interactiveOidcDiscoverySchema = z.object({
 	issuer: z.url(),
 	authorization_endpoint: endpointUrl,
 	token_endpoint: endpointUrl,
@@ -274,7 +274,7 @@ export async function discoverOidcLogin(
 		});
 	}
 
-	const parsed = endpointsSchema.safeParse(payload);
+	const parsed = interactiveOidcDiscoverySchema.safeParse(payload);
 
 	if (!parsed.success) {
 		throw new OidcLoginError(
