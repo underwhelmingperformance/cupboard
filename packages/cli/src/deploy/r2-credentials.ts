@@ -1,7 +1,9 @@
+import { discardResponseBody } from '@cupboard/shared/cleanup';
 import { readResponseText } from '@cupboard/shared/response-body';
 import { AwsClient } from 'aws4fetch';
 import { z } from 'zod';
 
+import { throwIfAborted } from '../abort.ts';
 import { resilientFetcher } from '../client/transport.ts';
 import { CliError } from '../errors.ts';
 
@@ -138,6 +140,7 @@ export async function checkR2Credentials(
 		readonly accountId: CloudflareAccountId;
 		readonly bucketName: string;
 		readonly credentials: R2Credentials;
+		readonly signal?: AbortSignal;
 	},
 	fetcher: typeof fetch = resilientFetcher('replay-unsafe')
 ): Promise<R2CredentialCheck> {
@@ -153,15 +156,20 @@ export async function checkR2Credentials(
 	let begun: Response;
 
 	try {
+		throwIfAborted(options.signal);
 		const signed = await client.sign(`${objectUrl}?uploads`, {
 			method: 'POST'
 		});
-		begun = await fetcher(signed);
+		begun = await fetcher(signed, { signal: options.signal });
 	} catch (error) {
+		throwIfAborted(options.signal);
+
 		return { kind: 'unreachable', cause: error };
 	}
 
 	if (!begun.ok) {
+		await discardResponseBody(begun);
+
 		return { kind: 'rejected', status: begun.status };
 	}
 
@@ -170,9 +178,12 @@ export async function checkR2Credentials(
 	try {
 		body = await readResponseText(begun, {
 			description: 'R2 multipart-upload response',
-			maximumBytes: 64 * 1024
+			maximumBytes: 64 * 1024,
+			signal: options.signal
 		});
 	} catch (error) {
+		throwIfAborted(options.signal);
+
 		return {
 			kind: 'invalid-response',
 			cause: error instanceof Error ? error : new R2CredentialResponseError()
@@ -185,16 +196,19 @@ export async function checkR2Credentials(
 		return { kind: 'invalid-response', cause: new R2CredentialResponseError() };
 	}
 
+	throwIfAborted(options.signal);
 	const signed = await client.sign(
 		`${objectUrl}?uploadId=${encodeURIComponent(uploadId)}`,
 		{ method: 'DELETE' }
 	);
 
 	try {
-		await fetcher(signed);
+		const cleaned = await fetcher(signed, { signal: options.signal });
+		await discardResponseBody(cleaned);
 	} catch {
-		// A begun upload holds no object, so a failed abort leaves only an empty
-		// in-progress upload that R2 drops on its own; the verdict is already set.
+		throwIfAborted(options.signal);
+		// A begun upload holds no object. If this request fails, R2 keeps the empty
+		// multipart upload until it is automatically aborted after seven days.
 	}
 
 	return { kind: 'valid' };

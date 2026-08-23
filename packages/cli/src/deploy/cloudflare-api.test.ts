@@ -1,9 +1,11 @@
+import { ProgressiveCollectionLimitError } from '@cupboard/shared/collections';
 import Cloudflare, { NotFoundError } from 'cloudflare';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import {
 	createCloudflareApi,
+	maximumCloudflareCollectionPages,
 	QueueConsumerIdMissingError
 } from './cloudflare-api.ts';
 import {
@@ -164,6 +166,38 @@ function fakeCloudflare(routes: Readonly<Record<string, unknown>>): {
 		client: new Cloudflare({ apiToken: 'token', fetch: fetcher }),
 		requests,
 		bodies
+	};
+}
+
+function paginatedD1Client(
+	itemsForPage: (page: number) => readonly unknown[]
+): { client: Cloudflare; pages: number[] } {
+	const pages: number[] = [];
+	const fetcher: typeof fetch = (input) => {
+		const rawUrl =
+			typeof input === 'string'
+				? input
+				: input instanceof URL
+					? input.href
+					: input.url;
+		const url = new URL(rawUrl);
+		const page = Number(url.searchParams.get('page') ?? '1');
+		pages.push(page);
+
+		return Promise.resolve(
+			Response.json({
+				success: true,
+				errors: [],
+				messages: [],
+				result: itemsForPage(page),
+				result_info: { page, per_page: 1 }
+			})
+		);
+	};
+
+	return {
+		client: new Cloudflare({ apiToken: 'token', fetch: fetcher }),
+		pages
 	};
 }
 
@@ -433,6 +467,42 @@ describe('ensureSchedules', () => {
 	});
 });
 
+describe('R2 bucket lookup', () => {
+	const bucketPath = '/accounts/acc-1/r2/buckets/cupboard-blobs';
+	const bucketsPath = '/accounts/acc-1/r2/buckets';
+
+	it('checks the exact bucket instead of a potentially truncated list', async () => {
+		const { client, requests } = fakeCloudflare({
+			[`GET ${bucketPath}`]: { name: 'cupboard-blobs' }
+		});
+
+		const isPresent = await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).r2BucketExists('cupboard-blobs');
+
+		expect({ isPresent, requests }).toStrictEqual({
+			isPresent: true,
+			requests: [{ method: 'GET', path: bucketPath }]
+		});
+	});
+
+	it('creates a bucket only after its exact lookup returns 404', async () => {
+		const { client, requests } = fakeCloudflare({
+			[`POST ${bucketsPath}`]: { name: 'cupboard-blobs' }
+		});
+
+		await createCloudflareApi(client, accountId('acc-1')).ensureR2Bucket(
+			'cupboard-blobs'
+		);
+
+		expect(requests).toStrictEqual([
+			{ method: 'GET', path: bucketPath },
+			{ method: 'POST', path: bucketsPath }
+		]);
+	});
+});
+
 describe('ensureStagingLifecycleRule', () => {
 	const lifecyclePath = '/accounts/acc-1/r2/buckets/cupboard-blobs/lifecycle';
 
@@ -530,6 +600,44 @@ describe('ensureStagingLifecycleRule', () => {
 			],
 			putBody: { rules: [otherRule, stagingRule] }
 		});
+	});
+});
+
+describe('bounded Cloudflare pagination', () => {
+	it('stops requesting pages when it finds the database', async () => {
+		const { client, pages } = paginatedD1Client((page) =>
+			page === 1
+				? [{ name: 'other', uuid: 'db-other' }]
+				: [{ name: 'cupboard', uuid: 'db-cupboard' }]
+		);
+
+		const found = await createCloudflareApi(
+			client,
+			accountId('acc-1')
+		).ensureD1Database('cupboard');
+
+		expect({ found, pages }).toStrictEqual({
+			found: 'db-cupboard',
+			pages: [1, 2]
+		});
+	});
+
+	it('does not request a page beyond the collection limit', async () => {
+		const { client, pages } = paginatedD1Client((page) => [
+			{ name: `other-${String(page)}`, uuid: `db-${String(page)}` }
+		]);
+
+		await expect(
+			createCloudflareApi(client, accountId('acc-1')).ensureD1Database(
+				'cupboard'
+			)
+		).rejects.toBeInstanceOf(ProgressiveCollectionLimitError);
+		expect(pages).toStrictEqual(
+			Array.from(
+				{ length: maximumCloudflareCollectionPages },
+				(_value, index) => index + 1
+			)
+		);
 	});
 });
 

@@ -2,6 +2,8 @@ import type { PhaseContext, Reporter, ResultRow } from '@cupboard/reporter';
 import { APIError, NotFoundError } from 'cloudflare';
 import { z } from 'zod';
 
+import { throwIfAborted } from '../abort.ts';
+
 import type { DeploymentArtifact } from './artifact.ts';
 import type { WorkerBundle } from './bundle.ts';
 import type { CloudflareApi, WorkerSecret } from './cloudflare-api.ts';
@@ -66,6 +68,7 @@ export interface DeployDependencies {
 	readonly api: CloudflareApi;
 	readonly reporter: Reporter;
 	readonly options: DeployOptions;
+	readonly signal?: AbortSignal;
 }
 
 interface ResourcePlan {
@@ -338,6 +341,23 @@ function canonicalJson(value: unknown): string {
  * this mutating operation.
  */
 export async function runDeploy(
+	dependencies: DeployDependencies
+): Promise<ResultRow[]> {
+	throwIfAborted(dependencies.signal);
+
+	try {
+		const result = await performDeploy(dependencies);
+		throwIfAborted(dependencies.signal);
+
+		return result;
+	} catch (error) {
+		throwIfAborted(dependencies.signal);
+
+		throw error;
+	}
+}
+
+async function performDeploy(
 	dependencies: DeployDependencies
 ): Promise<ResultRow[]> {
 	const { artifact, api, reporter, options } = dependencies;
