@@ -29,9 +29,9 @@ export interface AccessClaims {
 	readonly expiresAt: Date;
 }
 
-// Require the RFC 9068 access-token media type so an OIDC ID token cannot be
-// accepted here.
-const accessTokenType = 'at+jwt';
+// Keep Cupboard access tokens distinct from both OIDC ID tokens and the RFC
+// 9068 profile, whose required claims and algorithm contract differ.
+const accessTokenType = 'cupboard-access+jwt';
 const authorizationDetailsClaim = 'authorization_details';
 
 export const adminJwtTtlSeconds = ttlSecondsSchema.parse(10 * 60);

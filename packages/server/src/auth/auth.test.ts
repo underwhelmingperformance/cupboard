@@ -8,7 +8,7 @@ import {
 	oidcIssuerSchema,
 	oidcSubjectSchema
 } from '@cupboard/protocol/oidc';
-import { SignJWT } from 'jose';
+import { decodeProtectedHeader, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -177,6 +177,21 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		});
 	});
 
+	it('marks issued tokens with the private Cupboard access-token type', async () => {
+		const keyPair = await generateAuthKeyPair();
+		const token = await issueAccessJwt(
+			keyPair.privateJwk,
+			{ issuer, audience, subject, grants: wildcardGrants, kid, ttlSeconds },
+			now
+		);
+
+		expect(decodeProtectedHeader(token)).toStrictEqual({
+			alg: 'EdDSA',
+			typ: 'cupboard-access+jwt',
+			kid
+		});
+	});
+
 	it('verifies a token when its signing key is one of several live keys', async () => {
 		const retired = await generateAuthKeyPair();
 		const active = await generateAuthKeyPair();
@@ -332,7 +347,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 			at: now
 		},
 		{
-			name: 'a token without the at+jwt type header',
+			name: 'a token without the Cupboard access-token type header',
 			expected: { name: 'AccessTokenVerificationError', hasCause: true },
 			token: async (privateJwk: JsonWebKey, signingKey: CryptoKey) => {
 				void privateJwk;
@@ -353,6 +368,28 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 			at: now
 		},
 		{
+			name: 'an RFC 9068 access-token type header',
+			expected: { name: 'AccessTokenVerificationError', hasCause: true },
+			token: async (privateJwk: JsonWebKey, signingKey: CryptoKey) => {
+				void privateJwk;
+				const issuedAt = Math.floor(now.getTime() / 1000);
+
+				const jwt = new SignJWT({ authorization_details: wildcardGrants });
+				return jwt
+					.setProtectedHeader({ alg: 'EdDSA', typ: 'at+jwt', kid })
+					.setIssuer(issuer)
+					.setAudience(audience)
+					.setSubject(subject)
+					.setJti(crypto.randomUUID())
+					.setIssuedAt(issuedAt)
+					.setNotBefore(issuedAt)
+					.setExpirationTime(issuedAt + ttlSeconds)
+					.sign(signingKey);
+			},
+			verifyOptions: { issuer, audience },
+			at: now
+		},
+		{
 			name: 'a token without an authorization_details claim',
 			expected: { name: 'MissingGrantsError' },
 			token: async (privateJwk: JsonWebKey, signingKey: CryptoKey) => {
@@ -361,7 +398,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 
 				const jwt = new SignJWT({});
 				return jwt
-					.setProtectedHeader({ alg: 'EdDSA', typ: 'at+jwt', kid })
+					.setProtectedHeader({ alg: 'EdDSA', typ: 'cupboard-access+jwt', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
 					.setSubject(subject)
@@ -384,7 +421,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 					authorization_details: [{ type: 'unknown_grant' }]
 				});
 				return jwt
-					.setProtectedHeader({ alg: 'EdDSA', typ: 'at+jwt', kid })
+					.setProtectedHeader({ alg: 'EdDSA', typ: 'cupboard-access+jwt', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
 					.setSubject(subject)
@@ -408,7 +445,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 
 				const jwt = new SignJWT({ authorization_details: wildcardGrants });
 				return jwt
-					.setProtectedHeader({ alg: 'HS256', typ: 'at+jwt', kid })
+					.setProtectedHeader({ alg: 'HS256', typ: 'cupboard-access+jwt', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
 					.setSubject(subject)
@@ -429,7 +466,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 
 				const jwt = new SignJWT({ authorization_details: wildcardGrants });
 				return jwt
-					.setProtectedHeader({ alg: 'EdDSA', typ: 'at+jwt', kid })
+					.setProtectedHeader({ alg: 'EdDSA', typ: 'cupboard-access+jwt', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
 					.setIssuedAt(issuedAt)
