@@ -293,6 +293,10 @@ describe('oidc-trust admin API', () => {
 				...additionBody,
 				issuer: 'http://token.actions.githubusercontent.com'
 			}
+		},
+		{
+			name: 'a loopback HTTP issuer outside local development',
+			body: { ...additionBody, issuer: 'http://127.0.0.1:8788' }
 		}
 	])('refuses $name', async ({ body }) => {
 		const token = await adminToken();

@@ -25,6 +25,11 @@ import {
 } from '../errors.ts';
 import { parseFormBody } from '../http/parse.ts';
 import {
+	canUseLoopbackHttp,
+	isAllowedIssuerTransport,
+	type LocalDevelopmentEnvironment
+} from '../oidc/issuer-policy.ts';
+import {
 	decodeInboundClaims,
 	OidcDiscoveryStore,
 	OidcKeysUnreachableError,
@@ -38,6 +43,9 @@ type Database = DrizzleD1Database<typeof d1Schema>;
 // Issuer discovery cached across requests in this Worker instance, the same shape
 // the token exchange uses, here against the single deploy-configured signup issuer.
 const discovery = new OidcDiscoveryStore();
+const localDevelopmentDiscovery = new OidcDiscoveryStore({
+	canUseLoopbackHttp: true
+});
 
 // The gated first-signup claim: a caller presents an external OIDC subject token,
 // it is verified against the deploy-configured signup issuer, the deployment gate
@@ -61,7 +69,8 @@ export async function handleSignup(
 	const verified = await verifySignupToken(
 		issuer,
 		audience,
-		body.subject_token
+		body.subject_token,
+		canUseLoopbackHttp(env)
 	);
 	const subject = verifiedSubject(verified);
 
@@ -127,7 +136,7 @@ export async function enforceGate(
 		return;
 	}
 
-	if (isLocalDevelopment(env)) {
+	if (canUseLoopbackHttp(env)) {
 		return;
 	}
 
@@ -137,11 +146,14 @@ export async function enforceGate(
 async function verifySignupToken(
 	issuer: OidcIssuer,
 	audience: OidcAudience,
-	token: string
+	token: string,
+	canUseHttpLoopback: boolean
 ): Promise<JWTPayload> {
 	let resolved;
 	try {
-		resolved = await discovery.resolve(issuer);
+		resolved = await (
+			canUseHttpLoopback ? localDevelopmentDiscovery : discovery
+		).resolve(issuer);
 	} catch (error: unknown) {
 		throw new IssuerUnavailableError(issuer, { cause: error });
 	}
@@ -175,19 +187,13 @@ function verifiedSubject(verified: JWTPayload): string {
 	return verified.sub;
 }
 
-function isLocalDevelopment(env: SignupGate): boolean {
-	const flag = env.CUPBOARD_LOCAL_DEV;
-
-	return flag === '1' || flag === 'true';
-}
-
 function controlDatabase(env: Env): Database {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 }
 
 // The verification half of the signup config. A hand-rolled deployment may
 // omit the vars entirely, in which case the env reads as undefined; both refuse.
-interface SignupVerificationConfig {
+interface SignupVerificationConfig extends LocalDevelopmentEnvironment {
 	readonly CUPBOARD_SIGNUP_ISSUER: string | undefined;
 	readonly CUPBOARD_SIGNUP_AUDIENCE: string | undefined;
 }
@@ -198,7 +204,10 @@ function signupIssuer(env: SignupVerificationConfig): OidcIssuer {
 	// fault which the caller cannot clear by retrying.
 	const configured = IssuerUrl.parse(env.CUPBOARD_SIGNUP_ISSUER ?? '');
 
-	if (configured === undefined) {
+	if (
+		configured === undefined ||
+		!isAllowedIssuerTransport(configured.value, canUseLoopbackHttp(env))
+	) {
 		throw new ControlNotConfiguredError();
 	}
 

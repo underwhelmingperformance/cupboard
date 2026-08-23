@@ -57,6 +57,9 @@
 		"CUPBOARD_AUTH_ISSUER": "cupboard",
 		"CUPBOARD_AUTH_AUDIENCE": "cupboard",
 		"CUPBOARD_COLD_PATH_TTL_SECONDS": "",
+		// Local test and development harnesses set this explicitly so their OIDC
+		// issuer can listen over HTTP on the loopback interface.
+		"CUPBOARD_LOCAL_DEV": "",
 		// Empty means the built-in anti-abuse ceiling on a tenant's commit
 		// sockets. The tests bind a small value so a suite can reach it without
 		// opening hundreds of sockets.

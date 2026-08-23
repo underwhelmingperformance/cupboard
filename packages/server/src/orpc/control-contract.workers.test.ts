@@ -118,6 +118,21 @@ describe('control contract round trip', () => {
 		});
 	});
 
+	it('refuses a loopback HTTP control issuer outside local development', async () => {
+		const client = controlClient(await issueControlAdminToken());
+		const [error] = await safe(
+			client.oidcTrust.add({
+				issuer: 'http://127.0.0.1:8788',
+				audience: 'cupboard-control',
+				claims: { sub: 'automation' },
+				permittedGrants: [{ type: 'cupboard_wildcard' }]
+			})
+		);
+
+		expect(error).toBeInstanceOf(ORPCError);
+		expect(error).toMatchObject({ status: StatusCodes.BAD_REQUEST });
+	});
+
 	it('replaces a legacy-normalised control issuer through exact add and remove operations', async () => {
 		const client = controlClient(await issueControlAdminToken());
 		const body = {
@@ -222,6 +237,38 @@ describe('control contract round trip', () => {
 			});
 		}
 	);
+
+	it('rejects a loopback HTTP owner issuer before reserving the tenant slug', async () => {
+		const token = await issueControlAdminToken();
+		const invalid = await controlWorkerFetch(
+			new Request(`${currentOrigin()}/control/tenants`, {
+				method: 'POST',
+				headers: {
+					authorization: `Bearer ${token}`,
+					'content-type': 'application/json'
+				},
+				body: JSON.stringify({
+					id: 'acme',
+					readMode: 'private',
+					ownerIssuer: 'http://127.0.0.1:8788',
+					ownerSubject: 'owner',
+					ownerAudience: 'aud'
+				})
+			})
+		);
+		const created = await controlClient(token).tenants.create({
+			id: 'acme',
+			readMode: 'private',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud'
+		});
+
+		expect({ invalid: invalid.status, created: created.id }).toStrictEqual({
+			invalid: StatusCodes.BAD_REQUEST,
+			created: 'acme'
+		});
+	});
 
 	it('rebuilds tenant membership through the derived client', async () => {
 		const client = controlClient(await issueControlAdminToken());

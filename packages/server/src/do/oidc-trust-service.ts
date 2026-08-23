@@ -22,12 +22,17 @@ import type { JWTPayload } from 'jose';
 import * as schema from '../db/schema.ts';
 import {
 	IssuerUnavailableError,
+	OidcIssuerTransportRequiredError,
 	OidcTrustRuleNotFoundError,
 	OwnerConfigurationInvalidError,
 	OwnerRuleImmutableError,
 	SubjectTokenNotJwtError,
 	SubjectTokenVerificationFailedError
 } from '../errors.ts';
+import {
+	canUseLoopbackHttp,
+	isAllowedIssuerTransport
+} from '../oidc/issuer-policy.ts';
 import {
 	decodeInboundClaims,
 	OidcKeysUnreachableError,
@@ -85,7 +90,13 @@ export class OidcTrustService {
 		// to prevent seeding a rule that can never match.
 		const issuerUrl = IssuerUrl.parse(issuer);
 
-		if (issuerUrl === undefined) {
+		if (
+			issuerUrl === undefined ||
+			!isAllowedIssuerTransport(
+				issuerUrl.value,
+				canUseLoopbackHttp(this.context.env)
+			)
+		) {
 			throw new OwnerConfigurationInvalidError(issuer);
 		}
 
@@ -98,8 +109,7 @@ export class OidcTrustService {
 
 	private async verifyInboundOnce(
 		rule: OidcTrustRule,
-		token: string,
-		requiresIdTokenClaims: boolean
+		token: string
 	): Promise<JWTPayload> {
 		// Discovery and JWKS fetch failures are retryable issuer outages.
 		// Signature and claim failures remain non-retryable token errors.
@@ -120,7 +130,7 @@ export class OidcTrustService {
 					issuer: rule.issuer,
 					audience: rule.audience,
 					algorithms: issuer.algorithms,
-					requireIdTokenClaims: requiresIdTokenClaims
+					requireIdTokenClaims: true
 				},
 				new Date()
 			);
@@ -139,7 +149,9 @@ export class OidcTrustService {
 			.from(schema.oidcTrust)
 			.orderBy(asc(schema.oidcTrust.createdAt), asc(schema.oidcTrust.id))
 			.all()
-			.map((row) => oidcTrustSummaryFromRow(row));
+			.map((row) =>
+				oidcTrustSummaryFromRow(row, canUseLoopbackHttp(this.context.env))
+			);
 
 		return { rules };
 	}
@@ -155,10 +167,19 @@ export class OidcTrustService {
 			throw new OidcTrustRuleNotFoundError(id);
 		}
 
-		return oidcTrustSummaryFromRow(row);
+		return oidcTrustSummaryFromRow(row, canUseLoopbackHttp(this.context.env));
 	}
 
 	addRule(body: ParsedOidcTrustAddBody): OidcTrustSummary {
+		if (
+			!isAllowedIssuerTransport(
+				body.issuer,
+				canUseLoopbackHttp(this.context.env)
+			)
+		) {
+			throw new OidcIssuerTransportRequiredError(body.issuer);
+		}
+
 		const id = trustRuleIdSchema.parse(crypto.randomUUID());
 		const createdAt = isoTimestamp(new Date());
 
@@ -221,13 +242,9 @@ export class OidcTrustService {
 		}
 	}
 
-	async verifyInbound(
-		rule: OidcTrustRule,
-		token: string,
-		requiresIdTokenClaims: boolean
-	): Promise<JWTPayload> {
+	async verifyInbound(rule: OidcTrustRule, token: string): Promise<JWTPayload> {
 		try {
-			return await this.verifyInboundOnce(rule, token, requiresIdTokenClaims);
+			return await this.verifyInboundOnce(rule, token);
 		} catch (error) {
 			// Only the transient upstream refusal is retried; a token that failed
 			// verification is refused at once. One short in-place retry absorbs an
@@ -238,7 +255,7 @@ export class OidcTrustService {
 
 			await new Promise((resolve) => setTimeout(resolve, issuerRetryDelayMs));
 
-			return this.verifyInboundOnce(rule, token, requiresIdTokenClaims);
+			return this.verifyInboundOnce(rule, token);
 		}
 	}
 
@@ -249,7 +266,9 @@ export class OidcTrustService {
 			.where(isNull(schema.oidcTrust.disabledAt))
 			.orderBy(asc(schema.oidcTrust.createdAt), asc(schema.oidcTrust.id))
 			.all()
-			.map((row) => oidcTrustRuleFromRow(row));
+			.map((row) =>
+				oidcTrustRuleFromRow(row, canUseLoopbackHttp(this.context.env))
+			);
 	}
 
 	seedOwnerRule(database: SchemaWriter = this.context.db): void {

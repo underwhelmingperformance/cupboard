@@ -12,7 +12,6 @@ import {
 	oidcIssuerSchema,
 	oidcSubjectSchema,
 	subjectTokenTypeIdToken,
-	subjectTokenTypeJwt,
 	tokenExchangeGrantRequestSchema,
 	tokenExchangeGrantType,
 	tokenRequestSchema,
@@ -63,6 +62,7 @@ import {
 	ControlSubjectTokenUntrustedError,
 	InvalidAccessTokenError,
 	IssuerUnavailableError,
+	OidcIssuerTransportRequiredError,
 	SubjectTokenNotJwtError,
 	SubjectTokenRequiredError,
 	SubjectTokenVerificationFailedError,
@@ -72,6 +72,10 @@ import {
 } from '../errors.ts';
 import { oauthJsonResponse } from '../http/oauth-response.ts';
 import { parseFormBody, parseFormValue } from '../http/parse.ts';
+import {
+	canUseLoopbackHttp,
+	isAllowedIssuerTransport
+} from '../oidc/issuer-policy.ts';
 import {
 	decodeInboundClaims,
 	OidcDiscoveryStore,
@@ -92,8 +96,9 @@ import {
 } from './control-key-store.ts';
 import {
 	addControlTrust,
-	controlTrustRules,
+	controlTrustRuleSnapshots,
 	getControlTrust,
+	isControlTrustSnapshotCurrent,
 	listControlTrust,
 	removeControlTrust
 } from './control-trust.ts';
@@ -121,6 +126,9 @@ import {
 // the per-tenant Durable Object's own store: the control plane verifies inbound
 // tokens against its own trust policy.
 const discovery = new OidcDiscoveryStore();
+const localDevelopmentDiscovery = new OidcDiscoveryStore({
+	canUseLoopbackHttp: true
+});
 
 type Database = DrizzleD1Database<typeof d1Schema>;
 
@@ -143,7 +151,7 @@ export function controlInstanceInitialise(
 	);
 }
 
-// RFC 8693 token exchange for the control plane: an external OIDC subject token is
+// RFC 8693 token exchange for the control plane: an external OIDC ID token is
 // matched to a control trust rule on its unverified claims, the signature is then
 // checked against that rule's issuer JWKS, and only then is a global-admin token
 // issued with the control signing key. A subject token whose signature does not
@@ -166,7 +174,6 @@ export async function controlTokenExchange(
 
 	if (
 		exchange.subject_token_type !== subjectTokenTypeIdToken &&
-		exchange.subject_token_type !== subjectTokenTypeJwt &&
 		exchange.subject_token_type !== issuedAccessTokenType
 	) {
 		throw new UnsupportedSubjectTokenTypeError(exchange.subject_token_type);
@@ -220,7 +227,7 @@ export async function controlTokenExchange(
 		} satisfies TokenResponse);
 	}
 
-	if (exchange.subject_token_type === issuedAccessTokenType) {
+	if (exchange.subject_token_type !== subjectTokenTypeIdToken) {
 		throw new UnsupportedSubjectTokenTypeError(exchange.subject_token_type);
 	}
 
@@ -232,29 +239,41 @@ export async function controlTokenExchange(
 		throw new SubjectTokenNotJwtError();
 	}
 
-	const rule = matchOidcTrust(await controlTrustRules(database), claims);
+	const canUseHttpLoopback = canUseLoopbackHttp(env);
+	const snapshots = await controlTrustRuleSnapshots(
+		database,
+		canUseHttpLoopback
+	);
+	const rule = matchOidcTrust(
+		snapshots.map(({ rule }) => rule),
+		claims
+	);
 
 	if (rule === undefined) {
+		throw new ControlSubjectTokenUntrustedError();
+	}
+
+	const snapshot = snapshots.find(({ rule: candidate }) => candidate === rule);
+
+	if (snapshot === undefined) {
 		throw new ControlSubjectTokenUntrustedError();
 	}
 
 	const verified = await verifyControlInbound(
 		rule,
 		exchange.subject_token,
-		exchange.subject_token_type === subjectTokenTypeIdToken
+		canUseHttpLoopback
 	);
-	const requiresIdTokenClaims =
-		exchange.subject_token_type === subjectTokenTypeIdToken;
 	const verifiedSubject =
 		typeof verified.sub === 'string' && verified.sub !== ''
 			? verified.sub
 			: undefined;
 
-	if (requiresIdTokenClaims && verifiedSubject === undefined) {
+	if (verifiedSubject === undefined) {
 		throw new SubjectTokenVerificationFailedError();
 	}
 
-	const subject = oidcSubjectSchema.parse(verifiedSubject ?? rule.id);
+	const subject = oidcSubjectSchema.parse(verifiedSubject);
 
 	await ensureControlKey(database, wrappingSecret, isoTimestamp(now));
 	const active = await activeControlKey(database, wrappingSecret);
@@ -275,6 +294,10 @@ export async function controlTokenExchange(
 		},
 		now
 	);
+
+	if (!(await isControlTrustSnapshotCurrent(database, snapshot))) {
+		throw new ControlSubjectTokenUntrustedError();
+	}
 
 	return oauthJsonResponse({
 		access_token: accessToken,
@@ -311,13 +334,15 @@ async function verifyControlSelfIssued(
 async function verifyControlInbound(
 	rule: OidcTrustRule,
 	token: string,
-	requiresIdTokenClaims: boolean
+	canUseHttpLoopback: boolean
 ): Promise<JWTPayload> {
 	// Reaching the issuer is an upstream condition, not a bad token, so a discovery
 	// or JWKS-fetch failure is a retryable 503.
 	let issuer;
 	try {
-		issuer = await discovery.resolve(rule.issuer);
+		issuer = await (
+			canUseHttpLoopback ? localDevelopmentDiscovery : discovery
+		).resolve(rule.issuer);
 	} catch (error: unknown) {
 		throw new IssuerUnavailableError(rule.issuer, { cause: error });
 	}
@@ -330,7 +355,7 @@ async function verifyControlInbound(
 				issuer: rule.issuer,
 				audience: rule.audience,
 				algorithms: issuer.algorithms,
-				requireIdTokenClaims: requiresIdTokenClaims
+				requireIdTokenClaims: true
 			},
 			new Date()
 		);
@@ -500,14 +525,14 @@ export async function controlMembershipRebuild(
 }
 
 export function controlOidcTrustList(env: Env): Promise<OidcTrustListResponse> {
-	return listControlTrust(controlDatabase(env));
+	return listControlTrust(controlDatabase(env), canUseLoopbackHttp(env));
 }
 
 export function controlOidcTrustGet(
 	env: Env,
 	id: TrustRuleId
 ): Promise<OidcTrustSummary> {
-	return getControlTrust(controlDatabase(env), id);
+	return getControlTrust(controlDatabase(env), id, canUseLoopbackHttp(env));
 }
 
 export function controlOidcTrustAdd(
@@ -515,7 +540,12 @@ export function controlOidcTrustAdd(
 	body: ParsedOidcTrustAddBody
 ): Promise<OidcTrustSummary> {
 	const now = new Date();
-	return addControlTrust(controlDatabase(env), body, isoTimestamp(now));
+	return addControlTrust(
+		controlDatabase(env),
+		body,
+		isoTimestamp(now),
+		canUseLoopbackHttp(env)
+	);
 }
 
 export function controlOidcTrustRemove(
@@ -532,6 +562,10 @@ export async function controlTenantCreate(
 	origin: string,
 	rebuildFilter: (env: Env) => Promise<void> = rebuildMembershipFilter
 ): Promise<TenantSummary> {
+	if (!isAllowedIssuerTransport(body.ownerIssuer, canUseLoopbackHttp(env))) {
+		throw new OidcIssuerTransportRequiredError(body.ownerIssuer);
+	}
+
 	const database = controlDatabase(env);
 
 	// Provision in order: write the authoritative row, configure the Durable

@@ -1,9 +1,21 @@
 const loopbackHosts = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
 
 /**
- * OIDC issuer and JWKS URLs must use HTTPS so tokens and keys do not cross an
- * interceptable channel. HTTP is accepted only for a loopback host, which
- * supports local development and test issuers.
+ * Whether a URL uses HTTPS.
+ */
+export function isHttpsIssuerUrl(value: string): boolean {
+	try {
+		return new URL(value).protocol === 'https:';
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Whether a URL may be used as an OIDC issuer or JWKS endpoint. HTTPS is
+ * required so tokens and keys cannot be fetched over an interceptable channel;
+ * plain HTTP is permitted only for loopback hosts, so local development and the
+ * e2e stub issuer work without a certificate.
  */
 export function isAllowedIssuerUrl(value: string): boolean {
 	let url: URL;

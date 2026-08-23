@@ -3292,6 +3292,11 @@ Each step keeps a working deployment.
       acceptance, superset refusal, that a narrowed token cannot reach a
       resource the presenter could not, that CI exchanges receive no refresh
       token, and that refresh tracks a changed rule.
+- [ ] **Shared inbound OIDC verification boundary.** Tenant exchange, control
+      exchange, and first signup currently duplicate discovery, key loading,
+      signature verification, and error translation. Move those operations to
+      one boundary while keeping retry policy explicit: tenant exchange retries
+      one issuer outage, while control exchange and signup currently do not.
 - [x] **CLI.** `cupboard oidc-trust add` and the control trust commands accept
       permitted grants and their claim bindings. Add the GitHub PR preset,
       shorthand action expansion, validated `{name}` template rendering,

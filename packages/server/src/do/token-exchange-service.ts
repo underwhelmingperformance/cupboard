@@ -9,7 +9,6 @@ import {
 	refreshTokenGrantRequestSchema,
 	refreshTokenGrantType,
 	subjectTokenTypeIdToken,
-	subjectTokenTypeJwt,
 	tokenExchangeGrantRequestSchema,
 	tokenExchangeGrantType,
 	tokenRequestSchema,
@@ -71,7 +70,6 @@ export class TokenExchangeService {
 	): Promise<Response> {
 		if (
 			body.subject_token_type !== subjectTokenTypeIdToken &&
-			body.subject_token_type !== subjectTokenTypeJwt &&
 			body.subject_token_type !== issuedAccessTokenType
 		) {
 			throw new UnsupportedSubjectTokenTypeError(body.subject_token_type);
@@ -93,7 +91,7 @@ export class TokenExchangeService {
 			);
 		}
 
-		if (body.subject_token_type === issuedAccessTokenType) {
+		if (body.subject_token_type !== subjectTokenTypeIdToken) {
 			throw new UnsupportedSubjectTokenTypeError(body.subject_token_type);
 		}
 
@@ -104,30 +102,23 @@ export class TokenExchangeService {
 		const rule = matchOidcTrust(this.oidcTrust.enabledOidcTrustRules(), claims);
 
 		if (rule === undefined) {
-			throw await this.untrustedRefusal(
-				claims,
-				body.subject_token,
-				body.subject_token_type === subjectTokenTypeIdToken
-			);
+			throw await this.untrustedRefusal(claims, body.subject_token);
 		}
 
-		const requiresIdTokenClaims =
-			body.subject_token_type === subjectTokenTypeIdToken;
 		const verified = await this.oidcTrust.verifyInbound(
 			rule,
-			body.subject_token,
-			requiresIdTokenClaims
+			body.subject_token
 		);
 		const verifiedSubject =
 			typeof verified.sub === 'string' && verified.sub !== ''
 				? verified.sub
 				: undefined;
 
-		if (requiresIdTokenClaims && verifiedSubject === undefined) {
+		if (verifiedSubject === undefined) {
 			throw new SubjectTokenVerificationFailedError();
 		}
 
-		const subject = oidcSubjectSchema.parse(verifiedSubject ?? rule.id);
+		const subject = oidcSubjectSchema.parse(verifiedSubject);
 
 		return this.issuedResponse(
 			rule,
@@ -146,8 +137,7 @@ export class TokenExchangeService {
 	// about the rule.
 	private async untrustedRefusal(
 		claims: OidcClaims,
-		subjectToken: string,
-		requiresIdTokenClaims: boolean
+		subjectToken: string
 	): Promise<SubjectTokenUntrustedError> {
 		const candidate = this.repositoryPinnedCandidate(claims);
 
@@ -157,11 +147,7 @@ export class TokenExchangeService {
 
 		let verified: OidcClaims;
 		try {
-			verified = await this.oidcTrust.verifyInbound(
-				candidate,
-				subjectToken,
-				requiresIdTokenClaims
-			);
+			verified = await this.oidcTrust.verifyInbound(candidate, subjectToken);
 		} catch {
 			// Collapse signature failures and issuer outages to the same generic
 			// refusal. Neither failure can expose a claim value. Candidate verification

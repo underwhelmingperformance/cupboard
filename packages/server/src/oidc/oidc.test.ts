@@ -151,8 +151,20 @@ function successfulOidcMetadata(): Promise<Response> {
 	);
 }
 
+function verificationMetadata(
+	overrides: Readonly<Record<string, unknown>> = {}
+): Record<string, unknown> {
+	return {
+		issuer,
+		jwks_uri: 'https://accounts.example.com/jwks',
+		id_token_signing_alg_values_supported: ['RS256'],
+		...overrides
+	};
+}
+
 interface SignOptions {
 	readonly at?: Date;
+	readonly protectedType?: string;
 	readonly tokenIssuer?: string;
 	readonly withExpiry?: boolean;
 	readonly withIssuedAt?: boolean;
@@ -172,6 +184,10 @@ interface InboundIssuer {
 		tokenIssuer: string,
 		claims: Record<string, unknown>
 	): Promise<string>;
+	signWithType(
+		protectedType: string,
+		claims: Record<string, unknown>
+	): Promise<string>;
 }
 
 async function inboundIssuer(algorithm = 'RS256'): Promise<InboundIssuer> {
@@ -189,6 +205,7 @@ async function inboundIssuer(algorithm = 'RS256'): Promise<InboundIssuer> {
 		claims: Record<string, unknown>,
 		{
 			at = now,
+			protectedType,
 			tokenIssuer = issuer,
 			withExpiry = true,
 			withIssuedAt = true,
@@ -198,7 +215,11 @@ async function inboundIssuer(algorithm = 'RS256'): Promise<InboundIssuer> {
 		const issuedAt = Math.floor(at.getTime() / 1000);
 		const signJwt = new SignJWT(claims);
 		const jwt = signJwt
-			.setProtectedHeader({ alg: algorithm, kid })
+			.setProtectedHeader({
+				alg: algorithm,
+				kid,
+				...(protectedType !== undefined && { typ: protectedType })
+			})
 			.setIssuer(tokenIssuer)
 			.setAudience(tokenAudience);
 
@@ -220,7 +241,8 @@ async function inboundIssuer(algorithm = 'RS256'): Promise<InboundIssuer> {
 		signWithoutIssuedAt: (claims) => build(claims, { withIssuedAt: false }),
 		signWithAudience: (tokenAudience, claims) =>
 			build(claims, { tokenAudience }),
-		signWithIssuer: (tokenIssuer, claims) => build(claims, { tokenIssuer })
+		signWithIssuer: (tokenIssuer, claims) => build(claims, { tokenIssuer }),
+		signWithType: (protectedType, claims) => build(claims, { protectedType })
 	};
 }
 
@@ -299,6 +321,40 @@ describe('verifyInboundOidcToken', () => {
 				aud: payload.aud,
 				sub: payload.sub
 			}).toStrictEqual({ iss: issuer, aud: audience, sub: 'owner' });
+		}
+	);
+
+	it.each(['JWT', 'jwt', 'application/JWT'])(
+		'accepts an ID token with the standard %s type',
+		async (protectedType) => {
+			const idp = await inboundIssuer();
+			const token = await idp.signWithType(protectedType, { sub: 'owner' });
+
+			const payload = await verifyInboundOidcToken(
+				createLocalJWKSet(idp.jwks),
+				token,
+				verifyOptions(),
+				now
+			);
+
+			expect(payload.sub).toBe('owner');
+		}
+	);
+
+	it.each(['at+jwt', 'application/at+jwt', 'secevent+jwt'])(
+		'rejects an ID token with the unrelated %s type',
+		async (protectedType) => {
+			const idp = await inboundIssuer();
+			const token = await idp.signWithType(protectedType, { sub: 'owner' });
+
+			await expect(
+				verifyInboundOidcToken(
+					createLocalJWKSet(idp.jwks),
+					token,
+					verifyOptions(),
+					now
+				)
+			).rejects.toBeInstanceOf(OidcTokenVerificationError);
 		}
 	);
 
@@ -517,6 +573,72 @@ describe('verifyInboundOidcToken', () => {
 		).rejects.toBeInstanceOf(OidcTokenVerificationError);
 	});
 
+	it.each([
+		{ name: 'a string audience', tokenAudience: audience },
+		{ name: 'a singleton audience array', tokenAudience: [audience] },
+		{ name: 'a repeated audience array', tokenAudience: [audience, audience] }
+	])(
+		'accepts an ID token with $name and the expected authorised party',
+		async ({ tokenAudience }) => {
+			const idp = await inboundIssuer();
+			const token = await idp.signWithAudience(tokenAudience, {
+				sub: 'owner',
+				azp: audience
+			});
+
+			const payload = await verifyInboundOidcToken(
+				createLocalJWKSet(idp.jwks),
+				token,
+				verifyOptions(),
+				now
+			);
+
+			expect(payload.azp).toBe(audience);
+		}
+	);
+
+	it.each([
+		{ name: 'an empty authorised party', azp: '' },
+		{ name: 'an array authorised party', azp: [audience] },
+		{ name: 'a null authorised party', azp: jsonClaims('{"azp":null}').azp }
+	])('rejects an ID token with $name', async ({ azp }) => {
+		const idp = await inboundIssuer();
+		const token = await idp.sign({ sub: 'owner', azp });
+
+		await expect(
+			verifyInboundOidcToken(
+				createLocalJWKSet(idp.jwks),
+				token,
+				verifyOptions(),
+				now
+			)
+		).rejects.toBeInstanceOf(OidcTokenVerificationError);
+	});
+
+	it.each([
+		{ name: 'a string audience', tokenAudience: audience },
+		{ name: 'a singleton audience array', tokenAudience: [audience] },
+		{ name: 'a repeated audience array', tokenAudience: [audience, audience] }
+	])(
+		'rejects an ID token with $name and the wrong authorised party',
+		async ({ tokenAudience }) => {
+			const idp = await inboundIssuer();
+			const token = await idp.signWithAudience(tokenAudience, {
+				sub: 'owner',
+				azp: 'another-client'
+			});
+
+			await expect(
+				verifyInboundOidcToken(
+					createLocalJWKSet(idp.jwks),
+					token,
+					verifyOptions(),
+					now
+				)
+			).rejects.toBeInstanceOf(OidcTokenVerificationError);
+		}
+	);
+
 	it('classifies an unsupported critical header as a bad token', async () => {
 		const idp = await inboundIssuer();
 		const token = await idp.sign({ sub: 'owner' });
@@ -644,7 +766,8 @@ describe('fetchOidcDiscovery', () => {
 					response_types_supported: ['id_token'],
 					subject_types_supported: ['public'],
 					id_token_signing_alg_values_supported: ['RS256', 'ES256'],
-					authorization_endpoint: 'https://accounts.example.com/authorize'
+					authorization_endpoint: 'https://accounts.example.com/authorize',
+					token_endpoint: 'https://accounts.example.com/token'
 				})
 			);
 		};
@@ -660,6 +783,40 @@ describe('fetchOidcDiscovery', () => {
 		});
 	});
 
+	it('accepts the verification metadata that GitHub Actions publishes', async () => {
+		const githubIssuer = oidcIssuerSchema.parse(
+			'https://token.actions.githubusercontent.com'
+		);
+		const requested: string[] = [];
+		const fetcher: typeof fetch = (input) => {
+			requested.push(requestUrl(input));
+
+			return Promise.resolve(
+				Response.json({
+					issuer: githubIssuer,
+					jwks_uri:
+						'https://token.actions.githubusercontent.com/.well-known/jwks',
+					subject_types_supported: ['public', 'pairwise'],
+					response_types_supported: ['id_token'],
+					id_token_signing_alg_values_supported: ['RS256'],
+					scopes_supported: ['openid']
+				})
+			);
+		};
+
+		const discovery = await fetchOidcDiscovery(githubIssuer, fetcher);
+
+		expect({ requested, discovery }).toStrictEqual({
+			requested: [
+				'https://token.actions.githubusercontent.com/.well-known/openid-configuration'
+			],
+			discovery: {
+				jwksUri: 'https://token.actions.githubusercontent.com/.well-known/jwks',
+				signingAlgValues: ['RS256']
+			}
+		});
+	});
+
 	it('rejects metadata without required signing algorithms', async () => {
 		await expect(
 			fetchOidcDiscovery(issuer, () =>
@@ -670,6 +827,106 @@ describe('fetchOidcDiscovery', () => {
 						response_types_supported: ['id_token'],
 						subject_types_supported: ['public']
 					})
+				)
+			)
+		).rejects.toBeInstanceOf(OidcDiscoveryError);
+	});
+
+	it('rejects metadata without RS256 support', async () => {
+		await expect(
+			fetchOidcDiscovery(issuer, () =>
+				Promise.resolve(
+					Response.json(
+						verificationMetadata({
+							id_token_signing_alg_values_supported: ['ES256']
+						})
+					)
+				)
+			)
+		).rejects.toBeInstanceOf(OidcDiscoveryError);
+	});
+
+	it.each([
+		{
+			field: 'authorization_endpoint',
+			endpoint: 'javascript:alert(1)'
+		},
+		{
+			field: 'authorization_endpoint',
+			endpoint: 'ftp://accounts.example.com/authorize'
+		},
+		{
+			field: 'authorization_endpoint',
+			endpoint: 'http://accounts.example.com/authorize'
+		},
+		{ field: 'token_endpoint', endpoint: 'javascript:alert(1)' },
+		{ field: 'token_endpoint', endpoint: 'ftp://accounts.example.com/token' },
+		{ field: 'token_endpoint', endpoint: 'http://accounts.example.com/token' },
+		{
+			field: 'device_authorization_endpoint',
+			endpoint: 'http://accounts.example.com/device'
+		},
+		{
+			field: 'userinfo_endpoint',
+			endpoint: 'http://accounts.example.com/userinfo'
+		},
+		{
+			field: 'registration_endpoint',
+			endpoint: 'http://accounts.example.com/register'
+		},
+		{ field: 'extension_endpoint', endpoint: 42 }
+	] as const)('rejects $field value $endpoint', async ({ field, endpoint }) => {
+		await expect(
+			fetchOidcDiscovery(issuer, () =>
+				Promise.resolve(
+					Response.json(verificationMetadata({ [field]: endpoint }))
+				)
+			)
+		).rejects.toBeInstanceOf(OidcDiscoveryError);
+	});
+
+	it.each([
+		'authorization_endpoint',
+		'token_endpoint',
+		'device_authorization_endpoint',
+		'userinfo_endpoint',
+		'registration_endpoint'
+	] as const)(
+		'allows a loopback HTTP $field only in local development',
+		async (field) => {
+			const endpoint = `http://127.0.0.1:8788/${field}`;
+			const fetcher: typeof fetch = () =>
+				Promise.resolve(
+					Response.json(verificationMetadata({ [field]: endpoint }))
+				);
+
+			await expect(fetchOidcDiscovery(issuer, fetcher)).rejects.toBeInstanceOf(
+				OidcDiscoveryError
+			);
+			await expect(
+				fetchOidcDiscovery(issuer, fetcher, true)
+			).resolves.toStrictEqual({
+				jwksUri: 'https://accounts.example.com/jwks',
+				signingAlgValues: ['RS256']
+			});
+		}
+	);
+
+	it('rejects successful metadata without an application/json media type', async () => {
+		await expect(
+			fetchOidcDiscovery(issuer, () =>
+				Promise.resolve(
+					Response.json(
+						{
+							issuer,
+							jwks_uri: 'https://accounts.example.com/jwks',
+							authorization_endpoint: 'https://accounts.example.com/authorize',
+							response_types_supported: ['id_token'],
+							subject_types_supported: ['public'],
+							id_token_signing_alg_values_supported: ['RS256']
+						},
+						{ headers: { 'content-type': 'text/plain' } }
+					)
 				)
 			)
 		).rejects.toBeInstanceOf(OidcDiscoveryError);
@@ -736,6 +993,7 @@ describe('fetchOidcDiscovery', () => {
 			JSON.stringify({
 				issuer,
 				jwks_uri: 'https://accounts.example.com/jwks',
+				authorization_endpoint: 'https://accounts.example.com/authorize',
 				response_types_supported: ['id_token'],
 				subject_types_supported: ['public'],
 				id_token_signing_alg_values_supported: ['RS256']
@@ -885,9 +1143,99 @@ describe('fetchOidcDiscovery', () => {
 			requested: []
 		});
 	});
+
+	it('rejects a loopback HTTP issuer unless local development opts in', async () => {
+		const loopbackIssuer = oidcIssuerSchema.parse('http://127.0.0.1:8788');
+		const requested: string[] = [];
+		const fetcher: typeof fetch = (input) => {
+			requested.push(requestUrl(input));
+
+			return Promise.resolve(
+				Response.json({
+					issuer: loopbackIssuer,
+					jwks_uri: 'http://127.0.0.1:8788/jwks',
+					authorization_endpoint: 'http://127.0.0.1:8788/authorize',
+					response_types_supported: ['id_token'],
+					subject_types_supported: ['public'],
+					id_token_signing_alg_values_supported: ['RS256']
+				})
+			);
+		};
+
+		await expect(
+			fetchOidcDiscovery(loopbackIssuer, fetcher)
+		).rejects.toBeInstanceOf(OidcDiscoveryError);
+		const discovery = await fetchOidcDiscovery(loopbackIssuer, fetcher, true);
+
+		expect({ requested, discovery }).toStrictEqual({
+			requested: ['http://127.0.0.1:8788/.well-known/openid-configuration'],
+			discovery: {
+				jwksUri: 'http://127.0.0.1:8788/jwks',
+				signingAlgValues: ['RS256']
+			}
+		});
+	});
+
+	it('rejects a loopback HTTP JWKS outside local development', async () => {
+		const fetcher: typeof fetch = () =>
+			Promise.resolve(
+				Response.json({
+					issuer,
+					jwks_uri: 'http://127.0.0.1:8788/jwks',
+					authorization_endpoint: 'https://accounts.example.com/authorize',
+					response_types_supported: ['id_token'],
+					subject_types_supported: ['public'],
+					id_token_signing_alg_values_supported: ['RS256']
+				})
+			);
+
+		await expect(fetchOidcDiscovery(issuer, fetcher)).rejects.toBeInstanceOf(
+			OidcDiscoveryError
+		);
+		await expect(
+			fetchOidcDiscovery(issuer, fetcher, true)
+		).resolves.toStrictEqual({
+			jwksUri: 'http://127.0.0.1:8788/jwks',
+			signingAlgValues: ['RS256']
+		});
+	});
 });
 
 describe('OidcDiscoveryStore', () => {
+	it('requests the JWKS with manual redirect handling', async () => {
+		const idp = await inboundIssuer();
+		const requested: {
+			readonly url: string;
+			readonly redirect: string | undefined;
+		}[] = [];
+		const fetcher: typeof fetch = (input, init) => {
+			const url = requestUrl(input);
+			requested.push({ url, redirect: init?.redirect });
+
+			return url === metadataUrl
+				? successfulOidcMetadata()
+				: Promise.resolve(Response.json(idp.jwks));
+		};
+		const store = new OidcDiscoveryStore({ now: () => 0, fetcher });
+		const resolved = await store.resolve(issuer);
+		const token = await idp.sign({ sub: 'owner' });
+
+		const payload = await verifyInboundOidcToken(
+			resolved.resolver,
+			token,
+			{ issuer, audience, algorithms: resolved.algorithms },
+			now
+		);
+
+		expect({ requested, subject: payload.sub }).toStrictEqual({
+			requested: [
+				{ url: metadataUrl, redirect: 'manual' },
+				{ url: 'https://accounts.example.com/jwks', redirect: 'manual' }
+			],
+			subject: 'owner'
+		});
+	});
+
 	it('rejects and cancels an oversized JWKS body', async () => {
 		const idp = await inboundIssuer();
 		const oversized = streamedJsonResponse(
@@ -933,6 +1281,7 @@ describe('OidcDiscoveryStore', () => {
 				Response.json({
 					issuer,
 					jwks_uri: 'https://accounts.example.com/jwks',
+					authorization_endpoint: 'https://accounts.example.com/authorize',
 					response_types_supported: ['id_token'],
 					subject_types_supported: ['public'],
 					id_token_signing_alg_values_supported: ['RS256']
@@ -964,6 +1313,7 @@ describe('OidcDiscoveryStore', () => {
 				Response.json({
 					issuer: discoveredIssuers[requested.length - 1],
 					jwks_uri: 'https://accounts.example.com/jwks',
+					authorization_endpoint: 'https://accounts.example.com/authorize',
 					response_types_supported: ['id_token'],
 					subject_types_supported: ['public'],
 					id_token_signing_alg_values_supported: ['RS256']
@@ -990,6 +1340,7 @@ describe('OidcDiscoveryStore', () => {
 				Response.json({
 					issuer,
 					jwks_uri: 'https://accounts.example.com/jwks',
+					authorization_endpoint: 'https://accounts.example.com/authorize',
 					response_types_supported: ['id_token'],
 					subject_types_supported: ['public'],
 					id_token_signing_alg_values_supported: ['RS256']

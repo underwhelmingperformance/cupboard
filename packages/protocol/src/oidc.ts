@@ -47,7 +47,7 @@ export const claimMatchSchema = z.union([
 export type ClaimMatch = z.infer<typeof claimMatchSchema>;
 
 // RFC 8693 token exchange issues the first Cupboard token in a session from an
-// external OIDC JWT. The response reports the Cupboard token as an access token.
+// external OIDC ID token. The response reports it as an access token.
 export const tokenExchangeGrantType =
 	'urn:ietf:params:oauth:grant-type:token-exchange';
 export const issuedAccessTokenType =
@@ -59,13 +59,12 @@ export const issuedAccessTokenType =
 // stays exchange-only.
 export const refreshTokenGrantType = 'refresh_token';
 
-// An external OIDC subject uses one of these RFC 8693 type identifiers.
-// Cupboard's callers present an `id_token`; `jwt` supports clients that label a
-// plain OIDC JWT with the generic type. A self-issued Cupboard token uses the
-// `access_token` identifier and can only enter attenuation under that type.
+// Cupboard's external trust model consumes OIDC ID tokens. A generic JWT type
+// does not identify an issuer-specific profile with equivalent validation
+// rules, so external callers must use the ID-token type. A self-issued
+// Cupboard token uses the access-token type and can enter only attenuation.
 export const subjectTokenTypeIdToken =
 	'urn:ietf:params:oauth:token-type:id_token';
-export const subjectTokenTypeJwt = 'urn:ietf:params:oauth:token-type:jwt';
 
 // The stable Cupboard problem subtypes which distinguish subject-token
 // refusals inside OAuth's `invalid_request` error. The server emits these wire
