@@ -165,6 +165,7 @@ function randomState(): string {
 }
 
 export interface OidcLoginEndpoints {
+	readonly issuer: string;
 	readonly authorizationEndpoint: string;
 	readonly tokenEndpoint: string;
 	readonly deviceAuthorizationEndpoint?: string;
@@ -179,7 +180,17 @@ const endpointsSchema = z.object({
 	issuer: z.url(),
 	authorization_endpoint: endpointUrl,
 	token_endpoint: endpointUrl,
-	device_authorization_endpoint: endpointUrl.optional()
+	device_authorization_endpoint: endpointUrl.optional(),
+	authorization_response_iss_parameter_supported: z.literal(true),
+	response_types_supported: z
+		.array(z.string())
+		.min(1)
+		.refine((responseTypes) => responseTypes.includes('code')),
+	subject_types_supported: z.array(z.string()).min(1),
+	id_token_signing_alg_values_supported: z
+		.array(z.string())
+		.min(1)
+		.refine((algorithms) => algorithms.includes('RS256'))
 });
 
 /**
@@ -250,6 +261,19 @@ export async function discoverOidcLogin(
 		});
 	}
 
+	const mediaType = response.headers
+		.get('content-type')
+		?.split(';', 1)[0]
+		?.trim()
+		.toLowerCase();
+
+	if (mediaType !== 'application/json') {
+		throw new OidcLoginError(`Could not read OIDC metadata for ${issuer}`, {
+			kind: 'discovery-non-json',
+			issuer
+		});
+	}
+
 	const parsed = endpointsSchema.safeParse(payload);
 
 	if (!parsed.success) {
@@ -275,6 +299,7 @@ export async function discoverOidcLogin(
 	}
 
 	return {
+		issuer: issuerUrl.value,
 		authorizationEndpoint: parsed.data.authorization_endpoint,
 		tokenEndpoint: parsed.data.token_endpoint,
 		deviceAuthorizationEndpoint: parsed.data.device_authorization_endpoint
@@ -300,11 +325,11 @@ export interface LoopbackLoginOptions {
 }
 
 /**
- * The default owner-login flow: PKCE with a 127.0.0.1 loopback redirect. It
- * binds a throwaway server, opens the browser to the issuer's authorization
- * endpoint, accepts the redirect, and exchanges the code for an `id_token`.
- * `state` and the PKCE verifier guard the exchange; the redirect is accepted
- * only on loopback.
+ * Starts the default owner-login flow with PKCE and a 127.0.0.1 loopback
+ * redirect. It opens the browser to the issuer's authorization endpoint,
+ * accepts the redirect only on loopback, and exchanges the code for an
+ * `id_token`. The state, response issuer and PKCE verifier bind the response to
+ * this login.
  */
 export async function loopbackLogin(
 	options: LoopbackLoginOptions
@@ -313,6 +338,7 @@ export async function loopbackLogin(
 
 	const fetcher = options.fetcher ?? resilientFetcher('replay-unsafe');
 	const obtained = await obtainAuthorizationCode({
+		expectedIssuer: options.endpoints.issuer,
 		authorizationEndpoint: options.endpoints.authorizationEndpoint,
 		clientId: options.clientId,
 		scope: options.scope ?? 'openid',
@@ -368,6 +394,11 @@ export interface LoopbackOptions {
 }
 
 export interface AuthorizationCodeOptions {
+	/**
+	The issuer bound to this transaction. When present, the callback must contain
+	an exact RFC 9207 `iss` match.
+	*/
+	readonly expectedIssuer?: string;
 	readonly authorizationEndpoint: string;
 	readonly clientId: string;
 	readonly scope: string;
@@ -406,6 +437,7 @@ export async function obtainAuthorizationCode(
 	const path = options.loopback?.path ?? '/callback';
 	const loopback = await startLoopbackServer({
 		expectedState: state,
+		expectedIssuer: options.expectedIssuer,
 		ports: options.loopback?.ports,
 		host,
 		path
@@ -459,6 +491,7 @@ interface LoopbackServer {
 
 interface LoopbackServerOptions {
 	readonly expectedState: string;
+	readonly expectedIssuer?: string;
 	readonly ports?: readonly number[];
 	readonly host?: string;
 	readonly path?: string;
@@ -503,7 +536,11 @@ function bindLoopbackServer(
 				return;
 			}
 
-			const outcome = readCallback(url, options.expectedState);
+			const outcome = readCallback(
+				url,
+				options.expectedState,
+				options.expectedIssuer
+			);
 			response.writeHead(outcome.kind === 'code' ? 200 : 400, {
 				'content-type': 'text/plain; charset=utf-8'
 			});
@@ -557,9 +594,52 @@ type CallbackOutcome =
 	| { readonly kind: 'malformed'; readonly message: string }
 	| { readonly kind: 'ignore'; readonly message: string };
 
-function readCallback(url: URL, expectedState: string): CallbackOutcome {
-	if (url.searchParams.get('state') !== expectedState) {
+type CallbackParameter = 'state' | 'iss' | 'error' | 'code';
+
+function repeatedCallbackParameter(
+	parameters: URLSearchParams,
+	parameter: CallbackParameter
+): Extract<CallbackOutcome, { readonly kind: 'malformed' }> | undefined {
+	if (parameters.getAll(parameter).length < 2) {
+		return undefined;
+	}
+
+	return {
+		kind: 'malformed',
+		message: `Authorization response includes repeated ${parameter} parameter`
+	};
+}
+
+function readCallback(
+	url: URL,
+	expectedState: string,
+	expectedIssuer?: string
+): CallbackOutcome {
+	// Check state before parsing the response. Requests for another login are
+	// ignored.
+	if (!url.searchParams.getAll('state').includes(expectedState)) {
 		return { kind: 'ignore', message: 'Unexpected callback; ignoring.' };
+	}
+
+	for (const parameter of ['state', 'iss', 'error', 'code'] as const) {
+		const repeatedParameter = repeatedCallbackParameter(
+			url.searchParams,
+			parameter
+		);
+
+		if (repeatedParameter !== undefined) {
+			return repeatedParameter;
+		}
+	}
+
+	if (
+		expectedIssuer !== undefined &&
+		url.searchParams.get('iss') !== expectedIssuer
+	) {
+		return {
+			kind: 'malformed',
+			message: 'Authorization response issuer does not match the login issuer'
+		};
 	}
 
 	const error = url.searchParams.get('error');
