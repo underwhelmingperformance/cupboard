@@ -1076,7 +1076,7 @@ export async function clearBlobStorage(): Promise<void> {
 }
 
 /**
-The R2 key for the incarnation D1 currently records for a NAR.
+The R2 key for the object version D1 currently records for a NAR.
 */
 export async function currentNarObjectKey(
 	narHash: NixSha256HashString
@@ -1093,14 +1093,14 @@ export async function currentNarObjectKey(
 		.get();
 
 	if (row === undefined) {
-		throw new TypeError(`No NAR incarnation is registered for ${narHash}`);
+		throw new TypeError(`No NAR object version is registered for ${narHash}`);
 	}
 
 	return narObjectKey(narHash, row.incarnation);
 }
 
 /**
-The R2 key for the incarnation D1 currently records for a CAS object.
+The R2 key for the object version D1 currently records for a CAS object.
 */
 export async function currentCasObjectKey(
 	digest: Sha256HexDigest
@@ -1117,7 +1117,7 @@ export async function currentCasObjectKey(
 		.get();
 
 	if (row === undefined) {
-		throw new TypeError(`No CAS incarnation is registered for ${digest}`);
+		throw new TypeError(`No CAS object version is registered for ${digest}`);
 	}
 
 	return casObjectKey(digest, row.incarnation);

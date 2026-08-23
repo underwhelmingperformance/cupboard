@@ -34,7 +34,8 @@ export const instanceConfig = sqliteTable('instance_config', {
 });
 
 // Tracks the current version of each shared R2 object. The row remains after
-// collection so the next promotion receives a greater `incarnation` number.
+// collection so the next promotion receives a greater object version in the
+// `incarnation` column.
 // `pending` has reserved the versioned R2 key, `live` has completed the R2
 // write, and `absent` has no current object. Maintenance can recover or retire
 // an abandoned promotion when its `blob_state` or `cas_object` row is missing.
@@ -65,9 +66,9 @@ export const objectIncarnation = sqliteTable(
 );
 
 // Each row schedules deletion of one versioned R2 object after its `blob_state`
-// or `cas_object` row has been deleted. Maintenance deletes that R2 key
-// immediately. A replacement keeps the row until `remove_after` so a Worker
-// with the old reservation cannot recreate an untracked object.
+// or `cas_object` row has been deleted. Maintenance deletes the exact R2 key at
+// `remove_after` and then removes the marker. A replacement uses a deadline that
+// outlives preceding Workers and cached narinfos.
 export const objectDeletion = sqliteTable(
 	'object_deletion',
 	{
@@ -89,11 +90,11 @@ export const objectDeletion = sqliteTable(
 	]
 );
 
-// Each row records a verified shared NAR at one physical incarnation key. The
-// row supplies both availability and the compressed metadata advertised by
-// narinfo responses. Upload mismatches remain private to their upload rows and
-// cannot change this row. Collection deletes the row and schedules deletion of
-// the corresponding R2 key in one transaction.
+// Each row records a verified shared NAR at the physical R2 key for one object
+// version. The row supplies both availability and the compressed metadata
+// advertised by narinfo responses. Upload mismatches remain private to their
+// upload rows and cannot change this row. Collection deletes the row and
+// schedules deletion of the corresponding R2 key in one transaction.
 export const blobState = sqliteTable(
 	'blob_state',
 	{
@@ -284,9 +285,9 @@ export const tenantBlob = sqliteTable(
 	(table) => [primaryKey({ columns: [table.tenant, table.narHash] })]
 );
 
-// A row records measured attestation bytes stored at the physical incarnation
-// key for `cas/<digest>`. It does not mean that the bundle passed Sigstore,
-// DSSE, or trust-root verification.
+// A row records measured attestation bytes stored at the physical R2 key for one
+// object version of `cas/<digest>`. It does not mean that the bundle passed
+// Sigstore, DSSE, or trust-root verification.
 export const casObject = sqliteTable(
 	'cas_object',
 	{

@@ -288,7 +288,7 @@ describe('blob reaper', () => {
 		}).toStrictEqual({ markerCount: 0, objectPresent: false });
 	});
 
-	it('retries interrupted deletes without touching later NAR incarnations', async () => {
+	it('retries interrupted deletes without touching later NAR object versions', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('reaper-repeated-delete-retry');
 		const metadataFor = (hash: string, name: string) =>
@@ -476,8 +476,8 @@ describe('blob reaper', () => {
 			blobPresent: (await env.BLOBS.head(oldKey)) !== null
 		}).toStrictEqual({ edges: [], blobState: [], blobPresent: true });
 
-		// A fresh commit uses a new physical incarnation. The deletion queue retains
-		// the orphaned key until maintenance removes that exact incarnation.
+		// A fresh commit uses a new physical object version. The deletion queue
+		// retains the orphaned key until maintenance removes that exact version.
 		await commitPath(token, second, nar);
 		const served = await fetchNarInfo(second.storePathHash);
 
@@ -552,7 +552,7 @@ describe('blob reaper', () => {
 		});
 	});
 
-	it('does not delete an incarnation promoted after collection commits', async () => {
+	it('does not delete an object version promoted after collection commits', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('reaper-promotion-race');
 		const first = uploadMetadata({

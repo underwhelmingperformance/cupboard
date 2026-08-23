@@ -454,8 +454,7 @@ function runCasReaperPhase(
 
 /**
  * Scans a bounded page of `blob_state` for missing canonical objects. It removes
- * stale global facts and asks each tenant Durable Object to retire the affected
- * narinfos.
+ * stale rows and asks each tenant Durable Object to retire the affected narinfos.
  */
 export function runReaperDemote(
 	logger: Logger,

@@ -94,7 +94,7 @@ async function deletionMarkers(
 	return rows.map((row) => row.incarnation);
 }
 
-describe('abandoned object incarnation recovery', () => {
+describe('abandoned object version recovery', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(testBase);
@@ -286,7 +286,7 @@ describe('abandoned object incarnation recovery', () => {
 	);
 
 	it.each(['nar', 'cas'] as const)(
-		'reserves a new %s incarnation when the promotion owner changes',
+		'reserves a new %s object version when the promotion owner changes',
 		async (kind) => {
 			const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 			const nar = await verifiableNar(`replacement-owner-${kind}`);

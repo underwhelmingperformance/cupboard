@@ -65,8 +65,8 @@ export interface NarInfoDemoter {
 	demote(tenant: string, demotions: readonly NarInfoDemotion[]): Promise<void>;
 }
 
-// Identifies a missing CAS object and the incarnation that fences its reference
-// deletion.
+// Identifies a missing CAS object and the object version that fences deletion of
+// its reference.
 export interface CasReferenceDemotion {
 	readonly digest: Sha256HexDigest;
 	readonly fenceIncarnation: number;
@@ -530,8 +530,8 @@ export class BlobReaperService {
 		);
 	}
 
-	// Route tenants independently with bounded concurrency. Keep global facts for
-	// failed tenants so a later pass retries them.
+	// Route tenants independently with bounded concurrency. Keep the shared object
+	// rows for failed tenants so a later pass retries them.
 	private async routeByTenant<T>(
 		log: Logger,
 		byTenant: ReadonlyMap<string, readonly T[]>,
@@ -546,7 +546,8 @@ export class BlobReaperService {
 				try {
 					await send(tenant, items);
 				} catch (error) {
-					// Continue other tenants but report this failure to the cron caller.
+					// Continue routing other tenants. The returned failure set keeps the
+					// shared object row for a later pass.
 					failed.add(tenant);
 					log.error('reaper demote routing failed', {
 						tenant,
@@ -875,8 +876,8 @@ export class BlobReaperService {
 			return 0;
 		}
 
-		// Delete a global fact only after every referencing tenant was updated. A
-		// hash with no tenant references is eligible immediately.
+		// Delete a shared blob row only after every referencing tenant was updated.
+		// A hash with no tenant references is eligible immediately.
 		const demotionsByTenant = await this.referencingDemotions(
 			missing.map((blob) => blob.narHash)
 		);

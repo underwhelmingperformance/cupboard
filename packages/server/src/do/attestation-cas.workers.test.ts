@@ -454,7 +454,7 @@ describe('attestation CAS lifecycle', () => {
 		}).toStrictEqual({ armed: 0, collected: 1, rows: [], stored: false });
 	});
 
-	it('does not delete a CAS incarnation promoted after collection commits', async () => {
+	it('does not delete a CAS object version promoted after collection commits', async () => {
 		const bytes = textEncoder.encode('reaper-promotion-race');
 		const first = await fileAttestationReference({
 			uploadId: 'reaper-race-first',
@@ -637,9 +637,10 @@ describe('attestation CAS lifecycle', () => {
 			usage: await tenantUsageRow()
 		};
 
-		// The reaper observed one incarnation missing, but a concurrent promotion
+		// The reaper observed one object version missing, but a concurrent promotion
 		// advanced the shared object before the Durable Object acted. The stale
-		// incarnation must not remove the newer reference or credit its charge.
+		// demotion for that version must not remove the newer reference or credit its
+		// charge.
 		await env.BLOBS.delete(await currentCasObjectKey(bundle.digest));
 		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 		await database.batch([

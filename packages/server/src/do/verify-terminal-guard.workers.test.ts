@@ -600,7 +600,7 @@ describe('terminal verdicts against straggling verifications', () => {
 		);
 
 		if (staleIncarnation === undefined) {
-			throw new Error('The stale promotion did not reserve an incarnation.');
+			throw new Error('The stale promotion did not reserve an object version.');
 		}
 
 		const staleKey = narObjectKey(upload.narHash, staleIncarnation);
@@ -638,7 +638,7 @@ describe('terminal verdicts against straggling verifications', () => {
 		});
 	});
 
-	it('requeues a stale incarnation when its write lands after deletion', async () => {
+	it('requeues a stale object version when its write lands after deletion', async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(testBase);
 		const upload = await deferredUpload({
