@@ -39,7 +39,7 @@
 		"@types/proper-lockfile": "^4.1.4",
 		"@types/ws": "^8.18.1",
 		"esbuild": "^0.28.1",
-		"miniflare": "^4.20260603.0",
+		"miniflare": "^4.20260730.0",
 		"typescript": "^6.0.3",
 		"vitest": "^4.1.8"
 	},
