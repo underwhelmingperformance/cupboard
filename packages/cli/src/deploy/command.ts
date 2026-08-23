@@ -849,7 +849,8 @@ export async function verifyR2Credentials(options: {
 					const result = await check({
 						accountId: options.accountId,
 						bucketName: options.bucketName,
-						credentials
+						credentials,
+						signal: options.signal
 					});
 
 					if (result.kind === 'valid') {
@@ -1373,7 +1374,8 @@ async function deployFlow(
 		artifact: { ...artifact, config: deployedConfig },
 		api: apiFor(agreed.accountId),
 		reporter: ui.reporter(),
-		options
+		options,
+		signal: runtimeOptions.signal
 	});
 
 	// A newly supplied signup secret is available for the claim. An existing

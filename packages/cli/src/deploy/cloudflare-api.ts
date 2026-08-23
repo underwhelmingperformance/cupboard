@@ -1,5 +1,10 @@
 import { isDeepStrictEqual } from 'node:util';
 
+import {
+	filterProgressively,
+	findProgressively,
+	type ProgressivePage
+} from '@cupboard/shared/collections';
 import Cloudflare from 'cloudflare';
 import { NotFoundError } from 'cloudflare';
 import type { LifecycleUpdateParams } from 'cloudflare/resources/r2/buckets/lifecycle';
@@ -38,7 +43,8 @@ export interface QueueConsumerSettings {
 }
 
 /**
-Cloudflare returned a queue consumer that needs an update but has no update id.
+Cloudflare returned a queue consumer that Cupboard must update, but the response
+had no consumer ID.
 */
 export class QueueConsumerIdMissingError extends CliError {
 	constructor(
@@ -46,7 +52,7 @@ export class QueueConsumerIdMissingError extends CliError {
 		public readonly scriptName: ScriptName
 	) {
 		super(
-			`Cloudflare returned a drifted queue consumer for ${scriptName} without a consumer id; the consumer on queue ${queueId} cannot be updated.`
+			`Cloudflare returned the consumer for Worker ${scriptName} on queue ${queueId} with settings Cupboard must update, but the response had no consumer ID.`
 		);
 		this.name = 'QueueConsumerIdMissingError';
 	}
@@ -185,17 +191,56 @@ export interface CloudflareApi {
 	queryWorkerLogs(query: WorkerLogQuery): Promise<readonly WorkerLogEvent[]>;
 }
 
-async function firstMatch<T>(
-	page: AsyncIterable<T>,
-	isMatch: (item: T) => boolean
-): Promise<T | undefined> {
-	for await (const item of page) {
-		if (isMatch(item)) {
-			return item;
-		}
-	}
+interface CloudflarePage<T> {
+	getPaginatedItems(): T[];
+	hasNextPage(): boolean;
+	getNextPage(): Promise<CloudflarePage<T>>;
+}
 
-	return undefined;
+export const maximumCloudflareCollectionItems = 10_000;
+export const maximumCloudflareCollectionPages = 100;
+
+function progressiveCloudflarePage<T>(
+	page: CloudflarePage<T>
+): ProgressivePage<T> {
+	return {
+		items: page.getPaginatedItems(),
+		...(page.hasNextPage() && {
+			next: async () => progressiveCloudflarePage(await page.getNextPage())
+		})
+	};
+}
+
+function cloudflareCollectionLimits(description: string) {
+	return {
+		description,
+		maximumItems: maximumCloudflareCollectionItems,
+		maximumPages: maximumCloudflareCollectionPages
+	};
+}
+
+async function findCloudflareItem<T>(
+	firstPage: PromiseLike<CloudflarePage<T>>,
+	isMatch: (item: T) => boolean,
+	description: string
+): Promise<T | undefined> {
+	return findProgressively(
+		progressiveCloudflarePage(await firstPage),
+		isMatch,
+		cloudflareCollectionLimits(description)
+	);
+}
+
+async function filterCloudflareItems<T>(
+	firstPage: PromiseLike<CloudflarePage<T>>,
+	isMatch: (item: T) => boolean,
+	description: string
+): Promise<T[]> {
+	return filterProgressively(
+		progressiveCloudflarePage(await firstPage),
+		isMatch,
+		cloudflareCollectionLimits(description)
+	);
 }
 
 /**
@@ -324,23 +369,31 @@ export function createCloudflareApi(
 	const account = { account_id: accountId };
 
 	const isBucketPresent = async (name: string): Promise<boolean> => {
-		const list = await client.r2.buckets.list(account);
+		try {
+			await client.r2.buckets.get(name, account);
 
-		return (list.buckets ?? []).some((bucket) => bucket.name === name);
+			return true;
+		} catch (error) {
+			if (error instanceof NotFoundError) {
+				return false;
+			}
+
+			throw error;
+		}
 	};
 
 	return {
 		async listAccounts() {
-			const accounts: AccountSummary[] = [];
+			const accounts = await filterCloudflareItems(
+				client.accounts.list(),
+				() => true,
+				'Cloudflare account list'
+			);
 
-			for await (const item of client.accounts.list()) {
-				accounts.push({
-					id: cloudflareAccountIdSchema.parse(item.id),
-					name: item.name
-				});
-			}
-
-			return accounts;
+			return accounts.map((item) => ({
+				id: cloudflareAccountIdSchema.parse(item.id),
+				name: item.name
+			}));
 		},
 
 		r2BucketExists: isBucketPresent,
@@ -387,9 +440,10 @@ export function createCloudflareApi(
 		},
 
 		async ensureD1Database(name) {
-			const existing = await firstMatch(
+			const existing = await findCloudflareItem(
 				client.d1.database.list({ ...account, name }),
-				(database) => database.name === name
+				(database) => database.name === name,
+				'Cloudflare D1 database list'
 			);
 
 			if (existing?.uuid !== undefined) {
@@ -402,9 +456,10 @@ export function createCloudflareApi(
 		},
 
 		async ensureKvNamespace(title) {
-			const existing = await firstMatch(
+			const existing = await findCloudflareItem(
 				client.kv.namespaces.list(account),
-				(namespace) => namespace.title === title
+				(namespace) => namespace.title === title,
+				'Cloudflare KV namespace list'
 			);
 
 			if (existing?.id !== undefined) {
@@ -417,9 +472,10 @@ export function createCloudflareApi(
 		},
 
 		async ensureQueue(name) {
-			const existing = await firstMatch(
+			const existing = await findCloudflareItem(
 				client.queues.list(account),
-				(queue) => queue.queue_name === name
+				(queue) => queue.queue_name === name,
+				'Cloudflare queue list'
 			);
 
 			if (existing?.queue_id !== undefined) {
@@ -551,38 +607,45 @@ export function createCloudflareApi(
 				})
 			};
 
-			const consumers: unknown[] = await Array.fromAsync(
-				client.queues.consumers.list(queueId, account)
-			);
+			const existing = await findCloudflareItem(
+				client.queues.consumers.list(queueId, account),
+				(consumer) => {
+					const parsed = liveConsumerSchema.safeParse(consumer);
 
-			const existing = consumers
-				.map((consumer) => liveConsumerSchema.safeParse(consumer))
-				.filter((parsed) => parsed.success)
-				.map((parsed) => parsed.data)
-				.find(
-					(consumer) =>
-						(consumer.type === undefined || consumer.type === 'worker') &&
-						[consumer.script_name, consumer.script, consumer.service].includes(
-							scriptName
-						)
-				);
+					return (
+						parsed.success &&
+						(parsed.data.type === undefined || parsed.data.type === 'worker') &&
+						[
+							parsed.data.script_name,
+							parsed.data.script,
+							parsed.data.service
+						].includes(scriptName)
+					);
+				},
+				'Cloudflare queue consumer list'
+			);
 
 			if (existing === undefined) {
 				await client.queues.consumers.create(queueId, body);
 				return;
 			}
 
-			if (isConsumerSettled(existing, settings)) {
+			const parsedExisting = liveConsumerSchema.parse(existing);
+
+			if (isConsumerSettled(parsedExisting, settings)) {
 				return;
 			}
 
-			if (existing.consumer_id === undefined || existing.consumer_id === '') {
+			if (
+				parsedExisting.consumer_id === undefined ||
+				parsedExisting.consumer_id === ''
+			) {
 				throw new QueueConsumerIdMissingError(queueId, scriptName);
 			}
 
 			// This endpoint is PUT, so omitted settings return to their platform
 			// defaults when a deployment removes them.
-			await client.queues.consumers.update(existing.consumer_id, {
+			await client.queues.consumers.update(parsedExisting.consumer_id, {
 				...body,
 				queue_id: queueId
 			});
@@ -618,15 +681,14 @@ export function createCloudflareApi(
 		},
 
 		async listScriptSecrets(scriptName) {
-			const names: string[] = [];
-
 			try {
-				for await (const secret of client.workers.scripts.secrets.list(
-					scriptName,
-					account
-				)) {
-					names.push(secret.name);
-				}
+				const secrets = await filterCloudflareItems(
+					client.workers.scripts.secrets.list(scriptName, account),
+					() => true,
+					'Cloudflare Worker secret list'
+				);
+
+				return secrets.map((secret) => secret.name);
 			} catch (error) {
 				// A script that has not been deployed yet has no secrets to list.
 				if (
@@ -639,33 +701,34 @@ export function createCloudflareApi(
 
 				throw error;
 			}
-
-			return names;
 		},
 
 		async findZoneId(name) {
-			const zone = await firstMatch(
+			const zone = await findCloudflareItem(
 				client.zones.list({ name }),
-				(item) => item.name === name
+				(item) => item.name === name,
+				'Cloudflare zone list'
 			);
 
 			return zone === undefined ? undefined : zoneIdSchema.parse(zone.id);
 		},
 
 		async findCustomDomain(scriptName) {
-			const existing = await firstMatch(
+			const existing = await findCloudflareItem(
 				client.workers.domains.list(account),
-				(domain) => domain.service === scriptName
+				(domain) => domain.service === scriptName,
+				'Cloudflare Worker domain list'
 			);
 
 			return existing?.hostname;
 		},
 
 		async setCustomDomain(scriptName, desired) {
-			const domains = await Array.fromAsync(
-				client.workers.domains.list(account)
+			const current = await filterCloudflareItems(
+				client.workers.domains.list(account),
+				(domain) => domain.service === scriptName,
+				'Cloudflare Worker domain list'
 			);
-			const current = domains.filter((domain) => domain.service === scriptName);
 
 			if (
 				desired !== undefined &&
@@ -690,23 +753,23 @@ export function createCloudflareApi(
 		},
 
 		async listTokenPermissionGroups() {
-			const groups: TokenPermissionGroup[] = [];
+			const groups = await filterCloudflareItems(
+				client.accounts.tokens.permissionGroups.list(account),
+				(group) => group.id !== undefined && group.name !== undefined,
+				'Cloudflare token permission group list'
+			);
 
-			for await (const group of client.accounts.tokens.permissionGroups.list(
-				account
-			)) {
-				if (group.id !== undefined && group.name !== undefined) {
-					groups.push({ id: group.id, name: group.name });
-				}
-			}
-
-			return groups;
+			return groups.map((group) => ({
+				id: group.id ?? '',
+				name: group.name ?? ''
+			}));
 		},
 
 		async findApiTokenId(name) {
-			const existing = await firstMatch(
+			const existing = await findCloudflareItem(
 				client.accounts.tokens.list(account),
-				(token) => token.name === name
+				(token) => token.name === name,
+				'Cloudflare API token list'
 			);
 
 			return existing?.id;

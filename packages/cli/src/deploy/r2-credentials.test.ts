@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { StatusCodes } from 'http-status-codes';
+import { describe, expect, it, vi } from 'vitest';
 
 import { cloudflareAccountIdSchema } from './identifiers.ts';
 import {
@@ -82,12 +83,21 @@ describe('checkR2Credentials', () => {
 	});
 
 	it.each([[401], [403], [404]])('reports a %i as rejected', async (status) => {
-		const { fetcher } = respondingWith(status);
+		const cancelled = vi.fn();
+		const body = new ReadableStream({
+			cancel: cancelled,
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode('denied'));
+			}
+		});
+		const fetcher: typeof fetch = () =>
+			Promise.resolve(new Response(body, { status }));
 
 		expect(await checkR2Credentials(options, fetcher)).toStrictEqual({
 			kind: 'rejected',
 			status
 		});
+		expect(cancelled).toHaveBeenCalledOnce();
 	});
 
 	it('begins then aborts a multipart upload against the bucket', async () => {
@@ -133,6 +143,77 @@ describe('checkR2Credentials', () => {
 			kind: 'unreachable',
 			cause: { name: 'Error' }
 		});
+	});
+
+	it('passes the caller signal to the begin and cleanup requests', async () => {
+		const controller = new AbortController();
+		const signals: (AbortSignal | null | undefined)[] = [];
+		const fetcher: typeof fetch = (_input, init) => {
+			signals.push(init?.signal);
+
+			return Promise.resolve(
+				new Response(initiateBody, { status: StatusCodes.OK })
+			);
+		};
+
+		await checkR2Credentials(
+			{ ...options, signal: controller.signal },
+			fetcher
+		);
+
+		expect(signals).toStrictEqual([controller.signal, controller.signal]);
+	});
+
+	it('propagates cancellation while beginning an upload', async () => {
+		const controller = new AbortController();
+		const reason = new Error('stop the deploy');
+		const fetcher: typeof fetch = (_input, init) =>
+			new Promise((_resolve, reject) => {
+				if (init?.signal?.aborted === true) {
+					reject(reason);
+					return;
+				}
+
+				init?.signal?.addEventListener(
+					'abort',
+					() => {
+						reject(reason);
+					},
+					{ once: true }
+				);
+			});
+		const result = checkR2Credentials(
+			{ ...options, signal: controller.signal },
+			fetcher
+		);
+
+		controller.abort(reason);
+
+		await expect(result).rejects.toBe(reason);
+	});
+
+	it('discards the cleanup response body', async () => {
+		const cancelled = vi.fn();
+		const cleanupBody = new ReadableStream({
+			cancel: cancelled,
+			start(controller) {
+				controller.enqueue(new Uint8Array([1]));
+			}
+		});
+		let requestNumber = 0;
+		const fetcher: typeof fetch = () => {
+			requestNumber += 1;
+
+			return Promise.resolve(
+				requestNumber === 1
+					? new Response(initiateBody, { status: StatusCodes.OK })
+					: new Response(cleanupBody, { status: StatusCodes.OK })
+			);
+		};
+
+		await checkR2Credentials(options, fetcher);
+
+		expect(cancelled).toHaveBeenCalledOnce();
 	});
 });
 

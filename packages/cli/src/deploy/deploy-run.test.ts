@@ -277,6 +277,54 @@ describe('collectResources', () => {
 });
 
 describe('runDeploy', () => {
+	it('does not start a deploy after cancellation', async () => {
+		const controller = new AbortController();
+		const reason = new Error('stop the deploy');
+		const { api, calls } = recordingApi();
+		controller.abort(reason);
+
+		await expect(
+			runDeploy({
+				artifact,
+				api,
+				reporter: silentReporter,
+				options: {
+					domain: undefined,
+					secrets: { control: [], tenant: [] }
+				},
+				signal: controller.signal
+			})
+		).rejects.toBe(reason);
+		expect(calls).toStrictEqual([]);
+	});
+
+	it('reports cancellation that occurs during the final Cloudflare operation', async () => {
+		const controller = new AbortController();
+		const reason = new Error('stop the deploy');
+		const { api } = recordingApi();
+		const cancellingApi: CloudflareApi = {
+			...api,
+			setCustomDomain: () => {
+				controller.abort(reason);
+
+				return Promise.resolve();
+			}
+		};
+
+		await expect(
+			runDeploy({
+				artifact,
+				api: cancellingApi,
+				reporter: silentReporter,
+				options: {
+					domain: 'cupboard.store',
+					secrets: { control: [], tenant: [] }
+				},
+				signal: controller.signal
+			})
+		).rejects.toBe(reason);
+	});
+
 	it('provisions, migrates, uploads tenant before control, sets secrets and triggers', async () => {
 		const { api, calls } = recordingApi();
 
