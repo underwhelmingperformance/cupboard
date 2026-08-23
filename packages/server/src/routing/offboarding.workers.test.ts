@@ -39,6 +39,7 @@ import {
 	provisionNamedTenant,
 	pushPathToTenant,
 	resetTestServer,
+	runBlobReaperToCompletion as runBlobReaper,
 	tenantBlobRows,
 	tenantObjectKeys,
 	tenantRow,
@@ -48,7 +49,7 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
-import { runBlobReaper, runCronTick, runOffboardBatch } from './scheduled.ts';
+import { runCronTick, runOffboardBatch } from './scheduled.ts';
 
 // Offboarding is a quiesce-then-drain state machine. The control plane marks the
 // tenant `offboarding`, which stops new reads and writes as soon as the D1 update
@@ -407,8 +408,10 @@ describe('offboarding drain', () => {
 		await offboardTenant(id);
 
 		await runCronTick(rootLogger(), env);
+		await runBlobReaper(rootLogger(), env);
 		vi.setSystemTime(afterGrace());
 		await runCronTick(rootLogger(), env);
+		await runBlobReaper(rootLogger(), env);
 
 		const row = await tenantRow(id);
 

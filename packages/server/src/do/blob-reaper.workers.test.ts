@@ -6,7 +6,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { lateWriteTombstoneHorizonMs } from '../blob/object-incarnation.ts';
 import { blobReaperGraceMs, casObjectKey, narObjectKey } from '../http/http.ts';
-import { runBlobReaper, runCasReaper } from '../routing/scheduled.ts';
 import {
 	afterGrace,
 	blobReferenceRows,
@@ -23,6 +22,8 @@ import {
 	initialise,
 	readFetch,
 	resetTestServer,
+	runBlobReaperToCompletion as runBlobReaper,
+	runCasReaperToCompletion as runCasReaper,
 	seedBlobStates,
 	seedCasObjects,
 	syntheticCasDigest,

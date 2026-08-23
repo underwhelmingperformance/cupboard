@@ -17,7 +17,7 @@ import { reserveObjectIncarnation } from '../blob/object-incarnation.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import { blobReaperGraceMs, casObjectKey } from '../http/http.ts';
-import { runCasReaper, runCasReaperDemote } from '../routing/scheduled.ts';
+import { runCasReaperDemote } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	attestationReferenceRows,
@@ -35,6 +35,7 @@ import {
 	provisionFixtureTenant,
 	provisionNamedTenant,
 	resetTestServer,
+	runCasReaperToCompletion as runCasReaper,
 	stageAttestationBundle,
 	tenantCasBlobRows,
 	tenantUsageRow,

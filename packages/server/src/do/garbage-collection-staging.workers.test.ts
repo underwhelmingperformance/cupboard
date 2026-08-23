@@ -6,7 +6,7 @@ import { env } from 'cloudflare:workers';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { pendingUploads } from '../db/schema.ts';
+import { pendingAttestations, pendingUploads } from '../db/schema.ts';
 import { stagingObjectKey } from '../http/http.ts';
 import {
 	clearBlobStorage,
@@ -20,7 +20,10 @@ import {
 import { AttestationCasService } from './attestation-cas-service.ts';
 import { AttestationsService } from './attestations-service.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
-import { GarbageCollectionService } from './garbage-collection-service.ts';
+import {
+	GarbageCollectionService,
+	maxPendingRowsDeletedPerRun
+} from './garbage-collection-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { RetentionService } from './retention-service.ts';
 
@@ -164,6 +167,118 @@ describe('garbage collection best-effort staging deletes', () => {
 			},
 			failedDeletes: 1,
 			orphanPresent: false
+		});
+	});
+
+	it('drains expired pending rows across bounded collection passes', async () => {
+		await initialise();
+		const expired = isoTimestampSchema.parse('1970-01-01T00:00:00.000Z');
+		const backlogSize = maxPendingRowsDeletedPerRun + 1;
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				state.storage.sql.exec(
+					`WITH digits(digit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)),
+					 rows(value) AS (
+					   SELECT ones.digit + tens.digit * 10 + hundreds.digit * 100 + thousands.digit * 1000
+					   FROM digits AS ones
+					   CROSS JOIN digits AS tens
+					   CROSS JOIN digits AS hundreds
+					   CROSS JOIN digits AS thousands
+					 )
+					 INSERT INTO pending_upload
+					   (id, cache, nar_hash, r2_key, metadata_json, created_at, expires_at)
+					 SELECT printf('expired-upload-%d', value), '', ?,
+					        printf('staging/expired/upload-%d', value), '{}', ?, ?
+					 FROM rows WHERE value < ?`,
+					syntheticNarHash(1),
+					expired,
+					expired,
+					backlogSize
+				);
+				state.storage.sql.exec(
+					`WITH digits(digit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)),
+					 rows(value) AS (
+					   SELECT ones.digit + tens.digit * 10 + hundreds.digit * 100 + thousands.digit * 1000
+					   FROM digits AS ones
+					   CROSS JOIN digits AS tens
+					   CROSS JOIN digits AS hundreds
+					   CROSS JOIN digits AS thousands
+					 )
+					 INSERT INTO pending_attestation
+					   (id, cache, store_path_hash, digest, r2_key, created_at, expires_at)
+					 SELECT printf('expired-attestation-%d', value), '', ?, ?,
+					        printf('staging/expired/attestation-%d', value), ?, ?
+					 FROM rows WHERE value < ?`,
+					'a'.repeat(32),
+					'b'.repeat(64),
+					expired,
+					expired,
+					backlogSize
+				);
+
+				const narInfoObjects = new NarInfoObjectsService(instance.context);
+				const attestationCas = new AttestationCasService(instance.context);
+				const attestations = new AttestationsService(
+					instance.context,
+					attestationCas,
+					narInfoObjects
+				);
+				const deletionQueue = new DeletionQueueService(
+					instance.context,
+					attestationCas,
+					attestations,
+					narInfoObjects
+				);
+				const garbageCollection = new GarbageCollectionService(
+					instance.context,
+					deletionQueue,
+					new RetentionService(instance.context)
+				);
+				const first = await garbageCollection.collectGarbage(rootLogger());
+				const remainingAfterFirst = {
+					uploads: drizzle(state.storage, { schema: { pendingUploads } })
+						.select({ id: pendingUploads.id })
+						.from(pendingUploads)
+						.all().length,
+					attestations: drizzle(state.storage, {
+						schema: { pendingAttestations }
+					})
+						.select({ id: pendingAttestations.id })
+						.from(pendingAttestations)
+						.all().length
+				};
+				const second = await garbageCollection.collectGarbage(rootLogger());
+
+				return {
+					first: {
+						pendingUploadsDeleted: first.pendingUploadsDeleted,
+						pendingAttestationsDeleted: first.pendingAttestationsDeleted,
+						hasMoreWork: first.hasMoreWork
+					},
+					remainingAfterFirst,
+					second: {
+						pendingUploadsDeleted: second.pendingUploadsDeleted,
+						pendingAttestationsDeleted: second.pendingAttestationsDeleted,
+						hasMoreWork: second.hasMoreWork
+					}
+				};
+			}
+		);
+
+		expect(result).toStrictEqual({
+			first: {
+				pendingUploadsDeleted: maxPendingRowsDeletedPerRun,
+				pendingAttestationsDeleted: maxPendingRowsDeletedPerRun,
+				hasMoreWork: true
+			},
+			remainingAfterFirst: { uploads: 1, attestations: 1 },
+			second: {
+				pendingUploadsDeleted: 1,
+				pendingAttestationsDeleted: 1,
+				hasMoreWork: false
+			}
 		});
 	});
 });

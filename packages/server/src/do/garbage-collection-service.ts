@@ -13,7 +13,6 @@ import {
 	eq,
 	gt,
 	inArray,
-	isNull,
 	lt,
 	lte,
 	or,
@@ -35,7 +34,12 @@ import {
 	stagingPrefix
 } from '../http/http.ts';
 
-import { chunk, deleteObjects, maxInClauseValues } from './bulk.ts';
+import {
+	chunk,
+	deleteObjects,
+	maxInClauseValues,
+	maxOutgoingConnections
+} from './bulk.ts';
 import {
 	type GarbageCollectionOutcome,
 	type ServerContext
@@ -54,6 +58,11 @@ export const maxExpiredRootTargetsPerRun = 1000;
 
 export const maxRootsExpiredPerRun = 32;
 
+// Delete at most one R2 batch from each pending table. Deleted rows disappear
+// from the next indexed expiry query, so the existing alarm continuation drains
+// the remainder without a separate cursor.
+export const maxPendingRowsDeletedPerRun = 1000;
+
 // An upload credential can write any key below `staging/<pushId>/`, including
 // keys without pending rows. Preserve young objects because their row may not
 // exist in the snapshot yet. Pending-row reaping owns tracked keys, and the R2
@@ -66,6 +75,11 @@ const orphanListPageSize = 1000;
 // Bound each orphan scan. Later collections and the R2 lifecycle rule remove
 // any remaining objects.
 const maxOrphanReclaim = 1000;
+
+// R2 listing itself consumes a subrequest even when every object is tracked or
+// too young to reclaim. Stop before one maintenance pass can scan an unbounded
+// staging namespace; later passes and the lifecycle rule provide recovery.
+export const maxOrphanListPages = maxOutgoingConnections;
 
 export class GarbageCollectionService {
 	constructor(
@@ -939,19 +953,30 @@ export class GarbageCollectionService {
 
 	// Pending rows own their staging keys. The orphan scan must not delete those
 	// objects even when the rows appear after its R2 listing began.
-	private trackedStagingKeys(): ReadonlySet<string> {
-		return new Set<string>([
-			...this.context.db
+	private trackedStagingKeys(keys: readonly string[]): ReadonlySet<string> {
+		const tracked = new Set<string>();
+		const uniqueKeys = [...new Set(keys)].map((key) =>
+			r2ObjectKeySchema.parse(key)
+		);
+
+		for (const keyChunk of chunk(uniqueKeys, maxInClauseValues)) {
+			const uploadMatches = this.context.db
 				.select({ r2Key: schema.pendingUploads.r2Key })
 				.from(schema.pendingUploads)
-				.all()
-				.map((row) => row.r2Key),
-			...this.context.db
+				.where(inArray(schema.pendingUploads.r2Key, keyChunk))
+				.all();
+			const attestationMatches = this.context.db
 				.select({ r2Key: schema.pendingAttestations.r2Key })
 				.from(schema.pendingAttestations)
-				.all()
-				.map((row) => row.r2Key)
-		]);
+				.where(inArray(schema.pendingAttestations.r2Key, keyChunk))
+				.all();
+
+			for (const match of [...uploadMatches, ...attestationMatches]) {
+				tracked.add(match.r2Key);
+			}
+		}
+
+		return tracked;
 	}
 
 	// Require both an absent pending row and an age beyond the upload grace. The
@@ -964,12 +989,15 @@ export class GarbageCollectionService {
 		return !tracked.has(object.key) && object.uploaded.getTime() < orphanBefore;
 	}
 
+	// List staging objects until the object or page cap is reached. Load tracked
+	// rows only after finding an object, so an empty staging prefix reads no rows.
+	// Later passes and the lifecycle rule handle the remainder.
 	private async collectOrphanStagingKeys(
 		orphanBefore: number
 	): Promise<{ keys: R2ObjectKey[]; wasCapped: boolean }> {
 		const keys: R2ObjectKey[] = [];
 		let cursor: string | undefined;
-		let tracked: ReadonlySet<string> | undefined;
+		let pages = 0;
 
 		do {
 			const listed = await this.context.env.BLOBS.list({
@@ -977,13 +1005,15 @@ export class GarbageCollectionService {
 				cursor,
 				limit: orphanListPageSize
 			});
+			pages += 1;
+			const tracked = this.trackedStagingKeys(
+				listed.objects.map((object) => object.key)
+			);
 
 			for (const object of listed.objects) {
 				if (keys.length >= maxOrphanReclaim) {
 					return { keys, wasCapped: true };
 				}
-
-				tracked ??= this.trackedStagingKeys();
 
 				if (this.isReclaimableOrphan(object, tracked, orphanBefore)) {
 					keys.push(r2ObjectKeySchema.parse(object.key));
@@ -991,6 +1021,10 @@ export class GarbageCollectionService {
 			}
 
 			cursor = listed.truncated ? listed.cursor : undefined;
+
+			if (cursor !== undefined && pages === maxOrphanListPages) {
+				return { keys, wasCapped: true };
+			}
 		} while (cursor !== undefined);
 
 		return { keys, wasCapped: false };
@@ -1007,7 +1041,7 @@ export class GarbageCollectionService {
 		await deleteObjects(this.context.env.BLOBS, keys);
 
 		if (wasCapped) {
-			logger.warn('orphan staging reclaim hit the per-run cap', {
+			logger.warn('orphan staging scan hit the per-run cap', {
 				reclaimed: keys.length
 			});
 		}
@@ -1093,26 +1127,47 @@ export class GarbageCollectionService {
 			// `pending` and `committing` are live commit states, even after expiry;
 			// verification may still resume them. Reap only uploads without a verdict
 			// and terminal `servable`, `mismatch`, or `over-quota` uploads.
-			const reapable = and(
-				lt(schema.pendingUploads.expiresAt, now),
-				or(
-					isNull(schema.pendingUploads.verdict),
-					eq(schema.pendingUploads.verdict, 'servable'),
-					eq(schema.pendingUploads.verdict, 'mismatch'),
-					eq(schema.pendingUploads.verdict, 'over-quota')
-				)
+			const expiredUploadCandidates = this.context.db.all<
+				Pick<
+					typeof schema.pendingUploads.$inferSelect,
+					'id' | 'narHash' | 'r2Key'
+				>
+			>(
+				sql`SELECT id, nar_hash AS narHash, r2_key AS r2Key
+				    FROM pending_upload INDEXED BY pending_upload_terminal_expires_at_idx
+				    WHERE expires_at < ${now}
+				      AND (verdict IS NULL OR verdict = 'servable' OR verdict = 'mismatch' OR verdict = 'over-quota')
+				    ORDER BY expires_at, id
+				    LIMIT ${maxPendingRowsDeletedPerRun + 1}`
 			);
-
-			const expiredUploads = this.context.db
-				.select()
-				.from(schema.pendingUploads)
-				.where(reapable)
-				.all();
-			const expiredAttestations = this.context.db
-				.select()
+			const expiredAttestationCandidates = this.context.db
+				.select({
+					id: schema.pendingAttestations.id,
+					r2Key: schema.pendingAttestations.r2Key
+				})
 				.from(schema.pendingAttestations)
 				.where(lt(schema.pendingAttestations.expiresAt, now))
+				.orderBy(asc(schema.pendingAttestations.expiresAt))
+				.limit(maxPendingRowsDeletedPerRun + 1)
 				.all();
+			const expiredUploads = expiredUploadCandidates.slice(
+				0,
+				maxPendingRowsDeletedPerRun
+			);
+			const expiredAttestations = expiredAttestationCandidates.slice(
+				0,
+				maxPendingRowsDeletedPerRun
+			);
+			const hasMorePendingRows =
+				expiredUploadCandidates.length > maxPendingRowsDeletedPerRun ||
+				expiredAttestationCandidates.length > maxPendingRowsDeletedPerRun;
+
+			if (hasMorePendingRows) {
+				log.warn('pending staging backlog remains after bounded collection', {
+					uploadsDeleted: expiredUploads.length,
+					attestationsDeleted: expiredAttestations.length
+				});
+			}
 
 			// Delete only private staging objects here. A reuse upload points at the
 			// shared canonical NAR, whose lifetime is owned by the global reaper.
@@ -1123,11 +1178,30 @@ export class GarbageCollectionService {
 				...expiredAttestations.map((upload) => upload.r2Key)
 			];
 
-			this.context.db.delete(schema.pendingUploads).where(reapable).run();
-			this.context.db
-				.delete(schema.pendingAttestations)
-				.where(lt(schema.pendingAttestations.expiresAt, now))
-				.run();
+			for (const batch of chunk(expiredUploads, maxInClauseValues)) {
+				this.context.db
+					.delete(schema.pendingUploads)
+					.where(
+						inArray(
+							schema.pendingUploads.id,
+							batch.map((upload) => upload.id)
+						)
+					)
+					.run();
+			}
+
+			for (const batch of chunk(expiredAttestations, maxInClauseValues)) {
+				this.context.db
+					.delete(schema.pendingAttestations)
+					.where(
+						inArray(
+							schema.pendingAttestations.id,
+							batch.map((attestation) => attestation.id)
+						)
+					)
+					.run();
+			}
+
 			this.context.db
 				.delete(schema.refreshTokens)
 				.where(lt(schema.refreshTokens.expiresAt, now))
@@ -1143,12 +1217,13 @@ export class GarbageCollectionService {
 							hasMoreWork: false
 						}
 					: this.collectUnreachable(collectionCache, now, collectLimit);
-			const hasMoreWork =
+			const hasMoreCollectionWork =
 				cache === undefined &&
 				collectionCache !== undefined &&
 				!collected.hasMoreWork
 					? this.advanceTenantCollection(collectionCache)
 					: collected.hasMoreWork;
+			const hasMoreWork = hasMorePendingRows || hasMoreCollectionWork;
 
 			const narInfosDeleted =
 				await this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin);

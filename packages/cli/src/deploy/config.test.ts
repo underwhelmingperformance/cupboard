@@ -1,3 +1,5 @@
+import { readFile } from 'node:fs/promises';
+
 import { describe, expect, it } from 'vitest';
 
 import { parseDeploymentConfig, WranglerConfigError } from './config.ts';
@@ -20,7 +22,7 @@ const controlSource = `{
 	"queues": {
 		"producers": [{ "binding": "MAINTENANCE_QUEUE", "queue": "cupboard-maintenance" }],
 		"consumers": [
-			{ "queue": "cupboard-maintenance", "max_batch_size": 10, "dead_letter_queue": "cupboard-maintenance-dlq" }
+			{ "queue": "cupboard-maintenance", "max_batch_size": 1, "dead_letter_queue": "cupboard-maintenance-dlq" }
 		]
 	},
 	"vars": { "CUPBOARD_AUTH_ISSUER": "cupboard" },
@@ -48,6 +50,25 @@ const tenantSource = `{
 }`;
 
 describe('parseDeploymentConfig', () => {
+	it('limits production maintenance batches to one D1-budgeted operation', async () => {
+		const productionControlSource = await readFile(
+			new URL('../../../server/wrangler.jsonc', import.meta.url),
+			'utf8'
+		);
+		const config = parseDeploymentConfig(productionControlSource, tenantSource);
+
+		expect(config.control.queueConsumers).toStrictEqual([
+			{
+				queue: 'cupboard-maintenance',
+				maxBatchSize: 1,
+				maxBatchTimeout: 5,
+				maxRetries: 3,
+				maxConcurrency: 4,
+				deadLetterQueue: 'cupboard-maintenance-dlq'
+			}
+		]);
+	});
+
 	it('parses both workers, deriving KV titles and normalising bindings', () => {
 		expect(parseDeploymentConfig(controlSource, tenantSource)).toStrictEqual({
 			control: {
@@ -77,7 +98,7 @@ describe('parseDeploymentConfig', () => {
 				queueConsumers: [
 					{
 						queue: 'cupboard-maintenance',
-						maxBatchSize: 10,
+						maxBatchSize: 1,
 						maxBatchTimeout: undefined,
 						maxRetries: undefined,
 						maxConcurrency: undefined,

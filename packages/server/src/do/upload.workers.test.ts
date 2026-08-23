@@ -34,7 +34,6 @@ import {
 	enqueueMaintenanceJobs,
 	executeMaintenanceQueueMessage,
 	type MaintenanceQueueMessage,
-	runBlobReaper,
 	verifyTenant
 } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
@@ -92,6 +91,7 @@ import {
 	recordClaimedVerification,
 	removeRoot,
 	resetTestServer,
+	runBlobReaperToCompletion as runBlobReaper,
 	runGcFromInternalOrigin,
 	runGcResult,
 	seedReservedNarInfo,

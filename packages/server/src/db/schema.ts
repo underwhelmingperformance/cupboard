@@ -22,6 +22,7 @@ import type {
 } from '@cupboard/protocol/reuse-views';
 import type { IsoTimestamp } from '@cupboard/protocol/scalars';
 import type { SessionId, UploadId } from '@cupboard/protocol/upload';
+import { sql } from 'drizzle-orm';
 import {
 	index,
 	integer,
@@ -129,12 +130,18 @@ export const pendingUploads = sqliteTable(
 		// Null preserves the behaviour of pushes that did not request a root.
 		attachRootName: text('attach_root_name').$type<RootName>()
 	},
-	// The maintenance reconcile finds the soonest-expiring upload and probes for any
-	// still awaiting verification (an existence check, not a count); without these
-	// indexes each pass scans the whole in-flight set.
+	// Maintenance finds the soonest-expiring upload, probes for work awaiting
+	// verification, and checks listed staging keys for pending owners. Without
+	// these indexes each pass scans the whole in-flight set.
 	(table) => [
 		index('pending_upload_expires_at_idx').on(table.expiresAt),
-		index('pending_upload_verdict_idx').on(table.verdict)
+		index('pending_upload_terminal_expires_at_idx')
+			.on(table.expiresAt, table.id)
+			.where(
+				sql`${table.verdict} IS NULL OR ${table.verdict} = 'servable' OR ${table.verdict} = 'mismatch' OR ${table.verdict} = 'over-quota'`
+			),
+		index('pending_upload_verdict_idx').on(table.verdict),
+		index('pending_upload_r2_key_idx').on(table.r2Key)
 	]
 );
 
@@ -149,9 +156,12 @@ export const pendingAttestations = sqliteTable(
 		createdAt: text('created_at').$type<IsoTimestamp>().notNull(),
 		expiresAt: text('expires_at').$type<IsoTimestamp>().notNull()
 	},
-	// The maintenance pass finds the soonest-expiring attestation and GC reaps the
-	// expired ones; the index spares both a scan of every staged bundle.
-	(table) => [index('pending_attestation_expires_at_idx').on(table.expiresAt)]
+	// Maintenance finds the soonest-expiring attestation and checks listed staging
+	// keys for pending owners. The indexes spare scans of every staged bundle.
+	(table) => [
+		index('pending_attestation_expires_at_idx').on(table.expiresAt),
+		index('pending_attestation_r2_key_idx').on(table.r2Key)
+	]
 );
 
 export const narInfoDeletions = sqliteTable(

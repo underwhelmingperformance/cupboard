@@ -170,7 +170,7 @@ export class CupboardTestServer {
 						MAINTENANCE_QUEUE: { queueName: 'cupboard-maintenance' }
 					},
 					queueConsumers: {
-						'cupboard-maintenance': { maxBatchSize: 10, maxBatchTimeout: 0 }
+						'cupboard-maintenance': { maxBatchSize: 1, maxBatchTimeout: 0 }
 					}
 				},
 				{

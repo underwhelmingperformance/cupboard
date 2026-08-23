@@ -20,7 +20,8 @@ import {
 	type CasReferenceDemotion,
 	type DemoteCursor,
 	type NarInfoDemoter,
-	type NarInfoDemotion
+	type NarInfoDemotion,
+	type ObjectReaperPhase
 } from '../do/blob-reaper-service.ts';
 import { batchNonEmpty, chunk, maxInClauseValues } from '../do/bulk.ts';
 import type { VerificationRecordRpcResult } from '../do/server.ts';
@@ -84,8 +85,16 @@ interface ExecuteMaintenanceQueueOptions {
 	readonly maintainTenant?: MaintainTenant;
 	readonly verifyTenant?: MaintainTenant;
 	readonly drainTenant?: DrainTenant;
-	readonly runBlobReaper?: (logger: Logger, env: Env) => Promise<unknown>;
-	readonly runCasReaper?: (logger: Logger, env: Env) => Promise<unknown>;
+	readonly runBlobReaper?: (
+		logger: Logger,
+		env: Env,
+		phase: ObjectReaperPhase
+	) => Promise<unknown>;
+	readonly runCasReaper?: (
+		logger: Logger,
+		env: Env,
+		phase: ObjectReaperPhase
+	) => Promise<unknown>;
 	readonly runReaperDemote?: (logger: Logger, env: Env) => Promise<unknown>;
 	readonly runCasReaperDemote?: (logger: Logger, env: Env) => Promise<unknown>;
 	readonly runControlKeyRetirement?: (
@@ -97,13 +106,26 @@ interface ExecuteMaintenanceQueueOptions {
 const maxStoredErrorLength = 4096;
 const queueRetryDelaySeconds = 60;
 const queueSendBatchSize = 100;
+const objectReaperPhaseSchema = z.enum([
+	'delete-existing',
+	'recover',
+	'arm',
+	'collect',
+	'delete-collected'
+]);
 
 const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
 	z.object({ kind: z.literal('tenant-maintenance'), tenant: tenantIdSchema }),
 	z.object({ kind: z.literal('tenant-verify'), tenant: tenantIdSchema }),
 	z.object({ kind: z.literal('offboard'), tenant: tenantIdSchema }),
-	z.object({ kind: z.literal('blob-reaper') }),
-	z.object({ kind: z.literal('cas-reaper') }),
+	z.object({
+		kind: z.literal('blob-reaper'),
+		phase: objectReaperPhaseSchema.optional()
+	}),
+	z.object({
+		kind: z.literal('cas-reaper'),
+		phase: objectReaperPhaseSchema.optional()
+	}),
 	z.object({ kind: z.literal('blob-demote') }),
 	z.object({ kind: z.literal('cas-demote') }),
 	z.object({ kind: z.literal('control-key-retirement') })
@@ -113,8 +135,8 @@ export type MaintenanceQueueMessage =
 	| { readonly kind: 'tenant-maintenance'; readonly tenant: TenantId }
 	| { readonly kind: 'tenant-verify'; readonly tenant: TenantId }
 	| { readonly kind: 'offboard'; readonly tenant: TenantId }
-	| { readonly kind: 'blob-reaper' }
-	| { readonly kind: 'cas-reaper' }
+	| { readonly kind: 'blob-reaper'; readonly phase?: ObjectReaperPhase }
+	| { readonly kind: 'cas-reaper'; readonly phase?: ObjectReaperPhase }
 	| { readonly kind: 'blob-demote' }
 	| { readonly kind: 'cas-demote' }
 	| { readonly kind: 'control-key-retirement' };
@@ -289,11 +311,19 @@ export async function executeMaintenanceQueueMessage(
 				);
 			}
 			case 'blob-reaper': {
-				await (options.runBlobReaper ?? runBlobReaper)(logger, env);
+				await (options.runBlobReaper ?? runBlobReaperPhase)(
+					logger,
+					env,
+					message.phase ?? 'delete-existing'
+				);
 				return { action: 'ack' };
 			}
 			case 'cas-reaper': {
-				await (options.runCasReaper ?? runCasReaper)(logger, env);
+				await (options.runCasReaper ?? runCasReaperPhase)(
+					logger,
+					env,
+					message.phase ?? 'delete-existing'
+				);
 				return { action: 'ack' };
 			}
 			case 'blob-demote': {
@@ -342,10 +372,17 @@ function logMaintenanceQueueRetry(
 
 function maintenanceQueueMessageLogFields(message: MaintenanceQueueMessage): {
 	readonly kind: string;
+	readonly phase?: ObjectReaperPhase;
 	readonly tenant?: string;
 } {
 	if ('tenant' in message) {
 		return { kind: message.kind, tenant: message.tenant };
+	}
+	if (message.kind === 'blob-reaper' || message.kind === 'cas-reaper') {
+		return {
+			kind: message.kind,
+			phase: message.phase ?? 'delete-existing'
+		};
 	}
 
 	return { kind: message.kind };
@@ -355,20 +392,64 @@ function maintenanceQueueMessageLogFields(message: MaintenanceQueueMessage): {
  * Collects unreferenced canonical NAR objects. This runs on the Worker because
  * tenant Durable Objects cannot see reference edges owned by other tenants.
  */
-export function runBlobReaper(
+export async function runBlobReaper(
 	logger: Logger,
 	env: Env,
-	batchSize: number = blobReaperBatchSize
+	batchSize: number = blobReaperBatchSize,
+	continueReaper: (phase: ObjectReaperPhase) => Promise<void> = (phase) =>
+		sendQueueMessages(env.MAINTENANCE_QUEUE, [{ kind: 'blob-reaper', phase }]),
+	phase: ObjectReaperPhase = 'delete-existing'
 ): Promise<number> {
-	return blobReaper(env).reapBlobs(logger, new Date(), batchSize);
+	const result = await blobReaper(env).reapBlobs(
+		logger,
+		new Date(),
+		batchSize,
+		phase
+	);
+
+	if (result.continuation !== undefined) {
+		await continueReaper(result.continuation);
+	}
+
+	return result.deleted;
 }
 
-export function runCasReaper(
+export async function runCasReaper(
 	logger: Logger,
 	env: Env,
-	batchSize: number = blobReaperBatchSize
+	batchSize: number = blobReaperBatchSize,
+	continueReaper: (phase: ObjectReaperPhase) => Promise<void> = (phase) =>
+		sendQueueMessages(env.MAINTENANCE_QUEUE, [{ kind: 'cas-reaper', phase }]),
+	phase: ObjectReaperPhase = 'delete-existing'
 ): Promise<number> {
-	return blobReaper(env).reapCasObjects(logger, new Date(), batchSize);
+	const result = await blobReaper(env).reapCasObjects(
+		logger,
+		new Date(),
+		batchSize,
+		phase
+	);
+
+	if (result.continuation !== undefined) {
+		await continueReaper(result.continuation);
+	}
+
+	return result.deleted;
+}
+
+function runBlobReaperPhase(
+	logger: Logger,
+	env: Env,
+	phase: ObjectReaperPhase
+): Promise<number> {
+	return runBlobReaper(logger, env, blobReaperBatchSize, undefined, phase);
+}
+
+function runCasReaperPhase(
+	logger: Logger,
+	env: Env,
+	phase: ObjectReaperPhase
+): Promise<number> {
+	return runCasReaper(logger, env, blobReaperBatchSize, undefined, phase);
 }
 
 /**

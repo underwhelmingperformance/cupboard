@@ -37,6 +37,7 @@ import m0034 from './0034_gc_scan_collect_phase.sql';
 import m0035 from './0035_chunky_unicorn.sql';
 import m0036 from './0036_retention_policy_identity.sql';
 import m0037 from './0037_wakeful_longshot.sql';
+import m0038 from './0038_pending_staging_indexes.sql';
 
 export default {
 	journal,
@@ -78,6 +79,7 @@ export default {
 		m0034,
 		m0035,
 		m0036,
-		m0037
+		m0037,
+		m0038
 	}
 };

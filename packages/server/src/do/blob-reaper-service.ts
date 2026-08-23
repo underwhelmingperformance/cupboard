@@ -36,6 +36,8 @@ import {
 	blobReaperGraceMs,
 	casObjectKey,
 	narObjectKey,
+	objectDeletionBatchSize,
+	objectRecoveryBatchSize,
 	type R2ObjectKey
 } from '../http/http.ts';
 
@@ -77,6 +79,27 @@ export interface CasReferenceDemoter {
 	): Promise<void>;
 }
 
+export type ObjectReaperPhase =
+	'delete-existing' | 'recover' | 'arm' | 'collect' | 'delete-collected';
+
+export interface ObjectReaperOutcome {
+	readonly continuation: ObjectReaperPhase | undefined;
+	readonly deleted: number;
+}
+
+interface ReapObjectsOptions {
+	readonly arm: (now: Date, limit: number) => Promise<boolean>;
+	readonly collect: (
+		now: Date,
+		limit: number
+	) => Promise<{ readonly deleted: number; readonly hasMoreWork: boolean }>;
+	readonly kind: SharedObjectKind;
+	readonly limit: number;
+	readonly logger: Logger;
+	readonly now: Date;
+	readonly phase: ObjectReaperPhase;
+}
+
 const maxFencedDeleteRows = Math.floor(maxInClauseValues / 2);
 
 // Persist the last key scanned. An empty position wraps to the start. Eventual
@@ -101,7 +124,10 @@ export class BlobReaperService {
 
 	// Determine global reachability from `blob_ref.nar_hash`, not from one
 	// tenant's narinfos. A later reference clears the grace timer.
-	private async armUnreferencedBlobs(now: Date, limit: number): Promise<void> {
+	private async armUnreferencedBlobs(
+		now: Date,
+		limit: number
+	): Promise<boolean> {
 		const deletionTime = isoTimestamp(
 			new Date(now.getTime() + blobReaperGraceMs)
 		);
@@ -117,14 +143,15 @@ export class BlobReaperService {
 					notInArray(d1Schema.blobState.narHash, referencedHashes)
 				)
 			)
-			.limit(limit)
+			.limit(limit + 1)
 			.all();
+		const batch = candidates.slice(0, limit);
 
-		if (candidates.length === 0) {
-			return;
+		if (batch.length === 0) {
+			return false;
 		}
 
-		const candidateHashes = candidates.map((candidate) => candidate.narHash);
+		const candidateHashes = batch.map((candidate) => candidate.narHash);
 
 		// Chunk the update for D1's parameter limit. Each chunk arms only rows whose
 		// timer is still unset, so a concurrent reference wins.
@@ -143,12 +170,17 @@ export class BlobReaperService {
 		});
 
 		await batchNonEmpty(this.d1, queries);
+
+		return candidates.length > batch.length;
 	}
 
 	// Recheck the grace deadline and references while deleting the `blob_state`
 	// row. The same transaction records the corresponding R2 key so maintenance
 	// can retry an interrupted deletion.
-	private async collectExpiredBlobs(now: Date, limit: number): Promise<number> {
+	private async collectExpiredBlobs(
+		now: Date,
+		limit: number
+	): Promise<{ readonly deleted: number; readonly hasMoreWork: boolean }> {
 		const nowIso = isoTimestamp(now);
 		const expired = await this.d1
 			.select({
@@ -162,8 +194,9 @@ export class BlobReaperService {
 					lte(d1Schema.blobState.deleteAfter, nowIso)
 				)
 			)
-			.limit(limit)
+			.limit(limit + 1)
 			.all();
+		const batch = expired.slice(0, limit);
 		const removedKeys: R2ObjectKey[] = [];
 		const referencedHashes = this.d1
 			.select({ narHash: d1Schema.blobReference.narHash })
@@ -172,7 +205,7 @@ export class BlobReaperService {
 		// `RETURNING` identifies only rows that still satisfy the atomic deletion
 		// fence.
 		const hashChunks = chunk(
-			expired.map((blob) => blob.narHash),
+			batch.map((blob) => blob.narHash),
 			maxInClauseValues
 		);
 
@@ -258,17 +291,16 @@ export class BlobReaperService {
 			}
 		}
 
-		// Process R2 deletion markers only after their `blob_state` rows have been
-		// deleted.
-		await drainObjectDeletions(this.d1, this.blobs, 'nar', limit);
-
-		return removedKeys.length;
+		return {
+			deleted: removedKeys.length,
+			hasMoreWork: expired.length > batch.length
+		};
 	}
 
 	private async armUnreferencedCasObjects(
 		now: Date,
 		limit: number
-	): Promise<void> {
+	): Promise<boolean> {
 		const deletionTime = isoTimestamp(
 			new Date(now.getTime() + blobReaperGraceMs)
 		);
@@ -284,14 +316,15 @@ export class BlobReaperService {
 					notInArray(d1Schema.casObject.digest, referencedDigests)
 				)
 			)
-			.limit(limit)
+			.limit(limit + 1)
 			.all();
+		const batch = candidates.slice(0, limit);
 
-		if (candidates.length === 0) {
-			return;
+		if (batch.length === 0) {
+			return false;
 		}
 
-		const candidateDigests = candidates.map((candidate) => candidate.digest);
+		const candidateDigests = batch.map((candidate) => candidate.digest);
 
 		// Chunk the update for D1's parameter limit. Each chunk arms only rows whose
 		// timer is still unset, so a concurrent attestation reference wins.
@@ -310,12 +343,14 @@ export class BlobReaperService {
 		});
 
 		await batchNonEmpty(this.d1, queries);
+
+		return candidates.length > batch.length;
 	}
 
 	private async collectExpiredCasObjects(
 		now: Date,
 		limit: number
-	): Promise<number> {
+	): Promise<{ readonly deleted: number; readonly hasMoreWork: boolean }> {
 		const nowIso = isoTimestamp(now);
 		const expired = await this.d1
 			.select({
@@ -329,8 +364,9 @@ export class BlobReaperService {
 					lte(d1Schema.casObject.deleteAfter, nowIso)
 				)
 			)
-			.limit(limit)
+			.limit(limit + 1)
 			.all();
+		const batch = expired.slice(0, limit);
 		const removedKeys: R2ObjectKey[] = [];
 		const referencedDigests = this.d1
 			.select({ digest: d1Schema.attestationReference.digest })
@@ -339,7 +375,7 @@ export class BlobReaperService {
 		// `RETURNING` identifies only rows that still satisfy the atomic deletion
 		// fence.
 		const digestChunks = chunk(
-			expired.map((object) => object.digest),
+			batch.map((object) => object.digest),
 			maxInClauseValues
 		);
 
@@ -425,9 +461,10 @@ export class BlobReaperService {
 			}
 		}
 
-		await drainObjectDeletions(this.d1, this.blobs, 'cas', limit);
-
-		return removedKeys.length;
+		return {
+			deleted: removedKeys.length,
+			hasMoreWork: expired.length > batch.length
+		};
 	}
 
 	private async referencingDemotions(
@@ -708,38 +745,106 @@ export class BlobReaperService {
 		return demotionsByTenant;
 	}
 
-	async reapBlobs(logger: Logger, now: Date, limit: number): Promise<number> {
-		await drainObjectDeletions(this.d1, this.blobs, 'nar', limit);
-		await recoverAbandonedIncarnations(
-			this.d1,
-			this.blobs,
-			'nar',
-			now,
-			limit,
-			logger
-		);
-		await this.armUnreferencedBlobs(now, limit);
+	private async reapObjects({
+		arm,
+		collect,
+		kind,
+		limit,
+		logger,
+		now,
+		phase
+	}: ReapObjectsOptions): Promise<ObjectReaperOutcome> {
+		switch (phase) {
+			case 'delete-existing': {
+				const result = await drainObjectDeletions(
+					this.d1,
+					this.blobs,
+					kind,
+					Math.min(limit, objectDeletionBatchSize)
+				);
 
-		return this.collectExpiredBlobs(now, limit);
+				return {
+					deleted: 0,
+					continuation: result.hasMoreWork ? phase : 'recover'
+				};
+			}
+			case 'recover': {
+				const result = await recoverAbandonedIncarnations(
+					this.d1,
+					this.blobs,
+					kind,
+					now,
+					Math.min(limit, objectRecoveryBatchSize),
+					logger
+				);
+
+				return {
+					deleted: 0,
+					continuation: result.hasMoreWork ? phase : 'arm'
+				};
+			}
+			case 'arm': {
+				return {
+					deleted: 0,
+					continuation: (await arm(now, limit)) ? phase : 'collect'
+				};
+			}
+			case 'collect': {
+				const result = await collect(now, limit);
+
+				return {
+					deleted: result.deleted,
+					continuation: result.hasMoreWork ? phase : 'delete-collected'
+				};
+			}
+			case 'delete-collected': {
+				const result = await drainObjectDeletions(
+					this.d1,
+					this.blobs,
+					kind,
+					Math.min(limit, objectDeletionBatchSize)
+				);
+
+				return {
+					deleted: 0,
+					continuation: result.hasMoreWork ? phase : undefined
+				};
+			}
+		}
+	}
+
+	async reapBlobs(
+		logger: Logger,
+		now: Date,
+		limit: number,
+		phase: ObjectReaperPhase
+	): Promise<ObjectReaperOutcome> {
+		return this.reapObjects({
+			arm: (at, pageSize) => this.armUnreferencedBlobs(at, pageSize),
+			collect: (at, pageSize) => this.collectExpiredBlobs(at, pageSize),
+			kind: 'nar',
+			limit,
+			logger,
+			now,
+			phase
+		});
 	}
 
 	async reapCasObjects(
 		logger: Logger,
 		now: Date,
-		limit: number
-	): Promise<number> {
-		await drainObjectDeletions(this.d1, this.blobs, 'cas', limit);
-		await recoverAbandonedIncarnations(
-			this.d1,
-			this.blobs,
-			'cas',
-			now,
+		limit: number,
+		phase: ObjectReaperPhase
+	): Promise<ObjectReaperOutcome> {
+		return this.reapObjects({
+			arm: (at, pageSize) => this.armUnreferencedCasObjects(at, pageSize),
+			collect: (at, pageSize) => this.collectExpiredCasObjects(at, pageSize),
+			kind: 'cas',
 			limit,
-			logger
-		);
-		await this.armUnreferencedCasObjects(now, limit);
-
-		return this.collectExpiredCasObjects(now, limit);
+			logger,
+			now,
+			phase
+		});
 	}
 
 	// Dematerialise tenant narinfos before deleting the global `blob_state` row.

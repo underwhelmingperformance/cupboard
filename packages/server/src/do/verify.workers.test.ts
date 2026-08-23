@@ -27,6 +27,8 @@ import {
 	useTestServer
 } from '../test-support.ts';
 
+import { maxOutgoingConnections } from './bulk.ts';
+
 const buildsCache = cacheNameSchema.parse('builds');
 
 const healthy = {
@@ -410,6 +412,52 @@ describe('background verification', () => {
 			}).toStrictEqual({ restored: true, narInfoObjectsRestored: 1 });
 		} finally {
 			list.mockRestore();
+		}
+	});
+
+	it('bounds orphan listing before falling back to heads', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: 'z'.repeat(32)
+		});
+
+		await pushPath(token, metadata);
+
+		const prefix = `t/${fixtureTenant}/narinfo/`;
+		for (let index = 0; index < maxOutgoingConnections + 2; index += 1) {
+			await env.BLOBS.put(
+				`${prefix}${String(index).padStart(32, '0')}`,
+				'orphan'
+			);
+		}
+
+		const originalList = env.BLOBS.list.bind(env.BLOBS);
+		const list = vi
+			.spyOn(env.BLOBS, 'list')
+			.mockImplementation((options?: R2ListOptions) =>
+				originalList({ ...options, limit: 1 })
+			);
+		const head = vi.spyOn(env.BLOBS, 'head');
+
+		try {
+			const report = await runVerify(token, 1);
+			const targetKey = narInfoObjectKey(fixtureTenant, metadata.storePathHash);
+
+			expect({
+				listCalls: list.mock.calls.length,
+				targetHeaded: head.mock.calls.some(([key]) => key === targetKey),
+				cursor: report.cursor,
+				wrapped: report.wrapped
+			}).toStrictEqual({
+				listCalls: maxOutgoingConnections,
+				targetHeaded: true,
+				cursor: metadata.storePathHash,
+				wrapped: false
+			});
+		} finally {
+			list.mockRestore();
+			head.mockRestore();
 		}
 	});
 
