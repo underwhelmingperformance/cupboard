@@ -31,7 +31,10 @@ import {
 
 import { chunk } from './bulk.ts';
 import { maxNarInfoDeletionsFlushedPerRun } from './deletion-queue-service.ts';
-import { maxPathsCollectedPerRun } from './garbage-collection-service.ts';
+import {
+	maxPathsCollectedPerRun,
+	maxRefreshTokenMembersDeletedPerRun
+} from './garbage-collection-service.ts';
 import { gcContinuationKey } from './server.ts';
 
 const repeated = (character: string): string => character.repeat(32);
@@ -72,6 +75,54 @@ async function fireAlarm(): Promise<void> {
 	// The test pool does not deliver alarms predictably, so invoke the same handler
 	// directly.
 	await runInDurableObject(currentServer(), (instance) => instance.alarm());
+}
+
+async function seedExpiredRefreshFamily(memberCount: number): Promise<void> {
+	await runInDurableObject(currentServer(), (_instance, state) => {
+		const activeGeneration = memberCount - 1;
+		state.storage.sql.exec(
+			"INSERT INTO refresh_token_family (id, active_member_id, generation, rule_id, subject, grants_json, created_at, expires_at) VALUES ('expired-family', 'expired-active', ?, 'admin-rule', 'alice', ?, '2019-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z')",
+			activeGeneration,
+			JSON.stringify([{ type: 'cupboard_wildcard' }])
+		);
+		state.storage.sql.exec(
+			`WITH digits(digit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)),
+			 generations(value) AS (
+			   SELECT ones.digit + tens.digit * 10 + hundreds.digit * 100 + thousands.digit * 1000
+			   FROM digits AS ones
+			   CROSS JOIN digits AS tens
+			   CROSS JOIN digits AS hundreds
+			   CROSS JOIN digits AS thousands
+			 )
+			 INSERT INTO refresh_token_member (id, family_id, generation, secret_hash, created_at)
+			 SELECT CASE WHEN value = ? THEN 'expired-active' ELSE printf('expired-spent-%d', value) END,
+			        'expired-family', value, lower(hex(randomblob(32))), '2019-01-01T00:00:00.000Z'
+			 FROM generations
+			 WHERE value < ?`,
+			activeGeneration,
+			memberCount
+		);
+	});
+}
+
+async function refreshFamilyCounts(): Promise<{
+	readonly families: number;
+	readonly members: number;
+}> {
+	return runInDurableObject(currentServer(), (_instance, state) => ({
+		families:
+			state.storage.sql
+				.exec<{ count: number }>(
+					'SELECT count(*) AS count FROM refresh_token_family'
+				)
+				.toArray()[0]?.count ?? 0,
+		members:
+			state.storage.sql
+				.exec<{ count: number }>(
+					'SELECT count(*) AS count FROM refresh_token_member'
+				)
+				.toArray()[0]?.count ?? 0
+	}));
 }
 
 // An alarm with a collect budget of one either advances the walk by one unit
@@ -180,6 +231,83 @@ describe('garbage collection cap', () => {
 		}).toStrictEqual({ collectable: 0, continuation: undefined });
 
 		expect(await narInfoGeneration(kept.storePathHash)).not.toBeUndefined();
+	});
+
+	it('advances refresh-family and path collection in the same bounded pass', async () => {
+		await useTestServer('gc-refresh-and-path-cap');
+		const { token } = await bootstrap();
+		const kept = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('a'),
+			name: 'kept'
+		});
+		const collectable = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('b'),
+			name: 'collectable'
+		});
+
+		await pushPath(token, kept);
+		await pushPath(token, collectable);
+		await setRoot(token, { name: 'channel', targets: [kept.storePath] });
+		await seedExpiredRefreshFamily(maxRefreshTokenMembersDeletedPerRun + 1);
+
+		const firstPass = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				await instance.runGarbageCollection(1);
+				const progress = scanProgress(state);
+				const refresh = {
+					families:
+						state.storage.sql
+							.exec<{ count: number }>(
+								'SELECT count(*) AS count FROM refresh_token_family'
+							)
+							.toArray()[0]?.count ?? 0,
+					members:
+						state.storage.sql
+							.exec<{ count: number }>(
+								'SELECT count(*) AS count FROM refresh_token_member'
+							)
+							.toArray()[0]?.count ?? 0
+				};
+				const pending = await state.storage.get(gcContinuationKey);
+				await state.storage.deleteAlarm();
+
+				return { progress, refresh, continuation: pending };
+			}
+		);
+		const revision = firstPass.progress?.revision;
+
+		expect(typeof revision).toBe('number');
+		expect(firstPass).toStrictEqual({
+			progress: {
+				phase: 'mark',
+				revision,
+				cursor: '',
+				frontier: 0,
+				marks: 1
+			},
+			refresh: { families: 1, members: 1 },
+			continuation: [{ scope: 'tenant', collectLimit: 1 }]
+		});
+
+		await drainContinuation();
+		const keptGeneration = await narInfoGeneration(kept.storePathHash);
+
+		expect(typeof keptGeneration).toBe('number');
+
+		expect({
+			collectable: await narInfoGeneration(collectable.storePathHash),
+			kept: keptGeneration,
+			refresh: await refreshFamilyCounts(),
+			continuation: await continuation()
+		}).toStrictEqual({
+			collectable: undefined,
+			kept: keptGeneration,
+			refresh: { families: 0, members: 0 },
+			continuation: undefined
+		});
 	});
 
 	it('continues a reachability walk instead of rescanning its roots', async () => {

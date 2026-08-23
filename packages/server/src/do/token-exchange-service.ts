@@ -1,5 +1,9 @@
+import { type Logger } from '@cupboard/logger';
 import { type TtlSeconds } from '@cupboard/nix-store/scalars';
-import { type AuthorizationDetails } from '@cupboard/protocol/grants';
+import {
+	type AuthorizationDetails,
+	authorizationDetailsSchema
+} from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
 	type OidcSubject,
@@ -23,13 +27,14 @@ import {
 	type OidcTrustRule
 } from '@cupboard/protocol/oidc-trust-match';
 import { isoTimestamp } from '@cupboard/protocol/scalars';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 
 import {
 	type AccessClaims,
 	adminJwtTtlSeconds,
 	issueAccessJwt,
-	refreshTokenTtlSeconds,
+	maxRefreshTokenFamilyMembers,
+	refreshTokenFamilyTtlSeconds,
 	verifyAccessJwt,
 	writeJwtTtlSeconds
 } from '../auth/auth.ts';
@@ -55,8 +60,35 @@ import { oauthJsonResponse } from '../http/oauth-response.ts';
 import { parseFormBody, parseFormValue } from '../http/parse.ts';
 
 import { type AuthKeysService } from './auth-keys-service.ts';
-import { type ServerContext } from './context.ts';
-import { type OidcTrustService } from './oidc-trust-service.ts';
+import { type SchemaWriter, type ServerContext } from './context.ts';
+import {
+	type OidcTrustRuleSnapshot,
+	type OidcTrustService
+} from './oidc-trust-service.ts';
+
+interface PreparedRefreshToken {
+	readonly token: string;
+	readonly family: Omit<
+		typeof schema.refreshTokenFamilies.$inferInsert,
+		'grantsJson'
+	> & { readonly grantsJson: string };
+	readonly member: typeof schema.refreshTokenMembers.$inferInsert;
+}
+
+interface PreparedIssuedResponse {
+	readonly body: TokenResponse;
+	readonly refreshToken?: PreparedRefreshToken;
+}
+
+interface ParsedRefreshToken {
+	readonly id: string;
+	readonly secret: string;
+}
+
+type RefreshTokenFamily = typeof schema.refreshTokenFamilies.$inferSelect;
+type RefreshTokenMember = typeof schema.refreshTokenMembers.$inferSelect;
+type RefreshTokenDatabase = SchemaWriter;
+type RefreshTokenRotationOutcome = 'rotated' | 'rule-changed' | 'stale-member';
 
 export class TokenExchangeService {
 	constructor(
@@ -99,10 +131,20 @@ export class TokenExchangeService {
 		// rule's issuer, audience, and JWKS before resolving grants. Unverified claims
 		// cannot authorise the exchange.
 		const claims = this.oidcTrust.decodeInbound(body.subject_token);
-		const rule = matchOidcTrust(this.oidcTrust.enabledOidcTrustRules(), claims);
+		const snapshots = this.oidcTrust.enabledOidcTrustRuleSnapshots();
+		const rule = matchOidcTrust(
+			snapshots.map((snapshot) => snapshot.rule),
+			claims
+		);
 
 		if (rule === undefined) {
 			throw await this.untrustedRefusal(claims, body.subject_token);
+		}
+
+		const snapshot = snapshots.find((candidate) => candidate.rule === rule);
+
+		if (snapshot === undefined) {
+			throw new TenantSubjectTokenUntrustedError();
 		}
 
 		const verified = await this.oidcTrust.verifyInbound(
@@ -121,7 +163,7 @@ export class TokenExchangeService {
 		const subject = oidcSubjectSchema.parse(verifiedSubject);
 
 		return this.issuedResponse(
-			rule,
+			snapshot,
 			subject,
 			verified,
 			parseRequestedGrants(body.authorization_details),
@@ -240,6 +282,7 @@ export class TokenExchangeService {
 	}
 
 	private async refresh(
+		logger: Logger,
 		body: ParsedRefreshTokenGrantRequest
 	): Promise<Response> {
 		const presented = parseRefreshToken(body.refresh_token);
@@ -248,73 +291,157 @@ export class TokenExchangeService {
 			throw new StaleRefreshTokenError();
 		}
 
-		// Compute the hash before reading the row. This is the only await in the
-		// consume path. The synchronous lookup and conditional delete then run without
-		// yielding the Durable Object's input gate, so concurrent presentations cannot
-		// both consume the same refresh token.
+		// Hash the secret before loading its member. After response preparation, the
+		// rotation transaction checks the active member and generation. A concurrent
+		// presentation that loses that comparison revokes the family.
 		const presentedHash = await sha256Hex(presented.secret);
 
-		const row = this.context.db
+		const member = this.context.db
 			.select()
-			.from(schema.refreshTokens)
-			.where(eq(schema.refreshTokens.id, presented.id))
+			.from(schema.refreshTokenMembers)
+			.where(eq(schema.refreshTokenMembers.id, presented.id))
 			.get();
 
-		if (
-			row === undefined ||
-			!(await isConstantTimeEqual(row.secretHash, presentedHash, 64))
-		) {
+		if (member === undefined) {
 			throw new StaleRefreshTokenError();
 		}
 
-		const consumed = this.context.db
-			.delete(schema.refreshTokens)
-			.where(
-				and(
-					eq(schema.refreshTokens.id, presented.id),
-					eq(schema.refreshTokens.secretHash, presentedHash)
-				)
-			)
-			.returning()
-			.all();
-		const claimed = consumed.at(0);
+		if (!(await isConstantTimeEqual(member.secretHash, presentedHash, 64))) {
+			throw new StaleRefreshTokenError();
+		}
+
+		const family = this.context.db
+			.select()
+			.from(schema.refreshTokenFamilies)
+			.where(eq(schema.refreshTokenFamilies.id, member.familyId))
+			.get();
+
+		if (family === undefined) {
+			this.context.db
+				.delete(schema.refreshTokenMembers)
+				.where(eq(schema.refreshTokenMembers.id, member.id))
+				.run();
+			throw new StaleRefreshTokenError();
+		}
 
 		const nowIso = isoTimestamp(new Date());
 
-		if (claimed === undefined || claimed.expiresAt <= nowIso) {
+		if (family.expiresAt <= nowIso) {
+			this.revokeFamily(family.id);
 			throw new StaleRefreshTokenError();
 		}
 
-		const rule = this.oidcTrust
-			.enabledOidcTrustRules()
-			.find((candidate) => candidate.id === claimed.ruleId);
+		if (
+			family.activeMemberId !== member.id ||
+			family.generation !== member.generation
+		) {
+			this.revokeFamily(family.id);
+			this.logFamilyRevocation(logger, 'replay');
+			throw new StaleRefreshTokenError();
+		}
 
-		// The refresh token has already been consumed. If its rule is now absent or
-		// disabled, end the session without issuing a successor.
-		if (rule === undefined) {
+		const snapshot = this.oidcTrust
+			.enabledOidcTrustRuleSnapshots()
+			.find((candidate) => candidate.rule.id === family.ruleId);
+
+		if (snapshot === undefined) {
+			this.revokeFamily(family.id);
+			throw new StaleRefreshTokenError();
+		}
+
+		if (family.generation >= maxRefreshTokenFamilyMembers - 1) {
+			this.revokeFamily(family.id);
+			this.logFamilyRevocation(logger, 'member-limit');
 			throw new StaleRefreshTokenError();
 		}
 
 		// Refresh tokens originate only from interactive rules. Resolve any requested
-		// narrowing against the rule again before issuing the next session.
-		return this.issuedResponse(
-			rule,
-			claimed.subject,
+		// narrowing against the current rule before issuing the next session.
+		const prepared = await this.prepareIssuedResponse(
+			snapshot.rule,
+			family.subject,
 			{},
 			parseRequestedGrants(body.authorization_details),
-			{}
+			{},
+			family,
+			this.familyGrants(family)
 		);
+
+		if (prepared.refreshToken === undefined) {
+			this.revokeFamily(family.id);
+			throw new StaleRefreshTokenError();
+		}
+
+		const rotation = this.rotateFamily(
+			family,
+			member,
+			prepared.refreshToken,
+			snapshot
+		);
+
+		if (rotation === 'stale-member') {
+			this.logFamilyRevocation(logger, 'replay');
+			throw new StaleRefreshTokenError();
+		}
+
+		if (rotation === 'rule-changed') {
+			throw new StaleRefreshTokenError();
+		}
+
+		return oauthJsonResponse(prepared.body);
 	}
 
 	private async issuedResponse(
-		rule: OidcTrustRule,
+		snapshot: OidcTrustRuleSnapshot,
 		subject: OidcSubject,
 		claims: OidcClaims,
 		requested: AuthorizationDetails | undefined,
 		extra: Pick<TokenResponse, 'issued_token_type'>
 	): Promise<Response> {
+		const prepared = await this.prepareIssuedResponse(
+			snapshot.rule,
+			subject,
+			claims,
+			requested,
+			extra
+		);
+
+		this.context.db.transaction((transaction) => {
+			if (!this.oidcTrust.isEnabledSnapshotCurrent(snapshot, transaction)) {
+				throw new TenantSubjectTokenUntrustedError();
+			}
+
+			const refreshToken = prepared.refreshToken;
+
+			if (refreshToken !== undefined) {
+				transaction
+					.insert(schema.refreshTokenFamilies)
+					.values(refreshToken.family)
+					.run();
+				transaction
+					.insert(schema.refreshTokenMembers)
+					.values(refreshToken.member)
+					.run();
+			}
+		});
+
+		return oauthJsonResponse(prepared.body);
+	}
+
+	private async prepareIssuedResponse(
+		rule: OidcTrustRule,
+		subject: OidcSubject,
+		claims: OidcClaims,
+		requested: AuthorizationDetails | undefined,
+		extra: Pick<TokenResponse, 'issued_token_type'>,
+		family?: RefreshTokenFamily,
+		familyGrants?: AuthorizationDetails
+	): Promise<PreparedIssuedResponse> {
 		const isInteractive = isRuleInteractive(rule);
-		const granted = resolveRequestedGrants(rule, claims, requested);
+		const granted =
+			familyGrants === undefined
+				? resolveRequestedGrants(rule, claims, requested)
+				: attenuatedGrants(familyGrants, requested);
 		const ttlSeconds = isInteractive ? adminJwtTtlSeconds : writeJwtTtlSeconds;
 		const accessToken = await this.issueRuleToken(
 			rule,
@@ -327,44 +454,150 @@ export class TokenExchangeService {
 		// each run with a fresh external subject token. A refresh token would turn one
 		// federated CI exchange into a persistent session.
 		const refreshToken = isInteractive
-			? await this.issueRefreshToken(rule.id, subject)
+			? await this.prepareRefreshToken(rule.id, subject, granted, family)
 			: undefined;
 
-		return Response.json(
-			{
+		return {
+			body: {
 				access_token: accessToken,
 				token_type: 'Bearer',
 				expires_in: ttlSeconds,
 				...extra,
-				...(refreshToken !== undefined && { refresh_token: refreshToken }),
+				...(refreshToken !== undefined && {
+					refresh_token: refreshToken.token
+				}),
 				authorization_details: granted
 			} satisfies TokenResponse,
-			{ headers: { 'cache-control': 'no-store' } }
-		);
+			refreshToken
+		};
 	}
 
-	private async issueRefreshToken(
+	private async prepareRefreshToken(
 		ruleId: TrustRuleId,
-		subject: OidcSubject
-	): Promise<string> {
+		subject: OidcSubject,
+		grants: AuthorizationDetails,
+		current?: RefreshTokenFamily
+	): Promise<PreparedRefreshToken> {
+		const familyId = current?.id ?? crypto.randomUUID();
+		const generation = current === undefined ? 0 : current.generation + 1;
 		const id = crypto.randomUUID();
 		const secret = randomSecretHex();
 		const now = new Date();
-		const expiresAt = new Date(now.getTime() + refreshTokenTtlSeconds * 1000);
+		const createdAt = isoTimestamp(now);
+		const expiresAt =
+			current?.expiresAt ??
+			isoTimestamp(
+				new Date(now.getTime() + refreshTokenFamilyTtlSeconds * 1000)
+			);
 
-		this.context.db
-			.insert(schema.refreshTokens)
-			.values({
-				id,
-				secretHash: await sha256Hex(secret),
+		return {
+			token: `${id}.${secret}`,
+			family: {
+				id: familyId,
+				activeMemberId: id,
+				generation,
 				ruleId,
 				subject,
-				createdAt: isoTimestamp(now),
-				expiresAt: isoTimestamp(expiresAt)
-			})
-			.run();
+				grantsJson: JSON.stringify(grants),
+				createdAt: current?.createdAt ?? createdAt,
+				expiresAt
+			},
+			member: {
+				id,
+				familyId,
+				generation,
+				secretHash: await sha256Hex(secret),
+				createdAt
+			}
+		};
+	}
 
-		return `${id}.${secret}`;
+	private familyGrants(family: RefreshTokenFamily): AuthorizationDetails {
+		if (family.grantsJson === null) {
+			this.revokeFamily(family.id);
+			throw new StaleRefreshTokenError();
+		}
+
+		try {
+			return authorizationDetailsSchema.parse(JSON.parse(family.grantsJson));
+		} catch {
+			this.revokeFamily(family.id);
+			throw new StaleRefreshTokenError();
+		}
+	}
+
+	private rotateFamily(
+		family: RefreshTokenFamily,
+		member: RefreshTokenMember,
+		successor: PreparedRefreshToken,
+		snapshot: OidcTrustRuleSnapshot
+	): RefreshTokenRotationOutcome {
+		return this.context.db.transaction((transaction) => {
+			if (!this.oidcTrust.isEnabledSnapshotCurrent(snapshot, transaction)) {
+				this.revokeFamily(family.id, transaction);
+				return 'rule-changed';
+			}
+
+			const advancedRows = transaction
+				.update(schema.refreshTokenFamilies)
+				.set({
+					activeMemberId: successor.family.activeMemberId,
+					generation: successor.family.generation,
+					grantsJson: successor.family.grantsJson
+				})
+				.where(
+					and(
+						eq(schema.refreshTokenFamilies.id, family.id),
+						eq(schema.refreshTokenFamilies.activeMemberId, member.id),
+						eq(schema.refreshTokenFamilies.generation, member.generation)
+					)
+				)
+				.returning({ id: schema.refreshTokenFamilies.id })
+				.all();
+			const [advanced] = advancedRows;
+
+			if (advanced === undefined) {
+				this.revokeFamily(family.id, transaction);
+				return 'stale-member';
+			}
+
+			transaction
+				.insert(schema.refreshTokenMembers)
+				.values(successor.member)
+				.run();
+
+			return 'rotated';
+		});
+	}
+
+	private revokeFamily(
+		familyId: string,
+		database?: RefreshTokenDatabase
+	): void {
+		const revoke = (transaction: RefreshTokenDatabase): void => {
+			transaction
+				.delete(schema.refreshTokenMembers)
+				.where(eq(schema.refreshTokenMembers.familyId, familyId))
+				.run();
+			transaction
+				.delete(schema.refreshTokenFamilies)
+				.where(eq(schema.refreshTokenFamilies.id, familyId))
+				.run();
+		};
+
+		if (database !== undefined) {
+			revoke(database);
+			return;
+		}
+
+		this.context.db.transaction(revoke);
+	}
+
+	private logFamilyRevocation(
+		logger: Logger,
+		reason: 'member-limit' | 'replay'
+	): void {
+		logger.warn('refresh-token family revoked', { reason });
 	}
 
 	private async issueRuleToken(
@@ -390,7 +623,26 @@ export class TokenExchangeService {
 		);
 	}
 
-	async handleToken(request: Request): Promise<Response> {
+	revokeRuleFamilies(
+		ruleId: TrustRuleId,
+		database: RefreshTokenDatabase = this.context.db
+	): void {
+		const familyIds = database
+			.select({ id: schema.refreshTokenFamilies.id })
+			.from(schema.refreshTokenFamilies)
+			.where(eq(schema.refreshTokenFamilies.ruleId, ruleId));
+
+		database
+			.delete(schema.refreshTokenMembers)
+			.where(inArray(schema.refreshTokenMembers.familyId, familyIds))
+			.run();
+		database
+			.delete(schema.refreshTokenFamilies)
+			.where(eq(schema.refreshTokenFamilies.ruleId, ruleId))
+			.run();
+	}
+
+	async handleToken(logger: Logger, request: Request): Promise<Response> {
 		const body = await parseFormBody(tokenRequestSchema, request);
 
 		if (body.grant_type === tokenExchangeGrantType) {
@@ -408,16 +660,19 @@ export class TokenExchangeService {
 				throw new RefreshTokenRequiredError();
 			}
 
-			return this.refresh(parseFormValue(refreshTokenGrantRequestSchema, body));
+			return this.refresh(
+				logger,
+				parseFormValue(refreshTokenGrantRequestSchema, body)
+			);
 		}
 
 		throw new UnsupportedGrantTypeError(body.grant_type);
 	}
 }
 
-function parseRefreshToken(
-	token: string
-): undefined | { id: string; secret: string } {
+// The wire form is `<id>.<secret>`. The ID selects the row, and the secret
+// proves possession against the stored hash.
+function parseRefreshToken(token: string): ParsedRefreshToken | undefined {
 	const separator = token.indexOf('.');
 
 	if (separator <= 0 || separator === token.length - 1) {

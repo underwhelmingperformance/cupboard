@@ -5,7 +5,7 @@ import {
 	type StoredCache,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
-import { trustRuleIdSchema } from '@cupboard/protocol/oidc';
+import { oidcSubjectSchema, trustRuleIdSchema } from '@cupboard/protocol/oidc';
 import {
 	reuseViewPrioritySchema,
 	reuseViewRevisionSchema
@@ -17,6 +17,8 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	oidcTrust,
+	refreshTokenFamilies,
+	refreshTokenMembers,
 	retentionGrace,
 	retentionGracePolicies,
 	retentionPolicies,
@@ -162,6 +164,211 @@ describe('migrations', () => {
 		);
 
 		expect(rows).toStrictEqual([{ id: 'new', defaultTtlSeconds: 20 }]);
+	});
+
+	it('clears legacy refresh state while retaining the preceding table', async () => {
+		const migrated = await runInDurableObject(
+			testServerFor('migration-refresh-token-families'),
+			async (_instance, state) => {
+				await migrateThrough(state, 37);
+
+				state.storage.sql.exec(
+					"INSERT INTO refresh_token (id, secret_hash, rule_id, subject, created_at, expires_at) VALUES ('live', 'hash', 'owner', 'alice', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z')"
+				);
+				await migrateThrough(state, latestMigrationIndex);
+
+				const database = drizzle(state.storage, {
+					schema: { refreshTokenFamilies, refreshTokenMembers }
+				});
+				const clearedLegacyRows = state.storage.sql
+					.exec('SELECT id FROM refresh_token ORDER BY id')
+					.toArray();
+				const newTables = {
+					families: state.storage.sql
+						.exec('SELECT id FROM refresh_token_family ORDER BY id')
+						.toArray(),
+					members: state.storage.sql
+						.exec('SELECT id FROM refresh_token_member ORDER BY id')
+						.toArray()
+				};
+				const legacySchema = {
+					liveColumns: state.storage.sql
+						.exec(
+							'SELECT cid, name, type, "notnull", dflt_value IS NULL AS has_no_default, pk FROM pragma_table_info("refresh_token")'
+						)
+						.toArray(),
+					liveIndexes: state.storage.sql
+						.exec('PRAGMA index_list(refresh_token)')
+						.toArray(),
+					liveExpiryIndex: state.storage.sql
+						.exec('PRAGMA index_info(refresh_token_expires_at_idx)')
+						.toArray()
+				};
+
+				state.storage.sql.exec(
+					"INSERT INTO refresh_token (id, secret_hash, rule_id, subject, created_at, expires_at) VALUES ('old-live', 'live-hash', 'owner', 'alice', '2026-01-01T00:00:00.000Z', '2099-01-01T00:00:00.000Z'), ('old-expired', 'expired-hash', 'owner', 'alice', '2025-01-01T00:00:00.000Z', '2025-02-01T00:00:00.000Z')"
+				);
+				const precedingWorkerLookup = state.storage.sql
+					.exec(
+						"SELECT id, secret_hash, rule_id, subject, created_at, expires_at FROM refresh_token WHERE id = 'old-live'"
+					)
+					.toArray();
+				state.storage.sql.exec(
+					"DELETE FROM refresh_token WHERE expires_at <= '2026-01-01T00:00:00.000Z'"
+				);
+				database.transaction((transaction) => {
+					transaction
+						.insert(refreshTokenFamilies)
+						.values({
+							id: 'new-family',
+							activeMemberId: 'new-member',
+							generation: 0,
+							ruleId: trustRuleIdSchema.parse('owner'),
+							subject: oidcSubjectSchema.parse('alice'),
+							grantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
+							createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z'),
+							expiresAt: isoTimestampSchema.parse('2026-01-31T00:00:00.000Z')
+						})
+						.run();
+					transaction
+						.insert(refreshTokenMembers)
+						.values({
+							id: 'new-member',
+							familyId: 'new-family',
+							generation: 0,
+							secretHash: 'new-hash',
+							createdAt: isoTimestampSchema.parse('2026-01-01T00:00:00.000Z')
+						})
+						.run();
+				});
+
+				return {
+					clearedLegacyRows,
+					newTables,
+					legacySchema,
+					precedingWorkerLookup,
+					families: database.select().from(refreshTokenFamilies).all(),
+					members: database.select().from(refreshTokenMembers).all(),
+					legacyRows: {
+						live: state.storage.sql
+							.exec('SELECT id, secret_hash FROM refresh_token ORDER BY id')
+							.toArray(),
+						newMemberInLegacy: state.storage.sql
+							.exec("SELECT id FROM refresh_token WHERE id = 'new-member'")
+							.toArray()
+					}
+				};
+			}
+		);
+
+		expect(migrated).toStrictEqual({
+			clearedLegacyRows: [],
+			newTables: { families: [], members: [] },
+			legacySchema: {
+				liveColumns: [
+					{
+						cid: 0,
+						name: 'id',
+						type: 'TEXT',
+						notnull: 1,
+						has_no_default: 1,
+						pk: 1
+					},
+					{
+						cid: 1,
+						name: 'secret_hash',
+						type: 'TEXT',
+						notnull: 1,
+						has_no_default: 1,
+						pk: 0
+					},
+					{
+						cid: 2,
+						name: 'rule_id',
+						type: 'TEXT',
+						notnull: 1,
+						has_no_default: 1,
+						pk: 0
+					},
+					{
+						cid: 3,
+						name: 'subject',
+						type: 'TEXT',
+						notnull: 1,
+						has_no_default: 1,
+						pk: 0
+					},
+					{
+						cid: 4,
+						name: 'created_at',
+						type: 'TEXT',
+						notnull: 1,
+						has_no_default: 1,
+						pk: 0
+					},
+					{
+						cid: 5,
+						name: 'expires_at',
+						type: 'TEXT',
+						notnull: 1,
+						has_no_default: 1,
+						pk: 0
+					}
+				],
+				liveIndexes: [
+					{
+						seq: 0,
+						name: 'refresh_token_expires_at_idx',
+						unique: 0,
+						origin: 'c',
+						partial: 0
+					},
+					{
+						seq: 1,
+						name: 'sqlite_autoindex_refresh_token_1',
+						unique: 1,
+						origin: 'pk',
+						partial: 0
+					}
+				],
+				liveExpiryIndex: [{ seqno: 0, cid: 5, name: 'expires_at' }]
+			},
+			precedingWorkerLookup: [
+				{
+					id: 'old-live',
+					secret_hash: 'live-hash',
+					rule_id: 'owner',
+					subject: 'alice',
+					created_at: '2026-01-01T00:00:00.000Z',
+					expires_at: '2099-01-01T00:00:00.000Z'
+				}
+			],
+			families: [
+				{
+					id: 'new-family',
+					activeMemberId: 'new-member',
+					generation: 0,
+					ruleId: 'owner',
+					subject: 'alice',
+					grantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
+					createdAt: '2026-01-01T00:00:00.000Z',
+					expiresAt: '2026-01-31T00:00:00.000Z'
+				}
+			],
+			members: [
+				{
+					id: 'new-member',
+					familyId: 'new-family',
+					generation: 0,
+					secretHash: 'new-hash',
+					createdAt: '2026-01-01T00:00:00.000Z'
+				}
+			],
+			legacyRows: {
+				live: [{ id: 'old-live', secret_hash: 'live-hash' }],
+				newMemberInLegacy: []
+			}
+		});
 	});
 
 	it('migrates and round-trips the verification cursor', async () => {

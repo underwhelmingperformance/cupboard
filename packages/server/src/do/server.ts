@@ -117,6 +117,7 @@ import {
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import {
 	type GarbageCollectionOutcome,
+	ownerRuleId,
 	type RuntimeEnv,
 	ServerContext
 } from './context.ts';
@@ -666,7 +667,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// `/token` uses the subject token as its credential. The Worker proxies the
 		// JWKS route to this Durable Object.
 		this.app.post('/token', (context) =>
-			this.tokenExchange.handleToken(context.req.raw)
+			this.tokenExchange.handleToken(context.get('logger'), context.req.raw)
 		);
 		// Both key documents are served uncached so a rotation is visible across
 		// colos at once.
@@ -2128,16 +2129,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	// Ignore a stale or replayed configuration version. The synchronous SQLite
-	// read and write cannot interleave, and an accepted identity must reseed the
-	// owner rule.
+	// read and write cannot interleave. An accepted identity revokes sessions for
+	// the previous owner and reseeds the owner rule.
 	async configure(identity: TenantIdentity): Promise<void> {
 		await this.initialise();
 
 		await this.metered('configure', async () => {
 			this.context.db.transaction((transaction) => {
-				if (this.tenantIdentity.configure(identity, transaction)) {
-					this.oidcTrust.seedOwnerRule(transaction);
+				if (!this.tenantIdentity.configure(identity, transaction)) {
+					return;
 				}
+
+				this.tokenExchange.revokeRuleFamilies(ownerRuleId, transaction);
+				this.oidcTrust.seedOwnerRule(transaction);
 			});
 
 			await this.reconcileMaintenanceEligibility();

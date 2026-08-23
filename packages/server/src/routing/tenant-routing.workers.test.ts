@@ -1,11 +1,20 @@
 import {
+	issuedAccessTokenType,
+	oidcIssuerSchema,
+	oidcSubjectSchema,
 	refreshTokenGrantType,
 	tokenExchangeGrantType
 } from '@cupboard/protocol/oidc';
+import { isoTimestampSchema } from '@cupboard/protocol/scalars';
+import { runInDurableObject } from 'cloudflare:test';
+import { asc } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { sha256Hex } from '../crypto/crypto.ts';
+import * as schema from '../db/schema.ts';
+import { ownerRuleId } from '../do/context.ts';
 import { decodeInboundClaims } from '../oidc/oidc.ts';
 import {
 	adminGrants,
@@ -40,6 +49,76 @@ function writeRequest(): RequestInit {
 		headers: { 'content-type': 'application/json' },
 		body: '{}'
 	};
+}
+
+function tokenRequest(fields: Readonly<Record<string, string>>): RequestInit {
+	return {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams(fields).toString()
+	};
+}
+
+interface RefreshFixture {
+	readonly token: string;
+	readonly family: typeof schema.refreshTokenFamilies.$inferSelect;
+	readonly member: typeof schema.refreshTokenMembers.$inferSelect;
+}
+
+async function seedRefreshFamily(): Promise<RefreshFixture> {
+	const familyId = 'suspended-family';
+	const memberId = 'suspended-member';
+	const secret = 'suspended-refresh-secret';
+	const createdAt = isoTimestampSchema.parse('2026-01-01T00:00:00.000Z');
+	const expiresAt = isoTimestampSchema.parse('2099-01-01T00:00:00.000Z');
+	const family = {
+		id: familyId,
+		activeMemberId: memberId,
+		generation: 0,
+		ruleId: ownerRuleId,
+		subject: oidcSubjectSchema.parse('route-test'),
+		grantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
+		createdAt,
+		expiresAt
+	} as const satisfies typeof schema.refreshTokenFamilies.$inferInsert;
+	const member = {
+		id: memberId,
+		familyId,
+		generation: 0,
+		secretHash: await sha256Hex(secret),
+		createdAt
+	} as const satisfies typeof schema.refreshTokenMembers.$inferInsert;
+
+	await runInDurableObject(testServerFor(fixtureTenant), (instance) => {
+		instance.context.db.transaction((transaction) => {
+			transaction.insert(schema.refreshTokenFamilies).values(family).run();
+			transaction.insert(schema.refreshTokenMembers).values(member).run();
+		});
+	});
+
+	return {
+		token: `${memberId}.${secret}`,
+		family: { ...family },
+		member: { ...member }
+	};
+}
+
+async function refreshRows(): Promise<{
+	readonly families: (typeof schema.refreshTokenFamilies.$inferSelect)[];
+	readonly members: (typeof schema.refreshTokenMembers.$inferSelect)[];
+}> {
+	return runInDurableObject(testServerFor(fixtureTenant), (instance) => ({
+		families: instance.context.db
+			.select()
+			.from(schema.refreshTokenFamilies)
+			.orderBy(asc(schema.refreshTokenFamilies.id))
+			.all(),
+		members: instance.context.db
+			.select()
+			.from(schema.refreshTokenMembers)
+			.orderBy(asc(schema.refreshTokenMembers.id))
+			.all()
+	}));
 }
 
 const authorizationServerMetadataSchema = z.strictObject({
@@ -214,5 +293,45 @@ describe('tenant routing', () => {
 		);
 
 		expect(response.status).toBe(StatusCodes.FORBIDDEN);
+	});
+
+	it('refuses token exchange and refresh for a suspended tenant without rotating the family', async () => {
+		const issuer = oidcIssuerSchema.parse(
+			`${currentOrigin()}/t/${fixtureTenant}`
+		);
+		const accessToken = await issueTokenForTenant(
+			testServerFor(fixtureTenant),
+			issuer,
+			adminGrants()
+		);
+		const refresh = await seedRefreshFamily();
+
+		await suspendTenant(fixtureTenant);
+
+		const exchanged = await handlerFetch(
+			`/t/${fixtureTenant}/token`,
+			tokenRequest({
+				grant_type: tokenExchangeGrantType,
+				subject_token: accessToken,
+				subject_token_type: issuedAccessTokenType
+			})
+		);
+		const rotated = await handlerFetch(
+			`/t/${fixtureTenant}/token`,
+			tokenRequest({
+				grant_type: refreshTokenGrantType,
+				refresh_token: refresh.token
+			})
+		);
+
+		expect({
+			exchangeStatus: exchanged.status,
+			refreshStatus: rotated.status,
+			rows: await refreshRows()
+		}).toStrictEqual({
+			exchangeStatus: StatusCodes.FORBIDDEN,
+			refreshStatus: StatusCodes.FORBIDDEN,
+			rows: { families: [refresh.family], members: [refresh.member] }
+		});
 	});
 });

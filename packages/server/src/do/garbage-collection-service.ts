@@ -63,6 +63,17 @@ export const maxRootsExpiredPerRun = 32;
 // the remainder without a separate cursor.
 export const maxPendingRowsDeletedPerRun = 1000;
 
+// A family can contain more members than one deletion pass may process. Delete
+// one chunk from the oldest expired family and retain the family until every
+// member is gone.
+export const maxRefreshTokenMembersDeletedPerRun = 1000;
+
+interface ExpiredRefreshFamilyCollection {
+	readonly familiesDeleted: number;
+	readonly hasMoreWork: boolean;
+	readonly membersDeleted: number;
+}
+
 // An upload credential can write any key below `staging/<pushId>/`, including
 // keys without pending rows. Preserve young objects because their row may not
 // exist in the snapshot yet. Pending-row reaping owns tracked keys, and the R2
@@ -1105,6 +1116,81 @@ export class GarbageCollectionService {
 		return true;
 	}
 
+	private collectExpiredRefreshFamily(
+		now: IsoTimestamp
+	): ExpiredRefreshFamilyCollection {
+		return this.context.db.transaction((transaction) => {
+			const family = transaction
+				.select({ id: schema.refreshTokenFamilies.id })
+				.from(schema.refreshTokenFamilies)
+				.where(lte(schema.refreshTokenFamilies.expiresAt, now))
+				.orderBy(
+					asc(schema.refreshTokenFamilies.expiresAt),
+					asc(schema.refreshTokenFamilies.id)
+				)
+				.limit(1)
+				.get();
+
+			if (family === undefined) {
+				return { familiesDeleted: 0, hasMoreWork: false, membersDeleted: 0 };
+			}
+
+			const candidates = transaction
+				.select({ id: schema.refreshTokenMembers.id })
+				.from(schema.refreshTokenMembers)
+				.where(eq(schema.refreshTokenMembers.familyId, family.id))
+				.orderBy(
+					asc(schema.refreshTokenMembers.generation),
+					asc(schema.refreshTokenMembers.id)
+				)
+				.limit(maxRefreshTokenMembersDeletedPerRun + 1)
+				.all();
+
+			if (candidates.length > 0) {
+				const members = transaction
+					.select({ id: schema.refreshTokenMembers.id })
+					.from(schema.refreshTokenMembers)
+					.where(eq(schema.refreshTokenMembers.familyId, family.id))
+					.orderBy(
+						asc(schema.refreshTokenMembers.generation),
+						asc(schema.refreshTokenMembers.id)
+					)
+					.limit(maxRefreshTokenMembersDeletedPerRun);
+
+				transaction
+					.delete(schema.refreshTokenMembers)
+					.where(inArray(schema.refreshTokenMembers.id, members))
+					.run();
+			}
+
+			if (candidates.length > maxRefreshTokenMembersDeletedPerRun) {
+				return {
+					familiesDeleted: 0,
+					hasMoreWork: true,
+					membersDeleted: maxRefreshTokenMembersDeletedPerRun
+				};
+			}
+
+			transaction
+				.delete(schema.refreshTokenFamilies)
+				.where(eq(schema.refreshTokenFamilies.id, family.id))
+				.run();
+
+			const next = transaction
+				.select({ id: schema.refreshTokenFamilies.id })
+				.from(schema.refreshTokenFamilies)
+				.where(lte(schema.refreshTokenFamilies.expiresAt, now))
+				.limit(1)
+				.get();
+
+			return {
+				familiesDeleted: 1,
+				hasMoreWork: next !== undefined,
+				membersDeleted: candidates.length
+			};
+		});
+	}
+
 	async collectGarbage(
 		logger: Logger,
 		cache?: StoredCache,
@@ -1124,6 +1210,18 @@ export class GarbageCollectionService {
 		let stagingKeys: R2ObjectKey[] = [];
 
 		const reaped = await this.context.criticalSection(async () => {
+			const expiredRefreshFamilies = this.collectExpiredRefreshFamily(now);
+
+			if (expiredRefreshFamilies.hasMoreWork) {
+				log.warn(
+					'refresh-token family backlog remains after bounded collection',
+					{
+						membersDeleted: expiredRefreshFamilies.membersDeleted,
+						familiesDeleted: expiredRefreshFamilies.familiesDeleted
+					}
+				);
+			}
+
 			// `pending` and `committing` are live commit states, even after expiry;
 			// verification may still resume them. Reap only uploads without a verdict
 			// and terminal `servable`, `mismatch`, or `over-quota` uploads.
@@ -1202,11 +1300,9 @@ export class GarbageCollectionService {
 					.run();
 			}
 
-			this.context.db
-				.delete(schema.refreshTokens)
-				.where(lt(schema.refreshTokens.expiresAt, now))
-				.run();
-
+			// Tenant-wide collection advances through registered caches one at a time.
+			// Scoped collection uses only the requested cache. Persistent mark and
+			// frontier state resumes each pass without rereading earlier chunks.
 			const collectionCache = cache ?? this.tenantCollectionCache();
 			const collected =
 				collectionCache === undefined
@@ -1223,7 +1319,10 @@ export class GarbageCollectionService {
 				!collected.hasMoreWork
 					? this.advanceTenantCollection(collectionCache)
 					: collected.hasMoreWork;
-			const hasMoreWork = hasMorePendingRows || hasMoreCollectionWork;
+			const hasMoreWork =
+				expiredRefreshFamilies.hasMoreWork ||
+				hasMorePendingRows ||
+				hasMoreCollectionWork;
 
 			const narInfosDeleted =
 				await this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin);
