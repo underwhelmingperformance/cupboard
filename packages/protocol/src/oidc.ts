@@ -59,13 +59,29 @@ export const issuedAccessTokenType =
 // stays exchange-only.
 export const refreshTokenGrantType = 'refresh_token';
 
-// The subject token is a JWT either way. cupboard accepts only these two RFC 8693
-// type identifiers and verifies both the same way, rejecting any other type. Its
-// callers present an `id_token`; `jwt` is accepted for clients that label a plain
-// OIDC JWT with the generic type.
+// An external OIDC subject uses one of these RFC 8693 type identifiers.
+// Cupboard's callers present an `id_token`; `jwt` supports clients that label a
+// plain OIDC JWT with the generic type. A self-issued Cupboard token uses the
+// `access_token` identifier and can only enter attenuation under that type.
 export const subjectTokenTypeIdToken =
 	'urn:ietf:params:oauth:token-type:id_token';
 export const subjectTokenTypeJwt = 'urn:ietf:params:oauth:token-type:jwt';
+
+// The stable Cupboard problem subtypes which distinguish subject-token
+// refusals inside OAuth's `invalid_request` error. The server emits these wire
+// values and the CLI uses the same schema to decide whether a fresh login can
+// resolve the refusal.
+export const subjectTokenProblems = {
+	invalid: 'subject-token-invalid',
+	untrusted: 'subject-token-untrusted',
+	claimMismatch: 'subject-token-claim-mismatch'
+} as const;
+
+/**
+ * The Cupboard problem subtype of a subject-token refusal.
+ */
+export const subjectTokenProblemSchema = z.enum(subjectTokenProblems);
+export type SubjectTokenProblem = z.infer<typeof subjectTokenProblemSchema>;
 
 // A client sends the RFC 9396 `authorization_details` array as a JSON-encoded
 // form field. The token service parses and validates it and returns
@@ -74,30 +90,65 @@ export const subjectTokenTypeJwt = 'urn:ietf:params:oauth:token-type:jwt';
 // may omit it and receive that grant.
 const requestedAuthorizationDetailsSchema = z.string().min(1);
 
+// These standard RFC 8693 parameters change the target, requested token, or
+// acting party. Cupboard cannot ignore them and issue a token with different
+// semantics, so their presence makes the request invalid.
+const unsupportedTokenParameterSchema = z.never().optional();
+const tokenGrantFields = {
+	authorization_details: requestedAuthorizationDetailsSchema.optional(),
+	resource: unsupportedTokenParameterSchema,
+	audience: unsupportedTokenParameterSchema,
+	scope: unsupportedTokenParameterSchema,
+	requested_token_type: unsupportedTokenParameterSchema,
+	actor_token: unsupportedTokenParameterSchema,
+	actor_token_type: unsupportedTokenParameterSchema
+} satisfies z.ZodRawShape;
+
+// The dispatch envelope validates only the field needed to select a grant. It
+// retains every other singleton form field so the selected grant schema can
+// validate its own parameters. Unknown grants therefore reach
+// `unsupported_grant_type` even when they contain fields which a supported grant
+// would reject.
+export const tokenRequestSchema = z.looseObject({
+	grant_type: z.string().min(1)
+});
+export type ParsedTokenRequest = z.output<typeof tokenRequestSchema>;
+
+/**
+ * The fields to validate after dispatch selects token exchange.
+ */
+export const tokenExchangeGrantRequestSchema = z.object({
+	...tokenGrantFields,
+	grant_type: z.literal(tokenExchangeGrantType),
+	subject_token: z.string().min(1),
+	subject_token_type: z.string().min(1),
+	refresh_token: unsupportedTokenParameterSchema
+});
+export type ParsedTokenExchangeGrantRequest = z.output<
+	typeof tokenExchangeGrantRequestSchema
+>;
+
+/**
+ * The fields to validate after dispatch selects refresh-token rotation.
+ */
+export const refreshTokenGrantRequestSchema = z.object({
+	...tokenGrantFields,
+	grant_type: z.literal(refreshTokenGrantType),
+	refresh_token: z.string().min(1),
+	subject_token: unsupportedTokenParameterSchema,
+	subject_token_type: unsupportedTokenParameterSchema
+});
+export type ParsedRefreshTokenGrantRequest = z.output<
+	typeof refreshTokenGrantRequestSchema
+>;
+
 // The matched trust rule fixes the issued audience and grants. Optional RFC
 // 8693 target and token-type fields are therefore refused until Cupboard can
 // implement their semantics rather than silently returning a different token.
-export const tokenExchangeRequestSchema = z.strictObject({
-	grant_type: z.string().min(1),
-	subject_token: z.string().min(1),
-	subject_token_type: z.string().min(1),
-	authorization_details: requestedAuthorizationDetailsSchema.optional()
-});
+export const tokenExchangeRequestSchema = tokenExchangeGrantRequestSchema;
 export type ParsedTokenExchangeRequest = z.output<
 	typeof tokenExchangeRequestSchema
 >;
-
-// The tenant token endpoint's request, before grant dispatch: only the grant
-// type is required here, and each grant validates its own fields afterwards,
-// so an unknown grant type answers `unsupported_grant_type`.
-export const tokenRequestSchema = z.strictObject({
-	grant_type: z.string().min(1),
-	subject_token: z.string().min(1).optional(),
-	subject_token_type: z.string().min(1).optional(),
-	refresh_token: z.string().min(1).optional(),
-	authorization_details: requestedAuthorizationDetailsSchema.optional()
-});
-export type ParsedTokenRequest = z.output<typeof tokenRequestSchema>;
 
 // The token endpoint's success body (RFC 6749 §5.1 / RFC 8693 §2.2.1). The
 // access token is the Cupboard JWT; `issued_token_type` is present for the

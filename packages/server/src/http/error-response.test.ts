@@ -1,8 +1,13 @@
 import { type Capture, startCapture } from '@cupboard/logger/testing';
 import { Hono } from 'hono';
+import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { UnauthenticatedError } from '../errors.ts';
+import {
+	InsufficientScopeError,
+	InvalidAccessTokenError,
+	UnauthenticatedError
+} from '../errors.ts';
 
 import { serverErrorHandler } from './error-response.ts';
 
@@ -27,23 +32,51 @@ describe('serverErrorHandler', () => {
 		capture.stop();
 	});
 
-	it('returns the modelled status and message without logging', async () => {
-		const response = await appThatThrows(new UnauthenticatedError()).request(
-			'/'
-		);
-
-		expect({
-			status: response.status,
-			challenge: response.headers.get('www-authenticate'),
-			body: await response.text(),
-			logged: capture.logs
-		}).toStrictEqual({
+	it.each([
+		{
+			name: 'a missing credential',
+			error: new UnauthenticatedError(),
+			status: StatusCodes.UNAUTHORIZED,
+			challenge: 'Bearer realm="cupboard"',
+			cacheControl: 'no-store',
+			body: 'Unauthorised\n'
+		},
+		{
+			name: 'an invalid access token',
+			error: new InvalidAccessTokenError(),
 			status: 401,
-			challenge: 'Bearer',
-			body: 'Unauthorised\n',
-			logged: []
-		});
-	});
+			challenge: 'Bearer realm="cupboard", error="invalid_token"',
+			cacheControl: 'no-store',
+			body: 'Unauthorised\n'
+		},
+		{
+			name: 'an insufficiently scoped token',
+			error: new InsufficientScopeError(),
+			status: StatusCodes.FORBIDDEN,
+			challenge: 'Bearer realm="cupboard", error="insufficient_scope"',
+			cacheControl: 'no-store',
+			body: 'Forbidden\n'
+		}
+	])(
+		'maps $name to its Bearer response',
+		async ({ error, status, challenge, cacheControl, body }) => {
+			const response = await appThatThrows(error).request('/');
+
+			expect({
+				status: response.status,
+				challenge: response.headers.get('www-authenticate'),
+				cacheControl: response.headers.get('cache-control'),
+				body: await response.text(),
+				logged: capture.logs
+			}).toStrictEqual({
+				status,
+				challenge,
+				cacheControl,
+				body,
+				logged: []
+			});
+		}
+	);
 
 	it.each([
 		{

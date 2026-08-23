@@ -102,12 +102,12 @@ describe('parseFormBody', () => {
 		).rejects.toThrow(TokenRequestBodyInvalidError);
 	});
 
-	it('preserves a repeated parameter when the schema permits it', async () => {
+	it('rejects a repeated parameter even when the schema permits an array', async () => {
 		const repeated = z.strictObject({ resource: z.array(z.string()) });
 
 		await expect(
 			parseFormBody(repeated, formRequest('resource=one&resource=two'))
-		).resolves.toStrictEqual({ resource: ['one', 'two'] });
+		).rejects.toThrow(TokenRequestBodyInvalidError);
 	});
 
 	it('rejects a non-form media type', async () => {

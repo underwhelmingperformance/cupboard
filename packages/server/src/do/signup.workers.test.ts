@@ -243,7 +243,7 @@ describe('control plane POST /signup', () => {
 		}).toStrictEqual({
 			status: StatusCodes.BAD_REQUEST,
 			cacheControl: 'no-store',
-			error: 'invalid_grant',
+			error: 'invalid_request',
 			problem: 'subject-token-invalid'
 		});
 	});

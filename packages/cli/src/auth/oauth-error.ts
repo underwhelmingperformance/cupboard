@@ -2,7 +2,8 @@ import { z } from 'zod';
 
 const oauthErrorResponseSchema = z.object({
 	error: z.string().min(1),
-	error_description: z.string().optional()
+	error_description: z.string().optional(),
+	problem: z.string().min(1).optional()
 });
 
 export type OAuthErrorResponse = z.infer<typeof oauthErrorResponseSchema>;
@@ -49,4 +50,11 @@ Whether an OAuth client failure contains the specified protocol error code.
 */
 export function hasOAuthErrorCode(error: unknown, code: string): boolean {
 	return hasParsedOAuthError(error) && error.oauthError?.error === code;
+}
+
+/**
+Returns the Cupboard problem subtype from an OAuth client failure.
+*/
+export function oauthErrorProblem(error: unknown): string | undefined {
+	return hasParsedOAuthError(error) ? error.oauthError?.problem : undefined;
 }

@@ -1,8 +1,10 @@
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	type ParsedTokenResponse,
+	subjectTokenProblemSchema,
 	subjectTokenTypeIdToken
 } from '@cupboard/protocol/oidc';
+import { StatusCodes } from 'http-status-codes';
 
 import { type Audience } from '../audience.ts';
 import { CupboardClient, type TokenProvider } from '../client/client.ts';
@@ -18,7 +20,7 @@ import {
 	fetchGithubOidcToken,
 	type GithubOidcEnvironment
 } from './github-oidc.ts';
-import { hasOAuthErrorCode } from './oauth-error.ts';
+import { hasOAuthErrorCode, oauthErrorProblem } from './oauth-error.ts';
 import {
 	type CachedSession,
 	readCachedSession,
@@ -53,6 +55,7 @@ export interface OwnerSessionDependencies {
 
 // An access token this close to its expiry is renewed up front.
 const accessTokenFreshnessMarginMs = 30 * 1000;
+const badRequestStatusCode: number = StatusCodes.BAD_REQUEST;
 
 /**
  * Supplies the owner's admin token to the admin commands, keeping the session
@@ -124,7 +127,7 @@ async function rotateSession(
 	try {
 		return sessionFromTokenResponse(await client.tokenRefresh(refreshToken));
 	} catch (error) {
-		if (isGrantRefusal(error)) {
+		if (isStaleRefreshToken(error)) {
 			return undefined;
 		}
 
@@ -153,7 +156,7 @@ async function establishSession(
 			await client.tokenExchange(idToken, subjectTokenTypeIdToken)
 		);
 	} catch (error) {
-		if (isGrantRefusal(error)) {
+		if (isStaleSubjectToken(error)) {
 			throw new OwnerLoginRequiredError();
 		}
 
@@ -161,10 +164,29 @@ async function establishSession(
 	}
 }
 
-function isGrantRefusal(error: unknown): boolean {
+function isStaleRefreshToken(error: unknown): boolean {
+	return isBadRequest(error) && hasOAuthErrorCode(error, 'invalid_grant');
+}
+
+function isStaleSubjectToken(error: unknown): boolean {
+	if (!isBadRequest(error)) {
+		return false;
+	}
+
+	if (hasOAuthErrorCode(error, 'invalid_grant')) {
+		return true;
+	}
+
+	if (!hasOAuthErrorCode(error, 'invalid_request')) {
+		return false;
+	}
+
+	return subjectTokenProblemSchema.safeParse(oauthErrorProblem(error)).success;
+}
+
+function isBadRequest(error: unknown): error is CupboardHttpError {
 	return (
-		error instanceof CupboardHttpError &&
-		hasOAuthErrorCode(error, 'invalid_grant')
+		error instanceof CupboardHttpError && error.status === badRequestStatusCode
 	);
 }
 

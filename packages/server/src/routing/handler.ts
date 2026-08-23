@@ -179,9 +179,9 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		await next();
 	});
 
-	// Discovery includes absolute URLs derived from the public request origin,
-	// and key rotation changes the JWKS. Fetch both from the tenant Durable Object
-	// without caching them.
+	// Fetch discovery and signing keys from the tenant Durable Object without
+	// caching them. Discovery uses the stored issuer, so an alias cannot advertise
+	// another identity.
 	app.get('/t/:tenant/.well-known/oauth-authorization-server', (context) =>
 		tenantUncachedRead(context, true)
 	);

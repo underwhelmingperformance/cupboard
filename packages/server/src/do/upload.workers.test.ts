@@ -1193,6 +1193,53 @@ describe('upload flow', () => {
 		});
 	});
 
+	it.each([
+		{
+			name: 'a missing credential',
+			authorization: undefined,
+			status: StatusCodes.UNAUTHORIZED,
+			challenge: 'Bearer realm="cupboard"'
+		},
+		{
+			name: 'an invalid access token',
+			authorization: 'Bearer invalid',
+			status: StatusCodes.UNAUTHORIZED,
+			challenge: 'Bearer realm="cupboard", error="invalid_token"'
+		},
+		{
+			name: 'an insufficiently scoped token',
+			authorization: 'under-scoped',
+			status: StatusCodes.FORBIDDEN,
+			challenge: 'Bearer realm="cupboard", error="insufficient_scope"'
+		}
+	])(
+		'refuses $name on the raw commit route without caching it',
+		async ({ authorization, status, challenge }) => {
+			await initialise();
+			const underScopedToken = await issueServerSignedToken([
+				{ type: 'cupboard_domain', actions: ['cache:list'] }
+			]);
+			const resolvedAuthorization =
+				authorization === 'under-scoped'
+					? `Bearer ${underScopedToken}`
+					: authorization;
+			const response = await fetchPath('/cache/_default/commit', {
+				headers: {
+					upgrade: 'websocket',
+					...(resolvedAuthorization !== undefined && {
+						authorization: resolvedAuthorization
+					})
+				}
+			});
+
+			expect({
+				status: response.status,
+				challenge: response.headers.get('www-authenticate'),
+				cacheControl: response.headers.get('cache-control')
+			}).toStrictEqual({ status, challenge, cacheControl: 'no-store' });
+		}
+	);
+
 	it('advertises both capabilities through the worker hop', async () => {
 		const token = await initialiseViaWorker();
 		const response = await handlerFetch(`/t/${fixtureTenant}/commit`, {

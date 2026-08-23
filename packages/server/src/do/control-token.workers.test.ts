@@ -1,6 +1,7 @@
 import {
 	issuedAccessTokenType,
 	subjectTokenTypeIdToken,
+	subjectTokenTypeJwt,
 	tokenExchangeGrantType,
 	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
@@ -55,6 +56,7 @@ const authorizationServerMetadataSchema = z.strictObject({
 	issuer: z.string(),
 	token_endpoint: z.string(),
 	jwks_uri: z.string(),
+	response_types_supported: z.array(z.string()),
 	grant_types_supported: z.array(z.string()),
 	authorization_details_types_supported: z.array(z.string()),
 	token_endpoint_auth_methods_supported: z.array(z.string())
@@ -74,6 +76,14 @@ function postToken(
 		},
 		envOverride
 	);
+}
+
+function postRawToken(body: string): Promise<Response> {
+	return controlFetch('/token', {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body
+	});
 }
 
 function tokenExchangeRequest(form: Record<string, string>): Request {
@@ -167,6 +177,166 @@ describe('control plane POST /token', () => {
 		}
 	])('rejects $name', async ({ form, error }) => {
 		expect(await tokenExchangeError(await form())).toBeInstanceOf(error);
+	});
+
+	it('dispatches a minimal unsupported grant before exchange validation', async () => {
+		expect(
+			await tokenExchangeError({ grant_type: 'authorization_code' })
+		).toBeInstanceOf(UnsupportedGrantTypeError);
+	});
+
+	it('ignores an unknown extension parameter', async () => {
+		const presented = await issueControlAdminToken('global-admin');
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: presented,
+			subject_token_type: issuedAccessTokenType,
+			'urn:example:extension': 'value'
+		});
+
+		expect(response.status).toBe(StatusCodes.OK);
+	});
+
+	it.each([
+		{
+			name: 'an external subject token without its type',
+			form: async () => ({
+				grant_type: tokenExchangeGrantType,
+				subject_token: await signedToken({
+					issuer: 'https://idp.example.test',
+					audience: 'cupboard-control'
+				})
+			}),
+			problem: 'schema-mismatch'
+		},
+		{
+			name: 'a self-issued subject token without its type',
+			form: async () => ({
+				grant_type: tokenExchangeGrantType,
+				subject_token: await issueControlAdminToken('global-admin')
+			}),
+			problem: 'schema-mismatch'
+		},
+		{
+			name: 'a self-issued subject token with an unsupported type',
+			form: async () => ({
+				grant_type: tokenExchangeGrantType,
+				subject_token: await issueControlAdminToken('global-admin'),
+				subject_token_type: 'unsupported'
+			}),
+			problem: 'unsupported-subject-token-type'
+		},
+		{
+			name: 'a self-issued access token declared as an ID token',
+			form: async () => ({
+				grant_type: tokenExchangeGrantType,
+				subject_token: await issueControlAdminToken('global-admin'),
+				subject_token_type: subjectTokenTypeIdToken
+			}),
+			problem: 'unsupported-subject-token-type'
+		},
+		{
+			name: 'a self-issued access token declared as a generic JWT',
+			form: async () => ({
+				grant_type: tokenExchangeGrantType,
+				subject_token: await issueControlAdminToken('global-admin'),
+				subject_token_type: subjectTokenTypeJwt
+			}),
+			problem: 'unsupported-subject-token-type'
+		},
+		{
+			name: 'an external exchange with a refresh token',
+			form: async () => ({
+				grant_type: tokenExchangeGrantType,
+				subject_token: await signedToken({
+					issuer: 'https://idp.example.test',
+					audience: 'cupboard-control'
+				}),
+				subject_token_type: subjectTokenTypeIdToken,
+				refresh_token: 'refresh-token'
+			}),
+			problem: 'schema-mismatch'
+		},
+		{
+			name: 'a self-issued exchange with a refresh token',
+			form: async () => ({
+				grant_type: tokenExchangeGrantType,
+				subject_token: await issueControlAdminToken('global-admin'),
+				subject_token_type: issuedAccessTokenType,
+				refresh_token: 'refresh-token'
+			}),
+			problem: 'schema-mismatch'
+		}
+	])('rejects $name', async ({ form, problem }) => {
+		const response = await postToken(await form());
+		const body = oauthErrorShape(await response.json());
+
+		expect({
+			status: response.status,
+			error: body.error,
+			problem: body.problem
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_request',
+			problem
+		});
+	});
+
+	it.each([
+		{
+			name: 'grant_type',
+			body: 'grant_type=first&grant_type=second'
+		},
+		{
+			name: 'an unknown extension',
+			body: 'grant_type=authorization_code&extension=first&extension=second'
+		}
+	])('rejects a repeated $name parameter', async ({ body }) => {
+		const response = await postRawToken(body);
+		const error = oauthErrorShape(await response.json());
+
+		expect({ status: response.status, error: error.error }).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_request'
+		});
+	});
+
+	it.each([
+		'grant_type=authorization_code&subject_token=',
+		'grant_type=authorization_code&resource=https%3A%2F%2Fresource.example'
+	])(
+		'dispatches an unsupported grant before validating its fields: %s',
+		async (requestBody) => {
+			const response = await postRawToken(requestBody);
+			const body = oauthErrorShape(await response.json());
+
+			expect({ status: response.status, error: body.error }).toStrictEqual({
+				status: StatusCodes.BAD_REQUEST,
+				error: 'unsupported_grant_type'
+			});
+		}
+	);
+
+	it.each([
+		'resource',
+		'audience',
+		'scope',
+		'requested_token_type',
+		'actor_token',
+		'actor_token_type'
+	])('rejects the known unsupported %s parameter', async (parameter) => {
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: 'x',
+			subject_token_type: subjectTokenTypeIdToken,
+			[parameter]: 'unsupported'
+		});
+		const body = oauthErrorShape(await response.json());
+
+		expect({ status: response.status, error: body.error }).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_request'
+		});
 	});
 
 	it('renders an OAuth error as a no-store envelope', async () => {
@@ -343,6 +513,7 @@ describe('control plane POST /token', () => {
 				issuer: origin,
 				token_endpoint: `${origin}/token`,
 				jwks_uri: `${origin}/.well-known/jwks.json`,
+				response_types_supported: [],
 				grant_types_supported: [tokenExchangeGrantType],
 				authorization_details_types_supported: [
 					'cupboard_tenant',

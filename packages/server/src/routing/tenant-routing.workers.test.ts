@@ -46,6 +46,7 @@ const authorizationServerMetadataSchema = z.strictObject({
 	issuer: z.string(),
 	token_endpoint: z.string(),
 	jwks_uri: z.string(),
+	response_types_supported: z.array(z.string()),
 	grant_types_supported: z.array(z.string()),
 	authorization_details_types_supported: z.array(z.string()),
 	token_endpoint_auth_methods_supported: z.array(z.string())
@@ -71,6 +72,32 @@ describe('tenant routing', () => {
 				issuer: base,
 				token_endpoint: `${base}/token`,
 				jwks_uri: `${base}/.well-known/jwks.json`,
+				response_types_supported: [],
+				grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
+				authorization_details_types_supported: [
+					'cupboard_cache',
+					'cupboard_domain',
+					'cupboard_wildcard'
+				],
+				token_endpoint_auth_methods_supported: ['none']
+			}
+		});
+	});
+
+	it('advertises the canonical tenant identity through an alias origin', async () => {
+		const issuer = await provisionNamedTenant('acme');
+		const response = await handlerFetch(
+			'https://preview.example.test/t/acme/.well-known/oauth-authorization-server'
+		);
+		const body = authorizationServerMetadataSchema.parse(await response.json());
+
+		expect({ status: response.status, body }).toStrictEqual({
+			status: StatusCodes.OK,
+			body: {
+				issuer,
+				token_endpoint: `${issuer}/token`,
+				jwks_uri: `${issuer}/.well-known/jwks.json`,
+				response_types_supported: [],
 				grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
 				authorization_details_types_supported: [
 					'cupboard_cache',

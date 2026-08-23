@@ -3,6 +3,7 @@ import type {
 	ParsedTokenResponse,
 	TokenResponse
 } from '@cupboard/protocol/oidc';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import { audienceSchema } from '../audience.ts';
@@ -433,6 +434,42 @@ describe('cachedOwnerProvider', () => {
 		await expect(provider.get()).rejects.toBe(failure);
 	});
 
+	it.each([
+		{
+			name: 'a non-400 invalid_grant response',
+			failure: () =>
+				new CupboardHttpError(
+					'POST',
+					'/token',
+					503,
+					JSON.stringify({ error: 'invalid_grant' })
+				)
+		},
+		{
+			name: 'an arbitrary OAuth-shaped object',
+			failure: () =>
+				Object.assign(new Error('arbitrary OAuth carrier'), {
+					status: StatusCodes.BAD_REQUEST,
+					oauthError: { error: 'invalid_grant' }
+				})
+		}
+	])('surfaces $name during refresh rotation', async ({ failure }) => {
+		const rejected = failure();
+		const { harness } = sessionHarness({
+			accessToken: accessToken('stale', past - 60),
+			refreshToken: 'refresh-1'
+		});
+		const provider = cachedOwnerProvider(target, {
+			...harness,
+			client: {
+				...harness.client,
+				tokenRefresh: () => Promise.reject(rejected)
+			}
+		});
+
+		await expect(provider.get()).rejects.toBe(rejected);
+	});
+
 	it('prompts a login when no silent path can issue a token', async () => {
 		const { clientCalls, harness, sessions } = sessionHarness();
 
@@ -471,7 +508,33 @@ describe('cachedOwnerProvider', () => {
 		});
 	});
 
-	it('prompts a login when the exchange refuses the id_token', async () => {
+	it.each([
+		{
+			name: 'a preceding server returns invalid_grant',
+			body: { error: 'invalid_grant' }
+		},
+		{
+			name: 'the subject token is invalid',
+			body: {
+				error: 'invalid_request',
+				problem: 'subject-token-invalid'
+			}
+		},
+		{
+			name: 'the subject token is no longer trusted',
+			body: {
+				error: 'invalid_request',
+				problem: 'subject-token-untrusted'
+			}
+		},
+		{
+			name: 'the subject token no longer matches its rule',
+			body: {
+				error: 'invalid_request',
+				problem: 'subject-token-claim-mismatch'
+			}
+		}
+	])('prompts a login when $name', async ({ body }) => {
 		const { harness } = sessionHarness();
 		const provider = cachedOwnerProvider(target, {
 			...harness,
@@ -479,12 +542,7 @@ describe('cachedOwnerProvider', () => {
 				...harness.client,
 				tokenExchange: () =>
 					Promise.reject(
-						new CupboardHttpError(
-							'POST',
-							'/token',
-							400,
-							JSON.stringify({ error: 'invalid_grant' })
-						)
+						new CupboardHttpError('POST', '/token', 400, JSON.stringify(body))
 					)
 			},
 			grantChain: {
@@ -536,6 +594,76 @@ describe('cachedOwnerProvider', () => {
 		});
 
 		await expect(provider.refresh()).rejects.toBe(failure);
+	});
+
+	it.each([
+		{
+			name: 'a recognised problem with the wrong OAuth error',
+			failure: () =>
+				new CupboardHttpError(
+					'POST',
+					'/token',
+					400,
+					JSON.stringify({
+						error: 'server_error',
+						problem: 'subject-token-invalid'
+					})
+				)
+		},
+		{
+			name: 'a recognised problem on a non-400 response',
+			failure: () =>
+				new CupboardHttpError(
+					'POST',
+					'/token',
+					503,
+					JSON.stringify({
+						error: 'invalid_request',
+						problem: 'subject-token-invalid'
+					})
+				)
+		},
+		{
+			name: 'an unrecognised subject-token problem',
+			failure: () =>
+				new CupboardHttpError(
+					'POST',
+					'/token',
+					400,
+					JSON.stringify({
+						error: 'invalid_request',
+						problem: 'subject-token-new-problem'
+					})
+				)
+		},
+		{
+			name: 'an arbitrary OAuth-shaped object',
+			failure: () =>
+				Object.assign(new Error('arbitrary OAuth carrier'), {
+					status: StatusCodes.BAD_REQUEST,
+					oauthError: {
+						error: 'invalid_request',
+						problem: 'subject-token-invalid'
+					}
+				})
+		}
+	])('surfaces $name during subject-token exchange', async ({ failure }) => {
+		const rejected = failure();
+		const { harness } = sessionHarness();
+		const provider = cachedOwnerProvider(target, {
+			...harness,
+			client: {
+				...harness.client,
+				tokenExchange: () => Promise.reject(rejected)
+			},
+			grantChain: {
+				...harness.grantChain,
+				readGrant: () =>
+					Promise.resolve(cloudflareGrant(jwt({ exp: farFuture })))
+			}
+		});
+
+		await expect(provider.refresh()).rejects.toBe(rejected);
 	});
 
 	it('propagates a server failure rather than prompting a login', async () => {

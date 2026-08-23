@@ -65,7 +65,6 @@ import {
 	parseNarInfoName,
 	type R2ObjectKey,
 	type RequestOrigin,
-	requestOriginSchema,
 	textResponse,
 	verificationBatchSize
 } from '../http/http.ts';
@@ -677,10 +676,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			})
 		);
 		this.app.get('/.well-known/oauth-authorization-server', (context) => {
-			const origin = requestOriginSchema.parse(new URL(context.req.url).origin);
-
 			return context.json(
-				this.authKeys.authorizationServerMetadata(origin),
+				this.authKeys.authorizationServerMetadata(),
 				StatusCodes.OK,
 				{
 					'cache-control': 'public, max-age=3600'
