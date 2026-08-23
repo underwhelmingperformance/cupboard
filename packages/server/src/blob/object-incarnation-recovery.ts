@@ -25,6 +25,7 @@ import {
 	blobReaperGraceMs,
 	casObjectKey,
 	narObjectKey,
+	objectRecoveryBatchSize,
 	type R2ObjectKey
 } from '../http/http.ts';
 
@@ -57,7 +58,7 @@ export async function drainObjectDeletions(
 	blobs: R2Bucket,
 	kind: SharedObjectKind,
 	limit: number
-): Promise<number> {
+): Promise<{ readonly deleted: number; readonly hasMoreWork: boolean }> {
 	const now = isoTimestamp(new Date());
 	const rows = await database
 		.select({
@@ -78,16 +79,17 @@ export async function drainObjectDeletions(
 			asc(d1Schema.objectDeletion.objectId),
 			asc(d1Schema.objectDeletion.incarnation)
 		)
-		.limit(limit)
+		.limit(limit + 1)
 		.all();
+	const batch = rows.slice(0, limit);
 
-	if (rows.length === 0) {
-		return 0;
+	if (batch.length === 0) {
+		return { deleted: 0, hasMoreWork: false };
 	}
 
-	await blobs.delete(rows.map((row) => objectKey(row)));
+	await blobs.delete(batch.map((row) => objectKey(row)));
 
-	const deletions = rows.map((row) =>
+	const deletions = batch.map((row) =>
 		database
 			.delete(d1Schema.objectDeletion)
 			.where(
@@ -105,7 +107,10 @@ export async function drainObjectDeletions(
 		await database.batch([first, ...rest]);
 	}
 
-	return rows.length;
+	return {
+		deleted: batch.length,
+		hasMoreWork: rows.length > batch.length
+	};
 }
 
 function positiveSafeInteger(value: string | undefined): number | undefined {
@@ -361,8 +366,9 @@ export async function recoverAbandonedIncarnations(
 	now: Date,
 	limit: number,
 	logger: Logger
-): Promise<number> {
+): Promise<{ readonly hasMoreWork: boolean; readonly recovered: number }> {
 	const staleBefore = isoTimestamp(new Date(now.getTime() - blobReaperGraceMs));
+	const batchSize = Math.min(limit, objectRecoveryBatchSize);
 	const stateRowBehind =
 		kind === 'nar'
 			? blobStateIsBehind(
@@ -395,12 +401,13 @@ export async function recoverAbandonedIncarnations(
 			asc(d1Schema.objectIncarnation.updatedAt),
 			asc(d1Schema.objectIncarnation.objectId)
 		)
-		.limit(limit)
+		.limit(batchSize + 1)
 		.all();
+	const batch = rows.slice(0, batchSize);
 
 	let recovered = 0;
 
-	for (const row of rows) {
+	for (const row of batch) {
 		let object: R2Object | null;
 
 		try {
@@ -456,5 +463,5 @@ export async function recoverAbandonedIncarnations(
 			: 0;
 	}
 
-	return recovered;
+	return { hasMoreWork: rows.length > batch.length, recovered };
 }

@@ -408,6 +408,27 @@ describe('scheduled tenant pass failure records', () => {
 		});
 	});
 
+	it('passes the stored reaper phase to the bounded queue operation', async () => {
+		const phases: string[] = [];
+		const decision = await executeMaintenanceQueueMessage(
+			rootLogger(),
+			env,
+			{ kind: 'cas-reaper', phase: 'collect' },
+			{
+				runCasReaper: (_logger, _env, phase) => {
+					phases.push(phase);
+
+					return Promise.resolve();
+				}
+			}
+		);
+
+		expect({ decision, phases }).toStrictEqual({
+			decision: { action: 'ack' },
+			phases: ['collect']
+		});
+	});
+
 	it('acks an already-offboarded queue message without recording a fresh outcome', async () => {
 		await provisionNamedTenant('retiring');
 		await finaliseOffboardedTenant(
@@ -556,6 +577,62 @@ describe('scheduled tenant pass failure records', () => {
 						delaySeconds: 60,
 						kind: 'blob-demote',
 						reason: 'Error: kv unavailable'
+					}
+				]
+			]
+		});
+	});
+
+	it('logs the reaper phase when a continuation fails', async () => {
+		const actions: QueueMessageAction[] = [];
+		const batch = queueBatch(
+			[
+				queueMessage(
+					'retry',
+					{ kind: 'blob-reaper', phase: 'recover' },
+					actions
+				)
+			],
+			actions
+		);
+		const capture = startCapture();
+
+		try {
+			await worker.queue(batch, {
+				...env,
+				MAINTENANCE_QUEUE: {
+					...env.MAINTENANCE_QUEUE,
+					sendBatch: () => Promise.reject(new Error('queue unavailable'))
+				}
+			});
+		} finally {
+			capture.stop();
+		}
+		const errors = capture.logs
+			.filter((entry) => entry.level === 'error')
+			.map((entry) => [entry.message, entry.properties]);
+
+		expect({ actions, errors }).toStrictEqual({
+			actions: [
+				{
+					target: 'message',
+					id: 'retry',
+					action: 'retry',
+					delaySeconds: 60
+				}
+			],
+			errors: [
+				[
+					'maintenance queue message retrying',
+					{
+						worker: 'scheduled',
+						queue: 'cupboard-maintenance',
+						messageId: 'retry',
+						attempts: 1,
+						delaySeconds: 60,
+						kind: 'blob-reaper',
+						phase: 'recover',
+						reason: 'QueueBatchSendError'
 					}
 				]
 			]

@@ -12,11 +12,22 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
-import { blobReaperGraceMs, casObjectKey, narObjectKey } from '../http/http.ts';
-import { runBlobReaper, runCasReaper } from '../routing/scheduled.ts';
+import type { ObjectReaperPhase } from '../do/blob-reaper-service.ts';
+import {
+	blobReaperGraceMs,
+	casObjectKey,
+	d1StatementsPerReaperInvocation,
+	narObjectKey,
+	objectDeletionBatchSize,
+	objectRecoveryBatchSize
+} from '../http/http.ts';
+import { runBlobReaper as runBlobReaperPhase } from '../routing/scheduled.ts';
 import {
 	clearBlobStorage,
 	resetTestServer,
+	runBlobReaperToCompletion as runBlobReaper,
+	runCasReaperToCompletion as runCasReaper,
+	syntheticNarHash,
 	testBase,
 	verifiableNar
 } from '../test-support.ts';
@@ -728,7 +739,10 @@ describe('abandoned object incarnation recovery', () => {
 		const now = new Date(testBase.getTime() + blobReaperGraceMs + 1);
 		vi.setSystemTime(now);
 		const capture = startCapture();
-		let recovered: readonly number[];
+		let recovered: readonly {
+			readonly hasMoreWork: boolean;
+			readonly recovered: number;
+		}[];
 
 		try {
 			recovered = [
@@ -773,7 +787,10 @@ describe('abandoned object incarnation recovery', () => {
 			}));
 
 		expect({ recovered, states, warnings }).toStrictEqual({
-			recovered: [0, 1],
+			recovered: [
+				{ hasMoreWork: true, recovered: 0 },
+				{ hasMoreWork: false, recovered: 1 }
+			],
 			states: ['pending', 'pending', 'absent'],
 			warnings: [
 				{
@@ -791,6 +808,123 @@ describe('abandoned object incarnation recovery', () => {
 					reason: 'r2-head-failed'
 				}
 			]
+		});
+	});
+
+	it('continues a recovery backlog in query-budgeted pages', async () => {
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		const rowCount = objectRecoveryBatchSize + 1;
+		const rows = Array.from({ length: rowCount }, (_, index) => ({
+			kind: 'nar' as const,
+			objectId: syntheticNarHash(index + 10_000),
+			incarnation: firstVersionedObjectIncarnation,
+			state: 'pending' as const,
+			updatedAt: isoTimestamp(testBase)
+		}));
+
+		await env.CUPBOARD_DB.batch(
+			rows.map((row) =>
+				env.CUPBOARD_DB.prepare(
+					`INSERT INTO object_incarnation
+					 (kind, object_id, incarnation, state, updated_at)
+					 VALUES (?, ?, ?, ?, ?)`
+				).bind(
+					row.kind,
+					row.objectId,
+					row.incarnation,
+					row.state,
+					row.updatedAt
+				)
+			)
+		);
+		vi.setSystemTime(new Date(testBase.getTime() + blobReaperGraceMs + 1));
+		const continueReaper = vi.fn((_phase: ObjectReaperPhase) =>
+			Promise.resolve()
+		);
+
+		await runBlobReaperPhase(rootLogger(), env, 500, continueReaper, 'recover');
+		const afterFirst = await database
+			.select({ state: d1Schema.objectIncarnation.state })
+			.from(d1Schema.objectIncarnation)
+			.all();
+		await runBlobReaperPhase(rootLogger(), env, 500, continueReaper, 'recover');
+		const afterSecond = await database
+			.select({ state: d1Schema.objectIncarnation.state })
+			.from(d1Schema.objectIncarnation)
+			.all();
+
+		expect({
+			afterFirst: Object.fromEntries(
+				[...Map.groupBy(afterFirst, ({ state }) => state)].map(
+					([state, matching]) => [state, matching.length]
+				)
+			),
+			afterSecond: Object.fromEntries(
+				[...Map.groupBy(afterSecond, ({ state }) => state)].map(
+					([state, matching]) => [state, matching.length]
+				)
+			),
+			continuations: continueReaper.mock.calls.map(([phase]) => phase)
+		}).toStrictEqual({
+			afterFirst: { absent: objectRecoveryBatchSize, pending: 1 },
+			afterSecond: { absent: rowCount },
+			continuations: ['recover', 'arm']
+		});
+	});
+
+	it('continues deletion markers within the Workers Free D1 allowance', async () => {
+		const rowCount = objectDeletionBatchSize + 1;
+		await env.CUPBOARD_DB.batch(
+			Array.from({ length: rowCount }, (_, index) =>
+				env.CUPBOARD_DB.prepare(
+					`INSERT INTO object_deletion
+					 (kind, object_id, incarnation, remove_after)
+					 VALUES ('nar', ?, 1, ?)`
+				).bind(syntheticNarHash(index + 20_000), isoTimestamp(testBase))
+			)
+		);
+		const continuations: ObjectReaperPhase[] = [];
+		const continueReaper = (phase: ObjectReaperPhase): Promise<void> => {
+			continuations.push(phase);
+
+			return Promise.resolve();
+		};
+		const markerCount = async (): Promise<number> => {
+			const row = await env.CUPBOARD_DB.prepare(
+				"SELECT count(*) AS count FROM object_deletion WHERE kind = 'nar'"
+			).first<{ count: number }>();
+
+			return row?.count ?? 0;
+		};
+
+		await runBlobReaperPhase(
+			rootLogger(),
+			env,
+			500,
+			continueReaper,
+			'delete-existing'
+		);
+		const afterFirst = await markerCount();
+		await runBlobReaperPhase(
+			rootLogger(),
+			env,
+			500,
+			continueReaper,
+			'delete-existing'
+		);
+
+		expect({
+			statementLimit: d1StatementsPerReaperInvocation,
+			pageSize: objectDeletionBatchSize,
+			afterFirst,
+			afterSecond: await markerCount(),
+			continuations
+		}).toStrictEqual({
+			statementLimit: 50,
+			pageSize: 49,
+			afterFirst: 1,
+			afterSecond: 0,
+			continuations: ['delete-existing', 'recover']
 		});
 	});
 

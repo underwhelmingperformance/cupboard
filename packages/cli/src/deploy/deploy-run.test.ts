@@ -67,7 +67,7 @@ const artifact: DeploymentArtifact = {
 			queueConsumers: [
 				{
 					queue: 'cupboard-maintenance',
-					maxBatchSize: 10,
+					maxBatchSize: 1,
 					maxBatchTimeout: 5,
 					maxRetries: 3,
 					maxConcurrency: 4,

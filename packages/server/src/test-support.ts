@@ -1,4 +1,4 @@
-import { rootLogger } from '@cupboard/logger';
+import { type Logger, rootLogger } from '@cupboard/logger';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { NixPublicKey } from '@cupboard/nix-store/public-key';
@@ -131,12 +131,14 @@ import {
 	pendingUploads,
 	signingKeys
 } from './db/schema.ts';
+import type { ObjectReaperPhase } from './do/blob-reaper-service.ts';
 import { chunk } from './do/bulk.ts';
 import { MaintenanceEligibilityService } from './do/maintenance-eligibility-service.ts';
 import { applyMigrations } from './do/migrate.ts';
 import type { CupboardServer } from './do/server.ts';
 import {
 	attestationStagingObjectKey,
+	blobReaperBatchSize,
 	blobReaperGraceMs,
 	casObjectKey,
 	internalOrigin,
@@ -153,7 +155,11 @@ import {
 	type ReadPasswordSalt
 } from './read/read-auth.ts';
 import { tenantServer } from './routing/durable-object.ts';
-import { runBlobReaper, verifyTenant } from './routing/scheduled.ts';
+import {
+	runBlobReaper,
+	runCasReaper,
+	verifyTenant
+} from './routing/scheduled.ts';
 import { fixtureTenant } from './routing/tenant-routing.test-support.ts';
 import worker from './worker.ts';
 
@@ -2487,6 +2493,56 @@ export function afterGrace(): Date {
 	return new Date(testBase.getTime() + blobReaperGraceMs + 60_000);
 }
 
+async function runReaperToCompletion(
+	run: (
+		logger: Logger,
+		env: Env,
+		batchSize: number,
+		continueReaper: (phase: ObjectReaperPhase) => Promise<void>,
+		phase: ObjectReaperPhase
+	) => Promise<number>,
+	logger: Logger,
+	targetEnv: Env,
+	batchSize: number
+): Promise<number> {
+	let deleted = 0;
+	let phase: ObjectReaperPhase | undefined = 'delete-existing';
+
+	while (phase !== undefined) {
+		let continuation: ObjectReaperPhase | undefined;
+		deleted += await run(
+			logger,
+			targetEnv,
+			batchSize,
+			(next) => {
+				continuation = next;
+
+				return Promise.resolve();
+			},
+			phase
+		);
+		phase = continuation;
+	}
+
+	return deleted;
+}
+
+export function runBlobReaperToCompletion(
+	logger: Logger,
+	targetEnv: Env,
+	batchSize: number = blobReaperBatchSize
+): Promise<number> {
+	return runReaperToCompletion(runBlobReaper, logger, targetEnv, batchSize);
+}
+
+export function runCasReaperToCompletion(
+	logger: Logger,
+	targetEnv: Env,
+	batchSize: number = blobReaperBatchSize
+): Promise<number> {
+	return runReaperToCompletion(runCasReaper, logger, targetEnv, batchSize);
+}
+
 // Runs the reaper to completion against the current server: a first GC pass arms
 // the unreferenced shared blobs, then time advances past the grace and a second
 // pass collects them. Tests anchored at `testBase` use this to assert blob
@@ -2496,9 +2552,9 @@ export async function reapBlobsPastGrace(): Promise<void> {
 	// retires edges. Then the Worker reaper arms the now-unreferenced blobs and,
 	// past the grace, collects them.
 	await currentServer().runGarbageCollection();
-	await runBlobReaper(rootLogger(), env);
+	await runBlobReaperToCompletion(rootLogger(), env);
 	vi.setSystemTime(afterGrace());
-	await runBlobReaper(rootLogger(), env);
+	await runBlobReaperToCompletion(rootLogger(), env);
 }
 
 export async function fetchNarInfo(

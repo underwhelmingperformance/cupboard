@@ -138,6 +138,16 @@ interface RowObservation {
 	readonly objectPresent: boolean;
 }
 
+/**
+ * Runs probes with the same outgoing-connection bound as reconciliation.
+ */
+export function mapVerificationProbes<T, U>(
+	items: readonly T[],
+	probe: (item: T, index: number) => Promise<U>
+): Promise<U[]> {
+	return mapWithConcurrency(items, maxOutgoingConnections, probe);
+}
+
 type ReconcileOutcome = 'removed' | 'restored' | 'unchanged';
 
 /**
@@ -1240,12 +1250,22 @@ export class VerificationService {
 		const present = new Set<string>();
 		let cursor: string | undefined;
 		let isDone = false;
+		let pages = 0;
 
 		try {
 			while (!isDone) {
+				if (pages === maxOutgoingConnections) {
+					logger.warn(
+						'narinfo object listing reached its page limit; falling back to heads'
+					);
+
+					return undefined;
+				}
+
 				const listed = await this.context.env.BLOBS.list(
 					cursor === undefined ? { prefix, startAfter } : { prefix, cursor }
 				);
+				pages += 1;
 				const inRange = listed.objects.filter(
 					(object) => object.key <= lastKey
 				);
@@ -1731,10 +1751,8 @@ export class VerificationService {
 			return;
 		}
 
-		const observations = await Promise.all(
-			rows.map((row) =>
-				this.probeRow(logger, row, (target) => this.headNarInfoObject(target))
-			)
+		const observations = await mapVerificationProbes(rows, (row) =>
+			this.probeRow(logger, row, (target) => this.headNarInfoObject(target))
 		);
 		const committedEdges = await this.committedEdgeKeys(
 			reconcileCandidates(observations)
@@ -1819,8 +1837,8 @@ export class VerificationService {
 								narInfoObjectKey(tenant, target.storePathHash, target.cache)
 							)
 						);
-		const observations = await Promise.all(
-			rows.map((row) => this.probeRow(logger, row, resolveObjectPresent))
+		const observations = await mapVerificationProbes(rows, (row) =>
+			this.probeRow(logger, row, resolveObjectPresent)
 		);
 		const committedEdges = await this.committedEdgeKeys(
 			reconcileCandidates(observations)

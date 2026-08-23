@@ -267,6 +267,13 @@
 			"when": 1787467408991,
 			"tag": "0037_wakeful_longshot",
 			"breakpoints": true
+		},
+		{
+			"idx": 38,
+			"version": "6",
+			"when": 1787519324881,
+			"tag": "0038_pending_staging_indexes",
+			"breakpoints": true
 		}
 	]
 }

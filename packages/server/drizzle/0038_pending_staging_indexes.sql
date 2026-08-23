@@ -1,0 +1,3 @@
+CREATE INDEX `pending_attestation_r2_key_idx` ON `pending_attestation` (`r2_key`);--> statement-breakpoint
+CREATE INDEX `pending_upload_terminal_expires_at_idx` ON `pending_upload` (`expires_at`,`id`) WHERE "pending_upload"."verdict" IS NULL OR "pending_upload"."verdict" = 'servable' OR "pending_upload"."verdict" = 'mismatch' OR "pending_upload"."verdict" = 'over-quota';--> statement-breakpoint
+CREATE INDEX `pending_upload_r2_key_idx` ON `pending_upload` (`r2_key`);

@@ -211,6 +211,24 @@ describe('maintenance pass cost', () => {
 		});
 	});
 
+	it('collects terminal uploads without scanning older live uploads', async () => {
+		const smallBacklog = await terminalUploadCollectionCost(1001, 'small');
+		const largeBacklog = await terminalUploadCollectionCost(2001, 'large');
+
+		expect({ smallBacklog, largeBacklog }).toStrictEqual({
+			smallBacklog: {
+				rowsRead: 41,
+				usesIndex: true,
+				sorts: false
+			},
+			largeBacklog: {
+				rowsRead: 41,
+				usesIndex: true,
+				sorts: false
+			}
+		});
+	});
+
 	it('finds expired roots without scanning the live-root backlog', async () => {
 		await initialise();
 
@@ -235,6 +253,69 @@ describe('maintenance pass cost', () => {
 		});
 	});
 });
+
+async function terminalUploadCollectionCost(
+	liveCount: number,
+	label: string
+): Promise<{ rowsRead: number; sorts: boolean; usesIndex: boolean }> {
+	await resetTestServer();
+	await initialise();
+
+	const plan = await runInDurableObject(currentServer(), (_instance, state) => {
+		state.storage.sql.exec(
+			`WITH digits(digit) AS (VALUES (0), (1), (2), (3), (4), (5), (6), (7), (8), (9)),
+			 rows(value) AS (
+			   SELECT ones.digit + tens.digit * 10 + hundreds.digit * 100 + thousands.digit * 1000
+			   FROM digits AS ones
+			   CROSS JOIN digits AS tens
+			   CROSS JOIN digits AS hundreds
+			   CROSS JOIN digits AS thousands
+			 )
+			 INSERT INTO pending_upload
+			   (id, cache, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict)
+			 SELECT printf('%s-live-%d', ?, value), '', ?,
+			        printf('staging/%s/live-%d', ?, value), '{}',
+			        '2019-01-01T00:00:00.000Z', '2019-01-01T00:00:00.000Z', 'pending'
+			 FROM rows WHERE value < ?`,
+			label,
+			nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
+			label,
+			liveCount
+		);
+		state.storage.sql.exec(
+			`INSERT INTO pending_upload
+				   (id, cache, nar_hash, r2_key, metadata_json, created_at, expires_at, verdict)
+				 VALUES (?, '', ?, ?, '{}', '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z', 'servable')`,
+			`${label}-terminal`,
+			nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`),
+			`staging/${label}/terminal`
+		);
+
+		return state.storage.sql
+			.exec(
+				`EXPLAIN QUERY PLAN
+				 SELECT id, nar_hash, r2_key
+				 FROM pending_upload INDEXED BY pending_upload_terminal_expires_at_idx
+				 WHERE expires_at < '2026-01-01T00:00:00.000Z'
+				   AND (verdict IS NULL OR verdict = 'servable' OR verdict = 'mismatch' OR verdict = 'over-quota')
+				 ORDER BY expires_at, id
+				 LIMIT 1001`
+			)
+			.toArray();
+	});
+	const cost = await maintenancePassCost('garbage-collection', () =>
+		currentServer().runGarbageCollection()
+	);
+	const details = z.array(z.object({ detail: z.string() })).parse(plan);
+
+	return {
+		rowsRead: cost.rowsRead,
+		usesIndex: details.some((row) =>
+			row.detail.includes('pending_upload_terminal_expires_at_idx')
+		),
+		sorts: details.some((row) => row.detail.includes('USE TEMP B-TREE'))
+	};
+}
 
 async function seedRefreshTokens(count: number, label: string): Promise<void> {
 	await runInDurableObject(currentServer(), (instance) => {
