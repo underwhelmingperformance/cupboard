@@ -335,8 +335,8 @@ function hostOf(destination: string): string {
 
 function decodeHostKey(encoded: string): string {
 	const decoded = Buffer.from(encoded, 'base64');
-	const canonicalInput = encoded.replace(/=+$/u, '');
-	const canonicalDecoded = decoded.toString('base64').replace(/=+$/u, '');
+	const canonicalInput = withoutBase64Padding(encoded);
+	const canonicalDecoded = withoutBase64Padding(decoded.toString('base64'));
 
 	if (canonicalInput !== canonicalDecoded || decoded.length === 0) {
 		throw new Error(
@@ -345,6 +345,16 @@ function decodeHostKey(encoded: string): string {
 	}
 
 	return decoded.toString('utf8');
+}
+
+function withoutBase64Padding(value: string): string {
+	let end = value.length;
+
+	while (end > 0 && value[end - 1] === '=') {
+		end -= 1;
+	}
+
+	return value.slice(0, end);
 }
 
 function createKnownHostsFile(host: string, publicKey: string): KnownHostsFile {

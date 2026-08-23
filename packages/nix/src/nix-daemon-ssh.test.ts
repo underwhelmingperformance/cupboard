@@ -300,6 +300,16 @@ describe('parseSshNgStoreUri', () => {
 			"Nix configuration setting 'base64-ssh-public-host-key' is not valid base64"
 		);
 	});
+
+	it('accepts a base64 host key with a long padding suffix', () => {
+		const encoded = encodeURIComponent(`QQ${'='.repeat(10_000)}`);
+
+		expect(
+			parseSshNgStoreUri(
+				`ssh-ng://example.test?base64-ssh-public-host-key=${encoded}`
+			)
+		).toMatchObject({ sshPublicHostKey: 'A' });
+	});
 });
 
 describe('createSshNixDaemonConnector', () => {

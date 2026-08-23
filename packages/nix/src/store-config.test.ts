@@ -410,6 +410,10 @@ describe('discoverNixStoreConfig', () => {
 
 	it.each([
 		{ name: 'a trailing slash', value: '/nix/store/' },
+		{
+			name: 'many trailing slashes',
+			value: `/nix/store${'/'.repeat(10_000)}`
+		},
 		{ name: 'a doubled slash', value: '/nix//store' },
 		{ name: 'a current segment', value: '/nix/./store' },
 		{ name: 'a parent segment', value: '/nix/other/../store' }
